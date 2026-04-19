@@ -1,12 +1,15 @@
 pub mod adapter;
+pub mod auth;
 pub mod commands;
 pub mod error;
 pub mod events;
 pub mod ids;
 pub mod runtime;
 pub mod state;
+pub mod transport;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
+pub use auth::{AuthContext, AuthProvider, ContractFuture};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpRequest, InternalRequest, MarketCommand, OutboundFrame,
     OutboundRequest, QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand, SystemCommand,
@@ -25,4 +28,8 @@ pub use runtime::{CommitLog, Runtime, RuntimeHandle};
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,
+};
+pub use transport::{
+    BootstrapResult, EndpointConfig, HeartbeatPolicy, RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig,
+    SessionPhase, Transport,
 };
