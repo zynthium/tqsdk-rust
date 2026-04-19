@@ -476,6 +476,45 @@ pub trait SessionRouteConnector: Send + Sync {
     fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PassiveRouteTransport {
+    kind: &'static str,
+}
+
+impl PassiveRouteTransport {
+    fn new(kind: &'static str) -> Self {
+        Self { kind }
+    }
+}
+
+impl Transport for PassiveRouteTransport {
+    fn connect(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+        let kind = self.kind;
+        Box::pin(async move {
+            Err(ContractError::validation(format!(
+                "{kind} route transport does not support frame recv"
+            )))
+        })
+    }
+
+    fn send(&mut self, _frame: OutboundFrame) -> ContractFuture<'_, ()> {
+        let kind = self.kind;
+        Box::pin(async move {
+            Err(ContractError::validation(format!(
+                "{kind} route transport does not support frame send"
+            )))
+        })
+    }
+
+    fn close(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSocketRouteConnector;
 
@@ -492,6 +531,30 @@ impl SessionRouteConnector for WebSocketRouteConnector {
                 other => Err(ContractError::validation(format!(
                     "unsupported route endpoint for websocket connector: {other:?}"
                 ))),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultRouteConnector {
+    websocket: WebSocketRouteConnector,
+}
+
+impl SessionRouteConnector for DefaultRouteConnector {
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>> {
+        Box::pin(async move {
+            match &route.endpoint {
+                SessionRouteEndpoint::WebSocket { .. } => self.websocket.connect_route(route).await,
+                SessionRouteEndpoint::Http { .. } => {
+                    Ok(Box::new(PassiveRouteTransport::new("http")) as Box<dyn Transport>)
+                }
+                SessionRouteEndpoint::Replay { .. } => {
+                    Ok(Box::new(PassiveRouteTransport::new("replay")) as Box<dyn Transport>)
+                }
+                SessionRouteEndpoint::Internal { .. } => {
+                    Ok(Box::new(PassiveRouteTransport::new("internal")) as Box<dyn Transport>)
+                }
             }
         })
     }
