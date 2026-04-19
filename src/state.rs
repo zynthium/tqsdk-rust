@@ -40,6 +40,7 @@ pub enum ObjectKey {
     Tick { symbol: Symbol, tick_id: i64 },
     TradingStatus { symbol: Symbol },
     Chart { chart_id: ChartId },
+    Command { command_id: CommandId },
     Account { account_id: AccountId },
     Position { account_id: AccountId, symbol: Symbol },
     Order { account_id: AccountId, order_id: OrderId },

@@ -1,17 +1,18 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     sync::{Arc, Mutex},
 };
 
 use crate::{
     adapter::AdapterRegistry,
-    commands::{OutboundRequest, RuntimeCommand},
-    events::RuntimeInput,
-    error::Result,
-    ids::{CommandId, CursorId, Revision},
-    state::{ChangeSet, CommitResult, CommitScope, StateSnapshot, UpdateCursor},
+    commands::{CommandStatus, OutboundRequest, RuntimeCommand},
+    events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
+    error::{ContractError, Result},
+    ids::{CommandId, CursorId, ProtocolDomain, Revision},
+    state::{ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor},
 };
+use serde_json::{Value, json};
 
 pub trait Runtime {
     fn submit(&self, cmd: RuntimeCommand) -> impl Future<Output = Result<CommandId>> + Send;
@@ -71,6 +72,7 @@ struct RuntimeCore {
     snapshot: StateSnapshot,
     adapters: AdapterRegistry,
     outbound: VecDeque<OutboundEnvelope>,
+    command_domains: BTreeMap<CommandId, ProtocolDomain>,
 }
 
 #[derive(Clone)]
@@ -92,6 +94,7 @@ impl RuntimeHandle {
                 snapshot: StateSnapshot::new(Revision::new(0)),
                 adapters,
                 outbound: VecDeque::new(),
+                command_domains: BTreeMap::new(),
             })),
             commit_log: CommitLog::new(),
         }
@@ -121,22 +124,89 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         let mut inner = self.inner.lock().expect("runtime mutex poisoned");
         let mutations = inner.adapters.decode_input(&input)?;
+        let commit = self.build_commit(&mut inner, mutations, caused_by, scope);
+        drop(inner);
+
+        if let Some(commit) = commit.clone() {
+            self.commit_log.publish(commit);
+        }
+        Ok(commit)
+    }
+
+    pub fn record_command_status(
+        &self,
+        command_id: CommandId,
+        status: CommandStatus,
+        detail: Option<Value>,
+        scope: CommitScope,
+    ) -> Result<Option<CommitResult>> {
+        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let Some(domain) = inner.command_domains.get(&command_id).copied() else {
+            return Err(ContractError::validation(format!(
+                "unknown command id for command status update: {}",
+                command_id.get()
+            )));
+        };
+
+        let command_segment = command_id.get().to_string();
+        let mut fields = vec![
+            FieldMutation {
+                field: "domain".to_string(),
+                value: json!(domain.as_str()),
+            },
+            FieldMutation {
+                field: "status".to_string(),
+                value: json!(status.as_str()),
+            },
+            FieldMutation {
+                field: "detail".to_string(),
+                value: detail.unwrap_or(Value::Null),
+            },
+        ];
+        fields.sort_by(|left, right| left.field.cmp(&right.field));
+
+        let commit = self.build_commit(
+            &mut inner,
+            vec![NormalizedMutation {
+                path: StatePath::new(vec![
+                    "runtime".to_string(),
+                    "commands".to_string(),
+                    command_segment,
+                ]),
+                object: Some(ObjectKey::Command { command_id }),
+                fields,
+                source: MutationSource::SessionControl,
+            }],
+            vec![command_id],
+            scope,
+        );
+        drop(inner);
+
+        if let Some(commit) = commit.clone() {
+            self.commit_log.publish(commit);
+        }
+        Ok(commit)
+    }
+
+    fn build_commit(
+        &self,
+        inner: &mut RuntimeCore,
+        mutations: Vec<NormalizedMutation>,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Option<CommitResult> {
         if mutations.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         let next_revision = Revision::new(inner.snapshot.revision().get() + 1);
         let applied = inner.snapshot.apply(next_revision, &mutations);
         if applied.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         let changes = ChangeSet::from_mutations(&applied);
-        let commit = CommitResult::new(next_revision, changes, caused_by, scope);
-        drop(inner);
-
-        self.commit_log.publish(commit.clone());
-        Ok(Some(commit))
+        Some(CommitResult::new(next_revision, changes, caused_by, scope))
     }
 }
 
@@ -145,10 +215,12 @@ impl Runtime for RuntimeHandle {
         let this = self.clone();
         async move {
             let mut inner = this.inner.lock().expect("runtime mutex poisoned");
+            let outbound = inner.adapters.encode_command(&cmd)?;
             let command_id = CommandId::new(inner.next_command_id);
             inner.next_command_id += 1;
+            inner.command_domains.insert(command_id, cmd.domain());
 
-            for request in inner.adapters.encode_command(&cmd)? {
+            for request in outbound {
                 inner.outbound.push_back(OutboundEnvelope { command_id, request });
             }
 
