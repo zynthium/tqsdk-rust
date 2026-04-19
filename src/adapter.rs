@@ -793,6 +793,15 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
         [root, branch, notification_id] if root == "system" && branch == "notify" => Some(ObjectKey::Notification {
             notification_id: NotificationId::new(notification_id.clone()),
         }),
+        [root, branch, node] if root == "system" && branch == "auth" && node == "context" => {
+            Some(ObjectKey::SessionAuth)
+        }
+        [root, branch, node] if root == "system" && branch == "session" && node == "lifecycle" => {
+            Some(ObjectKey::SessionLifecycle)
+        }
+        [root, branch, node] if root == "system" && branch == "session" && node == "topology" => {
+            Some(ObjectKey::SessionTopology)
+        }
         _ => None,
     }
 }

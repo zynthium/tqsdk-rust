@@ -35,6 +35,9 @@ pub struct SeriesKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectKey {
+    SessionAuth,
+    SessionLifecycle,
+    SessionTopology,
     Quote { symbol: Symbol },
     Kline { series: SeriesKey, bar_id: i64 },
     Tick { symbol: Symbol, tick_id: i64 },
