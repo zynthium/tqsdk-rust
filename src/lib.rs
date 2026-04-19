@@ -9,12 +9,16 @@ pub mod state;
 pub mod tq_auth;
 pub mod transport;
 
-pub use adapter::{AdapterRegistry, ProtocolAdapter};
+pub use adapter::{
+    AdapterRegistry, MarketAdapter, ProtocolAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter, SystemAdapter,
+    TradeAdapter,
+};
 pub use auth::{AuthContext, AuthProvider, ContractFuture};
 pub use commands::{
-    CausationMeta, CommandEnvelope, CommandStatus, HttpRequest, InternalRequest, MarketCommand, OutboundFrame,
-    OutboundRequest, QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand, SystemCommand,
-    TradeAccountType, TradeCommand, TradeLoginCommand,
+    CausationMeta, CommandEnvelope, CommandStatus, HttpRequest, InternalRequest, MarketChartCommand, MarketCommand,
+    OutboundFrame, OutboundRequest, QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand,
+    SystemCommand, TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
+    TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 pub use error::{ContractError, Result};
 pub use events::{

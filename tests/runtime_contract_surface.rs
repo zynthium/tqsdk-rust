@@ -1,10 +1,11 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AccountId, AdapterRegistry, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId, CommandStatus,
-    CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation, MarketCommand, MutationSource,
-    NormalizedMutation, ObjectKey, OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId,
-    ReplayCommand, Revision, Result, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
-    SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, UpdateCursor,
+    CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation, MarketChartCommand, MarketCommand,
+    MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundRequest, ProtocolAdapter, ProtocolDomain,
+    QueryCommand, QueryId, ReplayCommand, Revision, Result, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
+    SchemaCommand, SchemaId, SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
 };
 
 struct TestAdapter;
@@ -50,17 +51,26 @@ fn runtime_commands_route_to_expected_domains() {
     let market = RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
         symbols: vec![Symbol::new("SHFE.au2602")],
     });
-    let trade = RuntimeCommand::Trade(TradeCommand::InsertOrder {
+    let trade = RuntimeCommand::Trade(TradeCommand::InsertOrder(TradeInsertOrderCommand {
         account_id: AccountId::new("sim"),
+        order_id: OrderId::new("order-1"),
         symbol: Symbol::new("SHFE.au2602"),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
         volume: 2,
-    });
+        price_type: TradePriceType::Limit,
+        limit_price: Some(json!(618.5)),
+        time_condition: TradeTimeCondition::Gfd,
+        volume_condition: TradeVolumeCondition::Any,
+    }));
     let query = RuntimeCommand::Query(QueryCommand::Fetch {
         query_id: QueryId::new("quotes-page-1"),
-        path: "/graphql/quotes".to_string(),
+        query: "query Quotes { symbols { instrument_id } }".to_string(),
+        variables: None,
     });
     let schema = RuntimeCommand::Schema(SchemaCommand::Refresh {
         schema_id: SchemaId::new("instrument-schema"),
+        path: "/t/symbols/latest.json".to_string(),
     });
     let replay = RuntimeCommand::Replay(ReplayCommand::Step);
     let system = RuntimeCommand::System(SystemCommand::Shutdown);
@@ -71,6 +81,19 @@ fn runtime_commands_route_to_expected_domains() {
     assert_eq!(schema.domain(), ProtocolDomain::Schema);
     assert_eq!(replay.domain(), ProtocolDomain::Replay);
     assert_eq!(system.domain(), ProtocolDomain::System);
+    assert!(matches!(
+        RuntimeCommand::Market(MarketCommand::SetChart(MarketChartCommand {
+            chart_id: "chart-1".to_string(),
+            symbols: vec![Symbol::new("SHFE.au2602")],
+            duration_ns: 60_000_000_000,
+            view_width: 128,
+            left_kline_id: Some(0),
+            focus_datetime_ns: None,
+            focus_position: None,
+        }))
+        .domain(),
+        ProtocolDomain::Market
+    ));
 
     let envelope = CommandEnvelope {
         id: CommandId::new(9),

@@ -35,6 +35,21 @@ pub enum SystemCommand {
 pub enum MarketCommand {
     SubscribeQuotes { symbols: Vec<Symbol> },
     UnsubscribeQuotes { symbols: Vec<Symbol> },
+    SetChart(MarketChartCommand),
+    CancelChart { chart_id: String },
+    SubscribeTradingStatus { symbols: Vec<Symbol> },
+    UnsubscribeTradingStatus { symbols: Vec<Symbol> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketChartCommand {
+    pub chart_id: String,
+    pub symbols: Vec<Symbol>,
+    pub duration_ns: i64,
+    pub view_width: usize,
+    pub left_kline_id: Option<i64>,
+    pub focus_datetime_ns: Option<i64>,
+    pub focus_position: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +68,7 @@ pub enum TradeCommand {
         account_id: AccountId,
         trading_day: u32,
     },
-    InsertOrder {
-        account_id: AccountId,
-        symbol: Symbol,
-        volume: i64,
-    },
+    InsertOrder(TradeInsertOrderCommand),
     CancelOrder {
         account_id: AccountId,
         order_id: OrderId,
@@ -104,6 +115,101 @@ pub struct TradeLoginCommand {
     pub client_system_info: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeDirection {
+    Buy,
+    Sell,
+}
+
+impl TradeDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeOffset {
+    Open,
+    Close,
+    CloseToday,
+}
+
+impl TradeOffset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "OPEN",
+            Self::Close => "CLOSE",
+            Self::CloseToday => "CLOSETODAY",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradePriceType {
+    Any,
+    Limit,
+    Best,
+    FiveLevel,
+}
+
+impl TradePriceType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "ANY",
+            Self::Limit => "LIMIT",
+            Self::Best => "BEST",
+            Self::FiveLevel => "FIVELEVEL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeTimeCondition {
+    Ioc,
+    Gfd,
+}
+
+impl TradeTimeCondition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ioc => "IOC",
+            Self::Gfd => "GFD",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeVolumeCondition {
+    Any,
+    All,
+}
+
+impl TradeVolumeCondition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "ANY",
+            Self::All => "ALL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeInsertOrderCommand {
+    pub account_id: AccountId,
+    pub order_id: OrderId,
+    pub symbol: Symbol,
+    pub direction: TradeDirection,
+    pub offset: Option<TradeOffset>,
+    pub volume: i64,
+    pub price_type: TradePriceType,
+    pub limit_price: Option<Value>,
+    pub time_condition: TradeTimeCondition,
+    pub volume_condition: TradeVolumeCondition,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayCommand {
     Step,
@@ -112,12 +218,16 @@ pub enum ReplayCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryCommand {
-    Fetch { query_id: QueryId, path: String },
+    Fetch {
+        query_id: QueryId,
+        query: String,
+        variables: Option<Value>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaCommand {
-    Refresh { schema_id: SchemaId },
+    Refresh { schema_id: SchemaId, path: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
