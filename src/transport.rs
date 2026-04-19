@@ -573,6 +573,15 @@ impl ConnectedTopology {
         })
     }
 
+    pub fn take_route_requests(&mut self, label: &str) -> Result<(SessionRoute, Vec<OutboundDispatch>)> {
+        let Some(route) = self.route_mut(label) else {
+            return Err(ContractError::validation(format!(
+                "unknown connected route for pending request drain: {label}"
+            )));
+        };
+        Ok((route.route.clone(), route.drain_pending_requests()))
+    }
+
     pub fn drain_queued_inputs(&mut self) -> Vec<RuntimeInput> {
         let mut inputs = Vec::new();
         for route in &mut self.routes {

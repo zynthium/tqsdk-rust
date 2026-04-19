@@ -31,7 +31,9 @@ pub use ids::{
     ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
 pub use runtime::{CommitLog, OutboundEnvelope, Runtime, RuntimeHandle};
-pub use session_runtime::{RoutePumpOutcome, SessionRun, SessionRuntime, SessionStepOutcome};
+pub use session_runtime::{
+    PendingRouteStepOutcome, RoutePumpOutcome, RouteRequestExecutor, SessionRun, SessionRuntime, SessionStepOutcome,
+};
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,

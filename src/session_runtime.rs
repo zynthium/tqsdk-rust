@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use crate::{
     adapter::AdapterRegistry,
     auth::{AuthProvider, ContractFuture},
-    commands::OutboundFrame,
+    commands::{OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
     runtime::RuntimeHandle,
@@ -33,9 +33,23 @@ pub struct SessionStepOutcome {
     pub recovered: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingRouteStepOutcome {
+    pub requests: Vec<OutboundDispatch>,
+    pub commits: Vec<CommitResult>,
+}
+
 struct RecoveryOutcome {
     run: SessionRun,
     commits: Vec<CommitResult>,
+}
+
+pub trait RouteRequestExecutor: Send + Sync {
+    fn execute<'a>(
+        &'a self,
+        route: &'a crate::transport::SessionRoute,
+        requests: Vec<OutboundDispatch>,
+    ) -> ContractFuture<'a, Vec<RuntimeInput>>;
 }
 
 #[derive(Clone)]
@@ -299,6 +313,33 @@ impl SessionRuntime {
             return Ok(None);
         }
         self.handle.ingest_batch(inputs, caused_by, scope)
+    }
+
+    pub fn drive_pending_route_once<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+        route_label: &'a str,
+        executor: &'a dyn RouteRequestExecutor,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> ContractFuture<'a, PendingRouteStepOutcome> {
+        Box::pin(async move {
+            let (route, requests) = run.connected.take_route_requests(route_label)?;
+            if requests.is_empty() {
+                return Ok(PendingRouteStepOutcome::default());
+            }
+
+            let mut outcome = PendingRouteStepOutcome {
+                requests: requests.clone(),
+                commits: Vec::new(),
+            };
+            let inputs = executor.execute(&route, requests).await?;
+            if let Some(commit) = self.handle.ingest_batch(inputs, caused_by, scope)? {
+                outcome.commits.push(commit);
+            }
+
+            Ok(outcome)
+        })
     }
 
     fn connect_if_needed<'a>(
