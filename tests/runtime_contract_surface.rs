@@ -1,7 +1,10 @@
+use serde_json::json;
 use tqsdk_runtime_contract::{
-    AccountId, CausationMeta, CommandEnvelope, CommandId, CommandStatus, ContractError, MarketCommand,
-    OutboundRequest, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Revision, RuntimeCommand,
-    SchemaCommand, SchemaId, Symbol, SystemCommand, TradeCommand,
+    AccountId, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId, CommandStatus, CommitResult,
+    CommitScope, ContractError, CursorId, FieldMutation, MarketCommand, MutationSource, NormalizedMutation,
+    ObjectKey, OutboundRequest, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Revision, RuntimeCommand,
+    SchemaCommand, SchemaId, SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand,
+    UpdateCursor,
 };
 
 #[test]
@@ -57,4 +60,46 @@ fn runtime_commands_route_to_expected_domains() {
         OutboundRequest::internal_label("flush-peek"),
         OutboundRequest::Internal(_)
     ));
+}
+
+#[test]
+fn snapshot_cursor_and_mutation_types_are_revision_bound() {
+    let path = StatePath::new(["market", "quotes", "SHFE.au2602"]);
+    let quote_key = ObjectKey::Quote {
+        symbol: Symbol::new("SHFE.au2602"),
+    };
+    let mutation = NormalizedMutation {
+        path: path.clone(),
+        object: Some(quote_key.clone()),
+        fields: vec![FieldMutation {
+            field: "last_price".to_string(),
+            value: json!(618.5),
+        }],
+        source: MutationSource::MarketDiff,
+    };
+
+    let snapshot = StateSnapshot::new(Revision::new(3));
+    let cursor = UpdateCursor::new(CursorId::new(1), Revision::new(4));
+    let changes = ChangeSet {
+        path_hits: vec![path.clone()],
+        object_hits: vec![quote_key.clone()],
+        field_hits: vec![ChangeHit::field(path.clone(), quote_key.clone(), "last_price")],
+    };
+    let commit = CommitResult::new(Revision::new(4), changes.clone(), vec![], CommitScope::RealtimeUpdate);
+
+    assert_eq!(snapshot.revision().get(), 3);
+    assert_eq!(cursor.next_revision().get(), 4);
+    assert_eq!(mutation.fields.len(), 1);
+    assert_eq!(changes.object_hits.len(), 1);
+    assert_eq!(commit.revision.get(), 4);
+
+    let series = SeriesKey {
+        primary: Symbol::new("SHFE.au2602"),
+        secondary: vec![Symbol::new("SHFE.au2604")],
+        duration_ns: 60_000_000_000,
+        view_width: 128,
+        right_id: Some(42),
+    };
+
+    assert_eq!(series.view_width, 128);
 }
