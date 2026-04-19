@@ -6,8 +6,8 @@ use tqsdk_runtime_contract::{
     QueryAdapter, QueryCommand, QueryId, ReplayAdapter, ReplayCommand, ReplayEvent,
     ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter, SchemaCommand, StatePath, Symbol,
     SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition,
-    TradeVolumeCondition,
+    TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePreInsertOrderCommand,
+    TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 
 #[derive(Clone)]
@@ -304,6 +304,44 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         }),
     );
 
+    let trade_pre_insert = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::PreInsertOrder(
+            TradePreInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("pre-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(0.0)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+                hedge_flag: "SPECULATION".to_string(),
+                contingent_condition: "IMMEDIATELY".to_string(),
+            },
+        )))
+        .unwrap();
+    assert_json_frame(
+        &trade_pre_insert[0],
+        json!({
+            "aid": "pre_insert_order",
+            "user_id": "simnow",
+            "order_id": "pre-1",
+            "exchange_id": "SHFE",
+            "instrument_id": "au2602",
+            "direction": "BUY",
+            "offset": "OPEN",
+            "volume": 1,
+            "price_type": "LIMIT",
+            "limit_price": 0.0,
+            "time_condition": "GFD",
+            "volume_condition": "ANY",
+            "hedge_flag": "SPECULATION",
+            "contingent_condition": "IMMEDIATELY",
+        }),
+    );
+
     let query_fetch = registry
         .encode_command(&RuntimeCommand::Query(QueryCommand::Fetch {
             query_id: QueryId::new("quotes-page-1"),
@@ -550,6 +588,14 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
                                         "volume_left": 2
                                     }
                                 },
+                                "pre_insert_orders": {
+                                    "pre-1": {
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "au2602",
+                                        "direction": "BUY",
+                                        "pre_margin": 1234.5
+                                    }
+                                },
                                 "trades": {
                                     "trade-1": {
                                         "order_id": "order-1",
@@ -643,6 +689,32 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
                     FieldMutation {
                         field: "volume_left".to_string(),
                         value: json!(2),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "pre_insert_orders", "pre-1"]),
+                object: Some(ObjectKey::PreInsertOrder {
+                    account_id: AccountId::new("simnow"),
+                    order_id: OrderId::new("pre-1"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "direction".to_string(),
+                        value: json!("BUY"),
+                    },
+                    FieldMutation {
+                        field: "exchange_id".to_string(),
+                        value: json!("SHFE"),
+                    },
+                    FieldMutation {
+                        field: "instrument_id".to_string(),
+                        value: json!("au2602"),
+                    },
+                    FieldMutation {
+                        field: "pre_margin".to_string(),
+                        value: json!(1234.5),
                     },
                 ],
                 source: MutationSource::TradeReply,

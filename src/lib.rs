@@ -20,7 +20,8 @@ pub use commands::{
     MarketChartCommand, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
     QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand, SystemCommand,
     TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
-    TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    TradeOffset, TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition,
+    TradeVolumeCondition,
 };
 pub use error::{ContractError, Result};
 pub use events::{

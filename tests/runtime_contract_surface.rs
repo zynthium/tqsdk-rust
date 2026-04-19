@@ -6,8 +6,8 @@ use tqsdk_runtime_contract::{
     OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Result,
     Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
     SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
-    UpdateCursor,
+    TradeInsertOrderCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType,
+    TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
 };
 
 struct TestAdapter;
@@ -76,6 +76,21 @@ fn runtime_commands_route_to_expected_domains() {
         query: "query Quotes { symbols { instrument_id } }".to_string(),
         variables: None,
     });
+    let trade_pre_insert =
+        RuntimeCommand::Trade(TradeCommand::PreInsertOrder(TradePreInsertOrderCommand {
+            account_id: AccountId::new("sim"),
+            order_id: OrderId::new("pre-1"),
+            symbol: Symbol::new("SHFE.au2602"),
+            direction: TradeDirection::Buy,
+            offset: Some(TradeOffset::Open),
+            volume: 1,
+            price_type: TradePriceType::Limit,
+            limit_price: Some(json!(0.0)),
+            time_condition: TradeTimeCondition::Gfd,
+            volume_condition: TradeVolumeCondition::Any,
+            hedge_flag: "SPECULATION".to_string(),
+            contingent_condition: "IMMEDIATELY".to_string(),
+        }));
     let schema = RuntimeCommand::Schema(SchemaCommand::Refresh {
         schema_id: SchemaId::new("instrument-schema"),
         path: "/t/symbols/latest.json".to_string(),
@@ -85,6 +100,7 @@ fn runtime_commands_route_to_expected_domains() {
 
     assert_eq!(market.domain(), ProtocolDomain::Market);
     assert_eq!(trade.domain(), ProtocolDomain::Trade);
+    assert_eq!(trade_pre_insert.domain(), ProtocolDomain::Trade);
     assert_eq!(query.domain(), ProtocolDomain::Query);
     assert_eq!(schema.domain(), ProtocolDomain::Schema);
     assert_eq!(replay.domain(), ProtocolDomain::Replay);

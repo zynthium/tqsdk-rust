@@ -68,6 +68,7 @@ pub enum TradeCommand {
         account_id: AccountId,
         trading_day: u32,
     },
+    PreInsertOrder(TradePreInsertOrderCommand),
     InsertOrder(TradeInsertOrderCommand),
     CancelOrder {
         account_id: AccountId,
@@ -208,6 +209,22 @@ pub struct TradeInsertOrderCommand {
     pub limit_price: Option<Value>,
     pub time_condition: TradeTimeCondition,
     pub volume_condition: TradeVolumeCondition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradePreInsertOrderCommand {
+    pub account_id: AccountId,
+    pub order_id: OrderId,
+    pub symbol: Symbol,
+    pub direction: TradeDirection,
+    pub offset: Option<TradeOffset>,
+    pub volume: i64,
+    pub price_type: TradePriceType,
+    pub limit_price: Option<Value>,
+    pub time_condition: TradeTimeCondition,
+    pub volume_condition: TradeVolumeCondition,
+    pub hedge_flag: String,
+    pub contingent_condition: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

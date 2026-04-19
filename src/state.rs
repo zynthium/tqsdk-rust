@@ -77,6 +77,10 @@ pub enum ObjectKey {
         account_id: AccountId,
         symbol: Symbol,
     },
+    PreInsertOrder {
+        account_id: AccountId,
+        order_id: OrderId,
+    },
     Order {
         account_id: AccountId,
         order_id: OrderId,

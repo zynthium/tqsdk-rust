@@ -11,8 +11,9 @@ use tqsdk_runtime_contract::{
     RawFrame, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
     SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun,
     SessionRuntime, SessionTarget, SessionTopology, Symbol, TradeAccountType, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePriceType,
-    TradeTimeCondition, TradeVolumeCondition, Transport,
+    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset,
+    TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    Transport,
 };
 
 #[derive(Clone)]
@@ -977,6 +978,119 @@ fn session_runtime_trade_risk_management_rule_diff_marks_transport_command_compl
             "exchange_id"
         ]),
         Some(&json!("SSE"))
+    );
+}
+
+#[test]
+fn session_runtime_trade_pre_insert_order_diff_marks_transport_command_completed() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let connector = TestRouteConnector {
+        sent_frames: Arc::clone(&sent_frames),
+        recv_frames: vec![RawFrame::Text(
+            json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "trade": {
+                        "simnow": {
+                            "pre_insert_orders": {
+                                "pre-1": {
+                                    "exchange_id": "SHFE",
+                                    "instrument_id": "au2602",
+                                    "direction": "BUY",
+                                    "pre_margin": 1234.5
+                                }
+                            }
+                        }
+                    }
+                }]
+            })
+            .to_string(),
+        )],
+    };
+
+    let topology = SessionTopology::default().with_route(SessionRoute {
+        label: "trade".to_string(),
+        target: SessionTarget::Account(AccountId::new("simnow")),
+        domains: vec![ProtocolDomain::Trade],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://trade.example".to_string(),
+            connect: Default::default(),
+        },
+    });
+
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Trade],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Trade(TradeCommand::PreInsertOrder(
+            TradePreInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("pre-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(0.0)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+                hedge_flag: "SPECULATION".to_string(),
+                contingent_condition: "IMMEDIATELY".to_string(),
+            },
+        ))),
+    )
+    .unwrap();
+
+    let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
+    assert_eq!(receipts.len(), 1);
+
+    let commit = block_on(runtime.recv_route_and_ingest(
+        &mut run,
+        "trade",
+        vec![command_id],
+        CommitScope::RealtimeUpdate,
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(commit.caused_by, vec![command_id]);
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "trade",
+            "simnow",
+            "pre_insert_orders",
+            "pre-1",
+            "pre_margin"
+        ]),
+        Some(&json!(1234.5))
+    );
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "pre_margin"
+        ]),
+        Some(&json!(1234.5))
     );
 }
 

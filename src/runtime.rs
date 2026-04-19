@@ -645,6 +645,17 @@ fn command_detail_fields_from_command(cmd: &RuntimeCommand) -> Map<String, Value
             detail.insert("account_id".to_string(), json!(account_id.as_str()));
             detail.insert("trading_day".to_string(), json!(trading_day.to_string()));
         }
+        RuntimeCommand::Trade(TradeCommand::PreInsertOrder(order)) => {
+            detail.insert("aid".to_string(), json!("pre_insert_order"));
+            detail.insert("account_id".to_string(), json!(order.account_id.as_str()));
+            detail.insert("order_id".to_string(), json!(order.order_id.as_str()));
+            detail.insert("symbol".to_string(), json!(order.symbol.as_str()));
+            detail.insert("hedge_flag".to_string(), json!(order.hedge_flag));
+            detail.insert(
+                "contingent_condition".to_string(),
+                json!(order.contingent_condition),
+            );
+        }
         RuntimeCommand::Trade(TradeCommand::InsertOrder(order)) => {
             detail.insert("aid".to_string(), json!("insert_order"));
             detail.insert("account_id".to_string(), json!(order.account_id.as_str()));

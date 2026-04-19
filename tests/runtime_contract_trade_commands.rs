@@ -1,6 +1,8 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AccountId, ProtocolDomain, RuntimeCommand, TradeAccountType, TradeCommand, TradeLoginCommand,
+    TradeOffset, TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition,
+    TradeVolumeCondition,
 };
 
 #[test]
@@ -42,6 +44,24 @@ fn trade_command_surface_covers_session_and_control_flows() {
             trading_day: 20260419,
         },
         TradeCommand::QuerySettlementInfo { .. }
+    ));
+
+    assert!(matches!(
+        TradeCommand::PreInsertOrder(TradePreInsertOrderCommand {
+            account_id: AccountId::new("simnow"),
+            order_id: tqsdk_runtime_contract::OrderId::new("pre-1"),
+            symbol: tqsdk_runtime_contract::Symbol::new("SHFE.au2602"),
+            direction: tqsdk_runtime_contract::TradeDirection::Buy,
+            offset: Some(TradeOffset::Open),
+            volume: 1,
+            price_type: TradePriceType::Limit,
+            limit_price: Some(json!(0.0)),
+            time_condition: TradeTimeCondition::Gfd,
+            volume_condition: TradeVolumeCondition::Any,
+            hedge_flag: "SPECULATION".to_string(),
+            contingent_condition: "IMMEDIATELY".to_string(),
+        }),
+        TradeCommand::PreInsertOrder(..)
     ));
 
     assert!(matches!(

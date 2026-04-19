@@ -2,7 +2,7 @@ use crate::{
     commands::{
         MarketChartCommand, MarketCommand, OutboundFrame, OutboundRequest, QueryCommand,
         ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand, TradeCommand,
-        TradeInsertOrderCommand,
+        TradeInsertOrderCommand, TradePreInsertOrderCommand,
     },
     error::{ContractError, Result},
     events::{
@@ -301,6 +301,9 @@ impl ProtocolAdapter for TradeAdapter {
                 "user_name": account_id.as_str(),
                 "trading_day": trading_day.to_string(),
             }),
+            RuntimeCommand::Trade(TradeCommand::PreInsertOrder(order)) => {
+                build_pre_insert_order_request(order)?
+            }
             RuntimeCommand::Trade(TradeCommand::InsertOrder(order)) => {
                 build_insert_order_request(order)?
             }
@@ -592,6 +595,40 @@ fn build_insert_order_request(order: &TradeInsertOrderCommand) -> Result<Value> 
         (
             "volume_condition".to_string(),
             json!(order.volume_condition.as_str()),
+        ),
+    ]);
+    if let Some(offset) = order.offset {
+        request.insert("offset".to_string(), json!(offset.as_str()));
+    }
+    if let Some(limit_price) = order.limit_price.clone() {
+        request.insert("limit_price".to_string(), limit_price);
+    }
+    Ok(Value::Object(request))
+}
+
+fn build_pre_insert_order_request(order: &TradePreInsertOrderCommand) -> Result<Value> {
+    let (exchange_id, instrument_id) = split_symbol(order.symbol.as_str())?;
+    let mut request = Map::from_iter([
+        ("aid".to_string(), json!("pre_insert_order")),
+        ("user_id".to_string(), json!(order.account_id.as_str())),
+        ("order_id".to_string(), json!(order.order_id.as_str())),
+        ("exchange_id".to_string(), json!(exchange_id)),
+        ("instrument_id".to_string(), json!(instrument_id)),
+        ("direction".to_string(), json!(order.direction.as_str())),
+        ("volume".to_string(), json!(order.volume)),
+        ("price_type".to_string(), json!(order.price_type.as_str())),
+        (
+            "time_condition".to_string(),
+            json!(order.time_condition.as_str()),
+        ),
+        (
+            "volume_condition".to_string(),
+            json!(order.volume_condition.as_str()),
+        ),
+        ("hedge_flag".to_string(), json!(order.hedge_flag)),
+        (
+            "contingent_condition".to_string(),
+            json!(order.contingent_condition),
         ),
     ]);
     if let Some(offset) = order.offset {
@@ -907,6 +944,14 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
             Some(ObjectKey::Position {
                 account_id: AccountId::new(account_id.clone()),
                 symbol: Symbol::new(symbol.clone()),
+            })
+        }
+        [root, account_id, branch, order_id]
+            if root == "trade" && branch == "pre_insert_orders" =>
+        {
+            Some(ObjectKey::PreInsertOrder {
+                account_id: AccountId::new(account_id.clone()),
+                order_id: OrderId::new(order_id.clone()),
             })
         }
         [root, account_id, branch, order_id] if root == "trade" && branch == "orders" => {
