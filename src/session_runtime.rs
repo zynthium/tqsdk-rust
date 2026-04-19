@@ -860,15 +860,35 @@ impl SessionRuntime {
         let order_status = snapshot
             .get(["trade", account_id, "orders", order_id, "status"])?
             .as_str()?;
+        let exchange_order_id = snapshot
+            .get(["trade", account_id, "orders", order_id, "exchange_order_id"])
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let last_msg = snapshot
+            .get(["trade", account_id, "orders", order_id, "last_msg"])
+            .cloned();
+        let volume_left = snapshot
+            .get(["trade", account_id, "orders", order_id, "volume_left"])
+            .cloned();
 
         let status = match order_status {
             "ALIVE" => CommandStatus::Acked,
+            "FINISHED" if exchange_order_id.is_empty() => CommandStatus::Rejected,
             "FINISHED" => CommandStatus::Completed,
             _ => return None,
         };
 
         let mut detail = Map::new();
         detail.insert("order_status".to_string(), json!(order_status));
+        if !exchange_order_id.is_empty() {
+            detail.insert("exchange_order_id".to_string(), json!(exchange_order_id));
+        }
+        if let Some(last_msg) = last_msg {
+            detail.insert("last_msg".to_string(), last_msg);
+        }
+        if let Some(volume_left) = volume_left {
+            detail.insert("volume_left".to_string(), volume_left);
+        }
 
         Some((
             status,

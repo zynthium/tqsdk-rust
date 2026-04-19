@@ -341,7 +341,9 @@ fn session_runtime_trade_order_finish_diff_marks_transport_command_completed() {
                                 "orders": {
                                     "order-1": {
                                         "status": "FINISHED",
-                                        "volume_left": 0
+                                        "volume_left": 0,
+                                        "exchange_order_id": "EX123",
+                                        "last_msg": "全部成交"
                                     }
                                 }
                             }
@@ -430,6 +432,105 @@ fn session_runtime_trade_order_finish_diff_marks_transport_command_completed() {
             "order_status"
         ]),
         Some(&json!("FINISHED"))
+    );
+}
+
+#[test]
+fn session_runtime_trade_reject_diff_marks_transport_command_rejected() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let connector = TestRouteConnector {
+        sent_frames: Arc::clone(&sent_frames),
+        recv_frames: vec![RawFrame::Text(
+            json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "trade": {
+                        "simnow": {
+                            "orders": {
+                                "order-1": {
+                                    "status": "FINISHED",
+                                    "volume_left": 1,
+                                    "last_msg": "开仓资金不足"
+                                }
+                            }
+                        }
+                    }
+                }]
+            })
+            .to_string(),
+        )],
+    };
+
+    let topology = SessionTopology::default().with_route(SessionRoute {
+        label: "trade".to_string(),
+        target: SessionTarget::Account(AccountId::new("simnow")),
+        domains: vec![ProtocolDomain::Trade],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://trade.example".to_string(),
+            connect: Default::default(),
+        },
+    });
+
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Trade],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("order-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))),
+    )
+    .unwrap();
+
+    let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
+    assert_eq!(receipts.len(), 1);
+
+    let commit = block_on(runtime.recv_route_and_ingest(
+        &mut run,
+        "trade",
+        vec![command_id],
+        CommitScope::RealtimeUpdate,
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(commit.caused_by, vec![command_id]);
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("rejected"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "last_msg"
+        ]),
+        Some(&json!("开仓资金不足"))
     );
 }
 
