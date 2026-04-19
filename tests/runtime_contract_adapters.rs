@@ -1,11 +1,12 @@
 use serde_json::{json, Value};
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, AuthEvent, FieldMutation, InputPayload, InternalEvent, MarketAdapter,
-    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundFrame,
-    OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryAdapter, QueryCommand, QueryId, ReplayAdapter,
-    ReplayCommand, ReplayEvent, ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter, SchemaCommand, StatePath,
-    Symbol, SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection, TradeInsertOrderCommand,
-    TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    AccountId, AdapterRegistry, ChartId, FieldMutation, InputPayload, InternalEvent, MarketAdapter,
+    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, NotificationId, ObjectKey, OrderId,
+    OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryAdapter, QueryCommand, QueryId,
+    ReplayAdapter, ReplayCommand, ReplayEvent, ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter,
+    SchemaCommand, StatePath, Symbol, SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition,
+    TradeVolumeCondition,
 };
 
 #[derive(Clone)]
@@ -279,34 +280,160 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
             route: "market.shared".to_string(),
             domains: vec![ProtocolDomain::Market],
             payload: InputPayload::Json(json!({
-                "quotes": {
-                    "SHFE.au2602": {
-                        "last_price": 618.5,
-                        "ask_price1": 619.0
+                "aid": "rtn_data",
+                "data": [
+                    {
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "last_price": 618.5,
+                                "ask_price1": 619.0
+                            }
+                        }
+                    },
+                    {
+                        "klines": {
+                            "SHFE.au2602": {
+                                "60000000000": {
+                                    "42": {
+                                        "open": 610.0,
+                                        "close": 618.5
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "ticks": {
+                            "SHFE.au2602": {
+                                "17": {
+                                    "last_price": 618.5,
+                                    "volume": 200
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "charts": {
+                            "chart-1": {
+                                "left_id": 40,
+                                "right_id": 42,
+                                "more_data": false
+                            }
+                        }
+                    },
+                    {
+                        "trading_status": {
+                            "SHFE.au2602": {
+                                "symbol": "SHFE.au2602",
+                                "trade_status": "CONTINOUS"
+                            }
+                        }
                     }
-                }
+                ]
             })),
         }))
         .unwrap();
     assert_eq!(
         market,
-        vec![NormalizedMutation {
-            path: StatePath::new(["quotes", "SHFE.au2602"]),
-            object: Some(ObjectKey::Quote {
-                symbol: Symbol::new("SHFE.au2602"),
-            }),
-            fields: vec![
-                FieldMutation {
-                    field: "ask_price1".to_string(),
-                    value: json!(619.0),
-                },
-                FieldMutation {
-                    field: "last_price".to_string(),
-                    value: json!(618.5),
-                },
-            ],
-            source: MutationSource::MarketDiff,
-        }]
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2602"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "ask_price1".to_string(),
+                        value: json!(619.0),
+                    },
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(618.5),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["klines", "SHFE.au2602", "60000000000", "42"]),
+                object: Some(ObjectKey::Kline {
+                    series: tqsdk_runtime_contract::SeriesKey {
+                        primary: Symbol::new("SHFE.au2602"),
+                        secondary: vec![],
+                        duration_ns: 60_000_000_000,
+                        view_width: 0,
+                        right_id: None,
+                    },
+                    bar_id: 42,
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "close".to_string(),
+                        value: json!(618.5),
+                    },
+                    FieldMutation {
+                        field: "open".to_string(),
+                        value: json!(610.0),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["ticks", "SHFE.au2602", "17"]),
+                object: Some(ObjectKey::Tick {
+                    symbol: Symbol::new("SHFE.au2602"),
+                    tick_id: 17,
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(618.5),
+                    },
+                    FieldMutation {
+                        field: "volume".to_string(),
+                        value: json!(200),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["charts", "chart-1"]),
+                object: Some(ObjectKey::Chart {
+                    chart_id: ChartId::new("chart-1"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "left_id".to_string(),
+                        value: json!(40),
+                    },
+                    FieldMutation {
+                        field: "more_data".to_string(),
+                        value: json!(false),
+                    },
+                    FieldMutation {
+                        field: "right_id".to_string(),
+                        value: json!(42),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trading_status", "SHFE.au2602"]),
+                object: Some(ObjectKey::TradingStatus {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "symbol".to_string(),
+                        value: json!("SHFE.au2602"),
+                    },
+                    FieldMutation {
+                        field: "trade_status".to_string(),
+                        value: json!("CONTINOUS"),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            }
+        ]
     );
 
     let trade = registry
@@ -314,39 +441,150 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
             route: "trade.simnow".to_string(),
             domains: vec![ProtocolDomain::Trade],
             payload: InputPayload::Json(json!({
-                "trade": {
-                    "simnow": {
-                        "orders": {
-                            "order-1": {
-                                "status": "ALIVE",
-                                "volume_left": 2
+                "aid": "rtn_data",
+                "data": [
+                    {
+                        "trade": {
+                            "simnow": {
+                                "accounts": {
+                                    "CNY": {
+                                        "balance": 100000.0,
+                                        "available": 80000.0
+                                    }
+                                },
+                                "orders": {
+                                    "order-1": {
+                                        "status": "ALIVE",
+                                        "volume_left": 2
+                                    }
+                                },
+                                "trades": {
+                                    "trade-1": {
+                                        "order_id": "order-1",
+                                        "trade_price": 618.5
+                                    }
+                                },
+                                "his_settlements": {
+                                    "20260419": {
+                                        "content": ["line-1", "line-2"]
+                                    }
+                                },
+                                "trade_more_data": false
+                            }
+                        }
+                    },
+                    {
+                        "trade": {
+                            "simnow": {
+                                "positions": {
+                                    "SHFE.au2602": {
+                                        "pos": 2,
+                                        "volume_long_today": 2
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                ]
             })),
         }))
         .unwrap();
     assert_eq!(
         trade,
-        vec![NormalizedMutation {
-            path: StatePath::new(["trade", "simnow", "orders", "order-1"]),
-            object: Some(ObjectKey::Order {
-                account_id: AccountId::new("simnow"),
-                order_id: OrderId::new("order-1"),
-            }),
-            fields: vec![
-                FieldMutation {
-                    field: "status".to_string(),
-                    value: json!("ALIVE"),
-                },
-                FieldMutation {
-                    field: "volume_left".to_string(),
-                    value: json!(2),
-                },
-            ],
-            source: MutationSource::TradeReply,
-        }]
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "accounts", "CNY"]),
+                object: Some(ObjectKey::Account {
+                    account_id: AccountId::new("simnow"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "available".to_string(),
+                        value: json!(80000.0),
+                    },
+                    FieldMutation {
+                        field: "balance".to_string(),
+                        value: json!(100000.0),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "his_settlements", "20260419"]),
+                object: Some(ObjectKey::Settlement {
+                    account_id: AccountId::new("simnow"),
+                    trading_day: "20260419".to_string(),
+                }),
+                fields: vec![FieldMutation {
+                    field: "content".to_string(),
+                    value: json!(["line-1", "line-2"]),
+                }],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "orders", "order-1"]),
+                object: Some(ObjectKey::Order {
+                    account_id: AccountId::new("simnow"),
+                    order_id: OrderId::new("order-1"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "status".to_string(),
+                        value: json!("ALIVE"),
+                    },
+                    FieldMutation {
+                        field: "volume_left".to_string(),
+                        value: json!(2),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "trade_more_data"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "value".to_string(),
+                    value: json!(false),
+                }],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "trades", "trade-1"]),
+                object: Some(ObjectKey::Trade {
+                    account_id: AccountId::new("simnow"),
+                    trade_id: tqsdk_runtime_contract::TradeId::new("trade-1"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "order_id".to_string(),
+                        value: json!("order-1"),
+                    },
+                    FieldMutation {
+                        field: "trade_price".to_string(),
+                        value: json!(618.5),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "positions", "SHFE.au2602"]),
+                object: Some(ObjectKey::Position {
+                    account_id: AccountId::new("simnow"),
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "pos".to_string(),
+                        value: json!(2),
+                    },
+                    FieldMutation {
+                        field: "volume_long_today".to_string(),
+                        value: json!(2),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            }
+        ]
     );
 
     let query = registry
@@ -354,10 +592,15 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
             route: "ins.query".to_string(),
             domains: vec![ProtocolDomain::Query],
             payload: InputPayload::Json(json!({
-                "quotes-page-1": {
-                    "items": [{"instrument_id": "au2602"}],
-                    "has_more": false
-                }
+                "aid": "rtn_data",
+                "data": [{
+                    "symbols": {
+                        "quotes-page-1": {
+                            "items": [{"instrument_id": "au2602"}],
+                            "has_more": false
+                        }
+                    }
+                }]
             })),
         }))
         .unwrap();
@@ -444,20 +687,44 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
     );
 
     let system = registry
-        .decode_input(&RuntimeInput::Auth(AuthEvent {
-            label: "refreshed",
-            payload: Some(json!({"token_state": "ready"})),
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "market.shared".to_string(),
+            domains: vec![ProtocolDomain::System],
+            payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "notify": {
+                        "notify-1": {
+                            "code": 2019112901,
+                            "level": "INFO",
+                            "content": "connected"
+                        }
+                    }
+                }]
+            })),
         }))
         .unwrap();
     assert_eq!(
         system,
         vec![NormalizedMutation {
-            path: StatePath::new(["system", "auth", "refreshed"]),
-            object: None,
-            fields: vec![FieldMutation {
-                field: "token_state".to_string(),
-                value: json!("ready"),
-            }],
+            path: StatePath::new(["system", "notify", "notify-1"]),
+            object: Some(ObjectKey::Notification {
+                notification_id: NotificationId::new("notify-1"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "code".to_string(),
+                    value: json!(2019112901),
+                },
+                FieldMutation {
+                    field: "content".to_string(),
+                    value: json!("connected"),
+                },
+                FieldMutation {
+                    field: "level".to_string(),
+                    value: json!("INFO"),
+                },
+            ],
             source: MutationSource::SessionControl,
         }]
     );

@@ -8,7 +8,10 @@ use crate::{
         AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource, NormalizedMutation,
         ReplayEvent, RuntimeInput,
     },
-    ids::{AccountId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, SchemaId, Symbol, TradeId},
+    ids::{
+        AccountId, ChartId, NotificationId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, SchemaId, Symbol,
+        TradeId,
+    },
     state::{ObjectKey, SeriesKey, StatePath},
 };
 use serde_json::{Map, Value, json};
@@ -142,7 +145,7 @@ impl ProtocolAdapter for SystemAdapter {
                 MutationSource::SessionControl,
             ),
             RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::System) => {
-                decode_io_payload(event, MutationSource::SessionControl, vec!["system".to_string(), event.route.clone()])
+                decode_system_io_payload(event)
             }
             _ => Ok(vec![]),
         }
@@ -346,11 +349,10 @@ impl ProtocolAdapter for QueryAdapter {
                     ("query_id".to_string(), json!(query_id.as_str())),
                     ("query".to_string(), json!(query)),
                 ]);
-                if let Some(variables) = variables.clone() {
-                    let should_include = !matches!(&variables, Value::Object(map) if map.is_empty());
-                    if should_include {
-                        request.insert("variables".to_string(), variables);
-                    }
+                if let Some(variables) = variables.clone()
+                    && !matches!(&variables, Value::Object(map) if map.is_empty())
+                {
+                    request.insert("variables".to_string(), variables);
                 }
                 Ok(request_with_peek(Value::Object(request)))
             }
@@ -364,9 +366,7 @@ impl ProtocolAdapter for QueryAdapter {
 
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
         match input {
-            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Query) => {
-                decode_io_payload(event, MutationSource::QueryResult, vec!["query".to_string()])
-            }
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Query) => decode_query_io_payload(event),
             _ => Ok(vec![]),
         }
     }
@@ -565,7 +565,7 @@ fn decode_named_payload(base: Vec<String>, event: &impl NamedPayloadEvent, sourc
     path.push(event.label().to_string());
 
     match event.payload() {
-        Some(Value::Object(_)) => decode_json_value(event.payload().unwrap(), source, path),
+        Some(payload @ Value::Object(_)) => decode_json_value(payload, source, path),
         Some(value) => Ok(vec![NormalizedMutation {
             path: StatePath::new(path),
             object: None,
@@ -609,6 +609,20 @@ fn decode_replay_payload(event: &ReplayEvent) -> Result<Vec<NormalizedMutation>>
     }
 }
 
+fn decode_system_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => decode_json_envelope(value, MutationSource::SessionControl, vec!["system".to_string()]),
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
+fn decode_query_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => decode_query_envelope(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
 fn decode_io_payload(event: &IoEvent, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
     match &event.payload {
         InputPayload::Json(value) => decode_json_envelope(value, source, prefix),
@@ -617,17 +631,38 @@ fn decode_io_payload(event: &IoEvent, source: MutationSource, prefix: Vec<String
 }
 
 fn decode_json_envelope(value: &Value, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
-    if value.get("aid").and_then(Value::as_str) == Some("rtn_data") {
-        if let Some(data) = value.get("data").and_then(Value::as_array) {
-            let mut mutations = Vec::new();
-            for item in data {
-                mutations.extend(decode_json_value(item, source, prefix.clone())?);
-            }
-            return Ok(mutations);
+    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+        && let Some(data) = value.get("data").and_then(Value::as_array)
+    {
+        let mut mutations = Vec::new();
+        for item in data {
+            mutations.extend(decode_json_value(item, source, prefix.clone())?);
         }
+        return Ok(mutations);
     }
 
     decode_json_value(value, source, prefix)
+}
+
+fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
+    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+        && let Some(data) = value.get("data").and_then(Value::as_array)
+    {
+        let mut mutations = Vec::new();
+        for item in data {
+            mutations.extend(decode_query_value(item)?);
+        }
+        return Ok(mutations);
+    }
+
+    decode_query_value(value)
+}
+
+fn decode_query_value(value: &Value) -> Result<Vec<NormalizedMutation>> {
+    if let Some(symbols) = value.get("symbols") {
+        return decode_json_value(symbols, MutationSource::QueryResult, vec!["query".to_string()]);
+    }
+    decode_json_value(value, MutationSource::QueryResult, vec!["query".to_string()])
 }
 
 fn decode_json_value(value: &Value, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
@@ -656,7 +691,7 @@ fn flatten_object(
 ) {
     let mut fields = map
         .iter()
-        .filter(|(_, value)| !matches!(value, Value::Object(_)))
+        .filter(|(field, value)| !matches!(value, Value::Object(_)) && !emits_scalar_leaf(&path, field))
         .map(|(field, value)| FieldMutation {
             field: field.clone(),
             value: value.clone(),
@@ -674,18 +709,39 @@ fn flatten_object(
     }
 
     for (field, value) in map {
+        let mut child_path = path.clone();
+        child_path.push(field.clone());
+
         if let Value::Object(child) = value {
-            let mut child_path = path.clone();
-            child_path.push(field.clone());
             flatten_object(child_path, child, source, out);
+        } else if emits_scalar_leaf(&path, field) {
+            out.push(NormalizedMutation {
+                path: StatePath::new(child_path),
+                object: infer_object_key_from_segments(&path),
+                fields: vec![FieldMutation {
+                    field: "value".to_string(),
+                    value: value.clone(),
+                }],
+                source,
+            });
         }
     }
+}
+
+fn emits_scalar_leaf(path: &[String], field: &str) -> bool {
+    matches!(path, [root, _account_id] if root == "trade") && field == "trade_more_data"
 }
 
 fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
     match path {
         [root, symbol] if root == "quotes" => Some(ObjectKey::Quote {
             symbol: Symbol::new(symbol.clone()),
+        }),
+        [root, symbol] if root == "trading_status" => Some(ObjectKey::TradingStatus {
+            symbol: Symbol::new(symbol.clone()),
+        }),
+        [root, chart_id] if root == "charts" => Some(ObjectKey::Chart {
+            chart_id: ChartId::new(chart_id.clone()),
         }),
         [root, symbol, duration, bar_id] if root == "klines" => Some(ObjectKey::Kline {
             series: SeriesKey {
@@ -716,6 +772,12 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
             account_id: AccountId::new(account_id.clone()),
             trade_id: TradeId::new(trade_id.clone()),
         }),
+        [root, account_id, branch, trading_day] if root == "trade" && branch == "his_settlements" => {
+            Some(ObjectKey::Settlement {
+                account_id: AccountId::new(account_id.clone()),
+                trading_day: trading_day.clone(),
+            })
+        }
         [root, query_id, ..] if root == "query" => Some(ObjectKey::QueryResult {
             query_id: QueryId::new(query_id.clone()),
         }),
@@ -724,6 +786,12 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
         }),
         [root, session_id, ..] if root == "replay" => Some(ObjectKey::ReplayCursor {
             session_id: ReplaySessionId::new(session_id.clone()),
+        }),
+        [root, notification_id] if root == "notify" => Some(ObjectKey::Notification {
+            notification_id: NotificationId::new(notification_id.clone()),
+        }),
+        [root, branch, notification_id] if root == "system" && branch == "notify" => Some(ObjectKey::Notification {
+            notification_id: NotificationId::new(notification_id.clone()),
         }),
         _ => None,
     }

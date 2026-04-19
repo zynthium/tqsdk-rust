@@ -62,6 +62,8 @@ string_id!(QueryId);
 string_id!(SchemaId);
 string_id!(ReplaySessionId);
 string_id!(AuthId);
+string_id!(ChartId);
+string_id!(NotificationId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolDomain {

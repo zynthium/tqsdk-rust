@@ -1,4 +1,7 @@
-use crate::ids::{AccountId, CommandId, CursorId, OrderId, QueryId, ReplaySessionId, Revision, SchemaId, Symbol, TradeId};
+use crate::ids::{
+    AccountId, ChartId, CommandId, CursorId, NotificationId, OrderId, QueryId, ReplaySessionId, Revision, SchemaId,
+    Symbol, TradeId,
+};
 
 pub type PathSegment = String;
 
@@ -33,13 +36,17 @@ pub enum ObjectKey {
     Quote { symbol: Symbol },
     Kline { series: SeriesKey, bar_id: i64 },
     Tick { symbol: Symbol, tick_id: i64 },
+    TradingStatus { symbol: Symbol },
+    Chart { chart_id: ChartId },
     Account { account_id: AccountId },
     Position { account_id: AccountId, symbol: Symbol },
     Order { account_id: AccountId, order_id: OrderId },
     Trade { account_id: AccountId, trade_id: TradeId },
+    Settlement { account_id: AccountId, trading_day: String },
     QueryResult { query_id: QueryId },
     SchemaNode { schema_id: SchemaId },
     ReplayCursor { session_id: ReplaySessionId },
+    Notification { notification_id: NotificationId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

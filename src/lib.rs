@@ -26,8 +26,8 @@ pub use events::{
     RuntimeInput, TimerEvent,
 };
 pub use ids::{
-    AccountId, AuthId, CommandId, CursorId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, Revision, SchemaId,
-    Symbol, TradeId,
+    AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain, QueryId,
+    ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
 pub use runtime::{CommitLog, Runtime, RuntimeHandle};
 pub use state::{
