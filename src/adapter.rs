@@ -286,11 +286,11 @@ impl ProtocolAdapter for TradeAdapter {
                 json!({"aid": "confirm_settlement"})
             }
             RuntimeCommand::Trade(TradeCommand::QueryAccountInfo { account_id }) => json!({
-                "aid": "query_account_info",
+                "aid": "qry_account_info",
                 "user_id": account_id.as_str(),
             }),
             RuntimeCommand::Trade(TradeCommand::QueryAccountRegister { account_id }) => json!({
-                "aid": "query_account_register",
+                "aid": "qry_account_register",
                 "user_id": account_id.as_str(),
             }),
             RuntimeCommand::Trade(TradeCommand::QuerySettlementInfo {

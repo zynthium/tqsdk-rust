@@ -867,6 +867,13 @@ impl SessionRuntime {
                 command_id,
                 &detail,
             ),
+            "qry_account_info" => self.derive_trade_account_info_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
             "qry_settlement_info" => self.derive_trade_settlement_query_command_status(
                 &snapshot,
                 route_label,
@@ -899,6 +906,28 @@ impl SessionRuntime {
 
         let mut detail = Map::new();
         detail.insert("trade_more_data".to_string(), json!(false));
+        Some((
+            CommandStatus::Completed,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
+    }
+
+    fn derive_trade_account_info_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        commit: &CommitResult,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let account_id = detail.get("account_id").and_then(Value::as_str)?;
+        if !commit_touches_path(commit, ["trade", account_id, "accounts", "CNY"]) {
+            return None;
+        }
+        snapshot.get(["trade", account_id, "accounts", "CNY"])?;
+
+        let mut detail = Map::new();
+        detail.insert("currency".to_string(), json!("CNY"));
         Some((
             CommandStatus::Completed,
             self.command_detail(command_id, Some(route_label), None, detail),

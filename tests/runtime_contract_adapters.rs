@@ -217,6 +217,32 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         }),
     );
 
+    let trade_query_account_info = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::QueryAccountInfo {
+            account_id: AccountId::new("simnow"),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_query_account_info[0],
+        json!({
+            "aid": "qry_account_info",
+            "user_id": "simnow",
+        }),
+    );
+
+    let trade_query_account_register = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::QueryAccountRegister {
+            account_id: AccountId::new("simnow"),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_query_account_register[0],
+        json!({
+            "aid": "qry_account_register",
+            "user_id": "simnow",
+        }),
+    );
+
     let trade_insert = registry
         .encode_command(&RuntimeCommand::Trade(TradeCommand::InsertOrder(
             TradeInsertOrderCommand {
