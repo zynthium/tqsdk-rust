@@ -25,6 +25,18 @@ pub struct RoutePumpOutcome {
     pub reconnect_required: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionStepOutcome {
+    pub dispatches: Vec<DispatchReceipt>,
+    pub commits: Vec<CommitResult>,
+    pub recovered: bool,
+}
+
+struct RecoveryOutcome {
+    run: SessionRun,
+    commits: Vec<CommitResult>,
+}
+
 #[derive(Clone)]
 pub struct SessionRuntime {
     handle: RuntimeHandle,
@@ -80,22 +92,10 @@ impl SessionRuntime {
         adapters: &'a AdapterRegistry,
     ) -> ContractFuture<'a, SessionRun> {
         Box::pin(async move {
-            self.handle
-                .record_session_phase(SessionPhase::Reconnecting, None, vec![])?;
-
-            let bootstrap = self
-                .bootstrap
-                .establish_with_resolver(auth, resolver, config, adapters)
+            let recovery = self
+                .recover_internal(auth, resolver, connector, config, adapters, true)
                 .await?;
-            let connected = self
-                .connect_if_needed(&bootstrap, connector, None)
-                .await?;
-
-            self.handle
-                .record_session_phase(SessionPhase::Resyncing, None, vec![])?;
-            self.handle.record_session_resync(&bootstrap, vec![])?;
-
-            Ok(SessionRun { bootstrap, connected })
+            Ok(recovery.run)
         })
     }
 
@@ -159,6 +159,48 @@ impl SessionRuntime {
         })
     }
 
+    pub fn drive_route_once<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+        route_label: &'a str,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        connector: &'a dyn SessionRouteConnector,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+    ) -> ContractFuture<'a, SessionStepOutcome> {
+        Box::pin(async move {
+            let mut outcome = SessionStepOutcome {
+                dispatches: self.flush_outbound(run).await?,
+                commits: Vec::new(),
+                recovered: false,
+            };
+
+            let route_outcome = self
+                .pump_route_once(run, route_label, caused_by.clone(), scope)
+                .await?;
+            outcome.commits.extend(route_outcome.commits);
+
+            if route_outcome.reconnect_required {
+                let recovery = self
+                    .recover_internal(auth, resolver, connector, config, adapters, false)
+                    .await?;
+                outcome.recovered = true;
+                outcome.commits.extend(recovery.commits);
+                *run = recovery.run;
+                return Ok(outcome);
+            }
+
+            if let Some(commit) = self.ingest_queued_inputs(run, caused_by, scope)? {
+                outcome.commits.push(commit);
+            }
+
+            Ok(outcome)
+        })
+    }
+
     pub fn ingest_queued_inputs(
         &self,
         run: &mut SessionRun,
@@ -194,6 +236,44 @@ impl SessionRuntime {
             self.bootstrap
                 .connect_topology(&bootstrap.topology, connector)
                 .await
+        })
+    }
+
+    fn recover_internal<'a>(
+        &'a self,
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        connector: &'a dyn SessionRouteConnector,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+        record_reconnecting: bool,
+    ) -> ContractFuture<'a, RecoveryOutcome> {
+        Box::pin(async move {
+            let mut commits = Vec::new();
+
+            if record_reconnecting {
+                if let Some(commit) = self.handle.record_session_phase(SessionPhase::Reconnecting, None, vec![])? {
+                    commits.push(commit);
+                }
+            }
+
+            let bootstrap = self
+                .bootstrap
+                .establish_with_resolver(auth, resolver, config, adapters)
+                .await?;
+            let connected = self.connect_if_needed(&bootstrap, connector, None).await?;
+
+            if let Some(commit) = self.handle.record_session_phase(SessionPhase::Resyncing, None, vec![])? {
+                commits.push(commit);
+            }
+            if let Some(commit) = self.handle.record_session_resync(&bootstrap, vec![])? {
+                commits.push(commit);
+            }
+
+            Ok(RecoveryOutcome {
+                run: SessionRun { bootstrap, connected },
+                commits,
+            })
         })
     }
 

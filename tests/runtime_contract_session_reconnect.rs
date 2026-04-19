@@ -1,12 +1,15 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, CommitScope, ContractError, ContractFuture, ProtocolDomain, RawFrame, Runtime,
-    RuntimeHandle, SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun,
-    SessionRuntime, SessionTarget, SessionTopology, StatePath, Transport,
+    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture, EndpointConfig,
+    ProtocolDomain, RawFrame, Revision, Runtime, RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase,
+    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget,
+    SessionTopology, SessionTopologyResolver, StatePath, Transport,
 };
 
 #[derive(Clone)]
@@ -45,18 +48,36 @@ impl Transport for ControlledTransport {
 }
 
 struct ControlledConnector {
-    behavior: RecvBehavior,
+    behaviors: Arc<Mutex<VecDeque<RecvBehavior>>>,
+    connected_labels: Arc<Mutex<Vec<String>>>,
+}
+
+impl ControlledConnector {
+    fn new(behaviors: Vec<RecvBehavior>) -> Self {
+        Self {
+            behaviors: Arc::new(Mutex::new(behaviors.into())),
+            connected_labels: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn connected_labels(&self) -> Vec<String> {
+        self.connected_labels.lock().unwrap().clone()
+    }
 }
 
 impl SessionRouteConnector for ControlledConnector {
     fn connect_route<'a>(
         &'a self,
-        _route: &'a SessionRoute,
+        route: &'a SessionRoute,
     ) -> ContractFuture<'a, Box<dyn Transport>> {
-        let transport = ControlledTransport {
-            behavior: self.behavior.clone(),
-        };
-        Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+        let behaviors = Arc::clone(&self.behaviors);
+        let connected_labels = Arc::clone(&self.connected_labels);
+        let label = route.label.clone();
+        Box::pin(async move {
+            connected_labels.lock().unwrap().push(label);
+            let behavior = behaviors.lock().unwrap().pop_front().unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
+            Ok(Box::new(ControlledTransport { behavior }) as Box<dyn Transport>)
+        })
     }
 }
 
@@ -142,6 +163,126 @@ fn session_runtime_turns_transport_recv_errors_into_reconnect_signal_and_commits
     );
 }
 
+#[test]
+fn session_runtime_drive_route_once_recovers_after_transport_close_without_duplicate_reconnecting_commit() {
+    let handle = runtime_with_default_adapters();
+    let log = handle.commit_log();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = ControlledConnector::new(vec![
+        RecvBehavior::Frame(RawFrame::Close),
+        RecvBehavior::Frame(RawFrame::Pong),
+    ]);
+    let adapters = adapter_registry();
+    let config = session_config();
+
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+    let start_revision = Revision::new(log.head_revision().unwrap().get() + 1);
+    let mut cursor = handle.cursor_from(start_revision);
+
+    let outcome = block_on(runtime.drive_route_once(
+        &mut run,
+        "market",
+        vec![],
+        CommitScope::RealtimeUpdate,
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    assert!(outcome.recovered);
+    assert!(outcome.dispatches.is_empty());
+    assert_eq!(outcome.commits.len(), 4);
+    assert_eq!(
+        outcome.commits[0].changes.path_hits,
+        vec![StatePath::new(["system", "internal", "transport-close"])]
+    );
+    assert_eq!(outcome.commits[1].scope, CommitScope::SessionTransition);
+    assert_eq!(outcome.commits[2].scope, CommitScope::SessionTransition);
+    assert_eq!(outcome.commits[3].scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        connector.connected_labels(),
+        vec!["market".to_string(), "market".to_string()]
+    );
+    assert_eq!(run.bootstrap.phase, SessionPhase::Running);
+    assert_eq!(run.connected.routes.len(), 1);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("running"))
+    );
+
+    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
+    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
+    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
+    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::ResyncRecovery);
+    assert_eq!(log.next(&mut cursor), None);
+}
+
+#[test]
+fn session_runtime_drive_route_once_recovers_after_transport_error() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = ControlledConnector::new(vec![
+        RecvBehavior::Error(ContractError::auth("websocket recv failed: broken pipe")),
+        RecvBehavior::Frame(RawFrame::Pong),
+    ]);
+    let adapters = adapter_registry();
+    let config = session_config();
+
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    let outcome = block_on(runtime.drive_route_once(
+        &mut run,
+        "market",
+        vec![],
+        CommitScope::RealtimeUpdate,
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    assert!(outcome.recovered);
+    assert_eq!(outcome.commits.len(), 4);
+    assert_eq!(
+        outcome.commits[0].changes.path_hits,
+        vec![StatePath::new(["system", "internal", "transport-error"])]
+    );
+    assert_eq!(outcome.commits[3].scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "transport-error", "message"]),
+        Some(&json!("auth error: websocket recv failed: broken pipe"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("running"))
+    );
+}
+
 fn connect_run(behavior: RecvBehavior) -> SessionRun {
     let topology = SessionTopology::default().with_route(SessionRoute {
         label: "market".to_string(),
@@ -154,7 +295,7 @@ fn connect_run(behavior: RecvBehavior) -> SessionRun {
     });
 
     let connected = block_on(
-        SessionBootstrap::new().connect_topology(&topology, &ControlledConnector { behavior }),
+        SessionBootstrap::new().connect_topology(&topology, &ControlledConnector::new(vec![behavior])),
     )
     .unwrap();
 
@@ -169,9 +310,54 @@ fn connect_run(behavior: RecvBehavior) -> SessionRun {
 }
 
 fn runtime_with_default_adapters() -> RuntimeHandle {
+    RuntimeHandle::with_adapters(adapter_registry())
+}
+
+fn adapter_registry() -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
-    RuntimeHandle::with_adapters(registry)
+    registry
+}
+
+fn session_config() -> SessionConfig {
+    SessionConfig::new(EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"))
+        .enable_domain(ProtocolDomain::Market)
+}
+
+struct TestAuthProvider;
+
+impl AuthProvider for TestAuthProvider {
+    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+        Box::pin(async { Ok(AuthContext::new("test-token")) })
+    }
+}
+
+struct MarketTopologyResolver;
+
+impl SessionTopologyResolver for MarketTopologyResolver {
+    fn resolve_topology<'a>(
+        &'a self,
+        _auth: &'a AuthContext,
+        _config: &'a SessionConfig,
+        enabled_domains: &'a [ProtocolDomain],
+    ) -> ContractFuture<'a, SessionTopology> {
+        Box::pin(async move {
+            assert_eq!(enabled_domains, &[ProtocolDomain::Market]);
+            Ok(market_topology())
+        })
+    }
+}
+
+fn market_topology() -> SessionTopology {
+    SessionTopology::default().with_route(SessionRoute {
+        label: "market".to_string(),
+        target: SessionTarget::Shared,
+        domains: vec![ProtocolDomain::Market],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://market.example".to_string(),
+            connect: Default::default(),
+        },
+    })
 }
 
 fn block_on<F>(future: F) -> F::Output
