@@ -151,7 +151,16 @@ impl SessionRuntime {
             let Some(input) = run.connected.recv_route_input(route_label).await? else {
                 return Ok(None);
             };
-            self.handle.ingest(input, caused_by, scope)
+            let commit = self.handle.ingest(input, caused_by.clone(), scope)?;
+            if commit.is_some() {
+                self.record_command_statuses(
+                    &caused_by,
+                    CommandStatus::PartiallyApplied,
+                    Some(json!({ "route": route_label })),
+                    scope,
+                )?;
+            }
+            Ok(commit)
         })
     }
 
@@ -180,8 +189,14 @@ impl SessionRuntime {
                 }
                 Ok(Some(input)) => {
                     let mut outcome = RoutePumpOutcome::default();
-                    if let Some(commit) = self.handle.ingest(input, caused_by, scope)? {
+                    if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
                         outcome.commits.push(commit);
+                        self.record_command_statuses(
+                            &caused_by,
+                            CommandStatus::PartiallyApplied,
+                            Some(json!({ "route": route_label })),
+                            scope,
+                        )?;
                     }
                     Ok(outcome)
                 }

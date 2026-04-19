@@ -155,6 +155,13 @@ fn session_runtime_flushes_and_ingests_transport_route_inputs() {
             .get(["quotes", "SHFE.au2602", "ask_price1"]),
         Some(&json!(619.0))
     );
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("partially_applied"))
+    );
 }
 
 #[test]
