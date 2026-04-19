@@ -4,8 +4,12 @@ use crate::{
         SchemaCommand, SystemCommand, TradeCommand, TradeInsertOrderCommand,
     },
     error::{ContractError, Result},
-    events::{NormalizedMutation, RuntimeInput},
-    ids::ProtocolDomain,
+    events::{
+        AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource, NormalizedMutation,
+        ReplayEvent, RuntimeInput,
+    },
+    ids::{AccountId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, SchemaId, Symbol, TradeId},
+    state::{ObjectKey, SeriesKey, StatePath},
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,12 +121,31 @@ impl ProtocolAdapter for SystemAdapter {
         }
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        match input {
+            RuntimeInput::Auth(_) | RuntimeInput::Internal(_) => true,
+            RuntimeInput::Io(IoEvent { domains, .. }) => domains.contains(&ProtocolDomain::System),
+            _ => false,
+        }
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("system"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Auth(event) => decode_named_payload(
+                ["system".to_string(), "auth".to_string()].to_vec(),
+                event,
+                MutationSource::SessionControl,
+            ),
+            RuntimeInput::Internal(event) => decode_named_payload(
+                ["system".to_string(), "internal".to_string()].to_vec(),
+                event,
+                MutationSource::SessionControl,
+            ),
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::System) => {
+                decode_io_payload(event, MutationSource::SessionControl, vec!["system".to_string(), event.route.clone()])
+            }
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -189,12 +212,17 @@ impl ProtocolAdapter for MarketAdapter {
         }
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Market))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("market"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Market) => {
+                decode_io_payload(event, MutationSource::MarketDiff, vec![])
+            }
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -280,12 +308,17 @@ impl ProtocolAdapter for TradeAdapter {
         Ok(vec![json_request(request)])
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Trade))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("trade"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Trade) => {
+                decode_io_payload(event, MutationSource::TradeReply, vec![])
+            }
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -325,12 +358,17 @@ impl ProtocolAdapter for QueryAdapter {
         }
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Query))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("query"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Query) => {
+                decode_io_payload(event, MutationSource::QueryResult, vec!["query".to_string()])
+            }
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -360,12 +398,19 @@ impl ProtocolAdapter for SchemaAdapter {
         }
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Schema))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("schema"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Schema) => decode_io_payload(
+                event,
+                MutationSource::SchemaBootstrap,
+                vec!["schema".to_string(), event.route.clone()],
+            ),
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -393,12 +438,15 @@ impl ProtocolAdapter for ReplayAdapter {
         }
     }
 
-    fn accepts_input(&self, _input: &RuntimeInput) -> bool {
-        false
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Replay(_))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
-        Err(ContractError::UnsupportedInput("replay"))
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Replay(event) => decode_replay_payload(event),
+            _ => Ok(vec![]),
+        }
     }
 }
 
@@ -510,4 +558,198 @@ fn split_symbol(symbol: &str) -> Result<(&str, &str)> {
     symbol
         .split_once('.')
         .ok_or_else(|| ContractError::validation(format!("invalid symbol format: {symbol}")))
+}
+
+fn decode_named_payload(base: Vec<String>, event: &impl NamedPayloadEvent, source: MutationSource) -> Result<Vec<NormalizedMutation>> {
+    let mut path = base;
+    path.push(event.label().to_string());
+
+    match event.payload() {
+        Some(Value::Object(_)) => decode_json_value(event.payload().unwrap(), source, path),
+        Some(value) => Ok(vec![NormalizedMutation {
+            path: StatePath::new(path),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "value".to_string(),
+                value: value.clone(),
+            }],
+            source,
+        }]),
+        None => Ok(vec![NormalizedMutation {
+            path: StatePath::new(path[..path.len().saturating_sub(1)].to_vec()),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "event".to_string(),
+                value: json!(event.label()),
+            }],
+            source,
+        }]),
+    }
+}
+
+fn decode_replay_payload(event: &ReplayEvent) -> Result<Vec<NormalizedMutation>> {
+    let mut prefix = vec!["replay".to_string()];
+    if let Some(session_id) = &event.session_id {
+        prefix.push(session_id.as_str().to_string());
+    } else {
+        prefix.push(event.label.to_string());
+    }
+
+    match &event.payload {
+        Some(payload) => decode_json_value(payload, MutationSource::ReplayStep, prefix),
+        None => Ok(vec![NormalizedMutation {
+            path: StatePath::new(prefix),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "event".to_string(),
+                value: json!(event.label),
+            }],
+            source: MutationSource::ReplayStep,
+        }]),
+    }
+}
+
+fn decode_io_payload(event: &IoEvent, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => decode_json_envelope(value, source, prefix),
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
+fn decode_json_envelope(value: &Value, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
+    if value.get("aid").and_then(Value::as_str) == Some("rtn_data") {
+        if let Some(data) = value.get("data").and_then(Value::as_array) {
+            let mut mutations = Vec::new();
+            for item in data {
+                mutations.extend(decode_json_value(item, source, prefix.clone())?);
+            }
+            return Ok(mutations);
+        }
+    }
+
+    decode_json_value(value, source, prefix)
+}
+
+fn decode_json_value(value: &Value, source: MutationSource, prefix: Vec<String>) -> Result<Vec<NormalizedMutation>> {
+    let mut mutations = Vec::new();
+    match value {
+        Value::Object(map) => flatten_object(prefix, map, source, &mut mutations),
+        _ if !prefix.is_empty() => mutations.push(NormalizedMutation {
+            path: StatePath::new(prefix),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "value".to_string(),
+                value: value.clone(),
+            }],
+            source,
+        }),
+        _ => {}
+    }
+    Ok(mutations)
+}
+
+fn flatten_object(
+    path: Vec<String>,
+    map: &Map<String, Value>,
+    source: MutationSource,
+    out: &mut Vec<NormalizedMutation>,
+) {
+    let mut fields = map
+        .iter()
+        .filter(|(_, value)| !matches!(value, Value::Object(_)))
+        .map(|(field, value)| FieldMutation {
+            field: field.clone(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by(|left, right| left.field.cmp(&right.field));
+
+    if !path.is_empty() && !fields.is_empty() {
+        out.push(NormalizedMutation {
+            path: StatePath::new(path.clone()),
+            object: infer_object_key_from_segments(&path),
+            fields,
+            source,
+        });
+    }
+
+    for (field, value) in map {
+        if let Value::Object(child) = value {
+            let mut child_path = path.clone();
+            child_path.push(field.clone());
+            flatten_object(child_path, child, source, out);
+        }
+    }
+}
+
+fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
+    match path {
+        [root, symbol] if root == "quotes" => Some(ObjectKey::Quote {
+            symbol: Symbol::new(symbol.clone()),
+        }),
+        [root, symbol, duration, bar_id] if root == "klines" => Some(ObjectKey::Kline {
+            series: SeriesKey {
+                primary: Symbol::new(symbol.clone()),
+                secondary: vec![],
+                duration_ns: duration.parse().ok()?,
+                view_width: 0,
+                right_id: None,
+            },
+            bar_id: bar_id.parse().ok()?,
+        }),
+        [root, symbol, tick_id] if root == "ticks" => Some(ObjectKey::Tick {
+            symbol: Symbol::new(symbol.clone()),
+            tick_id: tick_id.parse().ok()?,
+        }),
+        [root, account_id, branch, _currency] if root == "trade" && branch == "accounts" => Some(ObjectKey::Account {
+            account_id: AccountId::new(account_id.clone()),
+        }),
+        [root, account_id, branch, symbol] if root == "trade" && branch == "positions" => Some(ObjectKey::Position {
+            account_id: AccountId::new(account_id.clone()),
+            symbol: Symbol::new(symbol.clone()),
+        }),
+        [root, account_id, branch, order_id] if root == "trade" && branch == "orders" => Some(ObjectKey::Order {
+            account_id: AccountId::new(account_id.clone()),
+            order_id: OrderId::new(order_id.clone()),
+        }),
+        [root, account_id, branch, trade_id] if root == "trade" && branch == "trades" => Some(ObjectKey::Trade {
+            account_id: AccountId::new(account_id.clone()),
+            trade_id: TradeId::new(trade_id.clone()),
+        }),
+        [root, query_id, ..] if root == "query" => Some(ObjectKey::QueryResult {
+            query_id: QueryId::new(query_id.clone()),
+        }),
+        [root, schema_id, ..] if root == "schema" => Some(ObjectKey::SchemaNode {
+            schema_id: SchemaId::new(schema_id.clone()),
+        }),
+        [root, session_id, ..] if root == "replay" => Some(ObjectKey::ReplayCursor {
+            session_id: ReplaySessionId::new(session_id.clone()),
+        }),
+        _ => None,
+    }
+}
+
+trait NamedPayloadEvent {
+    fn label(&self) -> &'static str;
+    fn payload(&self) -> Option<&Value>;
+}
+
+impl NamedPayloadEvent for AuthEvent {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn payload(&self) -> Option<&Value> {
+        self.payload.as_ref()
+    }
+}
+
+impl NamedPayloadEvent for InternalEvent {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn payload(&self) -> Option<&Value> {
+        self.payload.as_ref()
+    }
 }

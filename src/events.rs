@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use crate::state::{ObjectKey, StatePath};
+use crate::{
+    ids::{ProtocolDomain, ReplaySessionId},
+    state::{ObjectKey, StatePath},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeInput {
@@ -13,27 +16,41 @@ pub enum RuntimeInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IoEvent {
-    pub label: &'static str,
+    pub route: String,
+    pub domains: Vec<ProtocolDomain>,
+    pub payload: InputPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputPayload {
+    Json(Value),
+    Text(String),
+    Binary(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerEvent {
     pub label: &'static str,
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthEvent {
     pub label: &'static str,
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayEvent {
     pub label: &'static str,
+    pub session_id: Option<ReplaySessionId>,
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalEvent {
     pub label: &'static str,
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -22,8 +22,8 @@ pub use commands::{
 };
 pub use error::{ContractError, Result};
 pub use events::{
-    AuthEvent, FieldMutation, InternalEvent, IoEvent, MutationSource, NormalizedMutation, ReplayEvent, RuntimeInput,
-    TimerEvent,
+    AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource, NormalizedMutation, ReplayEvent,
+    RuntimeInput, TimerEvent,
 };
 pub use ids::{
     AccountId, AuthId, CommandId, CursorId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, Revision, SchemaId,

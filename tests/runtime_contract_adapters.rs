@@ -1,11 +1,11 @@
 use serde_json::{json, Value};
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, FieldMutation, InternalEvent, MarketAdapter, MarketChartCommand, MarketCommand,
-    MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter,
-    ProtocolDomain, QueryAdapter, QueryCommand, QueryId, ReplayAdapter, ReplayCommand, RuntimeCommand, RuntimeInput,
-    SchemaAdapter, SchemaCommand, StatePath, Symbol, SystemAdapter, SystemCommand, TradeAdapter, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition,
-    TradeVolumeCondition,
+    AccountId, AdapterRegistry, AuthEvent, FieldMutation, InputPayload, InternalEvent, MarketAdapter,
+    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundFrame,
+    OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryAdapter, QueryCommand, QueryId, ReplayAdapter,
+    ReplayCommand, ReplayEvent, ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter, SchemaCommand, StatePath,
+    Symbol, SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection, TradeInsertOrderCommand,
+    TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 
 #[derive(Clone)]
@@ -33,7 +33,7 @@ impl ProtocolAdapter for StubAdapter {
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
         matches!(
             input,
-            RuntimeInput::Internal(InternalEvent { label }) if *label == self.accepted_input_label
+            RuntimeInput::Internal(InternalEvent { label, .. }) if *label == self.accepted_input_label
         )
     }
 
@@ -68,7 +68,10 @@ fn adapter_registry_routes_commands_and_fans_out_inputs() {
         vec![OutboundRequest::internal_label("shutdown-runtime")]
     );
 
-    let input = RuntimeInput::Internal(InternalEvent { label: "shared" });
+    let input = RuntimeInput::Internal(InternalEvent {
+        label: "shared",
+        payload: None,
+    });
     assert_eq!(
         registry.decode_input(&input).unwrap(),
         vec![
@@ -264,6 +267,200 @@ fn concrete_adapters_are_public_and_instantiable() {
     let _ = QueryAdapter::default();
     let _ = SchemaAdapter::default();
     let _ = ReplayAdapter::default();
+}
+
+#[test]
+fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let market = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "market.shared".to_string(),
+            domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(json!({
+                "quotes": {
+                    "SHFE.au2602": {
+                        "last_price": 618.5,
+                        "ask_price1": 619.0
+                    }
+                }
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        market,
+        vec![NormalizedMutation {
+            path: StatePath::new(["quotes", "SHFE.au2602"]),
+            object: Some(ObjectKey::Quote {
+                symbol: Symbol::new("SHFE.au2602"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "ask_price1".to_string(),
+                    value: json!(619.0),
+                },
+                FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(618.5),
+                },
+            ],
+            source: MutationSource::MarketDiff,
+        }]
+    );
+
+    let trade = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "trade.simnow".to_string(),
+            domains: vec![ProtocolDomain::Trade],
+            payload: InputPayload::Json(json!({
+                "trade": {
+                    "simnow": {
+                        "orders": {
+                            "order-1": {
+                                "status": "ALIVE",
+                                "volume_left": 2
+                            }
+                        }
+                    }
+                }
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        trade,
+        vec![NormalizedMutation {
+            path: StatePath::new(["trade", "simnow", "orders", "order-1"]),
+            object: Some(ObjectKey::Order {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("order-1"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "status".to_string(),
+                    value: json!("ALIVE"),
+                },
+                FieldMutation {
+                    field: "volume_left".to_string(),
+                    value: json!(2),
+                },
+            ],
+            source: MutationSource::TradeReply,
+        }]
+    );
+
+    let query = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "ins.query".to_string(),
+            domains: vec![ProtocolDomain::Query],
+            payload: InputPayload::Json(json!({
+                "quotes-page-1": {
+                    "items": [{"instrument_id": "au2602"}],
+                    "has_more": false
+                }
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        query,
+        vec![NormalizedMutation {
+            path: StatePath::new(["query", "quotes-page-1"]),
+            object: Some(ObjectKey::QueryResult {
+                query_id: QueryId::new("quotes-page-1"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "has_more".to_string(),
+                    value: json!(false),
+                },
+                FieldMutation {
+                    field: "items".to_string(),
+                    value: json!([{ "instrument_id": "au2602" }]),
+                },
+            ],
+            source: MutationSource::QueryResult,
+        }]
+    );
+
+    let schema = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "instrument-schema".to_string(),
+            domains: vec![ProtocolDomain::Schema],
+            payload: InputPayload::Json(json!({
+                "nodes": {
+                    "quote": {
+                        "fields": ["last_price", "ask_price1"]
+                    }
+                }
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        schema,
+        vec![NormalizedMutation {
+            path: StatePath::new(["schema", "instrument-schema", "nodes", "quote"]),
+            object: Some(ObjectKey::SchemaNode {
+                schema_id: tqsdk_runtime_contract::SchemaId::new("instrument-schema"),
+            }),
+            fields: vec![FieldMutation {
+                field: "fields".to_string(),
+                value: json!(["last_price", "ask_price1"]),
+            }],
+            source: MutationSource::SchemaBootstrap,
+        }]
+    );
+
+    let replay = registry
+        .decode_input(&RuntimeInput::Replay(ReplayEvent {
+            label: "step",
+            session_id: Some(ReplaySessionId::new("rb-replay")),
+            payload: Some(json!({
+                "cursor": {
+                    "dt": 1713500000000_i64,
+                    "state": "running"
+                }
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        replay,
+        vec![NormalizedMutation {
+            path: StatePath::new(["replay", "rb-replay", "cursor"]),
+            object: Some(ObjectKey::ReplayCursor {
+                session_id: ReplaySessionId::new("rb-replay"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "dt".to_string(),
+                    value: json!(1713500000000_i64),
+                },
+                FieldMutation {
+                    field: "state".to_string(),
+                    value: json!("running"),
+                },
+            ],
+            source: MutationSource::ReplayStep,
+        }]
+    );
+
+    let system = registry
+        .decode_input(&RuntimeInput::Auth(AuthEvent {
+            label: "refreshed",
+            payload: Some(json!({"token_state": "ready"})),
+        }))
+        .unwrap();
+    assert_eq!(
+        system,
+        vec![NormalizedMutation {
+            path: StatePath::new(["system", "auth", "refreshed"]),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "token_state".to_string(),
+                value: json!("ready"),
+            }],
+            source: MutationSource::SessionControl,
+        }]
+    );
 }
 
 fn mutation(prefix: &str, field: &str, value: &str, source: MutationSource) -> NormalizedMutation {

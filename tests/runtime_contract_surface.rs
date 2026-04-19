@@ -182,6 +182,7 @@ fn public_surface_exports_are_usable_together() {
     let _input = tqsdk_runtime_contract::RuntimeInput::Internal(
         tqsdk_runtime_contract::InternalEvent {
             label: "checkpoint",
+            payload: None,
         },
     );
     let _scope = tqsdk_runtime_contract::CommitScope::SessionTransition;
