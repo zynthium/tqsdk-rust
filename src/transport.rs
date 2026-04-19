@@ -11,8 +11,10 @@ use tungstenite::{connect, Message, WebSocket};
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::commands::{OutboundDispatch, OutboundFrame, OutboundRequest};
+use crate::events::{InputPayload, InternalEvent, IoEvent, RuntimeInput};
 use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
 use crate::{ContractError, Result};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawFrame {
@@ -456,11 +458,35 @@ pub struct ConnectedSessionRoute {
     pub route: SessionRoute,
     pub transport: Box<dyn Transport>,
     pending_requests: VecDeque<OutboundDispatch>,
+    pending_inputs: VecDeque<RuntimeInput>,
 }
 
 impl ConnectedSessionRoute {
     pub fn drain_pending_requests(&mut self) -> Vec<OutboundDispatch> {
         self.pending_requests.drain(..).collect()
+    }
+
+    pub fn queue_input(&mut self, input: RuntimeInput) {
+        self.pending_inputs.push_back(input);
+    }
+
+    pub fn drain_queued_inputs(&mut self) -> Vec<RuntimeInput> {
+        self.pending_inputs.drain(..).collect()
+    }
+
+    pub fn recv_input<'a>(&'a mut self) -> ContractFuture<'a, Option<RuntimeInput>> {
+        Box::pin(async move {
+            if let Some(input) = self.pending_inputs.pop_front() {
+                return Ok(Some(input));
+            }
+
+            if !matches!(self.route.endpoint, SessionRouteEndpoint::WebSocket { .. }) {
+                return Ok(None);
+            }
+
+            let frame = self.transport.recv().await?;
+            map_raw_frame_to_input(&self.route, frame)
+        })
     }
 }
 
@@ -515,6 +541,29 @@ impl ConnectedTopology {
                 route_label: route.route.label.clone(),
             })
         })
+    }
+
+    pub fn route_mut(&mut self, label: &str) -> Option<&mut ConnectedSessionRoute> {
+        self.routes.iter_mut().find(|route| route.route.label == label)
+    }
+
+    pub fn recv_route_input<'a>(&'a mut self, label: &'a str) -> ContractFuture<'a, Option<RuntimeInput>> {
+        Box::pin(async move {
+            let Some(route) = self.route_mut(label) else {
+                return Err(ContractError::validation(format!(
+                    "unknown connected route for input recv: {label}"
+                )));
+            };
+            route.recv_input().await
+        })
+    }
+
+    pub fn drain_queued_inputs(&mut self) -> Vec<RuntimeInput> {
+        let mut inputs = Vec::new();
+        for route in &mut self.routes {
+            inputs.extend(route.drain_queued_inputs());
+        }
+        inputs
     }
 }
 
@@ -617,6 +666,36 @@ fn route_accepts_dispatch(route: &SessionRoute, dispatch: &OutboundDispatch) -> 
         )
 }
 
+fn map_raw_frame_to_input(route: &SessionRoute, frame: RawFrame) -> Result<Option<RuntimeInput>> {
+    match frame {
+        RawFrame::Text(text) => Ok(Some(RuntimeInput::Io(IoEvent {
+            route: route.label.clone(),
+            domains: route.domains.clone(),
+            payload: parse_text_payload(text)?,
+        }))),
+        RawFrame::Binary(bytes) => Ok(Some(RuntimeInput::Io(IoEvent {
+            route: route.label.clone(),
+            domains: route.domains.clone(),
+            payload: InputPayload::Binary(bytes),
+        }))),
+        RawFrame::Ping | RawFrame::Pong => Ok(None),
+        RawFrame::Close => Ok(Some(RuntimeInput::Internal(InternalEvent {
+            label: "transport-close",
+            payload: Some(json!({
+                "route": route.label,
+                "domains": route.domains.iter().copied().map(ProtocolDomain::as_str).collect::<Vec<_>>(),
+            })),
+        }))),
+    }
+}
+
+fn parse_text_payload(text: String) -> Result<InputPayload> {
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => Ok(InputPayload::Json(value)),
+        Err(_) => Ok(InputPayload::Text(text)),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionBootstrap;
 
@@ -679,6 +758,7 @@ impl SessionBootstrap {
                         route: route.clone(),
                         transport,
                         pending_requests: VecDeque::new(),
+                        pending_inputs: VecDeque::new(),
                     }),
                     Err(err) => {
                         let _ = connected.close_all().await;

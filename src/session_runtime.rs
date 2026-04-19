@@ -3,11 +3,14 @@ use serde_json::json;
 use crate::{
     adapter::AdapterRegistry,
     auth::{AuthProvider, ContractFuture},
+    ids::CommandId,
     runtime::RuntimeHandle,
+    state::{CommitResult, CommitScope},
     transport::{
-        BootstrapResult, ConnectedTopology, SessionBootstrap, SessionConfig, SessionPhase, SessionRouteConnector,
-        SessionTopologyResolver,
+        BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig, SessionPhase,
+        SessionRouteConnector, SessionTopologyResolver,
     },
+    Result,
 };
 
 pub struct SessionRun {
@@ -87,6 +90,48 @@ impl SessionRuntime {
 
             Ok(SessionRun { bootstrap, connected })
         })
+    }
+
+    pub fn flush_outbound<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+    ) -> ContractFuture<'a, Vec<DispatchReceipt>> {
+        Box::pin(async move {
+            let dispatches = self.handle.drain_dispatches()?;
+            let mut receipts = Vec::with_capacity(dispatches.len());
+            for dispatch in dispatches {
+                receipts.push(run.connected.dispatch(dispatch).await?);
+            }
+            Ok(receipts)
+        })
+    }
+
+    pub fn recv_route_and_ingest<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+        route_label: &'a str,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> ContractFuture<'a, Option<CommitResult>> {
+        Box::pin(async move {
+            let Some(input) = run.connected.recv_route_input(route_label).await? else {
+                return Ok(None);
+            };
+            self.handle.ingest(input, caused_by, scope)
+        })
+    }
+
+    pub fn ingest_queued_inputs(
+        &self,
+        run: &mut SessionRun,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<CommitResult>> {
+        let inputs = run.connected.drain_queued_inputs();
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        self.handle.ingest_batch(inputs, caused_by, scope)
     }
 
     fn connect_if_needed<'a>(
