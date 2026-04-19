@@ -157,7 +157,26 @@ impl SessionRuntime {
             let dispatches = self.handle.drain_dispatches()?;
             let mut receipts = Vec::with_capacity(dispatches.len());
             for dispatch in dispatches {
-                let receipt = run.connected.dispatch(dispatch).await?;
+                let route_label = run
+                    .connected
+                    .route_label_for_dispatch(&dispatch)
+                    .map(str::to_string);
+                let receipt = match run.connected.dispatch(dispatch.clone()).await {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        self.handle.record_command_status(
+                            dispatch.command_id,
+                            CommandStatus::Failed,
+                            Some(json!({
+                                "route": route_label,
+                                "domain": dispatch.domain.as_str(),
+                                "message": err.to_string(),
+                            })),
+                            CommitScope::RealtimeUpdate,
+                        )?;
+                        return Err(err);
+                    }
+                };
                 let route_label = receipt.route_label.clone();
                 let domain = receipt.domain;
                 self.handle.record_command_status(

@@ -6,11 +6,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, BootstrapResult, CommitScope, ContractFuture, DefaultRouteConnector, IoEvent,
-    MarketCommand, OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeCommand, RuntimeHandle,
-    RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget, SessionTopology, Symbol,
-    Transport,
+    AdapterRegistry, BootstrapResult, CommitScope, ContractError, ContractFuture,
+    DefaultRouteConnector, IoEvent, MarketCommand, OutboundFrame, ProtocolDomain, RawFrame,
+    Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
+    SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun,
+    SessionRuntime, SessionTarget, SessionTopology, Symbol, Transport,
 };
 
 #[derive(Clone)]
@@ -66,6 +66,38 @@ impl SessionRouteConnector for TestRouteConnector {
         let transport =
             QueuedTransport::new(self.recv_frames.clone(), Arc::clone(&self.sent_frames));
         Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+    }
+}
+
+#[derive(Default)]
+struct FailingSendTransport;
+
+impl Transport for FailingSendTransport {
+    fn connect(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+        Box::pin(async { Ok(RawFrame::Pong) })
+    }
+
+    fn send(&mut self, _frame: OutboundFrame) -> ContractFuture<'_, ()> {
+        Box::pin(async { Err(ContractError::auth("websocket send failed: broken pipe")) })
+    }
+
+    fn close(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct FailingSendConnector;
+
+impl SessionRouteConnector for FailingSendConnector {
+    fn connect_route<'a>(
+        &'a self,
+        _route: &'a SessionRoute,
+    ) -> ContractFuture<'a, Box<dyn Transport>> {
+        Box::pin(async { Ok(Box::new(FailingSendTransport) as Box<dyn Transport>) })
     }
 }
 
@@ -322,6 +354,72 @@ fn session_runtime_flush_outbound_marks_commands_as_sent() {
             "route"
         ]),
         Some(&json!("instrument-schema"))
+    );
+}
+
+#[test]
+fn session_runtime_flush_outbound_marks_commands_failed_when_transport_send_errors() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let topology = SessionTopology::default().with_route(SessionRoute {
+        label: "market".to_string(),
+        target: SessionTarget::Shared,
+        domains: vec![ProtocolDomain::Market],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://market.example".to_string(),
+            connect: Default::default(),
+        },
+    });
+
+    let connected = block_on(
+        SessionBootstrap::new().connect_topology(&topology, &FailingSendConnector),
+    )
+    .unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Market],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let command_id = block_on(handle.submit(RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602")],
+        },
+    )))
+    .unwrap();
+
+    let err = block_on(runtime.flush_outbound(&mut run)).unwrap_err();
+    assert_eq!(err.to_string(), "auth error: websocket send failed: broken pipe");
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("failed"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "route"
+        ]),
+        Some(&json!("market"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "message"
+        ]),
+        Some(&json!("auth error: websocket send failed: broken pipe"))
     );
 }
 

@@ -558,6 +558,13 @@ impl ConnectedTopology {
             .find(|route| route.route.label == label)
     }
 
+    pub fn route_label_for_dispatch(&self, dispatch: &OutboundDispatch) -> Option<&str> {
+        self.routes
+            .iter()
+            .find(|route| route_accepts_dispatch(&route.route, dispatch))
+            .map(|route| route.route.label.as_str())
+    }
+
     pub fn has_route(&self, label: &str) -> bool {
         self.routes.iter().any(|route| route.route.label == label)
     }
