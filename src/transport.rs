@@ -1,9 +1,15 @@
 use std::time::Duration;
 
+use std::net::TcpStream;
+
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{connect, Message, WebSocket};
+
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::commands::OutboundFrame;
 use crate::ids::ProtocolDomain;
+use crate::{ContractError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawFrame {
@@ -19,6 +25,93 @@ pub trait Transport: Send {
     fn recv(&mut self) -> ContractFuture<'_, RawFrame>;
     fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()>;
     fn close(&mut self) -> ContractFuture<'_, ()>;
+}
+
+#[derive(Debug)]
+pub struct WebSocketTransport {
+    url: String,
+    socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+}
+
+impl WebSocketTransport {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            socket: None,
+        }
+    }
+
+    fn socket_mut(&mut self) -> Result<&mut WebSocket<MaybeTlsStream<TcpStream>>> {
+        self.socket
+            .as_mut()
+            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))
+    }
+
+    fn connect_blocking(&mut self) -> Result<()> {
+        let (socket, _) = connect(self.url.as_str())
+            .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
+        self.socket = Some(socket);
+        Ok(())
+    }
+
+    fn recv_blocking(&mut self) -> Result<RawFrame> {
+        let message = self
+            .socket_mut()?
+            .read()
+            .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
+
+        match message {
+            Message::Text(text) => Ok(RawFrame::Text(text.to_string())),
+            Message::Binary(bytes) => Ok(RawFrame::Binary(bytes.to_vec())),
+            Message::Ping(_) => Ok(RawFrame::Ping),
+            Message::Pong(_) => Ok(RawFrame::Pong),
+            Message::Close(_) => Ok(RawFrame::Close),
+            other => Err(ContractError::validation(format!(
+                "unsupported websocket message: {other:?}"
+            ))),
+        }
+    }
+
+    fn send_blocking(&mut self, frame: OutboundFrame) -> Result<()> {
+        let message = match frame {
+            OutboundFrame::Text(text) => Message::Text(text.into()),
+            OutboundFrame::Binary(bytes) => Message::Binary(bytes.into()),
+            OutboundFrame::Ping => Message::Ping(Vec::new().into()),
+            OutboundFrame::Close => Message::Close(None),
+        };
+
+        self.socket_mut()?
+            .send(message)
+            .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
+    }
+
+    fn close_blocking(&mut self) -> Result<()> {
+        if let Some(mut socket) = self.socket.take() {
+            socket
+                .close(None)
+                .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Transport for WebSocketTransport {
+    fn connect(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async move { self.connect_blocking() })
+    }
+
+    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+        Box::pin(async move { self.recv_blocking() })
+    }
+
+    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+        Box::pin(async move { self.send_blocking(frame) })
+    }
+
+    fn close(&mut self) -> ContractFuture<'_, ()> {
+        Box::pin(async move { self.close_blocking() })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
