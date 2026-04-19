@@ -40,6 +40,25 @@ pub enum OutboundRequest {
 - runtime 统一决定“发什么”
 - 具体 transport 或 client 决定“怎么发”
 
+`HttpRequest` 的最小稳定形状同时覆盖两类需求：
+
+```rust
+pub enum HttpMethod {
+    Get,
+    Post,
+}
+
+pub struct HttpRequest {
+    pub method: HttpMethod,
+    pub path: Option<String>,
+    pub body: Option<serde_json::Value>,
+}
+```
+
+- schema / metadata / bootstrap 可用 `GET + path`
+- GraphQL query 可用 `POST + JSON body`
+- 仍然保持在 runtime contract 的最小传输抽象层，不引入高层 facade 语义
+
 ## `RuntimeInput`
 ```rust
 pub enum RuntimeInput {

@@ -16,7 +16,7 @@ pub use adapter::{
 };
 pub use auth::{AuthContext, AuthProvider, ContractFuture};
 pub use commands::{
-    CausationMeta, CommandEnvelope, CommandStatus, HttpRequest, InternalRequest,
+    CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
     MarketChartCommand, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
     QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand, SystemCommand,
     TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,

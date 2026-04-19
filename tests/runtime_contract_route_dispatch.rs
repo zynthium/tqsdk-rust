@@ -5,8 +5,8 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, DefaultRouteConnector, MarketCommand, OutboundDispatch, ProtocolDomain,
-    ReplayCommand, Runtime, RuntimeCommand, RuntimeHandle, SchemaCommand, SchemaId,
+    AdapterRegistry, DefaultRouteConnector, HttpMethod, MarketCommand, OutboundDispatch,
+    ProtocolDomain, ReplayCommand, Runtime, RuntimeCommand, RuntimeHandle, SchemaCommand, SchemaId,
     SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology, Symbol,
     SystemCommand, WebSocketConnectOptions,
 };
@@ -59,7 +59,9 @@ fn runtime_handle_drain_dispatches_resolves_command_domains() {
                 domain: ProtocolDomain::Schema,
                 request: tqsdk_runtime_contract::OutboundRequest::Http(
                     tqsdk_runtime_contract::HttpRequest {
-                        path: "/schema/instrument.json".to_string(),
+                        method: HttpMethod::Get,
+                        path: Some("/schema/instrument.json".to_string()),
+                        body: None,
                     },
                 ),
             },
@@ -194,7 +196,9 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
             domain: ProtocolDomain::Schema,
             request: tqsdk_runtime_contract::OutboundRequest::Http(
                 tqsdk_runtime_contract::HttpRequest {
-                    path: "/schema/instrument.json".to_string(),
+                    method: HttpMethod::Get,
+                    path: Some("/schema/instrument.json".to_string()),
+                    body: None,
                 }
             ),
         }]

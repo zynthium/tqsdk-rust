@@ -1,7 +1,7 @@
 use crate::{
     commands::{
-        MarketChartCommand, MarketCommand, OutboundFrame, OutboundRequest, QueryCommand,
-        ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand, TradeCommand,
+        HttpMethod, HttpRequest, MarketChartCommand, MarketCommand, OutboundFrame, OutboundRequest,
+        QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand, TradeCommand,
         TradeInsertOrderCommand, TradePreInsertOrderCommand,
     },
     error::{ContractError, Result},
@@ -392,7 +392,11 @@ impl ProtocolAdapter for QueryAdapter {
                 {
                     request.insert("variables".to_string(), variables);
                 }
-                Ok(request_with_peek(Value::Object(request)))
+                Ok(vec![OutboundRequest::Http(HttpRequest {
+                    method: HttpMethod::Post,
+                    path: None,
+                    body: Some(Value::Object(request)),
+                })])
             }
             _ => Err(ContractError::UnsupportedCommand("query")),
         }
@@ -432,8 +436,10 @@ impl ProtocolAdapter for SchemaAdapter {
                         "schema refresh path must not be empty",
                     ));
                 }
-                Ok(vec![OutboundRequest::Http(crate::commands::HttpRequest {
-                    path: path.clone(),
+                Ok(vec![OutboundRequest::Http(HttpRequest {
+                    method: HttpMethod::Get,
+                    path: Some(path.clone()),
+                    body: None,
                 })])
             }
             _ => Err(ContractError::UnsupportedCommand("schema")),

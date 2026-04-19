@@ -1111,7 +1111,9 @@ impl SessionRuntime {
         }
 
         if let Some(dispatch) = dispatch {
-            detail.extend(command_detail_fields_from_dispatch(dispatch));
+            for (key, value) in command_detail_fields_from_dispatch(dispatch) {
+                detail.entry(key).or_insert(value);
+            }
         }
 
         detail.extend(extra);
@@ -1184,7 +1186,18 @@ fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<Strin
             detail.insert("frame".to_string(), json!("close"));
         }
         crate::commands::OutboundRequest::Http(request) => {
-            detail.insert("path".to_string(), json!(request.path));
+            detail.insert("method".to_string(), json!(request.method.as_str()));
+            if let Some(path) = &request.path {
+                detail.insert("path".to_string(), json!(path));
+            }
+            if let Some(Value::Object(body)) = &request.body {
+                if let Some(aid) = body.get("aid").and_then(Value::as_str) {
+                    detail.insert("aid".to_string(), json!(aid));
+                }
+                if let Some(query_id) = body.get("query_id").and_then(Value::as_str) {
+                    detail.insert("query_id".to_string(), json!(query_id));
+                }
+            }
         }
         crate::commands::OutboundRequest::Replay(request) => {
             detail.insert("action".to_string(), json!(request.action));

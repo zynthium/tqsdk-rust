@@ -44,6 +44,20 @@ V1 是：
 - `TargetPosTask`
 - DataFrame / polars / downloader / GUI / report
 
+## 当前实现状态
+当前仓库里的 V1 已经以“极简但协议完整”的 core contract 落地完成。
+
+当前 public core 可以直接覆盖并验证：
+
+- DIFF 协议对象
+- trade 命令与状态
+- replay/feed 推进
+- auth/session/system 控制
+- GraphQL / HTTP query
+- schema / metadata / bootstrap 交互
+
+验证入口见 [validation.md](validation.md) 与 `tests/runtime_contract_v1_capability.rs`。
+
 ## 参考仓库的使用方式
 - `tqsdk-python` 是语义基准
   - 尤其是提交边界、对象一致性、初始截面、命令可见性、回放推进这些语义

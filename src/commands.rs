@@ -295,9 +295,26 @@ pub enum OutboundFrame {
     Close,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    Get,
+    Post,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
-    pub path: String,
+    pub method: HttpMethod,
+    pub path: Option<String>,
+    pub body: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

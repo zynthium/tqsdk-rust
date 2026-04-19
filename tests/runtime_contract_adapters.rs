@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, ChartId, FieldMutation, InputPayload, InternalEvent, MarketAdapter,
-    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, NotificationId,
-    ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
-    QueryAdapter, QueryCommand, QueryId, ReplayAdapter, ReplayCommand, ReplayEvent,
+    AccountId, AdapterRegistry, ChartId, FieldMutation, HttpMethod, InputPayload, InternalEvent,
+    MarketAdapter, MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation,
+    NotificationId, ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter,
+    ProtocolDomain, QueryAdapter, QueryCommand, QueryId, ReplayAdapter, ReplayCommand, ReplayEvent,
     ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter, SchemaCommand, StatePath, Symbol,
     SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection,
     TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePreInsertOrderCommand,
@@ -350,16 +350,19 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
             variables: Some(json!({"instrument_id": "au2602"})),
         }))
         .unwrap();
-    assert_json_frame(
-        &query_fetch[0],
-        json!({
-            "aid": "ins_query",
-            "query_id": "quotes-page-1",
-            "query": "query Quotes($instrument_id: String!) { symbols(instrument_id: $instrument_id) { instrument_id } }",
-            "variables": {"instrument_id": "au2602"},
-        }),
+    assert_eq!(
+        query_fetch,
+        vec![OutboundRequest::Http(tqsdk_runtime_contract::HttpRequest {
+            method: HttpMethod::Post,
+            path: None,
+            body: Some(json!({
+                "aid": "ins_query",
+                "query_id": "quotes-page-1",
+                "query": "query Quotes($instrument_id: String!) { symbols(instrument_id: $instrument_id) { instrument_id } }",
+                "variables": {"instrument_id": "au2602"},
+            })),
+        })]
     );
-    assert_json_frame(&query_fetch[1], json!({"aid": "peek_message"}));
 
     assert_eq!(
         registry
@@ -369,7 +372,9 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
             }))
             .unwrap(),
         vec![OutboundRequest::Http(tqsdk_runtime_contract::HttpRequest {
-            path: "/t/symbols/latest.json".to_string(),
+            method: HttpMethod::Get,
+            path: Some("/t/symbols/latest.json".to_string()),
+            body: None,
         })]
     );
 
