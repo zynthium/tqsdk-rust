@@ -6,6 +6,11 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
+use crate::ids::ProtocolDomain;
+use crate::transport::{
+    SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology, SessionTopologyResolver, SessionConfig,
+    WebSocketConnectOptions,
+};
 use crate::{AuthId, ContractError, Result};
 
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
@@ -281,6 +286,83 @@ impl AuthProvider for TqAuthProvider {
         Box::pin(async move {
             let access_token = self.request_access_token()?;
             self.build_auth_context(access_token)
+        })
+    }
+}
+
+impl SessionTopologyResolver for TqAuthProvider {
+    fn resolve_topology<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        config: &'a SessionConfig,
+        enabled_domains: &'a [ProtocolDomain],
+    ) -> ContractFuture<'a, SessionTopology> {
+        Box::pin(async move {
+            let mut topology = SessionTopology::default();
+            let connect = WebSocketConnectOptions::default()
+                .with_header("Authorization", format!("Bearer {}", auth.access_token()));
+
+            let market_domains = enabled_domains
+                .iter()
+                .copied()
+                .filter(|domain| {
+                    matches!(
+                        domain,
+                        ProtocolDomain::System
+                            | ProtocolDomain::Market
+                            | ProtocolDomain::Query
+                            | ProtocolDomain::Schema
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !market_domains.is_empty() {
+                let market_url = if let Some(url) = &config.endpoints.market_url {
+                    url.clone()
+                } else {
+                    self.request_market_url(auth, config.market_target.stock, config.market_target.backtest)?
+                };
+
+                topology = topology.with_route(SessionRoute {
+                    label: "market".to_string(),
+                    target: SessionTarget::Shared,
+                    domains: market_domains,
+                    endpoint: SessionRouteEndpoint::WebSocket {
+                        url: market_url,
+                        connect: connect.clone(),
+                    },
+                });
+            }
+
+            if enabled_domains.contains(&ProtocolDomain::Trade) {
+                if config.trade_targets.is_empty() {
+                    return Err(ContractError::validation(
+                        "trade domain requires at least one trade target for topology resolution",
+                    ));
+                }
+
+                for target in &config.trade_targets {
+                    let trade_url = if let Some(url) = &target.trade_url {
+                        url.clone()
+                    } else if let Some(url) = &config.endpoints.trade_url {
+                        url.clone()
+                    } else {
+                        self.request_trade_broker(auth, &target.broker_id, target.account_id.as_str())?
+                            .url
+                    };
+
+                    topology = topology.with_route(SessionRoute {
+                        label: format!("trade:{}", target.account_id.as_str()),
+                        target: SessionTarget::Account(target.account_id.clone()),
+                        domains: vec![ProtocolDomain::Trade],
+                        endpoint: SessionRouteEndpoint::WebSocket {
+                            url: trade_url,
+                            connect: connect.clone(),
+                        },
+                    });
+                }
+            }
+
+            Ok(topology)
         })
     }
 }

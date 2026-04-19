@@ -10,7 +10,7 @@ use tungstenite::{connect, Message, WebSocket};
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::commands::OutboundFrame;
-use crate::ids::ProtocolDomain;
+use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
 use crate::{ContractError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +255,8 @@ pub struct SessionConfig {
     pub endpoints: EndpointConfig,
     pub heartbeat: HeartbeatPolicy,
     pub reconnect: ReconnectPolicy,
+    pub market_target: MarketSessionTarget,
+    pub trade_targets: Vec<TradeSessionTarget>,
     pub enabled_domains: Vec<ProtocolDomain>,
 }
 
@@ -264,6 +266,8 @@ impl SessionConfig {
             endpoints,
             heartbeat: HeartbeatPolicy::default(),
             reconnect: ReconnectPolicy::default(),
+            market_target: MarketSessionTarget::default(),
+            trade_targets: Vec::new(),
             enabled_domains: Vec::new(),
         }
     }
@@ -278,6 +282,16 @@ impl SessionConfig {
         self
     }
 
+    pub fn with_market_target(mut self, market_target: MarketSessionTarget) -> Self {
+        self.market_target = market_target;
+        self
+    }
+
+    pub fn add_trade_target(mut self, trade_target: TradeSessionTarget) -> Self {
+        self.trade_targets.push(trade_target);
+        self
+    }
+
     pub fn enable_domain(mut self, domain: ProtocolDomain) -> Self {
         if !self.enabled_domains.contains(&domain) {
             self.enabled_domains.push(domain);
@@ -287,6 +301,93 @@ impl SessionConfig {
 
     pub fn enabled_domains(&self) -> &[ProtocolDomain] {
         &self.enabled_domains
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarketSessionTarget {
+    pub stock: bool,
+    pub backtest: bool,
+}
+
+impl MarketSessionTarget {
+    pub fn new(stock: bool, backtest: bool) -> Self {
+        Self { stock, backtest }
+    }
+}
+
+impl Default for MarketSessionTarget {
+    fn default() -> Self {
+        Self {
+            stock: false,
+            backtest: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeSessionTarget {
+    pub broker_id: String,
+    pub account_id: AccountId,
+    pub trade_url: Option<String>,
+}
+
+impl TradeSessionTarget {
+    pub fn new(broker_id: impl Into<String>, account_id: AccountId) -> Self {
+        Self {
+            broker_id: broker_id.into(),
+            account_id,
+            trade_url: None,
+        }
+    }
+
+    pub fn with_trade_url(mut self, trade_url: impl Into<String>) -> Self {
+        self.trade_url = Some(trade_url.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTarget {
+    Shared,
+    Account(AccountId),
+    Replay(ReplaySessionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRouteEndpoint {
+    WebSocket {
+        url: String,
+        connect: WebSocketConnectOptions,
+    },
+    Http {
+        url: String,
+    },
+    Replay {
+        label: String,
+    },
+    Internal {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRoute {
+    pub label: String,
+    pub target: SessionTarget,
+    pub domains: Vec<ProtocolDomain>,
+    pub endpoint: SessionRouteEndpoint,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionTopology {
+    pub routes: Vec<SessionRoute>,
+}
+
+impl SessionTopology {
+    pub fn with_route(mut self, route: SessionRoute) -> Self {
+        self.routes.push(route);
+        self
     }
 }
 
@@ -322,6 +423,7 @@ pub struct BootstrapResult {
     pub phase: SessionPhase,
     pub auth: AuthContext,
     pub enabled_domains: Vec<ProtocolDomain>,
+    pub topology: SessionTopology,
 }
 
 impl BootstrapResult {
@@ -330,8 +432,23 @@ impl BootstrapResult {
             phase: SessionPhase::Running,
             auth,
             enabled_domains,
+            topology: SessionTopology::default(),
         }
     }
+
+    pub fn with_topology(mut self, topology: SessionTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+}
+
+pub trait SessionTopologyResolver: Send + Sync {
+    fn resolve_topology<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        config: &'a SessionConfig,
+        enabled_domains: &'a [ProtocolDomain],
+    ) -> ContractFuture<'a, SessionTopology>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -357,6 +474,28 @@ impl SessionBootstrap {
             };
 
             Ok(BootstrapResult::new(auth, enabled_domains))
+        })
+    }
+
+    pub fn establish_with_resolver<'a>(
+        &self,
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+    ) -> ContractFuture<'a, BootstrapResult> {
+        Box::pin(async move {
+            let auth = auth.authenticate().await?;
+            let enabled_domains = if config.enabled_domains.is_empty() {
+                adapters.domains().to_vec()
+            } else {
+                config.enabled_domains.clone()
+            };
+            let topology = resolver
+                .resolve_topology(&auth, config, &enabled_domains)
+                .await?;
+
+            Ok(BootstrapResult::new(auth, enabled_domains).with_topology(topology))
         })
     }
 }
