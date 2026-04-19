@@ -80,13 +80,35 @@ impl SessionRuntime {
             self.handle
                 .record_session_phase(SessionPhase::Authenticating, None, vec![])?;
 
-            let bootstrap = self
+            let bootstrap = match self
                 .bootstrap
                 .establish_with_resolver(auth, resolver, config, adapters)
-                .await?;
-            let connected = self
-                .connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting))
-                .await?;
+                .await
+            {
+                Ok(bootstrap) => bootstrap,
+                Err(err) => {
+                    self.record_session_failure(
+                        "session-establish-error",
+                        "bootstrap",
+                        &err,
+                        vec![],
+                    )?;
+                    return Err(err);
+                }
+            };
+            let connected =
+                match self.connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting)).await {
+                    Ok(connected) => connected,
+                    Err(err) => {
+                        self.record_session_failure(
+                            "session-establish-error",
+                            "connect",
+                            &err,
+                            vec![],
+                        )?;
+                        return Err(err);
+                    }
+                };
 
             self.handle
                 .record_session_phase(SessionPhase::Bootstrapping, None, vec![])?;
@@ -108,9 +130,21 @@ impl SessionRuntime {
         adapters: &'a AdapterRegistry,
     ) -> ContractFuture<'a, SessionRun> {
         Box::pin(async move {
-            let recovery = self
+            let recovery = match self
                 .recover_internal(auth, resolver, connector, config, adapters, true)
-                .await?;
+                .await
+            {
+                Ok(recovery) => recovery,
+                Err(err) => {
+                    self.record_session_failure(
+                        "session-recovery-error",
+                        "recover",
+                        &err,
+                        vec![],
+                    )?;
+                    return Err(err);
+                }
+            };
             Ok(recovery.run)
         })
     }
@@ -716,6 +750,38 @@ impl SessionRuntime {
             })),
             CommitScope::RealtimeUpdate,
         )
+    }
+
+    fn record_session_failure(
+        &self,
+        label: &'static str,
+        stage: &'static str,
+        err: &crate::ContractError,
+        caused_by: Vec<CommandId>,
+    ) -> Result<()> {
+        if let Some(_commit) = self.handle.ingest(
+            RuntimeInput::Internal(InternalEvent {
+                label,
+                payload: Some(json!({
+                    "stage": stage,
+                    "message": err.to_string(),
+                })),
+            }),
+            caused_by.clone(),
+            CommitScope::SessionTransition,
+        )? {}
+
+        if let Some(_commit) = self.handle.record_session_phase(
+            SessionPhase::Closed,
+            Some(json!({
+                "reason": label,
+                "stage": stage,
+                "message": err.to_string(),
+            })),
+            caused_by,
+        )? {}
+
+        Ok(())
     }
 }
 

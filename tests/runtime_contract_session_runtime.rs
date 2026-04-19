@@ -6,9 +6,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractFuture,
-    EndpointConfig, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
-    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, Transport,
+    ContractError, EndpointConfig, ProtocolDomain, RawFrame, Runtime, RuntimeHandle,
+    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology,
+    SessionTopologyResolver, StatePath, Transport,
 };
 
 struct TestAuthProvider;
@@ -20,6 +21,14 @@ impl AuthProvider for TestAuthProvider {
                 .with_auth_id(AuthId::new("auth-1"))
                 .with_feature("trade"))
         })
+    }
+}
+
+struct FailingAuthProvider;
+
+impl AuthProvider for FailingAuthProvider {
+    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+        Box::pin(async { Err(ContractError::auth("token expired")) })
     }
 }
 
@@ -88,6 +97,17 @@ impl SessionRouteConnector for TestRouteConnector {
             connected_labels.lock().unwrap().push(label);
             Ok(Box::new(TestTransport) as Box<dyn Transport>)
         })
+    }
+}
+
+struct FailingRouteConnector;
+
+impl SessionRouteConnector for FailingRouteConnector {
+    fn connect_route<'a>(
+        &'a self,
+        _route: &'a SessionRoute,
+    ) -> ContractFuture<'a, Box<dyn Transport>> {
+        Box::pin(async { Err(ContractError::auth("route connect refused")) })
     }
 }
 
@@ -190,6 +210,83 @@ fn session_runtime_recovery_uses_resync_recovery_commit() {
     assert_eq!(second.scope, CommitScope::SessionTransition);
     assert_eq!(third.scope, CommitScope::ResyncRecovery);
     assert_eq!(log.next(&mut cursor), None);
+}
+
+#[test]
+fn session_runtime_establish_commits_bootstrap_failures_under_system_state() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = TestRouteConnector::default();
+    let config = session_config();
+
+    let err = match block_on(runtime.establish(
+        &FailingAuthProvider,
+        &TestTopologyResolver,
+        &connector,
+        &config,
+        &adapter_registry(),
+    )) {
+        Ok(_) => panic!("establish unexpectedly succeeded"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.to_string(), "auth error: token expired");
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "session-establish-error", "stage"]),
+        Some(&json!("bootstrap"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "session-establish-error", "message"]),
+        Some(&json!("auth error: token expired"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("closed"))
+    );
+}
+
+#[test]
+fn session_runtime_establish_commits_connect_failures_under_system_state() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let config = session_config();
+
+    let err = match block_on(runtime.establish(
+        &TestAuthProvider,
+        &TestTopologyResolver,
+        &FailingRouteConnector,
+        &config,
+        &adapter_registry(),
+    )) {
+        Ok(_) => panic!("establish unexpectedly succeeded"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.to_string(), "auth error: route connect refused");
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "session-establish-error", "stage"]),
+        Some(&json!("connect"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "session-establish-error", "message"]),
+        Some(&json!("auth error: route connect refused"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("closed"))
+    );
 }
 
 fn runtime_with_default_adapters() -> RuntimeHandle {
