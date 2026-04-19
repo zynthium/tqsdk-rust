@@ -350,7 +350,7 @@ impl ProtocolAdapter for TradeAdapter {
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
         match input {
             RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Trade) => {
-                decode_io_payload(event, MutationSource::TradeReply, vec![])
+                decode_trade_io_payload(event)
             }
             _ => Ok(vec![]),
         }
@@ -677,6 +677,18 @@ fn decode_query_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
     }
 }
 
+fn decode_trade_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => {
+            if value.get("aid").and_then(Value::as_str) == Some("qry_settlement_info") {
+                return decode_trade_settlement_query_reply(value);
+            }
+            decode_json_envelope(value, MutationSource::TradeReply, vec![])
+        }
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
 fn decode_io_payload(
     event: &IoEvent,
     source: MutationSource,
@@ -732,6 +744,35 @@ fn decode_query_value(value: &Value) -> Result<Vec<NormalizedMutation>> {
         value,
         MutationSource::QueryResult,
         vec!["query".to_string()],
+    )
+}
+
+fn decode_trade_settlement_query_reply(value: &Value) -> Result<Vec<NormalizedMutation>> {
+    let Some(user_name) = value.get("user_name").and_then(Value::as_str) else {
+        return Ok(vec![]);
+    };
+    let Some(trading_day) = value.get("trading_day").and_then(Value::as_str) else {
+        return Ok(vec![]);
+    };
+    let Some(settlement_info) = value.get("settlement_info").and_then(Value::as_str) else {
+        return Ok(vec![]);
+    };
+
+    decode_json_value(
+        &json!({
+            "trade": {
+                user_name: {
+                    "his_settlements": {
+                        trading_day: {
+                            "content": settlement_info,
+                            "parsed": false,
+                        }
+                    }
+                }
+            }
+        }),
+        MutationSource::TradeReply,
+        vec![],
     )
 }
 

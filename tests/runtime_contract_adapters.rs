@@ -781,6 +781,47 @@ fn mutation(prefix: &str, field: &str, value: &str, source: MutationSource) -> N
     }
 }
 
+#[test]
+fn trade_adapter_decodes_settlement_query_reply_into_trade_snapshot() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let trade = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "trade.simnow".to_string(),
+            domains: vec![ProtocolDomain::Trade],
+            payload: InputPayload::Json(json!({
+                "aid": "qry_settlement_info",
+                "user_name": "simnow",
+                "trading_day": "20260420",
+                "settlement_info": "line-1\nline-2",
+            })),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        trade,
+        vec![NormalizedMutation {
+            path: StatePath::new(["trade", "simnow", "his_settlements", "20260420"]),
+            object: Some(ObjectKey::Settlement {
+                account_id: AccountId::new("simnow"),
+                trading_day: "20260420".to_string(),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "content".to_string(),
+                    value: json!("line-1\nline-2"),
+                },
+                FieldMutation {
+                    field: "parsed".to_string(),
+                    value: json!(false),
+                },
+            ],
+            source: MutationSource::TradeReply,
+        }]
+    );
+}
+
 fn assert_json_frame(request: &OutboundRequest, expected: Value) {
     match request {
         OutboundRequest::Transport(OutboundFrame::Text(text)) => {

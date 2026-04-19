@@ -8,7 +8,7 @@ use crate::{
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
     runtime::{Runtime, RuntimeHandle},
-    state::{CommitResult, CommitScope},
+    state::{CommitResult, CommitScope, StatePath},
     transport::{
         BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
         SessionPhase, SessionRouteConnector, SessionTopologyResolver,
@@ -206,8 +206,13 @@ impl SessionRuntime {
                 return Ok(None);
             };
             let commit = self.handle.ingest(input, caused_by.clone(), scope)?;
-            if commit.is_some() {
-                self.record_transport_commit_statuses(route_label, &caused_by, scope)?;
+            if let Some(commit_result) = commit.as_ref() {
+                self.record_transport_commit_statuses(
+                    route_label,
+                    commit_result,
+                    &caused_by,
+                    scope,
+                )?;
             }
             Ok(commit)
         })
@@ -239,8 +244,13 @@ impl SessionRuntime {
                 Ok(Some(input)) => {
                     let mut outcome = RoutePumpOutcome::default();
                     if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
+                        self.record_transport_commit_statuses(
+                            route_label,
+                            &commit,
+                            &caused_by,
+                            scope,
+                        )?;
                         outcome.commits.push(commit);
-                        self.record_transport_commit_statuses(route_label, &caused_by, scope)?;
                     }
                     Ok(outcome)
                 }
@@ -733,6 +743,7 @@ impl SessionRuntime {
     fn record_transport_commit_statuses(
         &self,
         route_label: &str,
+        commit: &CommitResult,
         command_ids: &[CommandId],
         scope: CommitScope,
     ) -> Result<()> {
@@ -743,7 +754,7 @@ impl SessionRuntime {
             }
 
             if let Some((status, detail)) =
-                self.derive_transport_command_status(route_label, command_id)
+                self.derive_transport_command_status(route_label, commit, command_id)
             {
                 self.handle
                     .record_command_status(command_id, status, detail, scope)?;
@@ -834,6 +845,7 @@ impl SessionRuntime {
     fn derive_transport_command_status(
         &self,
         route_label: &str,
+        commit: &CommitResult,
         command_id: CommandId,
     ) -> Option<(CommandStatus, Option<Value>)> {
         let snapshot = self.handle.latest_snapshot();
@@ -841,22 +853,97 @@ impl SessionRuntime {
         let aid = detail.get("aid").and_then(Value::as_str)?;
 
         match aid {
-            "insert_order" | "cancel_order" => {
-                self.derive_trade_order_command_status(&snapshot, route_label, command_id, &detail)
-            }
+            "insert_order" | "cancel_order" => self.derive_trade_order_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
+            "req_login" => self.derive_trade_login_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
+            "qry_settlement_info" => self.derive_trade_settlement_query_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
             _ => None,
         }
+    }
+
+    fn derive_trade_login_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        commit: &CommitResult,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let account_id = detail.get("account_id").and_then(Value::as_str)?;
+        if !commit_touches_path(commit, ["trade", account_id, "trade_more_data"]) {
+            return None;
+        }
+        let trade_more_data = snapshot
+            .get(["trade", account_id, "trade_more_data", "value"])?
+            .as_bool()?;
+        if trade_more_data {
+            return None;
+        }
+
+        let mut detail = Map::new();
+        detail.insert("trade_more_data".to_string(), json!(false));
+        Some((
+            CommandStatus::Completed,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
+    }
+
+    fn derive_trade_settlement_query_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        commit: &CommitResult,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let account_id = detail.get("account_id").and_then(Value::as_str)?;
+        let trading_day = detail.get("trading_day").and_then(Value::as_str)?;
+        if !commit_touches_path(
+            commit,
+            ["trade", account_id, "his_settlements", trading_day],
+        ) {
+            return None;
+        }
+        snapshot.get(["trade", account_id, "his_settlements", trading_day])?;
+
+        let mut detail = Map::new();
+        detail.insert("trading_day".to_string(), json!(trading_day));
+        Some((
+            CommandStatus::Completed,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
     }
 
     fn derive_trade_order_command_status(
         &self,
         snapshot: &crate::state::StateSnapshot,
         route_label: &str,
+        commit: &CommitResult,
         command_id: CommandId,
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
         let account_id = detail.get("account_id").and_then(Value::as_str)?;
         let order_id = detail.get("order_id").and_then(Value::as_str)?;
+        if !commit_touches_path(commit, ["trade", account_id, "orders", order_id]) {
+            return None;
+        }
         let order_status = snapshot
             .get(["trade", account_id, "orders", order_id, "status"])?
             .as_str()?;
@@ -975,6 +1062,9 @@ fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<Strin
                     if let Some(order_id) = request.get("order_id").and_then(Value::as_str) {
                         detail.insert("order_id".to_string(), json!(order_id));
                     }
+                    if let Some(trading_day) = request.get("trading_day").and_then(Value::as_str) {
+                        detail.insert("trading_day".to_string(), json!(trading_day));
+                    }
                 }
             }
         }
@@ -1006,4 +1096,12 @@ fn is_terminal_command_status(status: Option<&str>) -> bool {
         status,
         Some("completed" | "rejected" | "failed" | "cancelled")
     )
+}
+
+fn commit_touches_path<I, S>(commit: &CommitResult, path: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    commit.changes.path_hits.contains(&StatePath::new(path))
 }
