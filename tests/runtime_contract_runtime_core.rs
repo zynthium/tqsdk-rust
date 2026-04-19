@@ -4,9 +4,9 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, ChangeHit, CommandId, CommitScope, IoEvent, ObjectKey, OutboundEnvelope, OutboundFrame,
-    OutboundRequest, ProtocolDomain, Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, StatePath,
-    Symbol, UpdateCursor,
+    AdapterRegistry, ChangeHit, CommandId, CommitScope, IoEvent, ObjectKey, OutboundEnvelope,
+    OutboundFrame, OutboundRequest, ProtocolDomain, Revision, Runtime, RuntimeCommand,
+    RuntimeHandle, RuntimeInput, StatePath, Symbol, UpdateCursor,
 };
 
 #[test]
@@ -84,7 +84,10 @@ fn runtime_handle_ingests_inputs_into_committed_snapshot_and_cursored_log() {
     assert_eq!(commit.revision, Revision::new(1));
     assert_eq!(commit.caused_by, vec![submit_id]);
     assert_eq!(commit.scope, CommitScope::RealtimeUpdate);
-    assert_eq!(commit.changes.path_hits, vec![StatePath::new(["quotes", "SHFE.au2602"])]);
+    assert_eq!(
+        commit.changes.path_hits,
+        vec![StatePath::new(["quotes", "SHFE.au2602"])]
+    );
     assert_eq!(
         commit.changes.object_hits,
         vec![ObjectKey::Quote {
@@ -113,8 +116,14 @@ fn runtime_handle_ingests_inputs_into_committed_snapshot_and_cursored_log() {
 
     let snapshot = handle.latest_snapshot();
     assert_eq!(snapshot.revision(), Revision::new(1));
-    assert_eq!(snapshot.get(["quotes", "SHFE.au2602", "ask_price1"]), Some(&json!(619.0)));
-    assert_eq!(snapshot.get(["quotes", "SHFE.au2602", "last_price"]), Some(&json!(618.5)));
+    assert_eq!(
+        snapshot.get(["quotes", "SHFE.au2602", "ask_price1"]),
+        Some(&json!(619.0))
+    );
+    assert_eq!(
+        snapshot.get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(618.5))
+    );
     assert_eq!(log.head_revision(), Some(Revision::new(1)));
 
     assert_eq!(log.next(&mut pre_commit_cursor), Some(commit.clone()));
@@ -179,5 +188,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

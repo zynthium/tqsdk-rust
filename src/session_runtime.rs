@@ -1,18 +1,18 @@
 use serde_json::{Value, json};
 
 use crate::{
+    Result,
     adapter::AdapterRegistry,
     auth::{AuthProvider, ContractFuture},
-    commands::{OutboundDispatch, OutboundFrame},
+    commands::{CommandStatus, OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
     runtime::RuntimeHandle,
     state::{CommitResult, CommitScope},
     transport::{
-        BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig, SessionPhase,
-        SessionRouteConnector, SessionTopologyResolver,
+        BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
+        SessionPhase, SessionRouteConnector, SessionTopologyResolver,
     },
-    Result,
 };
 
 pub struct SessionRun {
@@ -83,18 +83,18 @@ impl SessionRuntime {
                 .bootstrap
                 .establish_with_resolver(auth, resolver, config, adapters)
                 .await?;
-            let connected = self.connect_if_needed(
-                &bootstrap,
-                connector,
-                Some(SessionPhase::Connecting),
-            )
-            .await?;
+            let connected = self
+                .connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting))
+                .await?;
 
             self.handle
                 .record_session_phase(SessionPhase::Bootstrapping, None, vec![])?;
             self.handle.record_session_bootstrap(&bootstrap, vec![])?;
 
-            Ok(SessionRun { bootstrap, connected })
+            Ok(SessionRun {
+                bootstrap,
+                connected,
+            })
         })
     }
 
@@ -122,7 +122,19 @@ impl SessionRuntime {
             let dispatches = self.handle.drain_dispatches()?;
             let mut receipts = Vec::with_capacity(dispatches.len());
             for dispatch in dispatches {
-                receipts.push(run.connected.dispatch(dispatch).await?);
+                let receipt = run.connected.dispatch(dispatch).await?;
+                let route_label = receipt.route_label.clone();
+                let domain = receipt.domain;
+                self.handle.record_command_status(
+                    receipt.command_id,
+                    CommandStatus::Sent,
+                    Some(json!({
+                        "route": route_label,
+                        "domain": domain.as_str(),
+                    })),
+                    CommitScope::RealtimeUpdate,
+                )?;
+                receipts.push(receipt);
             }
             Ok(receipts)
         })
@@ -333,9 +345,20 @@ impl SessionRuntime {
                 requests: requests.clone(),
                 commits: Vec::new(),
             };
-            let inputs = executor.execute(&route, requests).await?;
-            if let Some(commit) = self.handle.ingest_batch(inputs, caused_by, scope)? {
-                outcome.commits.push(commit);
+            let inputs = match executor.execute(&route, requests).await {
+                Ok(inputs) => inputs,
+                Err(err) => {
+                    self.record_command_failure(&caused_by, route.label.as_str(), &err)?;
+                    return Err(err);
+                }
+            };
+            match self.handle.ingest_batch(inputs, caused_by.clone(), scope) {
+                Ok(Some(commit)) => outcome.commits.push(commit),
+                Ok(None) => {}
+                Err(err) => {
+                    self.record_command_failure(&caused_by, route.label.as_str(), &err)?;
+                    return Err(err);
+                }
             }
 
             Ok(outcome)
@@ -380,7 +403,10 @@ impl SessionRuntime {
             let mut commits = Vec::new();
 
             if record_reconnecting {
-                if let Some(commit) = self.handle.record_session_phase(SessionPhase::Reconnecting, None, vec![])? {
+                if let Some(commit) =
+                    self.handle
+                        .record_session_phase(SessionPhase::Reconnecting, None, vec![])?
+                {
                     commits.push(commit);
                 }
             }
@@ -391,7 +417,10 @@ impl SessionRuntime {
                 .await?;
             let connected = self.connect_if_needed(&bootstrap, connector, None).await?;
 
-            if let Some(commit) = self.handle.record_session_phase(SessionPhase::Resyncing, None, vec![])? {
+            if let Some(commit) =
+                self.handle
+                    .record_session_phase(SessionPhase::Resyncing, None, vec![])?
+            {
                 commits.push(commit);
             }
             if let Some(commit) = self.handle.record_session_resync(&bootstrap, vec![])? {
@@ -399,7 +428,10 @@ impl SessionRuntime {
             }
 
             Ok(RecoveryOutcome {
-                run: SessionRun { bootstrap, connected },
+                run: SessionRun {
+                    bootstrap,
+                    connected,
+                },
                 commits,
             })
         })
@@ -506,4 +538,26 @@ fn timer_route_label(timer: &TimerEvent) -> Result<&str> {
                 timer.label
             ))
         })
+}
+
+impl SessionRuntime {
+    fn record_command_failure(
+        &self,
+        command_ids: &[CommandId],
+        route_label: &str,
+        err: &crate::ContractError,
+    ) -> Result<()> {
+        for &command_id in command_ids {
+            self.handle.record_command_status(
+                command_id,
+                CommandStatus::Failed,
+                Some(json!({
+                    "route": route_label,
+                    "message": err.to_string(),
+                })),
+                CommitScope::RealtimeUpdate,
+            )?;
+        }
+        Ok(())
+    }
 }

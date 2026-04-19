@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::ids::ProtocolDomain;
 use crate::transport::{
-    SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology, SessionTopologyResolver, SessionConfig,
-    WebSocketConnectOptions,
+    SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
+    SessionTopologyResolver, WebSocketConnectOptions,
 };
 use crate::{AuthId, ContractError, Result};
 
@@ -169,18 +169,26 @@ impl TqAuthProvider {
             .map_err(|err| ContractError::auth(format!("invalid token claims json: {err}")))
     }
 
-    fn request_market_url(&self, auth: &AuthContext, stock: bool, backtest: bool) -> Result<String> {
+    fn request_market_url(
+        &self,
+        auth: &AuthContext,
+        stock: bool,
+        backtest: bool,
+    ) -> Result<String> {
         let client = self.build_http_client()?;
         let response = client
             .get(&self.name_service_url)
-            .query(&[("stock", stock.to_string()), ("backtest", backtest.to_string())])
+            .query(&[
+                ("stock", stock.to_string()),
+                ("backtest", backtest.to_string()),
+            ])
             .headers(self.auth_headers(auth)?)
             .send()
             .map_err(|err| ContractError::auth(format!("market endpoint request failed: {err}")))?;
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| ContractError::auth(format!("failed to read market endpoint response: {err}")))?;
+        let body = response.text().map_err(|err| {
+            ContractError::auth(format!("failed to read market endpoint response: {err}"))
+        })?;
 
         if !status.is_success() {
             return Err(ContractError::auth(format!(
@@ -202,19 +210,31 @@ impl TqAuthProvider {
         Ok(md_url.to_string())
     }
 
-    fn request_trade_broker(&self, auth: &AuthContext, broker_id: &str, account_id: &str) -> Result<BrokerInfo> {
+    fn request_trade_broker(
+        &self,
+        auth: &AuthContext,
+        broker_id: &str,
+        account_id: &str,
+    ) -> Result<BrokerInfo> {
         let client = self.build_http_client()?;
-        let broker_url = format!("{}/{}.json", self.broker_base_url.trim_end_matches('/'), broker_id);
+        let broker_url = format!(
+            "{}/{}.json",
+            self.broker_base_url.trim_end_matches('/'),
+            broker_id
+        );
         let response = client
             .get(&broker_url)
-            .query(&[("account_id", account_id), ("auth", self.credentials.username.as_str())])
+            .query(&[
+                ("account_id", account_id),
+                ("auth", self.credentials.username.as_str()),
+            ])
             .headers(self.auth_headers(auth)?)
             .send()
             .map_err(|err| ContractError::auth(format!("trade broker request failed: {err}")))?;
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| ContractError::auth(format!("failed to read trade broker response: {err}")))?;
+        let body = response.text().map_err(|err| {
+            ContractError::auth(format!("failed to read trade broker response: {err}"))
+        })?;
 
         if !status.is_success() {
             return Err(ContractError::auth(format!(
@@ -224,9 +244,9 @@ impl TqAuthProvider {
 
         let payload: Value = serde_json::from_str(&body)
             .map_err(|err| ContractError::auth(format!("invalid trade broker json: {err}")))?;
-        let broker = payload
-            .get(broker_id)
-            .ok_or_else(|| ContractError::auth(format!("trade broker response missing {broker_id}")))?;
+        let broker = payload.get(broker_id).ok_or_else(|| {
+            ContractError::auth(format!("trade broker response missing {broker_id}"))
+        })?;
         let category = broker
             .get("category")
             .and_then(Value::as_array)
@@ -278,7 +298,10 @@ impl TqAuthProvider {
 }
 
 fn optional_string(payload: &Value, field: &str) -> Option<String> {
-    payload.get(field).and_then(Value::as_str).map(ToString::to_string)
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 impl AuthProvider for TqAuthProvider {
@@ -319,7 +342,11 @@ impl SessionTopologyResolver for TqAuthProvider {
                 let market_url = if let Some(url) = &config.endpoints.market_url {
                     url.clone()
                 } else {
-                    self.request_market_url(auth, config.market_target.stock, config.market_target.backtest)?
+                    self.request_market_url(
+                        auth,
+                        config.market_target.stock,
+                        config.market_target.backtest,
+                    )?
                 };
 
                 topology = topology.with_route(SessionRoute {
@@ -346,8 +373,12 @@ impl SessionTopologyResolver for TqAuthProvider {
                     } else if let Some(url) = &config.endpoints.trade_url {
                         url.clone()
                     } else {
-                        self.request_trade_broker(auth, &target.broker_id, target.account_id.as_str())?
-                            .url
+                        self.request_trade_broker(
+                            auth,
+                            &target.broker_id,
+                            target.account_id.as_str(),
+                        )?
+                        .url
                     };
 
                     topology = topology.with_route(SessionRoute {

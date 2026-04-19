@@ -1,7 +1,7 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, CommitScope, ObjectKey, ReplayEvent, ReplaySessionId, Runtime, RuntimeHandle, RuntimeInput,
-    StatePath,
+    AdapterRegistry, CommitScope, ObjectKey, ReplayEvent, ReplaySessionId, Runtime, RuntimeHandle,
+    RuntimeInput, StatePath,
 };
 
 #[test]
@@ -40,16 +40,23 @@ fn replay_steps_form_replay_scope_commits() {
         }]
     );
     assert_eq!(
-        handle.latest_snapshot().get(["replay", "rb-replay", "cursor", "dt"]),
+        handle
+            .latest_snapshot()
+            .get(["replay", "rb-replay", "cursor", "dt"]),
         Some(&json!(1713500000000_i64))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["replay", "rb-replay", "cursor", "state"]),
+        handle
+            .latest_snapshot()
+            .get(["replay", "rb-replay", "cursor", "state"]),
         Some(&json!("running"))
     );
 
     let mut cursor = handle.cursor_from(tqsdk_runtime_contract::Revision::new(1));
-    assert_eq!(log.next(&mut cursor).map(|commit| commit.revision.get()), Some(1));
+    assert_eq!(
+        log.next(&mut cursor).map(|commit| commit.revision.get()),
+        Some(1)
+    );
     assert_eq!(log.next(&mut cursor), None);
 }
 

@@ -5,9 +5,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, DefaultRouteConnector, OutboundDispatch, ProtocolDomain, Runtime, RuntimeCommand, RuntimeHandle,
-    SchemaCommand, SchemaId, SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    Symbol, SystemCommand, WebSocketConnectOptions, MarketCommand, ReplayCommand,
+    AdapterRegistry, DefaultRouteConnector, MarketCommand, OutboundDispatch, ProtocolDomain,
+    ReplayCommand, Runtime, RuntimeCommand, RuntimeHandle, SchemaCommand, SchemaId,
+    SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology, Symbol,
+    SystemCommand, WebSocketConnectOptions,
 };
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::{Message, accept_hdr};
@@ -16,14 +17,18 @@ use tungstenite::{Message, accept_hdr};
 fn runtime_handle_drain_dispatches_resolves_command_domains() {
     let handle = runtime_with_default_adapters();
 
-    let market_id = block_on(handle.submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-        symbols: vec![Symbol::new("SHFE.au2602")],
-    })))
+    let market_id = block_on(handle.submit(RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602")],
+        },
+    )))
     .unwrap();
-    let schema_id = block_on(handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-        schema_id: SchemaId::new("instrument"),
-        path: "/schema/instrument.json".to_string(),
-    })))
+    let schema_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
     .unwrap();
 
     let dispatches = handle.drain_dispatches().unwrap();
@@ -71,7 +76,10 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
         let (stream, _) = listener.accept().unwrap();
         let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
             assert_eq!(
-                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
                 Some("Bearer test-token"),
             );
             Ok(response)
@@ -82,9 +90,16 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
         let second = socket.read().unwrap();
         assert_eq!(
             first,
-            Message::Text(json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string().into())
+            Message::Text(
+                json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"})
+                    .to_string()
+                    .into()
+            )
         );
-        assert_eq!(second, Message::Text(json!({"aid": "peek_message"}).to_string().into()));
+        assert_eq!(
+            second,
+            Message::Text(json!({"aid": "peek_message"}).to_string().into())
+        );
         let _ = socket.close(None);
     });
 
@@ -124,21 +139,28 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
             },
         });
 
-    let mut connected =
-        block_on(SessionBootstrap::new().connect_topology(&topology, &DefaultRouteConnector::default())).unwrap();
+    let mut connected = block_on(
+        SessionBootstrap::new().connect_topology(&topology, &DefaultRouteConnector::default()),
+    )
+    .unwrap();
     let handle = runtime_with_default_adapters();
 
-    let market_id = block_on(handle.submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-        symbols: vec![Symbol::new("SHFE.au2602")],
-    })))
+    let market_id = block_on(handle.submit(RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602")],
+        },
+    )))
     .unwrap();
-    let schema_id = block_on(handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-        schema_id: SchemaId::new("instrument"),
-        path: "/schema/instrument.json".to_string(),
-    })))
+    let schema_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
     .unwrap();
     let replay_id = block_on(handle.submit(RuntimeCommand::Replay(ReplayCommand::Step))).unwrap();
-    let system_id = block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
+    let system_id =
+        block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
 
     let dispatches = handle.drain_dispatches().unwrap();
     let receipts = dispatches
@@ -149,7 +171,11 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
     assert_eq!(
         receipts
             .iter()
-            .map(|receipt| (receipt.command_id, receipt.route_label.as_str(), receipt.domain))
+            .map(|receipt| (
+                receipt.command_id,
+                receipt.route_label.as_str(),
+                receipt.domain
+            ))
             .collect::<Vec<_>>(),
         vec![
             (market_id, "market", ProtocolDomain::Market),
@@ -166,9 +192,11 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
         vec![OutboundDispatch {
             command_id: schema_id,
             domain: ProtocolDomain::Schema,
-            request: tqsdk_runtime_contract::OutboundRequest::Http(tqsdk_runtime_contract::HttpRequest {
-                path: "/schema/instrument.json".to_string(),
-            }),
+            request: tqsdk_runtime_contract::OutboundRequest::Http(
+                tqsdk_runtime_contract::HttpRequest {
+                    path: "/schema/instrument.json".to_string(),
+                }
+            ),
         }]
     );
     assert_eq!(
@@ -234,5 +262,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

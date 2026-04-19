@@ -17,7 +17,10 @@ fn tq_auth_provider_authenticates_against_token_endpoint() {
         let n = stream.read(&mut buf).unwrap();
         let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
-        assert!(request.starts_with("POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1"));
+        assert!(
+            request
+                .starts_with("POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1")
+        );
         assert!(request.contains("grant_type=password"));
         assert!(request.contains("username=demo"));
         assert!(request.contains("password=secret"));
@@ -38,7 +41,10 @@ fn tq_auth_provider_authenticates_against_token_endpoint() {
         .with_auth_url(format!("http://{addr}"));
     let context = block_on(provider.authenticate()).unwrap();
 
-    assert_eq!(context.access_token(), "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiZnV0ciIsInNlYyJdfX0.sig");
+    assert_eq!(
+        context.access_token(),
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiZnV0ciIsInNlYyJdfX0.sig"
+    );
     assert_eq!(context.auth_id().map(AuthId::as_str), Some("user-1"));
     assert_eq!(context.features(), &["futr".to_string(), "sec".to_string()]);
 
@@ -112,7 +118,10 @@ fn tq_auth_provider_resolves_trade_broker_metadata_after_authenticate() {
     let broker = block_on(provider.fetch_trade_broker(&auth, "BROKER", "022631")).unwrap();
 
     assert_eq!(broker.url, "wss://td.example/trade");
-    assert_eq!(broker.category, vec!["TQ".to_string(), "FUTURE".to_string()]);
+    assert_eq!(
+        broker.category,
+        vec!["TQ".to_string(), "FUTURE".to_string()]
+    );
     assert_eq!(broker.broker_type.as_deref(), Some("FUTURE"));
     assert_eq!(broker.smtype.as_deref(), Some("sm"));
     assert_eq!(broker.condition_config.as_deref(), Some("fast"));
@@ -123,7 +132,9 @@ fn respond_with_token_request(listener: &TcpListener) {
     let (mut stream, _) = listener.accept().unwrap();
     let request = read_request(&mut stream);
 
-    assert!(request.starts_with("POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1"));
+    assert!(
+        request.starts_with("POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1")
+    );
     assert!(request.contains("grant_type=password"));
     assert!(request.contains("username=demo"));
     assert!(request.contains("password=secret"));
@@ -214,5 +225,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

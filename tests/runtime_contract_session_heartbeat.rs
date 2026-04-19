@@ -6,10 +6,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig, OutboundFrame,
-    ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
-    SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology,
-    SessionTopologyResolver, StatePath, TimerEvent, Transport,
+    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
+    OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
+    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, TimerEvent,
+    Transport,
 };
 
 #[derive(Clone)]
@@ -82,8 +83,15 @@ impl SessionRouteConnector for HeartbeatConnector {
         let label = route.label.clone();
         Box::pin(async move {
             connected_labels.lock().unwrap().push(label);
-            let behavior = behaviors.lock().unwrap().pop_front().unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
-            Ok(Box::new(HeartbeatTransport { behavior, sent_frames }) as Box<dyn Transport>)
+            let behavior = behaviors
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
+            Ok(Box::new(HeartbeatTransport {
+                behavior,
+                sent_frames,
+            }) as Box<dyn Transport>)
         })
     }
 }
@@ -128,13 +136,9 @@ fn session_runtime_pump_route_once_commits_transport_pong_frames() {
     ))
     .unwrap();
 
-    let outcome = block_on(runtime.pump_route_once(
-        &mut run,
-        "market",
-        vec![],
-        CommitScope::RealtimeUpdate,
-    ))
-    .unwrap();
+    let outcome =
+        block_on(runtime.pump_route_once(&mut run, "market", vec![], CommitScope::RealtimeUpdate))
+            .unwrap();
 
     assert!(!outcome.reconnect_required);
     assert_eq!(outcome.commits.len(), 1);
@@ -261,8 +265,10 @@ fn adapter_registry() -> AdapterRegistry {
 }
 
 fn session_config() -> SessionConfig {
-    SessionConfig::new(EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"))
-        .enable_domain(ProtocolDomain::Market)
+    SessionConfig::new(
+        EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"),
+    )
+    .enable_domain(ProtocolDomain::Market)
 }
 
 fn market_topology() -> SessionTopology {
@@ -307,5 +313,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

@@ -4,30 +4,32 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, ChangeHit, CommitScope, CommandStatus, ObjectKey, OutboundEnvelope, OutboundFrame,
-    OutboundRequest, OrderId, Runtime, RuntimeCommand, RuntimeHandle, StatePath, Symbol, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
-    TradeVolumeCondition,
+    AccountId, AdapterRegistry, ChangeHit, CommandStatus, CommitScope, ObjectKey, OrderId,
+    OutboundEnvelope, OutboundFrame, OutboundRequest, Runtime, RuntimeCommand, RuntimeHandle,
+    StatePath, Symbol, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
+    TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 
 #[test]
 fn rejected_trade_commands_enter_runtime_command_snapshot_and_commit_log() {
     let handle = runtime_with_default_adapters();
 
-    let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
-        TradeInsertOrderCommand {
-            account_id: AccountId::new("simnow"),
-            order_id: OrderId::new("order-1"),
-            symbol: Symbol::new("SHFE.au2602"),
-            direction: TradeDirection::Buy,
-            offset: Some(TradeOffset::Open),
-            volume: 2,
-            price_type: TradePriceType::Limit,
-            limit_price: Some(json!(618.5)),
-            time_condition: TradeTimeCondition::Gfd,
-            volume_condition: TradeVolumeCondition::Any,
-        },
-    ))))
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("order-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 2,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))),
+    )
     .unwrap();
 
     assert_eq!(
@@ -149,5 +151,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

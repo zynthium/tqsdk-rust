@@ -1,7 +1,7 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, CommitScope, IoEvent, ObjectKey, QueryId, Runtime, RuntimeHandle, RuntimeInput, SchemaId,
-    StatePath,
+    AdapterRegistry, CommitScope, IoEvent, ObjectKey, QueryId, Runtime, RuntimeHandle,
+    RuntimeInput, SchemaId, StatePath,
 };
 
 #[test]
@@ -66,20 +66,29 @@ fn bootstrap_inputs_can_merge_into_one_initial_ready_commit() {
         ]
     );
     assert_eq!(
-        handle.latest_snapshot().get(["schema", "instrument-schema", "nodes", "quote", "fields"]),
+        handle
+            .latest_snapshot()
+            .get(["schema", "instrument-schema", "nodes", "quote", "fields"]),
         Some(&json!(["last_price", "ask_price1"]))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["query", "quotes-page-1", "has_more"]),
+        handle
+            .latest_snapshot()
+            .get(["query", "quotes-page-1", "has_more"]),
         Some(&json!(false))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["query", "quotes-page-1", "items"]),
+        handle
+            .latest_snapshot()
+            .get(["query", "quotes-page-1", "items"]),
         Some(&json!([{ "instrument_id": "au2602" }]))
     );
 
     let mut cursor = handle.cursor_from(tqsdk_runtime_contract::Revision::new(1));
-    assert_eq!(log.next(&mut cursor).map(|commit| commit.revision.get()), Some(1));
+    assert_eq!(
+        log.next(&mut cursor).map(|commit| commit.revision.get()),
+        Some(1)
+    );
     assert_eq!(log.next(&mut cursor), None);
 }
 

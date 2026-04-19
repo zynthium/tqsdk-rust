@@ -5,10 +5,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture, EndpointConfig,
-    MarketSessionTarget, PasswordCredentials, ProtocolDomain, SessionBootstrap, SessionConfig, SessionRoute,
-    SessionRouteEndpoint, SessionTarget, SessionTopology, SessionTopologyResolver, TqAuthProvider,
-    TradeSessionTarget, WebSocketConnectOptions,
+    AccountId, AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture,
+    EndpointConfig, MarketSessionTarget, PasswordCredentials, ProtocolDomain, SessionBootstrap,
+    SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
+    SessionTopologyResolver, TqAuthProvider, TradeSessionTarget, WebSocketConnectOptions,
 };
 
 struct TestAuthProvider;
@@ -16,11 +16,9 @@ struct TestAuthProvider;
 impl AuthProvider for TestAuthProvider {
     fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
         Box::pin(async {
-            Ok(
-                AuthContext::new("test-access-token")
-                    .with_auth_id(AuthId::new("auth-1"))
-                    .with_feature("futr"),
-            )
+            Ok(AuthContext::new("test-access-token")
+                .with_auth_id(AuthId::new("auth-1"))
+                .with_feature("futr"))
         })
     }
 }
@@ -41,21 +39,23 @@ impl SessionTopologyResolver for TestTopologyResolver {
             assert_eq!(auth_id.as_deref(), Some("auth-1"));
             assert_eq!(
                 enabled_domains,
-                vec![ProtocolDomain::Market, ProtocolDomain::Trade, ProtocolDomain::Schema]
+                vec![
+                    ProtocolDomain::Market,
+                    ProtocolDomain::Trade,
+                    ProtocolDomain::Schema
+                ]
             );
 
-            Ok(
-                SessionTopology::default().with_route(SessionRoute {
-                    label: "market".to_string(),
-                    target: SessionTarget::Shared,
-                    domains: vec![ProtocolDomain::Market, ProtocolDomain::Schema],
-                    endpoint: SessionRouteEndpoint::WebSocket {
-                        url: "wss://md.example/live".to_string(),
-                        connect: WebSocketConnectOptions::default()
-                            .with_header("Authorization", "Bearer test-access-token"),
-                    },
-                }),
-            )
+            Ok(SessionTopology::default().with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market, ProtocolDomain::Schema],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://md.example/live".to_string(),
+                    connect: WebSocketConnectOptions::default()
+                        .with_header("Authorization", "Bearer test-access-token"),
+                },
+            }))
         })
     }
 }
@@ -82,7 +82,14 @@ fn session_bootstrap_establish_with_resolver_returns_topology() {
     .unwrap();
 
     assert_eq!(result.phase.as_str(), "running");
-    assert_eq!(result.enabled_domains, vec![ProtocolDomain::Market, ProtocolDomain::Trade, ProtocolDomain::Schema]);
+    assert_eq!(
+        result.enabled_domains,
+        vec![
+            ProtocolDomain::Market,
+            ProtocolDomain::Trade,
+            ProtocolDomain::Schema
+        ]
+    );
     assert_eq!(result.topology.routes.len(), 1);
 }
 
@@ -103,7 +110,10 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
         let normalized = request.to_ascii_lowercase();
 
         assert!(request.starts_with("GET /ns?stock=false&backtest=true HTTP/1.1"));
-        assert!(normalized.contains("authorization: bearer test-access-token"), "{request}");
+        assert!(
+            normalized.contains("authorization: bearer test-access-token"),
+            "{request}"
+        );
         write_http_ok(&mut stream, &format!(r#"{{"mdurl":"ws://{md_addr}/md"}}"#));
     });
 
@@ -113,7 +123,10 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
         let normalized = request.to_ascii_lowercase();
 
         assert!(request.starts_with("GET /9999.json?account_id=simnow&auth=demo HTTP/1.1"));
-        assert!(normalized.contains("authorization: bearer test-access-token"), "{request}");
+        assert!(
+            normalized.contains("authorization: bearer test-access-token"),
+            "{request}"
+        );
         write_http_ok(
             &mut stream,
             &format!(
@@ -155,7 +168,10 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
             assert_eq!(url, &format!("ws://{md_addr}/md"));
             assert_eq!(
                 connect.headers,
-                vec![("Authorization".to_string(), "Bearer test-access-token".to_string())]
+                vec![(
+                    "Authorization".to_string(),
+                    "Bearer test-access-token".to_string()
+                )]
             );
         }
         other => panic!("expected market websocket route, got {other:?}"),
@@ -177,13 +193,19 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
             assert_eq!(url, &format!("ws://{td_addr}/trade"));
             assert_eq!(
                 connect.headers,
-                vec![("Authorization".to_string(), "Bearer test-access-token".to_string())]
+                vec![(
+                    "Authorization".to_string(),
+                    "Bearer test-access-token".to_string()
+                )]
             );
         }
         other => panic!("expected trade websocket route, got {other:?}"),
     }
     assert_eq!(topology.routes[1].label, "trade:simnow");
-    assert_eq!(topology.routes[1].target, SessionTarget::Account(AccountId::new("simnow")));
+    assert_eq!(
+        topology.routes[1].target,
+        SessionTarget::Account(AccountId::new("simnow"))
+    );
     assert_eq!(topology.routes[1].domains, vec![ProtocolDomain::Trade]);
 
     ns_server.join().unwrap();
@@ -263,5 +285,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

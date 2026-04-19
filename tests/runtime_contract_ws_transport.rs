@@ -5,7 +5,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use tqsdk_runtime_contract::{OutboundFrame, RawFrame, Transport, WebSocketTransport};
 use tungstenite::handshake::server::{Request, Response};
-use tungstenite::{accept, accept_hdr, Message};
+use tungstenite::{Message, accept, accept_hdr};
 
 #[test]
 fn websocket_transport_connects_and_round_trips_frames() {
@@ -28,7 +28,9 @@ fn websocket_transport_connects_and_round_trips_frames() {
             other => panic!("expected ping frame, got {other:?}"),
         }
 
-        socket.send(Message::Binary(vec![1_u8, 2, 3].into())).unwrap();
+        socket
+            .send(Message::Binary(vec![1_u8, 2, 3].into()))
+            .unwrap();
 
         match socket.read().unwrap() {
             Message::Close(_) => {}
@@ -65,11 +67,17 @@ fn websocket_transport_sends_custom_handshake_headers() {
         let (stream, _) = listener.accept().unwrap();
         let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
             assert_eq!(
-                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
                 Some("Bearer test-token"),
             );
             assert_eq!(
-                request.headers().get("x-tq-app").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("x-tq-app")
+                    .and_then(|value| value.to_str().ok()),
                 Some("contract-test"),
             );
             Ok(response)
@@ -121,5 +129,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

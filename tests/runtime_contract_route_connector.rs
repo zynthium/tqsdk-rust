@@ -4,11 +4,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use tqsdk_runtime_contract::{
-    DefaultRouteConnector, OutboundFrame, ProtocolDomain, SessionBootstrap, SessionRoute, SessionRouteEndpoint,
-    SessionTarget, SessionTopology, WebSocketConnectOptions,
+    DefaultRouteConnector, OutboundFrame, ProtocolDomain, SessionBootstrap, SessionRoute,
+    SessionRouteEndpoint, SessionTarget, SessionTopology, WebSocketConnectOptions,
 };
-use tungstenite::handshake::server::{Request, Response};
 use tungstenite::accept_hdr;
+use tungstenite::handshake::server::{Request, Response};
 
 #[test]
 fn default_route_connector_supports_non_websocket_route_endpoints() {
@@ -39,7 +39,8 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
         });
 
     let connector = DefaultRouteConnector::default();
-    let mut connected = block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
 
     assert_eq!(connected.routes.len(), 3);
     assert_eq!(connected.routes[0].route.label, "query");
@@ -58,7 +59,8 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
         "validation error: replay route transport does not support frame recv"
     );
 
-    let internal_send = block_on(connected.routes[2].transport.send(OutboundFrame::Ping)).unwrap_err();
+    let internal_send =
+        block_on(connected.routes[2].transport.send(OutboundFrame::Ping)).unwrap_err();
     assert_eq!(
         internal_send.to_string(),
         "validation error: internal route transport does not support frame send"
@@ -76,7 +78,10 @@ fn default_route_connector_delegates_websocket_routes() {
         let (stream, _) = listener.accept().unwrap();
         let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
             assert_eq!(
-                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
                 Some("Bearer test-token"),
             );
             Ok(response)
@@ -106,7 +111,8 @@ fn default_route_connector_delegates_websocket_routes() {
         });
 
     let connector = DefaultRouteConnector::default();
-    let mut connected = block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
 
     assert_eq!(connected.routes.len(), 2);
     assert_eq!(connected.routes[0].route.label, "market");
@@ -146,5 +152,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

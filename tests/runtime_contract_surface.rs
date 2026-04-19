@@ -1,11 +1,13 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId, CommandStatus,
-    CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation, MarketChartCommand, MarketCommand,
-    MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundRequest, ProtocolAdapter, ProtocolDomain,
-    QueryCommand, QueryId, ReplayCommand, Revision, Result, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
-    SchemaCommand, SchemaId, SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
+    AccountId, AdapterRegistry, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId,
+    CommandStatus, CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation,
+    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId,
+    OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Result,
+    Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
+    SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    UpdateCursor,
 };
 
 struct TestAdapter;
@@ -19,7 +21,10 @@ impl ProtocolAdapter for TestAdapter {
         matches!(cmd, RuntimeCommand::System(_))
     }
 
-    fn encode(&mut self, _cmd: &RuntimeCommand) -> Result<Vec<tqsdk_runtime_contract::OutboundRequest>> {
+    fn encode(
+        &mut self,
+        _cmd: &RuntimeCommand,
+    ) -> Result<Vec<tqsdk_runtime_contract::OutboundRequest>> {
         Err(ContractError::UnsupportedCommand("system skeleton"))
     }
 
@@ -27,7 +32,10 @@ impl ProtocolAdapter for TestAdapter {
         matches!(input, RuntimeInput::Internal(_))
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<tqsdk_runtime_contract::NormalizedMutation>> {
+    fn decode(
+        &mut self,
+        _input: &RuntimeInput,
+    ) -> Result<Vec<tqsdk_runtime_contract::NormalizedMutation>> {
         Ok(vec![])
     }
 }
@@ -130,9 +138,18 @@ fn snapshot_cursor_and_mutation_types_are_revision_bound() {
     let changes = ChangeSet {
         path_hits: vec![path.clone()],
         object_hits: vec![quote_key.clone()],
-        field_hits: vec![ChangeHit::field(path.clone(), quote_key.clone(), "last_price")],
+        field_hits: vec![ChangeHit::field(
+            path.clone(),
+            quote_key.clone(),
+            "last_price",
+        )],
     };
-    let commit = CommitResult::new(Revision::new(4), changes.clone(), vec![], CommitScope::RealtimeUpdate);
+    let commit = CommitResult::new(
+        Revision::new(4),
+        changes.clone(),
+        vec![],
+        CommitScope::RealtimeUpdate,
+    );
 
     assert_eq!(snapshot.revision().get(), 3);
     assert_eq!(cursor.next_revision().get(), 4);
@@ -179,12 +196,11 @@ fn public_surface_exports_are_usable_together() {
     let _command = tqsdk_runtime_contract::RuntimeCommand::System(
         tqsdk_runtime_contract::SystemCommand::RefreshAuth,
     );
-    let _input = tqsdk_runtime_contract::RuntimeInput::Internal(
-        tqsdk_runtime_contract::InternalEvent {
+    let _input =
+        tqsdk_runtime_contract::RuntimeInput::Internal(tqsdk_runtime_contract::InternalEvent {
             label: "checkpoint",
             payload: None,
-        },
-    );
+        });
     let _scope = tqsdk_runtime_contract::CommitScope::SessionTransition;
     let _domain = tqsdk_runtime_contract::ProtocolDomain::Schema;
 

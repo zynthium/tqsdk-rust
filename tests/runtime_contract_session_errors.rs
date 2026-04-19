@@ -43,7 +43,10 @@ fn session_errors_commit_under_system_namespace() {
     );
 
     let mut cursor = handle.cursor_from(tqsdk_runtime_contract::Revision::new(1));
-    assert_eq!(log.next(&mut cursor).map(|commit| commit.revision.get()), Some(1));
+    assert_eq!(
+        log.next(&mut cursor).map(|commit| commit.revision.get()),
+        Some(1)
+    );
     assert_eq!(log.next(&mut cursor), None);
 }
 

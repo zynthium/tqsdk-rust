@@ -7,8 +7,8 @@ use tqsdk_runtime_contract::{
     AccountId, ProtocolDomain, SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget,
     SessionTopology, WebSocketConnectOptions, WebSocketRouteConnector,
 };
-use tungstenite::handshake::server::{Request, Response};
 use tungstenite::accept_hdr;
+use tungstenite::handshake::server::{Request, Response};
 
 #[test]
 fn session_bootstrap_connects_websocket_routes_from_topology() {
@@ -21,7 +21,10 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
         let (stream, _) = market_listener.accept().unwrap();
         let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
             assert_eq!(
-                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
                 Some("Bearer test-token"),
             );
             Ok(response)
@@ -34,7 +37,10 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
         let (stream, _) = trade_listener.accept().unwrap();
         let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
             assert_eq!(
-                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
                 Some("Bearer test-token"),
             );
             Ok(response)
@@ -66,7 +72,8 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
         });
 
     let connector = WebSocketRouteConnector::default();
-    let mut connected = block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
 
     assert_eq!(connected.routes.len(), 2);
     assert_eq!(connected.routes[0].route.label, "market");
@@ -107,5 +114,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

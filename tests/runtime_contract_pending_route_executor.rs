@@ -6,11 +6,12 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommitScope, ContractFuture, EndpointConfig, IoEvent,
-    OutboundDispatch, ProtocolDomain, ReplayCommand, ReplayEvent, ReplaySessionId, RouteRequestExecutor, Runtime,
-    RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
-    SessionRoute, SessionRouteEndpoint, SessionRouteConnector, SessionRuntime, SessionTarget, SessionTopology,
-    SessionTopologyResolver, SystemCommand, Transport,
+    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommitScope, ContractFuture,
+    EndpointConfig, IoEvent, OutboundDispatch, ProtocolDomain, ReplayCommand, ReplayEvent,
+    ReplaySessionId, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
+    SchemaCommand, SchemaId, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver,
+    SystemCommand, Transport,
 };
 
 struct TestAuthProvider;
@@ -54,11 +55,19 @@ impl Transport for PassiveTransport {
     }
 
     fn recv(&mut self) -> ContractFuture<'_, tqsdk_runtime_contract::RawFrame> {
-        Box::pin(async { Err(tqsdk_runtime_contract::ContractError::validation("passive transport cannot recv")) })
+        Box::pin(async {
+            Err(tqsdk_runtime_contract::ContractError::validation(
+                "passive transport cannot recv",
+            ))
+        })
     }
 
     fn send(&mut self, _frame: tqsdk_runtime_contract::OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async { Err(tqsdk_runtime_contract::ContractError::validation("passive transport cannot send")) })
+        Box::pin(async {
+            Err(tqsdk_runtime_contract::ContractError::validation(
+                "passive transport cannot send",
+            ))
+        })
     }
 
     fn close(&mut self) -> ContractFuture<'_, ()> {
@@ -79,11 +88,17 @@ impl SessionRouteConnector for PassiveConnector {
 struct RecordingExecutor {
     responses: BTreeMap<String, Vec<RuntimeInput>>,
     seen: Arc<Mutex<Vec<(String, Vec<OutboundDispatch>)>>>,
+    error: Option<String>,
 }
 
 impl RecordingExecutor {
     fn with_response(mut self, route_label: impl Into<String>, inputs: Vec<RuntimeInput>) -> Self {
         self.responses.insert(route_label.into(), inputs);
+        self
+    }
+
+    fn with_error(mut self, message: impl Into<String>) -> Self {
+        self.error = Some(message.into());
         self
     }
 
@@ -98,12 +113,20 @@ impl RouteRequestExecutor for RecordingExecutor {
         route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
     ) -> ContractFuture<'a, Vec<RuntimeInput>> {
-        let responses = self.responses.get(&route.label).cloned().unwrap_or_default();
+        let responses = self
+            .responses
+            .get(&route.label)
+            .cloned()
+            .unwrap_or_default();
+        let error = self.error.clone();
         let seen = Arc::clone(&self.seen);
         let route_label = route.label.clone();
         let recorded_requests = requests.clone();
         Box::pin(async move {
             seen.lock().unwrap().push((route_label, recorded_requests));
+            if let Some(message) = error {
+                return Err(tqsdk_runtime_contract::ContractError::auth(message));
+            }
             Ok(responses)
         })
     }
@@ -124,8 +147,8 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
         }),
         expected_domains: vec![ProtocolDomain::Schema],
     };
-    let config =
-        SessionConfig::new(EndpointConfig::new("https://auth.example")).enable_domain(ProtocolDomain::Schema);
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::Schema);
     let adapters = adapter_registry();
     let mut run = block_on(runtime.establish(
         &TestAuthProvider,
@@ -150,10 +173,12 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
         })],
     );
 
-    let command_id = block_on(handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-        schema_id: SchemaId::new("instrument-schema"),
-        path: "/schema/instrument.json".to_string(),
-    })))
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument-schema"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
     .unwrap();
     block_on(runtime.flush_outbound(&mut run)).unwrap();
 
@@ -193,8 +218,8 @@ fn session_runtime_executes_pending_replay_route_requests_through_executor() {
         }),
         expected_domains: vec![ProtocolDomain::Replay],
     };
-    let config =
-        SessionConfig::new(EndpointConfig::new("https://auth.example")).enable_domain(ProtocolDomain::Replay);
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::Replay);
     let adapters = adapter_registry();
     let mut run = block_on(runtime.establish(
         &TestAuthProvider,
@@ -235,7 +260,9 @@ fn session_runtime_executes_pending_replay_route_requests_through_executor() {
     assert_eq!(outcome.commits.len(), 1);
     assert_eq!(outcome.commits[0].scope, CommitScope::ReplayStep);
     assert_eq!(
-        handle.latest_snapshot().get(["replay", "rb-1", "cursor", "seq"]),
+        handle
+            .latest_snapshot()
+            .get(["replay", "rb-1", "cursor", "seq"]),
         Some(&json!(1))
     );
 }
@@ -255,8 +282,8 @@ fn session_runtime_executes_pending_internal_route_requests_through_executor() {
         }),
         expected_domains: vec![ProtocolDomain::System],
     };
-    let config =
-        SessionConfig::new(EndpointConfig::new("https://auth.example")).enable_domain(ProtocolDomain::System);
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::System);
     let adapters = adapter_registry();
     let mut run = block_on(runtime.establish(
         &TestAuthProvider,
@@ -277,7 +304,8 @@ fn session_runtime_executes_pending_internal_route_requests_through_executor() {
         })],
     );
 
-    let command_id = block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
+    let command_id =
+        block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
     block_on(runtime.flush_outbound(&mut run)).unwrap();
 
     let outcome = block_on(runtime.drive_pending_route_once(
@@ -294,8 +322,76 @@ fn session_runtime_executes_pending_internal_route_requests_through_executor() {
     assert_eq!(outcome.commits.len(), 1);
     assert_eq!(outcome.commits[0].scope, CommitScope::SessionTransition);
     assert_eq!(
-        handle.latest_snapshot().get(["system", "auth", "refreshed", "auth_id"]),
+        handle
+            .latest_snapshot()
+            .get(["system", "auth", "refreshed", "auth_id"]),
         Some(&json!("auth-2"))
+    );
+}
+
+#[test]
+fn session_runtime_marks_pending_route_commands_failed_when_executor_errors() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let resolver = StaticTopologyResolver {
+        topology: SessionTopology::default().with_route(SessionRoute {
+            label: "instrument-schema".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Schema],
+            endpoint: SessionRouteEndpoint::Http {
+                url: "https://schema.example".to_string(),
+            },
+        }),
+        expected_domains: vec![ProtocolDomain::Schema],
+    };
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::Schema);
+    let adapters = adapter_registry();
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &resolver,
+        &PassiveConnector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+    let executor = RecordingExecutor::default().with_error("schema executor failed");
+
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument-schema"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
+    .unwrap();
+    block_on(runtime.flush_outbound(&mut run)).unwrap();
+
+    let err = block_on(runtime.drive_pending_route_once(
+        &mut run,
+        "instrument-schema",
+        &executor,
+        vec![command_id],
+        CommitScope::RealtimeUpdate,
+    ))
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "auth error: schema executor failed");
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("failed"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "route"
+        ]),
+        Some(&json!("instrument-schema"))
     );
 }
 
@@ -339,5 +435,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

@@ -5,10 +5,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractFuture, EndpointConfig, ProtocolDomain,
-    RawFrame, Runtime, RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
-    SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology,
-    SessionTopologyResolver, StatePath, Transport,
+    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractFuture,
+    EndpointConfig, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
+    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, Transport,
 };
 
 struct TestAuthProvider;
@@ -16,11 +16,9 @@ struct TestAuthProvider;
 impl AuthProvider for TestAuthProvider {
     fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
         Box::pin(async {
-            Ok(
-                AuthContext::new("test-token")
-                    .with_auth_id(AuthId::new("auth-1"))
-                    .with_feature("trade"),
-            )
+            Ok(AuthContext::new("test-token")
+                .with_auth_id(AuthId::new("auth-1"))
+                .with_feature("trade"))
         })
     }
 }
@@ -36,7 +34,10 @@ impl SessionTopologyResolver for TestTopologyResolver {
     ) -> ContractFuture<'a, SessionTopology> {
         Box::pin(async move {
             assert_eq!(auth.auth_id().map(AuthId::as_str), Some("auth-1"));
-            assert_eq!(enabled_domains, &[ProtocolDomain::System, ProtocolDomain::Trade]);
+            assert_eq!(
+                enabled_domains,
+                &[ProtocolDomain::System, ProtocolDomain::Trade]
+            );
 
             Ok(SessionTopology::default().with_route(SessionRoute {
                 label: "trade:simnow".to_string(),
@@ -114,11 +115,15 @@ fn session_runtime_establishes_topology_and_records_initial_ready_flow() {
         &["trade:simnow".to_string()]
     );
     assert_eq!(
-        handle.latest_snapshot().get(["system", "session", "lifecycle", "phase"]),
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["system", "auth", "context", "auth_id"]),
+        handle
+            .latest_snapshot()
+            .get(["system", "auth", "context", "auth_id"]),
         Some(&json!("auth-1"))
     );
 
@@ -129,7 +134,10 @@ fn session_runtime_establishes_topology_and_records_initial_ready_flow() {
     let fourth = log.next(&mut cursor).unwrap();
 
     assert_eq!(first.scope, CommitScope::SessionTransition);
-    assert_eq!(first.changes.path_hits, vec![StatePath::new(["system", "session", "lifecycle"])]);
+    assert_eq!(
+        first.changes.path_hits,
+        vec![StatePath::new(["system", "session", "lifecycle"])]
+    );
     assert_eq!(second.scope, CommitScope::SessionTransition);
     assert_eq!(third.scope, CommitScope::SessionTransition);
     assert_eq!(fourth.scope, CommitScope::InitialReady);
@@ -156,7 +164,9 @@ fn session_runtime_recovery_uses_resync_recovery_commit() {
     assert_eq!(recovered.bootstrap.phase, SessionPhase::Running);
     assert_eq!(recovered.connected.routes.len(), 1);
     assert_eq!(
-        handle.latest_snapshot().get(["system", "session", "lifecycle", "phase"]),
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
     );
     assert_eq!(
@@ -232,5 +242,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

@@ -1,8 +1,8 @@
-use crate::ids::{
-    AccountId, ChartId, CommandId, CursorId, NotificationId, OrderId, QueryId, ReplaySessionId, Revision, SchemaId,
-    Symbol, TradeId,
-};
 use crate::events::NormalizedMutation;
+use crate::ids::{
+    AccountId, ChartId, CommandId, CursorId, NotificationId, OrderId, QueryId, ReplaySessionId,
+    Revision, SchemaId, Symbol, TradeId,
+};
 use serde_json::{Map, Value};
 
 pub type PathSegment = String;
@@ -38,21 +38,57 @@ pub enum ObjectKey {
     SessionAuth,
     SessionLifecycle,
     SessionTopology,
-    Quote { symbol: Symbol },
-    Kline { series: SeriesKey, bar_id: i64 },
-    Tick { symbol: Symbol, tick_id: i64 },
-    TradingStatus { symbol: Symbol },
-    Chart { chart_id: ChartId },
-    Command { command_id: CommandId },
-    Account { account_id: AccountId },
-    Position { account_id: AccountId, symbol: Symbol },
-    Order { account_id: AccountId, order_id: OrderId },
-    Trade { account_id: AccountId, trade_id: TradeId },
-    Settlement { account_id: AccountId, trading_day: String },
-    QueryResult { query_id: QueryId },
-    SchemaNode { schema_id: SchemaId },
-    ReplayCursor { session_id: ReplaySessionId },
-    Notification { notification_id: NotificationId },
+    Quote {
+        symbol: Symbol,
+    },
+    Kline {
+        series: SeriesKey,
+        bar_id: i64,
+    },
+    Tick {
+        symbol: Symbol,
+        tick_id: i64,
+    },
+    TradingStatus {
+        symbol: Symbol,
+    },
+    Chart {
+        chart_id: ChartId,
+    },
+    Command {
+        command_id: CommandId,
+    },
+    Account {
+        account_id: AccountId,
+    },
+    Position {
+        account_id: AccountId,
+        symbol: Symbol,
+    },
+    Order {
+        account_id: AccountId,
+        order_id: OrderId,
+    },
+    Trade {
+        account_id: AccountId,
+        trade_id: TradeId,
+    },
+    Settlement {
+        account_id: AccountId,
+        trading_day: String,
+    },
+    QueryResult {
+        query_id: QueryId,
+    },
+    SchemaNode {
+        schema_id: SchemaId,
+    },
+    ReplayCursor {
+        session_id: ReplaySessionId,
+    },
+    Notification {
+        notification_id: NotificationId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +130,11 @@ impl ChangeSet {
                 }
 
                 for field in &mutation.fields {
-                    let hit = ChangeHit::field(mutation.path.clone(), object.clone(), field.field.clone());
+                    let hit = ChangeHit::field(
+                        mutation.path.clone(),
+                        object.clone(),
+                        field.field.clone(),
+                    );
                     if !changes.field_hits.contains(&hit) {
                         changes.field_hits.push(hit);
                     }
@@ -137,7 +177,11 @@ impl StateSnapshot {
         Some(cursor)
     }
 
-    pub(crate) fn apply(&mut self, revision: Revision, mutations: &[NormalizedMutation]) -> Vec<NormalizedMutation> {
+    pub(crate) fn apply(
+        &mut self,
+        revision: Revision,
+        mutations: &[NormalizedMutation],
+    ) -> Vec<NormalizedMutation> {
         let mut applied = Vec::new();
         for mutation in mutations {
             if let Some(changed) = apply_mutation(&mut self.data, mutation) {
@@ -170,7 +214,12 @@ pub struct CommitResult {
 }
 
 impl CommitResult {
-    pub fn new(revision: Revision, changes: ChangeSet, caused_by: Vec<CommandId>, scope: CommitScope) -> Self {
+    pub fn new(
+        revision: Revision,
+        changes: ChangeSet,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Self {
         Self {
             revision,
             changes,

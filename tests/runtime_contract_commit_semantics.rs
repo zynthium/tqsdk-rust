@@ -1,7 +1,7 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, ChangeHit, CommitScope, IoEvent, ObjectKey, ProtocolDomain, Revision, RuntimeHandle,
-    RuntimeInput, StatePath, Symbol, Runtime,
+    AdapterRegistry, ChangeHit, CommitScope, IoEvent, ObjectKey, ProtocolDomain, Revision, Runtime,
+    RuntimeHandle, RuntimeInput, StatePath, Symbol,
 };
 
 #[test]
@@ -10,19 +10,31 @@ fn runtime_only_commits_visible_field_changes() {
     let log = handle.commit_log();
 
     let first = handle
-        .ingest(market_quote_input(618.5, 619.0), vec![], CommitScope::RealtimeUpdate)
+        .ingest(
+            market_quote_input(618.5, 619.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(first.revision, Revision::new(1));
 
     let repeated = handle
-        .ingest(market_quote_input(618.5, 619.0), vec![], CommitScope::RealtimeUpdate)
+        .ingest(
+            market_quote_input(618.5, 619.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
         .unwrap();
     assert_eq!(repeated, None);
     assert_eq!(handle.latest_snapshot().revision(), Revision::new(1));
 
     let changed = handle
-        .ingest(market_quote_input(619.2, 619.0), vec![], CommitScope::RealtimeUpdate)
+        .ingest(
+            market_quote_input(619.2, 619.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(changed.revision, Revision::new(2));
@@ -37,17 +49,27 @@ fn runtime_only_commits_visible_field_changes() {
         )]
     );
     assert_eq!(
-        handle.latest_snapshot().get(["quotes", "SHFE.au2602", "last_price"]),
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "last_price"]),
         Some(&json!(619.2))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["quotes", "SHFE.au2602", "ask_price1"]),
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "ask_price1"]),
         Some(&json!(619.0))
     );
 
     let mut cursor = handle.cursor_from(Revision::new(1));
-    assert_eq!(log.next(&mut cursor).map(|commit| commit.revision), Some(Revision::new(1)));
-    assert_eq!(log.next(&mut cursor).map(|commit| commit.revision), Some(Revision::new(2)));
+    assert_eq!(
+        log.next(&mut cursor).map(|commit| commit.revision),
+        Some(Revision::new(1))
+    );
+    assert_eq!(
+        log.next(&mut cursor).map(|commit| commit.revision),
+        Some(Revision::new(2))
+    );
     assert_eq!(log.next(&mut cursor), None);
 }
 

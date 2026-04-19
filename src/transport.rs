@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::{HeaderName, HeaderValue};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::{Message, WebSocket, connect};
 
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
@@ -77,17 +77,17 @@ impl WebSocketTransport {
     }
 
     fn connect_blocking(&mut self) -> Result<()> {
-        let mut request = self
-            .url
-            .as_str()
-            .into_client_request()
-            .map_err(|err| ContractError::validation(format!("invalid websocket request: {err}")))?;
+        let mut request = self.url.as_str().into_client_request().map_err(|err| {
+            ContractError::validation(format!("invalid websocket request: {err}"))
+        })?;
 
         for (name, value) in &self.connect_options.headers {
-            let header_name = HeaderName::try_from(name.as_str())
-                .map_err(|err| ContractError::validation(format!("invalid websocket header name: {err}")))?;
-            let header_value = HeaderValue::from_str(value)
-                .map_err(|err| ContractError::validation(format!("invalid websocket header value: {err}")))?;
+            let header_name = HeaderName::try_from(name.as_str()).map_err(|err| {
+                ContractError::validation(format!("invalid websocket header name: {err}"))
+            })?;
+            let header_value = HeaderValue::from_str(value).map_err(|err| {
+                ContractError::validation(format!("invalid websocket header value: {err}"))
+            })?;
             request.headers_mut().insert(header_name, header_value);
         }
 
@@ -234,7 +234,11 @@ pub struct ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
-    pub fn new(initial_backoff: Duration, max_backoff: Duration, max_attempts: Option<u32>) -> Self {
+    pub fn new(
+        initial_backoff: Duration,
+        max_backoff: Duration,
+        max_attempts: Option<u32>,
+    ) -> Self {
         Self {
             initial_backoff,
             max_backoff,
@@ -512,7 +516,10 @@ impl ConnectedTopology {
         })
     }
 
-    pub fn dispatch<'a>(&'a mut self, dispatch: OutboundDispatch) -> ContractFuture<'a, DispatchReceipt> {
+    pub fn dispatch<'a>(
+        &'a mut self,
+        dispatch: OutboundDispatch,
+    ) -> ContractFuture<'a, DispatchReceipt> {
         Box::pin(async move {
             let route = self
                 .routes
@@ -530,7 +537,9 @@ impl ConnectedTopology {
                 OutboundRequest::Transport(frame) => {
                     route.transport.send(frame.clone()).await?;
                 }
-                OutboundRequest::Http(_) | OutboundRequest::Replay(_) | OutboundRequest::Internal(_) => {
+                OutboundRequest::Http(_)
+                | OutboundRequest::Replay(_)
+                | OutboundRequest::Internal(_) => {
                     route.pending_requests.push_back(dispatch.clone());
                 }
             }
@@ -544,14 +553,19 @@ impl ConnectedTopology {
     }
 
     pub fn route_mut(&mut self, label: &str) -> Option<&mut ConnectedSessionRoute> {
-        self.routes.iter_mut().find(|route| route.route.label == label)
+        self.routes
+            .iter_mut()
+            .find(|route| route.route.label == label)
     }
 
     pub fn has_route(&self, label: &str) -> bool {
         self.routes.iter().any(|route| route.route.label == label)
     }
 
-    pub fn recv_route_input<'a>(&'a mut self, label: &'a str) -> ContractFuture<'a, Option<RuntimeInput>> {
+    pub fn recv_route_input<'a>(
+        &'a mut self,
+        label: &'a str,
+    ) -> ContractFuture<'a, Option<RuntimeInput>> {
         Box::pin(async move {
             let Some(route) = self.route_mut(label) else {
                 return Err(ContractError::validation(format!(
@@ -562,7 +576,11 @@ impl ConnectedTopology {
         })
     }
 
-    pub fn send_route_frame<'a>(&'a mut self, label: &'a str, frame: OutboundFrame) -> ContractFuture<'a, ()> {
+    pub fn send_route_frame<'a>(
+        &'a mut self,
+        label: &'a str,
+        frame: OutboundFrame,
+    ) -> ContractFuture<'a, ()> {
         Box::pin(async move {
             let Some(route) = self.route_mut(label) else {
                 return Err(ContractError::validation(format!(
@@ -573,7 +591,10 @@ impl ConnectedTopology {
         })
     }
 
-    pub fn take_route_requests(&mut self, label: &str) -> Result<(SessionRoute, Vec<OutboundDispatch>)> {
+    pub fn take_route_requests(
+        &mut self,
+        label: &str,
+    ) -> Result<(SessionRoute, Vec<OutboundDispatch>)> {
         let Some(route) = self.route_mut(label) else {
             return Err(ContractError::validation(format!(
                 "unknown connected route for pending request drain: {label}"
@@ -592,7 +613,10 @@ impl ConnectedTopology {
 }
 
 pub trait SessionRouteConnector: Send + Sync {
-    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>>;
+    fn connect_route<'a>(
+        &'a self,
+        route: &'a SessionRoute,
+    ) -> ContractFuture<'a, Box<dyn Transport>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,7 +662,10 @@ impl Transport for PassiveRouteTransport {
 pub struct WebSocketRouteConnector;
 
 impl SessionRouteConnector for WebSocketRouteConnector {
-    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>> {
+    fn connect_route<'a>(
+        &'a self,
+        route: &'a SessionRoute,
+    ) -> ContractFuture<'a, Box<dyn Transport>> {
         Box::pin(async move {
             match &route.endpoint {
                 SessionRouteEndpoint::WebSocket { url, connect } => {
@@ -661,7 +688,10 @@ pub struct DefaultRouteConnector {
 }
 
 impl SessionRouteConnector for DefaultRouteConnector {
-    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>> {
+    fn connect_route<'a>(
+        &'a self,
+        route: &'a SessionRoute,
+    ) -> ContractFuture<'a, Box<dyn Transport>> {
         Box::pin(async move {
             match &route.endpoint {
                 SessionRouteEndpoint::WebSocket { .. } => self.websocket.connect_route(route).await,
@@ -683,10 +713,18 @@ fn route_accepts_dispatch(route: &SessionRoute, dispatch: &OutboundDispatch) -> 
     route.domains.contains(&dispatch.domain)
         && matches!(
             (&route.endpoint, &dispatch.request),
-            (SessionRouteEndpoint::WebSocket { .. }, OutboundRequest::Transport(_))
-                | (SessionRouteEndpoint::Http { .. }, OutboundRequest::Http(_))
-                | (SessionRouteEndpoint::Replay { .. }, OutboundRequest::Replay(_))
-                | (SessionRouteEndpoint::Internal { .. }, OutboundRequest::Internal(_))
+            (
+                SessionRouteEndpoint::WebSocket { .. },
+                OutboundRequest::Transport(_)
+            ) | (SessionRouteEndpoint::Http { .. }, OutboundRequest::Http(_))
+                | (
+                    SessionRouteEndpoint::Replay { .. },
+                    OutboundRequest::Replay(_)
+                )
+                | (
+                    SessionRouteEndpoint::Internal { .. },
+                    OutboundRequest::Internal(_)
+                )
         )
 }
 

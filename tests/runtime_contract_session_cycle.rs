@@ -6,10 +6,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, BootstrapResult, CommitScope, ContractFuture, DefaultRouteConnector, IoEvent, MarketCommand,
-    OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand,
-    SchemaId, SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun,
-    SessionRuntime, SessionTarget, SessionTopology, Symbol, Transport,
+    AdapterRegistry, BootstrapResult, CommitScope, ContractFuture, DefaultRouteConnector, IoEvent,
+    MarketCommand, OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeCommand, RuntimeHandle,
+    RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget, SessionTopology, Symbol,
+    Transport,
 };
 
 #[derive(Clone)]
@@ -62,7 +63,8 @@ impl SessionRouteConnector for TestRouteConnector {
         &'a self,
         _route: &'a SessionRoute,
     ) -> ContractFuture<'a, Box<dyn Transport>> {
-        let transport = QueuedTransport::new(self.recv_frames.clone(), Arc::clone(&self.sent_frames));
+        let transport =
+            QueuedTransport::new(self.recv_frames.clone(), Arc::clone(&self.sent_frames));
         Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
     }
 }
@@ -100,16 +102,22 @@ fn session_runtime_flushes_and_ingests_transport_route_inputs() {
         },
     });
 
-    let connected = block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
     let mut run = SessionRun {
-        bootstrap: BootstrapResult::new(tqsdk_runtime_contract::AuthContext::new("token"), vec![ProtocolDomain::Market])
-            .with_topology(topology),
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Market],
+        )
+        .with_topology(topology),
         connected,
     };
 
-    let command_id = block_on(handle.submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-        symbols: vec![Symbol::new("SHFE.au2602")],
-    })))
+    let command_id = block_on(handle.submit(RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602")],
+        },
+    )))
     .unwrap();
 
     let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
@@ -117,7 +125,9 @@ fn session_runtime_flushes_and_ingests_transport_route_inputs() {
     assert_eq!(
         sent_frames.lock().unwrap().clone(),
         vec![
-            OutboundFrame::Text(json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string()),
+            OutboundFrame::Text(
+                json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string()
+            ),
             OutboundFrame::Text(json!({"aid": "peek_message"}).to_string()),
         ]
     );
@@ -134,11 +144,15 @@ fn session_runtime_flushes_and_ingests_transport_route_inputs() {
     assert_eq!(commit.caused_by, vec![command_id]);
     assert_eq!(commit.scope, CommitScope::RealtimeUpdate);
     assert_eq!(
-        handle.latest_snapshot().get(["quotes", "SHFE.au2602", "last_price"]),
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "last_price"]),
         Some(&json!(618.5))
     );
     assert_eq!(
-        handle.latest_snapshot().get(["quotes", "SHFE.au2602", "ask_price1"]),
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "ask_price1"]),
         Some(&json!(619.0))
     );
 }
@@ -156,18 +170,25 @@ fn session_runtime_ingests_queued_non_transport_route_inputs() {
         },
     });
 
-    let connected = block_on(SessionBootstrap::new().connect_topology(&topology, &DefaultRouteConnector::default()))
-        .unwrap();
+    let connected = block_on(
+        SessionBootstrap::new().connect_topology(&topology, &DefaultRouteConnector::default()),
+    )
+    .unwrap();
     let mut run = SessionRun {
-        bootstrap: BootstrapResult::new(tqsdk_runtime_contract::AuthContext::new("token"), vec![ProtocolDomain::Schema])
-            .with_topology(topology),
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Schema],
+        )
+        .with_topology(topology),
         connected,
     };
 
-    let command_id = block_on(handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-        schema_id: SchemaId::new("instrument-schema"),
-        path: "/schema/instrument.json".to_string(),
-    })))
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument-schema"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
     .unwrap();
 
     let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
@@ -201,6 +222,99 @@ fn session_runtime_ingests_queued_non_transport_route_inputs() {
             .latest_snapshot()
             .get(["schema", "instrument-schema", "nodes", "quote", "fields"]),
         Some(&json!(["last_price", "ask_price1"]))
+    );
+}
+
+#[test]
+fn session_runtime_flush_outbound_marks_commands_as_sent() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let connector = TestRouteConnector {
+        sent_frames: Arc::clone(&sent_frames),
+        recv_frames: vec![RawFrame::Pong],
+    };
+
+    let topology = SessionTopology::default()
+        .with_route(SessionRoute {
+            label: "market".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Market],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "ws://market.example".to_string(),
+                connect: Default::default(),
+            },
+        })
+        .with_route(SessionRoute {
+            label: "instrument-schema".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Schema],
+            endpoint: SessionRouteEndpoint::Http {
+                url: "https://schema.example".to_string(),
+            },
+        });
+
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Market, ProtocolDomain::Schema],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let market_id = block_on(handle.submit(RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602")],
+        },
+    )))
+    .unwrap();
+    let schema_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument-schema"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
+    .unwrap();
+
+    let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
+    assert_eq!(receipts.len(), 3);
+
+    let market_segment = market_id.get().to_string();
+    let schema_segment = schema_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", market_segment.as_str(), "status"]),
+        Some(&json!("sent"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            market_segment.as_str(),
+            "detail",
+            "route"
+        ]),
+        Some(&json!("market"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", schema_segment.as_str(), "status"]),
+        Some(&json!("sent"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            schema_segment.as_str(),
+            "detail",
+            "route"
+        ]),
+        Some(&json!("instrument-schema"))
     );
 }
 
@@ -240,5 +354,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

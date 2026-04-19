@@ -6,10 +6,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture, EndpointConfig,
-    ProtocolDomain, RawFrame, Revision, Runtime, RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase,
-    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget,
-    SessionTopology, SessionTopologyResolver, StatePath, Transport,
+    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture,
+    EndpointConfig, ProtocolDomain, RawFrame, Revision, Runtime, RuntimeHandle, SessionBootstrap,
+    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRun, SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath,
+    Transport,
 };
 
 #[derive(Clone)]
@@ -75,7 +76,11 @@ impl SessionRouteConnector for ControlledConnector {
         let label = route.label.clone();
         Box::pin(async move {
             connected_labels.lock().unwrap().push(label);
-            let behavior = behaviors.lock().unwrap().pop_front().unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
+            let behavior = behaviors
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
             Ok(Box::new(ControlledTransport { behavior }) as Box<dyn Transport>)
         })
     }
@@ -87,13 +92,9 @@ fn session_runtime_turns_transport_close_into_reconnect_signal_and_commits() {
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
     let mut run = connect_run(RecvBehavior::Frame(RawFrame::Close));
 
-    let outcome = block_on(runtime.pump_route_once(
-        &mut run,
-        "market",
-        vec![],
-        CommitScope::RealtimeUpdate,
-    ))
-    .unwrap();
+    let outcome =
+        block_on(runtime.pump_route_once(&mut run, "market", vec![], CommitScope::RealtimeUpdate))
+            .unwrap();
 
     assert!(outcome.reconnect_required);
     assert_eq!(outcome.commits.len(), 2);
@@ -129,13 +130,9 @@ fn session_runtime_turns_transport_recv_errors_into_reconnect_signal_and_commits
         "websocket recv failed: connection reset",
     )));
 
-    let outcome = block_on(runtime.pump_route_once(
-        &mut run,
-        "market",
-        vec![],
-        CommitScope::RealtimeUpdate,
-    ))
-    .unwrap();
+    let outcome =
+        block_on(runtime.pump_route_once(&mut run, "market", vec![], CommitScope::RealtimeUpdate))
+            .unwrap();
 
     assert!(outcome.reconnect_required);
     assert_eq!(outcome.commits.len(), 2);
@@ -153,7 +150,9 @@ fn session_runtime_turns_transport_recv_errors_into_reconnect_signal_and_commits
         handle
             .latest_snapshot()
             .get(["system", "internal", "transport-error", "message"]),
-        Some(&json!("auth error: websocket recv failed: connection reset"))
+        Some(&json!(
+            "auth error: websocket recv failed: connection reset"
+        ))
     );
     assert_eq!(
         handle
@@ -164,7 +163,8 @@ fn session_runtime_turns_transport_recv_errors_into_reconnect_signal_and_commits
 }
 
 #[test]
-fn session_runtime_drive_route_once_recovers_after_transport_close_without_duplicate_reconnecting_commit() {
+fn session_runtime_drive_route_once_recovers_after_transport_close_without_duplicate_reconnecting_commit()
+ {
     let handle = runtime_with_default_adapters();
     let log = handle.commit_log();
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
@@ -222,10 +222,22 @@ fn session_runtime_drive_route_once_recovers_after_transport_close_without_dupli
         Some(&json!("running"))
     );
 
-    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
-    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
-    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::SessionTransition);
-    assert_eq!(log.next(&mut cursor).unwrap().scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        log.next(&mut cursor).unwrap().scope,
+        CommitScope::SessionTransition
+    );
+    assert_eq!(
+        log.next(&mut cursor).unwrap().scope,
+        CommitScope::SessionTransition
+    );
+    assert_eq!(
+        log.next(&mut cursor).unwrap().scope,
+        CommitScope::SessionTransition
+    );
+    assert_eq!(
+        log.next(&mut cursor).unwrap().scope,
+        CommitScope::ResyncRecovery
+    );
     assert_eq!(log.next(&mut cursor), None);
 }
 
@@ -295,7 +307,8 @@ fn connect_run(behavior: RecvBehavior) -> SessionRun {
     });
 
     let connected = block_on(
-        SessionBootstrap::new().connect_topology(&topology, &ControlledConnector::new(vec![behavior])),
+        SessionBootstrap::new()
+            .connect_topology(&topology, &ControlledConnector::new(vec![behavior])),
     )
     .unwrap();
 
@@ -320,8 +333,10 @@ fn adapter_registry() -> AdapterRegistry {
 }
 
 fn session_config() -> SessionConfig {
-    SessionConfig::new(EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"))
-        .enable_domain(ProtocolDomain::Market)
+    SessionConfig::new(
+        EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"),
+    )
+    .enable_domain(ProtocolDomain::Market)
 }
 
 struct TestAuthProvider;
@@ -390,5 +405,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

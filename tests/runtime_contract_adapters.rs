@@ -1,10 +1,11 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tqsdk_runtime_contract::{
     AccountId, AdapterRegistry, ChartId, FieldMutation, InputPayload, InternalEvent, MarketAdapter,
-    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, NotificationId, ObjectKey, OrderId,
-    OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryAdapter, QueryCommand, QueryId,
-    ReplayAdapter, ReplayCommand, ReplayEvent, ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter,
-    SchemaCommand, StatePath, Symbol, SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection,
+    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, NotificationId,
+    ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
+    QueryAdapter, QueryCommand, QueryId, ReplayAdapter, ReplayCommand, ReplayEvent,
+    ReplaySessionId, RuntimeCommand, RuntimeInput, SchemaAdapter, SchemaCommand, StatePath, Symbol,
+    SystemAdapter, SystemCommand, TradeAdapter, TradeCommand, TradeDirection,
     TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePriceType, TradeTimeCondition,
     TradeVolumeCondition,
 };
@@ -27,7 +28,10 @@ impl ProtocolAdapter for StubAdapter {
         cmd.domain() == self.accepts_command_domain
     }
 
-    fn encode(&mut self, _cmd: &RuntimeCommand) -> tqsdk_runtime_contract::Result<Vec<OutboundRequest>> {
+    fn encode(
+        &mut self,
+        _cmd: &RuntimeCommand,
+    ) -> tqsdk_runtime_contract::Result<Vec<OutboundRequest>> {
         Ok(self.encoded.clone())
     }
 
@@ -38,7 +42,10 @@ impl ProtocolAdapter for StubAdapter {
         )
     }
 
-    fn decode(&mut self, _input: &RuntimeInput) -> tqsdk_runtime_contract::Result<Vec<NormalizedMutation>> {
+    fn decode(
+        &mut self,
+        _input: &RuntimeInput,
+    ) -> tqsdk_runtime_contract::Result<Vec<NormalizedMutation>> {
         Ok(self.decoded.clone())
     }
 }
@@ -51,19 +58,37 @@ fn adapter_registry_routes_commands_and_fans_out_inputs() {
         accepts_command_domain: ProtocolDomain::System,
         accepted_input_label: "shared",
         encoded: vec![OutboundRequest::internal_label("shutdown-runtime")],
-        decoded: vec![mutation("system", "event", "shared", MutationSource::SessionControl)],
+        decoded: vec![mutation(
+            "system",
+            "event",
+            "shared",
+            MutationSource::SessionControl,
+        )],
     });
     registry.register_adapter(StubAdapter {
         domain: ProtocolDomain::Replay,
         accepts_command_domain: ProtocolDomain::Replay,
         accepted_input_label: "shared",
-        encoded: vec![OutboundRequest::Replay(tqsdk_runtime_contract::ReplayRequest { action: "step" })],
-        decoded: vec![mutation("replay", "event", "shared", MutationSource::ReplayStep)],
+        encoded: vec![OutboundRequest::Replay(
+            tqsdk_runtime_contract::ReplayRequest { action: "step" },
+        )],
+        decoded: vec![mutation(
+            "replay",
+            "event",
+            "shared",
+            MutationSource::ReplayStep,
+        )],
     });
 
     let command = RuntimeCommand::System(SystemCommand::Shutdown);
-    assert_eq!(registry.domains(), &[ProtocolDomain::System, ProtocolDomain::Replay]);
-    assert_eq!(registry.owning_domain(&command), Some(ProtocolDomain::System));
+    assert_eq!(
+        registry.domains(),
+        &[ProtocolDomain::System, ProtocolDomain::Replay]
+    );
+    assert_eq!(
+        registry.owning_domain(&command),
+        Some(ProtocolDomain::System)
+    );
     assert_eq!(
         registry.encode_command(&command).unwrap(),
         vec![OutboundRequest::internal_label("shutdown-runtime")]
@@ -101,7 +126,11 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
 
     let market_subscribe = registry
         .encode_command(&RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-            symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("DCE.m2609"), Symbol::new("SHFE.au2602")],
+            symbols: vec![
+                Symbol::new("SHFE.au2602"),
+                Symbol::new("DCE.m2609"),
+                Symbol::new("SHFE.au2602"),
+            ],
         }))
         .unwrap();
     assert_json_frame(
@@ -122,15 +151,17 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     assert_json_frame(&market_unsubscribe[1], json!({"aid": "peek_message"}));
 
     let chart_requests = registry
-        .encode_command(&RuntimeCommand::Market(MarketCommand::SetChart(MarketChartCommand {
-            chart_id: "chart-1".to_string(),
-            symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("SHFE.ag2606")],
-            duration_ns: 60_000_000_000,
-            view_width: 128,
-            left_kline_id: Some(42),
-            focus_datetime_ns: None,
-            focus_position: None,
-        })))
+        .encode_command(&RuntimeCommand::Market(MarketCommand::SetChart(
+            MarketChartCommand {
+                chart_id: "chart-1".to_string(),
+                symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("SHFE.ag2606")],
+                duration_ns: 60_000_000_000,
+                view_width: 128,
+                left_kline_id: Some(42),
+                focus_datetime_ns: None,
+                focus_position: None,
+            },
+        )))
         .unwrap();
     assert_json_frame(
         &chart_requests[0],
@@ -146,9 +177,11 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     assert_json_frame(&chart_requests[1], json!({"aid": "peek_message"}));
 
     let trading_status_requests = registry
-        .encode_command(&RuntimeCommand::Market(MarketCommand::SubscribeTradingStatus {
-            symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("CZCE.SR609")],
-        }))
+        .encode_command(&RuntimeCommand::Market(
+            MarketCommand::SubscribeTradingStatus {
+                symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("CZCE.SR609")],
+            },
+        ))
         .unwrap();
     assert_json_frame(
         &trading_status_requests[0],
@@ -157,16 +190,18 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     assert_json_frame(&trading_status_requests[1], json!({"aid": "peek_message"}));
 
     let trade_login = registry
-        .encode_command(&RuntimeCommand::Trade(TradeCommand::Login(TradeLoginCommand {
-            account_id: AccountId::new("simnow"),
-            broker_id: "9999".to_string(),
-            password: "secret".to_string(),
-            account_type: tqsdk_runtime_contract::TradeAccountType::Future,
-            front_broker: Some("9999".to_string()),
-            front_url: Some("tcp://127.0.0.1:12345".to_string()),
-            client_app_id: Some("SHINNY_TQ_1.0".to_string()),
-            client_system_info: Some("SYSINFO".to_string()),
-        })))
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::Login(
+            TradeLoginCommand {
+                account_id: AccountId::new("simnow"),
+                broker_id: "9999".to_string(),
+                password: "secret".to_string(),
+                account_type: tqsdk_runtime_contract::TradeAccountType::Future,
+                front_broker: Some("9999".to_string()),
+                front_url: Some("tcp://127.0.0.1:12345".to_string()),
+                client_app_id: Some("SHINNY_TQ_1.0".to_string()),
+                client_system_info: Some("SYSINFO".to_string()),
+            },
+        )))
         .unwrap();
     assert_json_frame(
         &trade_login[0],
@@ -183,18 +218,20 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     );
 
     let trade_insert = registry
-        .encode_command(&RuntimeCommand::Trade(TradeCommand::InsertOrder(TradeInsertOrderCommand {
-            account_id: AccountId::new("simnow"),
-            order_id: OrderId::new("order-1"),
-            symbol: Symbol::new("SHFE.au2602"),
-            direction: TradeDirection::Buy,
-            offset: Some(TradeOffset::Open),
-            volume: 2,
-            price_type: TradePriceType::Limit,
-            limit_price: Some(json!(618.5)),
-            time_condition: TradeTimeCondition::Gfd,
-            volume_condition: TradeVolumeCondition::Any,
-        })))
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("order-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 2,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        )))
         .unwrap();
     assert_json_frame(
         &trade_insert[0],
@@ -249,7 +286,9 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         registry
             .encode_command(&RuntimeCommand::Replay(ReplayCommand::Step))
             .unwrap(),
-        vec![OutboundRequest::Replay(tqsdk_runtime_contract::ReplayRequest { action: "step" })]
+        vec![OutboundRequest::Replay(
+            tqsdk_runtime_contract::ReplayRequest { action: "step" }
+        )]
     );
 
     assert_eq!(

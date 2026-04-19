@@ -7,10 +7,12 @@ use std::{
 use crate::{
     adapter::AdapterRegistry,
     commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
-    events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
     error::{ContractError, Result},
+    events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
     ids::{CommandId, CursorId, ProtocolDomain, Revision},
-    state::{ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor},
+    state::{
+        ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor,
+    },
     transport::{BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget},
 };
 use serde_json::{Value, json};
@@ -116,12 +118,16 @@ impl RuntimeHandle {
         envelopes
             .into_iter()
             .map(|envelope| {
-                let domain = inner.command_domains.get(&envelope.command_id).copied().ok_or_else(|| {
-                    ContractError::validation(format!(
-                        "unknown command id for outbound dispatch: {}",
-                        envelope.command_id.get()
-                    ))
-                })?;
+                let domain = inner
+                    .command_domains
+                    .get(&envelope.command_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        ContractError::validation(format!(
+                            "unknown command id for outbound dispatch: {}",
+                            envelope.command_id.get()
+                        ))
+                    })?;
                 Ok(OutboundDispatch {
                     command_id: envelope.command_id,
                     domain,
@@ -379,7 +385,14 @@ fn session_topology_mutation(result: &BootstrapResult) -> NormalizedMutation {
         },
         FieldMutation {
             field: "routes".to_string(),
-            value: Value::Array(result.topology.routes.iter().map(normalize_session_route).collect()),
+            value: Value::Array(
+                result
+                    .topology
+                    .routes
+                    .iter()
+                    .map(normalize_session_route)
+                    .collect(),
+            ),
         },
     ];
     sort_field_mutations(&mut fields);
@@ -451,7 +464,10 @@ impl Runtime for RuntimeHandle {
             inner.command_domains.insert(command_id, cmd.domain());
 
             for request in outbound {
-                inner.outbound.push_back(OutboundEnvelope { command_id, request });
+                inner.outbound.push_back(OutboundEnvelope {
+                    command_id,
+                    request,
+                });
             }
 
             Ok(command_id)
@@ -467,7 +483,11 @@ impl Runtime for RuntimeHandle {
     }
 
     fn cursor(&self) -> UpdateCursor {
-        let next_revision = Revision::new(self.commit_log.head_revision().map_or(1, |revision| revision.get() + 1));
+        let next_revision = Revision::new(
+            self.commit_log
+                .head_revision()
+                .map_or(1, |revision| revision.get() + 1),
+        );
         self.cursor_from(next_revision)
     }
 }

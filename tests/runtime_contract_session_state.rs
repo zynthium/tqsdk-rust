@@ -1,8 +1,8 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AccountId, AdapterRegistry, AuthContext, AuthId, BootstrapResult, CommitScope, ObjectKey, ProtocolDomain,
-    RuntimeHandle, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology, StatePath,
-    Runtime,
+    AccountId, AdapterRegistry, AuthContext, AuthId, BootstrapResult, CommitScope, ObjectKey,
+    ProtocolDomain, Runtime, RuntimeHandle, SessionPhase, SessionRoute, SessionRouteEndpoint,
+    SessionTarget, SessionTopology, StatePath,
 };
 
 #[test]
@@ -24,7 +24,10 @@ fn session_phase_transitions_commit_into_runtime_snapshot() {
         commit.changes.path_hits,
         vec![StatePath::new(["system", "session", "lifecycle"])]
     );
-    assert_eq!(commit.changes.object_hits, vec![ObjectKey::SessionLifecycle]);
+    assert_eq!(
+        commit.changes.object_hits,
+        vec![ObjectKey::SessionLifecycle]
+    );
     assert_eq!(
         handle
             .latest_snapshot()
@@ -98,11 +101,16 @@ fn bootstrap_and_resync_results_share_session_commit_contract() {
             }),
     );
 
-    let initial_ready = handle.record_session_bootstrap(&bootstrap, vec![]).unwrap().unwrap();
+    let initial_ready = handle
+        .record_session_bootstrap(&bootstrap, vec![])
+        .unwrap()
+        .unwrap();
     assert_eq!(initial_ready.revision.get(), 1);
     assert_eq!(initial_ready.scope, CommitScope::InitialReady);
     assert_eq!(
-        handle.latest_snapshot().get(["system", "auth", "context", "auth_id"]),
+        handle
+            .latest_snapshot()
+            .get(["system", "auth", "context", "auth_id"]),
         Some(&json!("auth-1"))
     );
     assert_eq!(
@@ -158,7 +166,11 @@ fn bootstrap_and_resync_results_share_session_commit_contract() {
             .with_auth_id(AuthId::new("auth-1"))
             .with_feature("trade")
             .with_feature("query"),
-        enabled_domains: vec![ProtocolDomain::System, ProtocolDomain::Trade, ProtocolDomain::Query],
+        enabled_domains: vec![
+            ProtocolDomain::System,
+            ProtocolDomain::Trade,
+            ProtocolDomain::Query,
+        ],
         topology: SessionTopology::default().with_route(SessionRoute {
             label: "trade:simnow".to_string(),
             target: SessionTarget::Account(AccountId::new("simnow")),
@@ -169,7 +181,10 @@ fn bootstrap_and_resync_results_share_session_commit_contract() {
         }),
     };
 
-    let recovery = handle.record_session_resync(&resync, vec![]).unwrap().unwrap();
+    let recovery = handle
+        .record_session_resync(&resync, vec![])
+        .unwrap()
+        .unwrap();
     assert_eq!(recovery.revision.get(), 2);
     assert_eq!(recovery.scope, CommitScope::ResyncRecovery);
     assert_eq!(

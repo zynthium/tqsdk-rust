@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::ids::AuthId;
 use crate::Result;
+use crate::ids::AuthId;
 
 pub type ContractFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 

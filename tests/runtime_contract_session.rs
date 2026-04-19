@@ -4,9 +4,9 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use tqsdk_runtime_contract::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture, EndpointConfig,
-    HeartbeatPolicy, OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig,
-    SessionPhase, Transport,
+    AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture,
+    EndpointConfig, HeartbeatPolicy, OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy,
+    SessionBootstrap, SessionConfig, SessionPhase, Transport,
 };
 
 struct TestAuthProvider;
@@ -14,11 +14,9 @@ struct TestAuthProvider;
 impl AuthProvider for TestAuthProvider {
     fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
         Box::pin(async {
-            Ok(
-                AuthContext::new("access-token")
-                    .with_auth_id(AuthId::new("auth-1"))
-                    .with_feature("trade"),
-            )
+            Ok(AuthContext::new("access-token")
+                .with_auth_id(AuthId::new("auth-1"))
+                .with_feature("trade"))
         })
     }
 }
@@ -63,7 +61,10 @@ fn auth_and_session_contracts_cover_login_bootstrap_shells() {
             .with_market_url("wss://market.example")
             .with_trade_url("wss://trade.example"),
     )
-    .with_heartbeat(HeartbeatPolicy::new(Duration::from_secs(5), Duration::from_secs(20)))
+    .with_heartbeat(HeartbeatPolicy::new(
+        Duration::from_secs(5),
+        Duration::from_secs(20),
+    ))
     .with_reconnect(ReconnectPolicy::new(
         Duration::from_secs(1),
         Duration::from_secs(30),
@@ -78,15 +79,24 @@ fn auth_and_session_contracts_cover_login_bootstrap_shells() {
     assert_eq!(result.phase, SessionPhase::Running);
     assert_eq!(result.auth.access_token(), "access-token");
     assert_eq!(result.auth.auth_id().map(AuthId::as_str), Some("auth-1"));
-    assert_eq!(result.enabled_domains, vec![ProtocolDomain::System, ProtocolDomain::Trade]);
-    assert_eq!(config.enabled_domains(), &[ProtocolDomain::System, ProtocolDomain::Trade]);
+    assert_eq!(
+        result.enabled_domains,
+        vec![ProtocolDomain::System, ProtocolDomain::Trade]
+    );
+    assert_eq!(
+        config.enabled_domains(),
+        &[ProtocolDomain::System, ProtocolDomain::Trade]
+    );
     assert_eq!(config.heartbeat.interval, Duration::from_secs(5));
     assert_eq!(config.reconnect.max_attempts, Some(8));
     assert_eq!(SessionPhase::Authenticating.as_str(), "authenticating");
 
     block_on(transport.connect()).unwrap();
     block_on(transport.send(OutboundFrame::Ping)).unwrap();
-    assert!(matches!(block_on(transport.recv()).unwrap(), RawFrame::Pong));
+    assert!(matches!(
+        block_on(transport.recv()).unwrap(),
+        RawFrame::Pong
+    ));
     block_on(transport.close()).unwrap();
 }
 
@@ -120,5 +130,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
