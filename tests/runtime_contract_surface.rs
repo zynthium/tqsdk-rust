@@ -149,3 +149,20 @@ fn adapter_registry_and_runtime_handle_surface_compile() {
     let adapter = TestAdapter;
     assert_eq!(adapter.domain(), ProtocolDomain::System);
 }
+
+#[test]
+fn public_surface_exports_are_usable_together() {
+    let _revision = tqsdk_runtime_contract::Revision::new(11);
+    let _command = tqsdk_runtime_contract::RuntimeCommand::System(
+        tqsdk_runtime_contract::SystemCommand::RefreshAuth,
+    );
+    let _input = tqsdk_runtime_contract::RuntimeInput::Internal(
+        tqsdk_runtime_contract::InternalEvent {
+            label: "checkpoint",
+        },
+    );
+    let _scope = tqsdk_runtime_contract::CommitScope::SessionTransition;
+    let _domain = tqsdk_runtime_contract::ProtocolDomain::Schema;
+
+    assert!(true);
+}
