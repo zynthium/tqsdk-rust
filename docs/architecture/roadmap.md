@@ -1,69 +1,85 @@
 # 分层成长路线
 
-## 为什么 `wait_update` 仍应是主范式
-- 更接近真实量化主循环
-- 更容易保证一致性
-- 更适合作为“最严格消费者”
+## 先纠正优先级
+- V1 不是 `wait_update` 路线
+- V1 也不是 `stream/callback` 路线
+- V1 不应该先做 facade，再倒逼内核
+- V1 应先锁定 protocol-complete runtime contract
 
-## 性能与适用场景
-### `wait_update` 更适合
-- 多对象联合决策
-- 高频 burst 更新下的批量合并
-- 多策略共享状态
-- 回测与实盘一致性验证
-
-### stream/callback 更适合
-- UI、告警、日志、落盘
-- 与异步管道集成
-- 单对象单事件的外围派发
+## 为什么要先做 runtime contract
+- 所有远端交互都必须进入统一提交链路
+- 未来 Python 风格和 Rust 风格 facade 都要复用同一个底座
+- 如果先做某一种 facade，后面大概率会把该 facade 的语义硬编码进内核
 
 ## 演进路线
-### V1：Runtime Kernel
+### Phase 0：协议与语义基线
 包含：
-- `Transport`
-- `AuthProvider`
-- `SessionLifecycle`
-- `SessionBootstrap`
-- `SubscriptionRegistry`
+- DIFF merge 语义
+- transport / auth 测试桩
+- schema / query / replay / trade 的最小协议编解码分析
+- 状态树命名空间设计
+- command causality 草图
+
+目标：
+- 锁定 V1 contract 的语义边界
+- 不引入高层 facade
+
+### Phase 1：Protocol-Complete Runtime Contract
+包含：
+- `RuntimeHandle`
+- `RuntimeCommand`
 - `RuntimeInput`
-- `StateStore`
-- `Revision`
-- `ChangeSet`
 - `StateSnapshot`
+- `Revision`
 - `CommitResult`
-- `wait_next_commit()`
+- `ChangeSet`
+- `CommitLog`
+- `UpdateCursor`
+- `CommandLedger`
+- `AdapterRegistry`
+- `SystemAdapter`
+- `MarketDiffAdapter`
+- `TradeAdapter`
+- `QueryAdapter`
+- `ReplayAdapter`
 
-### V2：`tqsdk-api-wait`
-完整专题设计见：
+目标：
+- 所有远端交互都进入统一 `command -> mutation -> commit` 链路
+- 不暴露任何用户态 facade
 
-- [api-wait.md](api-wait.md)
-- [validation.md](validation.md)
+### Phase 2：Consumption Adapters
+包含：
+- `wait_update` adapter
+- stream adapter
+- callback adapter
+- backpressure / cursor consumption policy
 
+目标：
+- 验证同一 commit log / cursor 模型足以支撑多种消费风格
+
+### Phase 3：Typed User Facades
+包含：
 - `TqApi`
-- `wait_update()`
-- `QuoteView`
-- `snapshot()`
-- `is_changing()`
+- typed views / snapshots
+- `is_changing()` 类查询接口
+- facade 级错误语义
 
-### V3：`tqsdk-api-stream`
-- `commit_stream()`
-- 对象级 stream 投影
+目标：
+- 在不回改 runtime core 的前提下，构建面向策略作者的稳定 API
 
-### V4：`tqsdk-api-callback`
-- `on_commit`
-- `on_quote`
-- `on_order`
-- `on_new_bar`
-
-### V5：更高层工具层
+### Phase 4：Higher-Level Tasks And Tooling
+包含：
 - `TargetPosTask`
-- `TradeSession`
-- `SeriesApi`
-- 多账户会话管理
-- 回测 facade
+- 多账户编排
+- 下载器 / dataframe / polars
+- GUI / report / helper 工具层
+
+目标：
+- 只在 facade 稳定后扩展高层能力
 
 ## 实现建议
-1. 先做 `tqsdk-diff-core`
-2. 再做 `tqsdk-runtime-core`
-3. 优先做 `tqsdk-api-wait`
-4. 最后补 stream/callback
+1. 先锁定 `RuntimeCommand` / `RuntimeInput` / `NormalizedMutation` / `CommitResult`
+2. 再实现 session runtime、adapter registry、state store、commit assembler
+3. 再接入 market / trade / query / schema / replay 各协议域
+4. 完成 contract-level 测试后，再做 `wait_update` / stream / callback adapter
+5. facade 和任务系统最后再做

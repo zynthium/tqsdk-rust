@@ -1,7 +1,7 @@
 # 核心数据契约
 
 ## 目标
-固定模块之间传递的最小数据契约，避免 transport、input pipeline、state store、commit bus 互相污染。
+固定 runtime contract 内部传递的最小稳定数据契约，避免 transport、adapter、state、commit 各层相互污染。
 
 ## `RawFrame`
 ```rust
@@ -14,9 +14,8 @@ pub enum RawFrame {
 }
 ```
 
-- 只表达传输层收到的内容
+- 只表达 transport 层收到的内容
 - 不直接推进 revision
-- 不携带业务层“已经可见”的含义
 
 ## `OutboundFrame`
 ```rust
@@ -28,53 +27,75 @@ pub enum OutboundFrame {
 }
 ```
 
-- runtime 决定“发什么”
-- transport 只负责“怎么发”
-
-## `NormalizedPatch`
+## `OutboundRequest`
 ```rust
-pub struct NormalizedPatch {
-    pub scope: PatchScope,
-    pub target: PatchTarget,
-    pub fields: Vec<FieldPatch>,
-    pub source: PatchSource,
+pub enum OutboundRequest {
+    Transport(OutboundFrame),
+    Http(HttpRequest),
+    Replay(ReplayRequest),
+    Internal(InternalRequest),
 }
 ```
 
+- runtime 统一决定“发什么”
+- 具体 transport 或 client 决定“怎么发”
+
+## `RuntimeInput`
 ```rust
-pub enum PatchScope {
-    Bootstrap,
-    Realtime,
-    Resync,
+pub enum RuntimeInput {
+    Io(IoEvent),
+    Timer(TimerEvent),
+    Auth(AuthEvent),
+    Replay(ReplayEvent),
+    Internal(InternalEvent),
+}
+```
+
+- 是 runtime 能理解的输入外壳
+- 允许多个 adapter 观察同一个输入
+
+## `NormalizedMutation`
+```rust
+pub struct NormalizedMutation {
+    pub path: StatePath,
+    pub object: Option<ObjectKey>,
+    pub fields: Vec<FieldMutation>,
+    pub source: MutationSource,
 }
 
-pub struct FieldPatch {
-    pub field: &'static str,
+pub struct FieldMutation {
+    pub field: String,
     pub value: serde_json::Value,
 }
 
-pub enum PatchSource {
-    LiveDiff,
-    BootstrapSync,
-    ReconnectResync,
-    Replay,
-    TestFeed,
+pub enum MutationSource {
+    MarketDiff,
+    TradeReply,
+    QueryResult,
+    SchemaBootstrap,
+    ReplayStep,
+    SessionControl,
 }
 ```
 
-- 是可提交变化，不是原始 diff
-- 已知道要写向哪个逻辑对象
-- 保留 scope/source，方便区分 bootstrap / realtime / resync / replay
+- 是可提交变化，不是原始 wire payload
+- 所有协议域最终都要落成 `NormalizedMutation`
 
-## `CommitBatch` 与 `CommitOutcome`
+## `ProjectionDelta`
 ```rust
-pub struct CommitBatch {
-    pub patches: Vec<NormalizedPatch>,
+pub struct ProjectionDelta {
+    pub path_hits: Vec<StatePath>,
+    pub object_hits: Vec<ObjectKey>,
+    pub field_hits: Vec<ChangeHit>,
 }
+```
 
-pub enum CommitOutcome {
-    NoVisibleChange,
-    VisibleCommit(CommitResult),
+## `CommandEnvelope`
+```rust
+pub struct CommandEnvelope {
+    pub id: CommandId,
+    pub command: RuntimeCommand,
+    pub causation: CausationMeta,
 }
 ```
 
@@ -83,6 +104,7 @@ pub enum CommitOutcome {
 pub struct CommitResult {
     pub revision: Revision,
     pub changes: ChangeSet,
+    pub caused_by: Vec<CommandId>,
     pub scope: CommitScope,
 }
 
@@ -91,18 +113,23 @@ pub enum CommitScope {
     RealtimeUpdate,
     ResyncRecovery,
     ReplayStep,
+    QueryRefresh,
+    SessionTransition,
 }
 ```
 
 ## 一条完整数据链
 ```text
-Transport.recv()
-  -> RawFrame
-  -> input_pipeline.parse()
-  -> NormalizedPatch
-  -> CommitBatch
+RuntimeCommand
+  -> ProtocolAdapter.encode()
+  -> OutboundRequest
+  -> RuntimeInput
+  -> ProtocolAdapter.decode()
+  -> NormalizedMutation
   -> StateStore.apply()
-  -> CommitOutcome::VisibleCommit(CommitResult)
-  -> CommitBus.publish()
-  -> RuntimeKernel / api-wait / api-stream / api-callback
+  -> ProjectionEngine.project()
+  -> CommitAssembler.assemble()
+  -> CommitResult
+  -> CommitLog.publish()
+  -> UpdateCursor
 ```

@@ -1,30 +1,39 @@
-# V1 Runtime Kernel 最小模块清单
+# Runtime Contract 最小模块清单
 
 ## 推荐模块
 1. `transport`
 2. `auth`
-3. `session`
-4. `subscription_registry`
-5. `input_pipeline`
-6. `state_store`
-7. `commit_bus`
-8. `runtime_kernel`
+3. `session_runtime`
+4. `adapter_registry`
+5. `command_ledger`
+6. `diff_core`
+7. `state_store`
+8. `projection_engine`
+9. `commit_assembler`
+10. `commit_log`
+11. `runtime_contract`
 
 ## 依赖方向
 ```text
 transport   auth
     \       /
-      session
+   session_runtime
          |
-subscription_registry
+   adapter_registry
          |
-   input_pipeline
+   command_ledger
          |
-    state_store
+      diff_core
          |
-     commit_bus
+     state_store
          |
-   runtime_kernel
+  projection_engine
+         |
+  commit_assembler
+         |
+      commit_log
+         |
+   runtime_contract
 ```
 
 ## 每个模块的最小公开接口
@@ -45,55 +54,97 @@ pub trait AuthProvider {
 }
 ```
 
-### session
+### adapter_registry
 ```rust
-pub struct SessionConfig;
-pub enum SessionLifecycle {
-    Idle,
-    Authenticating,
-    Connecting,
-    Bootstrapping,
-    SyncingInitialState,
-    Running,
-    Reconnecting,
-    Resyncing,
-    Closed,
+pub trait ProtocolAdapter {
+    fn domain(&self) -> ProtocolDomain;
+    fn accepts_command(&self, cmd: &RuntimeCommand) -> bool;
+    fn encode(&mut self, cmd: &RuntimeCommand) -> Result<Vec<OutboundRequest>>;
+    fn accepts_input(&self, input: &RuntimeInput) -> bool;
+    fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>>;
+}
+
+pub struct AdapterRegistry;
+```
+
+职责：
+- 维护所有协议域 adapter
+- 为每个命令选择 owning adapter
+- 将输入广播给 interested adapters
+
+### command_ledger
+```rust
+pub struct CommandEnvelope {
+    pub id: CommandId,
+    pub command: RuntimeCommand,
+}
+
+pub enum CommandStatus {
+    Queued,
+    Sent,
+    Acked,
+    PartiallyApplied,
+    Completed,
+    Rejected,
+    Failed,
+    Cancelled,
 }
 ```
 
-### input_pipeline
+职责：
+- 跟踪命令因果链
+- 将命令状态写入统一状态树
+
+### state_store
 ```rust
-pub enum RuntimeInput {
-    TransportConnected,
-    Authenticated(AuthContext),
-    Frame(RawFrame),
-    NormalizedPatch(NormalizedPatch),
-    HeartbeatTimeout,
-    ReconnectTriggered,
-    ResubscribeRequired,
-    Shutdown,
+pub trait StateStoreApi {
+    fn apply(&mut self, mutations: &[NormalizedMutation]);
+    fn snapshot(&self) -> StateSnapshot;
 }
 ```
 
-### runtime_kernel
+### projection_engine
 ```rust
-pub trait RuntimeKernel {
-    fn current_revision(&self) -> Revision;
-    fn current_snapshot(&self) -> StateSnapshot<'_>;
-    fn last_change_set(&self) -> &ChangeSet;
-    async fn wait_next_commit(&self, timeout: Option<Duration>) -> Option<CommitResult>;
+pub trait ProjectionEngine {
+    fn project(&mut self, mutations: &[NormalizedMutation]) -> ProjectionDelta;
+}
+```
+
+职责：
+- 将底层 mutation 归并为 path/object/field 级可见变化
+
+### commit_assembler
+```rust
+pub trait CommitAssembler {
+    fn assemble(
+        &mut self,
+        caused_by: &[CommandId],
+        projection: ProjectionDelta,
+        snapshot: &StateSnapshot,
+    ) -> Option<CommitResult>;
+}
+```
+
+### runtime_contract
+```rust
+pub trait Runtime {
+    async fn submit(&self, cmd: RuntimeCommand) -> Result<CommandId>;
+    fn latest_snapshot(&self) -> StateSnapshot;
+    fn cursor(&self) -> UpdateCursor;
 }
 ```
 
 ## V1 不应提前出现的模块
-- `quote_view`
-- `series_api`
-- `trade_session`
-- `callback_registry`
+- `TqApi`
+- `wait_adapter`
 - `stream_adapter`
+- `callback_adapter`
+- typed quote / kline / tick views
 - `target_pos_task`
+- 多账户 orchestration facade
 
-## 从 V1 到 V2/V3/V4
-- `V2 tqsdk-api-wait`：增加 `TqApi`、`View + Snapshot`、`is_changing()`
-- `V3 tqsdk-api-stream`：增加 `Stream<Item = CommitResult>` 和对象级投影 stream
-- `V4 tqsdk-api-callback`：增加 callback 注册与分发
+## 从 V1 到后续阶段
+- V1：runtime contract + protocol adapters
+- V2：wait / stream / callback adapters
+- V3：typed facades
+- V4：task/tooling layer

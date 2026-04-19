@@ -1,104 +1,107 @@
 # 类型级约束
 
 ## 原则
-`V1 Runtime Kernel` 建议从一开始就采用强类型 Newtype 风格，避免关键标识符和键体系在后续 API 层扩展中漂移。
+V1 应优先锁定“runtime contract 会长期稳定使用的标识符和路径体系”，而不是提前锁定 facade 类型。
 
-## 标识符类型
+## 必锁定的标识符类型
 ```rust
+pub struct Revision(u64);
+pub struct CommandId(u64);
+pub struct CursorId(u64);
+
 pub struct Symbol(String);
 pub struct AccountId(String);
 pub struct OrderId(String);
 pub struct TradeId(String);
+pub struct QueryId(String);
+pub struct SchemaId(String);
+pub struct ReplaySessionId(String);
 pub struct AuthId(String);
 ```
 
-## `SeriesKey`
+## `ProtocolDomain`
 ```rust
-pub struct SeriesKey {
-    pub primary: Symbol,
-    pub secondary: Vec<Symbol>,
-    pub duration_ns: i64,
-    pub view_width: usize,
-    pub right_id: Option<i64>,
+pub enum ProtocolDomain {
+    System,
+    Market,
+    Trade,
+    Replay,
+    Query,
+    Schema,
 }
 ```
 
-## `PatchTarget`
+## `StatePath`
 ```rust
-pub enum PatchTarget {
+pub struct StatePath(Vec<PathSegment>);
+```
+
+用途：
+- 保留协议原生结构
+- 保证任何 mutation 都有稳定落点
+
+## `ObjectKey`
+```rust
+pub enum ObjectKey {
     Quote { symbol: Symbol },
-    Tick { symbol: Symbol },
-    Kline { series: SeriesKey },
+    Kline { series: SeriesKey, bar_id: i64 },
+    Tick { symbol: Symbol, tick_id: i64 },
     Account { account_id: AccountId },
     Position { account_id: AccountId, symbol: Symbol },
     Order { account_id: AccountId, order_id: OrderId },
     Trade { account_id: AccountId, trade_id: TradeId },
+    QueryResult { query_id: QueryId },
+    SchemaNode { schema_id: SchemaId },
+    ReplayCursor { session_id: ReplaySessionId },
 }
 ```
 
-## `SubscriptionIntent`
+用途：
+- 给未来 facade 一个稳定逻辑对象身份
+- 支撑 path/object/field 三级变更命中
+
+## `RuntimeCommand`
 ```rust
-pub enum SubscriptionIntent {
-    Quote(QuoteIntent),
-    Series(SeriesIntent),
-    Trade(TradeIntent),
+pub enum RuntimeCommand {
+    System(SystemCommand),
+    Market(MarketCommand),
+    Trade(TradeCommand),
+    Replay(ReplayCommand),
+    Query(QueryCommand),
+    Schema(SchemaCommand),
 }
+```
 
-pub struct QuoteIntent {
-    pub symbols: Vec<Symbol>,
-}
-
-pub struct SeriesIntent {
-    pub key: SeriesKey,
-    pub kind: SeriesKind,
-}
-
-pub enum SeriesKind {
-    Kline,
-    Tick,
-}
-
-pub struct TradeIntent {
-    pub account_id: AccountId,
-    pub scope: TradeScope,
+## `ChangeSet`
+```rust
+pub struct ChangeSet {
+    pub path_hits: Vec<StatePath>,
+    pub object_hits: Vec<ObjectKey>,
+    pub field_hits: Vec<ChangeHit>,
 }
 ```
 
 ## `SessionConfig`
 ```rust
 pub struct SessionConfig {
-    pub endpoint: String,
+    pub endpoints: EndpointConfig,
     pub heartbeat: HeartbeatPolicy,
     pub reconnect: ReconnectPolicy,
-    pub initial_subscriptions: Vec<SubscriptionIntent>,
+    pub enabled_domains: Vec<ProtocolDomain>,
 }
 ```
 
-## `BootstrapResult`
-```rust
-pub struct BootstrapResult {
-    pub auth: AuthContext,
-    pub initial_revision: Revision,
-    pub ready_scope: CommitScope,
-}
-```
+## 为什么 V1 要先锁这些类型
+- 它们直接决定 runtime contract 的稳定性
+- 它们会被所有未来 facade 间接复用
+- 一旦这些类型漂移，后续 `wait_update` 和 stream/callback 都会被迫重构
 
-## 为什么内核层必须优先强类型
-- 避免 `symbol`、`account_id`、`auth_id`、`order_id` 混用
-- 稳定 `PatchTarget`、`SubscriptionIntent`、`ChangeSet` 的映射关系
-- 让 reconnect/resubscribe 过程复用同一套键体系
+## 明确后置到后续阶段的类型
+- `TqApi`
+- user-facing `ChangeTarget`
+- typed `QuoteView` / `QuoteSnapshot`
+- typed `KlineSerialView`
+- facade 级任务与 helper 类型
 
-## V1 先锁定的类型
-- `Symbol`
-- `AccountId`
-- `OrderId`
-- `TradeId`
-- `AuthId`
-- `SeriesKey`
-- `PatchTarget`
-- `SubscriptionIntent`
-- `QuoteIntent`
-- `SeriesIntent`
-- `TradeIntent`
-- `SessionConfig`
-- `BootstrapResult`
+原因：
+- 这些类型属于消费层，不属于 V1 contract

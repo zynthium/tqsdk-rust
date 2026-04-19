@@ -1,32 +1,37 @@
-# Session、Auth 与 Runtime Kernel
+# Session、Auth 与 Runtime Contract
 
 ## 放在哪一层
 以下能力都属于 `tqsdk-runtime-core`：
 
-- WebSocket 生命周期
-- 心跳与重连
-- 账户登录
+- transport 生命周期
+- auth / token / capability
+- heartbeat / reconnect
+- session bootstrap
+- session error 归一化
 
-它们不属于 `tqsdk-diff-core`，也不应散落到 `tqsdk-api-*`。
+它们不属于 `diff-core`，也不应散落到未来 facade 层。
 
-## runtime core 内部 3 个逻辑子层
+## runtime core 内部 4 个逻辑子层
 1. `runtime-foundation`
    - `Transport`
    - `AuthProvider`
-   - `SessionBootstrap`
-   - `SessionLifecycle`
    - `HeartbeatPolicy`
    - `ReconnectPolicy`
-   - `SubscriptionRegistry`
-2. `runtime-state`
+2. `runtime-orchestration`
+   - `SessionRuntime`
+   - `SessionLifecycle`
+   - `AdapterRegistry`
+   - `CommandLedger`
+3. `runtime-state`
    - `RuntimeInput`
    - `StateStore`
-   - `Revision`
-   - `ChangeSet`
+   - `ProjectionEngine`
+   - `CommitAssembler`
+   - `CommitLog`
+4. `runtime-contract`
+   - `RuntimeHandle`
    - `StateSnapshot`
-   - `CommitResult`
-3. `runtime-facade`
-   - `RuntimeKernel`
+   - `UpdateCursor`
 
 ## Transport
 ```rust
@@ -46,20 +51,23 @@ pub trait AuthProvider {
 
 pub struct AuthContext {
     pub access_token: String,
-    pub auth_id: Option<String>,
-    pub account_id: Option<String>,
+    pub auth_id: Option<AuthId>,
     pub features: Vec<String>,
 }
 ```
+
+约束：
+- auth 结果必须进入 runtime state
+- auth 失败和 auth 失效也必须进入统一 commit 语义
 
 ## SessionBootstrap
 session 建立不是单个 connect，而是一段流程：
 
 1. 认证
-2. 建立 transport
-3. 发送初始化请求
-4. 接收并合并初始截面
-5. 建立首个可见状态
+2. 建立 transport / client
+3. 注册 adapter
+4. 拉取 schema / metadata / bootstrap 状态
+5. 建立首个可见提交
 6. 进入 steady state
 
 ```rust
@@ -67,9 +75,9 @@ pub struct SessionBootstrap;
 
 impl SessionBootstrap {
     pub async fn establish(
-        transport: &mut dyn Transport,
         auth: &dyn AuthProvider,
         config: &SessionConfig,
+        adapters: &mut AdapterRegistry,
     ) -> Result<BootstrapResult>;
 }
 ```
@@ -80,7 +88,6 @@ Idle
 -> Authenticating
 -> Connecting
 -> Bootstrapping
--> SyncingInitialState
 -> Running
 -> Reconnecting
 -> Resyncing
@@ -102,9 +109,6 @@ pub struct ReconnectPolicy {
 }
 ```
 
-## SubscriptionRegistry
-`SubscriptionRegistry` 保存订阅意图，负责 bootstrap 和 reconnect/resync 后的重放。
-
-```rust
-pub struct SubscriptionRegistry;
-```
+## 关键判断
+- auth、session、reconnect 不只是基础设施问题，它们本身也是状态与提交语义的一部分
+- future facade 不应该自己维护另一套连接状态模型

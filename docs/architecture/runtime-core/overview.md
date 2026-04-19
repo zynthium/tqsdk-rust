@@ -1,52 +1,89 @@
 # tqsdk-runtime-core 总览
 
 ## 角色
-`tqsdk-runtime-core` 是整套系统最关键的一层。它负责：
+`tqsdk-runtime-core` 是整个系统的基础契约层。
 
-- 接收并归一化外部输入
-- 驱动 DIFF 合并结果进入中心状态仓
-- 定义 commit 边界
+它的职责不是提供某种用户 API，而是保证所有协议域都通过同一个提交模型对外可见。
+
+它至少负责：
+
+- 接收 `RuntimeCommand`
+- 协调 session 生命周期
+- 路由命令到各个 `ProtocolAdapter`
+- 收集 `RuntimeInput`
+- 将输入解码为 `NormalizedMutation`
+- 将 mutation 写入统一状态树
+- 运行投影与变更归并
+- 组装 `CommitResult`
 - 推进 `Revision`
-- 生成 `ChangeSet`
-- 维护 `StateSnapshot`
-- 在 commit 完成后通知上层消费者
+- 发布 `CommitLog`
+- 为消费者创建 `UpdateCursor`
+
+它必须覆盖的协议域：
+
+- market diff
+- trade
+- replay
+- query / schema
+- system / auth / session
 
 ## 核心原则
+### 单 actor 所有权
+session 推进必须由一个 runtime actor 串行拥有。
+
 ### 单一提交源
-所有用户可见状态都必须通过 runtime core 完成提交。
+所有对外可见状态都必须通过 runtime core 提交。
 
 ### 单一 revision 语义
 只有 runtime core 有资格推进 `Revision`。
 
-### 单一通知语义
-通知必须在 commit 完成之后触发，而不是在收到 diff 时触发。
+### 单一状态树
+所有可见状态都必须进入同一个 `StateSnapshot`，包括 query、schema、trade、replay 和 system 状态。
+
+### 单一因果语义
+命令的后续结果、错误和状态变化必须通过统一的 command causality 进入 commit。
+
+### 单一 cursor/log 语义
+后续任何消费风格都只能通过 `CommitLog` / `UpdateCursor` 读取提交结果。
+
+### adapter 无提交权
+adapter 只能编解码与生成 mutation，不能自行推进 revision、发通知或移动 cursor。
 
 ## 核心抽象
 ```rust
-pub struct RuntimeInput;
-pub struct CommitResult {
-    pub revision: Revision,
-    pub changes: ChangeSet,
-}
+pub struct RuntimeHandle;
 
-pub struct RuntimeCore;
-pub struct StateStore;
-pub struct StateSnapshot<'a>;
 pub struct Revision(u64);
+pub struct CommandId(u64);
+pub struct CursorId(u64);
+
+pub struct StateSnapshot;
 pub struct ChangeSet;
-pub struct UpdateWaiter;
+pub struct CommitResult;
+pub struct CommitLog;
+pub struct UpdateCursor;
+
+pub enum RuntimeCommand;
+pub enum RuntimeInput;
+pub enum NormalizedMutation;
+
+pub trait ProtocolAdapter;
 ```
 
 ```rust
-pub trait RuntimeCoreApi {
-    fn current_revision(&self) -> Revision;
-    fn current_snapshot(&self) -> StateSnapshot<'_>;
-    fn last_change_set(&self) -> &ChangeSet;
-    async fn wait_next_commit(&self, timeout: Option<Duration>) -> Option<CommitResult>;
+pub trait Runtime {
+    async fn submit(&self, cmd: RuntimeCommand) -> Result<CommandId>;
+    fn latest_snapshot(&self) -> StateSnapshot;
+    fn cursor(&self) -> UpdateCursor;
 }
 ```
 
+## 关键判断
+- `RuntimeHandle` 是 V1 唯一 canonical public entry point
+- V1 不直接公开 `wait_update()`、stream、callback facade
+- 未来 `wait_update` 和 `stream/callback` 都只能建立在 `StateSnapshot + CommitLog + UpdateCursor` 之上
+
 ## 进一步阅读
-- [Session/Auth](runtime-core/session-auth.md)
-- [协议交互](runtime-core/protocol-flow.md)
-- [模块清单](runtime-core/modules.md)
+- [Session/Auth](session-auth.md)
+- [协议交互](protocol-flow.md)
+- [模块清单](modules.md)

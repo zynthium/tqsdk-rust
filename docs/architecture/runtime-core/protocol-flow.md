@@ -1,53 +1,67 @@
 # 协议交互与会话流程
 
-## SessionBootstrap 的 5 个阶段
+## SessionBootstrap 的 6 个阶段
 1. `Authenticate`
    - 调用 `AuthProvider`
    - 获取 `AuthContext`
 2. `Connect`
-   - 建立 transport
-   - 启动读写循环，但还不 ready
-3. `Bootstrap Requests`
-   - 发送初始化请求
-   - 发送首批订阅/查询
-   - 将订阅登记到 `SubscriptionRegistry`
-4. `Initial Sync`
-   - 连续接收 frame
-   - 归一化为 `NormalizedPatch`
-   - 合并进 `StateStore`
-   - 暂不向上层产出首个可见 commit
+   - 建立 transport 与必要的 HTTP/replay client
+   - 启动 session runtime actor
+3. `Register Adapters`
+   - 装配 `System` / `Market` / `Trade` / `Query` / `Replay` adapter
+   - 建立 adapter registry
+4. `Bootstrap Remote State`
+   - 发送 schema / metadata / bootstrap query
+   - 发出必要的初始化命令
+   - 接收初始输入并解码为 `NormalizedMutation`
 5. `Ready Commit`
-   - 当满足初始截面完成判据时
-   - 形成首个可见 revision
-   - runtime 进入 `Running`
+   - 状态树达到内部一致
+   - 形成首个可见 `CommitResult`
+   - `CommitScope = InitialReady`
+6. `Running`
+   - 进入 steady-state 的 command / input / commit 循环
 
-## 初始截面完成判据
-`SessionReady` 至少满足：
+## Running 阶段的一轮标准推进
+1. runtime drain 一轮待执行 `RuntimeCommand`
+2. 为每个命令选择 owning adapter
+3. adapter 将命令编码成 `OutboundRequest`
+4. runtime 发送请求或推进 replay/feed
+5. runtime 接收 `RuntimeInput`
+6. 将输入广播给 interested adapters
+7. adapter 解码为 `NormalizedMutation`
+8. `StateStore` 应用 mutation
+9. `ProjectionEngine` 归并 path/object/field 命中
+10. `CommitAssembler` 判断是否形成可见提交
+11. 如形成提交，则推进 `Revision`，发布 `CommitLog`
 
-- 认证完成
-- transport 已连接
-- bootstrap 请求已发送
-- 已收到至少一轮有效 diff
-- 与当前订阅意图相关的初始同步条件满足
-- `StateStore` 能生成一份内部一致的 `StateSnapshot`
+## 关键点
+- 命令分发、输入解码、状态提交属于同一条 session runtime 链路
+- raw input 到达不等于一定形成 commit
+- adapter 可以保留短期协议态，但没有 commit 权
 
 ## commit 触发规则
-1. 原始 `Frame` 不直接触发 commit
-2. 只有 `NormalizedPatch` 被合并后，且形成用户可见变化时，才推进 revision
-3. bootstrap 期间允许内部多次 merge，但直到满足初始截面完成判据后，才允许产出首个可见 `CommitResult`
+1. 原始 `RuntimeInput` 不直接触发 commit
+2. 单独命令入队不直接触发 commit
+3. 只有 mutation 被应用、projection 完成、并形成新的可见变化时，才推进 revision
+4. bootstrap 期间允许内部多次 merge，但只在状态内部一致后产出 `InitialReady`
+5. query/schema/trade/replay/system 都必须遵守同一规则
+
+## 命令因果
+- 每个命令都有 `CommandId`
+- 一个 `CommitResult` 可以由一个或多个 `CommandId` 导致
+- 命令状态和命令错误必须进入统一状态树，而不是挂在旁路 future 上
 
 ## 重连恢复顺序
 1. session 进入 `Reconnecting`
-2. transport 重建
+2. transport / client 重建
 3. 重新认证或恢复凭证
-4. 重放 `SubscriptionRegistry`
+4. 重新装配 adapter 所需 bootstrap 状态
 5. 进入 `Resyncing`
-6. 接收并合并恢复期 diff
-7. 满足重同步完成判据
-8. 形成新的 `CommitResult`
-9. 回到 `Running`
+6. 接收恢复期输入并归一化为 mutation
+7. 达到内部一致后形成 `ResyncRecovery` commit
+8. 回到 `Running`
 
-## 与上层 API 的关系
-- `tqsdk-api-wait` 看到的是首个可见 commit 之后的状态世界
-- `tqsdk-api-stream` 看到的是 commit 序列
-- `tqsdk-api-callback` 看到的是 commit 之后派生的通知
+## 与后续 adapter 的关系
+- future `wait_update` adapter 只消费 `CommitLog` / `UpdateCursor`
+- future stream adapter 只消费 `CommitLog` / `UpdateCursor`
+- future callback adapter 只消费 `CommitLog` / `UpdateCursor`
