@@ -126,8 +126,12 @@ impl RuntimeHandle {
         }
 
         let next_revision = Revision::new(inner.snapshot.revision().get() + 1);
-        let changes = ChangeSet::from_mutations(&mutations);
-        inner.snapshot.apply(next_revision, &mutations);
+        let applied = inner.snapshot.apply(next_revision, &mutations);
+        if applied.is_empty() {
+            return Ok(None);
+        }
+
+        let changes = ChangeSet::from_mutations(&applied);
         let commit = CommitResult::new(next_revision, changes, caused_by, scope);
         drop(inner);
 

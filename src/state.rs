@@ -133,11 +133,17 @@ impl StateSnapshot {
         Some(cursor)
     }
 
-    pub(crate) fn apply(&mut self, revision: Revision, mutations: &[NormalizedMutation]) {
+    pub(crate) fn apply(&mut self, revision: Revision, mutations: &[NormalizedMutation]) -> Vec<NormalizedMutation> {
+        let mut applied = Vec::new();
         for mutation in mutations {
-            apply_mutation(&mut self.data, mutation);
+            if let Some(changed) = apply_mutation(&mut self.data, mutation) {
+                applied.push(changed);
+            }
         }
-        self.revision = revision;
+        if !applied.is_empty() {
+            self.revision = revision;
+        }
+        applied
     }
 }
 
@@ -194,18 +200,42 @@ impl UpdateCursor {
     }
 }
 
-fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) {
+fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) -> Option<NormalizedMutation> {
     let target = ensure_object_path(root, mutation.path.segments());
     let map = target
         .as_object_mut()
         .expect("state snapshot path targets must always resolve to objects");
 
+    let mut changed_fields = Vec::new();
     for field in &mutation.fields {
+        let has_changed = if field.value.is_null() {
+            map.contains_key(&field.field)
+        } else {
+            map.get(&field.field) != Some(&field.value)
+        };
+
+        if !has_changed {
+            continue;
+        }
+
         if field.value.is_null() {
             map.remove(&field.field);
         } else {
             map.insert(field.field.clone(), field.value.clone());
         }
+
+        changed_fields.push(field.clone());
+    }
+
+    if changed_fields.is_empty() {
+        None
+    } else {
+        Some(NormalizedMutation {
+            path: mutation.path.clone(),
+            object: mutation.object.clone(),
+            fields: changed_fields,
+            source: mutation.source,
+        })
     }
 }
 
