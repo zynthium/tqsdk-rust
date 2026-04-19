@@ -29,7 +29,7 @@ pub use ids::{
     AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain, QueryId,
     ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
-pub use runtime::{CommitLog, Runtime, RuntimeHandle};
+pub use runtime::{CommitLog, OutboundEnvelope, Runtime, RuntimeHandle};
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,

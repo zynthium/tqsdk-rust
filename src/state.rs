@@ -2,6 +2,8 @@ use crate::ids::{
     AccountId, ChartId, CommandId, CursorId, NotificationId, OrderId, QueryId, ReplaySessionId, Revision, SchemaId,
     Symbol, TradeId,
 };
+use crate::events::NormalizedMutation;
+use serde_json::{Map, Value};
 
 pub type PathSegment = String;
 
@@ -73,18 +75,69 @@ pub struct ChangeSet {
     pub field_hits: Vec<ChangeHit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ChangeSet {
+    pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
+        let mut changes = Self::default();
+
+        for mutation in mutations {
+            if !changes.path_hits.contains(&mutation.path) {
+                changes.path_hits.push(mutation.path.clone());
+            }
+
+            if let Some(object) = &mutation.object {
+                if !changes.object_hits.contains(object) {
+                    changes.object_hits.push(object.clone());
+                }
+
+                for field in &mutation.fields {
+                    let hit = ChangeHit::field(mutation.path.clone(), object.clone(), field.field.clone());
+                    if !changes.field_hits.contains(&hit) {
+                        changes.field_hits.push(hit);
+                    }
+                }
+            }
+        }
+
+        changes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     revision: Revision,
+    data: Value,
 }
 
 impl StateSnapshot {
     pub fn new(revision: Revision) -> Self {
-        Self { revision }
+        Self {
+            revision,
+            data: Value::Object(Map::new()),
+        }
     }
 
     pub fn revision(&self) -> Revision {
         self.revision
+    }
+
+    pub fn get<I, S>(&self, path: I) -> Option<&Value>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut cursor = &self.data;
+        for segment in path {
+            let map = cursor.as_object()?;
+            cursor = map.get(segment.as_ref())?;
+        }
+        Some(cursor)
+    }
+
+    pub(crate) fn apply(&mut self, revision: Revision, mutations: &[NormalizedMutation]) {
+        for mutation in mutations {
+            apply_mutation(&mut self.data, mutation);
+        }
+        self.revision = revision;
     }
 }
 
@@ -135,4 +188,44 @@ impl UpdateCursor {
     pub fn next_revision(&self) -> Revision {
         self.next_revision
     }
+
+    pub(crate) fn set_next_revision(&mut self, next_revision: Revision) {
+        self.next_revision = next_revision;
+    }
+}
+
+fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) {
+    let target = ensure_object_path(root, mutation.path.segments());
+    let map = target
+        .as_object_mut()
+        .expect("state snapshot path targets must always resolve to objects");
+
+    for field in &mutation.fields {
+        if field.value.is_null() {
+            map.remove(&field.field);
+        } else {
+            map.insert(field.field.clone(), field.value.clone());
+        }
+    }
+}
+
+fn ensure_object_path<'a>(root: &'a mut Value, path: &[PathSegment]) -> &'a mut Value {
+    if !root.is_object() {
+        *root = Value::Object(Map::new());
+    }
+
+    let mut cursor = root;
+    for segment in path {
+        let map = cursor
+            .as_object_mut()
+            .expect("state snapshot intermediate nodes must always be objects");
+        cursor = map
+            .entry(segment.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !cursor.is_object() {
+            *cursor = Value::Object(Map::new());
+        }
+    }
+
+    cursor
 }
