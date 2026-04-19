@@ -562,6 +562,17 @@ impl ConnectedTopology {
         })
     }
 
+    pub fn send_route_frame<'a>(&'a mut self, label: &'a str, frame: OutboundFrame) -> ContractFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(route) = self.route_mut(label) else {
+                return Err(ContractError::validation(format!(
+                    "unknown connected route for frame send: {label}"
+                )));
+            };
+            route.transport.send(frame).await
+        })
+    }
+
     pub fn drain_queued_inputs(&mut self) -> Vec<RuntimeInput> {
         let mut inputs = Vec::new();
         for route in &mut self.routes {
@@ -682,7 +693,14 @@ fn map_raw_frame_to_input(route: &SessionRoute, frame: RawFrame) -> Result<Optio
             domains: route.domains.clone(),
             payload: InputPayload::Binary(bytes),
         }))),
-        RawFrame::Ping | RawFrame::Pong => Ok(None),
+        RawFrame::Ping => Ok(None),
+        RawFrame::Pong => Ok(Some(RuntimeInput::Internal(InternalEvent {
+            label: "transport-pong",
+            payload: Some(json!({
+                "route": route.label,
+                "domains": route.domains.iter().copied().map(ProtocolDomain::as_str).collect::<Vec<_>>(),
+            })),
+        }))),
         RawFrame::Close => Ok(Some(RuntimeInput::Internal(InternalEvent {
             label: "transport-close",
             payload: Some(json!({

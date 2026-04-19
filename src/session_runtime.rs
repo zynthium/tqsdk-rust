@@ -1,9 +1,10 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     adapter::AdapterRegistry,
     auth::{AuthProvider, ContractFuture},
-    events::{InternalEvent, RuntimeInput},
+    commands::OutboundFrame,
+    events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
     runtime::RuntimeHandle,
     state::{CommitResult, CommitScope},
@@ -146,6 +147,11 @@ impl SessionRuntime {
                 Ok(Some(RuntimeInput::Internal(event))) if event.label == "transport-close" => {
                     self.handle_disconnect(route_label, event, caused_by)
                 }
+                Ok(Some(RuntimeInput::Internal(event)))
+                    if matches!(event.label, "transport-pong" | "transport-ping") =>
+                {
+                    self.handle_transport_signal(event, caused_by)
+                }
                 Ok(Some(input)) => {
                     let mut outcome = RoutePumpOutcome::default();
                     if let Some(commit) = self.handle.ingest(input, caused_by, scope)? {
@@ -195,6 +201,87 @@ impl SessionRuntime {
 
             if let Some(commit) = self.ingest_queued_inputs(run, caused_by, scope)? {
                 outcome.commits.push(commit);
+            }
+
+            Ok(outcome)
+        })
+    }
+
+    pub fn drive_timer_once<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+        timer: TimerEvent,
+        caused_by: Vec<CommandId>,
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        connector: &'a dyn SessionRouteConnector,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+    ) -> ContractFuture<'a, SessionStepOutcome> {
+        Box::pin(async move {
+            let mut outcome = SessionStepOutcome::default();
+
+            match timer.label {
+                "heartbeat-due" | "heartbeat-timeout" => {
+                    let route_label = timer_route_label(&timer)?;
+                    if !run.connected.has_route(route_label) {
+                        return Err(crate::ContractError::validation(format!(
+                            "unknown connected route for timer event: {route_label}"
+                        )));
+                    }
+                }
+                _ => {}
+            }
+
+            if let Some(commit) = self.handle.ingest(
+                RuntimeInput::Timer(timer.clone()),
+                caused_by.clone(),
+                CommitScope::SessionTransition,
+            )? {
+                outcome.commits.push(commit);
+            }
+
+            match timer.label {
+                "heartbeat-due" => {
+                    let route_label = timer_route_label(&timer)?;
+                    run.connected
+                        .send_route_frame(route_label, OutboundFrame::Ping)
+                        .await?;
+                    if let Some(commit) = self.handle.ingest(
+                        RuntimeInput::Internal(InternalEvent {
+                            label: "transport-ping",
+                            payload: Some(json!({
+                                "route": route_label,
+                                "reason": "heartbeat-due",
+                            })),
+                        }),
+                        caused_by,
+                        CommitScope::SessionTransition,
+                    )? {
+                        outcome.commits.push(commit);
+                    }
+                }
+                "heartbeat-timeout" => {
+                    let route_label = timer_route_label(&timer)?;
+                    if let Some(commit) = self.handle.record_session_phase(
+                        SessionPhase::Reconnecting,
+                        Some(json!({
+                            "route": route_label,
+                            "reason": "heartbeat-timeout",
+                        })),
+                        caused_by,
+                    )? {
+                        outcome.commits.push(commit);
+                    }
+
+                    let recovery = self
+                        .recover_internal(auth, resolver, connector, config, adapters, false)
+                        .await?;
+                    outcome.recovered = true;
+                    outcome.commits.extend(recovery.commits);
+                    *run = recovery.run;
+                }
+                _ => {}
             }
 
             Ok(outcome)
@@ -310,6 +397,22 @@ impl SessionRuntime {
         Ok(outcome)
     }
 
+    fn handle_transport_signal(
+        &self,
+        event: InternalEvent,
+        caused_by: Vec<CommandId>,
+    ) -> Result<RoutePumpOutcome> {
+        let mut outcome = RoutePumpOutcome::default();
+        if let Some(commit) = self.handle.ingest(
+            RuntimeInput::Internal(event),
+            caused_by,
+            CommitScope::SessionTransition,
+        )? {
+            outcome.commits.push(commit);
+        }
+        Ok(outcome)
+    }
+
     fn handle_transport_error(
         &self,
         route_label: &str,
@@ -348,4 +451,18 @@ impl SessionRuntime {
 
         Ok(outcome)
     }
+}
+
+fn timer_route_label(timer: &TimerEvent) -> Result<&str> {
+    timer
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("route"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            crate::ContractError::validation(format!(
+                "timer event '{}' requires payload.route string",
+                timer.label
+            ))
+        })
 }

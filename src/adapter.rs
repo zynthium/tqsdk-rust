@@ -6,7 +6,7 @@ use crate::{
     error::{ContractError, Result},
     events::{
         AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource, NormalizedMutation,
-        ReplayEvent, RuntimeInput,
+        ReplayEvent, RuntimeInput, TimerEvent,
     },
     ids::{
         AccountId, ChartId, NotificationId, OrderId, ProtocolDomain, QueryId, ReplaySessionId, SchemaId, Symbol,
@@ -126,7 +126,7 @@ impl ProtocolAdapter for SystemAdapter {
 
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
         match input {
-            RuntimeInput::Auth(_) | RuntimeInput::Internal(_) => true,
+            RuntimeInput::Auth(_) | RuntimeInput::Timer(_) | RuntimeInput::Internal(_) => true,
             RuntimeInput::Io(IoEvent { domains, .. }) => domains.contains(&ProtocolDomain::System),
             _ => false,
         }
@@ -136,6 +136,11 @@ impl ProtocolAdapter for SystemAdapter {
         match input {
             RuntimeInput::Auth(event) => decode_named_payload(
                 ["system".to_string(), "auth".to_string()].to_vec(),
+                event,
+                MutationSource::SessionControl,
+            ),
+            RuntimeInput::Timer(event) => decode_named_payload(
+                ["system".to_string(), "timers".to_string()].to_vec(),
                 event,
                 MutationSource::SessionControl,
             ),
@@ -812,6 +817,16 @@ trait NamedPayloadEvent {
 }
 
 impl NamedPayloadEvent for AuthEvent {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn payload(&self) -> Option<&Value> {
+        self.payload.as_ref()
+    }
+}
+
+impl NamedPayloadEvent for TimerEvent {
     fn label(&self) -> &'static str {
         self.label
     }
