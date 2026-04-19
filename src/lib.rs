@@ -30,7 +30,7 @@ pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,
 };
-pub use tq_auth::{PasswordCredentials, TqAuthProvider};
+pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
 pub use transport::{
     BootstrapResult, EndpointConfig, HeartbeatPolicy, RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig,
     SessionPhase, Transport,

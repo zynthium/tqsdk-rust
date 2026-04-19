@@ -2,12 +2,15 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::{AuthId, ContractError, Result};
 
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
+const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
+const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
 
@@ -30,6 +33,19 @@ impl PasswordCredentials {
 pub struct TqAuthProvider {
     credentials: PasswordCredentials,
     auth_url: String,
+    name_service_url: String,
+    broker_base_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerInfo {
+    pub category: Vec<String>,
+    pub url: String,
+    pub broker_type: Option<String>,
+    pub smtype: Option<String>,
+    pub smconfig: Option<String>,
+    pub condition_type: Option<String>,
+    pub condition_config: Option<String>,
 }
 
 impl TqAuthProvider {
@@ -37,11 +53,23 @@ impl TqAuthProvider {
         Self {
             credentials,
             auth_url: DEFAULT_AUTH_URL.to_string(),
+            name_service_url: DEFAULT_NAME_SERVICE_URL.to_string(),
+            broker_base_url: DEFAULT_BROKER_BASE_URL.to_string(),
         }
     }
 
     pub fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
         self.auth_url = auth_url.into();
+        self
+    }
+
+    pub fn with_name_service_url(mut self, name_service_url: impl Into<String>) -> Self {
+        self.name_service_url = name_service_url.into();
+        self
+    }
+
+    pub fn with_broker_base_url(mut self, broker_base_url: impl Into<String>) -> Self {
+        self.broker_base_url = broker_base_url.into();
         self
     }
 
@@ -53,10 +81,7 @@ impl TqAuthProvider {
     }
 
     fn request_access_token(&self) -> Result<String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))?;
+        let client = self.build_http_client()?;
         let response = client
             .post(self.token_url())
             .form(&[
@@ -87,6 +112,22 @@ impl TqAuthProvider {
             .ok_or_else(|| ContractError::auth("auth response missing access_token"))?;
 
         Ok(access_token.to_string())
+    }
+
+    fn build_http_client(&self) -> Result<reqwest::blocking::Client> {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))
+    }
+
+    fn auth_headers(&self, auth: &AuthContext) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        let authz = HeaderValue::from_str(&format!("Bearer {}", auth.access_token()))
+            .map_err(|err| ContractError::auth(format!("invalid authorization header: {err}")))?;
+        headers.insert(AUTHORIZATION, authz);
+        Ok(headers)
     }
 
     fn build_auth_context(&self, access_token: String) -> Result<AuthContext> {
@@ -122,6 +163,117 @@ impl TqAuthProvider {
         serde_json::from_slice(&decoded)
             .map_err(|err| ContractError::auth(format!("invalid token claims json: {err}")))
     }
+
+    fn request_market_url(&self, auth: &AuthContext, stock: bool, backtest: bool) -> Result<String> {
+        let client = self.build_http_client()?;
+        let response = client
+            .get(&self.name_service_url)
+            .query(&[("stock", stock.to_string()), ("backtest", backtest.to_string())])
+            .headers(self.auth_headers(auth)?)
+            .send()
+            .map_err(|err| ContractError::auth(format!("market endpoint request failed: {err}")))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|err| ContractError::auth(format!("failed to read market endpoint response: {err}")))?;
+
+        if !status.is_success() {
+            return Err(ContractError::auth(format!(
+                "market endpoint request failed with status {status}: {body}"
+            )));
+        }
+
+        let payload: Value = serde_json::from_str(&body)
+            .map_err(|err| ContractError::auth(format!("invalid market endpoint json: {err}")))?;
+        let md_url = payload
+            .get("mdurl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ContractError::auth("market endpoint response missing mdurl"))?;
+
+        if md_url.trim().is_empty() {
+            return Err(ContractError::auth("market endpoint returned empty mdurl"));
+        }
+
+        Ok(md_url.to_string())
+    }
+
+    fn request_trade_broker(&self, auth: &AuthContext, broker_id: &str, account_id: &str) -> Result<BrokerInfo> {
+        let client = self.build_http_client()?;
+        let broker_url = format!("{}/{}.json", self.broker_base_url.trim_end_matches('/'), broker_id);
+        let response = client
+            .get(&broker_url)
+            .query(&[("account_id", account_id), ("auth", self.credentials.username.as_str())])
+            .headers(self.auth_headers(auth)?)
+            .send()
+            .map_err(|err| ContractError::auth(format!("trade broker request failed: {err}")))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|err| ContractError::auth(format!("failed to read trade broker response: {err}")))?;
+
+        if !status.is_success() {
+            return Err(ContractError::auth(format!(
+                "trade broker request failed with status {status}: {body}"
+            )));
+        }
+
+        let payload: Value = serde_json::from_str(&body)
+            .map_err(|err| ContractError::auth(format!("invalid trade broker json: {err}")))?;
+        let broker = payload
+            .get(broker_id)
+            .ok_or_else(|| ContractError::auth(format!("trade broker response missing {broker_id}")))?;
+        let category = broker
+            .get("category")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ContractError::auth("trade broker response missing category"))?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        if !category.iter().any(|entry| entry == "TQ") {
+            return Err(ContractError::auth(format!(
+                "broker {broker_id} does not support TQ login"
+            )));
+        }
+
+        let url = broker
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ContractError::auth("trade broker response missing url"))?;
+
+        Ok(BrokerInfo {
+            category,
+            url: url.to_string(),
+            broker_type: optional_string(broker, "broker_type"),
+            smtype: optional_string(broker, "smtype"),
+            smconfig: optional_string(broker, "smconfig"),
+            condition_type: optional_string(broker, "condition_type"),
+            condition_config: optional_string(broker, "condition_config"),
+        })
+    }
+
+    pub fn fetch_market_url<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        stock: bool,
+        backtest: bool,
+    ) -> ContractFuture<'a, String> {
+        Box::pin(async move { self.request_market_url(auth, stock, backtest) })
+    }
+
+    pub fn fetch_trade_broker<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        broker_id: &'a str,
+        account_id: &'a str,
+    ) -> ContractFuture<'a, BrokerInfo> {
+        Box::pin(async move { self.request_trade_broker(auth, broker_id, account_id) })
+    }
+}
+
+fn optional_string(payload: &Value, field: &str) -> Option<String> {
+    payload.get(field).and_then(Value::as_str).map(ToString::to_string)
 }
 
 impl AuthProvider for TqAuthProvider {
