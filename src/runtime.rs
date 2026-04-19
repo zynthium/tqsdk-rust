@@ -133,6 +133,27 @@ impl RuntimeHandle {
         Ok(commit)
     }
 
+    pub fn ingest_batch(
+        &self,
+        inputs: Vec<RuntimeInput>,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<CommitResult>> {
+        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut mutations = Vec::new();
+        for input in &inputs {
+            mutations.extend(inner.adapters.decode_input(input)?);
+        }
+
+        let commit = self.build_commit(&mut inner, mutations, caused_by, scope);
+        drop(inner);
+
+        if let Some(commit) = commit.clone() {
+            self.commit_log.publish(commit);
+        }
+        Ok(commit)
+    }
+
     pub fn record_command_status(
         &self,
         command_id: CommandId,
