@@ -3,6 +3,7 @@ use serde_json::json;
 use crate::{
     adapter::AdapterRegistry,
     auth::{AuthProvider, ContractFuture},
+    events::{InternalEvent, RuntimeInput},
     ids::CommandId,
     runtime::RuntimeHandle,
     state::{CommitResult, CommitScope},
@@ -16,6 +17,12 @@ use crate::{
 pub struct SessionRun {
     pub bootstrap: BootstrapResult,
     pub connected: ConnectedTopology,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoutePumpOutcome {
+    pub commits: Vec<CommitResult>,
+    pub reconnect_required: bool,
 }
 
 #[derive(Clone)]
@@ -121,6 +128,37 @@ impl SessionRuntime {
         })
     }
 
+    pub fn pump_route_once<'a>(
+        &'a self,
+        run: &'a mut SessionRun,
+        route_label: &'a str,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> ContractFuture<'a, RoutePumpOutcome> {
+        Box::pin(async move {
+            if !run.connected.has_route(route_label) {
+                return Err(crate::ContractError::validation(format!(
+                    "unknown connected route for route pump: {route_label}"
+                )));
+            }
+
+            match run.connected.recv_route_input(route_label).await {
+                Ok(Some(RuntimeInput::Internal(event))) if event.label == "transport-close" => {
+                    self.handle_disconnect(route_label, event, caused_by)
+                }
+                Ok(Some(input)) => {
+                    let mut outcome = RoutePumpOutcome::default();
+                    if let Some(commit) = self.handle.ingest(input, caused_by, scope)? {
+                        outcome.commits.push(commit);
+                    }
+                    Ok(outcome)
+                }
+                Ok(None) => Ok(RoutePumpOutcome::default()),
+                Err(err) => self.handle_transport_error(route_label, err, caused_by),
+            }
+        })
+    }
+
     pub fn ingest_queued_inputs(
         &self,
         run: &mut SessionRun,
@@ -157,5 +195,77 @@ impl SessionRuntime {
                 .connect_topology(&bootstrap.topology, connector)
                 .await
         })
+    }
+
+    fn handle_disconnect(
+        &self,
+        route_label: &str,
+        event: InternalEvent,
+        caused_by: Vec<CommandId>,
+    ) -> Result<RoutePumpOutcome> {
+        let mut outcome = RoutePumpOutcome {
+            commits: Vec::new(),
+            reconnect_required: true,
+        };
+
+        if let Some(commit) = self.handle.ingest(
+            RuntimeInput::Internal(event),
+            caused_by.clone(),
+            CommitScope::SessionTransition,
+        )? {
+            outcome.commits.push(commit);
+        }
+
+        if let Some(commit) = self.handle.record_session_phase(
+            SessionPhase::Reconnecting,
+            Some(json!({
+                "route": route_label,
+                "reason": "transport-close",
+            })),
+            caused_by,
+        )? {
+            outcome.commits.push(commit);
+        }
+
+        Ok(outcome)
+    }
+
+    fn handle_transport_error(
+        &self,
+        route_label: &str,
+        err: crate::ContractError,
+        caused_by: Vec<CommandId>,
+    ) -> Result<RoutePumpOutcome> {
+        let mut outcome = RoutePumpOutcome {
+            commits: Vec::new(),
+            reconnect_required: true,
+        };
+
+        if let Some(commit) = self.handle.ingest(
+            RuntimeInput::Internal(InternalEvent {
+                label: "transport-error",
+                payload: Some(json!({
+                    "route": route_label,
+                    "message": err.to_string(),
+                })),
+            }),
+            caused_by.clone(),
+            CommitScope::SessionTransition,
+        )? {
+            outcome.commits.push(commit);
+        }
+
+        if let Some(commit) = self.handle.record_session_phase(
+            SessionPhase::Reconnecting,
+            Some(json!({
+                "route": route_label,
+                "reason": "transport-error",
+            })),
+            caused_by,
+        )? {
+            outcome.commits.push(commit);
+        }
+
+        Ok(outcome)
     }
 }

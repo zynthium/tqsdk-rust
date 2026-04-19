@@ -547,6 +547,10 @@ impl ConnectedTopology {
         self.routes.iter_mut().find(|route| route.route.label == label)
     }
 
+    pub fn has_route(&self, label: &str) -> bool {
+        self.routes.iter().any(|route| route.route.label == label)
+    }
+
     pub fn recv_route_input<'a>(&'a mut self, label: &'a str) -> ContractFuture<'a, Option<RuntimeInput>> {
         Box::pin(async move {
             let Some(route) = self.route_mut(label) else {

@@ -32,6 +32,7 @@ pub use ids::{
 };
 pub use runtime::{CommitLog, OutboundEnvelope, Runtime, RuntimeHandle};
 pub use session_runtime::{SessionRun, SessionRuntime};
+pub use session_runtime::RoutePumpOutcome;
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,
