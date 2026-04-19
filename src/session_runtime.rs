@@ -353,7 +353,15 @@ impl SessionRuntime {
                 }
             };
             match self.handle.ingest_batch(inputs, caused_by.clone(), scope) {
-                Ok(Some(commit)) => outcome.commits.push(commit),
+                Ok(Some(commit)) => {
+                    outcome.commits.push(commit);
+                    self.record_command_statuses(
+                        &caused_by,
+                        CommandStatus::Completed,
+                        Some(json!({ "route": route.label })),
+                        scope,
+                    )?;
+                }
                 Ok(None) => {}
                 Err(err) => {
                     self.record_command_failure(&caused_by, route.label.as_str(), &err)?;
@@ -541,23 +549,34 @@ fn timer_route_label(timer: &TimerEvent) -> Result<&str> {
 }
 
 impl SessionRuntime {
+    fn record_command_statuses(
+        &self,
+        command_ids: &[CommandId],
+        status: CommandStatus,
+        detail: Option<Value>,
+        scope: CommitScope,
+    ) -> Result<()> {
+        for &command_id in command_ids {
+            self.handle
+                .record_command_status(command_id, status, detail.clone(), scope)?;
+        }
+        Ok(())
+    }
+
     fn record_command_failure(
         &self,
         command_ids: &[CommandId],
         route_label: &str,
         err: &crate::ContractError,
     ) -> Result<()> {
-        for &command_id in command_ids {
-            self.handle.record_command_status(
-                command_id,
-                CommandStatus::Failed,
-                Some(json!({
-                    "route": route_label,
-                    "message": err.to_string(),
-                })),
-                CommitScope::RealtimeUpdate,
-            )?;
-        }
-        Ok(())
+        self.record_command_statuses(
+            command_ids,
+            CommandStatus::Failed,
+            Some(json!({
+                "route": route_label,
+                "message": err.to_string(),
+            })),
+            CommitScope::RealtimeUpdate,
+        )
     }
 }

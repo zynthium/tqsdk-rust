@@ -195,6 +195,13 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
     assert_eq!(executor.seen().len(), 1);
     assert_eq!(outcome.commits.len(), 1);
     assert_eq!(outcome.commits[0].scope, CommitScope::RealtimeUpdate);
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
     assert_eq!(
         handle
             .latest_snapshot()
@@ -259,6 +266,13 @@ fn session_runtime_executes_pending_replay_route_requests_through_executor() {
     assert_eq!(executor.seen().len(), 1);
     assert_eq!(outcome.commits.len(), 1);
     assert_eq!(outcome.commits[0].scope, CommitScope::ReplayStep);
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
     assert_eq!(
         handle
             .latest_snapshot()
@@ -321,6 +335,13 @@ fn session_runtime_executes_pending_internal_route_requests_through_executor() {
     assert_eq!(executor.seen().len(), 1);
     assert_eq!(outcome.commits.len(), 1);
     assert_eq!(outcome.commits[0].scope, CommitScope::SessionTransition);
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
     assert_eq!(
         handle
             .latest_snapshot()
