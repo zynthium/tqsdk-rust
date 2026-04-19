@@ -451,6 +451,52 @@ pub trait SessionTopologyResolver: Send + Sync {
     ) -> ContractFuture<'a, SessionTopology>;
 }
 
+pub struct ConnectedSessionRoute {
+    pub route: SessionRoute,
+    pub transport: Box<dyn Transport>,
+}
+
+#[derive(Default)]
+pub struct ConnectedTopology {
+    pub routes: Vec<ConnectedSessionRoute>,
+}
+
+impl ConnectedTopology {
+    pub fn close_all<'a>(&'a mut self) -> ContractFuture<'a, ()> {
+        Box::pin(async move {
+            for route in &mut self.routes {
+                route.transport.close().await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+pub trait SessionRouteConnector: Send + Sync {
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebSocketRouteConnector;
+
+impl SessionRouteConnector for WebSocketRouteConnector {
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> ContractFuture<'a, Box<dyn Transport>> {
+        Box::pin(async move {
+            match &route.endpoint {
+                SessionRouteEndpoint::WebSocket { url, connect } => {
+                    let mut transport =
+                        WebSocketTransport::new(url.clone()).with_connect_options(connect.clone());
+                    transport.connect().await?;
+                    Ok(Box::new(transport) as Box<dyn Transport>)
+                }
+                other => Err(ContractError::validation(format!(
+                    "unsupported route endpoint for websocket connector: {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionBootstrap;
 
@@ -496,6 +542,31 @@ impl SessionBootstrap {
                 .await?;
 
             Ok(BootstrapResult::new(auth, enabled_domains).with_topology(topology))
+        })
+    }
+
+    pub fn connect_topology<'a>(
+        &self,
+        topology: &'a SessionTopology,
+        connector: &'a dyn SessionRouteConnector,
+    ) -> ContractFuture<'a, ConnectedTopology> {
+        Box::pin(async move {
+            let mut connected = ConnectedTopology::default();
+
+            for route in &topology.routes {
+                match connector.connect_route(route).await {
+                    Ok(transport) => connected.routes.push(ConnectedSessionRoute {
+                        route: route.clone(),
+                        transport,
+                    }),
+                    Err(err) => {
+                        let _ = connected.close_all().await;
+                        return Err(err);
+                    }
+                }
+            }
+
+            Ok(connected)
         })
     }
 }
