@@ -101,7 +101,13 @@ fn rejected_trade_commands_enter_runtime_command_snapshot_and_commit_log() {
         handle
             .latest_snapshot()
             .get(["runtime", "commands", command_segment.as_str(), "detail"]),
-        Some(&json!({"reason": "insufficient_margin"}))
+        Some(&json!({
+            "aid": "insert_order",
+            "account_id": "simnow",
+            "order_id": "order-1",
+            "symbol": "SHFE.au2602",
+            "reason": "insufficient_margin",
+        }))
     );
 
     let repeated = handle

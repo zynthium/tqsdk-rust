@@ -92,11 +92,14 @@ impl SessionRouteConnector for ControlledConnector {
         let label = route.label.clone();
         Box::pin(async move {
             connected_labels.lock().unwrap().push(label);
-            let outcome = outcomes
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)));
+            let outcome =
+                outcomes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(ConnectOutcome::Connected(RecvBehavior::Frame(
+                        RawFrame::Pong,
+                    )));
 
             match outcome {
                 ConnectOutcome::Connected(behavior) => {
@@ -341,9 +344,7 @@ fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
     let connector = ControlledConnector::with_outcomes(vec![
         ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
-        ConnectOutcome::Error(ContractError::auth(
-            "websocket reconnect failed: attempt 1",
-        )),
+        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
         ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)),
     ]);
     let adapters = adapter_registry();
@@ -423,12 +424,8 @@ fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
     let connector = ControlledConnector::with_outcomes(vec![
         ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
-        ConnectOutcome::Error(ContractError::auth(
-            "websocket reconnect failed: attempt 1",
-        )),
-        ConnectOutcome::Error(ContractError::auth(
-            "websocket reconnect failed: attempt 2",
-        )),
+        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
+        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 2")),
     ]);
     let adapters = adapter_registry();
     let config = session_config().with_reconnect(ReconnectPolicy::new(

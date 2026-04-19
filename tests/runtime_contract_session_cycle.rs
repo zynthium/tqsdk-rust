@@ -627,6 +627,76 @@ fn session_runtime_trade_login_snapshot_marks_transport_command_completed() {
 }
 
 #[test]
+fn session_runtime_trade_confirm_settlement_sent_status_keeps_command_account_id() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let connector = TestRouteConnector {
+        sent_frames: Arc::clone(&sent_frames),
+        recv_frames: vec![],
+    };
+
+    let topology = SessionTopology::default().with_route(SessionRoute {
+        label: "trade".to_string(),
+        target: SessionTarget::Account(AccountId::new("simnow")),
+        domains: vec![ProtocolDomain::Trade],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://trade.example".to_string(),
+            connect: Default::default(),
+        },
+    });
+
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Trade],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let command_id = block_on(handle.submit(RuntimeCommand::Trade(
+        TradeCommand::ConfirmSettlement {
+            account_id: AccountId::new("simnow"),
+        },
+    )))
+    .unwrap();
+
+    let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
+    assert_eq!(receipts.len(), 1);
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("sent"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "account_id"
+        ]),
+        Some(&json!("simnow"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "aid"
+        ]),
+        Some(&json!("confirm_settlement"))
+    );
+}
+
+#[test]
 fn session_runtime_trade_settlement_reply_marks_transport_command_completed() {
     let handle = runtime_with_default_adapters();
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
