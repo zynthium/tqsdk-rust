@@ -890,6 +890,9 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
         [root, branch, node] if root == "system" && branch == "session" && node == "topology" => {
             Some(ObjectKey::SessionTopology)
         }
+        [root, branch, node] if root == "system" && branch == "session" && node == "reconnect" => {
+            Some(ObjectKey::SessionReconnect)
+        }
         _ => None,
     }
 }

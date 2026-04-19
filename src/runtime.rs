@@ -274,6 +274,51 @@ impl RuntimeHandle {
         )
     }
 
+    pub fn record_session_reconnect(
+        &self,
+        attempt: u32,
+        scheduled_backoff_ms: u64,
+        max_attempts: Option<u32>,
+        exhausted: bool,
+        detail: Option<Value>,
+        caused_by: Vec<CommandId>,
+    ) -> Result<Option<CommitResult>> {
+        let mut fields = vec![
+            FieldMutation {
+                field: "attempt".to_string(),
+                value: json!(attempt),
+            },
+            FieldMutation {
+                field: "scheduled_backoff_ms".to_string(),
+                value: json!(scheduled_backoff_ms),
+            },
+            FieldMutation {
+                field: "max_attempts".to_string(),
+                value: max_attempts.map_or(Value::Null, |value| json!(value)),
+            },
+            FieldMutation {
+                field: "exhausted".to_string(),
+                value: json!(exhausted),
+            },
+            FieldMutation {
+                field: "detail".to_string(),
+                value: detail.unwrap_or(Value::Null),
+            },
+        ];
+        sort_field_mutations(&mut fields);
+
+        self.record_mutations(
+            vec![NormalizedMutation {
+                path: StatePath::new(["system", "session", "reconnect"]),
+                object: Some(ObjectKey::SessionReconnect),
+                fields,
+                source: MutationSource::SessionControl,
+            }],
+            caused_by,
+            CommitScope::SessionTransition,
+        )
+    }
+
     fn record_mutations(
         &self,
         mutations: Vec<NormalizedMutation>,

@@ -3,14 +3,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture,
-    EndpointConfig, ProtocolDomain, RawFrame, Revision, Runtime, RuntimeHandle, SessionBootstrap,
-    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRun, SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath,
-    Transport,
+    EndpointConfig, ProtocolDomain, RawFrame, ReconnectPolicy, Revision, Runtime, RuntimeHandle,
+    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget, SessionTopology,
+    SessionTopologyResolver, StatePath, Transport,
 };
 
 #[derive(Clone)]
@@ -48,15 +49,30 @@ impl Transport for ControlledTransport {
     }
 }
 
+#[derive(Clone)]
+enum ConnectOutcome {
+    Connected(RecvBehavior),
+    Error(ContractError),
+}
+
 struct ControlledConnector {
-    behaviors: Arc<Mutex<VecDeque<RecvBehavior>>>,
+    outcomes: Arc<Mutex<VecDeque<ConnectOutcome>>>,
     connected_labels: Arc<Mutex<Vec<String>>>,
 }
 
 impl ControlledConnector {
     fn new(behaviors: Vec<RecvBehavior>) -> Self {
+        Self::with_outcomes(
+            behaviors
+                .into_iter()
+                .map(ConnectOutcome::Connected)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn with_outcomes(outcomes: Vec<ConnectOutcome>) -> Self {
         Self {
-            behaviors: Arc::new(Mutex::new(behaviors.into())),
+            outcomes: Arc::new(Mutex::new(outcomes.into())),
             connected_labels: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -71,17 +87,23 @@ impl SessionRouteConnector for ControlledConnector {
         &'a self,
         route: &'a SessionRoute,
     ) -> ContractFuture<'a, Box<dyn Transport>> {
-        let behaviors = Arc::clone(&self.behaviors);
+        let outcomes = Arc::clone(&self.outcomes);
         let connected_labels = Arc::clone(&self.connected_labels);
         let label = route.label.clone();
         Box::pin(async move {
             connected_labels.lock().unwrap().push(label);
-            let behavior = behaviors
+            let outcome = outcomes
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(RecvBehavior::Frame(RawFrame::Pong));
-            Ok(Box::new(ControlledTransport { behavior }) as Box<dyn Transport>)
+                .unwrap_or(ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)));
+
+            match outcome {
+                ConnectOutcome::Connected(behavior) => {
+                    Ok(Box::new(ControlledTransport { behavior }) as Box<dyn Transport>)
+                }
+                ConnectOutcome::Error(err) => Err(err),
+            }
         })
     }
 }
@@ -201,14 +223,18 @@ fn session_runtime_drive_route_once_recovers_after_transport_close_without_dupli
 
     assert!(outcome.recovered);
     assert!(outcome.dispatches.is_empty());
-    assert_eq!(outcome.commits.len(), 4);
+    assert_eq!(outcome.commits.len(), 5);
     assert_eq!(
         outcome.commits[0].changes.path_hits,
         vec![StatePath::new(["system", "internal", "transport-close"])]
     );
     assert_eq!(outcome.commits[1].scope, CommitScope::SessionTransition);
-    assert_eq!(outcome.commits[2].scope, CommitScope::SessionTransition);
-    assert_eq!(outcome.commits[3].scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        outcome.commits[2].changes.path_hits,
+        vec![StatePath::new(["system", "session", "reconnect"])]
+    );
+    assert_eq!(outcome.commits[3].scope, CommitScope::SessionTransition);
+    assert_eq!(outcome.commits[4].scope, CommitScope::ResyncRecovery);
     assert_eq!(
         connector.connected_labels(),
         vec!["market".to_string(), "market".to_string()]
@@ -221,7 +247,17 @@ fn session_runtime_drive_route_once_recovers_after_transport_close_without_dupli
             .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
     );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "attempt"]),
+        Some(&json!(1))
+    );
 
+    assert_eq!(
+        log.next(&mut cursor).unwrap().scope,
+        CommitScope::SessionTransition
+    );
     assert_eq!(
         log.next(&mut cursor).unwrap().scope,
         CommitScope::SessionTransition
@@ -275,12 +311,16 @@ fn session_runtime_drive_route_once_recovers_after_transport_error() {
     .unwrap();
 
     assert!(outcome.recovered);
-    assert_eq!(outcome.commits.len(), 4);
+    assert_eq!(outcome.commits.len(), 5);
     assert_eq!(
         outcome.commits[0].changes.path_hits,
         vec![StatePath::new(["system", "internal", "transport-error"])]
     );
-    assert_eq!(outcome.commits[3].scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        outcome.commits[2].changes.path_hits,
+        vec![StatePath::new(["system", "session", "reconnect"])]
+    );
+    assert_eq!(outcome.commits[4].scope, CommitScope::ResyncRecovery);
     assert_eq!(
         handle
             .latest_snapshot()
@@ -292,6 +332,161 @@ fn session_runtime_drive_route_once_recovers_after_transport_error() {
             .latest_snapshot()
             .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
+    );
+}
+
+#[test]
+fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = ControlledConnector::with_outcomes(vec![
+        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
+        ConnectOutcome::Error(ContractError::auth(
+            "websocket reconnect failed: attempt 1",
+        )),
+        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)),
+    ]);
+    let adapters = adapter_registry();
+    let config = session_config().with_reconnect(ReconnectPolicy::new(
+        Duration::from_secs(1),
+        Duration::from_secs(8),
+        Some(3),
+    ));
+
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    let outcome = block_on(runtime.drive_route_once(
+        &mut run,
+        "market",
+        vec![],
+        CommitScope::RealtimeUpdate,
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    assert!(outcome.recovered);
+    assert_eq!(run.bootstrap.phase, SessionPhase::Running);
+    assert_eq!(run.connected.routes.len(), 1);
+    assert_eq!(connector.connected_labels().len(), 3);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "attempt"]),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+        Some(&json!(2000))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "max_attempts"]),
+        Some(&json!(3))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "exhausted"]),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "internal", "session-recovery-error", "attempt"]),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("running"))
+    );
+}
+
+#[test]
+fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = ControlledConnector::with_outcomes(vec![
+        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
+        ConnectOutcome::Error(ContractError::auth(
+            "websocket reconnect failed: attempt 1",
+        )),
+        ConnectOutcome::Error(ContractError::auth(
+            "websocket reconnect failed: attempt 2",
+        )),
+    ]);
+    let adapters = adapter_registry();
+    let config = session_config().with_reconnect(ReconnectPolicy::new(
+        Duration::from_secs(1),
+        Duration::from_secs(8),
+        Some(2),
+    ));
+
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    let err = block_on(runtime.drive_route_once(
+        &mut run,
+        "market",
+        vec![],
+        CommitScope::RealtimeUpdate,
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "auth error: websocket reconnect failed: attempt 2"
+    );
+    assert_eq!(connector.connected_labels().len(), 3);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "attempt"]),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+        Some(&json!(2000))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "exhausted"]),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "lifecycle", "phase"]),
+        Some(&json!("closed"))
     );
 }
 

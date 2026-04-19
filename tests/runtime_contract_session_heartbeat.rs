@@ -235,12 +235,16 @@ fn session_runtime_drive_timer_once_recovers_after_heartbeat_timeout() {
     .unwrap();
 
     assert!(outcome.recovered);
-    assert_eq!(outcome.commits.len(), 4);
+    assert_eq!(outcome.commits.len(), 5);
     assert_eq!(
         outcome.commits[0].changes.path_hits,
         vec![StatePath::new(["system", "timers", "heartbeat-timeout"])]
     );
-    assert_eq!(outcome.commits[3].scope, CommitScope::ResyncRecovery);
+    assert_eq!(
+        outcome.commits[2].changes.path_hits,
+        vec![StatePath::new(["system", "session", "reconnect"])]
+    );
+    assert_eq!(outcome.commits[4].scope, CommitScope::ResyncRecovery);
     assert_eq!(
         connector.connected_labels(),
         vec!["market".to_string(), "market".to_string()]
@@ -251,6 +255,12 @@ fn session_runtime_drive_timer_once_recovers_after_heartbeat_timeout() {
             .latest_snapshot()
             .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "session", "reconnect", "attempt"]),
+        Some(&json!(1))
     );
 }
 

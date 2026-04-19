@@ -24,6 +24,7 @@ pub struct SessionRun {
 pub struct RoutePumpOutcome {
     pub commits: Vec<CommitResult>,
     pub reconnect_required: bool,
+    pub reconnect_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -232,7 +233,16 @@ impl SessionRuntime {
 
             if route_outcome.reconnect_required {
                 let recovery = self
-                    .recover_internal(auth, resolver, connector, config, adapters, false)
+                    .recover_with_policy(
+                        route_label,
+                        route_outcome.reconnect_reason.unwrap_or("transport-close"),
+                        caused_by,
+                        auth,
+                        resolver,
+                        connector,
+                        config,
+                        adapters,
+                    )
                     .await?;
                 outcome.recovered = true;
                 outcome.commits.extend(recovery.commits);
@@ -310,13 +320,22 @@ impl SessionRuntime {
                             "route": route_label,
                             "reason": "heartbeat-timeout",
                         })),
-                        caused_by,
+                        caused_by.clone(),
                     )? {
                         outcome.commits.push(commit);
                     }
 
                     let recovery = self
-                        .recover_internal(auth, resolver, connector, config, adapters, false)
+                        .recover_with_policy(
+                            route_label,
+                            "heartbeat-timeout",
+                            caused_by,
+                            auth,
+                            resolver,
+                            connector,
+                            config,
+                            adapters,
+                        )
                         .await?;
                     outcome.recovered = true;
                     outcome.commits.extend(recovery.commits);
@@ -413,6 +432,108 @@ impl SessionRuntime {
         })
     }
 
+    fn recover_with_policy<'a>(
+        &'a self,
+        route_label: &'a str,
+        reason: &'static str,
+        caused_by: Vec<CommandId>,
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        connector: &'a dyn SessionRouteConnector,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+    ) -> ContractFuture<'a, RecoveryOutcome> {
+        Box::pin(async move {
+            let mut commits = Vec::new();
+            let max_attempts = config.reconnect.max_attempts.unwrap_or(1).max(1);
+            let mut last_error = None;
+
+            for attempt in 1..=max_attempts {
+                let scheduled_backoff_ms = reconnect_backoff_ms(config, attempt);
+                if let Some(commit) = self.handle.record_session_reconnect(
+                    attempt,
+                    scheduled_backoff_ms,
+                    config.reconnect.max_attempts,
+                    false,
+                    Some(json!({
+                        "route": route_label,
+                        "reason": reason,
+                    })),
+                    caused_by.clone(),
+                )? {
+                    commits.push(commit);
+                }
+
+                match self
+                    .recover_internal(auth, resolver, connector, config, adapters, false)
+                    .await
+                {
+                    Ok(recovery) => {
+                        commits.extend(recovery.commits);
+                        return Ok(RecoveryOutcome {
+                            run: recovery.run,
+                            commits,
+                        });
+                    }
+                    Err(err) => {
+                        if let Some(commit) = self.handle.ingest(
+                            RuntimeInput::Internal(InternalEvent {
+                                label: "session-recovery-error",
+                                payload: Some(json!({
+                                    "route": route_label,
+                                    "reason": reason,
+                                    "attempt": attempt,
+                                    "message": err.to_string(),
+                                })),
+                            }),
+                            caused_by.clone(),
+                            CommitScope::SessionTransition,
+                        )? {
+                            commits.push(commit);
+                        }
+                        last_error = Some((attempt, scheduled_backoff_ms, err));
+                    }
+                }
+            }
+
+            let Some((attempt, scheduled_backoff_ms, err)) = last_error else {
+                return Err(crate::ContractError::validation(
+                    "reconnect policy exhausted without any recovery attempts",
+                ));
+            };
+
+            if let Some(commit) = self.handle.record_session_reconnect(
+                attempt,
+                scheduled_backoff_ms,
+                config.reconnect.max_attempts,
+                true,
+                Some(json!({
+                    "route": route_label,
+                    "reason": reason,
+                    "message": err.to_string(),
+                })),
+                caused_by.clone(),
+            )? {
+                commits.push(commit);
+            }
+
+            if let Some(commit) = self.handle.record_session_phase(
+                SessionPhase::Closed,
+                Some(json!({
+                    "route": route_label,
+                    "reason": "reconnect-exhausted",
+                    "attempt": attempt,
+                    "message": err.to_string(),
+                })),
+                caused_by,
+            )? {
+                commits.push(commit);
+            }
+
+            Err(err)
+        })
+    }
+
     fn recover_internal<'a>(
         &'a self,
         auth: &'a dyn AuthProvider,
@@ -469,6 +590,7 @@ impl SessionRuntime {
         let mut outcome = RoutePumpOutcome {
             commits: Vec::new(),
             reconnect_required: true,
+            reconnect_reason: Some("transport-close"),
         };
 
         if let Some(commit) = self.handle.ingest(
@@ -518,6 +640,7 @@ impl SessionRuntime {
         let mut outcome = RoutePumpOutcome {
             commits: Vec::new(),
             reconnect_required: true,
+            reconnect_reason: Some("transport-error"),
         };
 
         if let Some(commit) = self.handle.ingest(
@@ -594,4 +717,13 @@ impl SessionRuntime {
             CommitScope::RealtimeUpdate,
         )
     }
+}
+
+fn reconnect_backoff_ms(config: &SessionConfig, attempt: u32) -> u64 {
+    let base = config.reconnect.initial_backoff.as_millis();
+    let cap = config.reconnect.max_backoff.as_millis();
+    let shift = attempt.saturating_sub(1).min(63);
+    let multiplier = 1u128 << shift;
+    let scheduled = base.saturating_mul(multiplier);
+    scheduled.min(cap).min(u64::MAX as u128) as u64
 }

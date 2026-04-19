@@ -38,6 +38,7 @@ pub enum ObjectKey {
     SessionAuth,
     SessionLifecycle,
     SessionTopology,
+    SessionReconnect,
     Quote {
         symbol: Symbol,
     },
