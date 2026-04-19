@@ -331,11 +331,14 @@ impl ProtocolAdapter for TradeAdapter {
                 "amount": amount,
             }),
             RuntimeCommand::Trade(TradeCommand::SetRiskManagementRule { account_id, rule }) => {
-                json!({
-                    "aid": "set_risk_management_rule",
-                    "user_id": account_id.as_str(),
-                    "rule": rule,
-                })
+                let mut request = rule.as_object().cloned().ok_or_else(|| {
+                    ContractError::validation(
+                        "set_risk_management_rule expects an object-shaped rule payload",
+                    )
+                })?;
+                request.insert("aid".to_string(), json!("set_risk_management_rule"));
+                request.insert("user_id".to_string(), json!(account_id.as_str()));
+                Value::Object(request)
             }
             _ => return Err(ContractError::UnsupportedCommand("trade")),
         };
@@ -877,6 +880,22 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
         [root, account_id, branch, _currency] if root == "trade" && branch == "accounts" => {
             Some(ObjectKey::Account {
                 account_id: AccountId::new(account_id.clone()),
+            })
+        }
+        [root, account_id, branch, exchange_id]
+            if root == "trade" && branch == "risk_management_rule" =>
+        {
+            Some(ObjectKey::RiskManagementRule {
+                account_id: AccountId::new(account_id.clone()),
+                exchange_id: exchange_id.clone(),
+            })
+        }
+        [root, account_id, branch, symbol]
+            if root == "trade" && branch == "risk_management_data" =>
+        {
+            Some(ObjectKey::RiskManagementData {
+                account_id: AccountId::new(account_id.clone()),
+                symbol: Symbol::new(symbol.clone()),
             })
         }
         [root, account_id, branch, symbol] if root == "trade" && branch == "positions" => {

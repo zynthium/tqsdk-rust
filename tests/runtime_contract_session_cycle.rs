@@ -807,6 +807,110 @@ fn session_runtime_trade_account_info_diff_marks_transport_command_completed() {
 }
 
 #[test]
+fn session_runtime_trade_risk_management_rule_diff_marks_transport_command_completed() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let sent_frames = Arc::new(Mutex::new(Vec::new()));
+    let connector = TestRouteConnector {
+        sent_frames: Arc::clone(&sent_frames),
+        recv_frames: vec![RawFrame::Text(
+            json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "trade": {
+                        "simnow": {
+                            "risk_management_rule": {
+                                "SSE": {
+                                    "exchange_id": "SSE",
+                                    "enable": true,
+                                    "self_trade": {
+                                        "count_limit": 3
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }]
+            })
+            .to_string(),
+        )],
+    };
+
+    let topology = SessionTopology::default().with_route(SessionRoute {
+        label: "trade".to_string(),
+        target: SessionTarget::Account(AccountId::new("simnow")),
+        domains: vec![ProtocolDomain::Trade],
+        endpoint: SessionRouteEndpoint::WebSocket {
+            url: "ws://trade.example".to_string(),
+            connect: Default::default(),
+        },
+    });
+
+    let connected =
+        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+    let mut run = SessionRun {
+        bootstrap: BootstrapResult::new(
+            tqsdk_runtime_contract::AuthContext::new("token"),
+            vec![ProtocolDomain::Trade],
+        )
+        .with_topology(topology),
+        connected,
+    };
+
+    let command_id = block_on(handle.submit(RuntimeCommand::Trade(
+        TradeCommand::SetRiskManagementRule {
+            account_id: AccountId::new("simnow"),
+            rule: json!({
+                "exchange_id": "SSE",
+                "enable": true,
+                "self_trade": {
+                    "count_limit": 3
+                }
+            }),
+        },
+    )))
+    .unwrap();
+
+    let receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();
+    assert_eq!(receipts.len(), 1);
+
+    let commit = block_on(runtime.recv_route_and_ingest(
+        &mut run,
+        "trade",
+        vec![command_id],
+        CommitScope::RealtimeUpdate,
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(commit.caused_by, vec![command_id]);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["trade", "simnow", "risk_management_rule", "SSE", "enable"]),
+        Some(&json!(true))
+    );
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
+    assert_eq!(
+        handle.latest_snapshot().get([
+            "runtime",
+            "commands",
+            command_segment.as_str(),
+            "detail",
+            "exchange_id"
+        ]),
+        Some(&json!("SSE"))
+    );
+}
+
+#[test]
 fn session_runtime_ingests_queued_non_transport_route_inputs() {
     let handle = runtime_with_default_adapters();
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());

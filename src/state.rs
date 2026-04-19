@@ -62,6 +62,14 @@ pub enum ObjectKey {
     Account {
         account_id: AccountId,
     },
+    RiskManagementRule {
+        account_id: AccountId,
+        exchange_id: String,
+    },
+    RiskManagementData {
+        account_id: AccountId,
+        symbol: Symbol,
+    },
     Position {
         account_id: AccountId,
         symbol: Symbol,

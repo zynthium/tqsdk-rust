@@ -243,6 +243,33 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         }),
     );
 
+    let trade_set_risk_management_rule = registry
+        .encode_command(&RuntimeCommand::Trade(
+            TradeCommand::SetRiskManagementRule {
+                account_id: AccountId::new("simnow"),
+                rule: json!({
+                    "exchange_id": "SSE",
+                    "enable": true,
+                    "self_trade": {
+                        "count_limit": 3,
+                    },
+                }),
+            },
+        ))
+        .unwrap();
+    assert_json_frame(
+        &trade_set_risk_management_rule[0],
+        json!({
+            "aid": "set_risk_management_rule",
+            "user_id": "simnow",
+            "exchange_id": "SSE",
+            "enable": true,
+            "self_trade": {
+                "count_limit": 3,
+            },
+        }),
+    );
+
     let trade_insert = registry
         .encode_command(&RuntimeCommand::Trade(TradeCommand::InsertOrder(
             TradeInsertOrderCommand {
@@ -534,6 +561,22 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
                                         "content": ["line-1", "line-2"]
                                     }
                                 },
+                                "risk_management_rule": {
+                                    "SSE": {
+                                        "exchange_id": "SSE",
+                                        "enable": true,
+                                        "self_trade": {
+                                            "count_limit": 3
+                                        }
+                                    }
+                                },
+                                "risk_management_data": {
+                                    "SHFE.au2602": {
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "au2602",
+                                        "user_id": "simnow"
+                                    }
+                                },
                                 "trade_more_data": false
                             }
                         }
@@ -602,6 +645,61 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
                         value: json!(2),
                     },
                 ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "risk_management_data", "SHFE.au2602"]),
+                object: Some(ObjectKey::RiskManagementData {
+                    account_id: AccountId::new("simnow"),
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "exchange_id".to_string(),
+                        value: json!("SHFE"),
+                    },
+                    FieldMutation {
+                        field: "instrument_id".to_string(),
+                        value: json!("au2602"),
+                    },
+                    FieldMutation {
+                        field: "user_id".to_string(),
+                        value: json!("simnow"),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "simnow", "risk_management_rule", "SSE"]),
+                object: Some(ObjectKey::RiskManagementRule {
+                    account_id: AccountId::new("simnow"),
+                    exchange_id: "SSE".to_string(),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "enable".to_string(),
+                        value: json!(true),
+                    },
+                    FieldMutation {
+                        field: "exchange_id".to_string(),
+                        value: json!("SSE"),
+                    },
+                ],
+                source: MutationSource::TradeReply,
+            },
+            NormalizedMutation {
+                path: StatePath::new([
+                    "trade",
+                    "simnow",
+                    "risk_management_rule",
+                    "SSE",
+                    "self_trade"
+                ]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "count_limit".to_string(),
+                    value: json!(3),
+                }],
                 source: MutationSource::TradeReply,
             },
             NormalizedMutation {

@@ -874,6 +874,13 @@ impl SessionRuntime {
                 command_id,
                 &detail,
             ),
+            "set_risk_management_rule" => self.derive_trade_risk_management_rule_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
             "qry_settlement_info" => self.derive_trade_settlement_query_command_status(
                 &snapshot,
                 route_label,
@@ -928,6 +935,32 @@ impl SessionRuntime {
 
         let mut detail = Map::new();
         detail.insert("currency".to_string(), json!("CNY"));
+        Some((
+            CommandStatus::Completed,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
+    }
+
+    fn derive_trade_risk_management_rule_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        commit: &CommitResult,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let account_id = detail.get("account_id").and_then(Value::as_str)?;
+        let exchange_id = detail.get("exchange_id").and_then(Value::as_str)?;
+        if !commit_touches_path(
+            commit,
+            ["trade", account_id, "risk_management_rule", exchange_id],
+        ) {
+            return None;
+        }
+        snapshot.get(["trade", account_id, "risk_management_rule", exchange_id])?;
+
+        let mut detail = Map::new();
+        detail.insert("exchange_id".to_string(), json!(exchange_id));
         Some((
             CommandStatus::Completed,
             self.command_detail(command_id, Some(route_label), None, detail),
@@ -1093,6 +1126,9 @@ fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<Strin
                     }
                     if let Some(trading_day) = request.get("trading_day").and_then(Value::as_str) {
                         detail.insert("trading_day".to_string(), json!(trading_day));
+                    }
+                    if let Some(exchange_id) = request.get("exchange_id").and_then(Value::as_str) {
+                        detail.insert("exchange_id".to_string(), json!(exchange_id));
                     }
                 }
             }
