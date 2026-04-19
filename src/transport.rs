@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use std::net::TcpStream;
 
+use tungstenite::client::IntoClientRequest;
+use tungstenite::http::{HeaderName, HeaderValue};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -20,6 +22,18 @@ pub enum RawFrame {
     Close,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebSocketConnectOptions {
+    pub headers: Vec<(String, String)>,
+}
+
+impl WebSocketConnectOptions {
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
 pub trait Transport: Send {
     fn connect(&mut self) -> ContractFuture<'_, ()>;
     fn recv(&mut self) -> ContractFuture<'_, RawFrame>;
@@ -30,6 +44,7 @@ pub trait Transport: Send {
 #[derive(Debug)]
 pub struct WebSocketTransport {
     url: String,
+    connect_options: WebSocketConnectOptions,
     socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
 }
 
@@ -37,8 +52,19 @@ impl WebSocketTransport {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            connect_options: WebSocketConnectOptions::default(),
             socket: None,
         }
+    }
+
+    pub fn with_connect_options(mut self, connect_options: WebSocketConnectOptions) -> Self {
+        self.connect_options = connect_options;
+        self
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.connect_options = self.connect_options.with_header(name, value);
+        self
     }
 
     fn socket_mut(&mut self) -> Result<&mut WebSocket<MaybeTlsStream<TcpStream>>> {
@@ -48,7 +74,21 @@ impl WebSocketTransport {
     }
 
     fn connect_blocking(&mut self) -> Result<()> {
-        let (socket, _) = connect(self.url.as_str())
+        let mut request = self
+            .url
+            .as_str()
+            .into_client_request()
+            .map_err(|err| ContractError::validation(format!("invalid websocket request: {err}")))?;
+
+        for (name, value) in &self.connect_options.headers {
+            let header_name = HeaderName::try_from(name.as_str())
+                .map_err(|err| ContractError::validation(format!("invalid websocket header name: {err}")))?;
+            let header_value = HeaderValue::from_str(value)
+                .map_err(|err| ContractError::validation(format!("invalid websocket header value: {err}")))?;
+            request.headers_mut().insert(header_name, header_value);
+        }
+
+        let (socket, _) = connect(request)
             .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
         self.socket = Some(socket);
         Ok(())

@@ -33,5 +33,5 @@ pub use state::{
 pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
 pub use transport::{
     BootstrapResult, EndpointConfig, HeartbeatPolicy, RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig,
-    SessionPhase, Transport, WebSocketTransport,
+    SessionPhase, Transport, WebSocketConnectOptions, WebSocketTransport,
 };

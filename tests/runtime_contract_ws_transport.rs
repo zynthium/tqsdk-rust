@@ -4,7 +4,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use tqsdk_runtime_contract::{OutboundFrame, RawFrame, Transport, WebSocketTransport};
-use tungstenite::{accept, Message};
+use tungstenite::handshake::server::{Request, Response};
+use tungstenite::{accept, accept_hdr, Message};
 
 #[test]
 fn websocket_transport_connects_and_round_trips_frames() {
@@ -51,6 +52,41 @@ fn websocket_transport_connects_and_round_trips_frames() {
         other => panic!("expected binary frame, got {other:?}"),
     }
 
+    block_on(transport.close()).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn websocket_transport_sends_custom_handshake_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
+            assert_eq!(
+                request.headers().get("authorization").and_then(|value| value.to_str().ok()),
+                Some("Bearer test-token"),
+            );
+            assert_eq!(
+                request.headers().get("x-tq-app").and_then(|value| value.to_str().ok()),
+                Some("contract-test"),
+            );
+            Ok(response)
+        })
+        .unwrap();
+
+        match socket.read().unwrap() {
+            Message::Close(_) => {}
+            other => panic!("expected close frame, got {other:?}"),
+        }
+    });
+
+    let mut transport = WebSocketTransport::new(format!("ws://{addr}"))
+        .with_header("Authorization", "Bearer test-token")
+        .with_header("X-Tq-App", "contract-test");
+
+    block_on(transport.connect()).unwrap();
     block_on(transport.close()).unwrap();
     server.join().unwrap();
 }
