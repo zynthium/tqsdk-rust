@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use std::net::TcpStream;
@@ -9,7 +10,7 @@ use tungstenite::{connect, Message, WebSocket};
 
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
-use crate::commands::OutboundFrame;
+use crate::commands::{OutboundDispatch, OutboundFrame, OutboundRequest};
 use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
 use crate::{ContractError, Result};
 
@@ -454,11 +455,25 @@ pub trait SessionTopologyResolver: Send + Sync {
 pub struct ConnectedSessionRoute {
     pub route: SessionRoute,
     pub transport: Box<dyn Transport>,
+    pending_requests: VecDeque<OutboundDispatch>,
+}
+
+impl ConnectedSessionRoute {
+    pub fn drain_pending_requests(&mut self) -> Vec<OutboundDispatch> {
+        self.pending_requests.drain(..).collect()
+    }
 }
 
 #[derive(Default)]
 pub struct ConnectedTopology {
     pub routes: Vec<ConnectedSessionRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchReceipt {
+    pub command_id: crate::ids::CommandId,
+    pub domain: ProtocolDomain,
+    pub route_label: String,
 }
 
 impl ConnectedTopology {
@@ -468,6 +483,37 @@ impl ConnectedTopology {
                 route.transport.close().await?;
             }
             Ok(())
+        })
+    }
+
+    pub fn dispatch<'a>(&'a mut self, dispatch: OutboundDispatch) -> ContractFuture<'a, DispatchReceipt> {
+        Box::pin(async move {
+            let route = self
+                .routes
+                .iter_mut()
+                .find(|route| route_accepts_dispatch(&route.route, &dispatch))
+                .ok_or_else(|| {
+                    ContractError::validation(format!(
+                        "no connected route for {} {:?} request",
+                        dispatch.domain.as_str(),
+                        dispatch.request
+                    ))
+                })?;
+
+            match &dispatch.request {
+                OutboundRequest::Transport(frame) => {
+                    route.transport.send(frame.clone()).await?;
+                }
+                OutboundRequest::Http(_) | OutboundRequest::Replay(_) | OutboundRequest::Internal(_) => {
+                    route.pending_requests.push_back(dispatch.clone());
+                }
+            }
+
+            Ok(DispatchReceipt {
+                command_id: dispatch.command_id,
+                domain: dispatch.domain,
+                route_label: route.route.label.clone(),
+            })
         })
     }
 }
@@ -560,6 +606,17 @@ impl SessionRouteConnector for DefaultRouteConnector {
     }
 }
 
+fn route_accepts_dispatch(route: &SessionRoute, dispatch: &OutboundDispatch) -> bool {
+    route.domains.contains(&dispatch.domain)
+        && matches!(
+            (&route.endpoint, &dispatch.request),
+            (SessionRouteEndpoint::WebSocket { .. }, OutboundRequest::Transport(_))
+                | (SessionRouteEndpoint::Http { .. }, OutboundRequest::Http(_))
+                | (SessionRouteEndpoint::Replay { .. }, OutboundRequest::Replay(_))
+                | (SessionRouteEndpoint::Internal { .. }, OutboundRequest::Internal(_))
+        )
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionBootstrap;
 
@@ -621,6 +678,7 @@ impl SessionBootstrap {
                     Ok(transport) => connected.routes.push(ConnectedSessionRoute {
                         route: route.clone(),
                         transport,
+                        pending_requests: VecDeque::new(),
                     }),
                     Err(err) => {
                         let _ = connected.close_all().await;

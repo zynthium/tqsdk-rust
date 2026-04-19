@@ -306,3 +306,10 @@ impl OutboundRequest {
         Self::Internal(InternalRequest { label })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundDispatch {
+    pub command_id: CommandId,
+    pub domain: ProtocolDomain,
+    pub request: OutboundRequest,
+}

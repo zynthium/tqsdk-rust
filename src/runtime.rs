@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     adapter::AdapterRegistry,
-    commands::{CommandStatus, OutboundRequest, RuntimeCommand},
+    commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
     error::{ContractError, Result},
     ids::{CommandId, CursorId, ProtocolDomain, Revision},
@@ -108,6 +108,27 @@ impl RuntimeHandle {
     pub fn drain_outbound(&self) -> Vec<OutboundEnvelope> {
         let mut inner = self.inner.lock().expect("runtime mutex poisoned");
         inner.outbound.drain(..).collect()
+    }
+
+    pub fn drain_dispatches(&self) -> Result<Vec<OutboundDispatch>> {
+        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let envelopes = inner.outbound.drain(..).collect::<Vec<_>>();
+        envelopes
+            .into_iter()
+            .map(|envelope| {
+                let domain = inner.command_domains.get(&envelope.command_id).copied().ok_or_else(|| {
+                    ContractError::validation(format!(
+                        "unknown command id for outbound dispatch: {}",
+                        envelope.command_id.get()
+                    ))
+                })?;
+                Ok(OutboundDispatch {
+                    command_id: envelope.command_id,
+                    domain,
+                    request: envelope.request,
+                })
+            })
+            .collect()
     }
 
     pub fn cursor_from(&self, next_revision: Revision) -> UpdateCursor {
