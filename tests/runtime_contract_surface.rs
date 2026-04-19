@@ -1,11 +1,35 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AccountId, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId, CommandStatus, CommitResult,
-    CommitScope, ContractError, CursorId, FieldMutation, MarketCommand, MutationSource, NormalizedMutation,
-    ObjectKey, OutboundRequest, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Revision, RuntimeCommand,
-    SchemaCommand, SchemaId, SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand,
-    UpdateCursor,
+    AccountId, AdapterRegistry, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId, CommandStatus,
+    CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation, MarketCommand, MutationSource,
+    NormalizedMutation, ObjectKey, OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId,
+    ReplayCommand, Revision, Result, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
+    SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, UpdateCursor,
 };
+
+struct TestAdapter;
+
+impl ProtocolAdapter for TestAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        ProtocolDomain::System
+    }
+
+    fn accepts_command(&self, cmd: &RuntimeCommand) -> bool {
+        matches!(cmd, RuntimeCommand::System(_))
+    }
+
+    fn encode(&mut self, _cmd: &RuntimeCommand) -> Result<Vec<tqsdk_runtime_contract::OutboundRequest>> {
+        Err(ContractError::UnsupportedCommand("system skeleton"))
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(input, RuntimeInput::Internal(_))
+    }
+
+    fn decode(&mut self, _input: &RuntimeInput) -> Result<Vec<tqsdk_runtime_contract::NormalizedMutation>> {
+        Ok(vec![])
+    }
+}
 
 #[test]
 fn ids_and_domain_surface_are_stable() {
@@ -102,4 +126,26 @@ fn snapshot_cursor_and_mutation_types_are_revision_bound() {
     };
 
     assert_eq!(series.view_width, 128);
+}
+
+#[test]
+fn adapter_registry_and_runtime_handle_surface_compile() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_domain(ProtocolDomain::System);
+
+    let handle = RuntimeHandle::new();
+    let snapshot: StateSnapshot = handle.latest_snapshot();
+    let cursor: UpdateCursor = handle.cursor();
+    let log = CommitLog::new();
+
+    assert_eq!(registry.domains(), &[ProtocolDomain::System]);
+    assert_eq!(snapshot.revision().get(), 0);
+    assert_eq!(cursor.next_revision().get(), 1);
+    assert_eq!(log.head_revision(), None);
+
+    fn assert_runtime<T: Runtime>(_value: &T) {}
+    assert_runtime(&handle);
+
+    let adapter = TestAdapter;
+    assert_eq!(adapter.domain(), ProtocolDomain::System);
 }
