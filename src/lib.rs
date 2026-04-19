@@ -14,7 +14,7 @@ pub use auth::{AuthContext, AuthProvider, ContractFuture};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpRequest, InternalRequest, MarketCommand, OutboundFrame,
     OutboundRequest, QueryCommand, ReplayCommand, ReplayRequest, RuntimeCommand, SchemaCommand, SystemCommand,
-    TradeCommand,
+    TradeAccountType, TradeCommand, TradeLoginCommand,
 };
 pub use error::{ContractError, Result};
 pub use events::{

@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 use crate::ids::{AccountId, CommandId, OrderId, ProtocolDomain, QueryId, SchemaId, Symbol};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +39,20 @@ pub enum MarketCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TradeCommand {
+    Login(TradeLoginCommand),
+    ConfirmSettlement {
+        account_id: AccountId,
+    },
+    QueryAccountInfo {
+        account_id: AccountId,
+    },
+    QueryAccountRegister {
+        account_id: AccountId,
+    },
+    QuerySettlementInfo {
+        account_id: AccountId,
+        trading_day: u32,
+    },
     InsertOrder {
         account_id: AccountId,
         symbol: Symbol,
@@ -46,6 +62,46 @@ pub enum TradeCommand {
         account_id: AccountId,
         order_id: OrderId,
     },
+    Transfer {
+        account_id: AccountId,
+        bank_id: String,
+        bank_password: String,
+        future_account: String,
+        future_password: String,
+        currency: String,
+        amount: Value,
+    },
+    SetRiskManagementRule {
+        account_id: AccountId,
+        rule: Value,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeAccountType {
+    Future,
+    Spot,
+}
+
+impl TradeAccountType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Future => "future",
+            Self::Spot => "spot",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeLoginCommand {
+    pub account_id: AccountId,
+    pub broker_id: String,
+    pub password: String,
+    pub account_type: TradeAccountType,
+    pub front_broker: Option<String>,
+    pub front_url: Option<String>,
+    pub client_app_id: Option<String>,
+    pub client_system_info: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
