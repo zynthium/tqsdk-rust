@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     Result,
@@ -7,7 +7,7 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
-    runtime::RuntimeHandle,
+    runtime::{Runtime, RuntimeHandle},
     state::{CommitResult, CommitScope},
     transport::{
         BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
@@ -96,19 +96,21 @@ impl SessionRuntime {
                     return Err(err);
                 }
             };
-            let connected =
-                match self.connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting)).await {
-                    Ok(connected) => connected,
-                    Err(err) => {
-                        self.record_session_failure(
-                            "session-establish-error",
-                            "connect",
-                            &err,
-                            vec![],
-                        )?;
-                        return Err(err);
-                    }
-                };
+            let connected = match self
+                .connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting))
+                .await
+            {
+                Ok(connected) => connected,
+                Err(err) => {
+                    self.record_session_failure(
+                        "session-establish-error",
+                        "connect",
+                        &err,
+                        vec![],
+                    )?;
+                    return Err(err);
+                }
+            };
 
             self.handle
                 .record_session_phase(SessionPhase::Bootstrapping, None, vec![])?;
@@ -136,12 +138,7 @@ impl SessionRuntime {
             {
                 Ok(recovery) => recovery,
                 Err(err) => {
-                    self.record_session_failure(
-                        "session-recovery-error",
-                        "recover",
-                        &err,
-                        vec![],
-                    )?;
+                    self.record_session_failure("session-recovery-error", "recover", &err, vec![])?;
                     return Err(err);
                 }
             };
@@ -164,28 +161,31 @@ impl SessionRuntime {
                 let receipt = match run.connected.dispatch(dispatch.clone()).await {
                     Ok(receipt) => receipt,
                     Err(err) => {
+                        let mut detail = Map::new();
+                        detail.insert("message".to_string(), json!(err.to_string()));
                         self.handle.record_command_status(
                             dispatch.command_id,
                             CommandStatus::Failed,
-                            Some(json!({
-                                "route": route_label,
-                                "domain": dispatch.domain.as_str(),
-                                "message": err.to_string(),
-                            })),
+                            self.command_detail(
+                                dispatch.command_id,
+                                route_label.as_deref(),
+                                Some(&dispatch),
+                                detail,
+                            ),
                             CommitScope::RealtimeUpdate,
                         )?;
                         return Err(err);
                     }
                 };
-                let route_label = receipt.route_label.clone();
-                let domain = receipt.domain;
                 self.handle.record_command_status(
                     receipt.command_id,
                     CommandStatus::Sent,
-                    Some(json!({
-                        "route": route_label,
-                        "domain": domain.as_str(),
-                    })),
+                    self.command_detail(
+                        receipt.command_id,
+                        Some(receipt.route_label.as_str()),
+                        Some(&dispatch),
+                        Map::new(),
+                    ),
                     CommitScope::RealtimeUpdate,
                 )?;
                 receipts.push(receipt);
@@ -207,12 +207,7 @@ impl SessionRuntime {
             };
             let commit = self.handle.ingest(input, caused_by.clone(), scope)?;
             if commit.is_some() {
-                self.record_command_statuses(
-                    &caused_by,
-                    CommandStatus::PartiallyApplied,
-                    Some(json!({ "route": route_label })),
-                    scope,
-                )?;
+                self.record_transport_commit_statuses(route_label, &caused_by, scope)?;
             }
             Ok(commit)
         })
@@ -245,12 +240,7 @@ impl SessionRuntime {
                     let mut outcome = RoutePumpOutcome::default();
                     if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
                         outcome.commits.push(commit);
-                        self.record_command_statuses(
-                            &caused_by,
-                            CommandStatus::PartiallyApplied,
-                            Some(json!({ "route": route_label })),
-                            scope,
-                        )?;
+                        self.record_transport_commit_statuses(route_label, &caused_by, scope)?;
                     }
                     Ok(outcome)
                 }
@@ -740,6 +730,41 @@ fn timer_route_label(timer: &TimerEvent) -> Result<&str> {
 }
 
 impl SessionRuntime {
+    fn record_transport_commit_statuses(
+        &self,
+        route_label: &str,
+        command_ids: &[CommandId],
+        scope: CommitScope,
+    ) -> Result<()> {
+        for &command_id in command_ids {
+            let current = self.command_status(command_id);
+            if is_terminal_command_status(current.as_deref()) {
+                continue;
+            }
+
+            if let Some((status, detail)) =
+                self.derive_transport_command_status(route_label, command_id)
+            {
+                self.handle
+                    .record_command_status(command_id, status, detail, scope)?;
+                continue;
+            }
+
+            if matches!(current.as_deref(), Some("acked")) {
+                continue;
+            }
+
+            self.handle.record_command_status(
+                command_id,
+                CommandStatus::PartiallyApplied,
+                self.command_detail(command_id, Some(route_label), None, Map::new()),
+                scope,
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn record_command_statuses(
         &self,
         command_ids: &[CommandId],
@@ -760,15 +785,18 @@ impl SessionRuntime {
         route_label: &str,
         err: &crate::ContractError,
     ) -> Result<()> {
-        self.record_command_statuses(
-            command_ids,
-            CommandStatus::Failed,
-            Some(json!({
-                "route": route_label,
-                "message": err.to_string(),
-            })),
-            CommitScope::RealtimeUpdate,
-        )
+        for &command_id in command_ids {
+            let mut detail = Map::new();
+            detail.insert("message".to_string(), json!(err.to_string()));
+            self.handle.record_command_status(
+                command_id,
+                CommandStatus::Failed,
+                self.command_detail(command_id, Some(route_label), None, detail),
+                CommitScope::RealtimeUpdate,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn record_session_failure(
@@ -802,6 +830,88 @@ impl SessionRuntime {
 
         Ok(())
     }
+
+    fn derive_transport_command_status(
+        &self,
+        route_label: &str,
+        command_id: CommandId,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let snapshot = self.handle.latest_snapshot();
+        let detail = command_detail_map_from_snapshot(&snapshot, command_id)?;
+        let aid = detail.get("aid").and_then(Value::as_str)?;
+
+        match aid {
+            "insert_order" | "cancel_order" => {
+                self.derive_trade_order_command_status(&snapshot, route_label, command_id, &detail)
+            }
+            _ => None,
+        }
+    }
+
+    fn derive_trade_order_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let account_id = detail.get("account_id").and_then(Value::as_str)?;
+        let order_id = detail.get("order_id").and_then(Value::as_str)?;
+        let order_status = snapshot
+            .get(["trade", account_id, "orders", order_id, "status"])?
+            .as_str()?;
+
+        let status = match order_status {
+            "ALIVE" => CommandStatus::Acked,
+            "FINISHED" => CommandStatus::Completed,
+            _ => return None,
+        };
+
+        let mut detail = Map::new();
+        detail.insert("order_status".to_string(), json!(order_status));
+
+        Some((
+            status,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
+    }
+
+    fn command_status(&self, command_id: CommandId) -> Option<String> {
+        let snapshot = self.handle.latest_snapshot();
+        let command_segment = command_id.get().to_string();
+        snapshot
+            .get(["runtime", "commands", command_segment.as_str(), "status"])
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn command_detail(
+        &self,
+        command_id: CommandId,
+        route_label: Option<&str>,
+        dispatch: Option<&OutboundDispatch>,
+        extra: Map<String, Value>,
+    ) -> Option<Value> {
+        let snapshot = self.handle.latest_snapshot();
+        let mut detail =
+            command_detail_map_from_snapshot(&snapshot, command_id).unwrap_or_default();
+
+        if let Some(route_label) = route_label {
+            detail.insert("route".to_string(), json!(route_label));
+        }
+
+        if let Some(dispatch) = dispatch {
+            detail.extend(command_detail_fields_from_dispatch(dispatch));
+        }
+
+        detail.extend(extra);
+
+        if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        }
+    }
 }
 
 fn reconnect_backoff_ms(config: &SessionConfig, attempt: u32) -> u64 {
@@ -811,4 +921,69 @@ fn reconnect_backoff_ms(config: &SessionConfig, attempt: u32) -> u64 {
     let multiplier = 1u128 << shift;
     let scheduled = base.saturating_mul(multiplier);
     scheduled.min(cap).min(u64::MAX as u128) as u64
+}
+
+fn command_detail_map_from_snapshot(
+    snapshot: &crate::state::StateSnapshot,
+    command_id: CommandId,
+) -> Option<Map<String, Value>> {
+    let command_segment = command_id.get().to_string();
+    snapshot
+        .get(["runtime", "commands", command_segment.as_str(), "detail"])
+        .and_then(Value::as_object)
+        .cloned()
+}
+
+fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<String, Value> {
+    let mut detail = Map::new();
+
+    match &dispatch.request {
+        crate::commands::OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            if let Ok(Value::Object(request)) = serde_json::from_str::<Value>(text) {
+                if let Some(aid) = request.get("aid").and_then(Value::as_str) {
+                    detail.insert("aid".to_string(), json!(aid));
+                }
+
+                if dispatch.domain == crate::ids::ProtocolDomain::Trade {
+                    if let Some(account_id) = request
+                        .get("user_id")
+                        .or_else(|| request.get("user_name"))
+                        .and_then(Value::as_str)
+                    {
+                        detail.insert("account_id".to_string(), json!(account_id));
+                    }
+                    if let Some(order_id) = request.get("order_id").and_then(Value::as_str) {
+                        detail.insert("order_id".to_string(), json!(order_id));
+                    }
+                }
+            }
+        }
+        crate::commands::OutboundRequest::Transport(OutboundFrame::Binary(_)) => {
+            detail.insert("frame".to_string(), json!("binary"));
+        }
+        crate::commands::OutboundRequest::Transport(OutboundFrame::Ping) => {
+            detail.insert("frame".to_string(), json!("ping"));
+        }
+        crate::commands::OutboundRequest::Transport(OutboundFrame::Close) => {
+            detail.insert("frame".to_string(), json!("close"));
+        }
+        crate::commands::OutboundRequest::Http(request) => {
+            detail.insert("path".to_string(), json!(request.path));
+        }
+        crate::commands::OutboundRequest::Replay(request) => {
+            detail.insert("action".to_string(), json!(request.action));
+        }
+        crate::commands::OutboundRequest::Internal(request) => {
+            detail.insert("label".to_string(), json!(request.label));
+        }
+    }
+
+    detail
+}
+
+fn is_terminal_command_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("completed" | "rejected" | "failed" | "cancelled")
+    )
 }
