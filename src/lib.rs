@@ -6,6 +6,7 @@ pub mod events;
 pub mod ids;
 pub mod runtime;
 pub mod state;
+pub mod tq_auth;
 pub mod transport;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
@@ -29,6 +30,7 @@ pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,
 };
+pub use tq_auth::{PasswordCredentials, TqAuthProvider};
 pub use transport::{
     BootstrapResult, EndpointConfig, HeartbeatPolicy, RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig,
     SessionPhase, Transport,
