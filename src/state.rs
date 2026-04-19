@@ -62,6 +62,9 @@ pub enum ObjectKey {
     Account {
         account_id: AccountId,
     },
+    TradeSession {
+        account_id: AccountId,
+    },
     RiskManagementRule {
         account_id: AccountId,
         exchange_id: String,

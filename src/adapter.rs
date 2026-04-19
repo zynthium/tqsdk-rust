@@ -882,6 +882,11 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
                 account_id: AccountId::new(account_id.clone()),
             })
         }
+        [root, account_id, branch] if root == "trade" && branch == "session" => {
+            Some(ObjectKey::TradeSession {
+                account_id: AccountId::new(account_id.clone()),
+            })
+        }
         [root, account_id, branch, exchange_id]
             if root == "trade" && branch == "risk_management_rule" =>
         {

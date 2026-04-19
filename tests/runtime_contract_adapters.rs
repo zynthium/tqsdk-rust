@@ -946,6 +946,53 @@ fn trade_adapter_decodes_settlement_query_reply_into_trade_snapshot() {
     );
 }
 
+#[test]
+fn trade_adapter_decodes_trade_session_branch_into_session_object() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let trade = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "trade.simnow".to_string(),
+            domains: vec![ProtocolDomain::Trade],
+            payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "trade": {
+                        "simnow": {
+                            "session": {
+                                "trading_day": "20260420",
+                                "user_id": "simnow",
+                            }
+                        }
+                    }
+                }]
+            })),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        trade,
+        vec![NormalizedMutation {
+            path: StatePath::new(["trade", "simnow", "session"]),
+            object: Some(ObjectKey::TradeSession {
+                account_id: AccountId::new("simnow"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "trading_day".to_string(),
+                    value: json!("20260420"),
+                },
+                FieldMutation {
+                    field: "user_id".to_string(),
+                    value: json!("simnow"),
+                },
+            ],
+            source: MutationSource::TradeReply,
+        }]
+    );
+}
+
 fn assert_json_frame(request: &OutboundRequest, expected: Value) {
     match request {
         OutboundRequest::Transport(OutboundFrame::Text(text)) => {
