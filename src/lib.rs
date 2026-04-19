@@ -5,6 +5,7 @@ pub mod error;
 pub mod events;
 pub mod ids;
 pub mod runtime;
+pub mod session_runtime;
 pub mod state;
 pub mod tq_auth;
 pub mod transport;
@@ -30,6 +31,7 @@ pub use ids::{
     ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
 pub use runtime::{CommitLog, OutboundEnvelope, Runtime, RuntimeHandle};
+pub use session_runtime::{SessionRun, SessionRuntime};
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath, StateSnapshot,
     UpdateCursor,
