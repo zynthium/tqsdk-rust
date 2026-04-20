@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
@@ -13,6 +16,7 @@ use crate::transport::{SessionRoute, SessionRouteEndpoint};
 use crate::{ContractError, ContractFuture, ProtocolDomain, Result};
 
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
+static SHARED_HTTP_RUNTIME: OnceLock<Mutex<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ReqwestHttpExecutor {
@@ -121,8 +125,11 @@ impl RouteRequestExecutor for ReqwestHttpExecutor {
             if tokio::runtime::Handle::try_current().is_ok() {
                 self.execute_async(route, requests).await
             } else {
-                self.build_runtime()?
-                    .block_on(self.execute_async(route, requests))
+                crate::tokio_blocking::block_on_with_shared_runtime(
+                    &SHARED_HTTP_RUNTIME,
+                    || self.build_runtime(),
+                    self.execute_async(route, requests),
+                )
             }
         })
     }

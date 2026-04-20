@@ -10,6 +10,7 @@ pub mod session_runtime;
 pub mod state;
 pub mod tq_auth;
 pub mod transport;
+mod tokio_blocking;
 
 pub use adapter::{
     AdapterRegistry, MarketAdapter, ProtocolAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter,

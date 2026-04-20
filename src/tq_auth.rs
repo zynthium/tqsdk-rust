@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -22,6 +23,7 @@ const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
+static SHARED_AUTH_RUNTIME: OnceLock<Mutex<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordCredentials {
@@ -119,7 +121,11 @@ impl TqAuthProvider {
         if tokio::runtime::Handle::try_current().is_ok() {
             future.await
         } else {
-            self.build_tokio_runtime()?.block_on(future)
+            crate::tokio_blocking::block_on_with_shared_runtime(
+                &SHARED_AUTH_RUNTIME,
+                || self.build_tokio_runtime(),
+                future,
+            )
         }
     }
 
