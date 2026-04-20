@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use crate::{
@@ -22,6 +22,7 @@ use serde_json::{Map, Value, json};
 
 pub trait Runtime {
     fn submit(&self, cmd: RuntimeCommand) -> impl Future<Output = Result<CommandId>> + Send;
+    fn reader(&self) -> RuntimeReader;
     fn latest_snapshot(&self) -> StateSnapshot;
     fn cursor(&self) -> UpdateCursor;
 }
@@ -72,6 +73,24 @@ struct CommitLogInner {
     entries: Vec<CommitResult>,
 }
 
+pub struct SnapshotReadGuard<'a> {
+    guard: MutexGuard<'a, RuntimeCore>,
+}
+
+impl SnapshotReadGuard<'_> {
+    pub fn revision(&self) -> Revision {
+        self.guard.snapshot.revision()
+    }
+
+    pub fn get<I, S>(&self, path: I) -> Option<&Value>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.guard.snapshot.get(path)
+    }
+}
+
 struct RuntimeCore {
     next_command_id: u64,
     next_cursor_id: u64,
@@ -86,6 +105,40 @@ struct RuntimeCore {
 pub struct RuntimeHandle {
     inner: Arc<Mutex<RuntimeCore>>,
     commit_log: CommitLog,
+}
+
+#[derive(Clone)]
+pub struct RuntimeReader {
+    inner: Arc<Mutex<RuntimeCore>>,
+    commit_log: CommitLog,
+}
+
+impl RuntimeReader {
+    pub fn head_revision(&self) -> Option<Revision> {
+        self.commit_log.head_revision()
+    }
+
+    pub fn cursor(&self) -> UpdateCursor {
+        let next_revision = Revision::new(
+            self.commit_log
+                .head_revision()
+                .map_or(1, |revision| revision.get() + 1),
+        );
+        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let cursor_id = CursorId::new(inner.next_cursor_id);
+        inner.next_cursor_id += 1;
+        UpdateCursor::new(cursor_id, next_revision)
+    }
+
+    pub fn read(&self) -> SnapshotReadGuard<'_> {
+        SnapshotReadGuard {
+            guard: self.inner.lock().expect("runtime mutex poisoned"),
+        }
+    }
+
+    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
+        self.commit_log.next(cursor)
+    }
 }
 
 impl RuntimeHandle {
@@ -110,6 +163,13 @@ impl RuntimeHandle {
 
     pub fn commit_log(&self) -> CommitLog {
         self.commit_log.clone()
+    }
+
+    pub fn reader(&self) -> RuntimeReader {
+        RuntimeReader {
+            inner: Arc::clone(&self.inner),
+            commit_log: self.commit_log.clone(),
+        }
     }
 
     pub fn drain_outbound(&self) -> Vec<OutboundEnvelope> {
@@ -533,6 +593,10 @@ impl Runtime for RuntimeHandle {
 
             Ok(command_id)
         }
+    }
+
+    fn reader(&self) -> RuntimeReader {
+        self.reader()
     }
 
     fn latest_snapshot(&self) -> StateSnapshot {

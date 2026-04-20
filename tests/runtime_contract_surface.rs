@@ -4,10 +4,11 @@ use tqsdk_runtime_contract::{
     CommandStatus, CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation,
     MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId,
     OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Result,
-    Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
-    SeriesKey, StatePath, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType,
-    TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
+    Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, RuntimeReader, SchemaCommand,
+    SchemaId, SeriesKey, SnapshotReadGuard, StatePath, StateSnapshot, Symbol, SystemCommand,
+    TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
+    TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    UpdateCursor,
 };
 
 struct TestAdapter;
@@ -191,16 +192,22 @@ fn adapter_registry_and_runtime_handle_surface_compile() {
 
     let handle = RuntimeHandle::new();
     let default_handle = RuntimeHandle::default();
+    let reader: RuntimeReader = handle.reader();
+    let default_reader: RuntimeReader = default_handle.reader();
     let snapshot: StateSnapshot = handle.latest_snapshot();
     let cursor: UpdateCursor = handle.cursor();
     let log = CommitLog::new();
+    let read_guard: SnapshotReadGuard<'_> = reader.read();
 
     assert_eq!(registry.domains(), &[ProtocolDomain::System]);
     assert_eq!(snapshot.revision().get(), 0);
     assert_eq!(cursor.next_revision().get(), 1);
     assert_eq!(log.head_revision(), None);
+    assert_eq!(reader.head_revision(), None);
+    assert_eq!(read_guard.revision().get(), 0);
     assert_eq!(default_handle.latest_snapshot().revision().get(), 0);
     assert_eq!(default_handle.cursor().next_revision().get(), 1);
+    assert_eq!(default_reader.cursor().next_revision().get(), 1);
 
     fn assert_runtime<T: Runtime>(_value: &T) {}
     assert_runtime(&handle);
