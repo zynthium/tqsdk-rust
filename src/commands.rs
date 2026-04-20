@@ -350,8 +350,12 @@ impl OutboundRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundDispatch {
+    /// The runtime-assigned command id being dispatched.
     pub command_id: CommandId,
+    /// The protocol domain that owns the request.
     pub domain: ProtocolDomain,
+    /// Optional account routing key for multi-account trade dispatch.
     pub account_id: Option<AccountId>,
+    /// The low-level request payload to deliver on the selected route.
     pub request: OutboundRequest,
 }

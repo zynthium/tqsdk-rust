@@ -346,10 +346,7 @@ impl Transport for RecordingTransport {
         Box::pin(async { Ok(RawFrame::Pong) })
     }
 
-    fn send(
-        &mut self,
-        frame: OutboundFrame,
-    ) -> tqsdk_runtime_contract::ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> tqsdk_runtime_contract::ContractFuture<'_, ()> {
         let label = self.label.clone();
         let sent_frames = Arc::clone(&self.sent_frames);
         Box::pin(async move {

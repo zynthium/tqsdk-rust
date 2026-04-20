@@ -49,6 +49,12 @@ fn runtime_reader_exposes_zero_copy_snapshot_reads_and_cursor_access() {
             snapshot.get(["quotes", "SHFE.au2602", "last_price"]),
             Some(&json!(512.0))
         );
+        let borrowed_quote = snapshot
+            .decode_path::<Quote>(&["quotes", "SHFE.au2602"])
+            .expect("borrowed-path quote decode should succeed")
+            .expect("borrowed-path quote should exist");
+        assert_eq!(borrowed_quote.instrument_id, "SHFE.au2602");
+        assert_eq!(borrowed_quote.last_price, 512.0);
         let quote = snapshot
             .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
             .expect("quote decode should succeed")

@@ -17,6 +17,7 @@ pub struct StateSnapshot {
 pub(crate) type StateStore = StateSnapshot;
 
 impl StateSnapshot {
+    /// Creates an owned empty snapshot at the provided revision.
     pub fn new(revision: Revision) -> Self {
         Self {
             revision,
@@ -24,10 +25,12 @@ impl StateSnapshot {
         }
     }
 
+    /// Returns the revision carried by this owned snapshot.
     pub fn revision(&self) -> Revision {
         self.revision
     }
 
+    /// Looks up a value at the provided path.
     pub fn get<I, S>(&self, path: I) -> Option<&Value>
     where
         I: IntoIterator<Item = S>,
@@ -36,6 +39,12 @@ impl StateSnapshot {
         self.read().get(path)
     }
 
+    /// Looks up a value using a borrowed path slice.
+    pub fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        self.read().get_path(path)
+    }
+
+    /// Decodes a value at the provided path.
     pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
     where
         T: serde::de::DeserializeOwned,
@@ -45,6 +54,15 @@ impl StateSnapshot {
         self.read().decode(path)
     }
 
+    /// Decodes a value using a borrowed path slice.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.read().decode_path(path)
+    }
+
+    /// Returns a borrowed read view over this owned snapshot.
     pub fn read(&self) -> StateReadView<'_> {
         StateReadView::new(self.revision, &self.data)
     }

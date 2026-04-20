@@ -216,8 +216,20 @@ fn reader_surface_is_primary_and_compatibility_surface_remains_available() {
             .is_none()
     );
     assert!(
+        read_guard
+            .decode_path::<Quote>(&["quotes", "SHFE.au2602"])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
         compatibility_snapshot
             .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        compatibility_snapshot
+            .decode_path::<Quote>(&["quotes", "SHFE.au2602"])
             .unwrap()
             .is_none()
     );

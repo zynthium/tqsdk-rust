@@ -55,6 +55,7 @@ pub trait RouteRequestExecutor: Send + Sync {
     ) -> ContractFuture<'a, Vec<RuntimeInput>>;
 }
 
+/// Borrowed dependency bundle required to drive reconnect and timer flows.
 #[derive(Clone, Copy)]
 pub struct SessionRuntimeDeps<'a> {
     pub auth: &'a dyn AuthProvider,
@@ -65,6 +66,7 @@ pub struct SessionRuntimeDeps<'a> {
 }
 
 impl<'a> SessionRuntimeDeps<'a> {
+    /// Creates a dependency bundle for session orchestration helpers.
     pub fn new(
         auth: &'a dyn AuthProvider,
         resolver: &'a dyn SessionTopologyResolver,
@@ -82,6 +84,12 @@ impl<'a> SessionRuntimeDeps<'a> {
     }
 }
 
+/// Low-level session orchestrator for auth, topology establishment, dispatch,
+/// reconnect, and runtime ingestion.
+///
+/// This type intentionally stays below any end-user facade. It coordinates the
+/// substrate pieces that talk to TQ services and publishes all resulting state
+/// through the shared runtime handle.
 #[derive(Clone)]
 pub struct SessionRuntime {
     handle: RuntimeHandle,
@@ -89,14 +97,18 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
+    /// Creates a session runtime bound to the provided shared runtime handle.
     pub fn new(handle: RuntimeHandle, bootstrap: SessionBootstrap) -> Self {
         Self { handle, bootstrap }
     }
 
+    /// Returns a clone of the shared runtime handle backing this session.
     pub fn handle(&self) -> RuntimeHandle {
         self.handle.clone()
     }
 
+    /// Authenticates, resolves topology, connects routes, and records the
+    /// initial session bootstrap commits.
     pub fn establish<'a>(
         &'a self,
         auth: &'a dyn AuthProvider,

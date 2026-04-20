@@ -13,12 +13,20 @@ use crate::{ContractError, ContractFuture, ProtocolDomain, Result};
 
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 
+/// Low-level reqwest-backed executor for pending HTTP routes such as query and
+/// schema refresh requests.
+///
+/// This type is intentionally thin: it only turns `OutboundDispatch` batches
+/// into raw HTTP I/O and returns `RuntimeInput` values for adapters/runtime
+/// ingestion. It does not add any facade-level retries or response shaping
+/// beyond contract-required wrapping such as `query_id`.
 #[derive(Clone)]
 pub struct ReqwestHttpExecutor {
     client: reqwest::Client,
 }
 
 impl ReqwestHttpExecutor {
+    /// Builds an executor with the contract's default headers and timeout.
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: Self::build_client()?,

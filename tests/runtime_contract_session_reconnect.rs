@@ -398,9 +398,12 @@ fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds
             Some(&json!(2))
         );
         assert_eq!(
-            handle
-                .latest_snapshot()
-                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            handle.latest_snapshot().get([
+                "system",
+                "session",
+                "reconnect",
+                "scheduled_backoff_ms"
+            ]),
             Some(&json!(20))
         );
         assert_eq!(
@@ -416,9 +419,12 @@ fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds
             Some(&json!(false))
         );
         assert_eq!(
-            handle
-                .latest_snapshot()
-                .get(["system", "internal", "session-recovery-error", "attempt"]),
+            handle.latest_snapshot().get([
+                "system",
+                "internal",
+                "session-recovery-error",
+                "attempt"
+            ]),
             Some(&json!(1))
         );
         assert_eq!(
@@ -487,9 +493,12 @@ fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
             Some(&json!(2))
         );
         assert_eq!(
-            handle
-                .latest_snapshot()
-                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            handle.latest_snapshot().get([
+                "system",
+                "session",
+                "reconnect",
+                "scheduled_backoff_ms"
+            ]),
             Some(&json!(20))
         );
         assert_eq!(
@@ -559,9 +568,12 @@ fn session_runtime_applies_reconnect_backoff_before_retrying_recovery() {
             started_at.elapsed()
         );
         assert_eq!(
-            handle
-                .latest_snapshot()
-                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            handle.latest_snapshot().get([
+                "system",
+                "session",
+                "reconnect",
+                "scheduled_backoff_ms"
+            ]),
             Some(&json!(15))
         );
     });

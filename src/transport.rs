@@ -54,18 +54,21 @@ pub enum RawFrame {
     Close,
 }
 
+/// Handshake options applied when opening a websocket route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSocketConnectOptions {
     pub headers: Vec<(String, String)>,
 }
 
 impl WebSocketConnectOptions {
+    /// Adds a header to the websocket handshake request.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 }
 
+/// Minimal async transport abstraction used by connected session routes.
 pub trait Transport: Send {
     fn connect(&mut self) -> ContractFuture<'_, ()>;
     fn recv(&mut self) -> ContractFuture<'_, RawFrame>;
@@ -73,6 +76,11 @@ pub trait Transport: Send {
     fn close(&mut self) -> ContractFuture<'_, ()>;
 }
 
+/// Thin websocket transport built on `yawc`.
+///
+/// The transport requires an ambient Tokio runtime and only covers raw frame
+/// I/O. Route selection, reconnect policy, heartbeat semantics, and state
+/// projection remain the responsibility of higher contract layers.
 pub struct WebSocketTransport {
     url: String,
     connect_options: WebSocketConnectOptions,
@@ -80,6 +88,7 @@ pub struct WebSocketTransport {
 }
 
 impl WebSocketTransport {
+    /// Creates a websocket transport for the provided route URL.
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -88,11 +97,13 @@ impl WebSocketTransport {
         }
     }
 
+    /// Replaces the current websocket handshake options.
     pub fn with_connect_options(mut self, connect_options: WebSocketConnectOptions) -> Self {
         self.connect_options = connect_options;
         self
     }
 
+    /// Adds a handshake header to the websocket request.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.connect_options = self.connect_options.with_header(name, value);
         self

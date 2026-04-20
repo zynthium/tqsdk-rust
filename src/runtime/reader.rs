@@ -18,14 +18,17 @@ pub struct SnapshotReadGuard<'a> {
 }
 
 impl SnapshotReadGuard<'_> {
+    /// Returns a borrowed view over the currently locked snapshot.
     pub fn view(&self) -> StateReadView<'_> {
         self.guard.read()
     }
 
+    /// Returns the snapshot revision visible through this guard.
     pub fn revision(&self) -> Revision {
         self.view().revision()
     }
 
+    /// Looks up a value at the provided path.
     pub fn get<I, S>(&self, path: I) -> Option<&Value>
     where
         I: IntoIterator<Item = S>,
@@ -34,6 +37,12 @@ impl SnapshotReadGuard<'_> {
         self.view().get(path)
     }
 
+    /// Looks up a value using a borrowed path slice.
+    pub fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        self.view().get_path(path)
+    }
+
+    /// Decodes a value at the provided path.
     pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
     where
         T: DeserializeOwned,
@@ -41,6 +50,15 @@ impl SnapshotReadGuard<'_> {
         S: AsRef<str>,
     {
         self.view().decode(path)
+    }
+
+    /// Decodes a value using a borrowed path slice without per-segment
+    /// allocations on the success path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        self.view().decode_path(path)
     }
 }
 
@@ -51,18 +69,22 @@ pub struct CommitReadGuard<'a> {
 }
 
 impl CommitReadGuard<'_> {
+    /// Returns metadata for the commit this guard is pinned to.
     pub fn commit(&self) -> &CommitResult {
         &self.commit
     }
 
+    /// Returns a borrowed view over the state revision paired with this commit.
     pub fn view(&self) -> StateReadView<'_> {
         self.guard.read()
     }
 
+    /// Returns the commit revision represented by this guard.
     pub fn revision(&self) -> Revision {
         self.commit.revision
     }
 
+    /// Looks up a value at the provided path.
     pub fn get<I, S>(&self, path: I) -> Option<&Value>
     where
         I: IntoIterator<Item = S>,
@@ -71,6 +93,12 @@ impl CommitReadGuard<'_> {
         self.view().get(path)
     }
 
+    /// Looks up a value using a borrowed path slice.
+    pub fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        self.view().get_path(path)
+    }
+
+    /// Decodes a value at the provided path.
     pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
     where
         T: DeserializeOwned,
@@ -78,6 +106,15 @@ impl CommitReadGuard<'_> {
         S: AsRef<str>,
     {
         self.view().decode(path)
+    }
+
+    /// Decodes a value using a borrowed path slice without per-segment
+    /// allocations on the success path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        self.view().decode_path(path)
     }
 }
 
@@ -98,14 +135,17 @@ pub struct CursorLagged {
 }
 
 impl CursorLagged {
+    /// Returns the next revision the caller attempted to consume.
     pub fn expected_revision(self) -> Revision {
         self.expected_revision
     }
 
+    /// Returns the oldest revision still retained in the shared commit log.
     pub fn oldest_available_revision(self) -> Revision {
         self.oldest_available_revision
     }
 
+    /// Returns the current head revision visible in the shared state.
     pub fn current_revision(self) -> Revision {
         self.current_revision
     }
@@ -120,10 +160,12 @@ pub struct RuntimeReader {
 }
 
 impl RuntimeReader {
+    /// Returns the current head revision in the shared commit log.
     pub fn head_revision(&self) -> Option<Revision> {
         self.commit_log.head_revision()
     }
 
+    /// Creates a cursor positioned after the current head revision.
     pub fn cursor(&self) -> UpdateCursor {
         let next_revision = Revision::new(
             self.commit_log
@@ -133,16 +175,21 @@ impl RuntimeReader {
         self.commit_log.new_cursor(next_revision)
     }
 
+    /// Acquires a revision-bound snapshot read guard.
     pub fn read(&self) -> SnapshotReadGuard<'_> {
         SnapshotReadGuard {
             guard: self.state.read().expect("runtime state rwlock poisoned"),
         }
     }
 
+    /// Returns the next retained commit for the provided cursor, if available.
     pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
         self.commit_log.next(cursor)
     }
 
+    /// Returns a zero-copy guard pairing the next commit with the matching
+    /// state revision, or reports cursor lag when the caller fell behind
+    /// retention.
     pub fn next_view(
         &self,
         cursor: &mut UpdateCursor,
