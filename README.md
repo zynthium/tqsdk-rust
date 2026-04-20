@@ -1,27 +1,27 @@
 # `tqsdk-runtime-contract`
 
-Low-level async runtime contract for Tianqin / TQSDK server interaction.
+面向天勤 / TQSDK 服务交互的底层异步 runtime contract。
 
-This crate is the V1 core substrate of a Rust reimplementation of TQSDK. It is designed for performance-sensitive callers who want the thinnest possible layer over Tianqin's official services while keeping a stable abstraction boundary for higher-level facades.
+这个 crate 是 Rust 重写版 TQSDK 的 V1 核心基座，目标用户不是普通终端研究人员，而是对性能、稳定性和抽象边界有明确要求的上层 SDK / facade / 工具开发者。
 
 > [!IMPORTANT]
-> This crate is a pure async substrate. It never creates a Tokio runtime internally. Callers must provide an active Tokio runtime for auth, HTTP, websocket, reconnect backoff, and live session driving.
+> 这是一个纯 async substrate。crate 内部不会偷偷创建 Tokio runtime。凡是涉及 auth、HTTP、websocket、重连退避、live session 驱动的路径，调用方都必须自行提供 Tokio runtime。
 
 > [!NOTE]
-> This crate is not a `TqApi`, `wait_update()`, stream, or callback SDK. Those are intended to be built on top of this contract in separate facade crates.
+> 这个 crate 不是 `TqApi`，不是 `wait_update()` SDK，也不是 stream / callback SDK。后续这些高层能力应当建立在这个 contract 之上，而不是反过来侵入内核。
 
-## What This Crate Provides
+## 这个 Crate 提供什么
 
-- A protocol-complete runtime contract covering market diff, trade, replay, query, schema, auth, session, and system control.
-- A single command model: `RuntimeCommand -> OutboundDispatch -> RuntimeInput -> NormalizedMutation -> CommitResult`.
-- A single shared state tree for all visible data.
-- A reader-first consumption model built around `RuntimeReader`, `SnapshotReadGuard`, `CommitReadGuard`, and `UpdateCursor`.
-- Typed schema structs for official TQ objects and related metadata/query payloads.
-- Low-level transport, auth, topology bootstrap, HTTP execution, and session orchestration primitives.
+- 覆盖 market diff、trade、replay、query、schema、auth、session、system 的 protocol-complete runtime contract。
+- 一套统一命令模型：`RuntimeCommand -> OutboundDispatch -> RuntimeInput -> NormalizedMutation -> CommitResult`。
+- 一棵统一的 runtime state tree，用于承载所有上层可见状态。
+- 以 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`UpdateCursor` 为核心的 reader-first 消费模型。
+- 官方对象与相关 metadata/query 结果的 typed schema contract。
+- transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语。
 
-## Dependency
+## 依赖方式
 
-The Cargo package name is `tqsdk-runtime-contract`.
+Cargo 包名是 `tqsdk-runtime-contract`。
 
 ```toml
 [dependencies]
@@ -29,51 +29,51 @@ tqsdk-runtime-contract = { path = "../tqsdk-rust" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
-Replace the `path` dependency with your published version or git reference when you package this crate separately.
+后续如果你把它单独发布为 crate，把这里的 `path` 替换成发布版本号或 git 依赖即可。
 
-## Non-Goals
+## 明确不做什么
 
-- No high-level user convenience API.
-- No `wait_update()` facade.
-- No stream/callback facade.
-- No strategy helpers, tasks, GUI/reporting, downloader, DataFrame/polars integration, or rich typed view layer.
-- No hidden side channels that bypass the commit/revision model.
+- 不提供高层用户便利 API。
+- 不提供 `wait_update()` facade。
+- 不提供 stream / callback facade。
+- 不提供策略辅助、任务封装、GUI / 报表、下载器、DataFrame / polars 集成、富视图层。
+- 不提供绕过 commit / revision 模型的旁路结果通道。
 
-## Coverage
+## 覆盖范围
 
-The current core surface is intended to cover all protocol domains required by the official servers:
+当前核心层的目标是覆盖天勤官方服务交互所需的全部协议域：
 
-- DIFF protocol objects.
-- Trade commands and command status projection.
-- Replay/feed stepping and cursor state.
-- Auth/session/system lifecycle control.
-- GraphQL / HTTP query interaction.
-- Schema / metadata / bootstrap interaction.
+- DIFF 协议对象。
+- trade 命令与命令状态。
+- replay / feed 推进。
+- auth / session / system 生命周期控制。
+- GraphQL / HTTP query。
+- schema / metadata / bootstrap 交互。
 
-Typed schema coverage includes, among others:
+当前已纳入核心的 typed schema 主要包括：
 
-- Market objects: `Quote`, `Kline`, `Tick`, `Chart`, `ChartInfo`, `TradingTime`.
-- Trading objects: `Account`, `Position`, `Order`, `Trade`, `PreInsertOrder`, `Notification`, `SettlementInfo`.
-- Risk objects: `RiskManagementRule`, `RiskManagementData`, `SelfTrade`, `FrequentCancellation`, `TradePositionRatio`.
-- Security objects: `SecurityAccount`, `SecurityPosition`, `SecurityOrder`, `SecurityTrade`.
-- Query / metadata objects: `TradingStatus`, `SymbolSettlement`, `SymbolRanking`, `TradingCalendarDay`, `EdbIndexData`.
+- 市场对象：`Quote`、`Kline`、`Tick`、`Chart`、`ChartInfo`、`TradingTime`。
+- 交易对象：`Account`、`Position`、`Order`、`Trade`、`PreInsertOrder`、`Notification`、`SettlementInfo`。
+- 风控对象：`RiskManagementRule`、`RiskManagementData`、`SelfTrade`、`FrequentCancellation`、`TradePositionRatio`。
+- 证券对象：`SecurityAccount`、`SecurityPosition`、`SecurityOrder`、`SecurityTrade`。
+- 查询 / 元数据对象：`TradingStatus`、`SymbolSettlement`、`SymbolRanking`、`TradingCalendarDay`、`EdbIndexData`。
 
-## Core Surface
+## 核心公开面
 
-| API | Role |
+| API | 角色 |
 | --- | --- |
-| `RuntimeHandle` | Write-side entry point for command submission, ingestion, command status, and session state projection |
-| `RuntimeReader` | Canonical read-side entry point |
-| `SnapshotReadGuard` / `StateReadView` | Revision-bound zero-copy snapshot reads |
-| `CommitReadGuard` | Exact-revision commit + state read |
-| `UpdateCursor` | Independent commit consumption cursor |
-| `SessionRuntime` | Auth/bootstrap/connect/recover/flush/pump orchestration |
-| `AdapterRegistry` | Domain adapter registration and command/input encode/decode |
-| `TqAuthProvider` | Official Tianqin auth + topology resolver implementation |
-| `WebSocketTransport` / `DefaultRouteConnector` | Low-level websocket route connection |
-| `ReqwestHttpExecutor` | Pending HTTP route executor for query/schema-style requests |
+| `RuntimeHandle` | 写侧入口，负责命令提交、输入摄取、命令状态与 session 状态投影 |
+| `RuntimeReader` | 标准读侧入口 |
+| `SnapshotReadGuard` / `StateReadView` | revision-bound 的 zero-copy 快照读取 |
+| `CommitReadGuard` | exact revision 的 commit + state 读面 |
+| `UpdateCursor` | 独立推进的 commit 消费游标 |
+| `SessionRuntime` | auth / bootstrap / connect / recover / flush / pump 的统一编排器 |
+| `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
+| `TqAuthProvider` | 官方 Tianqin auth + topology resolver 实现 |
+| `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
+| `ReqwestHttpExecutor` | query / schema 这类 pending HTTP route 的执行器 |
 
-## Contract Model
+## 契约模型
 
 ```text
 RuntimeCommand
@@ -87,11 +87,11 @@ RuntimeCommand
   -> RuntimeReader / UpdateCursor
 ```
 
-The key architectural rule is simple: all user-visible state must enter the same runtime state tree, and all user-visible change must be explained by the same commit/revision/causality model.
+这个内核最重要的约束很简单：所有上层可见状态都必须进入同一棵状态树，所有上层可见变化都必须由同一套 commit / revision / causality 语义解释。
 
-## Quick Start
+## 快速开始
 
-### 1. Build the core runtime surface
+### 1. 先建立核心 runtime 面
 
 ```rust
 use tqsdk_runtime_contract::{
@@ -112,11 +112,11 @@ assert_eq!(cursor.next_revision().get(), 1);
 assert_eq!(reader.head_revision(), None);
 ```
 
-### 2. Submit low-level commands
+### 2. 提交底层命令
 
 ```rust
 use tqsdk_runtime_contract::{
-    Runtime, RuntimeCommand, MarketCommand, Symbol,
+    MarketCommand, Runtime, RuntimeCommand, Symbol,
 };
 
 async fn submit_quotes(handle: &impl Runtime) -> tqsdk_runtime_contract::Result<()> {
@@ -128,15 +128,15 @@ async fn submit_quotes(handle: &impl Runtime) -> tqsdk_runtime_contract::Result<
 
     println!("submitted command {}", command_id.get());
     let _reader = handle.reader();
-    // Command submission only creates outbound work.
-    // State becomes visible after the session/runtime ingests remote input.
+    // 命令提交只会生成 outbound work。
+    // 真正的状态写入要等 session/runtime 摄取远端输入之后才会可见。
     Ok(())
 }
 ```
 
-### 3. Drive a live session
+### 3. 驱动一个 live session
 
-For a real connection, the calling application assembles the runtime loop explicitly:
+真实联机时，调用方需要显式组装自己的 runtime loop：
 
 ```rust
 use tqsdk_runtime_contract::{
@@ -202,11 +202,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See [examples/live_probe.rs](examples/live_probe.rs) and [tests/runtime_contract_live_smoke.rs](tests/runtime_contract_live_smoke.rs) for complete end-to-end usage.
+完整可运行的端到端示例可参考：
 
-## Environment Variables
+- [examples/live_probe.rs](examples/live_probe.rs)
+- [tests/runtime_contract_live_smoke.rs](tests/runtime_contract_live_smoke.rs)
 
-`EndpointConfig::from_env()` recognizes the following endpoint overrides:
+## 环境变量
+
+`EndpointConfig::from_env()` 当前识别这些 endpoint 覆盖项：
 
 - `TQ_AUTH_URL`
 - `TQ_MD_URL`
@@ -217,31 +220,31 @@ See [examples/live_probe.rs](examples/live_probe.rs) and [tests/runtime_contract
 - `TQ_SCHEMA_URL`
 - `TQ_CHINESE_HOLIDAY_URL`
 
-The live probe and live smoke tests additionally use:
+live probe 与 live smoke 另外会用到：
 
 - `TQ_AUTH_USER`
 - `TQ_AUTH_PASS`
 - `TQ_TEST_SYMBOL`
 
-## Design Constraints
+## 设计约束
 
-- Single shared runtime state tree across all protocol domains.
-- Single revision source and single commit model.
-- Adapter code can encode/decode, but cannot publish commits on its own.
-- Reader-first abstraction so future `wait_update`, stream, and callback facades can share one substrate.
-- Compatibility helpers like `StateSnapshot` and `CommitLog` remain available, but they do not define the primary read model.
+- 所有协议域共享同一棵 runtime state tree。
+- 只有一套 revision 推进语义和一套 commit 模型。
+- adapter 可以编解码，但没有自行发布 commit 的权限。
+- 未来 `wait_update`、stream、callback facade 都应该只消费这个 substrate，而不是重定义内核。
+- `StateSnapshot`、`CommitLog` 这类兼容/底层原语仍然保留，但它们不定义主要读模型。
 
-## Validation
+## 验证
 
-The repository includes contract-focused tests for:
+仓库内已经包含面向 contract 的测试覆盖，主要验证：
 
-- V1 capability coverage across all protocol domains.
-- Reader surface and revision-bound state access.
-- Command ledger, commit retention, and reconnect behavior.
-- HTTP executor and websocket transport contracts.
-- Live smoke coverage for official auth/market/schema interaction.
+- V1 功能全景是否覆盖全部协议域。
+- reader surface 与 revision-bound state access。
+- command ledger、commit retention、reconnect 语义。
+- HTTP executor 与 websocket transport contract。
+- 官方服务 auth / market / schema 的 live smoke。
 
-Recommended regression entry points:
+建议的回归入口：
 
 ```bash
 cargo test -q --test runtime_contract_v1_capability
@@ -249,15 +252,15 @@ cargo test -q --test runtime_contract_reader_surface --test runtime_contract_sur
 cargo test -q
 ```
 
-## Architecture Notes
+## 架构文档
 
-The architecture docs in [`docs/architecture`](docs/architecture) describe the intended layering:
+仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明：
 
 - [`docs/architecture/README.md`](docs/architecture/README.md)
 - [`docs/architecture/runtime-core/overview.md`](docs/architecture/runtime-core/overview.md)
 - [`docs/architecture/validation.md`](docs/architecture/validation.md)
 
-The short version is:
+一句话总结就是：
 
-- V1 is the protocol-complete runtime contract.
-- V2+ facades should consume `RuntimeReader` and `UpdateCursor` instead of redefining the runtime core.
+- V1 交付的是 protocol-complete runtime contract。
+- V2 及以后所有 facade 都应建立在 `RuntimeReader` 和 `UpdateCursor` 之上，而不是反向改写 runtime core。
