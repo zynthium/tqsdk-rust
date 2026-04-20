@@ -1,4 +1,8 @@
-# `tqsdk-runtime-contract`
+# `tqsdk-rust`
+
+这是一个 Cargo workspace。
+
+当前已落地的 V1 core crate 是 `tqsdk-runtime-contract`，位于 `crates/tqsdk-runtime-contract`。后续 V2 不同风格的 facade 会继续作为独立子 crate 挂在这个 workspace 下面。
 
 面向天勤 / TQSDK 服务交互的底层异步 runtime contract。
 
@@ -25,7 +29,7 @@ Cargo 包名是 `tqsdk-runtime-contract`。
 
 ```toml
 [dependencies]
-tqsdk-runtime-contract = { path = "../tqsdk-rust" }
+tqsdk-runtime-contract = { path = "../tqsdk-rust/crates/tqsdk-runtime-contract" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
@@ -204,8 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 完整可运行的端到端示例可参考：
 
-- [examples/live_probe.rs](examples/live_probe.rs)
-- [tests/runtime_contract_live_smoke.rs](tests/runtime_contract_live_smoke.rs)
+- [crates/tqsdk-runtime-contract/examples/live_probe.rs](crates/tqsdk-runtime-contract/examples/live_probe.rs)
+- [crates/tqsdk-runtime-contract/tests/runtime_contract_live_smoke.rs](crates/tqsdk-runtime-contract/tests/runtime_contract_live_smoke.rs)
 
 ## 环境变量
 
@@ -250,9 +254,9 @@ live probe 与 live smoke 另外会用到：
 建议的回归入口：
 
 ```bash
-cargo test -q --test runtime_contract_v1_capability
-cargo test -q --test runtime_contract_reader_surface --test runtime_contract_surface
-cargo test -q
+cargo test -p tqsdk-runtime-contract -q --test runtime_contract_v1_capability
+cargo test -p tqsdk-runtime-contract -q --test runtime_contract_reader_surface --test runtime_contract_surface
+cargo test -p tqsdk-runtime-contract -q
 ```
 
 ## 架构文档

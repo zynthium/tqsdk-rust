@@ -76,7 +76,7 @@ V1 是：
 - GraphQL / HTTP query
 - schema / metadata / bootstrap 交互
 
-验证入口见 [validation.md](validation.md) 与 `tests/runtime_contract_v1_capability.rs`。
+验证入口见 [validation.md](validation.md) 与 `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`。
 
 ## 参考仓库的使用方式
 - `tqsdk-python` 是语义基准

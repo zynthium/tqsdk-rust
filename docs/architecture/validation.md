@@ -96,20 +96,20 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 | 能力面 | 主要验证文件 | 说明 |
 | :--- | :--- | :--- |
-| DIFF 协议对象 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_batch_commit.rs`、`tests/runtime_contract_adapters.rs` | 覆盖 market diff、trade diff、query/schema/replay 输入归一化与提交 |
-| trade 命令与状态 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_command_ledger.rs` | 覆盖 `req_login`、`insert_order`、`pre_insert_order` 及命令状态写回 |
-| replay/feed 推进 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs` | 覆盖 replay pending route 执行与 replay state 提交 |
-| auth/session/system 控制 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_tq_auth.rs`、`tests/runtime_contract_session_state.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
-| GraphQL / HTTP query | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
-| schema / metadata / bootstrap 交互 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
-| reader-first 读契约 | `tests/runtime_contract_reader_surface.rs`、`tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged` 与兼容 surface |
-| 官方对象 typed schema | `tests/runtime_contract_types.rs`、`tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface，以及 reader 侧 `decode<T>()` 接入 |
+| DIFF 协议对象 | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_batch_commit.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_adapters.rs` | 覆盖 market diff、trade diff、query/schema/replay 输入归一化与提交 |
+| trade 命令与状态 | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_command_ledger.rs` | 覆盖 `req_login`、`insert_order`、`pre_insert_order` 及命令状态写回 |
+| replay/feed 推进 | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_pending_route_executor.rs` | 覆盖 replay pending route 执行与 replay state 提交 |
+| auth/session/system 控制 | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_tq_auth.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_session_state.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
+| GraphQL / HTTP query | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
+| schema / metadata / bootstrap 交互 | `crates/tqsdk-runtime-contract/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
+| reader-first 读契约 | `crates/tqsdk-runtime-contract/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged` 与兼容 surface |
+| 官方对象 typed schema | `crates/tqsdk-runtime-contract/tests/runtime_contract_types.rs`、`crates/tqsdk-runtime-contract/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface，以及 reader 侧 `decode<T>()` 接入 |
 
 推荐的 V1 回归入口：
 
-1. `cargo test -q --test runtime_contract_v1_capability`
-2. `cargo test -q --test runtime_contract_reader_surface --test runtime_contract_surface`
-3. `cargo test -q`
+1. `cargo test -p tqsdk-runtime-contract -q --test runtime_contract_v1_capability`
+2. `cargo test -p tqsdk-runtime-contract -q --test runtime_contract_reader_surface --test runtime_contract_surface`
+3. `cargo test -p tqsdk-runtime-contract -q`
 
 ## V2+ adapter 验收基线
 ### wait adapter
