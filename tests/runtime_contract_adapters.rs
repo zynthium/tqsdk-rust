@@ -189,6 +189,39 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     );
     assert_json_frame(&trading_status_requests[1], json!({"aid": "peek_message"}));
 
+    let cancel_chart_requests = registry
+        .encode_command(&RuntimeCommand::Market(MarketCommand::CancelChart {
+            chart_id: "chart-1".to_string(),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &cancel_chart_requests[0],
+        json!({
+            "aid": "set_chart",
+            "chart_id": "chart-1",
+            "ins_list": "",
+            "duration": 60_000_000_000_i64,
+            "view_width": 128,
+        }),
+    );
+    assert_json_frame(&cancel_chart_requests[1], json!({"aid": "peek_message"}));
+
+    let trading_status_unsubscribe = registry
+        .encode_command(&RuntimeCommand::Market(
+            MarketCommand::UnsubscribeTradingStatus {
+                symbols: vec![Symbol::new("CZCE.SR609")],
+            },
+        ))
+        .unwrap();
+    assert_json_frame(
+        &trading_status_unsubscribe[0],
+        json!({"aid": "subscribe_trading_status", "ins_list": "SHFE.au2602"}),
+    );
+    assert_json_frame(
+        &trading_status_unsubscribe[1],
+        json!({"aid": "peek_message"}),
+    );
+
     let trade_login = registry
         .encode_command(&RuntimeCommand::Trade(TradeCommand::Login(
             TradeLoginCommand {
@@ -217,6 +250,18 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         }),
     );
 
+    let trade_confirm_settlement = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::ConfirmSettlement {
+            account_id: AccountId::new("simnow"),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_confirm_settlement[0],
+        json!({
+            "aid": "confirm_settlement",
+        }),
+    );
+
     let trade_query_account_info = registry
         .encode_command(&RuntimeCommand::Trade(TradeCommand::QueryAccountInfo {
             account_id: AccountId::new("simnow"),
@@ -240,6 +285,21 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         json!({
             "aid": "qry_account_register",
             "user_id": "simnow",
+        }),
+    );
+
+    let trade_query_settlement_info = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::QuerySettlementInfo {
+            account_id: AccountId::new("simnow"),
+            trading_day: 20260420,
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_query_settlement_info[0],
+        json!({
+            "aid": "qry_settlement_info",
+            "user_name": "simnow",
+            "trading_day": "20260420",
         }),
     );
 
@@ -342,6 +402,46 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         }),
     );
 
+    let trade_cancel = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::CancelOrder {
+            account_id: AccountId::new("simnow"),
+            order_id: OrderId::new("order-1"),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_cancel[0],
+        json!({
+            "aid": "cancel_order",
+            "user_id": "simnow",
+            "order_id": "order-1",
+        }),
+    );
+
+    let trade_transfer = registry
+        .encode_command(&RuntimeCommand::Trade(TradeCommand::Transfer {
+            account_id: AccountId::new("simnow"),
+            bank_id: "b001".to_string(),
+            bank_password: "bank-pass".to_string(),
+            future_account: "future-acc".to_string(),
+            future_password: "future-pass".to_string(),
+            currency: "CNY".to_string(),
+            amount: json!(1500.0),
+        }))
+        .unwrap();
+    assert_json_frame(
+        &trade_transfer[0],
+        json!({
+            "aid": "req_transfer",
+            "user_id": "simnow",
+            "bank_id": "b001",
+            "bank_password": "bank-pass",
+            "future_account": "future-acc",
+            "future_password": "future-pass",
+            "currency": "CNY",
+            "amount": 1500.0,
+        }),
+    );
+
     let query_fetch = registry
         .encode_command(&RuntimeCommand::Query(QueryCommand::Fetch {
             query_id: QueryId::new("quotes-page-1"),
@@ -385,6 +485,22 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         vec![OutboundRequest::Replay(
             tqsdk_runtime_contract::ReplayRequest { action: "step" }
         )]
+    );
+
+    assert_eq!(
+        registry
+            .encode_command(&RuntimeCommand::Replay(ReplayCommand::Reset))
+            .unwrap(),
+        vec![OutboundRequest::Replay(
+            tqsdk_runtime_contract::ReplayRequest { action: "reset" }
+        )]
+    );
+
+    assert_eq!(
+        registry
+            .encode_command(&RuntimeCommand::System(SystemCommand::Shutdown))
+            .unwrap(),
+        vec![OutboundRequest::internal_label("shutdown-runtime")]
     );
 
     assert_eq!(
