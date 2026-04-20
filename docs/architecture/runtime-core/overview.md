@@ -92,6 +92,7 @@ pub trait Runtime {
 - `RuntimeReader` 是 V1 的 canonical read-side entry point
 - `RuntimeReader::read()` 提供当前 head 的 zero-copy 读视图
 - `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
+- `SnapshotReadGuard` / `CommitReadGuard` / `StateReadView` 可以按路径 `decode<T>()` 成官方 schema，但这仍然只是底层 schema decode，不是 typed state facade
 - `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为
 - V1 不直接公开 `wait_update()`、stream、callback facade
 - 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上

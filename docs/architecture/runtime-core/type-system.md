@@ -106,6 +106,11 @@ pub struct SessionConfig {
 
 这些类型只表达远端状态树对象的字段契约、默认值和稀疏 payload 兼容语义，不表达 reader 绑定、增量更新语义或 facade 行为。
 
+它们进入 core 的方式应该是：
+- 通过 `RuntimeReader::read()` / `RuntimeReader::next_view()` 拿到 revision-bound 视图
+- 通过 `SnapshotReadGuard` / `CommitReadGuard` / `StateReadView::decode<T>()` 在需要时按路径解码为 typed schema
+- 不能把 runtime state 本身提前锁成 typed object graph
+
 ## 明确后置到后续阶段的类型
 - `TqApi`
 - user-facing `ChangeTarget`

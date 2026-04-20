@@ -228,12 +228,8 @@ impl RuntimeHandle {
             mutations.push(command_cleanup_mutation(evicted_command_id));
         }
 
-        let commit = self.apply_and_publish_locked(
-            &mut inner,
-            mutations,
-            vec![command_id],
-            scope,
-        )?;
+        let commit =
+            self.apply_and_publish_locked(&mut inner, mutations, vec![command_id], scope)?;
 
         if status.is_terminal() && commit.is_some() {
             inner
@@ -481,20 +477,22 @@ mod tests {
     fn released_terminal_command_statuses_drop_ledger_metadata_but_remain_idempotent() {
         let handle = runtime_with_default_adapters();
 
-        let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
-            TradeInsertOrderCommand {
-                account_id: AccountId::new("simnow"),
-                order_id: OrderId::new("order-1"),
-                symbol: Symbol::new("SHFE.au2602"),
-                direction: TradeDirection::Buy,
-                offset: Some(TradeOffset::Open),
-                volume: 2,
-                price_type: TradePriceType::Limit,
-                limit_price: Some(json!(618.5)),
-                time_condition: TradeTimeCondition::Gfd,
-                volume_condition: TradeVolumeCondition::Any,
-            },
-        ))))
+        let command_id = block_on(
+            handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+                TradeInsertOrderCommand {
+                    account_id: AccountId::new("simnow"),
+                    order_id: OrderId::new("order-1"),
+                    symbol: Symbol::new("SHFE.au2602"),
+                    direction: TradeDirection::Buy,
+                    offset: Some(TradeOffset::Open),
+                    volume: 2,
+                    price_type: TradePriceType::Limit,
+                    limit_price: Some(json!(618.5)),
+                    time_condition: TradeTimeCondition::Gfd,
+                    volume_condition: TradeVolumeCondition::Any,
+                },
+            ))),
+        )
         .unwrap();
 
         assert_eq!(
@@ -603,20 +601,22 @@ mod tests {
     }
 
     fn submit_rejected_trade_command(handle: &RuntimeHandle, order_id: &str) -> CommandId {
-        let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
-            TradeInsertOrderCommand {
-                account_id: AccountId::new("simnow"),
-                order_id: OrderId::new(order_id),
-                symbol: Symbol::new("SHFE.au2602"),
-                direction: TradeDirection::Buy,
-                offset: Some(TradeOffset::Open),
-                volume: 2,
-                price_type: TradePriceType::Limit,
-                limit_price: Some(json!(618.5)),
-                time_condition: TradeTimeCondition::Gfd,
-                volume_condition: TradeVolumeCondition::Any,
-            },
-        ))))
+        let command_id = block_on(
+            handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+                TradeInsertOrderCommand {
+                    account_id: AccountId::new("simnow"),
+                    order_id: OrderId::new(order_id),
+                    symbol: Symbol::new("SHFE.au2602"),
+                    direction: TradeDirection::Buy,
+                    offset: Some(TradeOffset::Open),
+                    volume: 2,
+                    price_type: TradePriceType::Limit,
+                    limit_price: Some(json!(618.5)),
+                    time_condition: TradeTimeCondition::Gfd,
+                    volume_condition: TradeVolumeCondition::Any,
+                },
+            ))),
+        )
         .unwrap();
 
         handle
@@ -662,6 +662,5 @@ mod tests {
 
     unsafe fn noop(_: *const ()) {}
 
-    static NOOP_WAKER_VTABLE: RawWakerVTable =
-        RawWakerVTable::new(noop_clone, noop, noop, noop);
+    static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
 }

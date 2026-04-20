@@ -1,9 +1,11 @@
 use std::fmt;
 use std::sync::RwLockReadGuard;
 
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
+    Result,
     ids::Revision,
     state::{CommitResult, StateReadView, StateStore, UpdateCursor},
 };
@@ -30,6 +32,15 @@ impl SnapshotReadGuard<'_> {
         S: AsRef<str>,
     {
         self.view().get(path)
+    }
+
+    pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.view().decode(path)
     }
 }
 
@@ -58,6 +69,15 @@ impl CommitReadGuard<'_> {
         S: AsRef<str>,
     {
         self.view().get(path)
+    }
+
+    pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.view().decode(path)
     }
 }
 

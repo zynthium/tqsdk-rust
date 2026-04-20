@@ -4,11 +4,11 @@ use tqsdk_runtime_contract::{
     CommandStatus, CommitLog, CommitReadGuard, CommitResult, CommitScope, ContractError, CursorId,
     CursorLagged, FieldMutation, MarketChartCommand, MarketCommand, MutationSource,
     NormalizedMutation, ObjectKey, OrderId, OutboundRequest, ProtocolAdapter, ProtocolDomain,
-    QueryCommand, QueryId, ReplayCommand, Result, Revision, Runtime, RuntimeCommand, RuntimeHandle,
-    RuntimeInput, RuntimeReader, SchemaCommand, SchemaId, SeriesKey, SnapshotReadGuard, StatePath,
-    StateReadView, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType,
-    TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
+    QueryCommand, QueryId, Quote, ReplayCommand, Result, Revision, Runtime, RuntimeCommand,
+    RuntimeHandle, RuntimeInput, RuntimeReader, SchemaCommand, SchemaId, SeriesKey,
+    SnapshotReadGuard, StatePath, StateReadView, StateSnapshot, Symbol, SystemCommand,
+    TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePreInsertOrderCommand,
+    TradePriceType, TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
 };
 
 struct TestAdapter;
@@ -209,6 +209,18 @@ fn reader_surface_is_primary_and_compatibility_surface_remains_available() {
     assert_eq!(reader.head_revision(), None);
     assert_eq!(read_guard.revision().get(), 0);
     assert_eq!(read_view.revision().get(), 0);
+    assert!(
+        read_guard
+            .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        compatibility_snapshot
+            .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(default_handle.latest_snapshot().revision().get(), 0);
     assert_eq!(default_handle.cursor().next_revision().get(), 1);
     assert_eq!(default_reader.cursor().next_revision().get(), 1);

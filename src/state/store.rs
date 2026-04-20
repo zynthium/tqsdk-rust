@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{events::NormalizedMutation, ids::Revision};
+use crate::{Result, events::NormalizedMutation, ids::Revision};
 
 use super::{PathSegment, StateReadView};
 
@@ -36,6 +36,15 @@ impl StateSnapshot {
         self.read().get(path)
     }
 
+    pub fn decode<T, I, S>(&self, path: I) -> Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.read().decode(path)
+    }
+
     pub fn read(&self) -> StateReadView<'_> {
         StateReadView::new(self.revision, &self.data)
     }
@@ -60,7 +69,12 @@ impl StateSnapshot {
 
 fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) -> Option<NormalizedMutation> {
     let mut changed_fields = Vec::new();
-    apply_mutation_at_path(root, mutation.path.segments(), &mutation.fields, &mut changed_fields);
+    apply_mutation_at_path(
+        root,
+        mutation.path.segments(),
+        &mutation.fields,
+        &mut changed_fields,
+    );
 
     if changed_fields.is_empty() {
         None

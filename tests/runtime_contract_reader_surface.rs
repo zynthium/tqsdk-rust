@@ -4,8 +4,8 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, Revision, Runtime,
-    RuntimeHandle, RuntimeInput, RuntimeReader, Symbol,
+    AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, ProtocolDomain, Quote,
+    Revision, Runtime, RuntimeHandle, RuntimeInput, RuntimeReader, Symbol,
 };
 
 #[test]
@@ -29,7 +29,10 @@ fn runtime_reader_exposes_zero_copy_snapshot_reads_and_cursor_access() {
                     "aid": "rtn_data",
                     "data": [{
                         "quotes": {
-                            "SHFE.au2602": { "last_price": 512.0 }
+                            "SHFE.au2602": {
+                                "instrument_id": "SHFE.au2602",
+                                "last_price": 512.0
+                            }
                         }
                     }]
                 })),
@@ -46,6 +49,12 @@ fn runtime_reader_exposes_zero_copy_snapshot_reads_and_cursor_access() {
             snapshot.get(["quotes", "SHFE.au2602", "last_price"]),
             Some(&json!(512.0))
         );
+        let quote = snapshot
+            .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+            .expect("quote decode should succeed")
+            .expect("quote should exist");
+        assert_eq!(quote.instrument_id, "SHFE.au2602");
+        assert_eq!(quote.last_price, 512.0);
     }
 
     let commit = reader.next(&mut cursor).unwrap();
@@ -67,6 +76,11 @@ fn runtime_reader_next_view_returns_revision_consistent_zero_copy_guard() {
         guard.get(["quotes", "SHFE.au2602", "last_price"]),
         Some(&json!(512.0))
     );
+    let quote = guard
+        .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+        .expect("commit quote decode should succeed")
+        .expect("commit quote should exist");
+    assert_eq!(quote.last_price, 512.0);
 }
 
 #[test]
@@ -105,6 +119,50 @@ fn runtime_handle_runtime_trait_surface_uses_reader_not_owned_snapshot() {
     assert_eq!(command_id.get(), 1);
 }
 
+#[test]
+fn runtime_reader_decode_distinguishes_missing_paths_from_invalid_payloads() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+
+    {
+        let snapshot = reader.read();
+        assert!(
+            snapshot
+                .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+                .expect("missing paths should not fail")
+                .is_none()
+        );
+    }
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "instrument_id": "SHFE.au2602",
+                                "trading_time": "invalid"
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+
+    let snapshot = reader.read();
+    let err = snapshot
+        .decode::<Quote, _, _>(["quotes", "SHFE.au2602"])
+        .expect_err("invalid payload should surface as validation error");
+    assert!(matches!(err, ContractError::Validation(_)));
+}
+
 fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
@@ -121,7 +179,10 @@ fn ingest_quote(handle: &RuntimeHandle, last_price: f64) {
                     "aid": "rtn_data",
                     "data": [{
                         "quotes": {
-                            "SHFE.au2602": { "last_price": last_price }
+                            "SHFE.au2602": {
+                                "instrument_id": "SHFE.au2602",
+                                "last_price": last_price
+                            }
                         }
                     }]
                 })),

@@ -101,7 +101,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | GraphQL / HTTP query | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
 | reader-first 读契约 | `tests/runtime_contract_reader_surface.rs`、`tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged` 与兼容 surface |
-| 官方对象 typed schema | `tests/runtime_contract_types.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface |
+| 官方对象 typed schema | `tests/runtime_contract_types.rs`、`tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface，以及 reader 侧 `decode<T>()` 接入 |
 
 推荐的 V1 回归入口：
 

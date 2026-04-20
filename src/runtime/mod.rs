@@ -25,10 +25,7 @@ pub(crate) struct RuntimeCore {
 pub(crate) type SharedState = Arc<RwLock<StateStore>>;
 
 impl RuntimeCore {
-    pub(crate) fn new(
-        adapters: AdapterRegistry,
-        max_retained_terminal_commands: usize,
-    ) -> Self {
+    pub(crate) fn new(adapters: AdapterRegistry, max_retained_terminal_commands: usize) -> Self {
         Self {
             adapters,
             outbound: VecDeque::new(),

@@ -1,10 +1,11 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
-    Account, CategoryInfo, Chart, FrequentCancellation, FrequentCancellationRule, Kline,
-    Notification, Order, Position, PreInsertOrder, Quote, RiskManagementData, RiskManagementRule,
-    SecurityAccount, SecurityOrder, SecurityPosition, SecurityTrade, SelfTrade, SelfTradeRule,
-    SettlementInfo, SymbolRanking, SymbolSettlement, Tick, Trade, TradePositionRatio,
-    TradePositionRatioRule, TradingStatus, TradingTime,
+    Account, CategoryInfo, Chart, ChartInfo, EdbIndexData, FrequentCancellation,
+    FrequentCancellationRule, Kline, Notification, Order, Position, PreInsertOrder, Quote,
+    RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
+    SecurityTrade, SelfTrade, SelfTradeRule, SettlementInfo, SymbolRanking, SymbolSettlement, Tick,
+    Trade, TradePositionRatio, TradePositionRatioRule, TradingCalendarDay, TradingStatus,
+    TradingTime,
 };
 
 #[test]
@@ -65,6 +66,17 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
     assert_eq!(chart.left_id, 10);
     assert_eq!(chart.state.get("ins_list"), Some(&json!("SHFE.au2602")));
 
+    let chart_info = serde_json::from_value::<ChartInfo>(json!({
+        "chart_id": "chart-1",
+        "left_id": 10,
+        "right_id": 42,
+        "more_data": true,
+        "ready": false,
+        "view_width": 128
+    }))
+    .expect("chart info schema should deserialize");
+    assert_eq!(chart_info.chart_id, "chart-1");
+
     let settlement = serde_json::from_value::<SymbolSettlement>(json!({
         "datetime": "2026-04-20",
         "symbol": "SHFE.au2602",
@@ -92,10 +104,30 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
     .expect("symbol ranking schema should deserialize");
     assert_eq!(ranking.exchange_id, "SHFE");
 
+    let trading_calendar_day = serde_json::from_value::<TradingCalendarDay>(json!({
+        "date": "2026-04-20",
+        "trading": true
+    }))
+    .expect("trading calendar day schema should deserialize");
+    assert!(trading_calendar_day.trading);
+
+    let edb_index_data = serde_json::from_value::<EdbIndexData>(json!({
+        "date": "2026-04-20",
+        "values": {
+            "1": 3.125,
+            "2": 2.75
+        }
+    }))
+    .expect("edb index data schema should deserialize");
+    assert_eq!(edb_index_data.values.get(&1), Some(&3.125));
+
     let _surface_refs = (
         Option::<TradingTime>::None,
         Option::<CategoryInfo>::None,
         Option::<Kline>::None,
+        Option::<ChartInfo>::None,
+        Option::<TradingCalendarDay>::None,
+        Option::<EdbIndexData>::None,
     );
 }
 
