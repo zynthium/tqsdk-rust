@@ -976,10 +976,28 @@ fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
             },
             bar_id: bar_id.parse().ok()?,
         }),
+        [root, symbol, duration, branch, bar_id] if root == "klines" && branch == "data" => {
+            Some(ObjectKey::Kline {
+                series: SeriesKey {
+                    primary: Symbol::new(symbol.clone()),
+                    secondary: vec![],
+                    duration_ns: duration.parse().ok()?,
+                    view_width: 0,
+                    right_id: None,
+                },
+                bar_id: bar_id.parse().ok()?,
+            })
+        }
         [root, symbol, tick_id] if root == "ticks" => Some(ObjectKey::Tick {
             symbol: Symbol::new(symbol.clone()),
             tick_id: tick_id.parse().ok()?,
         }),
+        [root, symbol, branch, tick_id] if root == "ticks" && branch == "data" => {
+            Some(ObjectKey::Tick {
+                symbol: Symbol::new(symbol.clone()),
+                tick_id: tick_id.parse().ok()?,
+            })
+        }
         [root, account_id, branch, _currency] if root == "trade" && branch == "accounts" => {
             Some(ObjectKey::Account {
                 account_id: AccountId::new(account_id.clone()),

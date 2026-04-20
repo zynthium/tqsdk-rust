@@ -1125,6 +1125,118 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
     );
 }
 
+#[test]
+fn default_protocol_adapters_decode_live_serial_data_shapes_into_typed_mutations() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let market = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "market.shared".to_string(),
+            domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [
+                    {
+                        "klines": {
+                            "SHFE.au2602": {
+                                "60000000000": {
+                                    "last_id": 42,
+                                    "data": {
+                                        "42": {
+                                            "open": 610.0,
+                                            "close": 618.5
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "ticks": {
+                            "SHFE.au2602": {
+                                "last_id": 17,
+                                "data": {
+                                    "17": {
+                                        "last_price": 618.5,
+                                        "volume": 200
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            })),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        market,
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["klines", "SHFE.au2602", "60000000000"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "last_id".to_string(),
+                    value: json!(42),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["klines", "SHFE.au2602", "60000000000", "data", "42"]),
+                object: Some(ObjectKey::Kline {
+                    series: tqsdk_runtime_contract::SeriesKey {
+                        primary: Symbol::new("SHFE.au2602"),
+                        secondary: vec![],
+                        duration_ns: 60_000_000_000,
+                        view_width: 0,
+                        right_id: None,
+                    },
+                    bar_id: 42,
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "close".to_string(),
+                        value: json!(618.5),
+                    },
+                    FieldMutation {
+                        field: "open".to_string(),
+                        value: json!(610.0),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["ticks", "SHFE.au2602"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "last_id".to_string(),
+                    value: json!(17),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["ticks", "SHFE.au2602", "data", "17"]),
+                object: Some(ObjectKey::Tick {
+                    symbol: Symbol::new("SHFE.au2602"),
+                    tick_id: 17,
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(618.5),
+                    },
+                    FieldMutation {
+                        field: "volume".to_string(),
+                        value: json!(200),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            }
+        ]
+    );
+}
+
 fn mutation(prefix: &str, field: &str, value: &str, source: MutationSource) -> NormalizedMutation {
     NormalizedMutation {
         path: StatePath::new([prefix]),
