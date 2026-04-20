@@ -178,8 +178,8 @@ fn read_handshake_request(stream: &mut TcpStream) -> io::Result<HandshakeRequest
         buffer.extend_from_slice(&chunk[..read]);
     }
 
-    let request = String::from_utf8(buffer)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let request =
+        String::from_utf8(buffer).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     let mut lines = request.split("\r\n").filter(|line| !line.is_empty());
     let request_line = lines
         .next()

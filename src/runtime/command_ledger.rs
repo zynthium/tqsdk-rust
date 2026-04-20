@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    commands::{MarketCommand, QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand, TradeCommand},
+    commands::{
+        MarketCommand, QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand,
+        TradeCommand,
+    },
     ids::{CommandId, ProtocolDomain, Symbol},
 };
 
@@ -211,5 +214,10 @@ pub(crate) fn command_detail_fields_from_command(cmd: &RuntimeCommand) -> Map<St
 }
 
 fn symbols_json(symbols: &[Symbol]) -> Value {
-    json!(symbols.iter().map(|symbol| symbol.as_str()).collect::<Vec<_>>())
+    json!(
+        symbols
+            .iter()
+            .map(|symbol| symbol.as_str())
+            .collect::<Vec<_>>()
+    )
 }

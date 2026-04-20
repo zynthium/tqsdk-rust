@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::ids::Revision;
 
+/// Borrowed, revision-bound view into the runtime state tree.
 #[derive(Clone, Copy)]
 pub struct StateReadView<'a> {
     revision: Revision,

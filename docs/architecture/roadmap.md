@@ -27,14 +27,16 @@
 ### Phase 1：Protocol-Complete Runtime Contract
 包含：
 - `RuntimeHandle`
+- `RuntimeReader`
+- `SnapshotReadGuard`
+- `StateReadView`
 - `RuntimeCommand`
 - `RuntimeInput`
-- `StateSnapshot`
 - `Revision`
 - `CommitResult`
 - `ChangeSet`
-- `CommitLog`
 - `UpdateCursor`
+- `StateSnapshot` / `CommitLog`（兼容与底层原语）
 - `CommandLedger`
 - `AdapterRegistry`
 - `SystemAdapter`
@@ -44,7 +46,7 @@
 - `ReplayAdapter`
 
 目标：
-- 所有远端交互都进入统一 `command -> mutation -> commit` 链路
+- 所有远端交互都进入统一 `command -> mutation -> commit -> reader` 链路
 - 不暴露任何用户态 facade
 
 ### Phase 2：Consumption Adapters
@@ -55,7 +57,7 @@
 - backpressure / cursor consumption policy
 
 目标：
-- 验证同一 commit log / cursor 模型足以支撑多种消费风格
+- 验证同一 reader / cursor 模型足以支撑多种消费风格
 
 ### Phase 3：Typed User Facades
 包含：

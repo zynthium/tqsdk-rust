@@ -59,11 +59,13 @@ fn runtime_handle_runtime_trait_surface_uses_reader_not_owned_snapshot() {
     assert_eq!(reader.head_revision(), None);
     assert_eq!(reader.cursor().next_revision().get(), 1);
 
-    let command_id = block_on(handle.submit(tqsdk_runtime_contract::RuntimeCommand::Market(
-        tqsdk_runtime_contract::MarketCommand::SubscribeQuotes {
-            symbols: vec![Symbol::new("SHFE.au2602")],
-        },
-    )))
+    let command_id = block_on(
+        handle.submit(tqsdk_runtime_contract::RuntimeCommand::Market(
+            tqsdk_runtime_contract::MarketCommand::SubscribeQuotes {
+                symbols: vec![Symbol::new("SHFE.au2602")],
+            },
+        )),
+    )
     .unwrap();
     assert_eq!(command_id.get(), 1);
 }

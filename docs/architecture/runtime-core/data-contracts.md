@@ -137,6 +137,18 @@ pub enum CommitScope {
 }
 ```
 
+## `RuntimeReader`
+```rust
+pub struct RuntimeReader;
+pub struct SnapshotReadGuard<'a>;
+pub struct StateReadView<'a>;
+```
+
+- `RuntimeReader` 是稳定的读侧入口
+- `SnapshotReadGuard` 将一次读取绑定到单个 revision
+- `StateReadView` 是零拷贝借用视图
+- `StateSnapshot` 只在确实需要 detached owned snapshot 时使用
+
 ## 一条完整数据链
 ```text
 RuntimeCommand
@@ -150,5 +162,6 @@ RuntimeCommand
   -> CommitAssembler.assemble()
   -> CommitResult
   -> CommitLog.publish()
-  -> UpdateCursor
+  -> RuntimeReader.next()
+  -> SnapshotReadGuard / StateReadView
 ```

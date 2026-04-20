@@ -5,7 +5,9 @@ use tqsdk_runtime_contract::{EndpointConfig, MarketSessionTarget};
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -72,7 +74,10 @@ fn endpoint_config_from_env_supports_tqsdk_rs_alias_env_vars() {
 
     let config = EndpointConfig::from_env();
     assert_eq!(config.query_url.as_deref(), Some("https://ins.env/graphql"));
-    assert_eq!(config.schema_url.as_deref(), Some("https://files.env/metadata/"));
+    assert_eq!(
+        config.schema_url.as_deref(),
+        Some("https://files.env/metadata/")
+    );
 
     restore_env(saved);
 }

@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
 
-use crate::{adapter::AdapterRegistry, ids::{CursorId, Revision}, state::UpdateCursor};
+use crate::{
+    adapter::AdapterRegistry,
+    ids::{CursorId, Revision},
+    state::UpdateCursor,
+};
 
 mod command_ledger;
 mod commit_engine;

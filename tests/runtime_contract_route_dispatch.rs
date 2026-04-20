@@ -79,7 +79,9 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
         );
         assert_eq!(
             socket.recv().unwrap(),
-            ClientFrame::Text(json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string())
+            ClientFrame::Text(
+                json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string()
+            )
         );
         assert_eq!(
             socket.recv().unwrap(),

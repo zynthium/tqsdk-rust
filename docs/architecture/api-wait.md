@@ -5,7 +5,7 @@
 
 它不是 V1 的基础契约，而是 V2+ 的用户态适配层，目标是：
 
-- 用同一个 `CommitLog` / `UpdateCursor` 构建 Python 风格的 `wait_update()` 语义
+- 用同一个 `RuntimeReader` / `UpdateCursor` 构建 Python 风格的 `wait_update()` 语义
 - 提供 `TqApi`、typed views、`snapshot()`、`is_changing()` 等 facade
 - 不回改 runtime core 的提交模型
 
@@ -22,12 +22,13 @@
 `tqsdk-api-wait` 必须只依赖这些基础能力：
 
 - `RuntimeHandle`
-- `StateSnapshot`
+- `RuntimeReader`
+- `SnapshotReadGuard` / `StateReadView`
 - `CommitResult`
 - `ChangeSet`
-- `CommitLog`
 - `UpdateCursor`
 - `StatePath` / `ObjectKey`
+- `StateSnapshot`（仅在 facade 明确需要 detached owned snapshot 时）
 
 如果 wait adapter 需要额外内核能力，说明 V1 contract 设计仍然不完整。
 
@@ -53,8 +54,9 @@ wait adapter 层未来可以提供：
 但这些都只是对 runtime contract 的消费包装，不属于 V1。
 
 ## 关键约束
-- `wait_update()` 只消费 cursor，不生成 commit
-- `snapshot()` 只读取某个已提交 revision 的稳定状态
+- `wait_update()` 只消费 `RuntimeReader::next()` / `UpdateCursor`，不生成 commit
+- facade 如提供 `snapshot()`，默认应建立在某个已提交 revision 的借用读视图之上
+- 只有明确需要 detached ownership 时，才应退回 `StateSnapshot` clone 路径
 - `is_changing()` 只解释最近一次成功消费到的 commit
 - 所有 timeout / 初始 ready / 重连行为都必须建立在同一 commit 模型上
 

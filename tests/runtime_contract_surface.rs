@@ -5,8 +5,8 @@ use tqsdk_runtime_contract::{
     MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId,
     OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Result,
     Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, RuntimeReader, SchemaCommand,
-    SchemaId, SeriesKey, SnapshotReadGuard, StatePath, StateSnapshot, Symbol, SystemCommand,
-    TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
+    SchemaId, SeriesKey, SnapshotReadGuard, StatePath, StateReadView, StateSnapshot, Symbol,
+    SystemCommand, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
     TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
     UpdateCursor,
 };
@@ -186,7 +186,7 @@ fn snapshot_cursor_and_mutation_types_are_revision_bound() {
 }
 
 #[test]
-fn adapter_registry_and_runtime_handle_surface_compile() {
+fn reader_surface_is_primary_and_compatibility_surface_remains_available() {
     let mut registry = AdapterRegistry::new();
     registry.register_domain(ProtocolDomain::System);
 
@@ -194,17 +194,21 @@ fn adapter_registry_and_runtime_handle_surface_compile() {
     let default_handle = RuntimeHandle::default();
     let reader: RuntimeReader = handle.reader();
     let default_reader: RuntimeReader = default_handle.reader();
-    let snapshot: StateSnapshot = handle.latest_snapshot();
-    let cursor: UpdateCursor = handle.cursor();
+    let view_cursor: UpdateCursor = reader.cursor();
+    let compatibility_cursor: UpdateCursor = handle.cursor();
+    let compatibility_snapshot: StateSnapshot = handle.latest_snapshot();
     let log = CommitLog::new();
     let read_guard: SnapshotReadGuard<'_> = reader.read();
+    let read_view: StateReadView<'_> = read_guard.view();
 
     assert_eq!(registry.domains(), &[ProtocolDomain::System]);
-    assert_eq!(snapshot.revision().get(), 0);
-    assert_eq!(cursor.next_revision().get(), 1);
+    assert_eq!(view_cursor.next_revision().get(), 1);
+    assert_eq!(compatibility_cursor.next_revision().get(), 1);
+    assert_eq!(compatibility_snapshot.revision().get(), 0);
     assert_eq!(log.head_revision(), None);
     assert_eq!(reader.head_revision(), None);
     assert_eq!(read_guard.revision().get(), 0);
+    assert_eq!(read_view.revision().get(), 0);
     assert_eq!(default_handle.latest_snapshot().revision().get(), 0);
     assert_eq!(default_handle.cursor().next_revision().get(), 1);
     assert_eq!(default_reader.cursor().next_revision().get(), 1);
@@ -231,6 +235,10 @@ fn public_surface_exports_are_usable_together() {
     let _scope = tqsdk_runtime_contract::CommitScope::SessionTransition;
     let _domain = tqsdk_runtime_contract::ProtocolDomain::Schema;
     let handle = tqsdk_runtime_contract::RuntimeHandle::default();
+    let reader = handle.reader();
+    let cursor = reader.cursor();
+    let guard = reader.read();
+    let _view = guard.view();
 
-    assert_eq!(handle.latest_snapshot().revision().get(), 0);
+    assert_eq!(cursor.next_revision().get(), 1);
 }

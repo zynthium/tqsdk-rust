@@ -30,8 +30,10 @@
    - `CommitLog`
 4. `runtime-contract`
    - `RuntimeHandle`
-   - `StateSnapshot`
+   - `RuntimeReader`
+   - `SnapshotReadGuard`
    - `UpdateCursor`
+   - `StateSnapshot`（兼容）
 
 ## Transport
 ```rust
@@ -59,6 +61,7 @@ pub struct AuthContext {
 约束：
 - auth 结果必须进入 runtime state
 - auth 失败和 auth 失效也必须进入统一 commit 语义
+- auth/session 结果必须能通过同一个 `RuntimeReader` 读面被观察到
 
 ## SessionBootstrap
 session 建立不是单个 connect，而是一段流程：
@@ -112,3 +115,4 @@ pub struct ReconnectPolicy {
 ## 关键判断
 - auth、session、reconnect 不只是基础设施问题，它们本身也是状态与提交语义的一部分
 - future facade 不应该自己维护另一套连接状态模型
+- future facade 也不应该自己维护另一套 reader model；它们只能包装 `RuntimeReader`

@@ -1,7 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use crate::{ids::Revision, state::{CommitResult, UpdateCursor}};
+use crate::{
+    ids::Revision,
+    state::{CommitResult, UpdateCursor},
+};
 
+/// Underlying append-only commit buffer.
+///
+/// Prefer consuming commits through `RuntimeReader::next` unless raw access to
+/// the shared log primitive is specifically required.
 #[derive(Debug, Clone, Default)]
 pub struct CommitLog {
     inner: Arc<Mutex<CommitLogInner>>,

@@ -9,6 +9,10 @@ use crate::{
 
 use super::RuntimeCore;
 
+/// Locked, revision-bound read guard over the runtime state tree.
+///
+/// Avoid calling other `RuntimeReader` methods that need the runtime mutex while
+/// this guard is alive.
 pub struct SnapshotReadGuard<'a> {
     guard: MutexGuard<'a, RuntimeCore>,
 }
@@ -31,6 +35,8 @@ impl SnapshotReadGuard<'_> {
     }
 }
 
+/// Canonical read-side surface for zero-copy state reads and cursor-driven
+/// commit consumption.
 #[derive(Clone)]
 pub struct RuntimeReader {
     pub(crate) inner: Arc<Mutex<RuntimeCore>>,

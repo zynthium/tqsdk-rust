@@ -4,6 +4,10 @@ use crate::{events::NormalizedMutation, ids::Revision};
 
 use super::{PathSegment, StateReadView};
 
+/// Owned snapshot clone of the runtime state tree.
+///
+/// Prefer `StateReadView` and `SnapshotReadGuard` on hot paths. Keep
+/// `StateSnapshot` when detached ownership is required.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     revision: Revision,

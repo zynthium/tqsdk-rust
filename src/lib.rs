@@ -43,7 +43,7 @@ pub use session_runtime::{
 };
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath,
-    StateSnapshot, UpdateCursor,
+    StateReadView, StateSnapshot, UpdateCursor,
 };
 pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
 pub use transport::{

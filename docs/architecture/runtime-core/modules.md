@@ -11,7 +11,8 @@
 8. `projection_engine`
 9. `commit_assembler`
 10. `commit_log`
-11. `runtime_contract`
+11. `runtime_reader`
+12. `runtime_contract`
 
 ## 依赖方向
 ```text
@@ -32,6 +33,8 @@ transport   auth
   commit_assembler
          |
       commit_log
+         |
+   runtime_reader
          |
    runtime_contract
 ```
@@ -99,7 +102,8 @@ pub enum CommandStatus {
 ```rust
 pub trait StateStoreApi {
     fn apply(&mut self, mutations: &[NormalizedMutation]);
-    fn snapshot(&self) -> StateSnapshot;
+    fn read(&self) -> StateReadView<'_>;
+    fn snapshot(&self) -> StateSnapshot; // compatibility
 }
 ```
 
@@ -120,17 +124,35 @@ pub trait CommitAssembler {
         &mut self,
         caused_by: &[CommandId],
         projection: ProjectionDelta,
-        snapshot: &StateSnapshot,
+        state: StateReadView<'_>,
     ) -> Option<CommitResult>;
 }
 ```
+
+### runtime_reader
+```rust
+pub struct RuntimeReader;
+pub struct SnapshotReadGuard<'a>;
+
+impl RuntimeReader {
+    pub fn cursor(&self) -> UpdateCursor;
+    pub fn read(&self) -> SnapshotReadGuard<'_>;
+    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult>;
+}
+```
+
+职责：
+- 暴露 canonical read-side API
+- 将 commit log 与状态树读锁收敛到同一组低层原语
+- 为后续 wait/stream/callback facade 提供统一底座
 
 ### runtime_contract
 ```rust
 pub trait Runtime {
     async fn submit(&self, cmd: RuntimeCommand) -> Result<CommandId>;
-    fn latest_snapshot(&self) -> StateSnapshot;
-    fn cursor(&self) -> UpdateCursor;
+    fn reader(&self) -> RuntimeReader;
+    fn latest_snapshot(&self) -> StateSnapshot; // compatibility
+    fn cursor(&self) -> UpdateCursor; // compatibility
 }
 ```
 

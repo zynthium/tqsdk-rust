@@ -5,20 +5,26 @@ future API 层的职责是消费 runtime contract 的提交结果，而不是重
 
 共同点：
 - 都建立在同一份 `CommitResult`
-- 都读取同一份 `StateSnapshot`
+- 都读取同一棵 runtime state tree
+- 都通过 `RuntimeReader::read()` / `SnapshotReadGuard` 获得 revision-bound 读视图
 - 都遵守同一套 `Revision / ChangeSet` 语义
-- 都通过 `UpdateCursor` / `CommitLog` 消费提交结果
+- 都通过 `RuntimeReader::cursor()` / `RuntimeReader::next()` 消费提交结果
+
+兼容层仍可直接使用 `StateSnapshot` / `CommitLog`，但这不是 V1 的主叙事。
 
 ## V1 只交付什么
 V1 只交付两类稳定 public contract：
 
 1. runtime contract
    - `RuntimeHandle`
+   - `RuntimeReader`
+   - `SnapshotReadGuard`
+   - `StateReadView`
    - `RuntimeCommand`
    - `RuntimeInput`
-   - `StateSnapshot`
    - `CommitResult`
    - `UpdateCursor`
+   - `StateSnapshot` / `CommitLog`（兼容与底层原语）
 2. protocol adapter contract
    - `ProtocolAdapter`
    - `ProtocolDomain`
@@ -31,9 +37,10 @@ V1 不交付任何用户态 facade。
 ### `tqsdk-api-wait`
 建立在：
 
-- `RuntimeHandle::cursor()`
-- `CommitLog`
-- `StateSnapshot`
+- `RuntimeHandle::reader()`
+- `RuntimeReader::cursor()`
+- `RuntimeReader::next()`
+- `SnapshotReadGuard` / `StateReadView`
 - `ChangeSet`
 
 目标：
@@ -81,4 +88,4 @@ pub trait CallbackApi {
 ## 关键判断
 - `wait` / stream / callback 是并列的消费 adapter
 - 它们都晚于 runtime contract
-- 它们的实现差异只能体现在消费模型，不能体现在状态提交模型
+- 它们的实现差异只能体现在 cursor 消费与读视图包装，不能体现在状态提交模型

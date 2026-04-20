@@ -9,7 +9,7 @@
 
 - V1 到底交付什么
 - 哪些能力必须进入 runtime kernel
-- 为什么 `wait_update` 和 `stream/callback` 都不能成为 V1 的核心接口
+- 为什么 `RuntimeReader` 而不是 `wait_update` / `stream-callback` 才是 V1 的主读契约
 - 如何在不回改内核的前提下，同时承载 Python 风格和 Rust 风格的后续 facade
 
 ## V1 的总定位
@@ -46,6 +46,26 @@ V1 是：
 
 ## 当前实现状态
 当前仓库里的 V1 已经以“极简但协议完整”的 core contract 落地完成。
+
+当前 public core 的稳定主线是：
+
+- `RuntimeHandle`
+  - 写入、命令提交、session/runtime 控制入口
+- `RuntimeReader`
+  - canonical read-side 入口
+  - 提供 cursor 创建、commit 消费、zero-copy 状态读取
+- `SnapshotReadGuard` / `StateReadView`
+  - revision-bound 的借用读视图
+  - 为未来 `wait_update` 与 stream/callback facade 提供共同读面
+- `UpdateCursor`
+  - 独立推进的 commit 消费游标
+
+仍保留的兼容/底层原语：
+
+- `StateSnapshot`
+  - 需要 detached owned snapshot 时可直接使用
+- `CommitLog`
+  - 底层 commit buffer，可用于兼容层或测试
 
 当前 public core 可以直接覆盖并验证：
 
@@ -93,7 +113,7 @@ V1 是：
    - `wait_update`
    - stream
    - callback
-   - 都只是消费 commit log / cursor 的后续适配层
+   - 都只是消费 `RuntimeReader` / `UpdateCursor` 的后续适配层
 5. `user facades`
    - `TqApi`
    - typed views
@@ -130,6 +150,6 @@ user facades / tools
 
 ## 当前总判断
 - 真正的可复用底层不是原始 WebSocket 客户端，也不是某一种用户 API
-- 真正的可复用底层是：`统一命令模型 + 统一状态树 + 统一 commit/revision/change 模型 + 统一 cursor/log`
-- `wait_update` 和 `stream/callback` 的差异只能体现在“怎么消费 commit”，不能体现在“怎么生成 commit”
+- 真正的可复用底层是：`统一命令模型 + 统一状态树 + 统一 commit/revision/change 模型 + reader-first 读契约`
+- `wait_update` 和 `stream/callback` 的差异只能体现在“怎么消费 commit / 怎么读取同一棵状态树”，不能体现在“怎么生成 commit”
 - V1 的完成标准是 contract 完整，不是 facade 完整

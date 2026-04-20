@@ -896,13 +896,9 @@ impl SessionRuntime {
                 command_id,
                 &detail,
             ),
-            "ins_query" => self.derive_query_command_status(
-                snapshot,
-                route_label,
-                commit,
-                command_id,
-                &detail,
-            ),
+            "ins_query" => {
+                self.derive_query_command_status(snapshot, route_label, commit, command_id, &detail)
+            }
             _ => None,
         }
     }

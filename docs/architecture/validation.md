@@ -30,7 +30,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 1. 统一性成立
    - 所有远端交互都进入同一 runtime contract
 2. 可见性成立
-   - 所有上层可见结果都进入同一 `StateSnapshot`
+   - 所有上层可见结果都进入同一 runtime state tree
+   - 这棵状态树必须能通过 `RuntimeReader` 以 revision-bound 方式稳定读取
 3. 可解释性成立
    - 所有可见变化都能被 `Revision` / `ChangeSet` / causality 解释
 4. 隔离性成立
@@ -44,7 +45,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - command-scoped 结果不得通过旁路 future 暴露
 
 ### 统一状态树
-- market / trade / replay / query / schema / system 状态都必须进入同一 `StateSnapshot`
+- market / trade / replay / query / schema / system 状态都必须进入同一 runtime state tree
 - 任意已提交 revision 都必须能提供内部一致的 snapshot
 - query/schema 结果不得躲在独立 side cache 中绕开 snapshot
 
@@ -59,7 +60,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - trade/replay/query/system 错误都必须进入同一 causality 模型
 
 ### 统一 cursor / log 语义
-- 所有消费者都必须通过 `CommitLog` / `UpdateCursor` 读取提交结果
+- 所有消费者都必须通过 `RuntimeReader::cursor()` / `RuntimeReader::next()` 或兼容的 `CommitLog` / `UpdateCursor` 读取提交结果
 - runtime core 不得为不同 future facade 维护不同的提交通道
 - 多个 cursor 必须能独立推进，不互相污染
 
@@ -92,23 +93,25 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | auth/session/system 控制 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_tq_auth.rs`、`tests/runtime_contract_session_state.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
 | GraphQL / HTTP query | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
+| reader-first 读契约 | `tests/runtime_contract_reader_surface.rs`、`tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`UpdateCursor` 与兼容 surface |
 
 推荐的 V1 回归入口：
 
 1. `cargo test -q --test runtime_contract_v1_capability`
-2. `cargo test -q`
+2. `cargo test -q --test runtime_contract_reader_surface --test runtime_contract_surface`
+3. `cargo test -q`
 
 ## V2+ adapter 验收基线
 ### wait adapter
-- 能只靠 `CommitLog` / `UpdateCursor` / `StateSnapshot` 实现 `wait_update()`
+- 能只靠 `RuntimeReader` / `SnapshotReadGuard` / `UpdateCursor` 实现 `wait_update()`
 - 能只靠 `ChangeSet` 实现 `is_changing()`
 
 ### stream adapter
-- 能只靠 cursor/log 形成连续 commit stream
+- 能只靠 `RuntimeReader::next()` / `UpdateCursor` 形成连续 commit stream
 - backpressure 策略不回灌 runtime core
 
 ### callback adapter
-- 能只靠 cursor/log 实现回调 fan-out
+- 能只靠 `RuntimeReader::next()` / `UpdateCursor` 实现回调 fan-out
 - callback 慢消费者不改变 commit 生成逻辑
 
 ## 测试策略总表

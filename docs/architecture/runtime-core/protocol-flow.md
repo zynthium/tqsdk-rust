@@ -32,12 +32,14 @@
 8. `StateStore` 应用 mutation
 9. `ProjectionEngine` 归并 path/object/field 命中
 10. `CommitAssembler` 判断是否形成可见提交
-11. 如形成提交，则推进 `Revision`，发布 `CommitLog`
+11. 如形成提交，则推进 `Revision`，发布底层 `CommitLog`
+12. 消费者通过 `RuntimeReader` / `UpdateCursor` 观察该提交
 
 ## 关键点
 - 命令分发、输入解码、状态提交属于同一条 session runtime 链路
 - raw input 到达不等于一定形成 commit
 - adapter 可以保留短期协议态，但没有 commit 权
+- 所有热路径读取都应通过 `RuntimeReader::read()` 获得 zero-copy 视图，而不是依赖快照 clone
 
 ## commit 触发规则
 1. 原始 `RuntimeInput` 不直接触发 commit
@@ -62,6 +64,6 @@
 8. 回到 `Running`
 
 ## 与后续 adapter 的关系
-- future `wait_update` adapter 只消费 `CommitLog` / `UpdateCursor`
-- future stream adapter 只消费 `CommitLog` / `UpdateCursor`
-- future callback adapter 只消费 `CommitLog` / `UpdateCursor`
+- future `wait_update` adapter 只消费 `RuntimeReader` / `UpdateCursor`
+- future stream adapter 只消费 `RuntimeReader` / `UpdateCursor`
+- future callback adapter 只消费 `RuntimeReader` / `UpdateCursor`

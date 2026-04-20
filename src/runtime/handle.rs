@@ -1,4 +1,7 @@
-use std::{future::Future, sync::{Arc, Mutex}};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use serde_json::{Value, json};
 
@@ -13,11 +16,16 @@ use crate::{
 };
 
 use super::{
+    CommitLog, RuntimeCore, RuntimeReader,
     command_ledger::command_detail_fields_from_command,
     commit_engine::{session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations},
-    CommitLog, RuntimeCore, RuntimeReader,
 };
 
+/// Low-level runtime contract.
+///
+/// `reader()` is the canonical read-side entry point. `latest_snapshot()` and
+/// `cursor()` remain available as compatibility helpers for detached snapshots
+/// and legacy consumers.
 pub trait Runtime {
     fn submit(&self, cmd: RuntimeCommand) -> impl Future<Output = Result<CommandId>> + Send;
     fn reader(&self) -> RuntimeReader;
@@ -31,6 +39,7 @@ pub struct OutboundEnvelope {
     pub request: OutboundRequest,
 }
 
+/// Mutable runtime owner for command submission, input ingestion, and commit publication.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: Arc<Mutex<RuntimeCore>>,
@@ -71,12 +80,15 @@ impl RuntimeHandle {
         envelopes
             .into_iter()
             .map(|envelope| {
-                let domain = inner.command_ledger.domain(envelope.command_id).ok_or_else(|| {
-                    ContractError::validation(format!(
-                        "unknown command id for outbound dispatch: {}",
-                        envelope.command_id.get()
-                    ))
-                })?;
+                let domain = inner
+                    .command_ledger
+                    .domain(envelope.command_id)
+                    .ok_or_else(|| {
+                        ContractError::validation(format!(
+                            "unknown command id for outbound dispatch: {}",
+                            envelope.command_id.get()
+                        ))
+                    })?;
                 Ok(OutboundDispatch {
                     command_id: envelope.command_id,
                     domain,

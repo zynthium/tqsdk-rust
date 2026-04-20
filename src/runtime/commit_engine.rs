@@ -3,7 +3,9 @@ use serde_json::{Value, json};
 use crate::{
     events::{FieldMutation, MutationSource, NormalizedMutation},
     ids::{CommandId, ProtocolDomain, Revision},
-    state::{ChangeSet, CommitResult, CommitScope, ObjectKey, StateSnapshot, StateStore, StatePath},
+    state::{
+        ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, StateStore,
+    },
     transport::{BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget},
 };
 
