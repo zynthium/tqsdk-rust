@@ -1,0 +1,18 @@
+[package]
+name = "tqsdk-core"
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+
+[dependencies]
+base64.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+yawc.workspace = true
+
+[dev-dependencies]
+sha1.workspace = true

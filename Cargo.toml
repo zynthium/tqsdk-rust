@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/tqsdk-runtime-contract"]
-default-members = ["crates/tqsdk-runtime-contract"]
+members = ["crates/tqsdk-core"]
+default-members = ["crates/tqsdk-core"]
 resolver = "3"
 
 [workspace.dependencies]
