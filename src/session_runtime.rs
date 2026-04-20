@@ -895,8 +895,35 @@ impl SessionRuntime {
                 command_id,
                 &detail,
             ),
+            "ins_query" => {
+                self.derive_query_command_status(&snapshot, route_label, commit, command_id, &detail)
+            }
             _ => None,
         }
+    }
+
+    fn derive_query_command_status(
+        &self,
+        snapshot: &crate::state::StateSnapshot,
+        route_label: &str,
+        commit: &CommitResult,
+        command_id: CommandId,
+        detail: &Map<String, Value>,
+    ) -> Option<(CommandStatus, Option<Value>)> {
+        let query_id = detail.get("query_id").and_then(Value::as_str)?;
+        if !commit_touches_path(commit, ["query", query_id]) {
+            return None;
+        }
+        snapshot.get(["query", query_id])?;
+
+        let mut detail = Map::new();
+        if let Some(has_more) = snapshot.get(["query", query_id, "has_more"]).cloned() {
+            detail.insert("has_more".to_string(), has_more);
+        }
+        Some((
+            CommandStatus::Completed,
+            self.command_detail(command_id, Some(route_label), None, detail),
+        ))
     }
 
     fn derive_trade_login_command_status(

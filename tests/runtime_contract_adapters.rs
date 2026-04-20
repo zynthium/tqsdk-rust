@@ -865,6 +865,42 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
         }]
     );
 
+    let http_query = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
+            route: "query".to_string(),
+            domains: vec![ProtocolDomain::Query],
+            payload: InputPayload::Json(json!({
+                "query_id": "quotes-page-2",
+                "data": {
+                    "multi_symbol_info": [{
+                        "instrument_id": "SHFE.au2602"
+                    }]
+                },
+                "errors": [],
+            })),
+        }))
+        .unwrap();
+    assert_eq!(
+        http_query,
+        vec![NormalizedMutation {
+            path: StatePath::new(["query", "quotes-page-2"]),
+            object: Some(ObjectKey::QueryResult {
+                query_id: QueryId::new("quotes-page-2"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "errors".to_string(),
+                    value: json!([]),
+                },
+                FieldMutation {
+                    field: "multi_symbol_info".to_string(),
+                    value: json!([{ "instrument_id": "SHFE.au2602" }]),
+                },
+            ],
+            source: MutationSource::QueryResult,
+        }]
+    );
+
     let schema = registry
         .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
             route: "instrument-schema".to_string(),

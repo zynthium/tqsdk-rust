@@ -3,6 +3,7 @@ pub mod auth;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub mod http_executor;
 pub mod ids;
 pub mod runtime;
 pub mod session_runtime;
@@ -28,6 +29,7 @@ pub use events::{
     AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
     NormalizedMutation, ReplayEvent, RuntimeInput, TimerEvent,
 };
+pub use http_executor::ReqwestHttpExecutor;
 pub use ids::{
     AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain,
     QueryId, ReplaySessionId, Revision, SchemaId, Symbol, TradeId,

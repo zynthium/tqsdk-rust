@@ -779,6 +779,36 @@ fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
 }
 
 fn decode_query_value(value: &Value) -> Result<Vec<NormalizedMutation>> {
+    if let Some(query_id) = value.get("query_id").and_then(Value::as_str) {
+        let mut fields = Map::new();
+        if let Some(data) = value.get("data") {
+            match data {
+                Value::Object(map) => {
+                    for (field, item) in map {
+                        fields.insert(field.clone(), item.clone());
+                    }
+                }
+                other => {
+                    fields.insert("data".to_string(), other.clone());
+                }
+            }
+        }
+        if let Some(errors) = value.get("errors") {
+            fields.insert("errors".to_string(), errors.clone());
+        }
+        if let Some(extensions) = value.get("extensions") {
+            fields.insert("extensions".to_string(), extensions.clone());
+        }
+
+        return decode_json_value(
+            &json!({
+                query_id: Value::Object(fields),
+            }),
+            MutationSource::QueryResult,
+            vec!["query".to_string()],
+        );
+    }
+
     if let Some(symbols) = value.get("symbols") {
         return decode_json_value(
             symbols,

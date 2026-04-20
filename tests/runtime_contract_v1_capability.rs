@@ -446,15 +446,12 @@ fn minimal_core_api_covers_v1_capability_matrix() {
                 route: "query".to_string(),
                 domains: vec![ProtocolDomain::Query],
                 payload: InputPayload::Json(json!({
-                    "aid": "rtn_data",
-                    "data": [{
-                        "symbols": {
-                            "quotes-page-1": {
-                                "items": [{"instrument_id": "au2602"}],
-                                "has_more": false,
-                            }
-                        }
-                    }]
+                    "query_id": "quotes-page-1",
+                    "data": {
+                        "items": [{"instrument_id": "au2602"}],
+                        "has_more": false,
+                    },
+                    "errors": [],
                 })),
             })],
         )

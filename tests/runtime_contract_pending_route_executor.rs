@@ -7,11 +7,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommitScope, ContractFuture,
-    EndpointConfig, IoEvent, OutboundDispatch, ProtocolDomain, ReplayCommand, ReplayEvent,
-    ReplaySessionId, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
-    SchemaCommand, SchemaId, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver,
-    SystemCommand, Transport,
+    EndpointConfig, IoEvent, OutboundDispatch, ProtocolDomain, QueryCommand, QueryId,
+    ReplayCommand, ReplayEvent, ReplaySessionId, RouteRequestExecutor, Runtime, RuntimeCommand,
+    RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
+    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
+    SessionTopology, SessionTopologyResolver, SystemCommand, Transport,
 };
 
 struct TestAuthProvider;
@@ -207,6 +207,90 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
             .latest_snapshot()
             .get(["schema", "instrument-schema", "nodes", "quote", "fields"]),
         Some(&json!(["last_price", "ask_price1"]))
+    );
+}
+
+#[test]
+fn session_runtime_executes_pending_query_route_requests_through_executor() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let resolver = StaticTopologyResolver {
+        topology: SessionTopology::default().with_route(SessionRoute {
+            label: "query".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Query],
+            endpoint: SessionRouteEndpoint::Http {
+                url: "https://query.example/graphql".to_string(),
+            },
+        }),
+        expected_domains: vec![ProtocolDomain::Query],
+    };
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::Query);
+    let adapters = adapter_registry();
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &resolver,
+        &PassiveConnector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+    let executor = RecordingExecutor::default().with_response(
+        "query",
+        vec![RuntimeInput::Io(IoEvent {
+            route: "query".to_string(),
+            domains: vec![ProtocolDomain::Query],
+            payload: tqsdk_runtime_contract::InputPayload::Json(json!({
+                "query_id": "quotes-page-1",
+                "data": {
+                    "items": [{"instrument_id": "au2602"}],
+                    "has_more": false,
+                },
+                "errors": [],
+            })),
+        })],
+    );
+
+    let command_id = block_on(handle.submit(RuntimeCommand::Query(QueryCommand::Fetch {
+        query_id: QueryId::new("quotes-page-1"),
+        query: "query Quotes { symbols { instrument_id } }".to_string(),
+        variables: None,
+    })))
+    .unwrap();
+    block_on(runtime.flush_outbound(&mut run)).unwrap();
+
+    let outcome = block_on(runtime.drive_pending_route_once(
+        &mut run,
+        "query",
+        &executor,
+        vec![command_id],
+        CommitScope::QueryRefresh,
+    ))
+    .unwrap();
+
+    assert_eq!(outcome.requests.len(), 1);
+    assert_eq!(executor.seen().len(), 1);
+    assert_eq!(outcome.commits.len(), 1);
+    assert_eq!(outcome.commits[0].scope, CommitScope::QueryRefresh);
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["query", "quotes-page-1", "items"]),
+        Some(&json!([{ "instrument_id": "au2602" }]))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["query", "quotes-page-1", "errors"]),
+        Some(&json!([]))
     );
 }
 

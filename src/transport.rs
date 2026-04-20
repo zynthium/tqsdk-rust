@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use std::net::TcpStream;
-
-use tungstenite::client::IntoClientRequest;
-use tungstenite::http::{HeaderName, HeaderValue};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket, connect};
+use futures::SinkExt;
+use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
+use url::Url;
+use yawc::frame::{Frame, OpCode};
+use yawc::{HttpRequestBuilder, Options, TcpWebSocket, WebSocket};
 
 use crate::adapter::AdapterRegistry;
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
@@ -44,11 +43,16 @@ pub trait Transport: Send {
     fn close(&mut self) -> ContractFuture<'_, ()>;
 }
 
-#[derive(Debug)]
 pub struct WebSocketTransport {
     url: String,
     connect_options: WebSocketConnectOptions,
-    socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+    execution: Option<WebSocketExecution>,
+    socket: Option<TcpWebSocket>,
+}
+
+enum WebSocketExecution {
+    Owned(TokioRuntime),
+    Ambient,
 }
 
 impl WebSocketTransport {
@@ -56,6 +60,7 @@ impl WebSocketTransport {
         Self {
             url: url.into(),
             connect_options: WebSocketConnectOptions::default(),
+            execution: None,
             socket: None,
         }
     }
@@ -70,70 +75,123 @@ impl WebSocketTransport {
         self
     }
 
-    fn socket_mut(&mut self) -> Result<&mut WebSocket<MaybeTlsStream<TcpStream>>> {
-        self.socket
-            .as_mut()
-            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))
+    fn build_runtime(&self) -> Result<TokioRuntime> {
+        TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ContractError::auth(format!("tokio runtime initialization failed: {err}")))
     }
 
-    fn connect_blocking(&mut self) -> Result<()> {
-        let mut request = self.url.as_str().into_client_request().map_err(|err| {
-            ContractError::validation(format!("invalid websocket request: {err}"))
-        })?;
-
-        for (name, value) in &self.connect_options.headers {
-            let header_name = HeaderName::try_from(name.as_str()).map_err(|err| {
-                ContractError::validation(format!("invalid websocket header name: {err}"))
-            })?;
-            let header_value = HeaderValue::from_str(value).map_err(|err| {
-                ContractError::validation(format!("invalid websocket header value: {err}"))
-            })?;
-            request.headers_mut().insert(header_name, header_value);
-        }
-
-        let (socket, _) = connect(request)
-            .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
-        self.socket = Some(socket);
-        Ok(())
+    fn require_execution(&self) -> Result<&WebSocketExecution> {
+        self.execution.as_ref().ok_or_else(|| {
+            ContractError::validation("websocket transport is not connected")
+        })
     }
 
-    fn recv_blocking(&mut self) -> Result<RawFrame> {
-        let message = self
-            .socket_mut()?
-            .read()
-            .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
-
-        match message {
-            Message::Text(text) => Ok(RawFrame::Text(text.to_string())),
-            Message::Binary(bytes) => Ok(RawFrame::Binary(bytes.to_vec())),
-            Message::Ping(_) => Ok(RawFrame::Ping),
-            Message::Pong(_) => Ok(RawFrame::Pong),
-            Message::Close(_) => Ok(RawFrame::Close),
+    fn decode_frame(frame: Frame) -> Result<RawFrame> {
+        match frame.opcode() {
+            OpCode::Text => {
+                let text = String::from_utf8(frame.payload().to_vec()).map_err(|err| {
+                    ContractError::validation(format!("invalid websocket text frame: {err}"))
+                })?;
+                Ok(RawFrame::Text(text))
+            }
+            OpCode::Binary => Ok(RawFrame::Binary(frame.payload().to_vec())),
+            OpCode::Ping => Ok(RawFrame::Ping),
+            OpCode::Pong => Ok(RawFrame::Pong),
+            OpCode::Close => Ok(RawFrame::Close),
             other => Err(ContractError::validation(format!(
                 "unsupported websocket message: {other:?}"
             ))),
         }
     }
 
-    fn send_blocking(&mut self, frame: OutboundFrame) -> Result<()> {
-        let message = match frame {
-            OutboundFrame::Text(text) => Message::Text(text.into()),
-            OutboundFrame::Binary(bytes) => Message::Binary(bytes.into()),
-            OutboundFrame::Ping => Message::Ping(Vec::new().into()),
-            OutboundFrame::Close => Message::Close(None),
-        };
-
-        self.socket_mut()?
-            .send(message)
-            .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
+    async fn connect_with_request(
+        url: Url,
+        request: HttpRequestBuilder,
+    ) -> std::result::Result<TcpWebSocket, yawc::WebSocketError> {
+        let options = Options::default()
+            .client_no_context_takeover()
+            .server_no_context_takeover();
+        WebSocket::connect(url)
+            .with_options(options)
+            .with_request(request)
+            .await
     }
 
-    fn close_blocking(&mut self) -> Result<()> {
-        if let Some(mut socket) = self.socket.take() {
-            socket
-                .close(None)
-                .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
+    async fn connect_async(&mut self) -> Result<()> {
+        let url = Url::parse(&self.url)
+            .map_err(|err| ContractError::validation(format!("invalid websocket url: {err}")))?;
+        let mut request = HttpRequestBuilder::new();
+        for (name, value) in &self.connect_options.headers {
+            request = request.header(name.as_str(), value.as_str());
         }
+
+        let socket = if tokio::runtime::Handle::try_current().is_ok() {
+            self.execution = Some(WebSocketExecution::Ambient);
+            Self::connect_with_request(url, request).await
+        } else {
+            let runtime = self.build_runtime()?;
+            let socket = runtime.block_on(Self::connect_with_request(url, request));
+            self.execution = Some(WebSocketExecution::Owned(runtime));
+            socket
+        }
+        .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
+        self.socket = Some(socket);
+        Ok(())
+    }
+
+    async fn recv_async(&mut self) -> Result<RawFrame> {
+        let Self {
+            execution, socket, ..
+        } = self;
+        let socket = socket
+            .as_mut()
+            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))?;
+        let frame = match execution.as_ref() {
+            Some(WebSocketExecution::Ambient) => socket.next_frame().await,
+            Some(WebSocketExecution::Owned(runtime)) => {
+                runtime.block_on(async { socket.next_frame().await })
+            }
+            None => return Err(ContractError::validation("websocket transport is not connected")),
+        }
+        .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
+        Self::decode_frame(frame)
+    }
+
+    async fn send_async(&mut self, frame: OutboundFrame) -> Result<()> {
+        let frame = match frame {
+            OutboundFrame::Text(text) => Frame::text(text),
+            OutboundFrame::Binary(bytes) => Frame::binary(bytes),
+            OutboundFrame::Ping => Frame::ping(Vec::<u8>::new()),
+            OutboundFrame::Close => return self.close_async().await,
+        };
+
+        let Self {
+            execution, socket, ..
+        } = self;
+        let socket = socket
+            .as_mut()
+            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))?;
+        match execution.as_ref() {
+            Some(WebSocketExecution::Ambient) => socket.send(frame).await,
+            Some(WebSocketExecution::Owned(runtime)) => {
+                runtime.block_on(async { socket.send(frame).await })
+            }
+            None => return Err(ContractError::validation("websocket transport is not connected")),
+        }
+        .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
+    }
+
+    async fn close_async(&mut self) -> Result<()> {
+        let Some(mut socket) = self.socket.take() else {
+            return Ok(());
+        };
+        match self.require_execution()? {
+            WebSocketExecution::Ambient => socket.close().await,
+            WebSocketExecution::Owned(runtime) => runtime.block_on(async { socket.close().await }),
+        }
+        .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
 
         Ok(())
     }
@@ -141,19 +199,19 @@ impl WebSocketTransport {
 
 impl Transport for WebSocketTransport {
     fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.connect_blocking() })
+        Box::pin(async move { self.connect_async().await })
     }
 
     fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
-        Box::pin(async move { self.recv_blocking() })
+        Box::pin(async move { self.recv_async().await })
     }
 
     fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.send_blocking(frame) })
+        Box::pin(async move { self.send_async(frame).await })
     }
 
     fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.close_blocking() })
+        Box::pin(async move { self.close_async().await })
     }
 }
 

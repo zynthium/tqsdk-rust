@@ -1,9 +1,12 @@
+use std::future::Future;
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use futures::StreamExt;
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
+use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::ids::ProtocolDomain;
@@ -16,6 +19,7 @@ use crate::{AuthId, ContractError, Result};
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
+const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
 
@@ -85,50 +89,99 @@ impl TqAuthProvider {
         )
     }
 
-    fn request_access_token(&self) -> Result<String> {
-        let client = self.build_http_client()?;
-        let response = client
-            .post(self.token_url())
-            .form(&[
-                ("client_id", CLIENT_ID),
-                ("client_secret", CLIENT_SECRET),
-                ("grant_type", "password"),
-                ("username", self.credentials.username.as_str()),
-                ("password", self.credentials.password.as_str()),
-            ])
-            .send()
-            .map_err(|err| ContractError::auth(format!("token request failed: {err}")))?;
+    fn build_http_client(&self, default_headers: Option<HeaderMap>) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .gzip(true)
+            .brotli(true)
+            .timeout(Duration::from_secs(30));
+
+        if let Some(headers) = default_headers {
+            builder = builder.default_headers(headers);
+        }
+
+        builder
+            .build()
+            .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))
+    }
+
+    fn build_tokio_runtime(&self) -> Result<tokio::runtime::Runtime> {
+        TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ContractError::auth(format!("failed to build tokio runtime: {err}")))
+    }
+
+    async fn run_http<F, T>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>> + Send,
+        T: Send,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            future.await
+        } else {
+            self.build_tokio_runtime()?.block_on(future)
+        }
+    }
+
+    async fn read_json_response(
+        &self,
+        response: reqwest::Response,
+        context: &str,
+    ) -> Result<Value> {
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| ContractError::auth(format!("failed to read auth response: {err}")))?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| {
+                ContractError::auth(format!("{context}: failed to read response chunk: {err}"))
+            })?;
+            buffer.extend_from_slice(&chunk);
+        }
 
         if !status.is_success() {
+            let body = String::from_utf8_lossy(&buffer);
             return Err(ContractError::auth(format!(
-                "token request failed with status {status}: {body}"
+                "{context} failed with status {status}: {body}"
             )));
         }
 
-        let payload: Value = serde_json::from_str(&body)
-            .map_err(|err| ContractError::auth(format!("invalid auth response json: {err}")))?;
-        let access_token = payload
-            .get("access_token")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ContractError::auth("auth response missing access_token"))?;
-
-        Ok(access_token.to_string())
+        serde_json::from_slice(&buffer)
+            .map_err(|err| ContractError::auth(format!("{context}: invalid json response: {err}")))
     }
 
-    fn build_http_client(&self) -> Result<reqwest::blocking::Client> {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))
+    async fn request_access_token(&self) -> Result<String> {
+        self.run_http(async {
+            let client = self.build_http_client(None)?;
+            let response = client
+                .post(self.token_url())
+                .form(&[
+                    ("client_id", CLIENT_ID),
+                    ("client_secret", CLIENT_SECRET),
+                    ("grant_type", "password"),
+                    ("username", self.credentials.username.as_str()),
+                    ("password", self.credentials.password.as_str()),
+                ])
+                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(|err| ContractError::auth(format!("token request failed: {err}")))?;
+            let payload = self.read_json_response(response, "token request").await?;
+            let access_token = payload
+                .get("access_token")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ContractError::auth("auth response missing access_token"))?;
+
+            Ok(access_token.to_string())
+        })
+        .await
     }
 
     fn auth_headers(&self, auth: &AuthContext) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
         let authz = HeaderValue::from_str(&format!("Bearer {}", auth.access_token()))
             .map_err(|err| ContractError::auth(format!("invalid authorization header: {err}")))?;
         headers.insert(AUTHORIZATION, authz);
@@ -169,113 +222,103 @@ impl TqAuthProvider {
             .map_err(|err| ContractError::auth(format!("invalid token claims json: {err}")))
     }
 
-    fn request_market_url(
+    async fn request_market_url(
         &self,
         auth: &AuthContext,
         stock: bool,
         backtest: bool,
     ) -> Result<String> {
-        let client = self.build_http_client()?;
-        let response = client
-            .get(&self.name_service_url)
-            .query(&[
-                ("stock", stock.to_string()),
-                ("backtest", backtest.to_string()),
-            ])
-            .headers(self.auth_headers(auth)?)
-            .send()
-            .map_err(|err| ContractError::auth(format!("market endpoint request failed: {err}")))?;
-        let status = response.status();
-        let body = response.text().map_err(|err| {
-            ContractError::auth(format!("failed to read market endpoint response: {err}"))
-        })?;
+        self.run_http(async {
+            let client = self.build_http_client(Some(self.auth_headers(auth)?))?;
+            let response = client
+                .get(&self.name_service_url)
+                .query(&[
+                    ("stock", stock.to_string()),
+                    ("backtest", backtest.to_string()),
+                ])
+                .send()
+                .await
+                .map_err(|err| {
+                    ContractError::auth(format!("market endpoint request failed: {err}"))
+                })?;
+            let payload = self
+                .read_json_response(response, "market endpoint request")
+                .await?;
+            let md_url = payload
+                .get("mdurl")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ContractError::auth("market endpoint response missing mdurl"))?;
 
-        if !status.is_success() {
-            return Err(ContractError::auth(format!(
-                "market endpoint request failed with status {status}: {body}"
-            )));
-        }
+            if md_url.trim().is_empty() {
+                return Err(ContractError::auth("market endpoint returned empty mdurl"));
+            }
 
-        let payload: Value = serde_json::from_str(&body)
-            .map_err(|err| ContractError::auth(format!("invalid market endpoint json: {err}")))?;
-        let md_url = payload
-            .get("mdurl")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ContractError::auth("market endpoint response missing mdurl"))?;
-
-        if md_url.trim().is_empty() {
-            return Err(ContractError::auth("market endpoint returned empty mdurl"));
-        }
-
-        Ok(md_url.to_string())
+            Ok(md_url.to_string())
+        })
+        .await
     }
 
-    fn request_trade_broker(
+    async fn request_trade_broker(
         &self,
         auth: &AuthContext,
         broker_id: &str,
         account_id: &str,
     ) -> Result<BrokerInfo> {
-        let client = self.build_http_client()?;
-        let broker_url = format!(
-            "{}/{}.json",
-            self.broker_base_url.trim_end_matches('/'),
-            broker_id
-        );
-        let response = client
-            .get(&broker_url)
-            .query(&[
-                ("account_id", account_id),
-                ("auth", self.credentials.username.as_str()),
-            ])
-            .headers(self.auth_headers(auth)?)
-            .send()
-            .map_err(|err| ContractError::auth(format!("trade broker request failed: {err}")))?;
-        let status = response.status();
-        let body = response.text().map_err(|err| {
-            ContractError::auth(format!("failed to read trade broker response: {err}"))
-        })?;
+        self.run_http(async {
+            let client = self.build_http_client(Some(self.auth_headers(auth)?))?;
+            let broker_url = format!(
+                "{}/{}.json",
+                self.broker_base_url.trim_end_matches('/'),
+                broker_id
+            );
+            let response = client
+                .get(&broker_url)
+                .query(&[
+                    ("account_id", account_id),
+                    ("auth", self.credentials.username.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(|err| {
+                    ContractError::auth(format!("trade broker request failed: {err}"))
+                })?;
+            let payload = self
+                .read_json_response(response, "trade broker request")
+                .await?;
+            let broker = payload.get(broker_id).ok_or_else(|| {
+                ContractError::auth(format!("trade broker response missing {broker_id}"))
+            })?;
+            let category = broker
+                .get("category")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ContractError::auth("trade broker response missing category"))?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
 
-        if !status.is_success() {
-            return Err(ContractError::auth(format!(
-                "trade broker request failed with status {status}: {body}"
-            )));
-        }
+            if !category.iter().any(|entry| entry == "TQ") {
+                return Err(ContractError::auth(format!(
+                    "broker {broker_id} does not support TQ login"
+                )));
+            }
 
-        let payload: Value = serde_json::from_str(&body)
-            .map_err(|err| ContractError::auth(format!("invalid trade broker json: {err}")))?;
-        let broker = payload.get(broker_id).ok_or_else(|| {
-            ContractError::auth(format!("trade broker response missing {broker_id}"))
-        })?;
-        let category = broker
-            .get("category")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ContractError::auth("trade broker response missing category"))?
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+            let url = broker
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ContractError::auth("trade broker response missing url"))?;
 
-        if !category.iter().any(|entry| entry == "TQ") {
-            return Err(ContractError::auth(format!(
-                "broker {broker_id} does not support TQ login"
-            )));
-        }
-
-        let url = broker
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ContractError::auth("trade broker response missing url"))?;
-
-        Ok(BrokerInfo {
-            category,
-            url: url.to_string(),
-            broker_type: optional_string(broker, "broker_type"),
-            smtype: optional_string(broker, "smtype"),
-            smconfig: optional_string(broker, "smconfig"),
-            condition_type: optional_string(broker, "condition_type"),
-            condition_config: optional_string(broker, "condition_config"),
+            Ok(BrokerInfo {
+                category,
+                url: url.to_string(),
+                broker_type: optional_string(broker, "broker_type"),
+                smtype: optional_string(broker, "smtype"),
+                smconfig: optional_string(broker, "smconfig"),
+                condition_type: optional_string(broker, "condition_type"),
+                condition_config: optional_string(broker, "condition_config"),
+            })
         })
+        .await
     }
 
     pub fn fetch_market_url<'a>(
@@ -284,7 +327,7 @@ impl TqAuthProvider {
         stock: bool,
         backtest: bool,
     ) -> ContractFuture<'a, String> {
-        Box::pin(async move { self.request_market_url(auth, stock, backtest) })
+        Box::pin(async move { self.request_market_url(auth, stock, backtest).await })
     }
 
     pub fn fetch_trade_broker<'a>(
@@ -293,7 +336,7 @@ impl TqAuthProvider {
         broker_id: &'a str,
         account_id: &'a str,
     ) -> ContractFuture<'a, BrokerInfo> {
-        Box::pin(async move { self.request_trade_broker(auth, broker_id, account_id) })
+        Box::pin(async move { self.request_trade_broker(auth, broker_id, account_id).await })
     }
 }
 
@@ -307,7 +350,7 @@ fn optional_string(payload: &Value, field: &str) -> Option<String> {
 impl AuthProvider for TqAuthProvider {
     fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
         Box::pin(async move {
-            let access_token = self.request_access_token()?;
+            let access_token = self.request_access_token().await?;
             self.build_auth_context(access_token)
         })
     }
@@ -323,21 +366,18 @@ impl SessionTopologyResolver for TqAuthProvider {
         Box::pin(async move {
             let mut topology = SessionTopology::default();
             let connect = WebSocketConnectOptions::default()
-                .with_header("Authorization", format!("Bearer {}", auth.access_token()));
+                .with_header("Authorization", format!("Bearer {}", auth.access_token()))
+                .with_header("Accept", "application/json")
+                .with_header("User-Agent", DEFAULT_USER_AGENT);
 
-            let market_domains = enabled_domains
-                .iter()
-                .copied()
-                .filter(|domain| {
-                    matches!(
-                        domain,
-                        ProtocolDomain::System
-                            | ProtocolDomain::Market
-                            | ProtocolDomain::Query
-                            | ProtocolDomain::Schema
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut market_domains = Vec::new();
+            for domain in enabled_domains.iter().copied().filter(|domain| {
+                matches!(domain, ProtocolDomain::Market)
+            }) {
+                if !market_domains.contains(&domain) {
+                    market_domains.push(domain);
+                }
+            }
             if !market_domains.is_empty() {
                 let market_url = if let Some(url) = &config.endpoints.market_url {
                     url.clone()
@@ -346,7 +386,8 @@ impl SessionTopologyResolver for TqAuthProvider {
                         auth,
                         config.market_target.stock,
                         config.market_target.backtest,
-                    )?
+                    )
+                    .await?
                 };
 
                 topology = topology.with_route(SessionRoute {
@@ -373,12 +414,9 @@ impl SessionTopologyResolver for TqAuthProvider {
                     } else if let Some(url) = &config.endpoints.trade_url {
                         url.clone()
                     } else {
-                        self.request_trade_broker(
-                            auth,
-                            &target.broker_id,
-                            target.account_id.as_str(),
-                        )?
-                        .url
+                        self.request_trade_broker(auth, &target.broker_id, target.account_id.as_str())
+                            .await?
+                            .url
                     };
 
                     topology = topology.with_route(SessionRoute {
@@ -391,6 +429,45 @@ impl SessionTopologyResolver for TqAuthProvider {
                         },
                     });
                 }
+            }
+
+            if enabled_domains.contains(&ProtocolDomain::Query) {
+                let Some(query_url) = config.endpoints.query_url.clone() else {
+                    return Err(ContractError::validation(
+                        "query domain requires endpoints.query_url for topology resolution",
+                    ));
+                };
+                topology = topology.with_route(SessionRoute {
+                    label: "query".to_string(),
+                    target: SessionTarget::Shared,
+                    domains: vec![ProtocolDomain::Query],
+                    endpoint: SessionRouteEndpoint::Http { url: query_url },
+                });
+            }
+
+            if enabled_domains.contains(&ProtocolDomain::Schema) {
+                let Some(schema_url) = config.endpoints.schema_url.clone() else {
+                    return Err(ContractError::validation(
+                        "schema domain requires endpoints.schema_url for topology resolution",
+                    ));
+                };
+                topology = topology.with_route(SessionRoute {
+                    label: "schema".to_string(),
+                    target: SessionTarget::Shared,
+                    domains: vec![ProtocolDomain::Schema],
+                    endpoint: SessionRouteEndpoint::Http { url: schema_url },
+                });
+            }
+
+            if enabled_domains.contains(&ProtocolDomain::System) {
+                topology = topology.with_route(SessionRoute {
+                    label: "system".to_string(),
+                    target: SessionTarget::Shared,
+                    domains: vec![ProtocolDomain::System],
+                    endpoint: SessionRouteEndpoint::Internal {
+                        label: "system-driver".to_string(),
+                    },
+                });
             }
 
             Ok(topology)
