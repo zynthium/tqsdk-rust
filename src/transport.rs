@@ -15,6 +15,19 @@ use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
 use crate::{ContractError, Result};
 use serde_json::{Value, json};
 
+const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
+
+fn read_optional_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_env_or_default(name: &str, default: &str) -> String {
+    read_optional_env(name).unwrap_or_else(|| default.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawFrame {
     Text(String),
@@ -215,7 +228,7 @@ impl Transport for WebSocketTransport {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointConfig {
     pub auth_url: Option<String>,
     pub market_url: Option<String>,
@@ -234,6 +247,17 @@ impl EndpointConfig {
             query_url: None,
             replay_url: None,
             schema_url: None,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self {
+            auth_url: Some(read_env_or_default("TQ_AUTH_URL", DEFAULT_AUTH_URL)),
+            market_url: read_optional_env("TQ_MD_URL"),
+            trade_url: read_optional_env("TQ_TD_URL"),
+            query_url: read_optional_env("TQ_QUERY_URL"),
+            replay_url: read_optional_env("TQ_REPLAY_URL"),
+            schema_url: read_optional_env("TQ_SCHEMA_URL"),
         }
     }
 
@@ -260,6 +284,12 @@ impl EndpointConfig {
     pub fn with_schema_url(mut self, schema_url: impl Into<String>) -> Self {
         self.schema_url = Some(schema_url.into());
         self
+    }
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self::from_env()
     }
 }
 
@@ -384,7 +414,7 @@ impl MarketSessionTarget {
 impl Default for MarketSessionTarget {
     fn default() -> Self {
         Self {
-            stock: false,
+            stock: true,
             backtest: false,
         }
     }
