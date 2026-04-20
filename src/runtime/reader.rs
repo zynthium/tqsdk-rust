@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::Value;
 
-use crate::{ids::Revision, state::{CommitResult, UpdateCursor}};
+use crate::{
+    ids::Revision,
+    state::{CommitResult, StateReadView, UpdateCursor},
+};
 
 use super::RuntimeCore;
 
@@ -11,8 +14,12 @@ pub struct SnapshotReadGuard<'a> {
 }
 
 impl SnapshotReadGuard<'_> {
+    pub fn view(&self) -> StateReadView<'_> {
+        self.guard.commit_engine.snapshot().read()
+    }
+
     pub fn revision(&self) -> Revision {
-        self.guard.commit_engine.snapshot().revision()
+        self.view().revision()
     }
 
     pub fn get<I, S>(&self, path: I) -> Option<&Value>
@@ -20,7 +27,7 @@ impl SnapshotReadGuard<'_> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.guard.commit_engine.snapshot().get(path)
+        self.view().get(path)
     }
 }
 

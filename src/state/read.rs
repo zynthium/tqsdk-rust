@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::ids::Revision;
 
+#[derive(Clone, Copy)]
 pub struct StateReadView<'a> {
     revision: Revision,
     data: &'a Value,

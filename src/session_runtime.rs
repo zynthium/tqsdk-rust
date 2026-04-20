@@ -7,7 +7,7 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
-    runtime::{Runtime, RuntimeHandle},
+    runtime::RuntimeHandle,
     state::{CommitResult, CommitScope, StatePath},
     transport::{
         BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
@@ -847,55 +847,57 @@ impl SessionRuntime {
         commit: &CommitResult,
         command_id: CommandId,
     ) -> Option<(CommandStatus, Option<Value>)> {
-        let snapshot = self.handle.latest_snapshot();
-        let detail = command_detail_map_from_snapshot(&snapshot, command_id)?;
+        let reader = self.handle.reader();
+        let snapshot = reader.read();
+        let snapshot = snapshot.view();
+        let detail = command_detail_map_from_snapshot(snapshot, command_id)?;
         let aid = detail.get("aid").and_then(Value::as_str)?;
 
         match aid {
             "insert_order" | "cancel_order" => self.derive_trade_order_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "req_login" => self.derive_trade_login_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "pre_insert_order" => self.derive_trade_pre_insert_order_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "qry_account_info" => self.derive_trade_account_info_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "set_risk_management_rule" => self.derive_trade_risk_management_rule_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "qry_settlement_info" => self.derive_trade_settlement_query_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
                 &detail,
             ),
             "ins_query" => self.derive_query_command_status(
-                &snapshot,
+                snapshot,
                 route_label,
                 commit,
                 command_id,
@@ -907,7 +909,7 @@ impl SessionRuntime {
 
     fn derive_query_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -919,19 +921,25 @@ impl SessionRuntime {
         }
         snapshot.get(["query", query_id])?;
 
-        let mut detail = Map::new();
+        let mut extra_detail = Map::new();
         if let Some(has_more) = snapshot.get(["query", query_id, "has_more"]).cloned() {
-            detail.insert("has_more".to_string(), has_more);
+            extra_detail.insert("has_more".to_string(), has_more);
         }
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_login_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -948,17 +956,23 @@ impl SessionRuntime {
             return None;
         }
 
-        let mut detail = Map::new();
-        detail.insert("trade_more_data".to_string(), json!(false));
+        let mut extra_detail = Map::new();
+        extra_detail.insert("trade_more_data".to_string(), json!(false));
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_account_info_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -970,17 +984,23 @@ impl SessionRuntime {
         }
         snapshot.get(["trade", account_id, "accounts", "CNY"])?;
 
-        let mut detail = Map::new();
-        detail.insert("currency".to_string(), json!("CNY"));
+        let mut extra_detail = Map::new();
+        extra_detail.insert("currency".to_string(), json!("CNY"));
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_pre_insert_order_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -993,7 +1013,7 @@ impl SessionRuntime {
         }
         snapshot.get(["trade", account_id, "pre_insert_orders", order_id])?;
 
-        let mut detail = Map::new();
+        let mut extra_detail = Map::new();
         if let Some(pre_margin) = snapshot
             .get([
                 "trade",
@@ -1004,17 +1024,23 @@ impl SessionRuntime {
             ])
             .cloned()
         {
-            detail.insert("pre_margin".to_string(), pre_margin);
+            extra_detail.insert("pre_margin".to_string(), pre_margin);
         }
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_risk_management_rule_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -1030,17 +1056,23 @@ impl SessionRuntime {
         }
         snapshot.get(["trade", account_id, "risk_management_rule", exchange_id])?;
 
-        let mut detail = Map::new();
-        detail.insert("exchange_id".to_string(), json!(exchange_id));
+        let mut extra_detail = Map::new();
+        extra_detail.insert("exchange_id".to_string(), json!(exchange_id));
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_settlement_query_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -1056,17 +1088,23 @@ impl SessionRuntime {
         }
         snapshot.get(["trade", account_id, "his_settlements", trading_day])?;
 
-        let mut detail = Map::new();
-        detail.insert("trading_day".to_string(), json!(trading_day));
+        let mut extra_detail = Map::new();
+        extra_detail.insert("trading_day".to_string(), json!(trading_day));
         Some((
             CommandStatus::Completed,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn derive_trade_order_command_status(
         &self,
-        snapshot: &crate::state::StateSnapshot,
+        snapshot: crate::state::StateReadView<'_>,
         route_label: &str,
         commit: &CommitResult,
         command_id: CommandId,
@@ -1098,26 +1136,34 @@ impl SessionRuntime {
             _ => return None,
         };
 
-        let mut detail = Map::new();
-        detail.insert("order_status".to_string(), json!(order_status));
+        let mut extra_detail = Map::new();
+        extra_detail.insert("order_status".to_string(), json!(order_status));
         if !exchange_order_id.is_empty() {
-            detail.insert("exchange_order_id".to_string(), json!(exchange_order_id));
+            extra_detail.insert("exchange_order_id".to_string(), json!(exchange_order_id));
         }
         if let Some(last_msg) = last_msg {
-            detail.insert("last_msg".to_string(), last_msg);
+            extra_detail.insert("last_msg".to_string(), last_msg);
         }
         if let Some(volume_left) = volume_left {
-            detail.insert("volume_left".to_string(), volume_left);
+            extra_detail.insert("volume_left".to_string(), volume_left);
         }
 
         Some((
             status,
-            self.command_detail(command_id, Some(route_label), None, detail),
+            command_detail_from_seed(
+                detail.clone(),
+                command_id,
+                Some(route_label),
+                None,
+                extra_detail,
+            ),
         ))
     }
 
     fn command_status(&self, command_id: CommandId) -> Option<String> {
-        let snapshot = self.handle.latest_snapshot();
+        let reader = self.handle.reader();
+        let snapshot = reader.read();
+        let snapshot = snapshot.view();
         let command_segment = command_id.get().to_string();
         snapshot
             .get(["runtime", "commands", command_segment.as_str(), "status"])
@@ -1132,9 +1178,10 @@ impl SessionRuntime {
         dispatch: Option<&OutboundDispatch>,
         extra: Map<String, Value>,
     ) -> Option<Value> {
-        let snapshot = self.handle.latest_snapshot();
-        let mut detail =
-            command_detail_map_from_snapshot(&snapshot, command_id).unwrap_or_default();
+        let reader = self.handle.reader();
+        let snapshot = reader.read();
+        let snapshot = snapshot.view();
+        let mut detail = command_detail_map_from_snapshot(snapshot, command_id).unwrap_or_default();
 
         if let Some(route_label) = route_label {
             detail.insert("route".to_string(), json!(route_label));
@@ -1166,7 +1213,7 @@ fn reconnect_backoff_ms(config: &SessionConfig, attempt: u32) -> u64 {
 }
 
 fn command_detail_map_from_snapshot(
-    snapshot: &crate::state::StateSnapshot,
+    snapshot: crate::state::StateReadView<'_>,
     command_id: CommandId,
 ) -> Option<Map<String, Value>> {
     let command_segment = command_id.get().to_string();
@@ -1174,6 +1221,32 @@ fn command_detail_map_from_snapshot(
         .get(["runtime", "commands", command_segment.as_str(), "detail"])
         .and_then(Value::as_object)
         .cloned()
+}
+
+fn command_detail_from_seed(
+    mut seed: Map<String, Value>,
+    _command_id: CommandId,
+    route_label: Option<&str>,
+    dispatch: Option<&OutboundDispatch>,
+    extra: Map<String, Value>,
+) -> Option<Value> {
+    if let Some(route_label) = route_label {
+        seed.insert("route".to_string(), json!(route_label));
+    }
+
+    if let Some(dispatch) = dispatch {
+        for (key, value) in command_detail_fields_from_dispatch(dispatch) {
+            seed.entry(key).or_insert(value);
+        }
+    }
+
+    seed.extend(extra);
+
+    if seed.is_empty() {
+        None
+    } else {
+        Some(Value::Object(seed))
+    }
 }
 
 fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<String, Value> {
