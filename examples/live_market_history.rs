@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::time::timeout;
 use tqsdk_runtime_contract::{
-    AdapterRegistry, Chart, CommitScope, DefaultRouteConnector, EndpointConfig, InputPayload,
-    IoEvent, Kline, MarketChartCommand, MarketCommand, MarketSessionTarget, OutboundFrame,
-    PasswordCredentials, ProtocolDomain, Quote, Runtime, RuntimeCommand, RuntimeHandle,
-    SessionBootstrap, SessionConfig, SessionRuntime, TqAuthProvider,
+    AdapterRegistry, Chart, CommandId, CommitResult, CommitScope, DefaultRouteConnector,
+    EndpointConfig, InputPayload, IoEvent, Kline, MarketChartCommand, MarketCommand,
+    MarketSessionTarget, OutboundFrame, PasswordCredentials, ProtocolDomain, Quote, Runtime,
+    RuntimeCommand, RuntimeHandle, RuntimeReader, SessionBootstrap, SessionConfig, SessionRun,
+    SessionRuntime, TqAuthProvider, UpdateCursor,
 };
 
 const MARKET_ROUTE: &str = "market";
@@ -33,39 +34,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_market_target(MarketSessionTarget::new(false, false))
         .enable_domain(ProtocolDomain::Market);
 
-    let mut run = runtime
+    let run = runtime
         .establish(&provider, &provider, &connector, &config, &adapters)
         .await?;
+    let mut api = ExampleWaitApi::new(handle, runtime, run);
 
     println!("symbol={symbol}");
     println!(
         "routes={:?}",
-        run.connected
+        api.run
+            .connected
             .routes
             .iter()
             .map(|route| route.route.label.as_str())
             .collect::<Vec<_>>()
     );
-    run.connected
-        .send_route_frame(
-            MARKET_ROUTE,
-            OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
-        )
-        .await?;
+    api.prime_market().await?;
 
-    let quote_command = handle
+    let quote_command = api
         .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
             symbols: vec![tqsdk_runtime_contract::Symbol::new(symbol.clone())],
         }))
         .await?;
+    println!("quote_command={}", quote_command.get());
 
-    let receipts = runtime.flush_outbound(&mut run).await?;
-    println!("dispatch_receipts={:?}", receipts);
+    let quote_ready = wait_for_quote_state(&mut api, &symbol).await?;
+    print_observation("quote-ready", &quote_ready);
 
-    let quote_ready = wait_for_quote_state(&handle, &mut run, &symbol, &[quote_command]).await?;
-    print_snapshot("quote-ready", &quote_ready);
-
-    let chart_command = handle
+    let chart_command = api
         .submit(RuntimeCommand::Market(MarketCommand::SetChart(
             MarketChartCommand {
                 chart_id: CHART_ID.to_string(),
@@ -78,23 +74,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
         )))
         .await?;
+    println!("chart_command={}", chart_command.get());
 
-    let receipts = runtime.flush_outbound(&mut run).await?;
-    println!("dispatch_receipts={:?}", receipts);
+    let history_ready = wait_for_history_state(&mut api, &symbol).await?;
+    print_observation("history-ready", &history_ready);
 
-    let initial =
-        wait_for_history_state(&handle, &mut run, &symbol, &[quote_command, chart_command]).await?;
-    print_snapshot("history-ready", &initial);
-
-    let updated = wait_for_realtime_quote_update(
-        &handle,
-        &mut run,
-        &symbol,
-        &[quote_command, chart_command],
-        &initial,
-    )
-    .await?;
-    print_snapshot("realtime-update", &updated);
+    let realtime_update =
+        wait_for_realtime_quote_update(&mut api, &symbol, &history_ready.summary).await?;
+    print_observation("realtime-update", &realtime_update);
 
     Ok(())
 }
@@ -105,126 +92,245 @@ fn default_adapters() -> AdapterRegistry {
     registry
 }
 
-async fn wait_for_quote_state(
-    handle: &RuntimeHandle,
-    run: &mut tqsdk_runtime_contract::SessionRun,
-    symbol: &str,
-    caused_by: &[tqsdk_runtime_contract::CommandId],
-) -> Result<SnapshotSummary, Box<dyn Error>> {
-    let deadline = Instant::now() + INITIAL_TIMEOUT;
-    let mut diagnostics = Vec::new();
+struct ExampleWaitApi {
+    handle: RuntimeHandle,
+    reader: RuntimeReader,
+    cursor: UpdateCursor,
+    runtime: SessionRuntime,
+    run: SessionRun,
+    active_commands: Vec<CommandId>,
+    last_commit: Option<CommitResult>,
+    last_diagnostic: Option<String>,
+}
 
-    loop {
-        let summary = snapshot_summary(handle, symbol)?;
-        if summary.quote.is_some() {
-            return Ok(summary);
-        }
-
-        if Instant::now() >= deadline {
-            let state_debug = state_debug(handle, symbol);
-            return Err(format!(
-                "initial history/quote snapshot not ready within {:?}; diagnostics={diagnostics:?}; state={state_debug}",
-                INITIAL_TIMEOUT,
-            )
-            .into());
-        }
-
-        if let Some(diag) = pump_market_once(handle, run, caused_by).await? {
-            push_diagnostic(&mut diagnostics, diag);
+impl ExampleWaitApi {
+    fn new(handle: RuntimeHandle, runtime: SessionRuntime, run: SessionRun) -> Self {
+        let reader = handle.reader();
+        let cursor = reader.cursor();
+        Self {
+            handle,
+            reader,
+            cursor,
+            runtime,
+            run,
+            active_commands: Vec::new(),
+            last_commit: None,
+            last_diagnostic: None,
         }
     }
+
+    async fn prime_market(&mut self) -> Result<(), Box<dyn Error>> {
+        self.run
+            .connected
+            .send_route_frame(
+                MARKET_ROUTE,
+                OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn submit(&mut self, command: RuntimeCommand) -> Result<CommandId, Box<dyn Error>> {
+        let command_id = self.handle.submit(command).await?;
+        push_command_id(&mut self.active_commands, command_id);
+        Ok(command_id)
+    }
+
+    async fn wait_update(&mut self, timeout_window: Duration) -> Result<bool, Box<dyn Error>> {
+        self.last_commit = None;
+        self.last_diagnostic = None;
+
+        let deadline = Instant::now() + timeout_window;
+        loop {
+            if self.capture_next_commit() {
+                return Ok(true);
+            }
+
+            let receipts = self.runtime.flush_outbound(&mut self.run).await?;
+            for receipt in receipts {
+                push_command_id(&mut self.active_commands, receipt.command_id);
+            }
+
+            if self.capture_next_commit() {
+                return Ok(true);
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+
+            let recv_budget = deadline.saturating_duration_since(now).min(RECV_TIMEOUT);
+            match timeout(
+                recv_budget,
+                self.run.connected.recv_route_input(MARKET_ROUTE),
+            )
+            .await
+            {
+                Ok(Ok(Some(input))) => {
+                    self.last_diagnostic = Some(describe_runtime_input(&input));
+                    let _ = self.handle.ingest(
+                        input,
+                        self.active_commands.clone(),
+                        CommitScope::RealtimeUpdate,
+                    )?;
+                    self.run
+                        .connected
+                        .send_route_frame(
+                            MARKET_ROUTE,
+                            OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
+                        )
+                        .await?;
+
+                    if self.capture_next_commit() {
+                        return Ok(true);
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => return Err(Box::new(err)),
+                Err(_) => {
+                    self.last_diagnostic = Some(format!("timeout:{recv_budget:?}"));
+                    self.run
+                        .connected
+                        .send_route_frame(
+                            MARKET_ROUTE,
+                            OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
+                        )
+                        .await?;
+                }
+            }
+        }
+    }
+
+    fn capture_next_commit(&mut self) -> bool {
+        let Some(commit) = self.reader.next(&mut self.cursor) else {
+            return false;
+        };
+        self.last_commit = Some(commit);
+        true
+    }
+
+    fn reader(&self) -> &RuntimeReader {
+        &self.reader
+    }
+
+    fn last_commit(&self) -> Option<&CommitResult> {
+        self.last_commit.as_ref()
+    }
+
+    fn last_diagnostic(&self) -> Option<&str> {
+        self.last_diagnostic.as_deref()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WaitUpdateObservation {
+    commit: CommitResult,
+    diagnostic: Option<String>,
+    summary: SnapshotSummary,
+}
+
+async fn wait_for_quote_state(
+    api: &mut ExampleWaitApi,
+    symbol: &str,
+) -> Result<WaitUpdateObservation, Box<dyn Error>> {
+    wait_for_summary(
+        api,
+        symbol,
+        INITIAL_TIMEOUT,
+        |summary| summary.quote.is_some(),
+        "quote snapshot not ready",
+    )
+    .await
 }
 
 async fn wait_for_history_state(
-    handle: &RuntimeHandle,
-    run: &mut tqsdk_runtime_contract::SessionRun,
+    api: &mut ExampleWaitApi,
     symbol: &str,
-    caused_by: &[tqsdk_runtime_contract::CommandId],
-) -> Result<SnapshotSummary, Box<dyn Error>> {
-    let deadline = Instant::now() + INITIAL_TIMEOUT;
-    let mut diagnostics = Vec::new();
-
-    loop {
-        let summary = snapshot_summary(handle, symbol)?;
-        if summary.has_history() && summary.quote.is_some() {
-            return Ok(summary);
-        }
-
-        if Instant::now() >= deadline {
-            let state_debug = state_debug(handle, symbol);
-            return Err(format!(
-                "initial history/quote snapshot not ready within {:?}; diagnostics={diagnostics:?}; state={state_debug}",
-                INITIAL_TIMEOUT,
-            )
-            .into());
-        }
-
-        if let Some(diag) = pump_market_once(handle, run, caused_by).await? {
-            push_diagnostic(&mut diagnostics, diag);
-        }
-    }
+) -> Result<WaitUpdateObservation, Box<dyn Error>> {
+    wait_for_summary(
+        api,
+        symbol,
+        INITIAL_TIMEOUT,
+        |summary| summary.has_history() && summary.quote.is_some(),
+        "history snapshot not ready",
+    )
+    .await
 }
 
 async fn wait_for_realtime_quote_update(
-    handle: &RuntimeHandle,
-    run: &mut tqsdk_runtime_contract::SessionRun,
+    api: &mut ExampleWaitApi,
     symbol: &str,
-    caused_by: &[tqsdk_runtime_contract::CommandId],
     baseline: &SnapshotSummary,
-) -> Result<SnapshotSummary, Box<dyn Error>> {
-    let deadline = Instant::now() + REALTIME_TIMEOUT;
+) -> Result<WaitUpdateObservation, Box<dyn Error>> {
+    wait_for_summary(
+        api,
+        symbol,
+        REALTIME_TIMEOUT,
+        |summary| summary.quote_changed_from(baseline),
+        "realtime quote did not change",
+    )
+    .await
+}
+
+async fn wait_for_summary<F>(
+    api: &mut ExampleWaitApi,
+    symbol: &str,
+    timeout_window: Duration,
+    mut predicate: F,
+    timeout_reason: &str,
+) -> Result<WaitUpdateObservation, Box<dyn Error>>
+where
+    F: FnMut(&SnapshotSummary) -> bool,
+{
+    let deadline = Instant::now() + timeout_window;
     let mut diagnostics = Vec::new();
 
     loop {
-        let summary = snapshot_summary(handle, symbol)?;
-        if summary.quote_changed_from(baseline) {
-            return Ok(summary);
-        }
-
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
+            let state_debug = state_debug(api.reader(), symbol);
             return Err(format!(
-                "no realtime quote change observed within {:?}; baseline={baseline:?}; diagnostics={diagnostics:?}",
-                REALTIME_TIMEOUT
+                "{timeout_reason} within {:?}; diagnostics={diagnostics:?}; state={state_debug}",
+                timeout_window
             )
             .into());
         }
 
-        if let Some(diag) = pump_market_once(handle, run, caused_by).await? {
-            push_diagnostic(&mut diagnostics, diag);
+        let remaining = deadline.saturating_duration_since(now);
+        if !api.wait_update(remaining).await? {
+            let state_debug = state_debug(api.reader(), symbol);
+            return Err(format!(
+                "{timeout_reason} within {:?}; diagnostics={diagnostics:?}; state={state_debug}",
+                timeout_window
+            )
+            .into());
+        }
+
+        let observation = current_observation(api, symbol)?;
+        push_diagnostic(&mut diagnostics, observation_diagnostic(&observation));
+        if predicate(&observation.summary) {
+            return Ok(observation);
         }
     }
 }
 
-async fn pump_market_once(
-    handle: &RuntimeHandle,
-    run: &mut tqsdk_runtime_contract::SessionRun,
-    caused_by: &[tqsdk_runtime_contract::CommandId],
-) -> Result<Option<String>, Box<dyn Error>> {
-    let recv = timeout(RECV_TIMEOUT, run.connected.recv_route_input(MARKET_ROUTE)).await;
-    match recv {
-        Ok(Ok(Some(input))) => {
-            let diagnostic = describe_runtime_input(&input);
-            let _ = handle.ingest(input, caused_by.to_vec(), CommitScope::RealtimeUpdate)?;
-            run.connected
-                .send_route_frame(
-                    MARKET_ROUTE,
-                    OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
-                )
-                .await?;
-            Ok(Some(diagnostic))
-        }
-        Ok(Ok(None)) => Ok(None),
-        Ok(Err(err)) => Err(Box::new(err)),
-        Err(_) => {
-            run.connected
-                .send_route_frame(
-                    MARKET_ROUTE,
-                    OutboundFrame::Text(r#"{"aid":"peek_message"}"#.to_string()),
-                )
-                .await?;
-            Ok(Some(format!("timeout:{:?}", RECV_TIMEOUT)))
-        }
-    }
+fn current_observation(
+    api: &ExampleWaitApi,
+    symbol: &str,
+) -> Result<WaitUpdateObservation, Box<dyn Error>> {
+    let commit = api
+        .last_commit()
+        .ok_or_else(|| "wait_update completed without a commit".to_string())?
+        .clone();
+    let diagnostic = api.last_diagnostic().map(str::to_owned);
+    let summary = snapshot_summary(api.reader(), symbol)?;
+
+    Ok(WaitUpdateObservation {
+        commit,
+        diagnostic,
+        summary,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -272,10 +378,9 @@ struct KlinePoint {
 }
 
 fn snapshot_summary(
-    handle: &RuntimeHandle,
+    reader: &RuntimeReader,
     symbol: &str,
 ) -> Result<SnapshotSummary, Box<dyn Error>> {
-    let reader = handle.reader();
     let guard = reader.read();
     let duration_segment = DURATION_NS.to_string();
     let quote = guard.decode_path::<Quote>(&["quotes", symbol])?;
@@ -331,9 +436,38 @@ fn snapshot_summary(
     })
 }
 
-fn print_snapshot(label: &str, summary: &SnapshotSummary) {
+fn print_observation(label: &str, observation: &WaitUpdateObservation) {
     println!("== {label} ==");
-    println!("revision={}", summary.revision);
+    println!(
+        "wait_update revision={} scope={:?} caused_by={:?}",
+        observation.commit.revision.get(),
+        observation.commit.scope,
+        observation
+            .commit
+            .caused_by
+            .iter()
+            .map(|id| id.get())
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "changed_paths={:?}",
+        observation
+            .commit
+            .changes
+            .path_hits
+            .iter()
+            .take(8)
+            .map(path_display)
+            .collect::<Vec<_>>()
+    );
+    if let Some(diagnostic) = &observation.diagnostic {
+        println!("source={diagnostic}");
+    }
+    print_snapshot(&observation.summary);
+}
+
+fn print_snapshot(summary: &SnapshotSummary) {
+    println!("state_revision={}", summary.revision);
 
     match &summary.quote {
         Some(quote) => {
@@ -378,6 +512,31 @@ fn print_snapshot(label: &str, summary: &SnapshotSummary) {
             bar.close_oi
         );
     }
+}
+
+fn observation_diagnostic(observation: &WaitUpdateObservation) -> String {
+    let mut description = format!(
+        "revision={} scope={:?} paths={:?}",
+        observation.commit.revision.get(),
+        observation.commit.scope,
+        observation
+            .commit
+            .changes
+            .path_hits
+            .iter()
+            .take(6)
+            .map(path_display)
+            .collect::<Vec<_>>()
+    );
+    if let Some(diagnostic) = &observation.diagnostic {
+        description.push_str(" source=");
+        description.push_str(diagnostic);
+    }
+    description
+}
+
+fn path_display(path: &tqsdk_runtime_contract::StatePath) -> String {
+    path.segments().join("/")
 }
 
 fn describe_runtime_input(input: &tqsdk_runtime_contract::RuntimeInput) -> String {
@@ -432,8 +591,7 @@ fn same_f64(left: f64, right: f64) -> bool {
     left.to_bits() == right.to_bits()
 }
 
-fn state_debug(handle: &RuntimeHandle, symbol: &str) -> String {
-    let reader = handle.reader();
+fn state_debug(reader: &RuntimeReader, symbol: &str) -> String {
     let guard = reader.read();
     let chart_keys = guard
         .get_path(&["charts"])
@@ -460,6 +618,12 @@ fn state_debug(handle: &RuntimeHandle, symbol: &str) -> String {
     format!(
         "chart_keys={chart_keys:?}, kline_symbols={kline_symbols:?}, symbol_durations={symbol_durations:?}, sample_bar_ids={bar_ids:?}"
     )
+}
+
+fn push_command_id(command_ids: &mut Vec<CommandId>, command_id: CommandId) {
+    if !command_ids.contains(&command_id) {
+        command_ids.push(command_id);
+    }
 }
 
 fn push_diagnostic(diagnostics: &mut Vec<String>, diagnostic: String) {
