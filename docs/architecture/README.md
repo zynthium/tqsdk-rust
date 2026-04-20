@@ -11,6 +11,7 @@
 - 哪些能力必须进入 runtime kernel
 - 为什么 `RuntimeReader` 而不是 `wait_update` / `stream-callback` 才是 V1 的主读契约
 - 如何在不回改内核的前提下，同时承载 Python 风格和 Rust 风格的后续 facade
+- `tqsdk-python` 与现有 `tqsdk-rs` 两种 facade 范式该如何取长补短
 
 ## V1 的总定位
 V1 不是：
@@ -95,6 +96,7 @@ V1 是：
 | 总架构、阶段边界、路线图 | [README.md](README.md)、[roadmap.md](roadmap.md) |
 | DIFF 协议的纯 merge 语义 | [diff-core.md](diff-core.md) |
 | runtime contract：命令、状态、commit、cursor、adapter | [runtime-core/overview.md](runtime-core/overview.md)、[runtime-core/modules.md](runtime-core/modules.md)、[runtime-core/protocol-flow.md](runtime-core/protocol-flow.md)、[runtime-core/data-contracts.md](runtime-core/data-contracts.md)、[runtime-core/type-system.md](runtime-core/type-system.md)、[runtime-core/session-auth.md](runtime-core/session-auth.md) |
+| Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
 | 未来 `wait_update` adapter | [api-wait.md](api-wait.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
 
@@ -127,9 +129,10 @@ V1 是：
 5. [模块清单](runtime-core/modules.md)
 6. [数据契约](runtime-core/data-contracts.md)
 7. [类型约束](runtime-core/type-system.md)
-8. [验收与测试矩阵](validation.md)
-9. [未来 wait adapter](api-wait.md)
-10. [演进路线](roadmap.md)
+8. [Python / Rust facade 范式对比](facade-paradigms.md)
+9. [验收与测试矩阵](validation.md)
+10. [未来 wait adapter](api-wait.md)
+11. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text

@@ -12,6 +12,7 @@
 相关文档：
 
 - [总架构入口](README.md)
+- [Python / Rust facade 范式对比](facade-paradigms.md)
 - [runtime-core 总览](runtime-core/overview.md)
 - [协议交互](runtime-core/protocol-flow.md)
 - [数据契约](runtime-core/data-contracts.md)
