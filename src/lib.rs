@@ -35,7 +35,8 @@ pub use ids::{
     QueryId, ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
 pub use runtime::{
-    CommitLog, OutboundEnvelope, Runtime, RuntimeHandle, RuntimeReader, SnapshotReadGuard,
+    CommitLog, CommitReadGuard, CursorLagged, OutboundEnvelope, Runtime, RuntimeHandle,
+    RuntimeReader, SnapshotReadGuard,
 };
 pub use session_runtime::{
     PendingRouteStepOutcome, RoutePumpOutcome, RouteRequestExecutor, SessionRun, SessionRuntime,

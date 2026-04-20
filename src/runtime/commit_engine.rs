@@ -3,29 +3,15 @@ use serde_json::{Value, json};
 use crate::{
     events::{FieldMutation, MutationSource, NormalizedMutation},
     ids::{CommandId, ProtocolDomain, Revision},
-    state::{
-        ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, StateStore,
-    },
+    state::{ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateStore},
     transport::{BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget},
 };
 
-pub(crate) struct CommitEngine {
-    snapshot: StateStore,
-}
+pub(crate) struct CommitEngine;
 
 impl CommitEngine {
-    pub(crate) fn new() -> Self {
-        Self {
-            snapshot: StateSnapshot::new(Revision::new(0)),
-        }
-    }
-
-    pub(crate) fn snapshot(&self) -> &StateSnapshot {
-        &self.snapshot
-    }
-
     pub(crate) fn apply(
-        &mut self,
+        snapshot: &mut StateStore,
         mutations: Vec<NormalizedMutation>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
@@ -34,8 +20,8 @@ impl CommitEngine {
             return None;
         }
 
-        let next_revision = Revision::new(self.snapshot.revision().get() + 1);
-        let applied = self.snapshot.apply(next_revision, &mutations);
+        let next_revision = Revision::new(snapshot.revision().get() + 1);
+        let applied = snapshot.apply(next_revision, &mutations);
         if applied.is_empty() {
             return None;
         }

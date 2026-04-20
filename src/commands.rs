@@ -285,6 +285,13 @@ impl CommandStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Rejected | Self::Failed | Self::Cancelled
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

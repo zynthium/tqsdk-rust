@@ -1,7 +1,13 @@
+use std::{fmt, sync::Arc};
+
 use crate::events::NormalizedMutation;
 use crate::ids::{CommandId, CursorId, Revision};
 
 use super::{ObjectKey, StatePath};
+
+pub(crate) trait CursorTracker: Send + Sync {
+    fn update(&self, next_revision: Revision);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeHit {
@@ -92,15 +98,31 @@ impl CommitResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCursor {
     id: CursorId,
     next_revision: Revision,
+    tracker: Option<Arc<dyn CursorTracker>>,
 }
 
 impl UpdateCursor {
     pub fn new(id: CursorId, next_revision: Revision) -> Self {
-        Self { id, next_revision }
+        Self {
+            id,
+            next_revision,
+            tracker: None,
+        }
+    }
+
+    pub(crate) fn with_tracker(
+        id: CursorId,
+        next_revision: Revision,
+        tracker: Arc<dyn CursorTracker>,
+    ) -> Self {
+        Self {
+            id,
+            next_revision,
+            tracker: Some(tracker),
+        }
     }
 
     pub fn id(&self) -> CursorId {
@@ -113,5 +135,35 @@ impl UpdateCursor {
 
     pub(crate) fn set_next_revision(&mut self, next_revision: Revision) {
         self.next_revision = next_revision;
+        if let Some(tracker) = &self.tracker {
+            tracker.update(next_revision);
+        }
     }
 }
+
+impl Clone for UpdateCursor {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            next_revision: self.next_revision,
+            tracker: self.tracker.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for UpdateCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateCursor")
+            .field("id", &self.id)
+            .field("next_revision", &self.next_revision)
+            .finish()
+    }
+}
+
+impl PartialEq for UpdateCursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.next_revision == other.next_revision
+    }
+}
+
+impl Eq for UpdateCursor {}

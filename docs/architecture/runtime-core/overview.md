@@ -56,7 +56,9 @@ adapter 只能编解码与生成 mutation，不能自行推进 revision、发通
 pub struct RuntimeHandle;
 pub struct RuntimeReader;
 pub struct SnapshotReadGuard<'a>;
+pub struct CommitReadGuard<'a>;
 pub struct StateReadView<'a>;
+pub struct CursorLagged;
 
 pub struct Revision(u64);
 pub struct CommandId(u64);
@@ -87,9 +89,12 @@ pub trait Runtime {
 ## 关键判断
 - `RuntimeHandle` 是 V1 的写入与控制入口
 - `RuntimeReader` 是 V1 的 canonical read-side entry point
+- `RuntimeReader::read()` 提供当前 head 的 zero-copy 读视图
+- `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
 - V1 不直接公开 `wait_update()`、stream、callback facade
 - 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型
+- `CommitLog` 必须是 indexable 且受 retention 约束，不能在长会话里线性退化或无界增长
 
 ## 进一步阅读
 - [Session/Auth](session-auth.md)

@@ -61,8 +61,11 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 ### 统一 cursor / log 语义
 - 所有消费者都必须通过 `RuntimeReader::cursor()` / `RuntimeReader::next()` 或兼容的 `CommitLog` / `UpdateCursor` 读取提交结果
+- 需要 exact revision 读面的消费者必须能通过 `RuntimeReader::next_view()` 获得一致视图，或明确得到 lagged 信号
 - runtime core 不得为不同 future facade 维护不同的提交通道
 - 多个 cursor 必须能独立推进，不互相污染
+- `CommitLog` 不得因为 revision 扫描而在长会话中退化为线性读取
+- `CommitLog` 必须有 retention 策略，且不能截断仍被活动 cursor 需要的提交
 
 ### adapter 边界
 - adapter 可以编解码和保留短期协议态
@@ -93,7 +96,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | auth/session/system 控制 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_tq_auth.rs`、`tests/runtime_contract_session_state.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
 | GraphQL / HTTP query | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `tests/runtime_contract_v1_capability.rs`、`tests/runtime_contract_pending_route_executor.rs`、`tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
-| reader-first 读契约 | `tests/runtime_contract_reader_surface.rs`、`tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`UpdateCursor` 与兼容 surface |
+| reader-first 读契约 | `tests/runtime_contract_reader_surface.rs`、`tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged` 与兼容 surface |
 
 推荐的 V1 回归入口：
 

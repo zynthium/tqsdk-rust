@@ -1,14 +1,14 @@
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AccountId, AdapterRegistry, CausationMeta, ChangeHit, ChangeSet, CommandEnvelope, CommandId,
-    CommandStatus, CommitLog, CommitResult, CommitScope, ContractError, CursorId, FieldMutation,
-    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, ObjectKey, OrderId,
-    OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, ReplayCommand, Result,
-    Revision, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, RuntimeReader, SchemaCommand,
-    SchemaId, SeriesKey, SnapshotReadGuard, StatePath, StateReadView, StateSnapshot, Symbol,
-    SystemCommand, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
-    TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
-    UpdateCursor,
+    CommandStatus, CommitLog, CommitReadGuard, CommitResult, CommitScope, ContractError, CursorId,
+    CursorLagged, FieldMutation, MarketChartCommand, MarketCommand, MutationSource,
+    NormalizedMutation, ObjectKey, OrderId, OutboundRequest, ProtocolAdapter, ProtocolDomain,
+    QueryCommand, QueryId, ReplayCommand, Result, Revision, Runtime, RuntimeCommand, RuntimeHandle,
+    RuntimeInput, RuntimeReader, SchemaCommand, SchemaId, SeriesKey, SnapshotReadGuard, StatePath,
+    StateReadView, StateSnapshot, Symbol, SystemCommand, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType,
+    TradeTimeCondition, TradeVolumeCondition, UpdateCursor,
 };
 
 struct TestAdapter;
@@ -239,6 +239,9 @@ fn public_surface_exports_are_usable_together() {
     let cursor = reader.cursor();
     let guard = reader.read();
     let _view = guard.view();
+    let _lagged: Option<CursorLagged> = None;
+    let _next_view = RuntimeReader::next_view;
+    let _typed_guard: Option<CommitReadGuard<'_>> = None;
 
     assert_eq!(cursor.next_revision().get(), 1);
 }

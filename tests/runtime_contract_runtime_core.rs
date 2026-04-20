@@ -152,10 +152,88 @@ fn runtime_handle_ingests_inputs_into_committed_snapshot_and_cursored_log() {
     assert_eq!(log.head_revision(), Some(Revision::new(1)));
 }
 
+#[test]
+fn commit_log_retention_drops_old_commits_when_no_cursor_needs_them() {
+    let handle = runtime_with_retention(2);
+    let log = handle.commit_log();
+
+    ingest_quote(&handle, 601.0);
+    ingest_quote(&handle, 602.0);
+    ingest_quote(&handle, 603.0);
+
+    let mut stale_cursor = handle.cursor_from(Revision::new(1));
+    let mut current_cursor = handle.cursor_from(Revision::new(2));
+
+    assert_eq!(log.next(&mut stale_cursor), None);
+    assert_eq!(
+        log.next(&mut current_cursor).unwrap().revision,
+        Revision::new(2)
+    );
+    assert_eq!(
+        log.next(&mut current_cursor).unwrap().revision,
+        Revision::new(3)
+    );
+    assert_eq!(log.next(&mut current_cursor), None);
+}
+
+#[test]
+fn commit_log_retention_preserves_old_commits_while_cursor_is_active() {
+    let handle = runtime_with_retention(2);
+    let log = handle.commit_log();
+    let mut protected_cursor = handle.cursor_from(Revision::new(1));
+
+    ingest_quote(&handle, 611.0);
+    ingest_quote(&handle, 612.0);
+    ingest_quote(&handle, 613.0);
+
+    assert_eq!(
+        log.next(&mut protected_cursor).unwrap().revision,
+        Revision::new(1)
+    );
+    assert_eq!(
+        log.next(&mut protected_cursor).unwrap().revision,
+        Revision::new(2)
+    );
+    assert_eq!(
+        log.next(&mut protected_cursor).unwrap().revision,
+        Revision::new(3)
+    );
+    assert_eq!(log.next(&mut protected_cursor), None);
+}
+
 fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
     RuntimeHandle::with_adapters(registry)
+}
+
+fn runtime_with_retention(max_commit_log_entries: usize) -> RuntimeHandle {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+    RuntimeHandle::with_adapters_and_commit_log_retention(registry, max_commit_log_entries)
+}
+
+fn ingest_quote(handle: &RuntimeHandle, last_price: f64) {
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market.shared".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: tqsdk_runtime_contract::InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "last_price": last_price
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
 }
 
 fn block_on<F>(future: F) -> F::Output

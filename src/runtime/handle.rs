@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use serde_json::{Value, json};
@@ -16,9 +16,11 @@ use crate::{
 };
 
 use super::{
-    CommitLog, RuntimeCore, RuntimeReader,
+    CommitLog, RuntimeCore, RuntimeReader, SharedState,
     command_ledger::command_detail_fields_from_command,
-    commit_engine::{session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations},
+    commit_engine::{
+        CommitEngine, session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations,
+    },
 };
 
 /// Low-level runtime contract.
@@ -43,6 +45,7 @@ pub struct OutboundEnvelope {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: Arc<Mutex<RuntimeCore>>,
+    state: SharedState,
     commit_log: CommitLog,
 }
 
@@ -52,9 +55,17 @@ impl RuntimeHandle {
     }
 
     pub fn with_adapters(adapters: AdapterRegistry) -> Self {
+        Self::with_adapters_and_commit_log_retention(adapters, 8_192)
+    }
+
+    pub fn with_adapters_and_commit_log_retention(
+        adapters: AdapterRegistry,
+        max_commit_log_entries: usize,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(RuntimeCore::new(adapters))),
-            commit_log: CommitLog::new(),
+            state: Arc::new(RwLock::new(StateSnapshot::new(Revision::new(0)))),
+            commit_log: CommitLog::with_retention(max_commit_log_entries),
         }
     }
 
@@ -64,7 +75,7 @@ impl RuntimeHandle {
 
     pub fn reader(&self) -> RuntimeReader {
         RuntimeReader {
-            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
             commit_log: self.commit_log.clone(),
         }
     }
@@ -99,8 +110,7 @@ impl RuntimeHandle {
     }
 
     pub fn cursor_from(&self, next_revision: Revision) -> UpdateCursor {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
-        inner.next_cursor(next_revision)
+        self.commit_log.new_cursor(next_revision)
     }
 
     pub fn ingest(
@@ -111,13 +121,7 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         let mut inner = self.inner.lock().expect("runtime mutex poisoned");
         let mutations = inner.adapters.decode_input(&input)?;
-        let commit = inner.commit_engine.apply(mutations, caused_by, scope);
-        drop(inner);
-
-        if let Some(commit) = commit.clone() {
-            self.commit_log.publish(commit);
-        }
-        Ok(commit)
+        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
     }
 
     pub fn ingest_batch(
@@ -131,14 +135,7 @@ impl RuntimeHandle {
         for input in &inputs {
             mutations.extend(inner.adapters.decode_input(input)?);
         }
-
-        let commit = inner.commit_engine.apply(mutations, caused_by, scope);
-        drop(inner);
-
-        if let Some(commit) = commit.clone() {
-            self.commit_log.publish(commit);
-        }
-        Ok(commit)
+        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
     }
 
     pub fn record_command_status(
@@ -174,7 +171,8 @@ impl RuntimeHandle {
         ];
         fields.sort_by(|left, right| left.field.cmp(&right.field));
 
-        let commit = inner.commit_engine.apply(
+        self.apply_and_publish_locked(
+            &mut inner,
             vec![NormalizedMutation {
                 path: StatePath::new(vec![
                     "runtime".to_string(),
@@ -187,13 +185,7 @@ impl RuntimeHandle {
             }],
             vec![command_id],
             scope,
-        );
-        drop(inner);
-
-        if let Some(commit) = commit.clone() {
-            self.commit_log.publish(commit);
-        }
-        Ok(commit)
+        )
     }
 
     pub fn record_session_phase(
@@ -285,11 +277,20 @@ impl RuntimeHandle {
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
         let mut inner = self.inner.lock().expect("runtime mutex poisoned");
-        let commit = inner.commit_engine.apply(mutations, caused_by, scope);
-        drop(inner);
+        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
+    }
 
-        if let Some(commit) = commit.clone() {
-            self.commit_log.publish(commit);
+    fn apply_and_publish_locked(
+        &self,
+        _inner: &mut RuntimeCore,
+        mutations: Vec<NormalizedMutation>,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<CommitResult>> {
+        let mut snapshot = self.state.write().expect("runtime state rwlock poisoned");
+        let commit = CommitEngine::apply(&mut snapshot, mutations, caused_by, scope);
+        if let Some(commit_ref) = commit.as_ref() {
+            self.commit_log.publish(commit_ref.clone());
         }
         Ok(commit)
     }
@@ -326,11 +327,9 @@ impl Runtime for RuntimeHandle {
     }
 
     fn latest_snapshot(&self) -> StateSnapshot {
-        self.inner
-            .lock()
-            .expect("runtime mutex poisoned")
-            .commit_engine
-            .snapshot()
+        self.state
+            .read()
+            .expect("runtime state rwlock poisoned")
             .clone()
     }
 

@@ -53,6 +53,41 @@ fn runtime_reader_exposes_zero_copy_snapshot_reads_and_cursor_access() {
 }
 
 #[test]
+fn runtime_reader_next_view_returns_revision_consistent_zero_copy_guard() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+
+    ingest_quote(&handle, 512.0);
+
+    let guard = reader.next_view(&mut cursor).unwrap().unwrap();
+    assert_eq!(guard.commit().revision, Revision::new(1));
+    assert_eq!(guard.revision(), Revision::new(1));
+    assert_eq!(
+        guard.get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(512.0))
+    );
+}
+
+#[test]
+fn runtime_reader_next_view_reports_lagged_cursor_when_head_has_advanced() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+
+    ingest_quote(&handle, 512.0);
+    ingest_quote(&handle, 513.0);
+
+    let lagged = match reader.next_view(&mut cursor) {
+        Err(lagged) => lagged,
+        Ok(result) => panic!("expected lagged cursor error, got {result:?}"),
+    };
+    assert_eq!(lagged.expected_revision(), Revision::new(1));
+    assert_eq!(lagged.current_revision(), Revision::new(2));
+    assert_eq!(lagged.oldest_available_revision(), Revision::new(1));
+}
+
+#[test]
 fn runtime_handle_runtime_trait_surface_uses_reader_not_owned_snapshot() {
     let handle = runtime_with_default_adapters();
     let reader = handle.reader();
@@ -74,6 +109,27 @@ fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
     RuntimeHandle::with_adapters(registry)
+}
+
+fn ingest_quote(handle: &RuntimeHandle, last_price: f64) {
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": { "last_price": last_price }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
 }
 
 fn block_on<F>(future: F) -> F::Output
