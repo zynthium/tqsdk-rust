@@ -138,9 +138,10 @@ impl RouteRequestExecutor for RecordingExecutor {
 fn session_runtime_executes_pending_http_route_requests_through_executor() {
     let handle = runtime_with_default_adapters();
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let route_label = "instrument-schema-route";
     let resolver = StaticTopologyResolver {
         topology: SessionTopology::default().with_route(SessionRoute {
-            label: "instrument-schema".to_string(),
+            label: route_label.to_string(),
             target: SessionTarget::Shared,
             domains: vec![ProtocolDomain::Schema],
             endpoint: SessionRouteEndpoint::Http {
@@ -161,9 +162,9 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
     ))
     .unwrap();
     let executor = RecordingExecutor::default().with_response(
-        "instrument-schema",
+        route_label,
         vec![RuntimeInput::Io(IoEvent {
-            route: "instrument-schema".to_string(),
+            route: route_label.to_string(),
             domains: vec![ProtocolDomain::Schema],
             payload: tqsdk_runtime_contract::InputPayload::Json(json!({
                 "nodes": {
@@ -186,7 +187,7 @@ fn session_runtime_executes_pending_http_route_requests_through_executor() {
 
     let outcome = block_on(runtime.drive_pending_route_once(
         &mut run,
-        "instrument-schema",
+        route_label,
         &executor,
         vec![command_id],
         CommitScope::RealtimeUpdate,

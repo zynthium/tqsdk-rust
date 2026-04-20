@@ -169,7 +169,7 @@ fn live_schema_http_contract_smoke() {
     assert!(
         handle
             .latest_snapshot()
-            .get(["schema", "schema-live"])
+            .get(["schema", "symbols-latest"])
             .is_some()
     );
 }

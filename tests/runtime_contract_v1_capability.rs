@@ -788,7 +788,7 @@ fn minimal_core_api_covers_v1_capability_matrix() {
     assert_eq!(
         handle
             .latest_snapshot()
-            .get(["schema", "schema", "nodes", "quote", "fields"]),
+            .get(["schema", "instrument-schema", "nodes", "quote", "fields"]),
         Some(&json!(["last_price", "ask_price1"]))
     );
 
@@ -867,7 +867,7 @@ fn minimal_core_api_covers_v1_capability_matrix() {
     assert!(
         observed_paths
             .iter()
-            .any(|path| path == "schema/schema/nodes/quote")
+            .any(|path| path == "schema/instrument-schema/nodes/quote")
     );
     assert!(
         observed_paths

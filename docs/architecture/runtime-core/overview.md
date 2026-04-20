@@ -94,6 +94,7 @@ pub trait Runtime {
 - `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
 - `SnapshotReadGuard` / `CommitReadGuard` / `StateReadView` 可以按路径 `decode<T>()` 成官方 schema，但这仍然只是底层 schema decode，不是 typed state facade
 - `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为
+- schema 刷新结果必须按 `schema_id` 进入状态树，不能把 transport route label 当成逻辑对象键
 - V1 不直接公开 `wait_update()`、stream、callback facade
 - 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型

@@ -448,6 +448,7 @@ impl SessionRuntime {
                     return Err(err);
                 }
             };
+            let inputs = self.annotate_pending_route_inputs(&outcome.requests, inputs)?;
             match self.handle.ingest_batch(inputs, caused_by.clone(), scope) {
                 Ok(Some(commit)) => {
                     outcome.commits.push(commit);
@@ -467,6 +468,61 @@ impl SessionRuntime {
 
             Ok(outcome)
         })
+    }
+
+    fn annotate_pending_route_inputs(
+        &self,
+        requests: &[OutboundDispatch],
+        inputs: Vec<RuntimeInput>,
+    ) -> Result<Vec<RuntimeInput>> {
+        let reader = self.handle.reader();
+        let snapshot = reader.read();
+        let snapshot = snapshot.view();
+        let schema_ids = requests
+            .iter()
+            .map(|dispatch| {
+                command_detail_map_from_snapshot(snapshot, dispatch.command_id).and_then(|detail| {
+                    detail
+                        .get("schema_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let schema_request_count = schema_ids.iter().flatten().count();
+        if schema_request_count == 0 {
+            return Ok(inputs);
+        }
+
+        if schema_request_count == 1 {
+            let schema_id = schema_ids
+                .iter()
+                .flatten()
+                .next()
+                .expect("schema request count should guarantee a schema id")
+                .clone();
+            return Ok(inputs
+                .into_iter()
+                .map(|input| annotate_schema_input(input, Some(schema_id.as_str())))
+                .collect());
+        }
+
+        if inputs.len() == requests.len() {
+            return Ok(inputs
+                .into_iter()
+                .zip(schema_ids)
+                .map(|(input, schema_id)| annotate_schema_input(input, schema_id.as_deref()))
+                .collect());
+        }
+
+        if inputs.iter().all(schema_input_is_annotated_or_non_schema) {
+            return Ok(inputs);
+        }
+
+        Err(crate::ContractError::validation(
+            "ambiguous schema response mapping: multiple schema requests returned an unexpected number of inputs",
+        ))
     }
 
     fn connect_if_needed<'a>(
@@ -1314,6 +1370,46 @@ fn is_terminal_command_status(status: Option<&str>) -> bool {
         status,
         Some("completed" | "rejected" | "failed" | "cancelled")
     )
+}
+
+fn annotate_schema_input(input: RuntimeInput, schema_id: Option<&str>) -> RuntimeInput {
+    let Some(schema_id) = schema_id else {
+        return input;
+    };
+
+    match input {
+        RuntimeInput::Io(mut event) if event.domains.contains(&crate::ProtocolDomain::Schema) => {
+            if let crate::InputPayload::Json(payload) = event.payload {
+                event.payload = crate::InputPayload::Json(wrap_schema_payload(payload, schema_id));
+            }
+            RuntimeInput::Io(event)
+        }
+        other => other,
+    }
+}
+
+fn schema_input_is_annotated_or_non_schema(input: &RuntimeInput) -> bool {
+    match input {
+        RuntimeInput::Io(event) if event.domains.contains(&crate::ProtocolDomain::Schema) => {
+            matches!(
+                &event.payload,
+                crate::InputPayload::Json(payload)
+                    if payload.get("schema_id").and_then(Value::as_str).is_some()
+            )
+        }
+        _ => true,
+    }
+}
+
+fn wrap_schema_payload(payload: Value, schema_id: &str) -> Value {
+    if payload.get("schema_id").and_then(Value::as_str).is_some() {
+        return payload;
+    }
+
+    json!({
+        "schema_id": schema_id,
+        "data": payload,
+    })
 }
 
 fn commit_touches_path<I, S>(commit: &CommitResult, path: I) -> bool

@@ -1019,12 +1019,15 @@ fn default_protocol_adapters_decode_structured_inputs_into_mutations() {
 
     let schema = registry
         .decode_input(&RuntimeInput::Io(tqsdk_runtime_contract::IoEvent {
-            route: "instrument-schema".to_string(),
+            route: "schema-route".to_string(),
             domains: vec![ProtocolDomain::Schema],
             payload: InputPayload::Json(json!({
-                "nodes": {
-                    "quote": {
-                        "fields": ["last_price", "ask_price1"]
+                "schema_id": "instrument-schema",
+                "data": {
+                    "nodes": {
+                        "quote": {
+                            "fields": ["last_price", "ask_price1"]
+                        }
                     }
                 }
             })),

@@ -453,11 +453,7 @@ impl ProtocolAdapter for SchemaAdapter {
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
         match input {
             RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Schema) => {
-                decode_io_payload(
-                    event,
-                    MutationSource::SchemaBootstrap,
-                    vec!["schema".to_string(), event.route.clone()],
-                )
+                decode_schema_io_payload(event)
             }
             _ => Ok(vec![]),
         }
@@ -730,6 +726,40 @@ fn decode_trade_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
                 return decode_trade_settlement_query_reply(value);
             }
             decode_json_envelope(value, MutationSource::TradeReply, vec![])
+        }
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
+fn decode_schema_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => {
+            let schema_id = value
+                .get("schema_id")
+                .and_then(Value::as_str)
+                .unwrap_or(event.route.as_str());
+            let owned_payload;
+            let payload = if let Some(data) = value.get("data") {
+                data
+            } else if value.get("schema_id").and_then(Value::as_str).is_some() {
+                match value {
+                    Value::Object(fields) => {
+                        let mut fields = fields.clone();
+                        fields.remove("schema_id");
+                        owned_payload = Value::Object(fields);
+                        &owned_payload
+                    }
+                    _ => value,
+                }
+            } else {
+                value
+            };
+
+            decode_json_envelope(
+                payload,
+                MutationSource::SchemaBootstrap,
+                vec!["schema".to_string(), schema_id.to_string()],
+            )
         }
         InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
     }
