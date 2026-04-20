@@ -1,42 +1,37 @@
 use std::future::Future;
-use std::net::TcpListener;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+mod support;
+
+use support::websocket::{ClientFrame, TestWebSocketServer};
 use tqsdk_runtime_contract::{OutboundFrame, RawFrame, Transport, WebSocketTransport};
-use tungstenite::handshake::server::{Request, Response};
-use tungstenite::{Message, accept, accept_hdr};
 
 #[test]
 fn websocket_transport_connects_and_round_trips_frames() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut socket = accept(stream).unwrap();
-
-        match socket.read().unwrap() {
-            Message::Text(text) => assert_eq!(text, "hello"),
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        match socket.recv().unwrap() {
+            ClientFrame::Text(text) => assert_eq!(text, "hello"),
             other => panic!("expected text frame, got {other:?}"),
         }
 
-        socket.send(Message::Text("world".into())).unwrap();
+        socket.send_text("world").unwrap();
 
-        match socket.read().unwrap() {
-            Message::Ping(payload) => assert!(payload.is_empty()),
+        match socket.recv().unwrap() {
+            ClientFrame::Ping => {}
             other => panic!("expected ping frame, got {other:?}"),
         }
 
-        socket.send(Message::Binary(vec![1_u8, 2, 3])).unwrap();
+        socket.send_binary(vec![1_u8, 2, 3]).unwrap();
 
-        match socket.read().unwrap() {
-            Message::Close(_) => {}
+        match socket.recv().unwrap() {
+            ClientFrame::Close => {}
             other => panic!("expected close frame, got {other:?}"),
         }
-    });
+    })
+    .unwrap();
 
-    let mut transport = WebSocketTransport::new(format!("ws://{addr}"));
+    let mut transport = WebSocketTransport::new(server.url(""));
     block_on(transport.connect()).unwrap();
     block_on(transport.send(OutboundFrame::Text("hello".to_string()))).unwrap();
 
@@ -53,49 +48,32 @@ fn websocket_transport_connects_and_round_trips_frames() {
     }
 
     block_on(transport.close()).unwrap();
-    server.join().unwrap();
+    server.join();
 }
 
-#[allow(clippy::result_large_err)]
 #[test]
 fn websocket_transport_sends_custom_handshake_headers() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        assert_eq!(
+            socket.request().header("authorization"),
+            Some("Bearer test-token"),
+        );
+        assert_eq!(socket.request().header("x-tq-app"), Some("contract-test"));
 
-    let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
-            assert_eq!(
-                request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer test-token"),
-            );
-            assert_eq!(
-                request
-                    .headers()
-                    .get("x-tq-app")
-                    .and_then(|value| value.to_str().ok()),
-                Some("contract-test"),
-            );
-            Ok(response)
-        })
-        .unwrap();
-
-        match socket.read().unwrap() {
-            Message::Close(_) => {}
+        match socket.recv().unwrap() {
+            ClientFrame::Close => {}
             other => panic!("expected close frame, got {other:?}"),
         }
-    });
+    })
+    .unwrap();
 
-    let mut transport = WebSocketTransport::new(format!("ws://{addr}"))
+    let mut transport = WebSocketTransport::new(server.url(""))
         .with_header("Authorization", "Bearer test-token")
         .with_header("X-Tq-App", "contract-test");
 
     block_on(transport.connect()).unwrap();
     block_on(transport.close()).unwrap();
-    server.join().unwrap();
+    server.join();
 }
 
 fn block_on<F>(future: F) -> F::Output

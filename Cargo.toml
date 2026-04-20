@@ -13,4 +13,4 @@ url = "2"
 yawc = "0.3.3"
 
 [dev-dependencies]
-tungstenite = { version = "0.24", default-features = false, features = ["handshake", "http", "rustls-tls-webpki-roots"] }
+sha1 = "0.10"

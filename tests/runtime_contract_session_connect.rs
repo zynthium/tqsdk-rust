@@ -1,54 +1,40 @@
 use std::future::Future;
-use std::net::TcpListener;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+mod support;
+
+use support::websocket::{ClientFrame, TestWebSocketServer};
 use tqsdk_runtime_contract::{
     AccountId, ProtocolDomain, SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget,
     SessionTopology, WebSocketConnectOptions, WebSocketRouteConnector,
 };
-use tungstenite::accept_hdr;
-use tungstenite::handshake::server::{Request, Response};
 
-#[allow(clippy::result_large_err)]
 #[test]
 fn session_bootstrap_connects_websocket_routes_from_topology() {
-    let market_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let market_addr = market_listener.local_addr().unwrap();
-    let trade_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let trade_addr = trade_listener.local_addr().unwrap();
+    let market_server = TestWebSocketServer::spawn(|mut socket| {
+        assert_eq!(
+            socket.request().header("authorization"),
+            Some("Bearer test-token"),
+        );
+        match socket.recv().unwrap() {
+            ClientFrame::Close => {}
+            other => panic!("expected close frame, got {other:?}"),
+        }
+    })
+    .unwrap();
 
-    let market_server = std::thread::spawn(move || {
-        let (stream, _) = market_listener.accept().unwrap();
-        let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
-            assert_eq!(
-                request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer test-token"),
-            );
-            Ok(response)
-        })
-        .unwrap();
-        let _ = socket.close(None);
-    });
-
-    let trade_server = std::thread::spawn(move || {
-        let (stream, _) = trade_listener.accept().unwrap();
-        let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
-            assert_eq!(
-                request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer test-token"),
-            );
-            Ok(response)
-        })
-        .unwrap();
-        let _ = socket.close(None);
-    });
+    let trade_server = TestWebSocketServer::spawn(|mut socket| {
+        assert_eq!(
+            socket.request().header("authorization"),
+            Some("Bearer test-token"),
+        );
+        match socket.recv().unwrap() {
+            ClientFrame::Close => {}
+            other => panic!("expected close frame, got {other:?}"),
+        }
+    })
+    .unwrap();
 
     let topology = SessionTopology::default()
         .with_route(SessionRoute {
@@ -56,7 +42,7 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
             target: SessionTarget::Shared,
             domains: vec![ProtocolDomain::System, ProtocolDomain::Market],
             endpoint: SessionRouteEndpoint::WebSocket {
-                url: format!("ws://{market_addr}/md"),
+                url: market_server.url("/md"),
                 connect: WebSocketConnectOptions::default()
                     .with_header("Authorization", "Bearer test-token"),
             },
@@ -66,7 +52,7 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
             target: SessionTarget::Account(AccountId::new("simnow")),
             domains: vec![ProtocolDomain::Trade],
             endpoint: SessionRouteEndpoint::WebSocket {
-                url: format!("ws://{trade_addr}/trade"),
+                url: trade_server.url("/trade"),
                 connect: WebSocketConnectOptions::default()
                     .with_header("Authorization", "Bearer test-token"),
             },
@@ -81,8 +67,8 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
     assert_eq!(connected.routes[1].route.label, "trade:simnow");
 
     block_on(connected.close_all()).unwrap();
-    market_server.join().unwrap();
-    trade_server.join().unwrap();
+    market_server.join();
+    trade_server.join();
 }
 
 fn block_on<F>(future: F) -> F::Output

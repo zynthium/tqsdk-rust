@@ -24,8 +24,26 @@ fn read_optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn read_optional_env_aliases(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| read_optional_env(name))
+}
+
 fn read_env_or_default(name: &str, default: &str) -> String {
     read_optional_env(name).unwrap_or_else(|| default.to_string())
+}
+
+fn schema_base_url_from_holiday_url(holiday_url: &str) -> Option<String> {
+    let mut url = Url::parse(holiday_url).ok()?;
+    {
+        let mut segments = url.path_segments_mut().ok()?;
+        segments.pop_if_empty();
+        segments.pop();
+    }
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    Some(url.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,9 +283,12 @@ impl EndpointConfig {
             auth_url: Some(read_env_or_default("TQ_AUTH_URL", DEFAULT_AUTH_URL)),
             market_url: read_optional_env("TQ_MD_URL"),
             trade_url: read_optional_env("TQ_TD_URL"),
-            query_url: read_optional_env("TQ_QUERY_URL"),
+            query_url: read_optional_env_aliases(&["TQ_QUERY_URL", "TQ_INS_URL"]),
             replay_url: read_optional_env("TQ_REPLAY_URL"),
-            schema_url: read_optional_env("TQ_SCHEMA_URL"),
+            schema_url: read_optional_env("TQ_SCHEMA_URL").or_else(|| {
+                read_optional_env("TQ_CHINESE_HOLIDAY_URL")
+                    .and_then(|url| schema_base_url_from_holiday_url(&url))
+            }),
         }
     }
 

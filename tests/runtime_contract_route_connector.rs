@@ -1,14 +1,14 @@
 use std::future::Future;
-use std::net::TcpListener;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+mod support;
+
+use support::websocket::{ClientFrame, TestWebSocketServer};
 use tqsdk_runtime_contract::{
     DefaultRouteConnector, OutboundFrame, ProtocolDomain, SessionBootstrap, SessionRoute,
     SessionRouteEndpoint, SessionTarget, SessionTopology, WebSocketConnectOptions,
 };
-use tungstenite::accept_hdr;
-use tungstenite::handshake::server::{Request, Response};
 
 #[test]
 fn default_route_connector_supports_non_websocket_route_endpoints() {
@@ -69,27 +69,19 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
     block_on(connected.close_all()).unwrap();
 }
 
-#[allow(clippy::result_large_err)]
 #[test]
 fn default_route_connector_delegates_websocket_routes() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
-            assert_eq!(
-                request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer test-token"),
-            );
-            Ok(response)
-        })
-        .unwrap();
-        let _ = socket.close(None);
-    });
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        assert_eq!(
+            socket.request().header("authorization"),
+            Some("Bearer test-token"),
+        );
+        match socket.recv().unwrap() {
+            ClientFrame::Close => {}
+            other => panic!("expected close frame, got {other:?}"),
+        }
+    })
+    .unwrap();
 
     let topology = SessionTopology::default()
         .with_route(SessionRoute {
@@ -97,7 +89,7 @@ fn default_route_connector_delegates_websocket_routes() {
             target: SessionTarget::Shared,
             domains: vec![ProtocolDomain::System, ProtocolDomain::Market],
             endpoint: SessionRouteEndpoint::WebSocket {
-                url: format!("ws://{addr}/md"),
+                url: server.url("/md"),
                 connect: WebSocketConnectOptions::default()
                     .with_header("Authorization", "Bearer test-token"),
             },
@@ -120,7 +112,7 @@ fn default_route_connector_delegates_websocket_routes() {
     assert_eq!(connected.routes[1].route.label, "internal");
 
     block_on(connected.close_all()).unwrap();
-    server.join().unwrap();
+    server.join();
 }
 
 fn block_on<F>(future: F) -> F::Output

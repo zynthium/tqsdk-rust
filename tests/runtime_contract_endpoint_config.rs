@@ -4,9 +4,13 @@ use tqsdk_runtime_contract::{EndpointConfig, MarketSessionTarget};
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
-    let _guard = ENV_MUTEX.lock().unwrap();
+    let _guard = env_lock();
     let keys = [
         "TQ_AUTH_URL",
         "TQ_MD_URL",
@@ -14,6 +18,8 @@ fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
         "TQ_QUERY_URL",
         "TQ_REPLAY_URL",
         "TQ_SCHEMA_URL",
+        "TQ_INS_URL",
+        "TQ_CHINESE_HOLIDAY_URL",
     ];
     let saved = snapshot_env(&keys);
 
@@ -41,8 +47,8 @@ fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
 }
 
 #[test]
-fn endpoint_config_default_and_market_target_match_runtime_defaults() {
-    let _guard = ENV_MUTEX.lock().unwrap();
+fn endpoint_config_from_env_supports_tqsdk_rs_alias_env_vars() {
+    let _guard = env_lock();
     let keys = [
         "TQ_AUTH_URL",
         "TQ_MD_URL",
@@ -50,6 +56,39 @@ fn endpoint_config_default_and_market_target_match_runtime_defaults() {
         "TQ_QUERY_URL",
         "TQ_REPLAY_URL",
         "TQ_SCHEMA_URL",
+        "TQ_INS_URL",
+        "TQ_CHINESE_HOLIDAY_URL",
+    ];
+    let saved = snapshot_env(&keys);
+    clear_env(&keys);
+
+    unsafe {
+        std::env::set_var("TQ_INS_URL", "https://ins.env/graphql");
+        std::env::set_var(
+            "TQ_CHINESE_HOLIDAY_URL",
+            "https://files.env/metadata/shinny_chinese_holiday.json",
+        );
+    }
+
+    let config = EndpointConfig::from_env();
+    assert_eq!(config.query_url.as_deref(), Some("https://ins.env/graphql"));
+    assert_eq!(config.schema_url.as_deref(), Some("https://files.env/metadata/"));
+
+    restore_env(saved);
+}
+
+#[test]
+fn endpoint_config_default_and_market_target_match_runtime_defaults() {
+    let _guard = env_lock();
+    let keys = [
+        "TQ_AUTH_URL",
+        "TQ_MD_URL",
+        "TQ_TD_URL",
+        "TQ_QUERY_URL",
+        "TQ_REPLAY_URL",
+        "TQ_SCHEMA_URL",
+        "TQ_INS_URL",
+        "TQ_CHINESE_HOLIDAY_URL",
     ];
     let saved = snapshot_env(&keys);
     clear_env(&keys);
