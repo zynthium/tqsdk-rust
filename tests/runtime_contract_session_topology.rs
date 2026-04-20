@@ -6,9 +6,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use tqsdk_runtime_contract::{
     AccountId, AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture,
-    EndpointConfig, MarketSessionTarget, PasswordCredentials, ProtocolDomain, SessionBootstrap,
-    SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    SessionTopologyResolver, TqAuthProvider, TradeSessionTarget, WebSocketConnectOptions,
+    EndpointConfig, MarketSessionTarget, PasswordCredentials, ProtocolDomain, ReplaySessionId,
+    SessionBootstrap, SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget,
+    SessionTopology, SessionTopologyResolver, TqAuthProvider, TradeSessionTarget,
+    WebSocketConnectOptions,
 };
 
 struct TestAuthProvider;
@@ -240,6 +241,48 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
 
     ns_server.join().unwrap();
     broker_server.join().unwrap();
+}
+
+#[test]
+fn tq_auth_provider_resolves_replay_and_system_routes_from_explicit_endpoints() {
+    let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"));
+    let config = SessionConfig::new(
+        EndpointConfig::new("https://auth.example").with_replay_url("replay-driver"),
+    )
+    .enable_domain(ProtocolDomain::Replay)
+    .enable_domain(ProtocolDomain::System);
+    let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
+
+    let topology = block_on(provider.resolve_topology(
+        &auth,
+        &config,
+        &[ProtocolDomain::Replay, ProtocolDomain::System],
+    ))
+    .unwrap();
+
+    assert_eq!(topology.routes.len(), 2);
+    assert_eq!(topology.routes[0].label, "replay");
+    assert_eq!(
+        topology.routes[0].target,
+        SessionTarget::Replay(ReplaySessionId::new("replay-driver"))
+    );
+    assert_eq!(topology.routes[0].domains, vec![ProtocolDomain::Replay]);
+    assert_eq!(
+        topology.routes[0].endpoint,
+        SessionRouteEndpoint::Replay {
+            label: "replay-driver".to_string(),
+        }
+    );
+
+    assert_eq!(topology.routes[1].label, "system");
+    assert_eq!(topology.routes[1].target, SessionTarget::Shared);
+    assert_eq!(topology.routes[1].domains, vec![ProtocolDomain::System]);
+    assert_eq!(
+        topology.routes[1].endpoint,
+        SessionRouteEndpoint::Internal {
+            label: "system-driver".to_string(),
+        }
+    );
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> String {

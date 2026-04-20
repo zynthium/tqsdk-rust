@@ -14,7 +14,7 @@ use crate::transport::{
     SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
     SessionTopologyResolver, WebSocketConnectOptions,
 };
-use crate::{AuthId, ContractError, Result};
+use crate::{AuthId, ContractError, ReplaySessionId, Result};
 
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
@@ -456,6 +456,22 @@ impl SessionTopologyResolver for TqAuthProvider {
                     target: SessionTarget::Shared,
                     domains: vec![ProtocolDomain::Schema],
                     endpoint: SessionRouteEndpoint::Http { url: schema_url },
+                });
+            }
+
+            if enabled_domains.contains(&ProtocolDomain::Replay) {
+                let Some(replay_label) = config.endpoints.replay_url.clone() else {
+                    return Err(ContractError::validation(
+                        "replay domain requires endpoints.replay_url for topology resolution",
+                    ));
+                };
+                topology = topology.with_route(SessionRoute {
+                    label: "replay".to_string(),
+                    target: SessionTarget::Replay(ReplaySessionId::new(replay_label.clone())),
+                    domains: vec![ProtocolDomain::Replay],
+                    endpoint: SessionRouteEndpoint::Replay {
+                        label: replay_label,
+                    },
                 });
             }
 
