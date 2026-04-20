@@ -214,11 +214,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `TQ_AUTH_URL`
 - `TQ_MD_URL`
 - `TQ_TD_URL`
-- `TQ_QUERY_URL`
-- `TQ_INS_URL`
-- `TQ_REPLAY_URL`
-- `TQ_SCHEMA_URL`
-- `TQ_CHINESE_HOLIDAY_URL`
+
+`query` / `schema` / `replay` 相关 endpoint 不会从环境变量隐式注入，需由调用方显式通过代码传入，例如：
+
+- `EndpointConfig::with_query_url(...)`
+- `EndpointConfig::with_schema_url(...)`
+- `EndpointConfig::with_replay_url(...)`
+
+`TQ_INS_URL` 与 `TQ_CHINESE_HOLIDAY_URL` 虽然在官方 Python SDK 中存在，但它们对应的是更高层的合约信息 / 交易日历数据源语义，不属于当前这个低层 runtime contract 的 `EndpointConfig::from_env()` 责任范围。
 
 live probe 与 live smoke 另外会用到：
 

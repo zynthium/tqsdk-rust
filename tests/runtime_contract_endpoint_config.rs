@@ -11,7 +11,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
+fn endpoint_config_from_env_reads_only_official_runtime_override_env_vars() {
     let _guard = env_lock();
     let keys = [
         "TQ_AUTH_URL",
@@ -38,18 +38,15 @@ fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
     assert_eq!(config.auth_url.as_deref(), Some("https://auth.env"));
     assert_eq!(config.market_url.as_deref(), Some("wss://md.env"));
     assert_eq!(config.trade_url.as_deref(), Some("wss://td.env"));
-    assert_eq!(
-        config.query_url.as_deref(),
-        Some("https://query.env/graphql")
-    );
-    assert_eq!(config.replay_url.as_deref(), Some("replay-driver"));
-    assert_eq!(config.schema_url.as_deref(), Some("https://schema.env"));
+    assert_eq!(config.query_url, None);
+    assert_eq!(config.replay_url, None);
+    assert_eq!(config.schema_url, None);
 
     restore_env(saved);
 }
 
 #[test]
-fn endpoint_config_from_env_supports_tqsdk_rs_alias_env_vars() {
+fn endpoint_config_from_env_ignores_non_runtime_or_misaligned_env_vars() {
     let _guard = env_lock();
     let keys = [
         "TQ_AUTH_URL",
@@ -73,11 +70,9 @@ fn endpoint_config_from_env_supports_tqsdk_rs_alias_env_vars() {
     }
 
     let config = EndpointConfig::from_env();
-    assert_eq!(config.query_url.as_deref(), Some("https://ins.env/graphql"));
-    assert_eq!(
-        config.schema_url.as_deref(),
-        Some("https://files.env/metadata/")
-    );
+    assert_eq!(config.query_url, None);
+    assert_eq!(config.replay_url, None);
+    assert_eq!(config.schema_url, None);
 
     restore_env(saved);
 }
