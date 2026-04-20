@@ -17,6 +17,7 @@
 - 组装 `CommitResult`
 - 推进 `Revision`
 - 发布底层 `CommitLog`
+- 提供官方对象的纯 typed schema contract
 - 为消费者暴露 `RuntimeReader` / `UpdateCursor`
 
 它必须覆盖的协议域：
@@ -91,6 +92,7 @@ pub trait Runtime {
 - `RuntimeReader` 是 V1 的 canonical read-side entry point
 - `RuntimeReader::read()` 提供当前 head 的 zero-copy 读视图
 - `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
+- `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为
 - V1 不直接公开 `wait_update()`、stream、callback facade
 - 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型

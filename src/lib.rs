@@ -8,9 +8,10 @@ pub mod ids;
 pub mod runtime;
 pub mod session_runtime;
 pub mod state;
+mod tokio_blocking;
 pub mod tq_auth;
 pub mod transport;
-mod tokio_blocking;
+pub mod types;
 
 pub use adapter::{
     AdapterRegistry, MarketAdapter, ProtocolAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter,
@@ -55,4 +56,12 @@ pub use transport::{
     SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
     SessionTopologyResolver, TradeSessionTarget, Transport, WebSocketConnectOptions,
     WebSocketRouteConnector, WebSocketTransport,
+};
+pub use types::{
+    Account, CategoryInfo, Chart, ChartInfo, EdbIndexData, FrequentCancellation,
+    FrequentCancellationRule, Kline, Notification, Order, Position, PreInsertOrder, Quote,
+    RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
+    SecurityTrade, SelfTrade, SelfTradeRule, SettlementInfo, SymbolRanking, SymbolSettlement, Tick,
+    Trade, TradePositionRatio, TradePositionRatioRule, TradingCalendarDay, TradingStatus,
+    TradingTime,
 };

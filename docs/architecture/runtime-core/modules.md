@@ -7,12 +7,13 @@
 4. `adapter_registry`
 5. `command_ledger`
 6. `diff_core`
-7. `state_store`
-8. `projection_engine`
-9. `commit_assembler`
-10. `commit_log`
-11. `runtime_reader`
-12. `runtime_contract`
+7. `types`
+8. `state_store`
+9. `projection_engine`
+10. `commit_assembler`
+11. `commit_log`
+12. `runtime_reader`
+13. `runtime_contract`
 
 ## 依赖方向
 ```text
@@ -25,6 +26,8 @@ transport   auth
    command_ledger
          |
       diff_core
+         |
+       types
          |
      state_store
          |
@@ -107,6 +110,20 @@ pub trait StateStoreApi {
     fn snapshot(&self) -> StateSnapshot; // compatibility
 }
 ```
+
+### types
+```rust
+pub struct Quote;
+pub struct Account;
+pub struct Order;
+pub struct SecurityAccount;
+pub struct RiskManagementRule;
+```
+
+职责：
+- 提供远端状态树对象的纯 schema/type contract
+- 对齐官方 `objs.py` 与已知协议字段默认值、缺失字段和稀疏 payload 兼容语义
+- 明确与 facade/view 类型分层，不承载用户便利行为
 
 ### projection_engine
 ```rust

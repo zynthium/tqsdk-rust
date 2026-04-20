@@ -3,6 +3,8 @@
 ## 原则
 V1 应优先锁定“runtime contract 会长期稳定使用的标识符和路径体系”，而不是提前锁定 facade 类型。
 
+同时，V1 可以锁定一层纯 schema/type contract，用来承载官方对象定义，但这层不能反向演化成 typed state view 或用户 facade。
+
 ## 必锁定的标识符类型
 ```rust
 pub struct Revision(u64);
@@ -95,6 +97,14 @@ pub struct SessionConfig {
 - 它们直接决定 runtime contract 的稳定性
 - 它们会被所有未来 facade 间接复用
 - 一旦这些类型漂移，后续 `wait_update` 和 stream/callback 都会被迫重构
+
+## 可提前锁定的纯 schema 类型
+- `types::Quote` / `types::Kline` / `types::Tick`
+- `types::Account` / `types::Position` / `types::Order` / `types::Trade`
+- `types::RiskManagementRule` / `types::RiskManagementData`
+- `types::SecurityAccount` / `types::SecurityPosition` / `types::SecurityOrder` / `types::SecurityTrade`
+
+这些类型只表达远端状态树对象的字段契约、默认值和稀疏 payload 兼容语义，不表达 reader 绑定、增量更新语义或 facade 行为。
 
 ## 明确后置到后续阶段的类型
 - `TqApi`
