@@ -352,5 +352,6 @@ impl OutboundRequest {
 pub struct OutboundDispatch {
     pub command_id: CommandId,
     pub domain: ProtocolDomain,
+    pub account_id: Option<AccountId>,
     pub request: OutboundRequest,
 }

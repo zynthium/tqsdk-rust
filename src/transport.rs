@@ -140,7 +140,7 @@ impl WebSocketTransport {
 
         let socket = Self::connect_with_request(url, request)
             .await
-            .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
+            .map_err(|err| ContractError::transport(format!("websocket connect failed: {err}")))?;
         self.socket = Some(socket);
         Ok(())
     }
@@ -154,7 +154,7 @@ impl WebSocketTransport {
         let frame = socket
             .next_frame()
             .await
-            .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
+            .map_err(|err| ContractError::transport(format!("websocket recv failed: {err}")))?;
         Self::decode_frame(frame)
     }
 
@@ -174,7 +174,7 @@ impl WebSocketTransport {
         socket
             .send(frame)
             .await
-            .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
+            .map_err(|err| ContractError::transport(format!("websocket send failed: {err}")))
     }
 
     async fn close_async(&mut self) -> Result<()> {
@@ -185,7 +185,7 @@ impl WebSocketTransport {
         socket
             .close()
             .await
-            .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
+            .map_err(|err| ContractError::transport(format!("websocket close failed: {err}")))?;
 
         Ok(())
     }
@@ -603,7 +603,11 @@ impl ConnectedTopology {
             let route = self
                 .routes
                 .iter_mut()
-                .find(|route| route_accepts_dispatch(&route.route, &dispatch))
+                .filter_map(|route| {
+                    route_dispatch_match_score(&route.route, &dispatch).map(|score| (score, route))
+                })
+                .max_by_key(|(score, _route)| *score)
+                .map(|(_score, route)| route)
                 .ok_or_else(|| {
                     ContractError::validation(format!(
                         "no connected route for {} {:?} request",
@@ -640,8 +644,11 @@ impl ConnectedTopology {
     pub fn route_label_for_dispatch(&self, dispatch: &OutboundDispatch) -> Option<&str> {
         self.routes
             .iter()
-            .find(|route| route_accepts_dispatch(&route.route, dispatch))
-            .map(|route| route.route.label.as_str())
+            .filter_map(|route| {
+                route_dispatch_match_score(&route.route, dispatch).map(|score| (score, route))
+            })
+            .max_by_key(|(score, _route)| *score)
+            .map(|(_score, route)| route.route.label.as_str())
     }
 
     pub fn has_route(&self, label: &str) -> bool {
@@ -795,8 +802,8 @@ impl SessionRouteConnector for DefaultRouteConnector {
     }
 }
 
-fn route_accepts_dispatch(route: &SessionRoute, dispatch: &OutboundDispatch) -> bool {
-    route.domains.contains(&dispatch.domain)
+fn route_dispatch_match_score(route: &SessionRoute, dispatch: &OutboundDispatch) -> Option<u8> {
+    let request_matches_route = route.domains.contains(&dispatch.domain)
         && matches!(
             (&route.endpoint, &dispatch.request),
             (
@@ -811,7 +818,20 @@ fn route_accepts_dispatch(route: &SessionRoute, dispatch: &OutboundDispatch) -> 
                     SessionRouteEndpoint::Internal { .. },
                     OutboundRequest::Internal(_)
                 )
-        )
+        );
+    if !request_matches_route {
+        return None;
+    }
+
+    match (&route.target, dispatch.account_id.as_ref()) {
+        (SessionTarget::Account(route_account_id), Some(dispatch_account_id))
+            if route_account_id == dispatch_account_id =>
+        {
+            Some(2)
+        }
+        (SessionTarget::Account(_), _) => None,
+        (SessionTarget::Shared, _) | (SessionTarget::Replay(_), _) => Some(1),
+    }
 }
 
 fn map_raw_frame_to_input(route: &SessionRoute, frame: RawFrame) -> Result<Option<RuntimeInput>> {

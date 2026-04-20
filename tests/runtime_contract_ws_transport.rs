@@ -93,6 +93,22 @@ fn websocket_transport_requires_tokio_runtime() {
     );
 }
 
+#[test]
+fn websocket_transport_connect_errors_use_transport_error_category() {
+    run_on_tokio(async {
+        let mut transport = WebSocketTransport::new("ws://127.0.0.1:9");
+        let err = transport
+            .connect()
+            .await
+            .expect_err("connecting to a closed port should fail");
+        assert!(
+            err.to_string()
+                .starts_with("transport error: websocket connect failed:"),
+            "{err}"
+        );
+    });
+}
+
 fn block_on<F>(future: F) -> F::Output
 where
     F: Future,

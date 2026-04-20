@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -436,6 +438,7 @@ impl SessionRuntime {
             if requests.is_empty() {
                 return Ok(PendingRouteStepOutcome::default());
             }
+            let request_command_ids = request_command_ids(&requests);
 
             let mut outcome = PendingRouteStepOutcome {
                 requests: requests.clone(),
@@ -444,7 +447,7 @@ impl SessionRuntime {
             let inputs = match executor.execute(&route, requests).await {
                 Ok(inputs) => inputs,
                 Err(err) => {
-                    self.record_command_failure(&caused_by, route.label.as_str(), &err)?;
+                    self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
                     return Err(err);
                 }
             };
@@ -453,7 +456,7 @@ impl SessionRuntime {
                 Ok(Some(commit)) => {
                     outcome.commits.push(commit);
                     self.record_command_statuses(
-                        &caused_by,
+                        &request_command_ids,
                         CommandStatus::Completed,
                         Some(json!({ "route": route.label })),
                         scope,
@@ -461,7 +464,7 @@ impl SessionRuntime {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    self.record_command_failure(&caused_by, route.label.as_str(), &err)?;
+                    self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
                     return Err(err);
                 }
             }
@@ -577,6 +580,7 @@ impl SessionRuntime {
                 )? {
                     commits.push(commit);
                 }
+                sleep_reconnect_backoff(scheduled_backoff_ms).await?;
 
                 match self.recover_internal(deps, false).await {
                     Ok(recovery) => {
@@ -1262,6 +1266,30 @@ fn reconnect_backoff_ms(config: &SessionConfig, attempt: u32) -> u64 {
     let multiplier = 1u128 << shift;
     let scheduled = base.saturating_mul(multiplier);
     scheduled.min(cap).min(u64::MAX as u128) as u64
+}
+
+fn request_command_ids(requests: &[OutboundDispatch]) -> Vec<CommandId> {
+    let mut command_ids = Vec::with_capacity(requests.len());
+    for request in requests {
+        if !command_ids.contains(&request.command_id) {
+            command_ids.push(request.command_id);
+        }
+    }
+    command_ids
+}
+
+async fn sleep_reconnect_backoff(scheduled_backoff_ms: u64) -> Result<()> {
+    if scheduled_backoff_ms == 0 {
+        return Ok(());
+    }
+
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        crate::ContractError::validation(
+            "session reconnect backoff requires an active Tokio runtime",
+        )
+    })?;
+    tokio::time::sleep(Duration::from_millis(scheduled_backoff_ms)).await;
+    Ok(())
 }
 
 fn command_detail_map_from_snapshot(

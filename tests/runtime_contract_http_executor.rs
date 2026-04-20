@@ -62,6 +62,7 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
                 vec![OutboundDispatch {
                     command_id: CommandId::new(1),
                     domain: ProtocolDomain::Query,
+                    account_id: None,
                     request: OutboundRequest::Http(HttpRequest {
                         method: HttpMethod::Post,
                         path: None,
@@ -138,6 +139,7 @@ fn reqwest_http_executor_joins_schema_paths_for_get_requests() {
                 vec![OutboundDispatch {
                     command_id: CommandId::new(2),
                     domain: ProtocolDomain::Schema,
+                    account_id: None,
                     request: OutboundRequest::Http(HttpRequest {
                         method: HttpMethod::Get,
                         path: Some("/schema/instrument.json".to_string()),
@@ -187,6 +189,7 @@ fn reqwest_http_executor_requires_tokio_runtime() {
         vec![OutboundDispatch {
             command_id: CommandId::new(3),
             domain: ProtocolDomain::Query,
+            account_id: None,
             request: OutboundRequest::Http(HttpRequest {
                 method: HttpMethod::Post,
                 path: None,
@@ -203,6 +206,58 @@ fn reqwest_http_executor_requires_tokio_runtime() {
         err.to_string(),
         "validation error: reqwest http executor requires an active Tokio runtime"
     );
+}
+
+#[test]
+fn reqwest_http_executor_reports_http_errors_for_non_success_status() {
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+
+            assert!(request.starts_with("GET /schema/instrument.json HTTP/1.1"));
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 16\r\nconnection: close\r\n\r\n{{\"error\":\"boom\"}}"
+            )
+            .unwrap();
+        });
+
+        let executor = ReqwestHttpExecutor::default();
+        let route = SessionRoute {
+            label: "schema".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Schema],
+            endpoint: SessionRouteEndpoint::Http {
+                url: format!("http://{addr}"),
+            },
+        };
+        let err = executor
+            .execute(
+                &route,
+                vec![OutboundDispatch {
+                    command_id: CommandId::new(4),
+                    domain: ProtocolDomain::Schema,
+                    account_id: None,
+                    request: OutboundRequest::Http(HttpRequest {
+                        method: HttpMethod::Get,
+                        path: Some("/schema/instrument.json".to_string()),
+                        body: None,
+                    }),
+                }],
+            )
+            .await
+            .expect_err("non-success status should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "http error: http request failed with status 500 Internal Server Error: {\"error\":\"boom\"}"
+        );
+        server.join().unwrap();
+    });
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {

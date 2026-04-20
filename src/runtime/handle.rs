@@ -10,7 +10,7 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
     error::{ContractError, Result},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
-    ids::{CommandId, ProtocolDomain, Revision},
+    ids::{AccountId, CommandId, ProtocolDomain, Revision},
     state::{CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor},
     transport::{BootstrapResult, SessionPhase},
 };
@@ -119,9 +119,14 @@ impl RuntimeHandle {
                             envelope.command_id.get()
                         ))
                     })?;
+                let account_id = inner
+                    .command_ledger
+                    .detail_seed(envelope.command_id)
+                    .and_then(dispatch_account_id_from_seed);
                 Ok(OutboundDispatch {
                     command_id: envelope.command_id,
                     domain,
+                    account_id,
                     request: envelope.request,
                 })
             })
@@ -449,6 +454,12 @@ fn command_cleanup_mutation(command_id: CommandId) -> NormalizedMutation {
         ],
         source: MutationSource::SessionControl,
     }
+}
+
+fn dispatch_account_id_from_seed(seed: &serde_json::Map<String, Value>) -> Option<AccountId> {
+    seed.get("account_id")
+        .and_then(Value::as_str)
+        .map(AccountId::new)
 }
 
 #[cfg(test)]

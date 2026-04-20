@@ -503,6 +503,62 @@ fn session_runtime_marks_pending_route_commands_failed_when_executor_errors() {
     );
 }
 
+#[test]
+fn session_runtime_marks_failed_pending_route_request_even_without_caused_by_ids() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let resolver = StaticTopologyResolver {
+        topology: SessionTopology::default().with_route(SessionRoute {
+            label: "instrument-schema".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Schema],
+            endpoint: SessionRouteEndpoint::Http {
+                url: "https://schema.example".to_string(),
+            },
+        }),
+        expected_domains: vec![ProtocolDomain::Schema],
+    };
+    let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+        .enable_domain(ProtocolDomain::Schema);
+    let adapters = adapter_registry();
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &resolver,
+        &PassiveConnector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+    let executor = RecordingExecutor::default().with_error("schema executor failed");
+
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("instrument-schema"),
+            path: "/schema/instrument.json".to_string(),
+        })),
+    )
+    .unwrap();
+    block_on(runtime.flush_outbound(&mut run)).unwrap();
+
+    let err = block_on(runtime.drive_pending_route_once(
+        &mut run,
+        "instrument-schema",
+        &executor,
+        vec![],
+        CommitScope::RealtimeUpdate,
+    ))
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "auth error: schema executor failed");
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("failed"))
+    );
+}
+
 fn runtime_with_default_adapters() -> RuntimeHandle {
     RuntimeHandle::with_adapters(adapter_registry())
 }

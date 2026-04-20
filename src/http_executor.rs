@@ -70,13 +70,13 @@ impl ReqwestHttpExecutor {
                     builder.send().await
                 }
             }
-            .map_err(|err| ContractError::auth(format!("http request failed: {err}")))?;
+            .map_err(|err| ContractError::http(format!("http request failed: {err}")))?;
 
             let status = response.status();
             let bytes = read_response_bytes(response).await?;
             if !status.is_success() {
                 let body = String::from_utf8_lossy(&bytes);
-                return Err(ContractError::auth(format!(
+                return Err(ContractError::http(format!(
                     "http request failed with status {status}: {body}"
                 )));
             }
@@ -139,7 +139,7 @@ async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
-            .map_err(|err| ContractError::auth(format!("failed to read http response: {err}")))?;
+            .map_err(|err| ContractError::http(format!("failed to read http response: {err}")))?;
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
@@ -151,7 +151,7 @@ fn decode_response_payload(
     bytes: &[u8],
 ) -> Result<InputPayload> {
     let value = serde_json::from_slice::<Value>(bytes)
-        .map_err(|err| ContractError::auth(format!("http response was not valid json: {err}")))?;
+        .map_err(|err| ContractError::http(format!("http response was not valid json: {err}")))?;
 
     if domains.contains(&ProtocolDomain::Query)
         && let Some(query_id) = request_body

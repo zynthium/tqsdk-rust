@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
@@ -344,155 +344,227 @@ fn session_runtime_drive_route_once_recovers_after_transport_error() {
 
 #[test]
 fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds() {
-    let handle = runtime_with_default_adapters();
-    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
-    let connector = ControlledConnector::with_outcomes(vec![
-        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
-        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
-        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)),
-    ]);
-    let adapters = adapter_registry();
-    let config = session_config().with_reconnect(ReconnectPolicy::new(
-        Duration::from_secs(1),
-        Duration::from_secs(8),
-        Some(3),
-    ));
+    run_on_tokio(async {
+        let handle = runtime_with_default_adapters();
+        let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+        let connector = ControlledConnector::with_outcomes(vec![
+            ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
+            ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
+            ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)),
+        ]);
+        let adapters = adapter_registry();
+        let config = session_config().with_reconnect(ReconnectPolicy::new(
+            Duration::from_millis(10),
+            Duration::from_millis(80),
+            Some(3),
+        ));
 
-    let mut run = block_on(runtime.establish(
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
-    ))
-    .unwrap();
+        let mut run = runtime
+            .establish(
+                &TestAuthProvider,
+                &MarketTopologyResolver,
+                &connector,
+                &config,
+                &adapters,
+            )
+            .await
+            .unwrap();
 
-    let outcome = block_on(runtime.drive_route_once(
-        &mut run,
-        "market",
-        vec![],
-        CommitScope::RealtimeUpdate,
-        SessionRuntimeDeps::new(
-            &TestAuthProvider,
-            &MarketTopologyResolver,
-            &connector,
-            &config,
-            &adapters,
-        ),
-    ))
-    .unwrap();
+        let outcome = runtime
+            .drive_route_once(
+                &mut run,
+                "market",
+                vec![],
+                CommitScope::RealtimeUpdate,
+                SessionRuntimeDeps::new(
+                    &TestAuthProvider,
+                    &MarketTopologyResolver,
+                    &connector,
+                    &config,
+                    &adapters,
+                ),
+            )
+            .await
+            .unwrap();
 
-    assert!(outcome.recovered);
-    assert_eq!(run.bootstrap.phase, SessionPhase::Running);
-    assert_eq!(run.connected.routes.len(), 1);
-    assert_eq!(connector.connected_labels().len(), 3);
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "attempt"]),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
-        Some(&json!(2000))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "max_attempts"]),
-        Some(&json!(3))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "exhausted"]),
-        Some(&json!(false))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "internal", "session-recovery-error", "attempt"]),
-        Some(&json!(1))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "lifecycle", "phase"]),
-        Some(&json!("running"))
-    );
+        assert!(outcome.recovered);
+        assert_eq!(run.bootstrap.phase, SessionPhase::Running);
+        assert_eq!(run.connected.routes.len(), 1);
+        assert_eq!(connector.connected_labels().len(), 3);
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "attempt"]),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            Some(&json!(20))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "max_attempts"]),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "exhausted"]),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "internal", "session-recovery-error", "attempt"]),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "lifecycle", "phase"]),
+            Some(&json!("running"))
+        );
+    });
 }
 
 #[test]
 fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
-    let handle = runtime_with_default_adapters();
-    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
-    let connector = ControlledConnector::with_outcomes(vec![
-        ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
-        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
-        ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 2")),
-    ]);
-    let adapters = adapter_registry();
-    let config = session_config().with_reconnect(ReconnectPolicy::new(
-        Duration::from_secs(1),
-        Duration::from_secs(8),
-        Some(2),
-    ));
+    run_on_tokio(async {
+        let handle = runtime_with_default_adapters();
+        let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+        let connector = ControlledConnector::with_outcomes(vec![
+            ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
+            ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 1")),
+            ConnectOutcome::Error(ContractError::auth("websocket reconnect failed: attempt 2")),
+        ]);
+        let adapters = adapter_registry();
+        let config = session_config().with_reconnect(ReconnectPolicy::new(
+            Duration::from_millis(10),
+            Duration::from_millis(80),
+            Some(2),
+        ));
 
-    let mut run = block_on(runtime.establish(
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
-    ))
-    .unwrap();
+        let mut run = runtime
+            .establish(
+                &TestAuthProvider,
+                &MarketTopologyResolver,
+                &connector,
+                &config,
+                &adapters,
+            )
+            .await
+            .unwrap();
 
-    let err = block_on(runtime.drive_route_once(
-        &mut run,
-        "market",
-        vec![],
-        CommitScope::RealtimeUpdate,
-        SessionRuntimeDeps::new(
-            &TestAuthProvider,
-            &MarketTopologyResolver,
-            &connector,
-            &config,
-            &adapters,
-        ),
-    ))
-    .unwrap_err();
+        let err = runtime
+            .drive_route_once(
+                &mut run,
+                "market",
+                vec![],
+                CommitScope::RealtimeUpdate,
+                SessionRuntimeDeps::new(
+                    &TestAuthProvider,
+                    &MarketTopologyResolver,
+                    &connector,
+                    &config,
+                    &adapters,
+                ),
+            )
+            .await
+            .unwrap_err();
 
-    assert_eq!(
-        err.to_string(),
-        "auth error: websocket reconnect failed: attempt 2"
-    );
-    assert_eq!(connector.connected_labels().len(), 3);
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "attempt"]),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
-        Some(&json!(2000))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "reconnect", "exhausted"]),
-        Some(&json!(true))
-    );
-    assert_eq!(
-        handle
-            .latest_snapshot()
-            .get(["system", "session", "lifecycle", "phase"]),
-        Some(&json!("closed"))
-    );
+        assert_eq!(
+            err.to_string(),
+            "auth error: websocket reconnect failed: attempt 2"
+        );
+        assert_eq!(connector.connected_labels().len(), 3);
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "attempt"]),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            Some(&json!(20))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "exhausted"]),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "lifecycle", "phase"]),
+            Some(&json!("closed"))
+        );
+    });
+}
+
+#[test]
+fn session_runtime_applies_reconnect_backoff_before_retrying_recovery() {
+    run_on_tokio(async {
+        let handle = runtime_with_default_adapters();
+        let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+        let connector = ControlledConnector::new(vec![
+            RecvBehavior::Frame(RawFrame::Close),
+            RecvBehavior::Frame(RawFrame::Pong),
+        ]);
+        let adapters = adapter_registry();
+        let config = session_config().with_reconnect(ReconnectPolicy::new(
+            Duration::from_millis(15),
+            Duration::from_millis(15),
+            Some(1),
+        ));
+
+        let mut run = runtime
+            .establish(
+                &TestAuthProvider,
+                &MarketTopologyResolver,
+                &connector,
+                &config,
+                &adapters,
+            )
+            .await
+            .unwrap();
+        let started_at = Instant::now();
+
+        let outcome = runtime
+            .drive_route_once(
+                &mut run,
+                "market",
+                vec![],
+                CommitScope::RealtimeUpdate,
+                SessionRuntimeDeps::new(
+                    &TestAuthProvider,
+                    &MarketTopologyResolver,
+                    &connector,
+                    &config,
+                    &adapters,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.recovered);
+        assert!(
+            started_at.elapsed() >= Duration::from_millis(10),
+            "expected reconnect backoff to delay recovery, elapsed: {:?}",
+            started_at.elapsed()
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "scheduled_backoff_ms"]),
+            Some(&json!(15))
+        );
+    });
 }
 
 fn connect_run(behavior: RecvBehavior) -> SessionRun {
@@ -536,6 +608,11 @@ fn session_config() -> SessionConfig {
     SessionConfig::new(
         EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"),
     )
+    .with_reconnect(ReconnectPolicy::new(
+        Duration::from_millis(0),
+        Duration::from_millis(0),
+        Some(1),
+    ))
     .enable_domain(ProtocolDomain::Market)
 }
 
@@ -606,3 +683,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

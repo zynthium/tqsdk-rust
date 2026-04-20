@@ -3,14 +3,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
-    OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
-    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopology, SessionTopologyResolver,
-    StatePath, TimerEvent, Transport,
+    OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy, Runtime, RuntimeHandle,
+    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopology,
+    SessionTopologyResolver, StatePath, TimerEvent, Transport,
 };
 
 #[derive(Clone)]
@@ -282,6 +283,11 @@ fn session_config() -> SessionConfig {
     SessionConfig::new(
         EndpointConfig::new("https://auth.example").with_market_url("wss://market.example"),
     )
+    .with_reconnect(ReconnectPolicy::new(
+        Duration::from_millis(0),
+        Duration::from_millis(0),
+        Some(1),
+    ))
     .enable_domain(ProtocolDomain::Market)
 }
 
