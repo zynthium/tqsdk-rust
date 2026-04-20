@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock},
+    sync::{Arc, LockResult, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::{adapter::AdapterRegistry, state::StateStore};
@@ -32,4 +32,26 @@ impl RuntimeCore {
             command_ledger: CommandLedger::with_retention(max_retained_terminal_commands),
         }
     }
+}
+
+fn recover_poisoned_lock<G>(result: LockResult<G>) -> G {
+    // Stability-first substrate: once a lock is poisoned, keep the contract
+    // usable and let higher layers observe state explicitly instead of
+    // permanently panicking every caller.
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub(crate) fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    recover_poisoned_lock(mutex.lock())
+}
+
+pub(crate) fn rwlock_read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    recover_poisoned_lock(lock.read())
+}
+
+pub(crate) fn rwlock_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    recover_poisoned_lock(lock.write())
 }

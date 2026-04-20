@@ -610,12 +610,23 @@ impl ConnectedTopology {
         &'a mut self,
         dispatch: OutboundDispatch,
     ) -> ContractFuture<'a, DispatchReceipt> {
+        Box::pin(async move { self.dispatch_ref(&dispatch).await })
+    }
+
+    /// Dispatches a request without moving ownership out of the caller.
+    ///
+    /// This is the preferred hot-path surface when the caller still needs the
+    /// dispatch metadata for command-status projection after the route send.
+    pub fn dispatch_ref<'a>(
+        &'a mut self,
+        dispatch: &'a OutboundDispatch,
+    ) -> ContractFuture<'a, DispatchReceipt> {
         Box::pin(async move {
             let route = self
                 .routes
                 .iter_mut()
                 .filter_map(|route| {
-                    route_dispatch_match_score(&route.route, &dispatch).map(|score| (score, route))
+                    route_dispatch_match_score(&route.route, dispatch).map(|score| (score, route))
                 })
                 .max_by_key(|(score, _route)| *score)
                 .map(|(_score, route)| route)

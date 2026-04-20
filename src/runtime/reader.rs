@@ -10,7 +10,7 @@ use crate::{
     state::{CommitResult, StateReadView, StateStore, UpdateCursor},
 };
 
-use super::SharedState;
+use super::{SharedState, rwlock_read};
 
 /// Locked, revision-bound read guard over the runtime state tree.
 pub struct SnapshotReadGuard<'a> {
@@ -178,7 +178,7 @@ impl RuntimeReader {
     /// Acquires a revision-bound snapshot read guard.
     pub fn read(&self) -> SnapshotReadGuard<'_> {
         SnapshotReadGuard {
-            guard: self.state.read().expect("runtime state rwlock poisoned"),
+            guard: rwlock_read(&self.state),
         }
     }
 
@@ -194,7 +194,7 @@ impl RuntimeReader {
         &self,
         cursor: &mut UpdateCursor,
     ) -> std::result::Result<Option<CommitReadGuard<'_>>, CursorLagged> {
-        let guard = self.state.read().expect("runtime state rwlock poisoned");
+        let guard = rwlock_read(&self.state);
         let current_revision = guard.revision();
         let expected_revision = cursor.next_revision();
 

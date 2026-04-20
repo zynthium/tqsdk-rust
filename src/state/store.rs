@@ -132,9 +132,9 @@ fn apply_fields(
         *cursor = Value::Object(Map::new());
     }
 
-    let map = cursor
-        .as_object_mut()
-        .expect("state snapshot path targets must always resolve to objects");
+    let Value::Object(map) = cursor else {
+        unreachable!("state snapshot path targets must always resolve to objects");
+    };
 
     for field in fields {
         let has_changed = if field.value.is_null() {
@@ -162,9 +162,9 @@ fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mu
         *root = Value::Object(Map::new());
     }
 
-    let map = root
-        .as_object_mut()
-        .expect("state snapshot intermediate nodes must always be objects");
+    let Value::Object(map) = root else {
+        unreachable!("state snapshot intermediate nodes must always be objects");
+    };
     let child = map
         .entry(segment.clone())
         .or_insert_with(|| Value::Object(Map::new()));

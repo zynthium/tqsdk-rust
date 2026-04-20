@@ -198,13 +198,13 @@ impl SessionRuntime {
             let dispatches = self.handle.drain_dispatches()?;
             let mut receipts = Vec::with_capacity(dispatches.len());
             for dispatch in dispatches {
-                let route_label = run
-                    .connected
-                    .route_label_for_dispatch(&dispatch)
-                    .map(str::to_string);
-                let receipt = match run.connected.dispatch(dispatch.clone()).await {
+                let receipt = match run.connected.dispatch_ref(&dispatch).await {
                     Ok(receipt) => receipt,
                     Err(err) => {
+                        let route_label = run
+                            .connected
+                            .route_label_for_dispatch(&dispatch)
+                            .map(str::to_string);
                         let mut detail = Map::new();
                         detail.insert("message".to_string(), json!(err.to_string()));
                         self.handle.record_command_status(
@@ -511,15 +511,14 @@ impl SessionRuntime {
         }
 
         if schema_request_count == 1 {
-            let schema_id = schema_ids
-                .iter()
-                .flatten()
-                .next()
-                .expect("schema request count should guarantee a schema id")
-                .clone();
+            let Some(schema_id) = schema_ids.iter().flatten().next().map(String::as_str) else {
+                return Err(crate::ContractError::validation(
+                    "schema response annotation invariant violated",
+                ));
+            };
             return Ok(inputs
                 .into_iter()
-                .map(|input| annotate_schema_input(input, Some(schema_id.as_str())))
+                .map(|input| annotate_schema_input(input, Some(schema_id)))
                 .collect());
         }
 

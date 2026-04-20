@@ -8,6 +8,8 @@ use crate::{
     state::{CommitResult, CursorTracker, UpdateCursor},
 };
 
+use super::mutex_lock;
+
 const DEFAULT_MAX_ENTRIES: usize = 8_192;
 
 /// Underlying append-only commit buffer.
@@ -31,11 +33,11 @@ impl CommitLog {
     }
 
     pub fn head_revision(&self) -> Option<Revision> {
-        self.inner.lock().expect("commit log mutex poisoned").head
+        mutex_lock(&self.inner).head
     }
 
     pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
-        let state = self.inner.lock().expect("commit log mutex poisoned");
+        let state = mutex_lock(&self.inner);
         let commit = state.commit_at(cursor.next_revision())?.clone();
         drop(state);
 
@@ -44,7 +46,7 @@ impl CommitLog {
     }
 
     pub(crate) fn new_cursor(&self, next_revision: Revision) -> UpdateCursor {
-        let mut state = self.inner.lock().expect("commit log mutex poisoned");
+        let mut state = mutex_lock(&self.inner);
         let cursor_id = CursorId::new(state.next_cursor_id);
         state.next_cursor_id += 1;
         state.cursor_positions.insert(cursor_id, next_revision);
@@ -61,22 +63,15 @@ impl CommitLog {
     }
 
     pub(crate) fn commit_at(&self, revision: Revision) -> Option<CommitResult> {
-        self.inner
-            .lock()
-            .expect("commit log mutex poisoned")
-            .commit_at(revision)
-            .cloned()
+        mutex_lock(&self.inner).commit_at(revision).cloned()
     }
 
     pub(crate) fn oldest_revision(&self) -> Option<Revision> {
-        self.inner
-            .lock()
-            .expect("commit log mutex poisoned")
-            .oldest_revision()
+        mutex_lock(&self.inner).oldest_revision()
     }
 
     pub(crate) fn publish(&self, commit: CommitResult) {
-        let mut state = self.inner.lock().expect("commit log mutex poisoned");
+        let mut state = mutex_lock(&self.inner);
         state.head = Some(commit.revision);
         if state.entries.is_empty() {
             state.first_retained_revision = Some(commit.revision);
@@ -164,7 +159,7 @@ impl CursorTracker for CommitLogCursorTracker {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut state = inner.lock().expect("commit log mutex poisoned");
+        let mut state = mutex_lock(&inner);
         if let Some(cursor_revision) = state.cursor_positions.get_mut(&self.cursor_id)
             && next_revision.get() > cursor_revision.get()
         {
@@ -179,8 +174,30 @@ impl Drop for CommitLogCursorTracker {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut state = inner.lock().expect("commit log mutex poisoned");
+        let mut state = mutex_lock(&inner);
         state.cursor_positions.remove(&self.cursor_id);
         state.trim();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+
+    use super::CommitLog;
+
+    #[test]
+    fn commit_log_recovers_from_poisoned_mutex() {
+        let log = CommitLog::new();
+        let inner = Arc::clone(&log.inner);
+
+        let panic = catch_unwind(AssertUnwindSafe(move || {
+            let _guard = inner.lock().unwrap();
+            panic!("poison commit log mutex");
+        }));
+        assert!(panic.is_err());
+
+        assert_eq!(log.head_revision(), None);
     }
 }

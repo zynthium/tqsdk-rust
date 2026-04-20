@@ -150,7 +150,7 @@ fn live_schema_http_contract_smoke() {
             )
             .await
             .expect("live schema establish should succeed");
-        let executor = ReqwestHttpExecutor::default();
+        let executor = ReqwestHttpExecutor::new().expect("reqwest http executor should build");
 
         let schema_id = handle
             .submit(RuntimeCommand::Schema(SchemaCommand::Refresh {

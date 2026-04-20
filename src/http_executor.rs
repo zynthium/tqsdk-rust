@@ -101,12 +101,6 @@ impl ReqwestHttpExecutor {
     }
 }
 
-impl Default for ReqwestHttpExecutor {
-    fn default() -> Self {
-        Self::new().expect("reqwest http executor should build with a valid default client")
-    }
-}
-
 impl RouteRequestExecutor for ReqwestHttpExecutor {
     fn execute<'a>(
         &'a self,
@@ -143,8 +137,12 @@ fn resolve_request_url(base_url: &str, path: Option<&str>) -> Result<String> {
 }
 
 async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0);
     let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(capacity);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
             .map_err(|err| ContractError::http(format!("failed to read http response: {err}")))?;

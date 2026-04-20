@@ -1,3 +1,11 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+//! Low-level async substrate for Tianqin/TQSDK server interaction.
+//!
+//! This crate intentionally stays at the contract layer: protocol adapters,
+//! transport/runtime coordination, state projection, schema/query/bootstrap
+//! interaction, and trade/replay/session control. It does not add facade-style
+//! user APIs or runtime ownership.
+
 pub mod adapter;
 pub mod auth;
 pub mod commands;

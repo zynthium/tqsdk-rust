@@ -47,7 +47,7 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
             );
         });
 
-        let executor = ReqwestHttpExecutor::default();
+        let executor = ReqwestHttpExecutor::new().expect("reqwest http executor should build");
         let route = SessionRoute {
             label: "query".to_string(),
             target: SessionTarget::Shared,
@@ -124,7 +124,7 @@ fn reqwest_http_executor_joins_schema_paths_for_get_requests() {
             );
         });
 
-        let executor = ReqwestHttpExecutor::default();
+        let executor = ReqwestHttpExecutor::new().expect("reqwest http executor should build");
         let route = SessionRoute {
             label: "schema".to_string(),
             target: SessionTarget::Shared,
@@ -175,7 +175,7 @@ fn reqwest_http_executor_requires_tokio_runtime() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let executor = ReqwestHttpExecutor::default();
+    let executor = ReqwestHttpExecutor::new().expect("reqwest http executor should build");
     let route = SessionRoute {
         label: "query".to_string(),
         target: SessionTarget::Shared,
@@ -226,7 +226,7 @@ fn reqwest_http_executor_reports_http_errors_for_non_success_status() {
             .unwrap();
         });
 
-        let executor = ReqwestHttpExecutor::default();
+        let executor = ReqwestHttpExecutor::new().expect("reqwest http executor should build");
         let route = SessionRoute {
             label: "schema".to_string(),
             target: SessionTarget::Shared,

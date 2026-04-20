@@ -21,6 +21,7 @@ use super::{
     commit_engine::{
         CommitEngine, session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations,
     },
+    mutex_lock, rwlock_read, rwlock_write,
 };
 
 /// Low-level runtime contract.
@@ -100,12 +101,12 @@ impl RuntimeHandle {
     }
 
     pub fn drain_outbound(&self) -> Vec<OutboundEnvelope> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         inner.outbound.drain(..).collect()
     }
 
     pub fn drain_dispatches(&self) -> Result<Vec<OutboundDispatch>> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         let envelopes = inner.outbound.drain(..).collect::<Vec<_>>();
         envelopes
             .into_iter()
@@ -143,7 +144,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         let mutations = inner.adapters.decode_input(&input)?;
         self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
     }
@@ -154,7 +155,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         let mut mutations = Vec::new();
         for input in &inputs {
             mutations.extend(inner.adapters.decode_input(input)?);
@@ -169,7 +170,7 @@ impl RuntimeHandle {
         detail: Option<Value>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         let domain_from_ledger = inner.command_ledger.domain(command_id);
         let detail_seed_from_ledger = inner.command_ledger.detail_seed(command_id);
 
@@ -178,7 +179,7 @@ impl RuntimeHandle {
         } else if inner.command_ledger.is_evicted_terminal(command_id) {
             return Ok(None);
         } else {
-            let snapshot_guard = self.state.read().expect("runtime state rwlock poisoned");
+            let snapshot_guard = rwlock_read(&self.state);
             let snapshot = snapshot_guard.read();
             let domain = command_domain_from_snapshot(snapshot, command_id);
             let seed = command_detail_seed_from_snapshot(snapshot, command_id);
@@ -333,7 +334,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
-        let mut inner = self.inner.lock().expect("runtime mutex poisoned");
+        let mut inner = mutex_lock(&self.inner);
         self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
     }
 
@@ -344,7 +345,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
-        let mut snapshot = self.state.write().expect("runtime state rwlock poisoned");
+        let mut snapshot = rwlock_write(&self.state);
         let commit = CommitEngine::apply(&mut snapshot, mutations, caused_by, scope);
         if let Some(commit_ref) = commit.as_ref() {
             self.commit_log.publish(commit_ref.clone());
@@ -363,7 +364,7 @@ impl Runtime for RuntimeHandle {
     fn submit(&self, cmd: RuntimeCommand) -> impl Future<Output = Result<CommandId>> + Send {
         let this = self.clone();
         async move {
-            let mut inner = this.inner.lock().expect("runtime mutex poisoned");
+            let mut inner = mutex_lock(&this.inner);
             let detail_seed = command_detail_fields_from_command(&cmd);
             let outbound = inner.adapters.encode_command(&cmd)?;
             let command_id = inner.command_ledger.allocate(cmd.domain(), detail_seed);
@@ -384,10 +385,7 @@ impl Runtime for RuntimeHandle {
     }
 
     fn latest_snapshot(&self) -> StateSnapshot {
-        self.state
-            .read()
-            .expect("runtime state rwlock poisoned")
-            .clone()
+        rwlock_read(&self.state).clone()
     }
 
     fn cursor(&self) -> UpdateCursor {
@@ -466,6 +464,7 @@ fn dispatch_account_id_from_seed(seed: &serde_json::Map<String, Value>) -> Optio
 mod tests {
     use std::{
         future::Future,
+        panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     };
@@ -475,10 +474,11 @@ mod tests {
     use crate::{
         adapter::AdapterRegistry,
         commands::{
-            CommandStatus, RuntimeCommand, TradeCommand, TradeDirection, TradeInsertOrderCommand,
-            TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+            CommandStatus, RuntimeCommand, SystemCommand, TradeCommand, TradeDirection,
+            TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
+            TradeVolumeCondition,
         },
-        ids::{AccountId, CommandId, OrderId, ProtocolDomain, Symbol},
+        ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
         state::CommitScope,
     };
 
@@ -545,6 +545,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repeated, None);
+    }
+
+    #[test]
+    fn runtime_handle_recovers_from_poisoned_inner_mutex() {
+        let handle = runtime_with_default_adapters();
+        let poisoned = handle.clone();
+
+        let panic = catch_unwind(AssertUnwindSafe(move || {
+            let _guard = poisoned.inner.lock().unwrap();
+            panic!("poison runtime mutex");
+        }));
+        assert!(panic.is_err());
+
+        let command_id =
+            block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
+        assert_eq!(command_id.get(), 1);
+    }
+
+    #[test]
+    fn runtime_handle_recovers_from_poisoned_state_lock() {
+        let handle = runtime_with_default_adapters();
+        let poisoned = handle.clone();
+
+        let panic = catch_unwind(AssertUnwindSafe(move || {
+            let _guard = poisoned.state.write().unwrap();
+            panic!("poison runtime state lock");
+        }));
+        assert!(panic.is_err());
+
+        assert_eq!(handle.latest_snapshot().revision(), Revision::new(0));
     }
 
     #[test]
