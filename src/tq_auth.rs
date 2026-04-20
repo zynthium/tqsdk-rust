@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -7,7 +6,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::ids::ProtocolDomain;
@@ -23,7 +21,6 @@ const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
-static SHARED_AUTH_RUNTIME: OnceLock<Mutex<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordCredentials {
@@ -106,27 +103,13 @@ impl TqAuthProvider {
             .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))
     }
 
-    fn build_tokio_runtime(&self) -> Result<tokio::runtime::Runtime> {
-        TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| ContractError::auth(format!("failed to build tokio runtime: {err}")))
-    }
-
     async fn run_http<F, T>(&self, future: F) -> Result<T>
     where
         F: Future<Output = Result<T>> + Send,
         T: Send,
     {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            future.await
-        } else {
-            crate::tokio_blocking::block_on_with_shared_runtime(
-                &SHARED_AUTH_RUNTIME,
-                || self.build_tokio_runtime(),
-                future,
-            )
-        }
+        require_tokio_runtime()?;
+        future.await
     }
 
     async fn read_json_response(
@@ -344,6 +327,13 @@ impl TqAuthProvider {
     ) -> ContractFuture<'a, BrokerInfo> {
         Box::pin(async move { self.request_trade_broker(auth, broker_id, account_id).await })
     }
+}
+
+fn require_tokio_runtime() -> Result<()> {
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        ContractError::validation("tq auth provider requires an active Tokio runtime")
+    })?;
+    Ok(())
 }
 
 fn optional_string(payload: &Value, field: &str) -> Option<String> {

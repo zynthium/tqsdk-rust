@@ -8,124 +8,147 @@ use tqsdk_runtime_contract::{AuthId, AuthProvider, PasswordCredentials, TqAuthPr
 
 #[test]
 fn tq_auth_provider_authenticates_against_token_endpoint() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
 
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0_u8; 4096];
-        let n = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
-        assert!(
-            request
-                .starts_with("POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1")
+            assert!(request.starts_with(
+                "POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1"
+            ));
+            assert!(request.contains("grant_type=password"));
+            assert!(request.contains("username=demo"));
+            assert!(request.contains("password=secret"));
+            assert!(request.contains("client_id=shinny_tq"));
+            assert!(request.contains("client_secret=be30b9f4-6862-488a-99ad-21bde0400081"));
+
+            let body = token_response_body();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_auth_url(format!("http://{addr}"));
+        let context = provider.authenticate().await.unwrap();
+
+        assert_eq!(
+            context.access_token(),
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiZnV0ciIsInNlYyJdfX0.sig"
         );
-        assert!(request.contains("grant_type=password"));
-        assert!(request.contains("username=demo"));
-        assert!(request.contains("password=secret"));
-        assert!(request.contains("client_id=shinny_tq"));
-        assert!(request.contains("client_secret=be30b9f4-6862-488a-99ad-21bde0400081"));
+        assert_eq!(context.auth_id().map(AuthId::as_str), Some("user-1"));
+        assert_eq!(context.features(), &["futr".to_string(), "sec".to_string()]);
 
-        let body = token_response_body();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
+        server.join().unwrap();
     });
-
-    let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
-        .with_auth_url(format!("http://{addr}"));
-    let context = block_on(provider.authenticate()).unwrap();
-
-    assert_eq!(
-        context.access_token(),
-        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiZnV0ciIsInNlYyJdfX0.sig"
-    );
-    assert_eq!(context.auth_id().map(AuthId::as_str), Some("user-1"));
-    assert_eq!(context.features(), &["futr".to_string(), "sec".to_string()]);
-
-    server.join().unwrap();
 }
 
 #[test]
 fn tq_auth_provider_resolves_market_url_after_authenticate() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
 
-    let server = std::thread::spawn(move || {
-        respond_with_token_request(&listener);
+        let server = std::thread::spawn(move || {
+            respond_with_token_request(&listener);
 
-        let (mut stream, _) = listener.accept().unwrap();
-        let request = read_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
 
-        assert!(request.starts_with("GET /ns?stock=false&backtest=true HTTP/1.1"));
-        assert!(
-            normalized.contains(&format!(
-                "authorization: bearer {}",
-                test_access_token().to_ascii_lowercase()
-            )),
-            "{request}"
-        );
+            assert!(request.starts_with("GET /ns?stock=false&backtest=true HTTP/1.1"));
+            assert!(
+                normalized.contains(&format!(
+                    "authorization: bearer {}",
+                    test_access_token().to_ascii_lowercase()
+                )),
+                "{request}"
+            );
 
-        let body = r#"{"mdurl":"wss://md.example/live"}"#;
-        write_http_ok(&mut stream, body);
+            let body = r#"{"mdurl":"wss://md.example/live"}"#;
+            write_http_ok(&mut stream, body);
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_auth_url(format!("http://{addr}"))
+            .with_name_service_url(format!("http://{addr}/ns"));
+        let auth = provider.authenticate().await.unwrap();
+        let market_url = provider.fetch_market_url(&auth, false, true).await.unwrap();
+
+        assert_eq!(market_url, "wss://md.example/live");
+        server.join().unwrap();
     });
-
-    let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
-        .with_auth_url(format!("http://{addr}"))
-        .with_name_service_url(format!("http://{addr}/ns"));
-    let auth = block_on(provider.authenticate()).unwrap();
-    let market_url = block_on(provider.fetch_market_url(&auth, false, true)).unwrap();
-
-    assert_eq!(market_url, "wss://md.example/live");
-    server.join().unwrap();
 }
 
 #[test]
 fn tq_auth_provider_resolves_trade_broker_metadata_after_authenticate() {
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            respond_with_token_request(&listener);
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(request.starts_with("GET /BROKER.json?account_id=022631&auth=demo HTTP/1.1"));
+            assert!(
+                normalized.contains(&format!(
+                    "authorization: bearer {}",
+                    test_access_token().to_ascii_lowercase()
+                )),
+                "{request}"
+            );
+
+            let body = r#"{"BROKER":{"category":["TQ","FUTURE"],"url":"wss://td.example/trade","broker_type":"FUTURE","smtype":"sm","smconfig":"cfg","condition_type":"ctp","condition_config":"fast"}}"#;
+            write_http_ok(&mut stream, body);
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_auth_url(format!("http://{addr}"))
+            .with_broker_base_url(format!("http://{addr}"));
+        let auth = provider.authenticate().await.unwrap();
+        let broker = provider
+            .fetch_trade_broker(&auth, "BROKER", "022631")
+            .await
+            .unwrap();
+
+        assert_eq!(broker.url, "wss://td.example/trade");
+        assert_eq!(
+            broker.category,
+            vec!["TQ".to_string(), "FUTURE".to_string()]
+        );
+        assert_eq!(broker.broker_type.as_deref(), Some("FUTURE"));
+        assert_eq!(broker.smtype.as_deref(), Some("sm"));
+        assert_eq!(broker.condition_config.as_deref(), Some("fast"));
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn tq_auth_provider_requires_tokio_runtime() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-
-    let server = std::thread::spawn(move || {
-        respond_with_token_request(&listener);
-
-        let (mut stream, _) = listener.accept().unwrap();
-        let request = read_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
-
-        assert!(request.starts_with("GET /BROKER.json?account_id=022631&auth=demo HTTP/1.1"));
-        assert!(
-            normalized.contains(&format!(
-                "authorization: bearer {}",
-                test_access_token().to_ascii_lowercase()
-            )),
-            "{request}"
-        );
-
-        let body = r#"{"BROKER":{"category":["TQ","FUTURE"],"url":"wss://td.example/trade","broker_type":"FUTURE","smtype":"sm","smconfig":"cfg","condition_type":"ctp","condition_config":"fast"}}"#;
-        write_http_ok(&mut stream, body);
-    });
+    drop(listener);
 
     let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
-        .with_auth_url(format!("http://{addr}"))
-        .with_broker_base_url(format!("http://{addr}"));
-    let auth = block_on(provider.authenticate()).unwrap();
-    let broker = block_on(provider.fetch_trade_broker(&auth, "BROKER", "022631")).unwrap();
-
-    assert_eq!(broker.url, "wss://td.example/trade");
+        .with_auth_url(format!("http://{addr}"));
+    let err = block_on(provider.authenticate()).expect_err("auth provider should require tokio");
     assert_eq!(
-        broker.category,
-        vec!["TQ".to_string(), "FUTURE".to_string()]
+        err.to_string(),
+        "validation error: tq auth provider requires an active Tokio runtime"
     );
-    assert_eq!(broker.broker_type.as_deref(), Some("FUTURE"));
-    assert_eq!(broker.smtype.as_deref(), Some("sm"));
-    assert_eq!(broker.condition_config.as_deref(), Some("fast"));
-    server.join().unwrap();
 }
 
 fn respond_with_token_request(listener: &TcpListener) {
@@ -226,3 +249,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

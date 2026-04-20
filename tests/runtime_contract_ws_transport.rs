@@ -9,71 +9,88 @@ use tqsdk_runtime_contract::{OutboundFrame, RawFrame, Transport, WebSocketTransp
 
 #[test]
 fn websocket_transport_connects_and_round_trips_frames() {
-    let server = TestWebSocketServer::spawn(|mut socket| {
-        match socket.recv().unwrap() {
-            ClientFrame::Text(text) => assert_eq!(text, "hello"),
+    run_on_tokio(async {
+        let server = TestWebSocketServer::spawn(|mut socket| {
+            match socket.recv().unwrap() {
+                ClientFrame::Text(text) => assert_eq!(text, "hello"),
+                other => panic!("expected text frame, got {other:?}"),
+            }
+
+            socket.send_text("world").unwrap();
+
+            match socket.recv().unwrap() {
+                ClientFrame::Ping => {}
+                other => panic!("expected ping frame, got {other:?}"),
+            }
+
+            socket.send_binary(vec![1_u8, 2, 3]).unwrap();
+
+            match socket.recv().unwrap() {
+                ClientFrame::Close => {}
+                other => panic!("expected close frame, got {other:?}"),
+            }
+        })
+        .unwrap();
+
+        let mut transport = WebSocketTransport::new(server.url(""));
+        transport.connect().await.unwrap();
+        transport
+            .send(OutboundFrame::Text("hello".to_string()))
+            .await
+            .unwrap();
+
+        match transport.recv().await.unwrap() {
+            RawFrame::Text(text) => assert_eq!(text, "world"),
             other => panic!("expected text frame, got {other:?}"),
         }
 
-        socket.send_text("world").unwrap();
+        transport.send(OutboundFrame::Ping).await.unwrap();
 
-        match socket.recv().unwrap() {
-            ClientFrame::Ping => {}
-            other => panic!("expected ping frame, got {other:?}"),
+        match transport.recv().await.unwrap() {
+            RawFrame::Binary(bytes) => assert_eq!(bytes, vec![1_u8, 2, 3]),
+            other => panic!("expected binary frame, got {other:?}"),
         }
 
-        socket.send_binary(vec![1_u8, 2, 3]).unwrap();
-
-        match socket.recv().unwrap() {
-            ClientFrame::Close => {}
-            other => panic!("expected close frame, got {other:?}"),
-        }
-    })
-    .unwrap();
-
-    let mut transport = WebSocketTransport::new(server.url(""));
-    block_on(transport.connect()).unwrap();
-    block_on(transport.send(OutboundFrame::Text("hello".to_string()))).unwrap();
-
-    match block_on(transport.recv()).unwrap() {
-        RawFrame::Text(text) => assert_eq!(text, "world"),
-        other => panic!("expected text frame, got {other:?}"),
-    }
-
-    block_on(transport.send(OutboundFrame::Ping)).unwrap();
-
-    match block_on(transport.recv()).unwrap() {
-        RawFrame::Binary(bytes) => assert_eq!(bytes, vec![1_u8, 2, 3]),
-        other => panic!("expected binary frame, got {other:?}"),
-    }
-
-    block_on(transport.close()).unwrap();
-    server.join();
+        transport.close().await.unwrap();
+        server.join();
+    });
 }
 
 #[test]
 fn websocket_transport_sends_custom_handshake_headers() {
-    let server = TestWebSocketServer::spawn(|mut socket| {
-        assert_eq!(
-            socket.request().header("authorization"),
-            Some("Bearer test-token"),
-        );
-        assert_eq!(socket.request().header("x-tq-app"), Some("contract-test"));
+    run_on_tokio(async {
+        let server = TestWebSocketServer::spawn(|mut socket| {
+            assert_eq!(
+                socket.request().header("authorization"),
+                Some("Bearer test-token"),
+            );
+            assert_eq!(socket.request().header("x-tq-app"), Some("contract-test"));
 
-        match socket.recv().unwrap() {
-            ClientFrame::Close => {}
-            other => panic!("expected close frame, got {other:?}"),
-        }
-    })
-    .unwrap();
+            match socket.recv().unwrap() {
+                ClientFrame::Close => {}
+                other => panic!("expected close frame, got {other:?}"),
+            }
+        })
+        .unwrap();
 
-    let mut transport = WebSocketTransport::new(server.url(""))
-        .with_header("Authorization", "Bearer test-token")
-        .with_header("X-Tq-App", "contract-test");
+        let mut transport = WebSocketTransport::new(server.url(""))
+            .with_header("Authorization", "Bearer test-token")
+            .with_header("X-Tq-App", "contract-test");
 
-    block_on(transport.connect()).unwrap();
-    block_on(transport.close()).unwrap();
-    server.join();
+        transport.connect().await.unwrap();
+        transport.close().await.unwrap();
+        server.join();
+    });
+}
+
+#[test]
+fn websocket_transport_requires_tokio_runtime() {
+    let mut transport = WebSocketTransport::new("ws://127.0.0.1:9");
+    let err = block_on(transport.connect()).expect_err("transport should require tokio");
+    assert_eq!(
+        err.to_string(),
+        "validation error: websocket transport requires an active Tokio runtime"
+    );
 }
 
 fn block_on<F>(future: F) -> F::Output
@@ -107,3 +124,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

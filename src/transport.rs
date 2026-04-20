@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures::SinkExt;
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 use url::Url;
 use yawc::frame::{Frame, OpCode};
 use yawc::{HttpRequestBuilder, Options, TcpWebSocket, WebSocket};
@@ -77,13 +76,7 @@ pub trait Transport: Send {
 pub struct WebSocketTransport {
     url: String,
     connect_options: WebSocketConnectOptions,
-    execution: Option<WebSocketExecution>,
     socket: Option<TcpWebSocket>,
-}
-
-enum WebSocketExecution {
-    Owned(TokioRuntime),
-    Ambient,
 }
 
 impl WebSocketTransport {
@@ -91,7 +84,6 @@ impl WebSocketTransport {
         Self {
             url: url.into(),
             connect_options: WebSocketConnectOptions::default(),
-            execution: None,
             socket: None,
         }
     }
@@ -104,21 +96,6 @@ impl WebSocketTransport {
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.connect_options = self.connect_options.with_header(name, value);
         self
-    }
-
-    fn build_runtime(&self) -> Result<TokioRuntime> {
-        TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| {
-                ContractError::auth(format!("tokio runtime initialization failed: {err}"))
-            })
-    }
-
-    fn require_execution(&self) -> Result<&WebSocketExecution> {
-        self.execution
-            .as_ref()
-            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))
     }
 
     fn decode_frame(frame: Frame) -> Result<RawFrame> {
@@ -153,6 +130,7 @@ impl WebSocketTransport {
     }
 
     async fn connect_async(&mut self) -> Result<()> {
+        require_tokio_runtime()?;
         let url = Url::parse(&self.url)
             .map_err(|err| ContractError::validation(format!("invalid websocket url: {err}")))?;
         let mut request = HttpRequestBuilder::new();
@@ -160,43 +138,28 @@ impl WebSocketTransport {
             request = request.header(name.as_str(), value.as_str());
         }
 
-        let socket = if tokio::runtime::Handle::try_current().is_ok() {
-            self.execution = Some(WebSocketExecution::Ambient);
-            Self::connect_with_request(url, request).await
-        } else {
-            let runtime = self.build_runtime()?;
-            let socket = runtime.block_on(Self::connect_with_request(url, request));
-            self.execution = Some(WebSocketExecution::Owned(runtime));
-            socket
-        }
-        .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
+        let socket = Self::connect_with_request(url, request)
+            .await
+            .map_err(|err| ContractError::auth(format!("websocket connect failed: {err}")))?;
         self.socket = Some(socket);
         Ok(())
     }
 
     async fn recv_async(&mut self) -> Result<RawFrame> {
-        let Self {
-            execution, socket, ..
-        } = self;
+        require_tokio_runtime()?;
+        let Self { socket, .. } = self;
         let socket = socket
             .as_mut()
             .ok_or_else(|| ContractError::validation("websocket transport is not connected"))?;
-        let frame = match execution.as_ref() {
-            Some(WebSocketExecution::Ambient) => socket.next_frame().await,
-            Some(WebSocketExecution::Owned(runtime)) => {
-                runtime.block_on(async { socket.next_frame().await })
-            }
-            None => {
-                return Err(ContractError::validation(
-                    "websocket transport is not connected",
-                ));
-            }
-        }
-        .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
+        let frame = socket
+            .next_frame()
+            .await
+            .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
         Self::decode_frame(frame)
     }
 
     async fn send_async(&mut self, frame: OutboundFrame) -> Result<()> {
+        require_tokio_runtime()?;
         let frame = match frame {
             OutboundFrame::Text(text) => Frame::text(text),
             OutboundFrame::Binary(bytes) => Frame::binary(bytes),
@@ -204,35 +167,25 @@ impl WebSocketTransport {
             OutboundFrame::Close => return self.close_async().await,
         };
 
-        let Self {
-            execution, socket, ..
-        } = self;
+        let Self { socket, .. } = self;
         let socket = socket
             .as_mut()
             .ok_or_else(|| ContractError::validation("websocket transport is not connected"))?;
-        match execution.as_ref() {
-            Some(WebSocketExecution::Ambient) => socket.send(frame).await,
-            Some(WebSocketExecution::Owned(runtime)) => {
-                runtime.block_on(async { socket.send(frame).await })
-            }
-            None => {
-                return Err(ContractError::validation(
-                    "websocket transport is not connected",
-                ));
-            }
-        }
-        .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
+        socket
+            .send(frame)
+            .await
+            .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
     }
 
     async fn close_async(&mut self) -> Result<()> {
+        require_tokio_runtime()?;
         let Some(mut socket) = self.socket.take() else {
             return Ok(());
         };
-        match self.require_execution()? {
-            WebSocketExecution::Ambient => socket.close().await,
-            WebSocketExecution::Owned(runtime) => runtime.block_on(async { socket.close().await }),
-        }
-        .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
+        socket
+            .close()
+            .await
+            .map_err(|err| ContractError::auth(format!("websocket close failed: {err}")))?;
 
         Ok(())
     }
@@ -254,6 +207,13 @@ impl Transport for WebSocketTransport {
     fn close(&mut self) -> ContractFuture<'_, ()> {
         Box::pin(async move { self.close_async().await })
     }
+}
+
+fn require_tokio_runtime() -> Result<()> {
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        ContractError::validation("websocket transport requires an active Tokio runtime")
+    })?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

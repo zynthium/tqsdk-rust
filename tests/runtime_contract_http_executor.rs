@@ -13,38 +13,165 @@ use tqsdk_runtime_contract::{
 
 #[test]
 fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(request.starts_with("POST /graphql HTTP/1.1"), "{request}");
+            assert!(normalized.contains("accept: application/json"), "{request}");
+            assert!(
+                normalized.contains("user-agent: tqsdk-python 3.8.1"),
+                "{request}"
+            );
+            assert!(
+                normalized.contains("content-type: application/json"),
+                "{request}"
+            );
+            assert!(
+                request.contains("\"query_id\":\"quotes-page-1\""),
+                "{request}"
+            );
+            assert!(
+                request.contains("\"query\":\"query Quotes { symbols { instrument_id } }\""),
+                "{request}"
+            );
+
+            write_http_ok(
+                &mut stream,
+                r#"{"data":{"items":[{"instrument_id":"au2602"}],"has_more":false},"errors":[]}"#,
+            );
+        });
+
+        let executor = ReqwestHttpExecutor::default();
+        let route = SessionRoute {
+            label: "query".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Query],
+            endpoint: SessionRouteEndpoint::Http {
+                url: format!("http://{addr}/graphql"),
+            },
+        };
+        let inputs = executor
+            .execute(
+                &route,
+                vec![OutboundDispatch {
+                    command_id: CommandId::new(1),
+                    domain: ProtocolDomain::Query,
+                    request: OutboundRequest::Http(HttpRequest {
+                        method: HttpMethod::Post,
+                        path: None,
+                        body: Some(json!({
+                            "aid": "ins_query",
+                            "query_id": "quotes-page-1",
+                            "query": "query Quotes { symbols { instrument_id } }",
+                        })),
+                    }),
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inputs,
+            vec![tqsdk_runtime_contract::RuntimeInput::Io(IoEvent {
+                route: "query".to_string(),
+                domains: vec![ProtocolDomain::Query],
+                payload: InputPayload::Json(json!({
+                    "query_id": "quotes-page-1",
+                    "data": {
+                        "items": [{"instrument_id": "au2602"}],
+                        "has_more": false,
+                    },
+                    "errors": [],
+                })),
+            })]
+        );
+
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn reqwest_http_executor_joins_schema_paths_for_get_requests() {
+    run_on_tokio(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(
+                request.starts_with("GET /schema/instrument.json HTTP/1.1"),
+                "{request}"
+            );
+            assert!(normalized.contains("accept: application/json"), "{request}");
+            assert!(
+                normalized.contains("user-agent: tqsdk-python 3.8.1"),
+                "{request}"
+            );
+
+            write_http_ok(
+                &mut stream,
+                r#"{"nodes":{"quote":{"fields":["last_price","ask_price1"]}}}"#,
+            );
+        });
+
+        let executor = ReqwestHttpExecutor::default();
+        let route = SessionRoute {
+            label: "schema".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Schema],
+            endpoint: SessionRouteEndpoint::Http {
+                url: format!("http://{addr}"),
+            },
+        };
+        let inputs = executor
+            .execute(
+                &route,
+                vec![OutboundDispatch {
+                    command_id: CommandId::new(2),
+                    domain: ProtocolDomain::Schema,
+                    request: OutboundRequest::Http(HttpRequest {
+                        method: HttpMethod::Get,
+                        path: Some("/schema/instrument.json".to_string()),
+                        body: None,
+                    }),
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inputs,
+            vec![tqsdk_runtime_contract::RuntimeInput::Io(IoEvent {
+                route: "schema".to_string(),
+                domains: vec![ProtocolDomain::Schema],
+                payload: InputPayload::Json(json!({
+                    "nodes": {
+                        "quote": {
+                            "fields": ["last_price", "ask_price1"],
+                        }
+                    }
+                })),
+            })]
+        );
+
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn reqwest_http_executor_requires_tokio_runtime() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let request = read_http_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
-
-        assert!(request.starts_with("POST /graphql HTTP/1.1"), "{request}");
-        assert!(normalized.contains("accept: application/json"), "{request}");
-        assert!(
-            normalized.contains("user-agent: tqsdk-python 3.8.1"),
-            "{request}"
-        );
-        assert!(
-            normalized.contains("content-type: application/json"),
-            "{request}"
-        );
-        assert!(
-            request.contains("\"query_id\":\"quotes-page-1\""),
-            "{request}"
-        );
-        assert!(
-            request.contains("\"query\":\"query Quotes { symbols { instrument_id } }\""),
-            "{request}"
-        );
-
-        write_http_ok(
-            &mut stream,
-            r#"{"data":{"items":[{"instrument_id":"au2602"}],"has_more":false},"errors":[]}"#,
-        );
-    });
+    drop(listener);
 
     let executor = ReqwestHttpExecutor::default();
     let route = SessionRoute {
@@ -55,10 +182,10 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
             url: format!("http://{addr}/graphql"),
         },
     };
-    let inputs = block_on(executor.execute(
+    let err = block_on(executor.execute(
         &route,
         vec![OutboundDispatch {
-            command_id: CommandId::new(1),
+            command_id: CommandId::new(3),
             domain: ProtocolDomain::Query,
             request: OutboundRequest::Http(HttpRequest {
                 method: HttpMethod::Post,
@@ -71,92 +198,11 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
             }),
         }],
     ))
-    .unwrap();
-
+    .expect_err("executor should require a tokio runtime");
     assert_eq!(
-        inputs,
-        vec![tqsdk_runtime_contract::RuntimeInput::Io(IoEvent {
-            route: "query".to_string(),
-            domains: vec![ProtocolDomain::Query],
-            payload: InputPayload::Json(json!({
-                "query_id": "quotes-page-1",
-                "data": {
-                    "items": [{"instrument_id": "au2602"}],
-                    "has_more": false,
-                },
-                "errors": [],
-            })),
-        })]
+        err.to_string(),
+        "validation error: reqwest http executor requires an active Tokio runtime"
     );
-
-    server.join().unwrap();
-}
-
-#[test]
-fn reqwest_http_executor_joins_schema_paths_for_get_requests() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let request = read_http_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
-
-        assert!(
-            request.starts_with("GET /schema/instrument.json HTTP/1.1"),
-            "{request}"
-        );
-        assert!(normalized.contains("accept: application/json"), "{request}");
-        assert!(
-            normalized.contains("user-agent: tqsdk-python 3.8.1"),
-            "{request}"
-        );
-
-        write_http_ok(
-            &mut stream,
-            r#"{"nodes":{"quote":{"fields":["last_price","ask_price1"]}}}"#,
-        );
-    });
-
-    let executor = ReqwestHttpExecutor::default();
-    let route = SessionRoute {
-        label: "schema".to_string(),
-        target: SessionTarget::Shared,
-        domains: vec![ProtocolDomain::Schema],
-        endpoint: SessionRouteEndpoint::Http {
-            url: format!("http://{addr}"),
-        },
-    };
-    let inputs = block_on(executor.execute(
-        &route,
-        vec![OutboundDispatch {
-            command_id: CommandId::new(2),
-            domain: ProtocolDomain::Schema,
-            request: OutboundRequest::Http(HttpRequest {
-                method: HttpMethod::Get,
-                path: Some("/schema/instrument.json".to_string()),
-                body: None,
-            }),
-        }],
-    ))
-    .unwrap();
-
-    assert_eq!(
-        inputs,
-        vec![tqsdk_runtime_contract::RuntimeInput::Io(IoEvent {
-            route: "schema".to_string(),
-            domains: vec![ProtocolDomain::Schema],
-            payload: InputPayload::Json(json!({
-                "nodes": {
-                    "quote": {
-                        "fields": ["last_price", "ask_price1"],
-                    }
-                }
-            })),
-        })]
-    );
-
-    server.join().unwrap();
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
@@ -234,3 +280,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

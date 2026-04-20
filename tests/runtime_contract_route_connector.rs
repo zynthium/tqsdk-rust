@@ -71,48 +71,52 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
 
 #[test]
 fn default_route_connector_delegates_websocket_routes() {
-    let server = TestWebSocketServer::spawn(|mut socket| {
-        assert_eq!(
-            socket.request().header("authorization"),
-            Some("Bearer test-token"),
-        );
-        match socket.recv().unwrap() {
-            ClientFrame::Close => {}
-            other => panic!("expected close frame, got {other:?}"),
-        }
-    })
-    .unwrap();
-
-    let topology = SessionTopology::default()
-        .with_route(SessionRoute {
-            label: "market".to_string(),
-            target: SessionTarget::Shared,
-            domains: vec![ProtocolDomain::System, ProtocolDomain::Market],
-            endpoint: SessionRouteEndpoint::WebSocket {
-                url: server.url("/md"),
-                connect: WebSocketConnectOptions::default()
-                    .with_header("Authorization", "Bearer test-token"),
-            },
+    run_on_tokio(async {
+        let server = TestWebSocketServer::spawn(|mut socket| {
+            assert_eq!(
+                socket.request().header("authorization"),
+                Some("Bearer test-token"),
+            );
+            match socket.recv().unwrap() {
+                ClientFrame::Close => {}
+                other => panic!("expected close frame, got {other:?}"),
+            }
         })
-        .with_route(SessionRoute {
-            label: "internal".to_string(),
-            target: SessionTarget::Shared,
-            domains: vec![ProtocolDomain::System],
-            endpoint: SessionRouteEndpoint::Internal {
-                label: "system-driver".to_string(),
-            },
-        });
+        .unwrap();
 
-    let connector = DefaultRouteConnector::default();
-    let mut connected =
-        block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
+        let topology = SessionTopology::default()
+            .with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System, ProtocolDomain::Market],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: server.url("/md"),
+                    connect: WebSocketConnectOptions::default()
+                        .with_header("Authorization", "Bearer test-token"),
+                },
+            })
+            .with_route(SessionRoute {
+                label: "internal".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            });
 
-    assert_eq!(connected.routes.len(), 2);
-    assert_eq!(connected.routes[0].route.label, "market");
-    assert_eq!(connected.routes[1].route.label, "internal");
+        let connector = DefaultRouteConnector::default();
+        let mut connected = SessionBootstrap::new()
+            .connect_topology(&topology, &connector)
+            .await
+            .unwrap();
 
-    block_on(connected.close_all()).unwrap();
-    server.join();
+        assert_eq!(connected.routes.len(), 2);
+        assert_eq!(connected.routes[0].route.label, "market");
+        assert_eq!(connected.routes[1].route.label, "internal");
+
+        connected.close_all().await.unwrap();
+        server.join();
+    });
 }
 
 fn block_on<F>(future: F) -> F::Output
@@ -146,3 +150,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

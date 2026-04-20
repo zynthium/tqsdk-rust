@@ -72,148 +72,155 @@ fn runtime_handle_drain_dispatches_resolves_command_domains() {
 #[test]
 #[allow(clippy::result_large_err)]
 fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
-    let server = TestWebSocketServer::spawn(|mut socket| {
-        assert_eq!(
-            socket.request().header("authorization"),
-            Some("Bearer test-token"),
-        );
-        assert_eq!(
-            socket.recv().unwrap(),
-            ClientFrame::Text(
-                json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string()
-            )
-        );
-        assert_eq!(
-            socket.recv().unwrap(),
-            ClientFrame::Text(json!({"aid": "peek_message"}).to_string())
-        );
-        socket.send_close().unwrap();
-    })
-    .unwrap();
-
-    let topology = SessionTopology::default()
-        .with_route(SessionRoute {
-            label: "market".to_string(),
-            target: SessionTarget::Shared,
-            domains: vec![ProtocolDomain::Market],
-            endpoint: SessionRouteEndpoint::WebSocket {
-                url: server.url("/md"),
-                connect: WebSocketConnectOptions::default()
-                    .with_header("Authorization", "Bearer test-token"),
-            },
+    run_on_tokio(async {
+        let server = TestWebSocketServer::spawn(|mut socket| {
+            assert_eq!(
+                socket.request().header("authorization"),
+                Some("Bearer test-token"),
+            );
+            assert_eq!(
+                socket.recv().unwrap(),
+                ClientFrame::Text(
+                    json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string()
+                )
+            );
+            assert_eq!(
+                socket.recv().unwrap(),
+                ClientFrame::Text(json!({"aid": "peek_message"}).to_string())
+            );
+            socket.send_close().unwrap();
         })
-        .with_route(SessionRoute {
-            label: "schema".to_string(),
-            target: SessionTarget::Shared,
-            domains: vec![ProtocolDomain::Schema],
-            endpoint: SessionRouteEndpoint::Http {
-                url: "https://schema.example".to_string(),
-            },
-        })
-        .with_route(SessionRoute {
-            label: "replay".to_string(),
-            target: SessionTarget::Replay(tqsdk_runtime_contract::ReplaySessionId::new("rb-1")),
-            domains: vec![ProtocolDomain::Replay],
-            endpoint: SessionRouteEndpoint::Replay {
-                label: "replay-driver".to_string(),
-            },
-        })
-        .with_route(SessionRoute {
-            label: "system".to_string(),
-            target: SessionTarget::Shared,
-            domains: vec![ProtocolDomain::System],
-            endpoint: SessionRouteEndpoint::Internal {
-                label: "system-driver".to_string(),
-            },
-        });
+        .unwrap();
 
-    let mut connected = block_on(
-        SessionBootstrap::new().connect_topology(&topology, &DefaultRouteConnector::default()),
-    )
-    .unwrap();
-    let handle = runtime_with_default_adapters();
-
-    let market_id = block_on(handle.submit(RuntimeCommand::Market(
-        MarketCommand::SubscribeQuotes {
-            symbols: vec![Symbol::new("SHFE.au2602")],
-        },
-    )))
-    .unwrap();
-    let schema_id = block_on(
-        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-            schema_id: SchemaId::new("instrument"),
-            path: "/schema/instrument.json".to_string(),
-        })),
-    )
-    .unwrap();
-    let replay_id = block_on(handle.submit(RuntimeCommand::Replay(ReplayCommand::Step))).unwrap();
-    let system_id =
-        block_on(handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))).unwrap();
-
-    let dispatches = handle.drain_dispatches().unwrap();
-    let receipts = dispatches
-        .into_iter()
-        .map(|dispatch| block_on(connected.dispatch(dispatch)).unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        receipts
-            .iter()
-            .map(|receipt| (
-                receipt.command_id,
-                receipt.route_label.as_str(),
-                receipt.domain
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (market_id, "market", ProtocolDomain::Market),
-            (market_id, "market", ProtocolDomain::Market),
-            (schema_id, "schema", ProtocolDomain::Schema),
-            (replay_id, "replay", ProtocolDomain::Replay),
-            (system_id, "system", ProtocolDomain::System),
-        ]
-    );
-
-    assert!(connected.routes[0].drain_pending_requests().is_empty());
-    assert_eq!(
-        connected.routes[1].drain_pending_requests(),
-        vec![OutboundDispatch {
-            command_id: schema_id,
-            domain: ProtocolDomain::Schema,
-            request: tqsdk_runtime_contract::OutboundRequest::Http(
-                tqsdk_runtime_contract::HttpRequest {
-                    method: HttpMethod::Get,
-                    path: Some("/schema/instrument.json".to_string()),
-                    body: None,
-                }
-            ),
-        }]
-    );
-    assert_eq!(
-        connected.routes[2].drain_pending_requests(),
-        vec![OutboundDispatch {
-            command_id: replay_id,
-            domain: ProtocolDomain::Replay,
-            request: tqsdk_runtime_contract::OutboundRequest::Replay(
-                tqsdk_runtime_contract::ReplayRequest { action: "step" },
-            ),
-        }]
-    );
-    assert_eq!(
-        connected.routes[3].drain_pending_requests(),
-        vec![OutboundDispatch {
-            command_id: system_id,
-            domain: ProtocolDomain::System,
-            request: tqsdk_runtime_contract::OutboundRequest::Internal(
-                tqsdk_runtime_contract::InternalRequest {
-                    label: "refresh-auth",
+        let topology = SessionTopology::default()
+            .with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: server.url("/md"),
+                    connect: WebSocketConnectOptions::default()
+                        .with_header("Authorization", "Bearer test-token"),
                 },
-            ),
-        }]
-    );
+            })
+            .with_route(SessionRoute {
+                label: "schema".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Schema],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://schema.example".to_string(),
+                },
+            })
+            .with_route(SessionRoute {
+                label: "replay".to_string(),
+                target: SessionTarget::Replay(tqsdk_runtime_contract::ReplaySessionId::new("rb-1")),
+                domains: vec![ProtocolDomain::Replay],
+                endpoint: SessionRouteEndpoint::Replay {
+                    label: "replay-driver".to_string(),
+                },
+            })
+            .with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            });
 
-    block_on(connected.close_all()).unwrap();
-    server.join();
+        let mut connected = SessionBootstrap::new()
+            .connect_topology(&topology, &DefaultRouteConnector::default())
+            .await
+            .unwrap();
+        let handle = runtime_with_default_adapters();
+
+        let market_id = handle
+            .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+                symbols: vec![Symbol::new("SHFE.au2602")],
+            }))
+            .await
+            .unwrap();
+        let schema_id = handle
+            .submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+                schema_id: SchemaId::new("instrument"),
+                path: "/schema/instrument.json".to_string(),
+            }))
+            .await
+            .unwrap();
+        let replay_id = handle
+            .submit(RuntimeCommand::Replay(ReplayCommand::Step))
+            .await
+            .unwrap();
+        let system_id = handle
+            .submit(RuntimeCommand::System(SystemCommand::RefreshAuth))
+            .await
+            .unwrap();
+
+        let dispatches = handle.drain_dispatches().unwrap();
+        let mut receipts = Vec::new();
+        for dispatch in dispatches {
+            receipts.push(connected.dispatch(dispatch).await.unwrap());
+        }
+
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| (
+                    receipt.command_id,
+                    receipt.route_label.as_str(),
+                    receipt.domain
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (market_id, "market", ProtocolDomain::Market),
+                (market_id, "market", ProtocolDomain::Market),
+                (schema_id, "schema", ProtocolDomain::Schema),
+                (replay_id, "replay", ProtocolDomain::Replay),
+                (system_id, "system", ProtocolDomain::System),
+            ]
+        );
+
+        assert!(connected.routes[0].drain_pending_requests().is_empty());
+        assert_eq!(
+            connected.routes[1].drain_pending_requests(),
+            vec![OutboundDispatch {
+                command_id: schema_id,
+                domain: ProtocolDomain::Schema,
+                request: tqsdk_runtime_contract::OutboundRequest::Http(
+                    tqsdk_runtime_contract::HttpRequest {
+                        method: HttpMethod::Get,
+                        path: Some("/schema/instrument.json".to_string()),
+                        body: None,
+                    }
+                ),
+            }]
+        );
+        assert_eq!(
+            connected.routes[2].drain_pending_requests(),
+            vec![OutboundDispatch {
+                command_id: replay_id,
+                domain: ProtocolDomain::Replay,
+                request: tqsdk_runtime_contract::OutboundRequest::Replay(
+                    tqsdk_runtime_contract::ReplayRequest { action: "step" },
+                ),
+            }]
+        );
+        assert_eq!(
+            connected.routes[3].drain_pending_requests(),
+            vec![OutboundDispatch {
+                command_id: system_id,
+                domain: ProtocolDomain::System,
+                request: tqsdk_runtime_contract::OutboundRequest::Internal(
+                    tqsdk_runtime_contract::InternalRequest {
+                        label: "refresh-auth",
+                    },
+                ),
+            }]
+        );
+
+        connected.close_all().await.unwrap();
+        server.join();
+    });
 }
 
 fn runtime_with_default_adapters() -> RuntimeHandle {
@@ -253,3 +260,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

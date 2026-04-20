@@ -1,12 +1,8 @@
-use std::{
-    sync::{Mutex, OnceLock},
-    time::Duration,
-};
+use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 use url::Url;
 
 use crate::commands::{HttpMethod, OutboundDispatch, OutboundRequest};
@@ -16,7 +12,6 @@ use crate::transport::{SessionRoute, SessionRouteEndpoint};
 use crate::{ContractError, ContractFuture, ProtocolDomain, Result};
 
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
-static SHARED_HTTP_RUNTIME: OnceLock<Mutex<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ReqwestHttpExecutor {
@@ -43,17 +38,6 @@ impl ReqwestHttpExecutor {
             .build()
             .map_err(|err| {
                 ContractError::validation(format!("failed to build reqwest http executor: {err}"))
-            })
-    }
-
-    fn build_runtime(&self) -> Result<tokio::runtime::Runtime> {
-        TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| {
-                ContractError::validation(format!(
-                    "failed to build tokio runtime for http executor: {err}"
-                ))
             })
     }
 
@@ -122,17 +106,17 @@ impl RouteRequestExecutor for ReqwestHttpExecutor {
         requests: Vec<OutboundDispatch>,
     ) -> ContractFuture<'a, Vec<RuntimeInput>> {
         Box::pin(async move {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                self.execute_async(route, requests).await
-            } else {
-                crate::tokio_blocking::block_on_with_shared_runtime(
-                    &SHARED_HTTP_RUNTIME,
-                    || self.build_runtime(),
-                    self.execute_async(route, requests),
-                )
-            }
+            require_tokio_runtime()?;
+            self.execute_async(route, requests).await
         })
     }
+}
+
+fn require_tokio_runtime() -> Result<()> {
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        ContractError::validation("reqwest http executor requires an active Tokio runtime")
+    })?;
+    Ok(())
 }
 
 fn resolve_request_url(base_url: &str, path: Option<&str>) -> Result<String> {

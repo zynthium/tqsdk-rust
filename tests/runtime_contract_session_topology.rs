@@ -96,163 +96,161 @@ fn session_bootstrap_establish_with_resolver_returns_topology() {
 
 #[test]
 fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
-    let md_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let md_addr = md_listener.local_addr().unwrap();
-    let td_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let td_addr = td_listener.local_addr().unwrap();
-    let ns_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let ns_addr = ns_listener.local_addr().unwrap();
-    let broker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let broker_addr = broker_listener.local_addr().unwrap();
+    run_on_tokio(async {
+        let md_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let md_addr = md_listener.local_addr().unwrap();
+        let td_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let td_addr = td_listener.local_addr().unwrap();
+        let ns_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ns_addr = ns_listener.local_addr().unwrap();
+        let broker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let broker_addr = broker_listener.local_addr().unwrap();
 
-    let ns_server = std::thread::spawn(move || {
-        let (mut stream, _) = ns_listener.accept().unwrap();
-        let request = read_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
+        let ns_server = std::thread::spawn(move || {
+            let (mut stream, _) = ns_listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
 
-        assert!(request.starts_with("GET /ns?stock=false&backtest=true HTTP/1.1"));
-        assert!(
-            normalized.contains("authorization: bearer test-access-token"),
-            "{request}"
+            assert!(request.starts_with("GET /ns?stock=false&backtest=true HTTP/1.1"));
+            assert!(
+                normalized.contains("authorization: bearer test-access-token"),
+                "{request}"
+            );
+            write_http_ok(&mut stream, &format!(r#"{{"mdurl":"ws://{md_addr}/md"}}"#));
+        });
+
+        let broker_server = std::thread::spawn(move || {
+            let (mut stream, _) = broker_listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(request.starts_with("GET /9999.json?account_id=simnow&auth=demo HTTP/1.1"));
+            assert!(
+                normalized.contains("authorization: bearer test-access-token"),
+                "{request}"
+            );
+            write_http_ok(
+                &mut stream,
+                &format!(
+                    r#"{{"9999":{{"category":["TQ","FUTURE"],"url":"ws://{td_addr}/trade","broker_type":"FUTURE"}}}}"#
+                ),
+            );
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_name_service_url(format!("http://{ns_addr}/ns"))
+            .with_broker_base_url(format!("http://{broker_addr}"));
+        let config = SessionConfig::new(
+            EndpointConfig::new("https://auth.example")
+                .with_query_url("https://query.example/graphql")
+                .with_schema_url("https://schema.example"),
+        )
+        .with_market_target(MarketSessionTarget::new(false, true))
+        .add_trade_target(TradeSessionTarget::new("9999", AccountId::new("simnow")))
+        .enable_domain(ProtocolDomain::System)
+        .enable_domain(ProtocolDomain::Market)
+        .enable_domain(ProtocolDomain::Query)
+        .enable_domain(ProtocolDomain::Schema)
+        .enable_domain(ProtocolDomain::Trade);
+        let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
+
+        let topology = provider
+            .resolve_topology(
+                &auth,
+                &config,
+                &[
+                    ProtocolDomain::System,
+                    ProtocolDomain::Market,
+                    ProtocolDomain::Query,
+                    ProtocolDomain::Schema,
+                    ProtocolDomain::Trade,
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(topology.routes.len(), 5);
+
+        match &topology.routes[0].endpoint {
+            SessionRouteEndpoint::WebSocket { url, connect } => {
+                assert_eq!(url, &format!("ws://{md_addr}/md"));
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "Authorization" && value == "Bearer test-access-token"
+                }));
+                assert!(
+                    connect
+                        .headers
+                        .iter()
+                        .any(|(name, value)| { name == "Accept" && value == "application/json" })
+                );
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "User-Agent" && value == "tqsdk-python 3.8.1"
+                }));
+            }
+            other => panic!("expected market websocket route, got {other:?}"),
+        }
+        assert_eq!(topology.routes[0].label, "market");
+        assert_eq!(topology.routes[0].target, SessionTarget::Shared);
+        assert_eq!(topology.routes[0].domains, vec![ProtocolDomain::Market]);
+
+        match &topology.routes[1].endpoint {
+            SessionRouteEndpoint::WebSocket { url, connect } => {
+                assert_eq!(url, &format!("ws://{td_addr}/trade"));
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "Authorization" && value == "Bearer test-access-token"
+                }));
+                assert!(
+                    connect
+                        .headers
+                        .iter()
+                        .any(|(name, value)| { name == "Accept" && value == "application/json" })
+                );
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "User-Agent" && value == "tqsdk-python 3.8.1"
+                }));
+            }
+            other => panic!("expected trade websocket route, got {other:?}"),
+        }
+        assert_eq!(topology.routes[1].label, "trade:simnow");
+        assert_eq!(
+            topology.routes[1].target,
+            SessionTarget::Account(AccountId::new("simnow"))
         );
-        write_http_ok(&mut stream, &format!(r#"{{"mdurl":"ws://{md_addr}/md"}}"#));
+        assert_eq!(topology.routes[1].domains, vec![ProtocolDomain::Trade]);
+
+        assert_eq!(topology.routes[2].label, "query");
+        assert_eq!(topology.routes[2].target, SessionTarget::Shared);
+        assert_eq!(topology.routes[2].domains, vec![ProtocolDomain::Query]);
+        assert_eq!(
+            topology.routes[2].endpoint,
+            SessionRouteEndpoint::Http {
+                url: "https://query.example/graphql".to_string(),
+            }
+        );
+
+        assert_eq!(topology.routes[3].label, "schema");
+        assert_eq!(topology.routes[3].target, SessionTarget::Shared);
+        assert_eq!(topology.routes[3].domains, vec![ProtocolDomain::Schema]);
+        assert_eq!(
+            topology.routes[3].endpoint,
+            SessionRouteEndpoint::Http {
+                url: "https://schema.example".to_string(),
+            }
+        );
+
+        assert_eq!(topology.routes[4].label, "system");
+        assert_eq!(topology.routes[4].target, SessionTarget::Shared);
+        assert_eq!(topology.routes[4].domains, vec![ProtocolDomain::System]);
+        assert_eq!(
+            topology.routes[4].endpoint,
+            SessionRouteEndpoint::Internal {
+                label: "system-driver".to_string(),
+            }
+        );
+
+        ns_server.join().unwrap();
+        broker_server.join().unwrap();
     });
-
-    let broker_server = std::thread::spawn(move || {
-        let (mut stream, _) = broker_listener.accept().unwrap();
-        let request = read_request(&mut stream);
-        let normalized = request.to_ascii_lowercase();
-
-        assert!(request.starts_with("GET /9999.json?account_id=simnow&auth=demo HTTP/1.1"));
-        assert!(
-            normalized.contains("authorization: bearer test-access-token"),
-            "{request}"
-        );
-        write_http_ok(
-            &mut stream,
-            &format!(
-                r#"{{"9999":{{"category":["TQ","FUTURE"],"url":"ws://{td_addr}/trade","broker_type":"FUTURE"}}}}"#
-            ),
-        );
-    });
-
-    let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
-        .with_name_service_url(format!("http://{ns_addr}/ns"))
-        .with_broker_base_url(format!("http://{broker_addr}"));
-    let config = SessionConfig::new(
-        EndpointConfig::new("https://auth.example")
-            .with_query_url("https://query.example/graphql")
-            .with_schema_url("https://schema.example"),
-    )
-    .with_market_target(MarketSessionTarget::new(false, true))
-    .add_trade_target(TradeSessionTarget::new("9999", AccountId::new("simnow")))
-    .enable_domain(ProtocolDomain::System)
-    .enable_domain(ProtocolDomain::Market)
-    .enable_domain(ProtocolDomain::Query)
-    .enable_domain(ProtocolDomain::Schema)
-    .enable_domain(ProtocolDomain::Trade);
-    let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
-
-    let topology = block_on(provider.resolve_topology(
-        &auth,
-        &config,
-        &[
-            ProtocolDomain::System,
-            ProtocolDomain::Market,
-            ProtocolDomain::Query,
-            ProtocolDomain::Schema,
-            ProtocolDomain::Trade,
-        ],
-    ))
-    .unwrap();
-
-    assert_eq!(topology.routes.len(), 5);
-
-    match &topology.routes[0].endpoint {
-        SessionRouteEndpoint::WebSocket { url, connect } => {
-            assert_eq!(url, &format!("ws://{md_addr}/md"));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "Authorization" && value == "Bearer test-access-token"
-            }));
-            assert!(
-                connect
-                    .headers
-                    .iter()
-                    .any(|(name, value)| { name == "Accept" && value == "application/json" })
-            );
-            assert!(
-                connect
-                    .headers
-                    .iter()
-                    .any(|(name, value)| { name == "User-Agent" && value == "tqsdk-python 3.8.1" })
-            );
-        }
-        other => panic!("expected market websocket route, got {other:?}"),
-    }
-    assert_eq!(topology.routes[0].label, "market");
-    assert_eq!(topology.routes[0].target, SessionTarget::Shared);
-    assert_eq!(topology.routes[0].domains, vec![ProtocolDomain::Market]);
-
-    match &topology.routes[1].endpoint {
-        SessionRouteEndpoint::WebSocket { url, connect } => {
-            assert_eq!(url, &format!("ws://{td_addr}/trade"));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "Authorization" && value == "Bearer test-access-token"
-            }));
-            assert!(
-                connect
-                    .headers
-                    .iter()
-                    .any(|(name, value)| { name == "Accept" && value == "application/json" })
-            );
-            assert!(
-                connect
-                    .headers
-                    .iter()
-                    .any(|(name, value)| { name == "User-Agent" && value == "tqsdk-python 3.8.1" })
-            );
-        }
-        other => panic!("expected trade websocket route, got {other:?}"),
-    }
-    assert_eq!(topology.routes[1].label, "trade:simnow");
-    assert_eq!(
-        topology.routes[1].target,
-        SessionTarget::Account(AccountId::new("simnow"))
-    );
-    assert_eq!(topology.routes[1].domains, vec![ProtocolDomain::Trade]);
-
-    assert_eq!(topology.routes[2].label, "query");
-    assert_eq!(topology.routes[2].target, SessionTarget::Shared);
-    assert_eq!(topology.routes[2].domains, vec![ProtocolDomain::Query]);
-    assert_eq!(
-        topology.routes[2].endpoint,
-        SessionRouteEndpoint::Http {
-            url: "https://query.example/graphql".to_string(),
-        }
-    );
-
-    assert_eq!(topology.routes[3].label, "schema");
-    assert_eq!(topology.routes[3].target, SessionTarget::Shared);
-    assert_eq!(topology.routes[3].domains, vec![ProtocolDomain::Schema]);
-    assert_eq!(
-        topology.routes[3].endpoint,
-        SessionRouteEndpoint::Http {
-            url: "https://schema.example".to_string(),
-        }
-    );
-
-    assert_eq!(topology.routes[4].label, "system");
-    assert_eq!(topology.routes[4].target, SessionTarget::Shared);
-    assert_eq!(topology.routes[4].domains, vec![ProtocolDomain::System]);
-    assert_eq!(
-        topology.routes[4].endpoint,
-        SessionRouteEndpoint::Internal {
-            label: "system-driver".to_string(),
-        }
-    );
-
-    ns_server.join().unwrap();
-    broker_server.join().unwrap();
 }
 
 #[test]
@@ -371,3 +369,14 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 unsafe fn noop(_: *const ()) {}
 
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+
+fn run_on_tokio<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}

@@ -51,6 +51,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - 任意已提交 revision 都必须能提供内部一致的 snapshot
 - query/schema 结果不得躲在独立 side cache 中绕开 snapshot
 - schema 状态键必须由 `schema_id` 决定，不能退化成 transport route label
+- core 不得内部创建 Tokio runtime 作为 sync fallback；需要网络 IO 的调用方必须自带 async runtime
 - 本地控制面对象允许 retention-bounded 裁剪，但裁剪语义必须显式、可验证且不破坏幂等重放
 
 ### 统一 revision / change 模型
