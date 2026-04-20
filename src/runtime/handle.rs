@@ -10,14 +10,14 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
     error::{ContractError, Result},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
-    ids::{CommandId, Revision},
+    ids::{CommandId, ProtocolDomain, Revision},
     state::{CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor},
     transport::{BootstrapResult, SessionPhase},
 };
 
 use super::{
     CommitLog, RuntimeCore, RuntimeReader, SharedState,
-    command_ledger::command_detail_fields_from_command,
+    command_ledger::{command_detail_fields_from_command, merged_detail_from_seed},
     commit_engine::{
         CommitEngine, session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations,
     },
@@ -146,13 +146,30 @@ impl RuntimeHandle {
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
         let mut inner = self.inner.lock().expect("runtime mutex poisoned");
-        let Some(domain) = inner.command_ledger.domain(command_id) else {
+        let domain_from_ledger = inner.command_ledger.domain(command_id);
+        let detail_seed_from_ledger = inner.command_ledger.detail_seed(command_id);
+
+        let (domain, seed_from_snapshot) = if let Some(domain) = domain_from_ledger {
+            (Some(domain), None)
+        } else {
+            let snapshot_guard = self.state.read().expect("runtime state rwlock poisoned");
+            let snapshot = snapshot_guard.read();
+            let domain = command_domain_from_snapshot(snapshot, command_id);
+            let seed = command_detail_seed_from_snapshot(snapshot, command_id);
+            drop(snapshot_guard);
+            (domain, seed)
+        };
+
+        let Some(domain) = domain else {
             return Err(ContractError::validation(format!(
                 "unknown command id for command status update: {}",
                 command_id.get()
             )));
         };
-        let detail = inner.command_ledger.merged_detail(command_id, detail);
+        let detail = merged_detail_from_seed(
+            detail_seed_from_ledger.or(seed_from_snapshot.as_ref()),
+            detail,
+        );
 
         let command_segment = command_id.get().to_string();
         let mut fields = vec![
@@ -171,7 +188,7 @@ impl RuntimeHandle {
         ];
         fields.sort_by(|left, right| left.field.cmp(&right.field));
 
-        self.apply_and_publish_locked(
+        let commit = self.apply_and_publish_locked(
             &mut inner,
             vec![NormalizedMutation {
                 path: StatePath::new(vec![
@@ -185,7 +202,13 @@ impl RuntimeHandle {
             }],
             vec![command_id],
             scope,
-        )
+        )?;
+
+        if status.is_terminal() {
+            inner.command_ledger.release(command_id);
+        }
+
+        Ok(commit)
     }
 
     pub fn record_session_phase(
@@ -341,4 +364,157 @@ impl Runtime for RuntimeHandle {
         );
         self.cursor_from(next_revision)
     }
+}
+
+fn command_domain_from_snapshot(
+    snapshot: crate::state::StateReadView<'_>,
+    command_id: CommandId,
+) -> Option<ProtocolDomain> {
+    let command_segment = command_id.get().to_string();
+    let domain = snapshot
+        .get(["runtime", "commands", command_segment.as_str(), "domain"])?
+        .as_str()?;
+    match domain {
+        "system" => Some(ProtocolDomain::System),
+        "market" => Some(ProtocolDomain::Market),
+        "trade" => Some(ProtocolDomain::Trade),
+        "replay" => Some(ProtocolDomain::Replay),
+        "query" => Some(ProtocolDomain::Query),
+        "schema" => Some(ProtocolDomain::Schema),
+        _ => None,
+    }
+}
+
+fn command_detail_seed_from_snapshot(
+    snapshot: crate::state::StateReadView<'_>,
+    command_id: CommandId,
+) -> Option<serde_json::Map<String, Value>> {
+    let command_segment = command_id.get().to_string();
+    snapshot
+        .get(["runtime", "commands", command_segment.as_str(), "detail"])
+        .and_then(Value::as_object)
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    };
+
+    use serde_json::json;
+
+    use crate::{
+        adapter::AdapterRegistry,
+        commands::{
+            CommandStatus, RuntimeCommand, TradeCommand, TradeDirection, TradeInsertOrderCommand,
+            TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+        },
+        ids::{AccountId, OrderId, ProtocolDomain, Symbol},
+        state::CommitScope,
+    };
+
+    use super::{Runtime, RuntimeHandle};
+
+    #[test]
+    fn released_terminal_command_statuses_drop_ledger_metadata_but_remain_idempotent() {
+        let handle = runtime_with_default_adapters();
+
+        let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("order-1"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 2,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))))
+        .unwrap();
+
+        assert_eq!(
+            handle
+                .inner
+                .lock()
+                .expect("runtime mutex poisoned")
+                .command_ledger
+                .domain(command_id),
+            Some(ProtocolDomain::Trade)
+        );
+
+        handle
+            .record_command_status(
+                command_id,
+                CommandStatus::Rejected,
+                Some(json!({"reason": "insufficient_margin"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .expect("first terminal status should publish a commit");
+
+        assert_eq!(
+            handle
+                .inner
+                .lock()
+                .expect("runtime mutex poisoned")
+                .command_ledger
+                .domain(command_id),
+            None
+        );
+
+        let repeated = handle
+            .record_command_status(
+                command_id,
+                CommandStatus::Rejected,
+                Some(json!({"reason": "insufficient_margin"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        assert_eq!(repeated, None);
+    }
+
+    fn runtime_with_default_adapters() -> RuntimeHandle {
+        let mut registry = AdapterRegistry::new();
+        registry.register_default_adapters();
+        RuntimeHandle::with_adapters(registry)
+    }
+
+    fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let mut future = Pin::from(Box::new(future));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn noop_waker() -> Waker {
+        unsafe { Waker::from_raw(noop_raw_waker()) }
+    }
+
+    fn noop_raw_waker() -> RawWaker {
+        RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE)
+    }
+
+    unsafe fn noop_clone(_: *const ()) -> RawWaker {
+        noop_raw_waker()
+    }
+
+    unsafe fn noop(_: *const ()) {}
+
+    static NOOP_WAKER_VTABLE: RawWakerVTable =
+        RawWakerVTable::new(noop_clone, noop, noop, noop);
 }

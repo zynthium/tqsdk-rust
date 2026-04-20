@@ -44,12 +44,20 @@ impl CommandLedger {
         self.command_domains.get(&command_id).copied()
     }
 
-    pub(crate) fn merged_detail(&self, command_id: CommandId, detail: Option<Value>) -> Value {
-        merge_command_detail(self.command_detail_seeds.get(&command_id), detail)
+    pub(crate) fn detail_seed(&self, command_id: CommandId) -> Option<&Map<String, Value>> {
+        self.command_detail_seeds.get(&command_id)
+    }
+
+    pub(crate) fn release(&mut self, command_id: CommandId) {
+        self.command_domains.remove(&command_id);
+        self.command_detail_seeds.remove(&command_id);
     }
 }
 
-fn merge_command_detail(seed: Option<&Map<String, Value>>, detail: Option<Value>) -> Value {
+pub(crate) fn merged_detail_from_seed(
+    seed: Option<&Map<String, Value>>,
+    detail: Option<Value>,
+) -> Value {
     let mut merged = seed.cloned().unwrap_or_default();
 
     match detail {

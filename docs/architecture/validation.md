@@ -58,6 +58,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - 每个命令都必须可追踪到 `CommandId`
 - `CommitResult` 必须能表达由哪些命令导致
 - trade/replay/query/system 错误都必须进入同一 causality 模型
+- terminal 命令在状态树落地后可以释放 active ledger 元数据，但重复 terminal 写入仍必须保持幂等
 
 ### 统一 cursor / log 语义
 - 所有消费者都必须通过 `RuntimeReader::cursor()` / `RuntimeReader::next()` 或兼容的 `CommitLog` / `UpdateCursor` 读取提交结果

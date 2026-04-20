@@ -97,6 +97,7 @@ pub enum CommandStatus {
 职责：
 - 跟踪命令因果链
 - 将命令状态写入统一状态树
+- 只保留活跃命令的最小元数据；terminal 后由状态树承载读侧语义
 
 ### state_store
 ```rust
