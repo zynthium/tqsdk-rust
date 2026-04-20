@@ -34,9 +34,8 @@ fn live_auth_market_contract_smoke() {
     let adapters = adapter_registry();
 
     let auth = block_on(provider.authenticate()).expect("live auth should succeed");
-    let topology =
-        block_on(provider.resolve_topology(&auth, &config, &[ProtocolDomain::Market]))
-            .expect("live topology resolution should succeed");
+    let topology = block_on(provider.resolve_topology(&auth, &config, &[ProtocolDomain::Market]))
+        .expect("live topology resolution should succeed");
     let market_url = topology
         .routes
         .iter()
@@ -49,7 +48,9 @@ fn live_auth_market_contract_smoke() {
         .expect("live topology should include market websocket route");
 
     let mut run = block_on(runtime.establish(&provider, &provider, &connector, &config, &adapters))
-        .unwrap_or_else(|err| panic!("live auth/topology establish should succeed via {market_url}: {err}"));
+        .unwrap_or_else(|err| {
+            panic!("live auth/topology establish should succeed via {market_url}: {err}")
+        });
 
     block_on(run.connected.send_route_frame(
         "market",
@@ -77,8 +78,8 @@ fn live_auth_market_contract_smoke() {
     )))
     .expect("live market subscribe should succeed");
 
-    let market_receipts = block_on(runtime.flush_outbound(&mut run))
-        .expect("live market dispatch should succeed");
+    let market_receipts =
+        block_on(runtime.flush_outbound(&mut run)).expect("live market dispatch should succeed");
     assert_eq!(market_receipts.len(), 2);
 
     let market_diagnostics = pump_route_until(
@@ -136,14 +137,16 @@ fn live_schema_http_contract_smoke() {
     .expect("live schema establish should succeed");
     let executor = ReqwestHttpExecutor::default();
 
-    let schema_id = block_on(handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-        schema_id: SchemaId::new("symbols-latest"),
-        path: "/shinny_chinese_holiday.json".to_string(),
-    })))
+    let schema_id = block_on(
+        handle.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new("symbols-latest"),
+            path: "/shinny_chinese_holiday.json".to_string(),
+        })),
+    )
     .expect("live schema submit should succeed");
 
-    let receipts = block_on(runtime.flush_outbound(&mut run))
-        .expect("live schema dispatch should succeed");
+    let receipts =
+        block_on(runtime.flush_outbound(&mut run)).expect("live schema dispatch should succeed");
     assert_eq!(receipts.len(), 1);
 
     let outcome = block_on(runtime.drive_pending_route_once(

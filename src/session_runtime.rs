@@ -53,6 +53,33 @@ pub trait RouteRequestExecutor: Send + Sync {
     ) -> ContractFuture<'a, Vec<RuntimeInput>>;
 }
 
+#[derive(Clone, Copy)]
+pub struct SessionRuntimeDeps<'a> {
+    pub auth: &'a dyn AuthProvider,
+    pub resolver: &'a dyn SessionTopologyResolver,
+    pub connector: &'a dyn SessionRouteConnector,
+    pub config: &'a SessionConfig,
+    pub adapters: &'a AdapterRegistry,
+}
+
+impl<'a> SessionRuntimeDeps<'a> {
+    pub fn new(
+        auth: &'a dyn AuthProvider,
+        resolver: &'a dyn SessionTopologyResolver,
+        connector: &'a dyn SessionRouteConnector,
+        config: &'a SessionConfig,
+        adapters: &'a AdapterRegistry,
+    ) -> Self {
+        Self {
+            auth,
+            resolver,
+            connector,
+            config,
+            adapters,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionRuntime {
     handle: RuntimeHandle,
@@ -133,7 +160,10 @@ impl SessionRuntime {
     ) -> ContractFuture<'a, SessionRun> {
         Box::pin(async move {
             let recovery = match self
-                .recover_internal(auth, resolver, connector, config, adapters, true)
+                .recover_internal(
+                    SessionRuntimeDeps::new(auth, resolver, connector, config, adapters),
+                    true,
+                )
                 .await
             {
                 Ok(recovery) => recovery,
@@ -266,11 +296,7 @@ impl SessionRuntime {
         route_label: &'a str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-        auth: &'a dyn AuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
+        deps: SessionRuntimeDeps<'a>,
     ) -> ContractFuture<'a, SessionStepOutcome> {
         Box::pin(async move {
             let mut outcome = SessionStepOutcome {
@@ -290,11 +316,7 @@ impl SessionRuntime {
                         route_label,
                         route_outcome.reconnect_reason.unwrap_or("transport-close"),
                         caused_by,
-                        auth,
-                        resolver,
-                        connector,
-                        config,
-                        adapters,
+                        deps,
                     )
                     .await?;
                 outcome.recovered = true;
@@ -316,11 +338,7 @@ impl SessionRuntime {
         run: &'a mut SessionRun,
         timer: TimerEvent,
         caused_by: Vec<CommandId>,
-        auth: &'a dyn AuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
+        deps: SessionRuntimeDeps<'a>,
     ) -> ContractFuture<'a, SessionStepOutcome> {
         Box::pin(async move {
             let mut outcome = SessionStepOutcome::default();
@@ -379,16 +397,7 @@ impl SessionRuntime {
                     }
 
                     let recovery = self
-                        .recover_with_policy(
-                            route_label,
-                            "heartbeat-timeout",
-                            caused_by,
-                            auth,
-                            resolver,
-                            connector,
-                            config,
-                            adapters,
-                        )
+                        .recover_with_policy(route_label, "heartbeat-timeout", caused_by, deps)
                         .await?;
                     outcome.recovered = true;
                     outcome.commits.extend(recovery.commits);
@@ -490,23 +499,19 @@ impl SessionRuntime {
         route_label: &'a str,
         reason: &'static str,
         caused_by: Vec<CommandId>,
-        auth: &'a dyn AuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
+        deps: SessionRuntimeDeps<'a>,
     ) -> ContractFuture<'a, RecoveryOutcome> {
         Box::pin(async move {
             let mut commits = Vec::new();
-            let max_attempts = config.reconnect.max_attempts.unwrap_or(1).max(1);
+            let max_attempts = deps.config.reconnect.max_attempts.unwrap_or(1).max(1);
             let mut last_error = None;
 
             for attempt in 1..=max_attempts {
-                let scheduled_backoff_ms = reconnect_backoff_ms(config, attempt);
+                let scheduled_backoff_ms = reconnect_backoff_ms(deps.config, attempt);
                 if let Some(commit) = self.handle.record_session_reconnect(
                     attempt,
                     scheduled_backoff_ms,
-                    config.reconnect.max_attempts,
+                    deps.config.reconnect.max_attempts,
                     false,
                     Some(json!({
                         "route": route_label,
@@ -517,10 +522,7 @@ impl SessionRuntime {
                     commits.push(commit);
                 }
 
-                match self
-                    .recover_internal(auth, resolver, connector, config, adapters, false)
-                    .await
-                {
+                match self.recover_internal(deps, false).await {
                     Ok(recovery) => {
                         commits.extend(recovery.commits);
                         return Ok(RecoveryOutcome {
@@ -558,7 +560,7 @@ impl SessionRuntime {
             if let Some(commit) = self.handle.record_session_reconnect(
                 attempt,
                 scheduled_backoff_ms,
-                config.reconnect.max_attempts,
+                deps.config.reconnect.max_attempts,
                 true,
                 Some(json!({
                     "route": route_label,
@@ -589,30 +591,27 @@ impl SessionRuntime {
 
     fn recover_internal<'a>(
         &'a self,
-        auth: &'a dyn AuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
+        deps: SessionRuntimeDeps<'a>,
         record_reconnecting: bool,
     ) -> ContractFuture<'a, RecoveryOutcome> {
         Box::pin(async move {
             let mut commits = Vec::new();
 
-            if record_reconnecting {
-                if let Some(commit) =
+            if record_reconnecting
+                && let Some(commit) =
                     self.handle
                         .record_session_phase(SessionPhase::Reconnecting, None, vec![])?
-                {
-                    commits.push(commit);
-                }
+            {
+                commits.push(commit);
             }
 
             let bootstrap = self
                 .bootstrap
-                .establish_with_resolver(auth, resolver, config, adapters)
+                .establish_with_resolver(deps.auth, deps.resolver, deps.config, deps.adapters)
                 .await?;
-            let connected = self.connect_if_needed(&bootstrap, connector, None).await?;
+            let connected = self
+                .connect_if_needed(&bootstrap, deps.connector, None)
+                .await?;
 
             if let Some(commit) =
                 self.handle
@@ -895,9 +894,13 @@ impl SessionRuntime {
                 command_id,
                 &detail,
             ),
-            "ins_query" => {
-                self.derive_query_command_status(&snapshot, route_label, commit, command_id, &detail)
-            }
+            "ins_query" => self.derive_query_command_status(
+                &snapshot,
+                route_label,
+                commit,
+                command_id,
+                &detail,
+            ),
             _ => None,
         }
     }

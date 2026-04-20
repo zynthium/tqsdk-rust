@@ -53,12 +53,12 @@ impl AdapterRegistry {
     }
 
     pub fn register_default_adapters(&mut self) {
-        self.register_adapter(SystemAdapter::default());
+        self.register_adapter(SystemAdapter);
         self.register_adapter(MarketAdapter::default());
-        self.register_adapter(TradeAdapter::default());
-        self.register_adapter(ReplayAdapter::default());
-        self.register_adapter(QueryAdapter::default());
-        self.register_adapter(SchemaAdapter::default());
+        self.register_adapter(TradeAdapter);
+        self.register_adapter(ReplayAdapter);
+        self.register_adapter(QueryAdapter);
+        self.register_adapter(SchemaAdapter);
     }
 
     pub fn owning_domain(&self, cmd: &RuntimeCommand) -> Option<ProtocolDomain> {

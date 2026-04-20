@@ -371,9 +371,11 @@ impl SessionTopologyResolver for TqAuthProvider {
                 .with_header("User-Agent", DEFAULT_USER_AGENT);
 
             let mut market_domains = Vec::new();
-            for domain in enabled_domains.iter().copied().filter(|domain| {
-                matches!(domain, ProtocolDomain::Market)
-            }) {
+            for domain in enabled_domains
+                .iter()
+                .copied()
+                .filter(|domain| matches!(domain, ProtocolDomain::Market))
+            {
                 if !market_domains.contains(&domain) {
                     market_domains.push(domain);
                 }
@@ -414,9 +416,13 @@ impl SessionTopologyResolver for TqAuthProvider {
                     } else if let Some(url) = &config.endpoints.trade_url {
                         url.clone()
                     } else {
-                        self.request_trade_broker(auth, &target.broker_id, target.account_id.as_str())
-                            .await?
-                            .url
+                        self.request_trade_broker(
+                            auth,
+                            &target.broker_id,
+                            target.account_id.as_str(),
+                        )
+                        .await?
+                        .url
                     };
 
                     topology = topology.with_route(SessionRoute {

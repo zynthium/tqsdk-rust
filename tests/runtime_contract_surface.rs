@@ -190,6 +190,7 @@ fn adapter_registry_and_runtime_handle_surface_compile() {
     registry.register_domain(ProtocolDomain::System);
 
     let handle = RuntimeHandle::new();
+    let default_handle = RuntimeHandle::default();
     let snapshot: StateSnapshot = handle.latest_snapshot();
     let cursor: UpdateCursor = handle.cursor();
     let log = CommitLog::new();
@@ -198,9 +199,12 @@ fn adapter_registry_and_runtime_handle_surface_compile() {
     assert_eq!(snapshot.revision().get(), 0);
     assert_eq!(cursor.next_revision().get(), 1);
     assert_eq!(log.head_revision(), None);
+    assert_eq!(default_handle.latest_snapshot().revision().get(), 0);
+    assert_eq!(default_handle.cursor().next_revision().get(), 1);
 
     fn assert_runtime<T: Runtime>(_value: &T) {}
     assert_runtime(&handle);
+    assert_runtime(&default_handle);
 
     let adapter = TestAdapter;
     assert_eq!(adapter.domain(), ProtocolDomain::System);
@@ -219,6 +223,7 @@ fn public_surface_exports_are_usable_together() {
         });
     let _scope = tqsdk_runtime_contract::CommitScope::SessionTransition;
     let _domain = tqsdk_runtime_contract::ProtocolDomain::Schema;
+    let handle = tqsdk_runtime_contract::RuntimeHandle::default();
 
-    assert!(true);
+    assert_eq!(handle.latest_snapshot().revision().get(), 0);
 }

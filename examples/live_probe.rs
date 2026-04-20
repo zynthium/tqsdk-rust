@@ -75,7 +75,9 @@ async fn probe_sequence(
 
     for frame in frames {
         println!("send {}", frame);
-        transport.send(OutboundFrame::Text(frame.to_string())).await?;
+        transport
+            .send(OutboundFrame::Text(frame.to_string()))
+            .await?;
     }
 
     for idx in 1..=5 {

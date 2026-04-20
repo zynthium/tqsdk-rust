@@ -7,8 +7,8 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use serde_json::json;
 use tqsdk_runtime_contract::{
     CommandId, HttpMethod, HttpRequest, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
-    ProtocolDomain, ReqwestHttpExecutor, RouteRequestExecutor, SessionRoute,
-    SessionRouteEndpoint, SessionTarget,
+    ProtocolDomain, ReqwestHttpExecutor, RouteRequestExecutor, SessionRoute, SessionRouteEndpoint,
+    SessionTarget,
 };
 
 #[test]
@@ -23,10 +23,22 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
 
         assert!(request.starts_with("POST /graphql HTTP/1.1"), "{request}");
         assert!(normalized.contains("accept: application/json"), "{request}");
-        assert!(normalized.contains("user-agent: tqsdk-python 3.8.1"), "{request}");
-        assert!(normalized.contains("content-type: application/json"), "{request}");
-        assert!(request.contains("\"query_id\":\"quotes-page-1\""), "{request}");
-        assert!(request.contains("\"query\":\"query Quotes { symbols { instrument_id } }\""), "{request}");
+        assert!(
+            normalized.contains("user-agent: tqsdk-python 3.8.1"),
+            "{request}"
+        );
+        assert!(
+            normalized.contains("content-type: application/json"),
+            "{request}"
+        );
+        assert!(
+            request.contains("\"query_id\":\"quotes-page-1\""),
+            "{request}"
+        );
+        assert!(
+            request.contains("\"query\":\"query Quotes { symbols { instrument_id } }\""),
+            "{request}"
+        );
 
         write_http_ok(
             &mut stream,
@@ -90,9 +102,15 @@ fn reqwest_http_executor_joins_schema_paths_for_get_requests() {
         let request = read_http_request(&mut stream);
         let normalized = request.to_ascii_lowercase();
 
-        assert!(request.starts_with("GET /schema/instrument.json HTTP/1.1"), "{request}");
+        assert!(
+            request.starts_with("GET /schema/instrument.json HTTP/1.1"),
+            "{request}"
+        );
         assert!(normalized.contains("accept: application/json"), "{request}");
-        assert!(normalized.contains("user-agent: tqsdk-python 3.8.1"), "{request}");
+        assert!(
+            normalized.contains("user-agent: tqsdk-python 3.8.1"),
+            "{request}"
+        );
 
         write_http_ok(
             &mut stream,
@@ -215,5 +233,4 @@ unsafe fn noop_clone(_: *const ()) -> RawWaker {
 
 unsafe fn noop(_: *const ()) {}
 
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(noop_clone, noop, noop, noop);
+static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);

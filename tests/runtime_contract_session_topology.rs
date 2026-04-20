@@ -174,12 +174,18 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
             assert!(connect.headers.iter().any(|(name, value)| {
                 name == "Authorization" && value == "Bearer test-access-token"
             }));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "Accept" && value == "application/json"
-            }));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "User-Agent" && value == "tqsdk-python 3.8.1"
-            }));
+            assert!(
+                connect
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "Accept" && value == "application/json" })
+            );
+            assert!(
+                connect
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "User-Agent" && value == "tqsdk-python 3.8.1" })
+            );
         }
         other => panic!("expected market websocket route, got {other:?}"),
     }
@@ -193,12 +199,18 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
             assert!(connect.headers.iter().any(|(name, value)| {
                 name == "Authorization" && value == "Bearer test-access-token"
             }));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "Accept" && value == "application/json"
-            }));
-            assert!(connect.headers.iter().any(|(name, value)| {
-                name == "User-Agent" && value == "tqsdk-python 3.8.1"
-            }));
+            assert!(
+                connect
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "Accept" && value == "application/json" })
+            );
+            assert!(
+                connect
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "User-Agent" && value == "tqsdk-python 3.8.1" })
+            );
         }
         other => panic!("expected trade websocket route, got {other:?}"),
     }

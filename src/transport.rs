@@ -92,13 +92,15 @@ impl WebSocketTransport {
         TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|err| ContractError::auth(format!("tokio runtime initialization failed: {err}")))
+            .map_err(|err| {
+                ContractError::auth(format!("tokio runtime initialization failed: {err}"))
+            })
     }
 
     fn require_execution(&self) -> Result<&WebSocketExecution> {
-        self.execution.as_ref().ok_or_else(|| {
-            ContractError::validation("websocket transport is not connected")
-        })
+        self.execution
+            .as_ref()
+            .ok_or_else(|| ContractError::validation("websocket transport is not connected"))
     }
 
     fn decode_frame(frame: Frame) -> Result<RawFrame> {
@@ -166,7 +168,11 @@ impl WebSocketTransport {
             Some(WebSocketExecution::Owned(runtime)) => {
                 runtime.block_on(async { socket.next_frame().await })
             }
-            None => return Err(ContractError::validation("websocket transport is not connected")),
+            None => {
+                return Err(ContractError::validation(
+                    "websocket transport is not connected",
+                ));
+            }
         }
         .map_err(|err| ContractError::auth(format!("websocket recv failed: {err}")))?;
         Self::decode_frame(frame)
@@ -191,7 +197,11 @@ impl WebSocketTransport {
             Some(WebSocketExecution::Owned(runtime)) => {
                 runtime.block_on(async { socket.send(frame).await })
             }
-            None => return Err(ContractError::validation("websocket transport is not connected")),
+            None => {
+                return Err(ContractError::validation(
+                    "websocket transport is not connected",
+                ));
+            }
         }
         .map_err(|err| ContractError::auth(format!("websocket send failed: {err}")))
     }

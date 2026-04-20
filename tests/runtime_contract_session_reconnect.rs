@@ -10,8 +10,8 @@ use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture,
     EndpointConfig, ProtocolDomain, RawFrame, ReconnectPolicy, Revision, Runtime, RuntimeHandle,
     SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionTarget, SessionTopology,
-    SessionTopologyResolver, StatePath, Transport,
+    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget,
+    SessionTopology, SessionTopologyResolver, StatePath, Transport,
 };
 
 #[derive(Clone)]
@@ -216,11 +216,13 @@ fn session_runtime_drive_route_once_recovers_after_transport_close_without_dupli
         "market",
         vec![],
         CommitScope::RealtimeUpdate,
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap();
 
@@ -305,11 +307,13 @@ fn session_runtime_drive_route_once_recovers_after_transport_error() {
         "market",
         vec![],
         CommitScope::RealtimeUpdate,
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap();
 
@@ -368,11 +372,13 @@ fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds
         "market",
         vec![],
         CommitScope::RealtimeUpdate,
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap();
 
@@ -448,11 +454,13 @@ fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
         "market",
         vec![],
         CommitScope::RealtimeUpdate,
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap_err();
 

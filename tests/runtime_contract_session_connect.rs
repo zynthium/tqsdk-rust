@@ -10,6 +10,7 @@ use tqsdk_runtime_contract::{
 use tungstenite::accept_hdr;
 use tungstenite::handshake::server::{Request, Response};
 
+#[allow(clippy::result_large_err)]
 #[test]
 fn session_bootstrap_connects_websocket_routes_from_topology() {
     let market_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -71,7 +72,7 @@ fn session_bootstrap_connects_websocket_routes_from_topology() {
             },
         });
 
-    let connector = WebSocketRouteConnector::default();
+    let connector = WebSocketRouteConnector;
     let mut connected =
         block_on(SessionBootstrap::new().connect_topology(&topology, &connector)).unwrap();
 

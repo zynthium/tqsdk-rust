@@ -69,6 +69,7 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
     block_on(connected.close_all()).unwrap();
 }
 
+#[allow(clippy::result_large_err)]
 #[test]
 fn default_route_connector_delegates_websocket_routes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -397,12 +397,12 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
 
 #[test]
 fn concrete_adapters_are_public_and_instantiable() {
-    let _ = SystemAdapter::default();
+    let _ = SystemAdapter;
     let _ = MarketAdapter::default();
-    let _ = TradeAdapter::default();
-    let _ = QueryAdapter::default();
-    let _ = SchemaAdapter::default();
-    let _ = ReplayAdapter::default();
+    let _ = TradeAdapter;
+    let _ = QueryAdapter;
+    let _ = SchemaAdapter;
+    let _ = ReplayAdapter;
 }
 
 #[test]

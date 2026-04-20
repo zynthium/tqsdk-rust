@@ -30,7 +30,10 @@ fn endpoint_config_from_env_reads_tqsdk_rs_named_env_vars() {
     assert_eq!(config.auth_url.as_deref(), Some("https://auth.env"));
     assert_eq!(config.market_url.as_deref(), Some("wss://md.env"));
     assert_eq!(config.trade_url.as_deref(), Some("wss://td.env"));
-    assert_eq!(config.query_url.as_deref(), Some("https://query.env/graphql"));
+    assert_eq!(
+        config.query_url.as_deref(),
+        Some("https://query.env/graphql")
+    );
     assert_eq!(config.replay_url.as_deref(), Some("replay-driver"));
     assert_eq!(config.schema_url.as_deref(), Some("https://schema.env"));
 
@@ -52,7 +55,10 @@ fn endpoint_config_default_and_market_target_match_runtime_defaults() {
     clear_env(&keys);
 
     let config = EndpointConfig::default();
-    assert_eq!(config.auth_url.as_deref(), Some("https://auth.shinnytech.com"));
+    assert_eq!(
+        config.auth_url.as_deref(),
+        Some("https://auth.shinnytech.com")
+    );
     assert_eq!(config.market_url, None);
     assert_eq!(config.trade_url, None);
     assert_eq!(config.query_url, None);

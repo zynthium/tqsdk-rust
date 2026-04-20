@@ -70,6 +70,7 @@ fn runtime_handle_drain_dispatches_resolves_command_domains() {
 }
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -92,15 +93,11 @@ fn connected_topology_dispatches_transport_and_queues_non_transport_requests() {
         let second = socket.read().unwrap();
         assert_eq!(
             first,
-            Message::Text(
-                json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"})
-                    .to_string()
-                    .into()
-            )
+            Message::Text(json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string())
         );
         assert_eq!(
             second,
-            Message::Text(json!({"aid": "peek_message"}).to_string().into())
+            Message::Text(json!({"aid": "peek_message"}).to_string())
         );
         let _ = socket.close(None);
     });

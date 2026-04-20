@@ -28,9 +28,7 @@ fn websocket_transport_connects_and_round_trips_frames() {
             other => panic!("expected ping frame, got {other:?}"),
         }
 
-        socket
-            .send(Message::Binary(vec![1_u8, 2, 3].into()))
-            .unwrap();
+        socket.send(Message::Binary(vec![1_u8, 2, 3])).unwrap();
 
         match socket.read().unwrap() {
             Message::Close(_) => {}
@@ -58,6 +56,7 @@ fn websocket_transport_connects_and_round_trips_frames() {
     server.join().unwrap();
 }
 
+#[allow(clippy::result_large_err)]
 #[test]
 fn websocket_transport_sends_custom_handshake_headers() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

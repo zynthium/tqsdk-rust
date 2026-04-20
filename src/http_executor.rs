@@ -93,11 +93,7 @@ impl ReqwestHttpExecutor {
                 )));
             }
 
-            let payload = decode_response_payload(
-                &route.domains,
-                http.body.as_ref(),
-                &bytes,
-            )?;
+            let payload = decode_response_payload(&route.domains, http.body.as_ref(), &bytes)?;
             inputs.push(RuntimeInput::Io(IoEvent {
                 route: route.label.clone(),
                 domains: route.domains.clone(),
@@ -125,7 +121,8 @@ impl RouteRequestExecutor for ReqwestHttpExecutor {
             if tokio::runtime::Handle::try_current().is_ok() {
                 self.execute_async(route, requests).await
             } else {
-                self.build_runtime()?.block_on(self.execute_async(route, requests))
+                self.build_runtime()?
+                    .block_on(self.execute_async(route, requests))
             }
         })
     }

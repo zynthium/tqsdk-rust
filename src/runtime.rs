@@ -363,6 +363,12 @@ impl RuntimeHandle {
     }
 }
 
+impl Default for RuntimeHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn session_snapshot_mutations(result: &BootstrapResult) -> Vec<NormalizedMutation> {
     vec![
         session_auth_mutation(result),

@@ -9,8 +9,8 @@ use tqsdk_runtime_contract::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
     OutboundFrame, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
     SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, TimerEvent,
-    Transport,
+    SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopology, SessionTopologyResolver,
+    StatePath, TimerEvent, Transport,
 };
 
 #[derive(Clone)]
@@ -178,11 +178,13 @@ fn session_runtime_drive_timer_once_sends_ping_and_commits_heartbeat_due() {
             payload: Some(json!({ "route": "market" })),
         },
         vec![],
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap();
 
@@ -226,11 +228,13 @@ fn session_runtime_drive_timer_once_recovers_after_heartbeat_timeout() {
             payload: Some(json!({ "route": "market" })),
         },
         vec![],
-        &TestAuthProvider,
-        &MarketTopologyResolver,
-        &connector,
-        &config,
-        &adapters,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
     ))
     .unwrap();
 

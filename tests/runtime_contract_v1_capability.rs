@@ -179,10 +179,12 @@ impl SessionRouteConnector for CapabilityConnector {
     }
 }
 
+type SeenDispatches = Arc<Mutex<Vec<(String, Vec<OutboundDispatch>)>>>;
+
 #[derive(Clone, Default)]
 struct RecordingExecutor {
     responses: BTreeMap<String, Vec<RuntimeInput>>,
-    seen: Arc<Mutex<Vec<(String, Vec<OutboundDispatch>)>>>,
+    seen: SeenDispatches,
 }
 
 impl RecordingExecutor {
