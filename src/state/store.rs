@@ -59,13 +59,52 @@ impl StateSnapshot {
 }
 
 fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) -> Option<NormalizedMutation> {
-    let target = ensure_object_path(root, mutation.path.segments());
-    let map = target
+    let mut changed_fields = Vec::new();
+    apply_mutation_at_path(root, mutation.path.segments(), &mutation.fields, &mut changed_fields);
+
+    if changed_fields.is_empty() {
+        None
+    } else {
+        Some(NormalizedMutation {
+            path: mutation.path.clone(),
+            object: mutation.object.clone(),
+            fields: changed_fields,
+            source: mutation.source,
+        })
+    }
+}
+
+fn apply_mutation_at_path(
+    cursor: &mut Value,
+    path: &[PathSegment],
+    fields: &[crate::events::FieldMutation],
+    changed_fields: &mut Vec<crate::events::FieldMutation>,
+) {
+    if path.is_empty() {
+        apply_fields(cursor, fields, changed_fields);
+        return;
+    }
+
+    let segment = &path[0];
+    let child = ensure_child_object(cursor, segment);
+    apply_mutation_at_path(child, &path[1..], fields, changed_fields);
+    prune_empty_child(cursor, segment);
+}
+
+fn apply_fields(
+    cursor: &mut Value,
+    fields: &[crate::events::FieldMutation],
+    changed_fields: &mut Vec<crate::events::FieldMutation>,
+) {
+    if !cursor.is_object() {
+        *cursor = Value::Object(Map::new());
+    }
+
+    let map = cursor
         .as_object_mut()
         .expect("state snapshot path targets must always resolve to objects");
 
-    let mut changed_fields = Vec::new();
-    for field in &mutation.fields {
+    for field in fields {
         let has_changed = if field.value.is_null() {
             map.contains_key(&field.field)
         } else {
@@ -84,36 +123,36 @@ fn apply_mutation(root: &mut Value, mutation: &NormalizedMutation) -> Option<Nor
 
         changed_fields.push(field.clone());
     }
-
-    if changed_fields.is_empty() {
-        None
-    } else {
-        Some(NormalizedMutation {
-            path: mutation.path.clone(),
-            object: mutation.object.clone(),
-            fields: changed_fields,
-            source: mutation.source,
-        })
-    }
 }
 
-fn ensure_object_path<'a>(root: &'a mut Value, path: &[PathSegment]) -> &'a mut Value {
+fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mut Value {
     if !root.is_object() {
         *root = Value::Object(Map::new());
     }
 
-    let mut cursor = root;
-    for segment in path {
-        let map = cursor
-            .as_object_mut()
-            .expect("state snapshot intermediate nodes must always be objects");
-        cursor = map
-            .entry(segment.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !cursor.is_object() {
-            *cursor = Value::Object(Map::new());
-        }
+    let map = root
+        .as_object_mut()
+        .expect("state snapshot intermediate nodes must always be objects");
+    let child = map
+        .entry(segment.clone())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !child.is_object() {
+        *child = Value::Object(Map::new());
     }
 
-    cursor
+    child
+}
+
+fn prune_empty_child(root: &mut Value, segment: &PathSegment) {
+    let Some(map) = root.as_object_mut() else {
+        return;
+    };
+
+    let should_remove = map
+        .get(segment)
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty);
+    if should_remove {
+        map.remove(segment);
+    }
 }

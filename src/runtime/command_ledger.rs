@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Map, Value, json};
 
@@ -10,19 +10,34 @@ use crate::{
     ids::{CommandId, ProtocolDomain, Symbol},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CommandLedger {
     next_command_id: u64,
     command_domains: BTreeMap<CommandId, ProtocolDomain>,
     command_detail_seeds: BTreeMap<CommandId, Map<String, Value>>,
+    retained_terminal_commands: VecDeque<CommandId>,
+    retained_terminal_set: BTreeSet<CommandId>,
+    evicted_terminal_commands: VecDeque<CommandId>,
+    evicted_terminal_set: BTreeSet<CommandId>,
+    max_retained_terminal_commands: usize,
+    max_evicted_terminal_commands: usize,
 }
 
 impl CommandLedger {
-    pub(crate) fn new() -> Self {
+    pub(crate) const DEFAULT_MAX_RETAINED_TERMINAL_COMMANDS: usize = 4_096;
+
+    pub(crate) fn with_retention(max_retained_terminal_commands: usize) -> Self {
+        let max_retained_terminal_commands = max_retained_terminal_commands.max(1);
         Self {
             next_command_id: 1,
             command_domains: BTreeMap::new(),
             command_detail_seeds: BTreeMap::new(),
+            retained_terminal_commands: VecDeque::new(),
+            retained_terminal_set: BTreeSet::new(),
+            evicted_terminal_commands: VecDeque::new(),
+            evicted_terminal_set: BTreeSet::new(),
+            max_retained_terminal_commands,
+            max_evicted_terminal_commands: max_retained_terminal_commands,
         }
     }
 
@@ -51,6 +66,66 @@ impl CommandLedger {
     pub(crate) fn release(&mut self, command_id: CommandId) {
         self.command_domains.remove(&command_id);
         self.command_detail_seeds.remove(&command_id);
+    }
+
+    pub(crate) fn is_evicted_terminal(&self, command_id: CommandId) -> bool {
+        self.evicted_terminal_set.contains(&command_id)
+    }
+
+    pub(crate) fn pending_terminal_eviction(&self, command_id: CommandId) -> Option<CommandId> {
+        if self.retained_terminal_set.contains(&command_id)
+            || self.evicted_terminal_set.contains(&command_id)
+        {
+            return None;
+        }
+
+        (self.retained_terminal_commands.len() >= self.max_retained_terminal_commands)
+            .then(|| self.retained_terminal_commands.front().copied())
+            .flatten()
+    }
+
+    pub(crate) fn commit_terminal(
+        &mut self,
+        command_id: CommandId,
+        evicted_command_id: Option<CommandId>,
+    ) {
+        self.release(command_id);
+
+        if self.retained_terminal_set.contains(&command_id)
+            || self.evicted_terminal_set.contains(&command_id)
+        {
+            return;
+        }
+
+        if let Some(evicted_command_id) = evicted_command_id
+            && self.retained_terminal_commands.front().copied() == Some(evicted_command_id)
+        {
+            self.retained_terminal_commands.pop_front();
+            self.retained_terminal_set.remove(&evicted_command_id);
+            self.record_evicted_terminal(evicted_command_id);
+        }
+
+        self.retained_terminal_commands.push_back(command_id);
+        self.retained_terminal_set.insert(command_id);
+    }
+
+    fn record_evicted_terminal(&mut self, command_id: CommandId) {
+        if !self.evicted_terminal_set.insert(command_id) {
+            return;
+        }
+
+        self.evicted_terminal_commands.push_back(command_id);
+        while self.evicted_terminal_commands.len() > self.max_evicted_terminal_commands {
+            if let Some(expired_command_id) = self.evicted_terminal_commands.pop_front() {
+                self.evicted_terminal_set.remove(&expired_command_id);
+            }
+        }
+    }
+}
+
+impl Default for CommandLedger {
+    fn default() -> Self {
+        Self::with_retention(Self::DEFAULT_MAX_RETAINED_TERMINAL_COMMANDS)
     }
 }
 

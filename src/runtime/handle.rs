@@ -55,15 +55,34 @@ impl RuntimeHandle {
     }
 
     pub fn with_adapters(adapters: AdapterRegistry) -> Self {
-        Self::with_adapters_and_commit_log_retention(adapters, 8_192)
+        Self::with_adapters_and_retention_limits(
+            adapters,
+            8_192,
+            super::CommandLedger::DEFAULT_MAX_RETAINED_TERMINAL_COMMANDS,
+        )
     }
 
     pub fn with_adapters_and_commit_log_retention(
         adapters: AdapterRegistry,
         max_commit_log_entries: usize,
     ) -> Self {
+        Self::with_adapters_and_retention_limits(
+            adapters,
+            max_commit_log_entries,
+            super::CommandLedger::DEFAULT_MAX_RETAINED_TERMINAL_COMMANDS,
+        )
+    }
+
+    pub fn with_adapters_and_retention_limits(
+        adapters: AdapterRegistry,
+        max_commit_log_entries: usize,
+        max_retained_terminal_commands: usize,
+    ) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(RuntimeCore::new(adapters))),
+            inner: Arc::new(Mutex::new(RuntimeCore::new(
+                adapters,
+                max_retained_terminal_commands,
+            ))),
             state: Arc::new(RwLock::new(StateSnapshot::new(Revision::new(0)))),
             commit_log: CommitLog::with_retention(max_commit_log_entries),
         }
@@ -151,6 +170,8 @@ impl RuntimeHandle {
 
         let (domain, seed_from_snapshot) = if let Some(domain) = domain_from_ledger {
             (Some(domain), None)
+        } else if inner.command_ledger.is_evicted_terminal(command_id) {
+            return Ok(None);
         } else {
             let snapshot_guard = self.state.read().expect("runtime state rwlock poisoned");
             let snapshot = snapshot_guard.read();
@@ -188,24 +209,36 @@ impl RuntimeHandle {
         ];
         fields.sort_by(|left, right| left.field.cmp(&right.field));
 
+        let evicted_terminal_command_id = status
+            .is_terminal()
+            .then(|| inner.command_ledger.pending_terminal_eviction(command_id))
+            .flatten();
+
+        let mut mutations = vec![NormalizedMutation {
+            path: StatePath::new(vec![
+                "runtime".to_string(),
+                "commands".to_string(),
+                command_segment,
+            ]),
+            object: Some(ObjectKey::Command { command_id }),
+            fields,
+            source: MutationSource::SessionControl,
+        }];
+        if let Some(evicted_command_id) = evicted_terminal_command_id {
+            mutations.push(command_cleanup_mutation(evicted_command_id));
+        }
+
         let commit = self.apply_and_publish_locked(
             &mut inner,
-            vec![NormalizedMutation {
-                path: StatePath::new(vec![
-                    "runtime".to_string(),
-                    "commands".to_string(),
-                    command_segment,
-                ]),
-                object: Some(ObjectKey::Command { command_id }),
-                fields,
-                source: MutationSource::SessionControl,
-            }],
+            mutations,
             vec![command_id],
             scope,
         )?;
 
-        if status.is_terminal() {
-            inner.command_ledger.release(command_id);
+        if status.is_terminal() && commit.is_some() {
+            inner
+                .command_ledger
+                .commit_terminal(command_id, evicted_terminal_command_id);
         }
 
         Ok(commit)
@@ -396,6 +429,32 @@ fn command_detail_seed_from_snapshot(
         .cloned()
 }
 
+fn command_cleanup_mutation(command_id: CommandId) -> NormalizedMutation {
+    NormalizedMutation {
+        path: StatePath::new(vec![
+            "runtime".to_string(),
+            "commands".to_string(),
+            command_id.get().to_string(),
+        ]),
+        object: Some(ObjectKey::Command { command_id }),
+        fields: vec![
+            FieldMutation {
+                field: "detail".to_string(),
+                value: Value::Null,
+            },
+            FieldMutation {
+                field: "domain".to_string(),
+                value: Value::Null,
+            },
+            FieldMutation {
+                field: "status".to_string(),
+                value: Value::Null,
+            },
+        ],
+        source: MutationSource::SessionControl,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -412,7 +471,7 @@ mod tests {
             CommandStatus, RuntimeCommand, TradeCommand, TradeDirection, TradeInsertOrderCommand,
             TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
         },
-        ids::{AccountId, OrderId, ProtocolDomain, Symbol},
+        ids::{AccountId, CommandId, OrderId, ProtocolDomain, Symbol},
         state::CommitScope,
     };
 
@@ -479,10 +538,98 @@ mod tests {
         assert_eq!(repeated, None);
     }
 
+    #[test]
+    fn terminal_command_state_retention_prunes_old_entries_but_keeps_idempotence() {
+        let handle = runtime_with_terminal_command_retention(1);
+
+        let first_command_id = submit_rejected_trade_command(&handle, "order-1");
+        let second_command_id = submit_rejected_trade_command(&handle, "order-2");
+
+        let first_command_segment = first_command_id.get().to_string();
+        let second_command_segment = second_command_id.get().to_string();
+
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["runtime", "commands", first_command_segment.as_str()]),
+            None
+        );
+        assert_eq!(
+            handle.latest_snapshot().get([
+                "runtime",
+                "commands",
+                first_command_segment.as_str(),
+                "status"
+            ]),
+            None
+        );
+        assert_eq!(
+            handle.latest_snapshot().get([
+                "runtime",
+                "commands",
+                second_command_segment.as_str(),
+                "status"
+            ]),
+            Some(&json!("rejected"))
+        );
+
+        let repeated = handle
+            .record_command_status(
+                first_command_id,
+                CommandStatus::Rejected,
+                Some(json!({"reason": "insufficient_margin"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        assert_eq!(repeated, None);
+    }
+
     fn runtime_with_default_adapters() -> RuntimeHandle {
         let mut registry = AdapterRegistry::new();
         registry.register_default_adapters();
         RuntimeHandle::with_adapters(registry)
+    }
+
+    fn runtime_with_terminal_command_retention(
+        max_retained_terminal_commands: usize,
+    ) -> RuntimeHandle {
+        let mut registry = AdapterRegistry::new();
+        registry.register_default_adapters();
+        RuntimeHandle::with_adapters_and_retention_limits(
+            registry,
+            8_192,
+            max_retained_terminal_commands,
+        )
+    }
+
+    fn submit_rejected_trade_command(handle: &RuntimeHandle, order_id: &str) -> CommandId {
+        let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new(order_id),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 2,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))))
+        .unwrap();
+
+        handle
+            .record_command_status(
+                command_id,
+                CommandStatus::Rejected,
+                Some(json!({"reason": "insufficient_margin"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .expect("terminal status should publish a commit");
+
+        command_id
     }
 
     fn block_on<F>(future: F) -> F::Output

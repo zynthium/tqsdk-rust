@@ -48,6 +48,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - market / trade / replay / query / schema / system 状态都必须进入同一 runtime state tree
 - 任意已提交 revision 都必须能提供内部一致的 snapshot
 - query/schema 结果不得躲在独立 side cache 中绕开 snapshot
+- 本地控制面对象允许 retention-bounded 裁剪，但裁剪语义必须显式、可验证且不破坏幂等重放
 
 ### 统一 revision / change 模型
 - 只有形成可见 commit 时才推进 `Revision`

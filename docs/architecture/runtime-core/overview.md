@@ -95,6 +95,7 @@ pub trait Runtime {
 - 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型
 - `CommitLog` 必须是 indexable 且受 retention 约束，不能在长会话里线性退化或无界增长
+- `runtime.commands/*` 属于本地控制面状态，可做 retention-bounded 保留；terminal 命令一旦超出保留上限必须被裁剪且保持幂等写回
 
 ## 进一步阅读
 - [Session/Auth](session-auth.md)
