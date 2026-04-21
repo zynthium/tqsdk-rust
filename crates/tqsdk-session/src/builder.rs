@@ -2,7 +2,11 @@
 
 use tqsdk_core::{EndpointConfig, RuntimeHandle};
 
-use crate::{client::SessionClient, config::SessionFacadeConfig, error::Result};
+use crate::{
+    client::{SessionClient, SessionClientContext},
+    config::SessionFacadeConfig,
+    error::Result,
+};
 
 #[derive(Debug, Clone)]
 pub struct SessionClientBuilder {
@@ -55,12 +59,13 @@ impl SessionClientBuilder {
 
     pub fn build(self) -> Result<SessionClient> {
         let Self {
-            auth_user: _auth_user,
-            auth_pass: _auth_pass,
-            endpoints: _endpoints,
+            auth_user,
+            auth_pass,
+            endpoints,
             facade_config,
         } = self;
         let handle = RuntimeHandle::new();
-        Ok(SessionClient::new(handle, facade_config))
+        let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
+        Ok(SessionClient::new(handle, facade_config, context))
     }
 }
