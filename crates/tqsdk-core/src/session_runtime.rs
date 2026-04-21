@@ -1393,6 +1393,10 @@ fn command_detail_fields_from_dispatch(dispatch: &OutboundDispatch) -> Map<Strin
                 }
             }
         }
+        crate::commands::OutboundRequest::Query(request) => {
+            detail.insert("aid".to_string(), json!("ins_query"));
+            detail.insert("query_id".to_string(), json!(request.query_id.as_str()));
+        }
         crate::commands::OutboundRequest::Replay(request) => {
             detail.insert("action".to_string(), json!(request.action));
         }

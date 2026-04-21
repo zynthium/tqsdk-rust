@@ -446,15 +446,11 @@ fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
         .unwrap();
     assert_eq!(
         query_fetch,
-        vec![OutboundRequest::Http(tqsdk_core::HttpRequest {
-            method: HttpMethod::Post,
-            path: None,
-            body: Some(json!({
-                "aid": "ins_query",
-                "query_id": "quotes-page-1",
-                "query": "query Quotes($instrument_id: String!) { symbols(instrument_id: $instrument_id) { instrument_id } }",
-                "variables": {"instrument_id": "au2602"},
-            })),
+        vec![OutboundRequest::Query(tqsdk_core::QueryRequest {
+            query_id: QueryId::new("quotes-page-1"),
+            query: "query Quotes($instrument_id: String!) { symbols(instrument_id: $instrument_id) { instrument_id } }"
+                .to_string(),
+            variables: Some(json!({"instrument_id": "au2602"})),
         })]
     );
 

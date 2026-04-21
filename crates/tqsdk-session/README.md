@@ -30,6 +30,7 @@
 
 默认会预置官方静态文件域名 `https://files.shinnytech.com` 作为 schema/file-backed metadata 的基地址，因此文件型 schema/metadata 刷新不需要额外传入环境变量。
 
-`query_graphql_value()` 与 replay 的 `*_value()` helper 只会在显式配置了对应 route 时工作；当前它们不会假装复用官方 `ins_query` 行情链路。
+`query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
+如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
 
 它不直接定义高层用户 API，也不把某一种消费风格硬编码进核心。

@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::ids::{AccountId, CommandId, OrderId, ProtocolDomain, QueryId, SchemaId, Symbol};
 
@@ -335,9 +335,34 @@ pub struct InternalRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRequest {
+    pub query_id: QueryId,
+    pub query: String,
+    pub variables: Option<Value>,
+}
+
+impl QueryRequest {
+    pub fn body(&self) -> Value {
+        let mut request = json!({
+            "aid": "ins_query",
+            "query_id": self.query_id.as_str(),
+            "query": self.query,
+        });
+        if let Some(variables) = self.variables.as_ref()
+            && !matches!(variables, Value::Object(map) if map.is_empty())
+            && let Value::Object(fields) = &mut request
+        {
+            fields.insert("variables".to_string(), variables.clone());
+        }
+        request
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundRequest {
     Transport(OutboundFrame),
     Http(HttpRequest),
+    Query(QueryRequest),
     Replay(ReplayRequest),
     Internal(InternalRequest),
 }

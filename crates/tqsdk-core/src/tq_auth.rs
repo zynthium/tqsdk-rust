@@ -366,6 +366,7 @@ impl SessionTopologyResolver for TqAuthProvider {
                 .with_header("Accept", "application/json")
                 .with_header("User-Agent", DEFAULT_USER_AGENT);
 
+            let mut market_url = None;
             let mut market_domains = Vec::new();
             for domain in enabled_domains
                 .iter()
@@ -377,7 +378,7 @@ impl SessionTopologyResolver for TqAuthProvider {
                 }
             }
             if !market_domains.is_empty() {
-                let market_url = if let Some(url) = &config.endpoints.market_url {
+                let resolved_market_url = if let Some(url) = &config.endpoints.market_url {
                     url.clone()
                 } else {
                     self.request_market_url(
@@ -387,13 +388,14 @@ impl SessionTopologyResolver for TqAuthProvider {
                     )
                     .await?
                 };
+                market_url = Some(resolved_market_url.clone());
 
                 topology = topology.with_route(SessionRoute {
                     label: "market".to_string(),
                     target: SessionTarget::Shared,
                     domains: market_domains,
                     endpoint: SessionRouteEndpoint::WebSocket {
-                        url: market_url,
+                        url: resolved_market_url,
                         connect: connect.clone(),
                     },
                 });
@@ -434,17 +436,36 @@ impl SessionTopologyResolver for TqAuthProvider {
             }
 
             if enabled_domains.contains(&ProtocolDomain::Query) {
-                let Some(query_url) = config.endpoints.query_url.clone() else {
-                    return Err(ContractError::validation(
-                        "query domain requires endpoints.query_url for topology resolution",
-                    ));
-                };
-                topology = topology.with_route(SessionRoute {
-                    label: "query".to_string(),
-                    target: SessionTarget::Shared,
-                    domains: vec![ProtocolDomain::Query],
-                    endpoint: SessionRouteEndpoint::Http { url: query_url },
-                });
+                if let Some(query_url) = config.endpoints.query_url.clone() {
+                    topology = topology.with_route(SessionRoute {
+                        label: "query".to_string(),
+                        target: SessionTarget::Shared,
+                        domains: vec![ProtocolDomain::Query],
+                        endpoint: SessionRouteEndpoint::Http { url: query_url },
+                    });
+                } else {
+                    let query_market_url = if let Some(url) = market_url.clone() {
+                        url
+                    } else if let Some(url) = &config.endpoints.market_url {
+                        url.clone()
+                    } else {
+                        self.request_market_url(
+                            auth,
+                            config.market_target.stock,
+                            config.market_target.backtest,
+                        )
+                        .await?
+                    };
+                    topology = topology.with_route(SessionRoute {
+                        label: "query".to_string(),
+                        target: SessionTarget::Shared,
+                        domains: vec![ProtocolDomain::Query],
+                        endpoint: SessionRouteEndpoint::WebSocket {
+                            url: query_market_url,
+                            connect: connect.clone(),
+                        },
+                    });
+                }
             }
 
             if enabled_domains.contains(&ProtocolDomain::Schema) {

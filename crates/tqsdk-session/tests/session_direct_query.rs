@@ -56,12 +56,12 @@ fn graphql_fetch_submits_query_command() {
     assert_eq!(dispatches[1].domain, ProtocolDomain::Query);
 
     let first_body = match &dispatches[0].request {
-        OutboundRequest::Http(request) => request.body.as_ref().unwrap(),
-        other => panic!("expected query http dispatch, got {other:?}"),
+        OutboundRequest::Query(request) => request.body(),
+        other => panic!("expected query dispatch, got {other:?}"),
     };
     let second_body = match &dispatches[1].request {
-        OutboundRequest::Http(request) => request.body.as_ref().unwrap(),
-        other => panic!("expected query http dispatch, got {other:?}"),
+        OutboundRequest::Query(request) => request.body(),
+        other => panic!("expected query dispatch, got {other:?}"),
     };
 
     assert_eq!(first_body.get("query"), Some(&json!(first_query)));

@@ -71,7 +71,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
 | `TqAuthProvider` | 官方 Tianqin auth + topology resolver 实现 |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
-| `ReqwestHttpExecutor` | query / schema 这类 pending HTTP route 的执行器 |
+| `ReqwestHttpExecutor` | schema 与显式 HTTP query override 这类 pending HTTP route 的执行器 |
 
 ## 契约模型
 
@@ -212,11 +212,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `TQ_MD_URL`
 - `TQ_TD_URL`
 
-`query` / `schema` / `replay` 相关 endpoint 不会从环境变量隐式注入，需由调用方显式通过代码传入，例如：
+`schema` / `replay` 相关 endpoint 不会从环境变量隐式注入，需由调用方显式通过代码传入，例如：
 
-- `EndpointConfig::with_query_url(...)`
 - `EndpointConfig::with_schema_url(...)`
 - `EndpointConfig::with_replay_url(...)`
+
+`query` 默认不需要环境变量覆盖。官方 live query 语义会复用市场侧解析出的 websocket 地址并通过 `ins_query` 往返；只有当调用方明确希望把 query 改走自定义 HTTP endpoint 时，才需要显式设置：
+
+- `EndpointConfig::with_query_url(...)`
 
 `TQ_INS_URL` 与 `TQ_CHINESE_HOLIDAY_URL` 虽然在官方 Python SDK 中存在，但它们对应的是更高层的合约信息 / 交易日历数据源语义，不属于当前这个低层 runtime contract 的 `EndpointConfig::from_env()` 责任范围。
 

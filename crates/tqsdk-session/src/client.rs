@@ -419,22 +419,36 @@ impl SessionClient {
         }
     }
 
-    fn require_query_value_route(&self) -> crate::error::Result<()> {
-        if self.context.endpoints.query_url.is_some() {
+    async fn require_query_value_route(&self) -> crate::error::Result<()> {
+        if let Some(io) = self.io.as_ref()
+            && io
+                .lock()
+                .await
+                .config
+                .enabled_domains()
+                .contains(&tqsdk_core::ProtocolDomain::Query)
+        {
             Ok(())
         } else {
             Err(crate::error::SessionFacadeError::InvalidState(
-                "query value helper requires an explicit query route",
+                "query value helper requires an enabled query route",
             ))
         }
     }
 
-    fn require_replay_value_route(&self) -> crate::error::Result<()> {
-        if self.context.endpoints.replay_url.is_some() {
+    async fn require_replay_value_route(&self) -> crate::error::Result<()> {
+        if let Some(io) = self.io.as_ref()
+            && io
+                .lock()
+                .await
+                .config
+                .enabled_domains()
+                .contains(&tqsdk_core::ProtocolDomain::Replay)
+        {
             Ok(())
         } else {
             Err(crate::error::SessionFacadeError::InvalidState(
-                "replay value helper requires an explicit replay route",
+                "replay value helper requires an enabled replay route",
             ))
         }
     }
@@ -503,7 +517,7 @@ impl SessionClient {
         query: &str,
         variables: Option<Value>,
     ) -> crate::error::Result<Value> {
-        self.require_query_value_route()?;
+        self.require_query_value_route().await?;
         let query_id = Self::next_query_id();
         let command_id = self
             .submit(RuntimeCommand::Query(QueryCommand::Fetch {
@@ -559,7 +573,7 @@ impl SessionClient {
     }
 
     pub async fn replay_step_value(&self, replay_id: &str) -> crate::error::Result<Value> {
-        self.require_replay_value_route()?;
+        self.require_replay_value_route().await?;
         let command_id = self.replay_step().await?;
         self.drive_until_command_completed(command_id).await?;
         self.replay_state(replay_id)?
@@ -574,7 +588,7 @@ impl SessionClient {
     }
 
     pub async fn replay_reset_value(&self, replay_id: &str) -> crate::error::Result<Value> {
-        self.require_replay_value_route()?;
+        self.require_replay_value_route().await?;
         let command_id = self.replay_reset().await?;
         self.drive_until_command_completed(command_id).await?;
         self.replay_state(replay_id)?
@@ -959,6 +973,7 @@ mod tests {
                     .and_then(|body| body.get("query_id"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                OutboundRequest::Query(request) => Some(request.query_id.as_str().to_string()),
                 OutboundRequest::Transport(_)
                 | OutboundRequest::Internal(_)
                 | OutboundRequest::Replay(_) => None,
@@ -1252,7 +1267,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_value_helper_requires_explicit_query_route() {
+    async fn query_value_helper_requires_enabled_query_route() {
         let client = SessionClient::new_for_test_with_handle(
             runtime_with_default_adapters(),
             SessionFacadeConfig::default(),
@@ -1265,7 +1280,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid session facade state: query value helper requires an explicit query route"
+            "invalid session facade state: query value helper requires an enabled query route"
         );
     }
 
@@ -1280,7 +1295,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid session facade state: replay value helper requires an explicit replay route"
+            "invalid session facade state: replay value helper requires an enabled replay route"
         );
     }
 
@@ -1307,6 +1322,27 @@ mod tests {
             client.endpoints().replay_url.as_deref(),
             Some("wss://replay.example.com/feed")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn built_client_enable_query_enables_query_domain_without_query_url() {
+        let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
+            .enable_query()
+            .build()
+            .expect("builder should enable live query domain without requiring query_url");
+
+        assert_eq!(client.endpoints().query_url, None);
+
+        let io = client
+            .io
+            .as_ref()
+            .expect("live client should retain io state");
+        let io = io.lock().await;
+        let enabled = io.config.enabled_domains();
+
+        assert!(enabled.contains(&ProtocolDomain::Market));
+        assert!(enabled.contains(&ProtocolDomain::System));
+        assert!(enabled.contains(&ProtocolDomain::Query));
     }
 
     fn test_live_client(

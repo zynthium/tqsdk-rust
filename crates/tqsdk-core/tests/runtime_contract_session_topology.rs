@@ -254,6 +254,67 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
 }
 
 #[test]
+fn tq_auth_provider_resolves_query_to_websocket_without_explicit_query_url() {
+    run_on_tokio(async {
+        let md_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let md_addr = md_listener.local_addr().unwrap();
+        let ns_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ns_addr = ns_listener.local_addr().unwrap();
+
+        let ns_server = std::thread::spawn(move || {
+            let (mut stream, _) = ns_listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(request.starts_with("GET /ns?stock=false&backtest=false HTTP/1.1"));
+            assert!(
+                normalized.contains("authorization: bearer test-access-token"),
+                "{request}"
+            );
+            write_http_ok(&mut stream, &format!(r#"{{"mdurl":"ws://{md_addr}/md"}}"#));
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_name_service_url(format!("http://{ns_addr}/ns"));
+        let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+            .with_market_target(MarketSessionTarget::new(false, false))
+            .enable_domain(ProtocolDomain::Query);
+        let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
+
+        let topology = provider
+            .resolve_topology(&auth, &config, &[ProtocolDomain::Query])
+            .await
+            .unwrap();
+
+        assert_eq!(topology.routes.len(), 1);
+        assert_eq!(topology.routes[0].label, "query");
+        assert_eq!(topology.routes[0].target, SessionTarget::Shared);
+        assert_eq!(topology.routes[0].domains, vec![ProtocolDomain::Query]);
+
+        match &topology.routes[0].endpoint {
+            SessionRouteEndpoint::WebSocket { url, connect } => {
+                assert_eq!(url, &format!("ws://{md_addr}/md"));
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "Authorization" && value == "Bearer test-access-token"
+                }));
+                assert!(
+                    connect
+                        .headers
+                        .iter()
+                        .any(|(name, value)| { name == "Accept" && value == "application/json" })
+                );
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "User-Agent" && value == "tqsdk-python 3.8.1"
+                }));
+            }
+            other => panic!("expected query websocket route, got {other:?}"),
+        }
+
+        ns_server.join().unwrap();
+    });
+}
+
+#[test]
 fn tq_auth_provider_resolves_replay_and_system_routes_from_explicit_endpoints() {
     let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"));
     let config = SessionConfig::new(

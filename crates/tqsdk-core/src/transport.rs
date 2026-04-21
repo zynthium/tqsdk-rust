@@ -621,6 +621,23 @@ impl ConnectedTopology {
                 OutboundRequest::Transport(frame) => {
                     route.transport.send(frame.clone()).await?;
                 }
+                OutboundRequest::Query(query) => match &route.route.endpoint {
+                    SessionRouteEndpoint::WebSocket { .. } => {
+                        route
+                            .transport
+                            .send(OutboundFrame::Text(query.body().to_string()))
+                            .await?;
+                    }
+                    SessionRouteEndpoint::Http { .. } => {
+                        route.pending_requests.push_back(dispatch.clone());
+                    }
+                    SessionRouteEndpoint::Replay { .. } | SessionRouteEndpoint::Internal { .. } => {
+                        return Err(ContractError::validation(format!(
+                            "query request cannot be dispatched to {:?}",
+                            route.route.endpoint
+                        )));
+                    }
+                },
                 OutboundRequest::Http(_)
                 | OutboundRequest::Replay(_)
                 | OutboundRequest::Internal(_) => {
@@ -810,7 +827,11 @@ fn route_dispatch_match_score(route: &SessionRoute, dispatch: &OutboundDispatch)
             (
                 SessionRouteEndpoint::WebSocket { .. },
                 OutboundRequest::Transport(_)
+            ) | (
+                SessionRouteEndpoint::WebSocket { .. },
+                OutboundRequest::Query(_)
             ) | (SessionRouteEndpoint::Http { .. }, OutboundRequest::Http(_))
+                | (SessionRouteEndpoint::Http { .. }, OutboundRequest::Query(_))
                 | (
                     SessionRouteEndpoint::Replay { .. },
                     OutboundRequest::Replay(_)

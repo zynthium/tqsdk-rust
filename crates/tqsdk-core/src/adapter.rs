@@ -1,8 +1,8 @@
 use crate::{
     commands::{
         HttpMethod, HttpRequest, MarketChartCommand, MarketCommand, OutboundFrame, OutboundRequest,
-        QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand, TradeCommand,
-        TradeInsertOrderCommand, TradePreInsertOrderCommand,
+        QueryCommand, QueryRequest, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand,
+        TradeCommand, TradeInsertOrderCommand, TradePreInsertOrderCommand,
     },
     error::{ContractError, Result},
     events::{
@@ -381,29 +381,17 @@ impl ProtocolAdapter for QueryAdapter {
                 query_id,
                 query,
                 variables,
-            }) => {
-                let mut request = Map::from_iter([
-                    ("aid".to_string(), json!("ins_query")),
-                    ("query_id".to_string(), json!(query_id.as_str())),
-                    ("query".to_string(), json!(query)),
-                ]);
-                if let Some(variables) = variables.clone()
-                    && !matches!(&variables, Value::Object(map) if map.is_empty())
-                {
-                    request.insert("variables".to_string(), variables);
-                }
-                Ok(vec![OutboundRequest::Http(HttpRequest {
-                    method: HttpMethod::Post,
-                    path: None,
-                    body: Some(Value::Object(request)),
-                })])
-            }
+            }) => Ok(vec![OutboundRequest::Query(QueryRequest {
+                query_id: query_id.clone(),
+                query: query.clone(),
+                variables: variables.clone(),
+            })]),
             _ => Err(ContractError::UnsupportedCommand("query")),
         }
     }
 
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
-        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Query))
+        matches!(input, RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Query) && is_query_io_event(event))
     }
 
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
@@ -717,6 +705,27 @@ fn decode_query_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
         InputPayload::Json(value) => decode_query_envelope(value),
         InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
     }
+}
+
+fn is_query_io_event(event: &IoEvent) -> bool {
+    match &event.payload {
+        InputPayload::Json(value) => value_contains_query_payload(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => false,
+    }
+}
+
+fn value_contains_query_payload(value: &Value) -> bool {
+    if value.get("query_id").and_then(Value::as_str).is_some() || value.get("symbols").is_some() {
+        return true;
+    }
+
+    value
+        .get("aid")
+        .and_then(Value::as_str)
+        .filter(|aid| *aid == "rtn_data")
+        .and_then(|_| value.get("data"))
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(value_contains_query_payload))
 }
 
 fn decode_trade_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {

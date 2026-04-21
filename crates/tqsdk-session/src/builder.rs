@@ -18,6 +18,7 @@ pub struct SessionClientBuilder {
     auth_user: String,
     auth_pass: String,
     endpoints: EndpointConfig,
+    query_enabled: bool,
     facade_config: SessionFacadeConfig,
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
@@ -35,6 +36,7 @@ impl SessionClientBuilder {
             auth_user: auth_user.into(),
             auth_pass: auth_pass.into(),
             endpoints,
+            query_enabled: false,
             facade_config: SessionFacadeConfig::default(),
             market_target: MarketSessionTarget::new(false, false),
             trade_targets: Vec::new(),
@@ -52,6 +54,12 @@ impl SessionClientBuilder {
 
     pub fn query_url(mut self, query_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_query_url(query_url);
+        self.query_enabled = true;
+        self
+    }
+
+    pub fn enable_query(mut self) -> Self {
+        self.query_enabled = true;
         self
     }
 
@@ -104,6 +112,7 @@ impl SessionClientBuilder {
             auth_user,
             auth_pass,
             endpoints,
+            query_enabled,
             facade_config,
             market_target,
             trade_targets,
@@ -112,13 +121,19 @@ impl SessionClientBuilder {
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
         let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
-        let config = session_config(context.endpoints.clone(), market_target, &trade_targets);
+        let config = session_config(
+            context.endpoints.clone(),
+            query_enabled,
+            market_target,
+            &trade_targets,
+        );
         SessionClient::new_live(handle, facade_config, context, config, trade_targets)
     }
 }
 
 fn session_config(
     endpoints: EndpointConfig,
+    query_enabled: bool,
     market_target: MarketSessionTarget,
     trade_targets: &[TradeSessionTarget],
 ) -> SessionConfig {
@@ -127,7 +142,7 @@ fn session_config(
         .enable_domain(ProtocolDomain::Market)
         .enable_domain(ProtocolDomain::System);
 
-    if config.endpoints.query_url.is_some() {
+    if query_enabled || config.endpoints.query_url.is_some() {
         config = config.enable_domain(ProtocolDomain::Query);
     }
     if config.endpoints.schema_url.is_some() {

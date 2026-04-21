@@ -43,6 +43,13 @@ fn builder_accepts_explicit_query_schema_and_replay_urls() {
 }
 
 #[test]
+fn builder_can_enable_query_without_explicit_query_url() {
+    let builder = SessionClientBuilder::new("user", "pass").enable_query();
+
+    assert_eq!(builder.endpoints().query_url, None);
+}
+
+#[test]
 fn facade_config_clamps_zero_view_width_to_one() {
     let config = SessionFacadeConfig::default().with_default_view_width(0);
 

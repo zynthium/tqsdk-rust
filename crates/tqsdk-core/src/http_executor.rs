@@ -62,17 +62,21 @@ impl ReqwestHttpExecutor {
 
         let mut inputs = Vec::with_capacity(requests.len());
         for request in requests {
-            let OutboundRequest::Http(http) = request.request else {
-                return Err(ContractError::validation(
-                    "reqwest http executor received non-http request",
-                ));
+            let (http_method, http_path, request_body) = match request.request {
+                OutboundRequest::Http(http) => (http.method, http.path, http.body),
+                OutboundRequest::Query(query) => (HttpMethod::Post, None, Some(query.body())),
+                other => {
+                    return Err(ContractError::validation(format!(
+                        "reqwest http executor received unsupported request: {other:?}"
+                    )));
+                }
             };
-            let request_url = resolve_request_url(url, http.path.as_deref())?;
-            let response = match http.method {
+            let request_url = resolve_request_url(url, http_path.as_deref())?;
+            let response = match http_method {
                 HttpMethod::Get => self.client.get(request_url).send().await,
                 HttpMethod::Post => {
                     let mut builder = self.client.post(request_url);
-                    if let Some(body) = http.body.as_ref() {
+                    if let Some(body) = request_body.as_ref() {
                         builder = builder.header(CONTENT_TYPE, "application/json").json(body);
                     }
                     builder.send().await
@@ -89,7 +93,7 @@ impl ReqwestHttpExecutor {
                 )));
             }
 
-            let payload = decode_response_payload(&route.domains, http.body.as_ref(), &bytes)?;
+            let payload = decode_response_payload(&route.domains, request_body.as_ref(), &bytes)?;
             inputs.push(RuntimeInput::Io(IoEvent {
                 route: route.label.clone(),
                 domains: route.domains.clone(),

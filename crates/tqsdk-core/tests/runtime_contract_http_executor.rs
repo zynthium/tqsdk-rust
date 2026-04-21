@@ -7,8 +7,8 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use serde_json::json;
 use tqsdk_core::{
     CommandId, HttpMethod, HttpRequest, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
-    ProtocolDomain, ReqwestHttpExecutor, RouteRequestExecutor, SessionRoute, SessionRouteEndpoint,
-    SessionTarget,
+    ProtocolDomain, QueryId, QueryRequest, ReqwestHttpExecutor, RouteRequestExecutor, SessionRoute,
+    SessionRouteEndpoint, SessionTarget,
 };
 
 #[test]
@@ -63,14 +63,10 @@ fn reqwest_http_executor_posts_query_requests_and_wraps_query_id() {
                     command_id: CommandId::new(1),
                     domain: ProtocolDomain::Query,
                     account_id: None,
-                    request: OutboundRequest::Http(HttpRequest {
-                        method: HttpMethod::Post,
-                        path: None,
-                        body: Some(json!({
-                            "aid": "ins_query",
-                            "query_id": "quotes-page-1",
-                            "query": "query Quotes { symbols { instrument_id } }",
-                        })),
+                    request: OutboundRequest::Query(QueryRequest {
+                        query_id: QueryId::new("quotes-page-1"),
+                        query: "query Quotes { symbols { instrument_id } }".to_string(),
+                        variables: None,
                     }),
                 }],
             )
@@ -190,14 +186,10 @@ fn reqwest_http_executor_requires_tokio_runtime() {
             command_id: CommandId::new(3),
             domain: ProtocolDomain::Query,
             account_id: None,
-            request: OutboundRequest::Http(HttpRequest {
-                method: HttpMethod::Post,
-                path: None,
-                body: Some(json!({
-                    "aid": "ins_query",
-                    "query_id": "quotes-page-1",
-                    "query": "query Quotes { symbols { instrument_id } }",
-                })),
+            request: OutboundRequest::Query(QueryRequest {
+                query_id: QueryId::new("quotes-page-1"),
+                query: "query Quotes { symbols { instrument_id } }".to_string(),
+                variables: None,
             }),
         }],
     ))
