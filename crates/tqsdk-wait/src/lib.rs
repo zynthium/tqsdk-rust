@@ -29,7 +29,8 @@ pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
 pub use refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
-    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SettlementInfoRef, TickSerialRef,
-    TradeRef, TradingStatusRef,
+    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
+    TradingStatusRef,
 };
 pub use views::{KlineWindow, TickWindow};

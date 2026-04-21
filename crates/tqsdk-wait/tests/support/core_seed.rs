@@ -462,3 +462,84 @@ pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
 
     api.push_deferred_commit_for_test(commit);
 }
+
+#[allow(dead_code)]
+pub fn seed_security_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "accounts": {
+                                    "CNY": {
+                                        "user_id": account_id,
+                                        "currency": "CNY",
+                                        "market_value": 12345.0,
+                                        "asset": 20000.0,
+                                        "available": 15000.0
+                                    }
+                                },
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "create_date": "20260422",
+                                        "volume": 100,
+                                        "volume_his": 100,
+                                        "market_value": 12345.0
+                                    }
+                                },
+                                "orders": {
+                                    "stock-order-1": {
+                                        "user_id": account_id,
+                                        "order_id": "stock-order-1",
+                                        "exchange_order_id": "stock-exchange-order-1",
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "direction": "BUY",
+                                        "volume_orign": 100,
+                                        "volume_left": 0,
+                                        "price_type": "LIMIT",
+                                        "limit_price": 123.45,
+                                        "frozen_fee": 2.0,
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "status": "FINISHED",
+                                        "last_msg": "accepted"
+                                    }
+                                },
+                                "trades": {
+                                    "stock-trade-1": {
+                                        "user_id": account_id,
+                                        "trade_id": "stock-trade-1",
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "order_id": "stock-order-1",
+                                        "exchange_order_id": "stock-exchange-order-1",
+                                        "direction": "BUY",
+                                        "volume": 100,
+                                        "price": 123.45,
+                                        "balance": 12345.0,
+                                        "fee": 2.0,
+                                        "trade_date_time": 1_713_660_000_100_000_000_i64
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed security trade snapshot should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}

@@ -68,3 +68,21 @@ async fn trade_risk_and_notification_refs_report_changes_after_wait_update() {
     assert!(api.is_changing(&notification).unwrap());
     assert!(api.is_changing_fields(&notification, &["content"]).unwrap());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn security_refs_report_changes_after_wait_update() {
+    let mut api = support::seeded_api();
+    let account = api.get_security_account("stock-sim");
+    let position = api.get_security_position("stock-sim", "SSE.600000");
+    let order = api.get_security_order("stock-sim", "stock-order-1");
+    let trade = api.get_security_trade("stock-sim", "stock-trade-1");
+
+    support::seed_security_trade_snapshot(&mut api, "stock-sim", "SSE.600000");
+
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&account).unwrap());
+    assert!(api.is_changing(&position).unwrap());
+    assert!(api.is_changing(&order).unwrap());
+    assert!(api.is_changing_fields(&order, &["limit_price"]).unwrap());
+    assert!(api.is_changing(&trade).unwrap());
+}

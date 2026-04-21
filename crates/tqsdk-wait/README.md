@@ -39,6 +39,10 @@
 - `RiskManagementDataRef`
 - `SettlementInfoRef`
 - `NotificationRef`
+- `SecurityAccountRef`
+- `SecurityPositionRef`
+- `SecurityOrderRef`
+- `SecurityTradeRef`
 - `KlineWindow`
 - `TickWindow`
 - `wait_update(deadline).await`
@@ -57,6 +61,10 @@
 - `get_risk_management_data(...)`
 - `get_settlement_info(...)`
 - `get_notification(...)`
+- `get_security_account(...)`
+- `get_security_position(...)`
+- `get_security_order(...)`
+- `get_security_trade(...)`
 - `insert_order(...).await`
 - `cancel_order(...).await`
 - `confirm_settlement(...).await`

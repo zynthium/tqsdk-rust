@@ -16,8 +16,9 @@ use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
-    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SettlementInfoRef, TickSerialRef,
-    TradeRef, TradingStatusRef,
+    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
+    TradingStatusRef,
 };
 
 /// Single-owner wait facade over a shared [`tqsdk_session::SessionClient`].
@@ -187,6 +188,26 @@ impl TqApi {
     #[must_use]
     pub fn get_notification(&self, notification_id: &str) -> NotificationRef {
         NotificationRef::new(notification_id)
+    }
+
+    #[must_use]
+    pub fn get_security_account(&self, account_id: &str) -> SecurityAccountRef {
+        SecurityAccountRef::new(account_id)
+    }
+
+    #[must_use]
+    pub fn get_security_position(&self, account_id: &str, symbol: &str) -> SecurityPositionRef {
+        SecurityPositionRef::new(account_id, symbol)
+    }
+
+    #[must_use]
+    pub fn get_security_order(&self, account_id: &str, order_id: &str) -> SecurityOrderRef {
+        SecurityOrderRef::new(account_id, order_id)
+    }
+
+    #[must_use]
+    pub fn get_security_trade(&self, account_id: &str, trade_id: &str) -> SecurityTradeRef {
+        SecurityTradeRef::new(account_id, trade_id)
     }
 
     pub async fn get_quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {

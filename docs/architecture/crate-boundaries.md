@@ -181,19 +181,17 @@
 
 这意味着适合进入 `tqsdk-wait` 的对象包括：
 
-- 已落地：
-  - `PreInsertOrder`
-  - `RiskManagementRule`
-  - `RiskManagementData`
-  - `Notification`
-  - `SettlementInfo`
-- 仍待补齐：
-  - `SecurityAccount`
-  - `SecurityPosition`
-  - `SecurityOrder`
-  - `SecurityTrade`
+- `PreInsertOrder`
+- `RiskManagementRule`
+- `RiskManagementData`
+- `Notification`
+- `SettlementInfo`
+- `SecurityAccount`
+- `SecurityPosition`
+- `SecurityOrder`
+- `SecurityTrade`
 
-这些对象的 typed contract 都已经存在于 core 中；其中前一组已经有 wait facade live refs，后一组仍需要先确认实际 runtime diff 路径与对象归一化后再进入 wait facade。
+这些对象的 typed contract 都已经存在于 core 中，并且当前都已经有 wait facade live refs。对于证券账户这组对象，虽然路径仍然复用 `trade/{account_id}/...`，但其 facade 通过独立 decode 类型与独立 `Ref` 名称保持了 futures / securities schema 的边界清晰。
 
 ### 不应吸收的能力
 

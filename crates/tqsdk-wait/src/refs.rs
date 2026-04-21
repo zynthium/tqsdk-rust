@@ -2,6 +2,7 @@
 
 mod kline;
 mod quote;
+mod security;
 mod system;
 mod tick;
 mod trade;
@@ -9,6 +10,7 @@ mod trading_status;
 
 pub use kline::KlineSerialRef;
 pub use quote::QuoteRef;
+pub use security::{SecurityAccountRef, SecurityOrderRef, SecurityPositionRef, SecurityTradeRef};
 pub use system::NotificationRef;
 pub use tick::TickSerialRef;
 pub use trade::{

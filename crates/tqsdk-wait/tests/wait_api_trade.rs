@@ -119,6 +119,41 @@ async fn notification_ref_decodes_from_state_tree() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn security_trade_refs_decode_from_state_tree() {
+    let mut api = support::seeded_api();
+    support::seed_security_trade_snapshot(&mut api, "stock-sim", "SSE.600000");
+
+    assert_eq!(
+        api.get_security_account("stock-sim")
+            .load(&api)
+            .unwrap()
+            .market_value,
+        12345.0
+    );
+    assert_eq!(
+        api.get_security_position("stock-sim", "SSE.600000")
+            .load(&api)
+            .unwrap()
+            .volume,
+        100
+    );
+    assert_eq!(
+        api.get_security_order("stock-sim", "stock-order-1")
+            .load(&api)
+            .unwrap()
+            .limit_price,
+        123.45
+    );
+    assert_eq!(
+        api.get_security_trade("stock-sim", "stock-trade-1")
+            .load(&api)
+            .unwrap()
+            .balance,
+        12345.0
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn insert_order_without_limit_price_uses_any_ioc_semantics() {
     let mut api = support::seeded_api();
     api.insert_order(
