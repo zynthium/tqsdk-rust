@@ -244,6 +244,7 @@ impl TqApi {
     ) -> crate::error::Result<OrderRef> {
         let order_seq = self.driver.next_order_seq.fetch_add(1, Ordering::Relaxed);
         let order_id = OrderId::new(format!("wait-order-{order_seq}"));
+        let (price_type, limit_price, time_condition) = map_wait_order_price(limit_price);
 
         self.driver
             .session
@@ -255,9 +256,9 @@ impl TqApi {
                     direction,
                     offset,
                     volume,
-                    price_type: TradePriceType::Limit,
+                    price_type,
                     limit_price,
-                    time_condition: TradeTimeCondition::Gfd,
+                    time_condition,
                     volume_condition: TradeVolumeCondition::Any,
                 },
             )))
@@ -364,5 +365,24 @@ impl TqApi {
     #[doc(hidden)]
     pub fn push_deferred_commit_for_test(&mut self, commit: tqsdk_core::CommitResult) {
         self.driver.deferred_commits.push_back(commit);
+    }
+}
+
+fn map_wait_order_price(
+    limit_price: Option<Value>,
+) -> (TradePriceType, Option<Value>, TradeTimeCondition) {
+    match limit_price {
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("BEST") => {
+            (TradePriceType::Best, None, TradeTimeCondition::Ioc)
+        }
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("FIVELEVEL") => {
+            (TradePriceType::FiveLevel, None, TradeTimeCondition::Ioc)
+        }
+        Some(limit_price) => (
+            TradePriceType::Limit,
+            Some(limit_price),
+            TradeTimeCondition::Gfd,
+        ),
+        None => (TradePriceType::Any, None, TradeTimeCondition::Ioc),
     }
 }

@@ -44,6 +44,8 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
     assert_eq!(payload["user_id"], "sim");
     assert_eq!(payload["exchange_id"], "SHFE");
     assert_eq!(payload["instrument_id"], "ao2602");
+    assert_eq!(payload["price_type"], "LIMIT");
+    assert_eq!(payload["time_condition"], "GFD");
     assert_eq!(payload["limit_price"], 618.0);
 }
 
@@ -68,6 +70,50 @@ async fn account_position_order_and_trade_refs_decode_from_state_tree() {
         api.get_trade("sim", "trade-1").load(&api).unwrap().volume,
         1
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_order_without_limit_price_uses_any_ioc_semantics() {
+    let mut api = support::seeded_api();
+    api.insert_order(
+        "sim",
+        "DCE.m2601",
+        TradeDirection::Buy,
+        Some(TradeOffset::Open),
+        1,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let payload = transport_payload(&dispatches[0].request);
+
+    assert_eq!(payload["price_type"], "ANY");
+    assert_eq!(payload["time_condition"], "IOC");
+    assert!(payload.get("limit_price").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_order_best_price_maps_to_best_ioc_semantics() {
+    let mut api = support::seeded_api();
+    api.insert_order(
+        "sim",
+        "CFFEX.IF2606",
+        TradeDirection::Buy,
+        Some(TradeOffset::Open),
+        1,
+        Some(json!("BEST")),
+    )
+    .await
+    .unwrap();
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let payload = transport_payload(&dispatches[0].request);
+
+    assert_eq!(payload["price_type"], "BEST");
+    assert_eq!(payload["time_condition"], "IOC");
+    assert!(payload.get("limit_price").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
