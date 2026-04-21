@@ -51,7 +51,7 @@ impl TqApi {
 
     pub async fn wait_update(
         &mut self,
-        _deadline: Option<tokio::time::Instant>,
+        deadline: Option<tokio::time::Instant>,
     ) -> crate::error::Result<bool> {
         let _guard = WaitGuard::new(&self.driver.waiting)?;
 
@@ -60,7 +60,52 @@ impl TqApi {
             return Ok(true);
         }
 
-        Ok(false)
+        loop {
+            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
+                self.driver.last_commit = Some(commit);
+                return Ok(true);
+            }
+
+            let flushed = self
+                .driver
+                .session
+                .flush_outbound()
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            if flushed {
+                continue;
+            }
+
+            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
+                self.driver.last_commit = Some(commit);
+                return Ok(true);
+            }
+
+            let drove_pending = self
+                .driver
+                .session
+                .drive_pending_once()
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            if drove_pending {
+                continue;
+            }
+
+            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
+                self.driver.last_commit = Some(commit);
+                return Ok(true);
+            }
+
+            let drove_route = self
+                .driver
+                .session
+                .drive_route_once(deadline)
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            if !drove_route {
+                return Ok(false);
+            }
+        }
     }
 
     pub fn last_commit(&self) -> Option<&tqsdk_core::CommitResult> {

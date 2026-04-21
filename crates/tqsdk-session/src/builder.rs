@@ -1,6 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use tqsdk_core::{AdapterRegistry, EndpointConfig, RuntimeHandle};
+use tqsdk_core::{
+    AccountId, AdapterRegistry, EndpointConfig, MarketSessionTarget, ProtocolDomain, RuntimeHandle,
+    SessionConfig, TradeSessionTarget,
+};
 
 use crate::{
     client::{SessionClient, SessionClientContext},
@@ -14,6 +17,8 @@ pub struct SessionClientBuilder {
     auth_pass: String,
     endpoints: EndpointConfig,
     facade_config: SessionFacadeConfig,
+    market_target: MarketSessionTarget,
+    trade_targets: Vec<TradeSessionTarget>,
 }
 
 impl SessionClientBuilder {
@@ -23,6 +28,8 @@ impl SessionClientBuilder {
             auth_pass: auth_pass.into(),
             endpoints: EndpointConfig::from_env(),
             facade_config: SessionFacadeConfig::default(),
+            market_target: MarketSessionTarget::new(false, false),
+            trade_targets: Vec::new(),
         }
     }
 
@@ -50,6 +57,36 @@ impl SessionClientBuilder {
         self
     }
 
+    pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
+        self.market_target = MarketSessionTarget::new(stock, backtest);
+        self
+    }
+
+    pub fn trade_target(
+        mut self,
+        broker_id: impl Into<String>,
+        account_id: impl Into<String>,
+    ) -> Self {
+        self.trade_targets.push(TradeSessionTarget::new(
+            broker_id,
+            AccountId::new(account_id.into()),
+        ));
+        self
+    }
+
+    pub fn trade_target_with_url(
+        mut self,
+        broker_id: impl Into<String>,
+        account_id: impl Into<String>,
+        trade_url: impl Into<String>,
+    ) -> Self {
+        self.trade_targets.push(
+            TradeSessionTarget::new(broker_id, AccountId::new(account_id.into()))
+                .with_trade_url(trade_url),
+        );
+        self
+    }
+
     pub fn endpoints(&self) -> &EndpointConfig {
         &self.endpoints
     }
@@ -60,11 +97,43 @@ impl SessionClientBuilder {
             auth_pass,
             endpoints,
             facade_config,
+            market_target,
+            trade_targets,
         } = self;
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
         let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
-        Ok(SessionClient::new(handle, facade_config, context))
+        let config = session_config(context.endpoints.clone(), market_target, &trade_targets);
+        SessionClient::new_live(handle, facade_config, context, config, trade_targets)
     }
+}
+
+fn session_config(
+    endpoints: EndpointConfig,
+    market_target: MarketSessionTarget,
+    trade_targets: &[TradeSessionTarget],
+) -> SessionConfig {
+    let mut config = SessionConfig::new(endpoints).with_market_target(market_target);
+    config = config
+        .enable_domain(ProtocolDomain::Market)
+        .enable_domain(ProtocolDomain::System);
+
+    if config.endpoints.query_url.is_some() {
+        config = config.enable_domain(ProtocolDomain::Query);
+    }
+    if config.endpoints.schema_url.is_some() {
+        config = config.enable_domain(ProtocolDomain::Schema);
+    }
+    if config.endpoints.replay_url.is_some() {
+        config = config.enable_domain(ProtocolDomain::Replay);
+    }
+    if !trade_targets.is_empty() {
+        config = config.enable_domain(ProtocolDomain::Trade);
+        for target in trade_targets {
+            config = config.add_trade_target(target.clone());
+        }
+    }
+
+    config
 }

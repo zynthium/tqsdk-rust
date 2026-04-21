@@ -83,12 +83,14 @@ V1 是：
 
 - `tqsdk-session`
   - shared session shell
+  - lazy establish + route / pending-route 驱动原语
   - direct query / schema refresh 薄层入口
   - 供 `wait` / 未来 `stream` 共同依赖
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
   - market/trade 对象引用
   - serial window 视图
+  - 基于 shared session 的 live `wait_update()` 驱动链路
   - trade 命令的 wait 风格薄包装
 
 这两层当前仍然遵守同一个约束：

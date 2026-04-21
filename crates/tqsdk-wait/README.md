@@ -5,7 +5,7 @@
 它的职责很窄：
 
 - 提供单 owner 的 `TqApi`
-- 提供 `wait_update()` 语义和最近一次用户可见 commit 的变化解释
+- 提供真实驱动 live session 的 `wait_update()` 语义和最近一次用户可见 commit 的变化解释
 - 提供基于状态树的轻量对象引用与窗口视图
 - 提供 trade 命令的 wait 风格薄包装
 
