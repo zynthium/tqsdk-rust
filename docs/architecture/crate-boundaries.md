@@ -179,19 +179,21 @@
 - 它依赖后续 diff 持续推进
 - 用户需要在稳定 commit 边界上读取它
 
-这意味着未来还应继续进入 `tqsdk-wait` 的对象包括：
+这意味着适合进入 `tqsdk-wait` 的对象包括：
 
-- `PreInsertOrder`
-- `RiskManagementRule`
-- `RiskManagementData`
-- `Notification`
-- `SettlementInfo`
-- `SecurityAccount`
-- `SecurityPosition`
-- `SecurityOrder`
-- `SecurityTrade`
+- 已落地：
+  - `PreInsertOrder`
+  - `RiskManagementRule`
+  - `RiskManagementData`
+  - `Notification`
+  - `SettlementInfo`
+- 仍待补齐：
+  - `SecurityAccount`
+  - `SecurityPosition`
+  - `SecurityOrder`
+  - `SecurityTrade`
 
-这些对象的 typed contract 已在 core 中存在，但目前还没有 wait facade 的 live refs。
+这些对象的 typed contract 都已经存在于 core 中；其中前一组已经有 wait facade live refs，后一组仍需要先确认实际 runtime diff 路径与对象归一化后再进入 wait facade。
 
 ### 不应吸收的能力
 

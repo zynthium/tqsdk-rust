@@ -1,8 +1,21 @@
+use serde::de::DeserializeOwned;
 use tqsdk_core::{
-    Account, AccountId, ObjectKey, Order, OrderId, Position, StatePath, Symbol, Trade, TradeId,
+    Account, AccountId, ObjectKey, Order, OrderId, Position, PreInsertOrder, RiskManagementData,
+    RiskManagementRule, SettlementInfo, StatePath, Symbol, Trade, TradeId,
 };
 
 use crate::{api::TqApi, change::ChangeTrackedRef};
+
+fn decode_optional<T: DeserializeOwned>(
+    api: &TqApi,
+    path: &[&str],
+) -> crate::error::Result<Option<T>> {
+    api.driver
+        .reader
+        .read()
+        .decode_path::<T>(path)
+        .map_err(Into::into)
+}
 
 /// Lightweight handle to `trade/{account_id}/accounts/CNY`.
 #[derive(Debug, Clone)]
@@ -26,11 +39,7 @@ impl AccountRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Account>> {
-        api.driver
-            .reader
-            .read()
-            .decode_path::<Account>(&["trade", self.account_id.as_str(), "accounts", "CNY"])
-            .map_err(Into::into)
+        decode_optional(api, &["trade", self.account_id.as_str(), "accounts", "CNY"])
     }
 
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
@@ -74,16 +83,15 @@ impl PositionRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Position>> {
-        api.driver
-            .reader
-            .read()
-            .decode_path::<Position>(&[
+        decode_optional(
+            api,
+            &[
                 "trade",
                 self.account_id.as_str(),
                 "positions",
                 self.symbol.as_str(),
-            ])
-            .map_err(Into::into)
+            ],
+        )
     }
 
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
@@ -109,6 +117,64 @@ impl ChangeTrackedRef for PositionRef {
     }
 }
 
+/// Lightweight handle to `trade/{account_id}/pre_insert_orders/{order_id}`.
+#[derive(Debug, Clone)]
+pub struct PreInsertOrderRef {
+    account_id: AccountId,
+    order_id: OrderId,
+}
+
+impl PreInsertOrderRef {
+    #[must_use]
+    pub fn new(account_id: impl Into<String>, order_id: impl Into<String>) -> Self {
+        Self {
+            account_id: AccountId::new(account_id.into()),
+            order_id: OrderId::new(order_id.into()),
+        }
+    }
+
+    pub fn load(&self, api: &TqApi) -> crate::error::Result<PreInsertOrder> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "pre-insert order not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<PreInsertOrder>> {
+        decode_optional(
+            api,
+            &[
+                "trade",
+                self.account_id.as_str(),
+                "pre_insert_orders",
+                self.order_id.as_str(),
+            ],
+        )
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for PreInsertOrderRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::PreInsertOrder {
+            account_id: self.account_id.clone(),
+            order_id: self.order_id.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "pre_insert_orders",
+            self.order_id.as_str(),
+        ])
+    }
+}
+
 /// Lightweight handle to `trade/{account_id}/orders/{order_id}`.
 #[derive(Debug, Clone)]
 pub struct OrderRef {
@@ -130,16 +196,15 @@ impl OrderRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Order>> {
-        api.driver
-            .reader
-            .read()
-            .decode_path::<Order>(&[
+        decode_optional(
+            api,
+            &[
                 "trade",
                 self.account_id.as_str(),
                 "orders",
                 self.order_id.as_str(),
-            ])
-            .map_err(Into::into)
+            ],
+        )
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<Order> {
@@ -192,16 +257,15 @@ impl TradeRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Trade>> {
-        api.driver
-            .reader
-            .read()
-            .decode_path::<Trade>(&[
+        decode_optional(
+            api,
+            &[
                 "trade",
                 self.account_id.as_str(),
                 "trades",
                 self.trade_id.as_str(),
-            ])
-            .map_err(Into::into)
+            ],
+        )
     }
 
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
@@ -223,6 +287,180 @@ impl ChangeTrackedRef for TradeRef {
             self.account_id.as_str(),
             "trades",
             self.trade_id.as_str(),
+        ])
+    }
+}
+
+/// Lightweight handle to `trade/{account_id}/risk_management_rule/{exchange_id}`.
+#[derive(Debug, Clone)]
+pub struct RiskManagementRuleRef {
+    account_id: AccountId,
+    exchange_id: String,
+}
+
+impl RiskManagementRuleRef {
+    #[must_use]
+    pub fn new(account_id: impl Into<String>, exchange_id: impl Into<String>) -> Self {
+        Self {
+            account_id: AccountId::new(account_id.into()),
+            exchange_id: exchange_id.into(),
+        }
+    }
+
+    pub fn load(&self, api: &TqApi) -> crate::error::Result<RiskManagementRule> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "risk management rule not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<RiskManagementRule>> {
+        decode_optional(
+            api,
+            &[
+                "trade",
+                self.account_id.as_str(),
+                "risk_management_rule",
+                self.exchange_id.as_str(),
+            ],
+        )
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for RiskManagementRuleRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::RiskManagementRule {
+            account_id: self.account_id.clone(),
+            exchange_id: self.exchange_id.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "risk_management_rule",
+            self.exchange_id.as_str(),
+        ])
+    }
+}
+
+/// Lightweight handle to `trade/{account_id}/risk_management_data/{symbol}`.
+#[derive(Debug, Clone)]
+pub struct RiskManagementDataRef {
+    account_id: AccountId,
+    symbol: Symbol,
+}
+
+impl RiskManagementDataRef {
+    #[must_use]
+    pub fn new(account_id: impl Into<String>, symbol: impl Into<String>) -> Self {
+        Self {
+            account_id: AccountId::new(account_id.into()),
+            symbol: Symbol::new(symbol.into()),
+        }
+    }
+
+    pub fn load(&self, api: &TqApi) -> crate::error::Result<RiskManagementData> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "risk management data not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<RiskManagementData>> {
+        decode_optional(
+            api,
+            &[
+                "trade",
+                self.account_id.as_str(),
+                "risk_management_data",
+                self.symbol.as_str(),
+            ],
+        )
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for RiskManagementDataRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::RiskManagementData {
+            account_id: self.account_id.clone(),
+            symbol: self.symbol.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "risk_management_data",
+            self.symbol.as_str(),
+        ])
+    }
+}
+
+/// Lightweight handle to `trade/{account_id}/his_settlements/{trading_day}`.
+#[derive(Debug, Clone)]
+pub struct SettlementInfoRef {
+    account_id: AccountId,
+    trading_day: String,
+}
+
+impl SettlementInfoRef {
+    #[must_use]
+    pub fn new(account_id: impl Into<String>, trading_day: impl Into<String>) -> Self {
+        Self {
+            account_id: AccountId::new(account_id.into()),
+            trading_day: trading_day.into(),
+        }
+    }
+
+    pub fn load(&self, api: &TqApi) -> crate::error::Result<SettlementInfo> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "settlement info not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SettlementInfo>> {
+        decode_optional(
+            api,
+            &[
+                "trade",
+                self.account_id.as_str(),
+                "his_settlements",
+                self.trading_day.as_str(),
+            ],
+        )
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for SettlementInfoRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Settlement {
+            account_id: self.account_id.clone(),
+            trading_day: self.trading_day.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "his_settlements",
+            self.trading_day.as_str(),
         ])
     }
 }

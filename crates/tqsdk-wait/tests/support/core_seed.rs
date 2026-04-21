@@ -265,3 +265,200 @@ pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
 
     api.push_deferred_commit_for_test(commit);
 }
+
+#[allow(dead_code)]
+pub fn seed_trade_extended_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "pre_insert_orders": {
+                                    "pre-1": {
+                                        "user_id": account_id,
+                                        "order_id": "pre-1",
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "direction": "BUY",
+                                        "pre_margin": 1234.5
+                                    }
+                                },
+                                "risk_management_rule": {
+                                    "SSE": {
+                                        "user_id": account_id,
+                                        "exchange_id": "SSE",
+                                        "enable": true,
+                                        "self_trade": {
+                                            "count_limit": 3
+                                        },
+                                        "frequent_cancellation": {
+                                            "insert_order_count_limit": 10,
+                                            "cancel_order_count_limit": 2,
+                                            "cancel_order_percent_limit": 5.0
+                                        },
+                                        "trade_position_ratio": {
+                                            "trade_units_limit": 100,
+                                            "trade_position_ratio_limit": 70.0
+                                        }
+                                    }
+                                },
+                                "risk_management_data": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "self_trade": {
+                                            "highest_buy_price": 618.0,
+                                            "lowest_sell_price": 617.0,
+                                            "self_trade_count": 1,
+                                            "rejected_count": 0
+                                        },
+                                        "frequent_cancellation": {
+                                            "insert_order_count": 2,
+                                            "cancel_order_count": 1,
+                                            "cancel_order_percent": 50.0,
+                                            "rejected_count": 0
+                                        },
+                                        "trade_position_ratio": {
+                                            "trade_units": 12,
+                                            "net_position_units": 4,
+                                            "trade_position_ratio": 300.0,
+                                            "rejected_count": 1
+                                        }
+                                    }
+                                },
+                                "his_settlements": {
+                                    "20260420": {
+                                        "content": "line-1\nline-2"
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed extended trade snapshot should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}
+
+#[allow(dead_code)]
+pub fn seed_risk_management_rule_nested_update(
+    api: &mut TqApi,
+    account_id: &str,
+    exchange_id: &str,
+    count_limit: i64,
+) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "risk_management_rule": {
+                                    exchange_id: {
+                                        "self_trade": {
+                                            "count_limit": count_limit
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed risk management rule nested update should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}
+
+#[allow(dead_code)]
+pub fn seed_risk_management_data_nested_update(
+    api: &mut TqApi,
+    account_id: &str,
+    symbol: &str,
+    trade_units: i64,
+) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "risk_management_data": {
+                                    symbol: {
+                                        "trade_position_ratio": {
+                                            "trade_units": trade_units
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed risk management data nested update should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}
+
+#[allow(dead_code)]
+pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market.shared".to_string(),
+                domains: vec![ProtocolDomain::System],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "notify": {
+                            notification_id: {
+                                "code": "INFO",
+                                "level": "INFO",
+                                "type": "MESSAGE",
+                                "content": "connected",
+                                "bid": "system",
+                                "user_id": "sim"
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed notification commit should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}

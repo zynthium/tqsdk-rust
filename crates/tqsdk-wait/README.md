@@ -32,8 +32,13 @@
 - `TickSerialRef`
 - `AccountRef`
 - `PositionRef`
+- `PreInsertOrderRef`
 - `OrderRef`
 - `TradeRef`
+- `RiskManagementRuleRef`
+- `RiskManagementDataRef`
+- `SettlementInfoRef`
+- `NotificationRef`
 - `KlineWindow`
 - `TickWindow`
 - `wait_update(deadline).await`
@@ -45,8 +50,13 @@
 - `get_tick_serial(...).await`
 - `get_account(...)`
 - `get_position(...)`
+- `get_pre_insert_order(...)`
 - `get_order(...)`
 - `get_trade(...)`
+- `get_risk_management_rule(...)`
+- `get_risk_management_data(...)`
+- `get_settlement_info(...)`
+- `get_notification(...)`
 - `insert_order(...).await`
 - `cancel_order(...).await`
 - `confirm_settlement(...).await`

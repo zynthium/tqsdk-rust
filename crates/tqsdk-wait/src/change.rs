@@ -18,7 +18,7 @@ pub(crate) fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -
     changes
         .path_hits
         .iter()
-        .any(|path| path == &target.state_path())
+        .any(|path| path_matches(&target.state_path(), path))
 }
 
 pub(crate) fn matches_fields(
@@ -34,4 +34,15 @@ pub(crate) fn matches_fields(
         .field_hits
         .iter()
         .any(|hit| hit.object == key && fields.iter().any(|field| *field == hit.field))
+}
+
+fn path_matches(target: &StatePath, changed: &StatePath) -> bool {
+    let target_segments = target.segments();
+    let changed_segments = changed.segments();
+
+    target_segments.len() <= changed_segments.len()
+        && target_segments
+            .iter()
+            .zip(changed_segments.iter())
+            .all(|(left, right)| left == right)
 }

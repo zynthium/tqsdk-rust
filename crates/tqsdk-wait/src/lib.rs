@@ -28,7 +28,8 @@ pub use builder::TqApiBuilder;
 pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
 pub use refs::{
-    AccountRef, KlineSerialRef, OrderRef, PositionRef, QuoteRef, TickSerialRef, TradeRef,
-    TradingStatusRef,
+    AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
+    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SettlementInfoRef, TickSerialRef,
+    TradeRef, TradingStatusRef,
 };
 pub use views::{KlineWindow, TickWindow};

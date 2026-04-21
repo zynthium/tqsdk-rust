@@ -15,8 +15,9 @@ use tqsdk_session::SessionClient;
 use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::refs::{
-    AccountRef, KlineSerialRef, OrderRef, PositionRef, QuoteRef, TickSerialRef, TradeRef,
-    TradingStatusRef,
+    AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
+    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SettlementInfoRef, TickSerialRef,
+    TradeRef, TradingStatusRef,
 };
 
 /// Single-owner wait facade over a shared [`tqsdk_session::SessionClient`].
@@ -151,8 +152,41 @@ impl TqApi {
     }
 
     #[must_use]
+    pub fn get_pre_insert_order(&self, account_id: &str, order_id: &str) -> PreInsertOrderRef {
+        PreInsertOrderRef::new(account_id, order_id)
+    }
+
+    #[must_use]
     pub fn get_trade(&self, account_id: &str, trade_id: &str) -> TradeRef {
         TradeRef::new(account_id, trade_id)
+    }
+
+    #[must_use]
+    pub fn get_risk_management_rule(
+        &self,
+        account_id: &str,
+        exchange_id: &str,
+    ) -> RiskManagementRuleRef {
+        RiskManagementRuleRef::new(account_id, exchange_id)
+    }
+
+    #[must_use]
+    pub fn get_risk_management_data(
+        &self,
+        account_id: &str,
+        symbol: &str,
+    ) -> RiskManagementDataRef {
+        RiskManagementDataRef::new(account_id, symbol)
+    }
+
+    #[must_use]
+    pub fn get_settlement_info(&self, account_id: &str, trading_day: &str) -> SettlementInfoRef {
+        SettlementInfoRef::new(account_id, trading_day)
+    }
+
+    #[must_use]
+    pub fn get_notification(&self, notification_id: &str) -> NotificationRef {
+        NotificationRef::new(notification_id)
     }
 
     pub async fn get_quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {

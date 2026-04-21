@@ -31,3 +31,40 @@ async fn kline_and_tick_serial_changes_are_visible_after_wait_update() {
     assert!(api.wait_update(None).await.unwrap());
     assert!(api.is_changing(&ticks).unwrap());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn trade_risk_and_notification_refs_report_changes_after_wait_update() {
+    let mut api = support::seeded_api();
+
+    support::seed_trade_extended_snapshot(&mut api, "sim", "SHFE.ao2602");
+    let pre_insert = api.get_pre_insert_order("sim", "pre-1");
+    let rule = api.get_risk_management_rule("sim", "SSE");
+    let data = api.get_risk_management_data("sim", "SHFE.ao2602");
+    let settlement = api.get_settlement_info("sim", "20260420");
+
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&pre_insert).unwrap());
+    assert!(
+        api.is_changing_fields(&pre_insert, &["pre_margin"])
+            .unwrap()
+    );
+    assert!(api.is_changing(&rule).unwrap());
+    assert!(api.is_changing(&data).unwrap());
+    assert!(api.is_changing(&settlement).unwrap());
+
+    support::seed_risk_management_rule_nested_update(&mut api, "sim", "SSE", 4);
+    support::seed_risk_management_data_nested_update(&mut api, "sim", "SHFE.ao2602", 16);
+
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&rule).unwrap());
+
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&data).unwrap());
+
+    let notification = api.get_notification("notify-1");
+    support::seed_notification_commit(&mut api, "notify-1");
+
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&notification).unwrap());
+    assert!(api.is_changing_fields(&notification, &["content"]).unwrap());
+}

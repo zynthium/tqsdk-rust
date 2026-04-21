@@ -38,7 +38,7 @@
   - direct query / schema / metadata / calendar / settlement / ranking / EDB
 - `tqsdk-wait`
   - Python 风格单 owner `wait_update()` facade
-  - live quote / trading status / kline / tick / account / position / order / trade
+  - live quote / trading status / kline / tick / account / position / pre-insert order / order / trade / risk / settlement / notification
   - trade command 的 wait 风格薄包装
 
 当前尚未进入但已经明确方向的上层：
@@ -87,13 +87,8 @@
 
 ### 本阶段最适合补齐的能力
 
-优先考虑仍属于 current facade boundary 的对象：
+优先考虑仍属于 current facade boundary、且当前尚未补齐的对象：
 
-- `PreInsertOrderRef`
-- `RiskManagementRuleRef`
-- `RiskManagementDataRef`
-- `NotificationRef`
-- `SettlementInfoRef`
 - `SecurityAccountRef`
 - `SecurityPositionRef`
 - `SecurityOrderRef`

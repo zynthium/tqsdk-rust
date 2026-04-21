@@ -73,6 +73,52 @@ async fn account_position_order_and_trade_refs_decode_from_state_tree() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn extended_trade_refs_decode_from_state_tree() {
+    let mut api = support::seeded_api();
+    support::seed_trade_extended_snapshot(&mut api, "sim", "SHFE.ao2602");
+
+    assert_eq!(
+        api.get_pre_insert_order("sim", "pre-1")
+            .load(&api)
+            .unwrap()
+            .pre_margin,
+        1234.5
+    );
+    assert!(
+        api.get_risk_management_rule("sim", "SSE")
+            .load(&api)
+            .unwrap()
+            .enable
+    );
+    assert_eq!(
+        api.get_risk_management_data("sim", "SHFE.ao2602")
+            .load(&api)
+            .unwrap()
+            .trade_position_ratio
+            .trade_units,
+        12
+    );
+    assert_eq!(
+        api.get_settlement_info("sim", "20260420")
+            .load(&api)
+            .unwrap()
+            .content,
+        "line-1\nline-2"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn notification_ref_decodes_from_state_tree() {
+    let mut api = support::seeded_api();
+    support::seed_notification_commit(&mut api, "notify-1");
+
+    assert_eq!(
+        api.get_notification("notify-1").load(&api).unwrap().content,
+        "connected"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn insert_order_without_limit_price_uses_any_ioc_semantics() {
     let mut api = support::seeded_api();
     api.insert_order(
