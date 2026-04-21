@@ -117,14 +117,11 @@ impl SessionClient {
 
     #[doc(hidden)]
     pub fn new_for_test_with_handle(
-        _handle: RuntimeHandle,
+        handle: RuntimeHandle,
         facade_config: SessionFacadeConfig,
     ) -> Self {
-        let mut adapters = tqsdk_core::AdapterRegistry::new();
-        adapters.register_default_adapters();
-
         Self::new(
-            RuntimeHandle::with_adapters(adapters),
+            handle,
             facade_config,
             SessionClientContext::new(
                 String::new(),
