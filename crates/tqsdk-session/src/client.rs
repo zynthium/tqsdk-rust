@@ -113,6 +113,13 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
+    fn next_query_id() -> QueryId {
+        QueryId::new(format!(
+            "query-{}",
+            NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     pub(crate) fn new_live(
         handle: RuntimeHandle,
         facade_config: SessionFacadeConfig,
@@ -345,16 +352,61 @@ impl SessionClient {
         Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
     }
 
+    pub fn query_result(&self, query_id: &str) -> crate::error::Result<Option<Value>> {
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["query", query_id])
+            .map_err(Into::into)
+    }
+
+    pub fn schema_value(&self, schema_id: &str) -> crate::error::Result<Option<Value>> {
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["schema", schema_id])
+            .map_err(Into::into)
+    }
+
+    async fn drive_until_value<F>(&self, mut load: F) -> crate::error::Result<Value>
+    where
+        F: FnMut(&Self) -> crate::error::Result<Option<Value>>,
+    {
+        if let Some(value) = load(self)? {
+            return Ok(value);
+        }
+
+        loop {
+            let mut progress = false;
+
+            progress |= self.flush_outbound().await?;
+            if let Some(value) = load(self)? {
+                return Ok(value);
+            }
+
+            progress |= self.drive_pending_once().await?;
+            if let Some(value) = load(self)? {
+                return Ok(value);
+            }
+
+            progress |= self.drive_route_once(None).await?;
+            if let Some(value) = load(self)? {
+                return Ok(value);
+            }
+
+            if !progress {
+                return Err(crate::error::SessionFacadeError::InvalidState(
+                    "direct query did not produce a result",
+                ));
+            }
+        }
+    }
+
     pub async fn query_graphql(
         &self,
         query: &str,
         variables: Option<Value>,
     ) -> crate::error::Result<CommandId> {
         self.submit(RuntimeCommand::Query(QueryCommand::Fetch {
-            query_id: QueryId::new(format!(
-                "query-{}",
-                NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
-            )),
+            query_id: Self::next_query_id(),
             query: query.to_owned(),
             variables,
         }))
@@ -371,6 +423,33 @@ impl SessionClient {
             path: path.to_owned(),
         }))
         .await
+    }
+
+    pub async fn query_graphql_value(
+        &self,
+        query: &str,
+        variables: Option<Value>,
+    ) -> crate::error::Result<Value> {
+        let query_id = Self::next_query_id();
+        self.submit(RuntimeCommand::Query(QueryCommand::Fetch {
+            query_id: query_id.clone(),
+            query: query.to_owned(),
+            variables,
+        }))
+        .await?;
+
+        self.drive_until_value(|client| client.query_result(query_id.as_str()))
+            .await
+    }
+
+    pub async fn refresh_schema_value(
+        &self,
+        schema_id: &str,
+        path: &str,
+    ) -> crate::error::Result<Value> {
+        self.refresh_schema(schema_id, path).await?;
+        self.drive_until_value(|client| client.schema_value(schema_id))
+            .await
     }
 
     pub fn facade_config(&self) -> &SessionFacadeConfig {
@@ -420,6 +499,22 @@ impl SessionDirectQuery for SessionClient {
 
     async fn refresh_schema(&self, schema_id: &str, path: &str) -> crate::error::Result<CommandId> {
         SessionClient::refresh_schema(self, schema_id, path).await
+    }
+
+    async fn query_graphql_value(
+        &self,
+        query: &str,
+        variables: Option<Value>,
+    ) -> crate::error::Result<Value> {
+        SessionClient::query_graphql_value(self, query, variables).await
+    }
+
+    async fn refresh_schema_value(
+        &self,
+        schema_id: &str,
+        path: &str,
+    ) -> crate::error::Result<Value> {
+        SessionClient::refresh_schema_value(self, schema_id, path).await
     }
 }
 
@@ -575,16 +670,16 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{Duration, Instant};
     use tqsdk_core::{
         AdapterRegistry, AuthContext, AuthProvider, ContractFuture, EndpointConfig, InputPayload,
-        IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, ProtocolDomain, QueryCommand,
-        QueryId, RawFrame, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle,
-        RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
-        SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology,
-        SessionTopologyResolver, Transport,
+        IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolDomain,
+        QueryCommand, QueryId, RawFrame, RouteRequestExecutor, Runtime, RuntimeCommand,
+        RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
+        SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
+        SessionTopology, SessionTopologyResolver, Transport,
     };
 
     use super::{
@@ -682,6 +777,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingExecutor {
         responses: Arc<Mutex<BTreeMap<String, Vec<RuntimeInput>>>>,
+        query_values: Arc<Mutex<BTreeMap<String, Value>>>,
     }
 
     impl RecordingExecutor {
@@ -692,23 +788,58 @@ mod tests {
                 .insert(route_label.into(), inputs);
             self
         }
+
+        fn with_query_value(self, route_label: impl Into<String>, value: Value) -> Self {
+            self.query_values
+                .lock()
+                .unwrap()
+                .insert(route_label.into(), value);
+            self
+        }
     }
 
     impl RouteRequestExecutor for RecordingExecutor {
         fn execute<'a>(
             &'a self,
             route: &'a SessionRoute,
-            _requests: Vec<OutboundDispatch>,
+            requests: Vec<OutboundDispatch>,
         ) -> ContractFuture<'a, Vec<RuntimeInput>> {
-            let inputs = self
-                .responses
-                .lock()
-                .unwrap()
-                .get(&route.label)
-                .cloned()
+            let fixed_inputs = self.responses.lock().unwrap().get(&route.label).cloned();
+            let query_value = self.query_values.lock().unwrap().get(&route.label).cloned();
+            let inputs = fixed_inputs
+                .or_else(|| build_query_inputs(route, &requests, query_value))
                 .unwrap_or_default();
             Box::pin(async move { Ok(inputs) })
         }
+    }
+
+    fn build_query_inputs(
+        route: &SessionRoute,
+        requests: &[OutboundDispatch],
+        value: Option<Value>,
+    ) -> Option<Vec<RuntimeInput>> {
+        let value = value?;
+        let query_id = requests
+            .iter()
+            .find_map(|dispatch| match &dispatch.request {
+                OutboundRequest::Http(request) => request
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.get("query_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                OutboundRequest::Transport(_)
+                | OutboundRequest::Internal(_)
+                | OutboundRequest::Replay(_) => None,
+            })?;
+        Some(vec![RuntimeInput::Io(IoEvent {
+            route: route.label.clone(),
+            domains: route.domains.clone(),
+            payload: InputPayload::Json(json!({
+                "query_id": query_id,
+                "data": value,
+            })),
+        })])
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -810,6 +941,86 @@ mod tests {
         assert_eq!(
             handle.latest_snapshot().get(["query", "query-1", "quotes"]),
             Some(&json!(["SHFE.au2602"]))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_graphql_value_drives_query_route_and_returns_state_value() {
+        let handle = runtime_with_default_adapters();
+        let executor: SharedRouteExecutor = Arc::new(
+            RecordingExecutor::default()
+                .with_query_value("query", json!({ "quotes": ["SHFE.au2602"] })),
+        );
+        let client = test_live_client(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "query".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://query.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            executor,
+        );
+
+        let value = client
+            .query_graphql_value("query { quotes }", None)
+            .await
+            .unwrap();
+
+        assert_eq!(value, json!({ "quotes": ["SHFE.au2602"] }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_schema_value_drives_schema_route_and_returns_state_value() {
+        let handle = runtime_with_default_adapters();
+        let executor: SharedRouteExecutor = Arc::new(RecordingExecutor::default().with_response(
+            "schema",
+            vec![RuntimeInput::Io(IoEvent {
+                route: "schema".to_string(),
+                domains: vec![ProtocolDomain::Schema],
+                payload: InputPayload::Json(json!({
+                    "schema_id": "instrument-schema",
+                    "data": {
+                        "nodes": {
+                            "quote": {
+                                "fields": ["last_price", "ask_price1"]
+                            }
+                        }
+                    }
+                })),
+            })],
+        ));
+        let client = test_live_client(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "schema".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Schema],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://schema.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            executor,
+        );
+
+        let value = client
+            .refresh_schema_value("instrument-schema", "/schema/instrument.json")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "nodes": {
+                    "quote": {
+                        "fields": ["last_price", "ask_price1"]
+                    }
+                }
+            })
         );
     }
 

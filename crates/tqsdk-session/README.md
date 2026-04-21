@@ -13,6 +13,8 @@
 - `drive_pending_once()`
 - `drive_route_once()`
 - `query_graphql(...).await`
+- `query_graphql_value(...).await`
 - `refresh_schema(...).await`
+- `refresh_schema_value(...).await`
 
 它不直接定义高层用户 API，也不把某一种消费风格硬编码进核心。
