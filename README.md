@@ -57,7 +57,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - V1 core 已独立为子 crate，可单独发布。
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
-- `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface，以及 path/scope 级 commit 过滤；后续继续补对象级 stream 与 trade 可靠事件流。
+- `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface，以及 path/scope/object/field 级 commit 过滤；后续继续补对象级 stream 与 trade 可靠事件流。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
 

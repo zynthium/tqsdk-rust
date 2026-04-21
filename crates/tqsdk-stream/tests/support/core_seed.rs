@@ -1,3 +1,4 @@
+use serde_json::Value;
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
@@ -35,6 +36,24 @@ pub fn seed_quote_commit_with_scope(
     last_price: f64,
     scope: CommitScope,
 ) {
+    seed_quote_fields_commit_with_scope(
+        stream,
+        symbol,
+        json!({
+            "instrument_id": symbol,
+            "last_price": last_price
+        }),
+        scope,
+    );
+}
+
+#[allow(dead_code)]
+pub fn seed_quote_fields_commit_with_scope(
+    stream: &TqStream,
+    symbol: &str,
+    quote_fields: Value,
+    scope: CommitScope,
+) {
     stream
         .handle_for_test()
         .ingest(
@@ -45,10 +64,7 @@ pub fn seed_quote_commit_with_scope(
                     "aid": "rtn_data",
                     "data": [{
                         "quotes": {
-                            symbol: {
-                                "instrument_id": symbol,
-                                "last_price": last_price
-                            }
+                            symbol: quote_fields
                         }
                     }]
                 })),

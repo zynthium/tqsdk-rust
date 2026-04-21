@@ -26,4 +26,4 @@ mod filter;
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
 pub use error::{Result, StreamFacadeError};
-pub use filter::{PathCommitStream, ScopeCommitStream};
+pub use filter::{FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream};

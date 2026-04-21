@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{CommitResult, CommitScope, StatePath};
+use tqsdk_core::{CommitResult, CommitScope, ObjectKey, StatePath};
 
 use crate::{CommitStream, Result};
 
@@ -25,18 +25,9 @@ impl Stream for PathCommitStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-
-        loop {
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(commit))) if matches_path_filters(&this.paths, &commit) => {
-                    return Poll::Ready(Some(Ok(commit)));
-                }
-                Poll::Ready(Some(Ok(_))) => continue,
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
+        poll_next_filtered(&mut this.inner, cx, |commit| {
+            matches_path_filters(&this.paths, commit)
+        })
     }
 }
 
@@ -57,18 +48,60 @@ impl Stream for ScopeCommitStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        poll_next_filtered(&mut this.inner, cx, |commit| {
+            matches_scope_filters(&this.scopes, commit)
+        })
+    }
+}
 
-        loop {
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(commit))) if matches_scope_filters(&this.scopes, &commit) => {
-                    return Poll::Ready(Some(Ok(commit)));
-                }
-                Poll::Ready(Some(Ok(_))) => continue,
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
+/// Commit stream filtered by changed object identities.
+pub struct ObjectCommitStream {
+    inner: CommitStream,
+    objects: Vec<ObjectKey>,
+}
+
+impl ObjectCommitStream {
+    pub(crate) fn new(inner: CommitStream, objects: Vec<ObjectKey>) -> Self {
+        Self { inner, objects }
+    }
+}
+
+impl Stream for ObjectCommitStream {
+    type Item = Result<CommitResult>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        poll_next_filtered(&mut this.inner, cx, |commit| {
+            matches_object_filters(&this.objects, commit)
+        })
+    }
+}
+
+/// Commit stream filtered by field hits on a specific object.
+pub struct FieldCommitStream {
+    inner: CommitStream,
+    object: ObjectKey,
+    fields: Vec<String>,
+}
+
+impl FieldCommitStream {
+    pub(crate) fn new(inner: CommitStream, object: ObjectKey, fields: Vec<String>) -> Self {
+        Self {
+            inner,
+            object,
+            fields,
         }
+    }
+}
+
+impl Stream for FieldCommitStream {
+    type Item = Result<CommitResult>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        poll_next_filtered(&mut this.inner, cx, |commit| {
+            matches_field_filters(&this.object, &this.fields, commit)
+        })
     }
 }
 
@@ -83,6 +116,47 @@ pub(crate) fn matches_path_filters(paths: &[StatePath], commit: &CommitResult) -
 
 pub(crate) fn matches_scope_filters(scopes: &[CommitScope], commit: &CommitResult) -> bool {
     scopes.is_empty() || scopes.contains(&commit.scope)
+}
+
+pub(crate) fn matches_object_filters(objects: &[ObjectKey], commit: &CommitResult) -> bool {
+    objects.is_empty()
+        || commit
+            .changes
+            .object_hits
+            .iter()
+            .any(|hit| objects.contains(hit))
+}
+
+pub(crate) fn matches_field_filters(
+    object: &ObjectKey,
+    fields: &[String],
+    commit: &CommitResult,
+) -> bool {
+    commit.changes.field_hits.iter().any(|hit| {
+        &hit.object == object
+            && (fields.is_empty() || fields.iter().any(|field| field == &hit.field))
+    })
+}
+
+fn poll_next_filtered<F>(
+    inner: &mut CommitStream,
+    cx: &mut Context<'_>,
+    mut predicate: F,
+) -> Poll<Option<Result<CommitResult>>>
+where
+    F: FnMut(&CommitResult) -> bool,
+{
+    loop {
+        match Pin::new(&mut *inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(commit))) if predicate(&commit) => {
+                return Poll::Ready(Some(Ok(commit)));
+            }
+            Poll::Ready(Some(Ok(_))) => continue,
+            Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        }
+    }
 }
 
 fn path_matches(target: &StatePath, changed: &StatePath) -> bool {
