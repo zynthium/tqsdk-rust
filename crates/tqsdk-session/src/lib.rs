@@ -13,6 +13,7 @@ pub use client::SessionClient;
 pub use config::SessionFacadeConfig;
 pub use direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
-    OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SymbolRankingType,
+    OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SessionMetadataQuery,
+    SessionRawQuery, SessionServiceQuery, SymbolRankingType,
 };
 pub use error::{Result, SessionFacadeError};

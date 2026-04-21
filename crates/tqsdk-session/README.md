@@ -35,6 +35,10 @@
 - `AllLevelOptionQuery`
 - `FinanceOptionLevelQuery`
 - `OptionLevelQuotes`
+- `SessionRawQuery`
+- `SessionMetadataQuery`
+- `SessionServiceQuery`
+- `SessionDirectQuery`
 - `refresh_auth(...).await`
 - `refresh_auth_value(...).await`
 - `replay_step(...).await`
@@ -71,9 +75,9 @@
 
 ## 建议的 Direct Query 接口层次
 
-按当前分层，`tqsdk-session` 里的 direct query 再细分为三层：
+按当前分层，`tqsdk-session` 里的 direct query 再细分为三层 trait：
 
-### 第一层：已经存在的原始入口
+### 第一层：`SessionRawQuery`
 
 - `query_graphql(...).await`
 - `query_graphql_value(...).await`
@@ -82,7 +86,7 @@
 
 这一层的目标是保证所有一次性 query/schema 都已经有可用底座。
 
-### 第二层：typed/thin wrappers
+### 第二层：`SessionMetadataQuery`
 
 这些接口仍然属于 `tqsdk-session`，因为它们只是一次性 request/response：
 
@@ -107,7 +111,18 @@
 
 这一批已经先落地，因为它们和当前 core 里的 `TradingCalendarDay`、`SymbolSettlement`、`SymbolRanking`、`EdbIndexData` typed contract 直接对应。
 
-### 第三层：不应放进 `tqsdk-session` 的高层派生接口
+### 第三层：`SessionServiceQuery`
+
+- `get_trading_calendar(...)`
+- `query_symbol_settlement(...)`
+- `query_symbol_ranking(...)`
+- `query_edb_data(...)`
+
+这些接口虽然请求目标是官方独立 HTTP 服务，但语义依然是一次性 request/response，因此继续放在 `tqsdk-session`，而不是进入 `tqsdk-wait` / `tqsdk-stream`。
+
+`SessionDirectQuery` 只是把这三层统一组合成一个总 trait，便于上层在泛型约束里一次性声明完整 direct-query 能力。
+
+### 不应放进 `tqsdk-session` 的高层派生接口
 
 下面这些虽然在 Python 里也表现成“查询”，但已经不只是薄的 request/response 包装，更像研究工具层：
 

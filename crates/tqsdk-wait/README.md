@@ -38,6 +38,8 @@
 - `insert_order(...).await`
 - `cancel_order(...).await`
 - `confirm_settlement(...).await`
+- `session()`
+- `into_session()`
 
 ## 设计边界
 
@@ -45,6 +47,7 @@
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `insert_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
+- 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
 - 未来 `tqsdk-stream` 也只会承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
 
 ## 示例
@@ -84,3 +87,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `replay_url(...)`
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqApiBuilder::from_session_builder(...)` 包装成 wait facade。
+
+如果已经持有 `TqApi`，但某个路径上又需要一次性 direct query / schema / metadata 调用，不需要再额外建立第二个 client，可以直接通过 `api.session()` 复用同一个底层 session。

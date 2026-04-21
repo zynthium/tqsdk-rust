@@ -20,7 +20,8 @@ use tqsdk_core::{
 use crate::config::SessionFacadeConfig;
 use crate::direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
-    OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SymbolRankingType,
+    OptionLevelQuotes, OptionQueryFilter, SessionMetadataQuery, SessionRawQuery,
+    SessionServiceQuery, SymbolRankingType,
 };
 use crate::services::SessionServiceEndpoints;
 
@@ -692,7 +693,7 @@ impl SessionClient {
     }
 }
 
-impl SessionDirectQuery for SessionClient {
+impl SessionRawQuery for SessionClient {
     async fn query_graphql(
         &self,
         query: &str,
@@ -720,7 +721,9 @@ impl SessionDirectQuery for SessionClient {
     ) -> crate::error::Result<Value> {
         SessionClient::refresh_schema_value(self, schema_id, path).await
     }
+}
 
+impl SessionMetadataQuery for SessionClient {
     async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>> {
         SessionClient::query_symbol_info(self, symbols).await
     }
@@ -777,7 +780,9 @@ impl SessionDirectQuery for SessionClient {
     ) -> crate::error::Result<OptionLevelQuotes> {
         SessionClient::query_all_level_finance_options(self, underlying_symbol, query).await
     }
+}
 
+impl SessionServiceQuery for SessionClient {
     async fn get_trading_calendar(
         &self,
         start_dt: chrono::NaiveDate,

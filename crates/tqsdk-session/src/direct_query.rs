@@ -77,8 +77,16 @@ pub struct OptionLevelQuotes {
     pub out_of_money: Vec<String>,
 }
 
-#[allow(async_fn_in_trait)]
-pub trait SessionDirectQuery {
+/// Raw one-shot query/schema command surface.
+///
+/// These methods expose the low-level command contract. The `*_value` helpers
+/// drive the session until the corresponding command completes and then return
+/// the decoded payload.
+#[expect(
+    async_fn_in_trait,
+    reason = "session query traits are intended for static dispatch without async-trait boxing"
+)]
+pub trait SessionRawQuery {
     async fn query_graphql(
         &self,
         query: &str,
@@ -98,7 +106,14 @@ pub trait SessionDirectQuery {
         schema_id: &str,
         path: &str,
     ) -> crate::error::Result<Value>;
+}
 
+/// Thin typed wrappers over official GraphQL metadata queries.
+#[expect(
+    async_fn_in_trait,
+    reason = "session query traits are intended for static dispatch without async-trait boxing"
+)]
+pub trait SessionMetadataQuery {
     async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>>;
 
     async fn query_quotes(
@@ -140,7 +155,14 @@ pub trait SessionDirectQuery {
         underlying_symbol: &str,
         query: &FinanceOptionLevelQuery,
     ) -> crate::error::Result<OptionLevelQuotes>;
+}
 
+/// Thin typed wrappers over official HTTP direct-query services.
+#[expect(
+    async_fn_in_trait,
+    reason = "session query traits are intended for static dispatch without async-trait boxing"
+)]
+pub trait SessionServiceQuery {
     async fn get_trading_calendar(
         &self,
         start_dt: chrono::NaiveDate,
@@ -171,4 +193,16 @@ pub trait SessionDirectQuery {
         align: Option<EdbDataAlign>,
         fill: Option<EdbDataFill>,
     ) -> crate::error::Result<Vec<EdbIndexData>>;
+}
+
+/// Full direct-query surface for callers that want one trait bound.
+///
+/// This trait is intentionally not object-safe: the crate keeps these async
+/// calls statically dispatched to avoid boxing futures on the performance
+/// critical substrate.
+pub trait SessionDirectQuery: SessionRawQuery + SessionMetadataQuery + SessionServiceQuery {}
+
+impl<T> SessionDirectQuery for T where
+    T: SessionRawQuery + SessionMetadataQuery + SessionServiceQuery
+{
 }

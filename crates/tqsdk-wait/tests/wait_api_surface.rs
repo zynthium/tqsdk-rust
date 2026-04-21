@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tqsdk_session::SessionFacadeError;
 use tqsdk_wait::WaitFacadeError;
 
 mod support;
@@ -37,4 +38,20 @@ async fn wait_update_timeout_returns_false() {
         .unwrap();
 
     assert!(!ready);
+}
+
+#[tokio::test]
+async fn wait_api_exposes_underlying_session_for_direct_queries() {
+    let api = support::seeded_api();
+
+    let err = api
+        .session()
+        .query_graphql_value("query { __typename }", None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        SessionFacadeError::InvalidState("query value helper requires an enabled query route")
+    );
 }

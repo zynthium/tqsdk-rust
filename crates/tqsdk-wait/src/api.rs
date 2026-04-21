@@ -112,6 +112,14 @@ impl TqApi {
         self.driver.last_commit.as_ref()
     }
 
+    pub fn session(&self) -> &SessionClient {
+        &self.driver.session
+    }
+
+    pub fn into_session(self) -> SessionClient {
+        self.driver.session
+    }
+
     pub fn quote_ref(&self, symbol: &str) -> QuoteRef {
         QuoteRef::new(symbol)
     }
