@@ -52,6 +52,10 @@ impl SessionClientBuilder {
         &self.facade_config
     }
 
+    pub fn query_enabled(&self) -> bool {
+        self.query_enabled
+    }
+
     pub fn query_url(mut self, query_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_query_url(query_url);
         self.query_enabled = true;
@@ -105,6 +109,14 @@ impl SessionClientBuilder {
 
     pub fn endpoints(&self) -> &EndpointConfig {
         &self.endpoints
+    }
+
+    pub fn market_target_ref(&self) -> &MarketSessionTarget {
+        &self.market_target
+    }
+
+    pub fn trade_targets_ref(&self) -> &[TradeSessionTarget] {
+        &self.trade_targets
     }
 
     pub fn build(self) -> Result<SessionClient> {
