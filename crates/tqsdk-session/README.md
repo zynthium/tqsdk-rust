@@ -30,4 +30,6 @@
 
 默认会预置官方静态文件域名 `https://files.shinnytech.com` 作为 schema/file-backed metadata 的基地址，因此文件型 schema/metadata 刷新不需要额外传入环境变量。
 
+`query_graphql_value()` 与 replay 的 `*_value()` helper 只会在显式配置了对应 route 时工作；当前它们不会假装复用官方 `ins_query` 行情链路。
+
 它不直接定义高层用户 API，也不把某一种消费风格硬编码进核心。

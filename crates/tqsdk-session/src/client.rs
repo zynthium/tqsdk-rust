@@ -419,6 +419,26 @@ impl SessionClient {
         }
     }
 
+    fn require_query_value_route(&self) -> crate::error::Result<()> {
+        if self.context.endpoints.query_url.is_some() {
+            Ok(())
+        } else {
+            Err(crate::error::SessionFacadeError::InvalidState(
+                "query value helper requires an explicit query route",
+            ))
+        }
+    }
+
+    fn require_replay_value_route(&self) -> crate::error::Result<()> {
+        if self.context.endpoints.replay_url.is_some() {
+            Ok(())
+        } else {
+            Err(crate::error::SessionFacadeError::InvalidState(
+                "replay value helper requires an explicit replay route",
+            ))
+        }
+    }
+
     async fn drive_until_command_completed(
         &self,
         command_id: CommandId,
@@ -483,6 +503,7 @@ impl SessionClient {
         query: &str,
         variables: Option<Value>,
     ) -> crate::error::Result<Value> {
+        self.require_query_value_route()?;
         let query_id = Self::next_query_id();
         let command_id = self
             .submit(RuntimeCommand::Query(QueryCommand::Fetch {
@@ -538,6 +559,7 @@ impl SessionClient {
     }
 
     pub async fn replay_step_value(&self, replay_id: &str) -> crate::error::Result<Value> {
+        self.require_replay_value_route()?;
         let command_id = self.replay_step().await?;
         self.drive_until_command_completed(command_id).await?;
         self.replay_state(replay_id)?
@@ -552,6 +574,7 @@ impl SessionClient {
     }
 
     pub async fn replay_reset_value(&self, replay_id: &str) -> crate::error::Result<Value> {
+        self.require_replay_value_route()?;
         let command_id = self.replay_reset().await?;
         self.drive_until_command_completed(command_id).await?;
         self.replay_state(replay_id)?
@@ -1228,6 +1251,39 @@ mod tests {
         assert_eq!(reset, json!({ "state": "reset" }));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_value_helper_requires_explicit_query_route() {
+        let client = SessionClient::new_for_test_with_handle(
+            runtime_with_default_adapters(),
+            SessionFacadeConfig::default(),
+        );
+
+        let error = client
+            .query_graphql_value("query { ping }", None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: query value helper requires an explicit query route"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replay_value_helpers_require_explicit_replay_route() {
+        let client = SessionClient::new_for_test_with_handle(
+            runtime_with_default_adapters(),
+            SessionFacadeConfig::default(),
+        );
+
+        let error = client.replay_step_value("rb-test").await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: replay value helper requires an explicit replay route"
+        );
+    }
+
     #[test]
     fn built_client_retains_builder_auth_and_endpoints() {
         let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
@@ -1260,17 +1316,56 @@ mod tests {
         http_executor: SharedRouteExecutor,
     ) -> SessionClient {
         let auth_provider: SharedAuthProvider = Arc::new(TestAuthProvider);
-        let topology_resolver: SharedTopologyResolver =
-            Arc::new(StaticTopologyResolver { topology });
+        let topology_resolver: SharedTopologyResolver = Arc::new(StaticTopologyResolver {
+            topology: topology.clone(),
+        });
         let route_connector: SharedRouteConnector = Arc::new(QueueConnector { transport });
         let internal_executor: SharedRouteExecutor =
             Arc::new(SessionInternalExecutor::new(auth_provider.clone()));
         let replay_executor: SharedRouteExecutor = Arc::new(SessionReplayExecutor);
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
-        let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
-            .enable_domain(ProtocolDomain::Market)
-            .enable_domain(ProtocolDomain::Query);
+        let mut endpoints = EndpointConfig::new("https://auth.example");
+        let mut enabled_domains = Vec::new();
+        for route in &topology.routes {
+            for domain in &route.domains {
+                if !enabled_domains.contains(domain) {
+                    enabled_domains.push(*domain);
+                }
+            }
+            match &route.endpoint {
+                SessionRouteEndpoint::WebSocket { url, .. }
+                    if route.domains.contains(&ProtocolDomain::Market) =>
+                {
+                    endpoints = endpoints.with_market_url(url.clone());
+                }
+                SessionRouteEndpoint::WebSocket { url, .. }
+                    if route.domains.contains(&ProtocolDomain::Trade) =>
+                {
+                    endpoints = endpoints.with_trade_url(url.clone());
+                }
+                SessionRouteEndpoint::Http { url }
+                    if route.domains.contains(&ProtocolDomain::Query) =>
+                {
+                    endpoints = endpoints.with_query_url(url.clone());
+                }
+                SessionRouteEndpoint::Http { url }
+                    if route.domains.contains(&ProtocolDomain::Schema) =>
+                {
+                    endpoints = endpoints.with_schema_url(url.clone());
+                }
+                SessionRouteEndpoint::Replay { label } => {
+                    endpoints = endpoints.with_replay_url(label.clone());
+                }
+                SessionRouteEndpoint::WebSocket { .. }
+                | SessionRouteEndpoint::Http { .. }
+                | SessionRouteEndpoint::Internal { .. } => {}
+            }
+        }
+        let mut config = SessionConfig::new(endpoints.clone());
+        for domain in enabled_domains {
+            config = config.enable_domain(domain);
+        }
 
         SessionClient {
             handle: handle.clone(),
@@ -1280,7 +1375,7 @@ mod tests {
             context: SessionClientContext::new(
                 "demo-user".to_string(),
                 "demo-pass".to_string(),
-                EndpointConfig::new("https://auth.example"),
+                endpoints,
             ),
             io: Some(Arc::new(TokioMutex::new(SessionIoState::new(
                 SessionIoComponents {
