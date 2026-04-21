@@ -12,6 +12,8 @@
 - `flush_outbound()`
 - `drive_pending_once()`
 - `drive_route_once()`
+- `command_state()`
+- `command_status()`
 - `query_graphql(...).await`
 - `query_graphql_value(...).await`
 - `refresh_schema(...).await`

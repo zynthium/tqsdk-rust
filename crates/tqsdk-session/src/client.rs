@@ -359,6 +359,23 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
+    pub fn command_state(&self, command_id: CommandId) -> crate::error::Result<Option<Value>> {
+        let command_segment = command_id.get().to_string();
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["runtime", "commands", command_segment.as_str()])
+            .map_err(Into::into)
+    }
+
+    pub fn command_status(&self, command_id: CommandId) -> crate::error::Result<Option<String>> {
+        Ok(self.command_state(command_id)?.and_then(|command| {
+            command
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }))
+    }
+
     pub fn schema_value(&self, schema_id: &str) -> crate::error::Result<Option<Value>> {
         let guard = self.reader.read();
         guard
@@ -366,35 +383,50 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
-    async fn drive_until_value<F>(&self, mut load: F) -> crate::error::Result<Value>
-    where
-        F: FnMut(&Self) -> crate::error::Result<Option<Value>>,
-    {
-        if let Some(value) = load(self)? {
-            return Ok(value);
+    fn command_completed(&self, command_id: CommandId) -> crate::error::Result<bool> {
+        let Some(command) = self.command_state(command_id)? else {
+            return Ok(false);
+        };
+        match command.get("status").and_then(Value::as_str) {
+            Some("completed") => Ok(true),
+            Some("rejected" | "failed" | "cancelled") => {
+                Err(crate::error::SessionFacadeError::InvalidState(
+                    "command reached a non-completed terminal status",
+                ))
+            }
+            Some(_) | None => Ok(false),
         }
+    }
 
+    async fn drive_until_command_completed(
+        &self,
+        command_id: CommandId,
+    ) -> crate::error::Result<()> {
         loop {
+            if self.command_completed(command_id)? {
+                return Ok(());
+            }
+
             let mut progress = false;
 
             progress |= self.flush_outbound().await?;
-            if let Some(value) = load(self)? {
-                return Ok(value);
+            if self.command_completed(command_id)? {
+                return Ok(());
             }
 
             progress |= self.drive_pending_once().await?;
-            if let Some(value) = load(self)? {
-                return Ok(value);
+            if self.command_completed(command_id)? {
+                return Ok(());
             }
 
             progress |= self.drive_route_once(None).await?;
-            if let Some(value) = load(self)? {
-                return Ok(value);
+            if self.command_completed(command_id)? {
+                return Ok(());
             }
 
             if !progress {
                 return Err(crate::error::SessionFacadeError::InvalidState(
-                    "direct query did not produce a result",
+                    "command did not reach a terminal state",
                 ));
             }
         }
@@ -431,15 +463,19 @@ impl SessionClient {
         variables: Option<Value>,
     ) -> crate::error::Result<Value> {
         let query_id = Self::next_query_id();
-        self.submit(RuntimeCommand::Query(QueryCommand::Fetch {
-            query_id: query_id.clone(),
-            query: query.to_owned(),
-            variables,
-        }))
-        .await?;
+        let command_id = self
+            .submit(RuntimeCommand::Query(QueryCommand::Fetch {
+                query_id: query_id.clone(),
+                query: query.to_owned(),
+                variables,
+            }))
+            .await?;
 
-        self.drive_until_value(|client| client.query_result(query_id.as_str()))
-            .await
+        self.drive_until_command_completed(command_id).await?;
+        self.query_result(query_id.as_str())?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "query command completed without a result payload",
+            ))
     }
 
     pub async fn refresh_schema_value(
@@ -447,9 +483,18 @@ impl SessionClient {
         schema_id: &str,
         path: &str,
     ) -> crate::error::Result<Value> {
-        self.refresh_schema(schema_id, path).await?;
-        self.drive_until_value(|client| client.schema_value(schema_id))
-            .await
+        let command_id = self
+            .submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+                schema_id: SchemaId::new(schema_id),
+                path: path.to_owned(),
+            }))
+            .await?;
+
+        self.drive_until_command_completed(command_id).await?;
+        self.schema_value(schema_id)?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "schema refresh completed without a schema payload",
+            ))
     }
 
     pub fn facade_config(&self) -> &SessionFacadeConfig {
@@ -674,10 +719,10 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{Duration, Instant};
     use tqsdk_core::{
-        AdapterRegistry, AuthContext, AuthProvider, ContractFuture, EndpointConfig, InputPayload,
-        IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolDomain,
-        QueryCommand, QueryId, RawFrame, RouteRequestExecutor, Runtime, RuntimeCommand,
-        RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
+        AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
+        InputPayload, IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
+        ProtocolDomain, QueryCommand, QueryId, RawFrame, RouteRequestExecutor, Runtime,
+        RuntimeCommand, RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
         SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
         SessionTopology, SessionTopologyResolver, Transport,
     };
@@ -1022,6 +1067,56 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_schema_value_waits_for_fresh_command_completion_instead_of_returning_cache() {
+        let handle = runtime_with_default_adapters();
+        handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "schema".to_string(),
+                    domains: vec![ProtocolDomain::Schema],
+                    payload: InputPayload::Json(json!({
+                        "schema_id": "instrument-schema",
+                        "data": { "version": 1 }
+                    })),
+                }),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        let executor: SharedRouteExecutor = Arc::new(RecordingExecutor::default().with_response(
+            "schema",
+            vec![RuntimeInput::Io(IoEvent {
+                route: "schema".to_string(),
+                domains: vec![ProtocolDomain::Schema],
+                payload: InputPayload::Json(json!({
+                    "schema_id": "instrument-schema",
+                    "data": { "version": 2 }
+                })),
+            })],
+        ));
+        let client = test_live_client(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "schema".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Schema],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://schema.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            executor,
+        );
+
+        let value = client
+            .refresh_schema_value("instrument-schema", "/schema/instrument.json")
+            .await
+            .unwrap();
+
+        assert_eq!(value, json!({ "version": 2 }));
     }
 
     #[test]
