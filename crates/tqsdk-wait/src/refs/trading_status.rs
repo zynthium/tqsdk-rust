@@ -2,6 +2,7 @@ use tqsdk_core::{ObjectKey, StatePath, Symbol, TradingStatus};
 
 use crate::{api::TqApi, change::ChangeTrackedRef};
 
+/// Lightweight handle to `trading_status/{symbol}`.
 #[derive(Debug, Clone)]
 pub struct TradingStatusRef {
     symbol: Symbol,

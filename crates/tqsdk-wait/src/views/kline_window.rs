@@ -1,5 +1,6 @@
 use tqsdk_core::Kline;
 
+/// Owned snapshot of the current kline serial window.
 #[derive(Debug, Clone, Default)]
 pub struct KlineWindow {
     symbol: String,

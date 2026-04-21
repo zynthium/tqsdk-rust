@@ -2,6 +2,7 @@ use tqsdk_core::{ChartId, ObjectKey, StatePath, Tick};
 
 use crate::{api::TqApi, change::ChangeTrackedRef, views::TickWindow};
 
+/// Handle to a subscribed tick chart plus its current materialized window.
 #[derive(Debug, Clone)]
 pub struct TickSerialRef {
     pub(crate) symbol: String,

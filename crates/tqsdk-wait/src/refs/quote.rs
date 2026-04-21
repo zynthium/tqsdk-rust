@@ -3,6 +3,7 @@ use tqsdk_core::{ObjectKey, Quote, StatePath, Symbol};
 use crate::api::TqApi;
 use crate::change::ChangeTrackedRef;
 
+/// Lightweight handle to `quotes/{symbol}` in the runtime state tree.
 #[derive(Debug, Clone)]
 pub struct QuoteRef {
     symbol: Symbol,

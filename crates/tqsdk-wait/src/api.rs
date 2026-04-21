@@ -19,6 +19,11 @@ use crate::refs::{
     TradingStatusRef,
 };
 
+/// Single-owner wait facade over a shared [`tqsdk_session::SessionClient`].
+///
+/// [`TqApi`] drives the underlying session one commit at a time through
+/// [`TqApi::wait_update`], while exposing lightweight references into the
+/// projected state tree.
 pub struct TqApi {
     pub(crate) driver: WaitDriver,
 }

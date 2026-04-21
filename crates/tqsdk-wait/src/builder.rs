@@ -2,6 +2,10 @@
 
 use crate::api::TqApi;
 
+/// Builder for the single-owner wait facade.
+///
+/// This is a thin convenience layer over [`tqsdk_session::SessionClientBuilder`]
+/// for users who want Python-style `wait_update()` consumption.
 #[derive(Debug, Clone)]
 pub struct TqApiBuilder {
     inner: tqsdk_session::SessionClientBuilder,

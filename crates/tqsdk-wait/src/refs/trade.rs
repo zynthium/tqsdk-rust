@@ -4,6 +4,7 @@ use tqsdk_core::{
 
 use crate::{api::TqApi, change::ChangeTrackedRef};
 
+/// Lightweight handle to `trade/{account_id}/accounts/CNY`.
 #[derive(Debug, Clone)]
 pub struct AccountRef {
     account_id: AccountId,
@@ -49,6 +50,7 @@ impl ChangeTrackedRef for AccountRef {
     }
 }
 
+/// Lightweight handle to `trade/{account_id}/positions/{symbol}`.
 #[derive(Debug, Clone)]
 pub struct PositionRef {
     account_id: AccountId,
@@ -107,6 +109,7 @@ impl ChangeTrackedRef for PositionRef {
     }
 }
 
+/// Lightweight handle to `trade/{account_id}/orders/{order_id}`.
 #[derive(Debug, Clone)]
 pub struct OrderRef {
     account_id: AccountId,
@@ -165,6 +168,7 @@ impl ChangeTrackedRef for OrderRef {
     }
 }
 
+/// Lightweight handle to `trade/{account_id}/trades/{trade_id}`.
 #[derive(Debug, Clone)]
 pub struct TradeRef {
     account_id: AccountId,

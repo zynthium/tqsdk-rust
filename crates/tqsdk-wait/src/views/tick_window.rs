@@ -1,5 +1,6 @@
 use tqsdk_core::Tick;
 
+/// Owned snapshot of the current tick serial window.
 #[derive(Debug, Clone, Default)]
 pub struct TickWindow {
     symbol: String,

@@ -2,8 +2,10 @@
 
 use std::fmt::{Display, Formatter};
 
+/// Result alias for `tqsdk-wait`.
 pub type Result<T> = std::result::Result<T, WaitFacadeError>;
 
+/// Errors returned by the wait-style facade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitFacadeError {
     Session(tqsdk_session::SessionFacadeError),

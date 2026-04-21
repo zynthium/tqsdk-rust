@@ -2,6 +2,7 @@
 
 use tqsdk_core::{ChangeSet, ObjectKey, StatePath};
 
+/// Lightweight handle that can be matched against the latest diff commit.
 pub trait ChangeTrackedRef {
     fn object_key(&self) -> Option<ObjectKey>;
     fn state_path(&self) -> StatePath;

@@ -2,6 +2,7 @@ use tqsdk_core::{ChartId, Kline, ObjectKey, StatePath};
 
 use crate::{api::TqApi, change::ChangeTrackedRef, views::KlineWindow};
 
+/// Handle to a subscribed kline chart plus its current materialized window.
 #[derive(Debug, Clone)]
 pub struct KlineSerialRef {
     pub(crate) symbol: String,
