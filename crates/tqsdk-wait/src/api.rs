@@ -324,6 +324,7 @@ impl TqApi {
             return Ok(());
         }
 
+        let previous_last_commit = self.driver.last_commit.clone();
         let mut replay = Vec::new();
 
         while !ready(self)? {
@@ -331,6 +332,7 @@ impl TqApi {
                 for commit in replay.into_iter().rev() {
                     self.driver.deferred_commits.push_front(commit);
                 }
+                self.driver.last_commit = previous_last_commit;
                 return Err(crate::error::WaitFacadeError::InvalidState(
                     "object not ready",
                 ));
@@ -344,6 +346,7 @@ impl TqApi {
         for commit in replay.into_iter().rev() {
             self.driver.deferred_commits.push_front(commit);
         }
+        self.driver.last_commit = previous_last_commit;
 
         Ok(())
     }

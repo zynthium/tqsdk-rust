@@ -17,6 +17,15 @@ async fn get_trading_status_returns_ref_without_blocking() {
 #[tokio::test(flavor = "current_thread")]
 async fn get_kline_serial_waits_for_initial_ready_and_preserves_commit_for_user() {
     let mut api = support::seeded_api();
+    let quote = api.get_quote("SHFE.au2602").await.unwrap();
+    support::seed_quote_commit(&mut api, "SHFE.au2602", 618.0);
+    assert!(api.wait_update(None).await.unwrap());
+    let previous_revision = api
+        .last_commit()
+        .expect("seed quote commit should be visible")
+        .revision;
+    assert!(api.is_changing(&quote).unwrap());
+
     support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 64);
 
     let serial = api
@@ -24,12 +33,31 @@ async fn get_kline_serial_waits_for_initial_ready_and_preserves_commit_for_user(
         .await
         .unwrap();
     assert!(serial.is_ready(&api).unwrap());
+
+    assert_eq!(
+        api.last_commit().map(|commit| commit.revision),
+        Some(previous_revision)
+    );
+    assert!(api.is_changing(&quote).unwrap());
     assert!(api.wait_update(None).await.unwrap());
+    assert_ne!(
+        api.last_commit().map(|commit| commit.revision),
+        Some(previous_revision)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_user() {
     let mut api = support::seeded_api();
+    let quote = api.get_quote("SHFE.au2602").await.unwrap();
+    support::seed_quote_commit(&mut api, "SHFE.au2602", 618.0);
+    assert!(api.wait_update(None).await.unwrap());
+    let previous_revision = api
+        .last_commit()
+        .expect("seed quote commit should be visible")
+        .revision;
+    assert!(api.is_changing(&quote).unwrap());
+
     support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 32);
 
     let serial = api.get_tick_serial("SHFE.au2602", 32).await.unwrap();
@@ -39,5 +67,15 @@ async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_use
     assert_eq!(window.symbol(), "SHFE.au2602");
     assert_eq!(window.view_width(), 32);
     assert_eq!(window.last().unwrap().last_price, 618.5);
+
+    assert_eq!(
+        api.last_commit().map(|commit| commit.revision),
+        Some(previous_revision)
+    );
+    assert!(api.is_changing(&quote).unwrap());
     assert!(api.wait_update(None).await.unwrap());
+    assert_ne!(
+        api.last_commit().map(|commit| commit.revision),
+        Some(previous_revision)
+    );
 }
