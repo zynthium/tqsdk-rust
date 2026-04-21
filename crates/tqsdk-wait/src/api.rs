@@ -24,12 +24,14 @@ pub struct TqApi {
 }
 
 impl TqApi {
+    #[must_use]
     pub fn new(session: SessionClient) -> Self {
         let handle = session.handle().clone();
         Self::new_for_test(handle, session)
     }
 
     #[doc(hidden)]
+    #[must_use]
     pub fn new_for_test(handle: tqsdk_core::RuntimeHandle, session: SessionClient) -> Self {
         let reader = handle.reader();
         let cursor = reader.cursor();
@@ -108,34 +110,42 @@ impl TqApi {
         }
     }
 
+    #[must_use]
     pub fn last_commit(&self) -> Option<&tqsdk_core::CommitResult> {
         self.driver.last_commit.as_ref()
     }
 
+    #[must_use]
     pub fn session(&self) -> &SessionClient {
         &self.driver.session
     }
 
+    #[must_use]
     pub fn into_session(self) -> SessionClient {
         self.driver.session
     }
 
+    #[must_use]
     pub fn quote_ref(&self, symbol: &str) -> QuoteRef {
         QuoteRef::new(symbol)
     }
 
+    #[must_use]
     pub fn get_account(&self, account_id: &str) -> AccountRef {
         AccountRef::new(account_id)
     }
 
+    #[must_use]
     pub fn get_position(&self, account_id: &str, symbol: &str) -> PositionRef {
         PositionRef::new(account_id, symbol)
     }
 
+    #[must_use]
     pub fn get_order(&self, account_id: &str, order_id: &str) -> OrderRef {
         OrderRef::new(account_id, order_id)
     }
 
+    #[must_use]
     pub fn get_trade(&self, account_id: &str, trade_id: &str) -> TradeRef {
         TradeRef::new(account_id, trade_id)
     }

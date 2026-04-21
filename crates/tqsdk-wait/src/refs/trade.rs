@@ -10,6 +10,7 @@ pub struct AccountRef {
 }
 
 impl AccountRef {
+    #[must_use]
     pub fn new(account_id: impl Into<String>) -> Self {
         Self {
             account_id: AccountId::new(account_id.into()),
@@ -55,6 +56,7 @@ pub struct PositionRef {
 }
 
 impl PositionRef {
+    #[must_use]
     pub fn new(account_id: impl Into<String>, symbol: impl Into<String>) -> Self {
         Self {
             account_id: AccountId::new(account_id.into()),
@@ -112,6 +114,7 @@ pub struct OrderRef {
 }
 
 impl OrderRef {
+    #[must_use]
     pub fn new(account_id: impl Into<String>, order_id: impl Into<String>) -> Self {
         Self {
             account_id: AccountId::new(account_id.into()),
@@ -169,6 +172,7 @@ pub struct TradeRef {
 }
 
 impl TradeRef {
+    #[must_use]
     pub fn new(account_id: impl Into<String>, trade_id: impl Into<String>) -> Self {
         Self {
             account_id: AccountId::new(account_id.into()),

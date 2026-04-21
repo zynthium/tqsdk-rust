@@ -9,6 +9,7 @@ pub struct QuoteRef {
 }
 
 impl QuoteRef {
+    #[must_use]
     pub fn new(symbol: impl Into<String>) -> Self {
         Self {
             symbol: Symbol::new(symbol.into()),

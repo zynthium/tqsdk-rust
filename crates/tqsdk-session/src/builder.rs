@@ -25,6 +25,7 @@ pub struct SessionClientBuilder {
 }
 
 impl SessionClientBuilder {
+    #[must_use]
     pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
         let endpoints = EndpointConfig::from_env();
         let endpoints = if endpoints.schema_url.is_some() {
@@ -43,45 +44,54 @@ impl SessionClientBuilder {
         }
     }
 
+    #[must_use]
     pub fn facade_config(mut self, facade_config: SessionFacadeConfig) -> Self {
         self.facade_config = facade_config;
         self
     }
 
+    #[must_use]
     pub fn facade_config_ref(&self) -> &SessionFacadeConfig {
         &self.facade_config
     }
 
+    #[must_use]
     pub fn query_enabled(&self) -> bool {
         self.query_enabled
     }
 
+    #[must_use]
     pub fn query_url(mut self, query_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_query_url(query_url);
         self.query_enabled = true;
         self
     }
 
+    #[must_use]
     pub fn enable_query(mut self) -> Self {
         self.query_enabled = true;
         self
     }
 
+    #[must_use]
     pub fn schema_url(mut self, schema_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_schema_url(schema_url);
         self
     }
 
+    #[must_use]
     pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_replay_url(replay_url);
         self
     }
 
+    #[must_use]
     pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
         self.market_target = MarketSessionTarget::new(stock, backtest);
         self
     }
 
+    #[must_use]
     pub fn trade_target(
         mut self,
         broker_id: impl Into<String>,
@@ -94,6 +104,7 @@ impl SessionClientBuilder {
         self
     }
 
+    #[must_use]
     pub fn trade_target_with_url(
         mut self,
         broker_id: impl Into<String>,
@@ -107,14 +118,17 @@ impl SessionClientBuilder {
         self
     }
 
+    #[must_use]
     pub fn endpoints(&self) -> &EndpointConfig {
         &self.endpoints
     }
 
+    #[must_use]
     pub fn market_target_ref(&self) -> &MarketSessionTarget {
         &self.market_target
     }
 
+    #[must_use]
     pub fn trade_targets_ref(&self) -> &[TradeSessionTarget] {
         &self.trade_targets
     }

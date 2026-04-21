@@ -8,6 +8,7 @@ pub struct TradingStatusRef {
 }
 
 impl TradingStatusRef {
+    #[must_use]
     pub fn new(symbol: impl Into<String>) -> Self {
         Self {
             symbol: Symbol::new(symbol.into()),

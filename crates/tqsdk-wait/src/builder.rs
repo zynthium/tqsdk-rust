@@ -8,21 +8,25 @@ pub struct TqApiBuilder {
 }
 
 impl TqApiBuilder {
+    #[must_use]
     pub fn from_session_builder(inner: tqsdk_session::SessionClientBuilder) -> Self {
         Self { inner }
     }
 
+    #[must_use]
     pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
         Self::from_session_builder(tqsdk_session::SessionClientBuilder::new(
             auth_user, auth_pass,
         ))
     }
 
+    #[must_use]
     pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
         self.inner = self.inner.market_target(stock, backtest);
         self
     }
 
+    #[must_use]
     pub fn trade_target(
         mut self,
         broker_id: impl Into<String>,
@@ -32,6 +36,7 @@ impl TqApiBuilder {
         self
     }
 
+    #[must_use]
     pub fn trade_target_with_url(
         mut self,
         broker_id: impl Into<String>,
@@ -44,6 +49,7 @@ impl TqApiBuilder {
         self
     }
 
+    #[must_use]
     pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
         self.inner = self.inner.replay_url(replay_url);
         self

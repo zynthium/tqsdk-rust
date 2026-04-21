@@ -221,22 +221,27 @@ impl SessionClient {
         }
     }
 
+    #[must_use]
     pub fn handle(&self) -> &RuntimeHandle {
         &self.handle
     }
 
+    #[must_use]
     pub fn reader(&self) -> &RuntimeReader {
         &self.reader
     }
 
+    #[must_use]
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
     }
 
+    #[must_use]
     pub fn reader_clone(&self) -> RuntimeReader {
         self.reader.clone()
     }
 
+    #[must_use]
     pub fn runtime_clone(&self) -> SessionRuntime {
         self.runtime.clone()
     }
@@ -626,6 +631,7 @@ impl SessionClient {
             ))
     }
 
+    #[must_use]
     pub fn facade_config(&self) -> &SessionFacadeConfig {
         &self.facade_config
     }
