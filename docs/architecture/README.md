@@ -148,7 +148,10 @@ runtime-contract
 protocol-adapters
     ^
     |
-consumption-adapters
+shared session layer
+    ^
+    |
+consumption facades
     ^
     |
 user facades / tools

@@ -35,11 +35,11 @@ docs/
 
 ## 文档入口
 
-- core crate 说明见 [crates/tqsdk-core/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-core/README.md)
-- session crate 说明见 [crates/tqsdk-session/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-session/README.md)
-- wait crate 说明见 [crates/tqsdk-wait/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-wait/README.md)
-- 架构总览见 [docs/architecture/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/docs/architecture/README.md)
-- 验证矩阵见 [docs/architecture/validation.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/docs/architecture/validation.md)
+- core crate 说明见 [crates/tqsdk-core/README.md](crates/tqsdk-core/README.md)
+- session crate 说明见 [crates/tqsdk-session/README.md](crates/tqsdk-session/README.md)
+- wait crate 说明见 [crates/tqsdk-wait/README.md](crates/tqsdk-wait/README.md)
+- 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
+- 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
 
 ## 常用命令
 
