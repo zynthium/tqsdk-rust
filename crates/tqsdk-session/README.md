@@ -6,6 +6,12 @@
 
 它不是只给 facade 内部复用的隐藏层。对需要“一次性 query / metadata / schema 访问”的用户，`tqsdk-session` 本身就是正确入口。
 
+它同时保持一个明确约束：
+
+- 它是纯 async substrate，不内置 runtime
+- 调用方必须自己提供 Tokio runtime
+- direct service helper（交易日历、结算价、排名、EDB）也要求当前已经处于 Tokio runtime 中
+
 它当前已经提供：
 
 - `SessionClientBuilder`

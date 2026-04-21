@@ -86,6 +86,7 @@ V1 是：
   - lazy establish + route / pending-route 驱动原语
   - direct query / schema refresh 薄层入口
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
+  - 保持“纯 async substrate，调用方自带 Tokio runtime”的约束
   - 供 `wait` / 未来 `stream` 共同依赖
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
