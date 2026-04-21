@@ -4,6 +4,8 @@
 
 这个 crate 负责把会话生命周期、route 驱动、schema / metadata / direct query 这类和具体 facade 无关的能力先抽出来，作为 `tqsdk-wait`、`tqsdk-stream` 等上层 facade 的共同底座。
 
+它不是只给 facade 内部复用的隐藏层。对需要“一次性 query / metadata / schema 访问”的用户，`tqsdk-session` 本身就是正确入口。
+
 它当前已经提供：
 
 - `SessionClientBuilder`
@@ -33,4 +35,10 @@
 `query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
 如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
 
-它不直接定义高层用户 API，也不把某一种消费风格硬编码进核心。
+它不直接定义高层 diff-backed 用户 API，也不把某一种消费风格硬编码进核心。
+
+可以把它理解为：
+
+- `tqsdk-session` 负责一次性 direct query / schema / metadata
+- `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
+- 未来 `tqsdk-stream` 负责 stream/event 风格的持续状态消费

@@ -85,6 +85,11 @@
 
 这些接口虽然底层仍可通过 `tqsdk-core` 走统一 command / pending route / commit 链路，但在对用户的 API 形状上，不需要 `wait_update` 或 stream 风格去重新表达。
 
+这里需要再强调一层：
+
+- 它们的 crate 归属应当固定在 `tqsdk-session`
+- `tqsdk-wait` 和未来的 `tqsdk-stream` 都只复用 `tqsdk-session` 提供的 direct query 能力，不重新包装成自己的主 surface
+
 ### 判断 2：需要一个模式无关的共享薄层
 如果 `tqsdk-wait` 和 `tqsdk-stream` 都各自重复 auth、bootstrap、query、schema、session 装配，就会出现两类问题：
 
@@ -160,6 +165,11 @@ tqsdk-wait              tqsdk-stream
   - `recv_and_ingest(...)`
   - pending route 执行能力
 
+它也应当成为两类用户的共享 direct-query 入口：
+
+- 研究员主要用 `tqsdk-wait`，但做 metadata/query 时直接调用 `tqsdk-session`
+- 高性能用户主要用未来的 `tqsdk-stream`，但做 metadata/query 时同样直接调用 `tqsdk-session`
+
 #### `tqsdk-session` 不应提供
 - `wait_update`
 - `is_changing`
@@ -219,6 +229,25 @@ tqsdk-wait              tqsdk-stream
 
 - 绕开 `tqsdk-core` 自建另一套更新语义
 - 直接持有 raw websocket / raw diff 层能力
+- 吸纳 GraphQL / HTTP query、schema refresh、metadata query 这类一次性接口
+
+## API 归属清单
+
+下面这张表是后续实现 `tqsdk-stream` 与高层工具时的硬约束：
+
+| API 形态 | 典型接口 | 应归属的 crate |
+| --- | --- | --- |
+| 一次性 direct query | `query_graphql`、`query_* metadata`、`refresh_schema` | `tqsdk-session` |
+| 一次性 metadata 结果 | 交易日历、`SymbolSettlement`、`SymbolRanking` | `tqsdk-session` |
+| wait 风格持续状态消费 | `get_quote`、`get_kline_serial`、`get_account`、`insert_order` | `tqsdk-wait` |
+| stream 风格持续状态消费 | quote/kline/tick/account/order/trade 的 stream / event API | `tqsdk-stream` |
+| 高级任务/工具 | downloader、`TargetPosTask`、scheduler、DataFrame/polars | 独立高级工具 crate |
+
+这张表背后的原则只有一条：
+
+- “是不是持续依赖同一棵状态树的后续 commit 才成立”
+  - 如果是，就属于 `wait` / `stream`
+  - 如果不是，只是一次 `await` 请求/响应，就属于 `tqsdk-session`
 
 ### 高级工具层
 这些能力属于独立高级工具 crate，而不属于 `wait`/`stream`：

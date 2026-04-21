@@ -99,6 +99,31 @@ V1 是：
 - 不在 facade 层复制第二棵状态树
 - direct query 不重新塞回 `tqsdk-wait`
 
+## API 归属总表
+
+为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或未来的 `stream`，当前架构采用下面这条硬边界：
+
+- `tqsdk-session` 负责所有一次性 request/response 接口
+- `tqsdk-wait` 和未来的 `tqsdk-stream` 只负责 diff-backed 持续状态消费接口
+
+| 接口类别 | 应归属的 crate | 原因 |
+| :--- | :--- | :--- |
+| GraphQL / HTTP query | `tqsdk-session` | 一次 `await` 请求/响应，不依赖 `wait_update()` 或 stream |
+| schema refresh / fetch | `tqsdk-session` | 一次性拉取/刷新，不是持续变化对象 |
+| 合约元数据查询 | `tqsdk-session` | 属于 direct query / metadata，不需要模式化消费 |
+| 交易日历 | `tqsdk-session` | 一次性结果，不应绑定某种 diff 消费形状 |
+| `SymbolSettlement` / `SymbolRanking` / 其他 metadata query | `tqsdk-session` | 都是 query 结果，不是 live object |
+| `get_quote` / `get_trading_status` | `tqsdk-wait` / `tqsdk-stream` | 返回持续变化对象，依赖 commit 持续推进 |
+| `get_kline_serial` / `get_tick_serial` | `tqsdk-wait` / `tqsdk-stream` | 返回持续更新窗口，依赖后续 diff |
+| `get_account` / `get_position` / `get_order` / `get_trade` | `tqsdk-wait` / `tqsdk-stream` | 读取的是同一棵状态树中的 live 对象 |
+| `insert_order` / `cancel_order` / `confirm_settlement` | `tqsdk-wait` / `tqsdk-stream` | 属于 trade diff-backed 消费语义的一部分 |
+
+对用户形态的含义也应明确：
+
+- `tqsdk-session` 不是只给 facade 内部用，用户也可以直接使用它来做 direct query / schema / metadata 访问
+- `tqsdk-stream` 将来不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
+- 对性能极致敏感的用户，仍然可以直接使用 `tqsdk-core + tqsdk-session`
+
 ## 参考仓库的使用方式
 - `tqsdk-python` 是语义基准
   - 尤其是提交边界、对象一致性、初始截面、命令可见性、回放推进这些语义

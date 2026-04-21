@@ -16,6 +16,8 @@
 - downloader / `TargetPosTask` / callback / stream
 - 本地订单 overlay 或第二棵状态树
 
+这些一次性接口的正确归属始终是 `tqsdk-session`，即使后续面向高性能用户增加 `tqsdk-stream` 也不改变这一点。
+
 ## 当前公开面
 
 当前 MVP 已包含：
@@ -43,6 +45,7 @@
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `insert_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
+- 未来 `tqsdk-stream` 也只会承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
 
 ## 示例
 

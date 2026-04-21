@@ -239,6 +239,12 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 
 但这些能力应出现在未来的 `tqsdk-stream` / `tqsdk-callback`，而不是抢占 `tqsdk-wait` 的第一优先级。
 
+这里还需要明确一条边界：
+
+- `tqsdk-stream` 负责的是 diff-backed 实时对象的异步消费形状
+- 它不是 direct query / schema / metadata 的承载层
+- 一次性 query/request-response 接口应继续留在 `tqsdk-session`
+
 ## 面向后续 crate 的建议
 
 ### 对 `tqsdk-wait`
@@ -255,6 +261,7 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 - 可以按需引入背压与丢弃策略
 - 可以对订单/成交保留“可靠事件流”而不是快照轮询
 - 但 stream 的更新边界应从 core commit 派生，而不是绕开 core 再建一套 epoch contract
+- 不应重新暴露 direct query / schema / metadata facade；这些接口无论服务于研究员还是高性能用户，都应直接来自 `tqsdk-session`
 
 ### 对 `tqsdk-callback`
 
@@ -282,3 +289,4 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 - `tqsdk-python` 更像“单推进点的稳定业务语义”
 - `tqsdk-rs` 更像“异步多消费者的工程组织方式”
 - 当前 workspace 应同时吸收两者，但必须把它们放在 facade 层，而不是 core 层
+- direct query / schema / metadata 这类一次性接口则应始终停留在 `tqsdk-session`，不随 facade 风格漂移
