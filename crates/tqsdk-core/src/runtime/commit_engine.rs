@@ -13,6 +13,7 @@ impl CommitEngine {
     pub(crate) fn apply(
         snapshot: &mut StateStore,
         mutations: Vec<NormalizedMutation>,
+        domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Option<CommitResult> {
@@ -27,7 +28,13 @@ impl CommitEngine {
         }
 
         let changes = ChangeSet::from_mutations(&applied);
-        Some(CommitResult::new(next_revision, changes, caused_by, scope))
+        Some(CommitResult::new(
+            next_revision,
+            domains,
+            changes,
+            caused_by,
+            scope,
+        ))
     }
 }
 

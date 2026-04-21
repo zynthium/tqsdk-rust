@@ -54,12 +54,29 @@ pub fn seed_quote_fields_commit_with_scope(
     quote_fields: Value,
     scope: CommitScope,
 ) {
+    seed_quote_fields_commit_on_domains_with_scope(
+        stream,
+        symbol,
+        quote_fields,
+        vec![ProtocolDomain::Market],
+        scope,
+    );
+}
+
+#[allow(dead_code)]
+pub fn seed_quote_fields_commit_on_domains_with_scope(
+    stream: &TqStream,
+    symbol: &str,
+    quote_fields: Value,
+    domains: Vec<ProtocolDomain>,
+    scope: CommitScope,
+) {
     stream
         .handle_for_test()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
-                domains: vec![ProtocolDomain::Market],
+                domains,
                 payload: InputPayload::Json(json!({
                     "aid": "rtn_data",
                     "data": [{

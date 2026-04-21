@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use crate::events::NormalizedMutation;
-use crate::ids::{CommandId, CursorId, Revision};
+use crate::ids::{CommandId, CursorId, ProtocolDomain, Revision};
 
 use super::{ObjectKey, StatePath};
 
@@ -77,6 +77,7 @@ pub enum CommitScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitResult {
     pub revision: Revision,
+    pub domains: Vec<ProtocolDomain>,
     pub changes: ChangeSet,
     pub caused_by: Vec<CommandId>,
     pub scope: CommitScope,
@@ -85,12 +86,14 @@ pub struct CommitResult {
 impl CommitResult {
     pub fn new(
         revision: Revision,
+        domains: Vec<ProtocolDomain>,
         changes: ChangeSet,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Self {
         Self {
             revision,
+            domains,
             changes,
             caused_by,
             scope,

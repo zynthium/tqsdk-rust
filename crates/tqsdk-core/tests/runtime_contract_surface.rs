@@ -157,6 +157,7 @@ fn snapshot_cursor_and_mutation_types_are_revision_bound() {
     };
     let commit = CommitResult::new(
         Revision::new(4),
+        vec![ProtocolDomain::Market],
         changes.clone(),
         vec![],
         CommitScope::RealtimeUpdate,

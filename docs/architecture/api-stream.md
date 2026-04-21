@@ -225,6 +225,12 @@ impl CommitStream {
         scopes: impl IntoIterator<Item = CommitScope>,
     ) -> ScopeCommitStream;
 
+    pub fn filter_domain(self, domain: ProtocolDomain) -> DomainCommitStream;
+    pub fn filter_domains(
+        self,
+        domains: impl IntoIterator<Item = ProtocolDomain>,
+    ) -> DomainCommitStream;
+
     pub fn filter_object(self, object: ObjectKey) -> ObjectCommitStream;
     pub fn filter_objects(
         self,
@@ -280,14 +286,12 @@ pub enum StreamFacadeError {
 - `tick_stream(...)`
 - `order_stream(...)`
 - `trade_events(...)`
-- 协议域过滤 stream
 - callback bridge
 - trade command thin wrappers
 
 其中：
 
-- path / scope / object / field 过滤现在已经可以作为 commit stream 的薄组合层实现
-- protocol-domain 过滤仍应暂缓，因为当前 `CommitResult` 没有显式携带 domain provenance
+- path / scope / domain / object / field 过滤现在已经可以作为 commit stream 的薄组合层实现
 - 对象级 stream 与可靠事件流仍应等 commit 级过滤语义先稳定，再继续叠加
 
 ## 内部驱动模型
@@ -414,8 +418,7 @@ crates/tqsdk-stream/
 
 ### 第二批
 
-- `CommitStream` 的 path / scope / object / field 过滤已经落地
-- 如需按协议域过滤，需要先决定是否把 domain provenance 纳入 `CommitResult`
+- `CommitStream` 的 path / scope / domain / object / field 过滤已经落地
 
 ### 第三批
 

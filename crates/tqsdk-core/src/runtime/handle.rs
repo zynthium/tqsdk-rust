@@ -146,7 +146,13 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         let mut inner = mutex_lock(&self.inner);
         let mutations = inner.adapters.decode_input(&input)?;
-        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
+        self.apply_and_publish_locked(
+            &mut inner,
+            mutations,
+            input_domains(&input),
+            caused_by,
+            scope,
+        )
     }
 
     pub fn ingest_batch(
@@ -160,7 +166,13 @@ impl RuntimeHandle {
         for input in &inputs {
             mutations.extend(inner.adapters.decode_input(input)?);
         }
-        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
+        self.apply_and_publish_locked(
+            &mut inner,
+            mutations,
+            batch_input_domains(&inputs),
+            caused_by,
+            scope,
+        )
     }
 
     pub fn record_command_status(
@@ -234,8 +246,13 @@ impl RuntimeHandle {
             mutations.push(command_cleanup_mutation(evicted_command_id));
         }
 
-        let commit =
-            self.apply_and_publish_locked(&mut inner, mutations, vec![command_id], scope)?;
+        let commit = self.apply_and_publish_locked(
+            &mut inner,
+            mutations,
+            vec![domain],
+            vec![command_id],
+            scope,
+        )?;
 
         if status.is_terminal() && commit.is_some() {
             inner
@@ -254,6 +271,7 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         self.record_mutations(
             vec![session_lifecycle_mutation(phase, detail)],
+            vec![ProtocolDomain::System],
             caused_by,
             CommitScope::SessionTransition,
         )
@@ -266,6 +284,7 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         self.record_mutations(
             session_snapshot_mutations(result),
+            vec![ProtocolDomain::System],
             caused_by,
             CommitScope::InitialReady,
         )
@@ -278,6 +297,7 @@ impl RuntimeHandle {
     ) -> Result<Option<CommitResult>> {
         self.record_mutations(
             session_snapshot_mutations(result),
+            vec![ProtocolDomain::System],
             caused_by,
             CommitScope::ResyncRecovery,
         )
@@ -323,6 +343,7 @@ impl RuntimeHandle {
                 fields,
                 source: MutationSource::SessionControl,
             }],
+            vec![ProtocolDomain::System],
             caused_by,
             CommitScope::SessionTransition,
         )
@@ -331,22 +352,24 @@ impl RuntimeHandle {
     fn record_mutations(
         &self,
         mutations: Vec<NormalizedMutation>,
+        domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
         let mut inner = mutex_lock(&self.inner);
-        self.apply_and_publish_locked(&mut inner, mutations, caused_by, scope)
+        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
     }
 
     fn apply_and_publish_locked(
         &self,
         _inner: &mut RuntimeCore,
         mutations: Vec<NormalizedMutation>,
+        domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
         let mut snapshot = rwlock_write(&self.state);
-        let commit = CommitEngine::apply(&mut snapshot, mutations, caused_by, scope);
+        let commit = CommitEngine::apply(&mut snapshot, mutations, domains, caused_by, scope);
         if let Some(commit_ref) = commit.as_ref() {
             self.commit_log.publish(commit_ref.clone());
         }
@@ -396,6 +419,30 @@ impl Runtime for RuntimeHandle {
         );
         self.cursor_from(next_revision)
     }
+}
+
+fn input_domains(input: &RuntimeInput) -> Vec<ProtocolDomain> {
+    match input {
+        RuntimeInput::Io(event) => event.domains.clone(),
+        RuntimeInput::Replay(_) => vec![ProtocolDomain::Replay],
+        RuntimeInput::Auth(_) | RuntimeInput::Timer(_) | RuntimeInput::Internal(_) => {
+            vec![ProtocolDomain::System]
+        }
+    }
+}
+
+fn batch_input_domains(inputs: &[RuntimeInput]) -> Vec<ProtocolDomain> {
+    let mut domains = Vec::new();
+
+    for input in inputs {
+        for domain in input_domains(input) {
+            if !domains.contains(&domain) {
+                domains.push(domain);
+            }
+        }
+    }
+
+    domains
 }
 
 fn command_domain_from_snapshot(

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{CommitResult, CommitScope, ObjectKey, StatePath};
+use tqsdk_core::{CommitResult, CommitScope, ObjectKey, ProtocolDomain, StatePath};
 
 use crate::{CommitStream, Result};
 
@@ -50,6 +50,29 @@ impl Stream for ScopeCommitStream {
         let this = self.get_mut();
         poll_next_filtered(&mut this.inner, cx, |commit| {
             matches_scope_filters(&this.scopes, commit)
+        })
+    }
+}
+
+/// Commit stream filtered by protocol domains recorded on each commit.
+pub struct DomainCommitStream {
+    inner: CommitStream,
+    domains: Vec<ProtocolDomain>,
+}
+
+impl DomainCommitStream {
+    pub(crate) fn new(inner: CommitStream, domains: Vec<ProtocolDomain>) -> Self {
+        Self { inner, domains }
+    }
+}
+
+impl Stream for DomainCommitStream {
+    type Item = Result<CommitResult>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        poll_next_filtered(&mut this.inner, cx, |commit| {
+            matches_domain_filters(&this.domains, commit)
         })
     }
 }
@@ -116,6 +139,10 @@ pub(crate) fn matches_path_filters(paths: &[StatePath], commit: &CommitResult) -
 
 pub(crate) fn matches_scope_filters(scopes: &[CommitScope], commit: &CommitResult) -> bool {
     scopes.is_empty() || scopes.contains(&commit.scope)
+}
+
+pub(crate) fn matches_domain_filters(domains: &[ProtocolDomain], commit: &CommitResult) -> bool {
+    domains.is_empty() || commit.domains.iter().any(|hit| domains.contains(hit))
 }
 
 pub(crate) fn matches_object_filters(objects: &[ObjectKey], commit: &CommitResult) -> bool {

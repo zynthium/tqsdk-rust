@@ -7,10 +7,12 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tqsdk_core::{CommitScope, ObjectKey, StatePath};
+use tqsdk_core::{CommitScope, ObjectKey, ProtocolDomain, StatePath};
 
 use crate::driver::{DriverEvent, StreamDriver};
-use crate::filter::{FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream};
+use crate::filter::{
+    DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
+};
 
 const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -122,6 +124,19 @@ impl CommitStream {
     #[must_use]
     pub fn filter_scopes(self, scopes: impl IntoIterator<Item = CommitScope>) -> ScopeCommitStream {
         ScopeCommitStream::new(self, scopes.into_iter().collect())
+    }
+
+    #[must_use]
+    pub fn filter_domain(self, domain: ProtocolDomain) -> DomainCommitStream {
+        DomainCommitStream::new(self, vec![domain])
+    }
+
+    #[must_use]
+    pub fn filter_domains(
+        self,
+        domains: impl IntoIterator<Item = ProtocolDomain>,
+    ) -> DomainCommitStream {
+        DomainCommitStream::new(self, domains.into_iter().collect())
     }
 
     #[must_use]
