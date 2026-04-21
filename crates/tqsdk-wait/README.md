@@ -18,12 +18,24 @@
 
 这些一次性接口的正确归属始终是 `tqsdk-session`，即使后续面向高性能用户增加 `tqsdk-stream` 也不改变这一点。
 
+用户真正会持有和传递的 `Ref` / `Window` 类型都直接从 crate 根导出，不需要再通过 `refs::*` / `views::*` 子模块路径访问。
+
 ## 当前公开面
 
 当前 MVP 已包含：
 
 - `TqApiBuilder`
 - `TqApi`
+- `QuoteRef`
+- `TradingStatusRef`
+- `KlineSerialRef`
+- `TickSerialRef`
+- `AccountRef`
+- `PositionRef`
+- `OrderRef`
+- `TradeRef`
+- `KlineWindow`
+- `TickWindow`
 - `wait_update(deadline).await`
 - `is_changing(...)`
 - `is_changing_fields(...)`

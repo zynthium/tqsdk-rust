@@ -6,6 +6,7 @@ pub struct SessionFacadeConfig {
 }
 
 impl SessionFacadeConfig {
+    #[must_use]
     pub fn with_default_view_width(mut self, default_view_width: usize) -> Self {
         self.default_view_width = default_view_width.max(1);
         self
