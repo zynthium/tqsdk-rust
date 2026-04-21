@@ -21,7 +21,9 @@ mod api;
 mod builder;
 mod driver;
 mod error;
+mod filter;
 
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
 pub use error::{Result, StreamFacadeError};
+pub use filter::{PathCommitStream, ScopeCommitStream};

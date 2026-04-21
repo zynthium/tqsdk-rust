@@ -7,8 +7,10 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tqsdk_core::{CommitScope, StatePath};
 
 use crate::driver::{DriverEvent, StreamDriver};
+use crate::filter::{PathCommitStream, ScopeCommitStream};
 
 const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -96,6 +98,30 @@ impl CommitStream {
         Self {
             inner: BroadcastStream::new(receiver),
         }
+    }
+
+    #[must_use]
+    pub fn filter_path<I, S>(self, path: I) -> PathCommitStream
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        PathCommitStream::new(self, vec![StatePath::new(path)])
+    }
+
+    #[must_use]
+    pub fn filter_paths(self, paths: impl IntoIterator<Item = StatePath>) -> PathCommitStream {
+        PathCommitStream::new(self, paths.into_iter().collect())
+    }
+
+    #[must_use]
+    pub fn filter_scope(self, scope: CommitScope) -> ScopeCommitStream {
+        ScopeCommitStream::new(self, vec![scope])
+    }
+
+    #[must_use]
+    pub fn filter_scopes(self, scopes: impl IntoIterator<Item = CommitScope>) -> ScopeCommitStream {
+        ScopeCommitStream::new(self, scopes.into_iter().collect())
     }
 }
 

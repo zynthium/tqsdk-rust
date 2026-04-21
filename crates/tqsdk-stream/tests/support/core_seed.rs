@@ -25,6 +25,16 @@ pub fn seeded_stream_with_capacity(capacity: usize) -> TqStream {
 
 #[allow(dead_code)]
 pub fn seed_quote_commit(stream: &TqStream, symbol: &str, last_price: f64) {
+    seed_quote_commit_with_scope(stream, symbol, last_price, CommitScope::RealtimeUpdate);
+}
+
+#[allow(dead_code)]
+pub fn seed_quote_commit_with_scope(
+    stream: &TqStream,
+    symbol: &str,
+    last_price: f64,
+    scope: CommitScope,
+) {
     stream
         .handle_for_test()
         .ingest(
@@ -44,7 +54,7 @@ pub fn seed_quote_commit(stream: &TqStream, symbol: &str, last_price: f64) {
                 })),
             }),
             vec![],
-            CommitScope::RealtimeUpdate,
+            scope,
         )
         .unwrap()
         .expect("seed quote commit should produce a commit");

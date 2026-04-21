@@ -209,6 +209,22 @@ pub struct CommitStream { /* private */ }
 impl futures::Stream for CommitStream {
     type Item = tqsdk_stream::Result<tqsdk_core::CommitResult>;
 }
+
+impl CommitStream {
+    pub fn filter_path<I, S>(self, path: I) -> PathCommitStream
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>;
+
+    pub fn filter_paths(self, paths: impl IntoIterator<Item = StatePath>)
+        -> PathCommitStream;
+
+    pub fn filter_scope(self, scope: CommitScope) -> ScopeCommitStream;
+    pub fn filter_scopes(
+        self,
+        scopes: impl IntoIterator<Item = CommitScope>,
+    ) -> ScopeCommitStream;
+}
 ```
 
 其中 `Result` 的 error surface 在第一版应显式覆盖：
@@ -252,12 +268,15 @@ pub enum StreamFacadeError {
 - `tick_stream(...)`
 - `order_stream(...)`
 - `trade_events(...)`
-- 路径过滤 stream
 - 协议域过滤 stream
 - callback bridge
 - trade command thin wrappers
 
-这些都应该等最小 commit stream 先稳定，再按第二批能力逐步叠加。
+其中：
+
+- path / scope 过滤现在已经可以作为 commit stream 的薄组合层实现
+- protocol-domain 过滤仍应暂缓，因为当前 `CommitResult` 没有显式携带 domain provenance
+- 对象级 stream 与可靠事件流仍应等 commit 级过滤语义先稳定，再继续叠加
 
 ## 内部驱动模型
 
@@ -383,9 +402,9 @@ crates/tqsdk-stream/
 
 ### 第二批
 
-- `CommitStreamExt` 风格的过滤器
-- 按协议域过滤
-- 按 `StatePath` / `ObjectKey` 过滤
+- `CommitStream` 的 path / scope 过滤已经落地
+- 下一步是补按 `ObjectKey` 的过滤
+- 如需按协议域过滤，需要先决定是否把 domain provenance 纳入 `CommitResult`
 
 ### 第三批
 
