@@ -2,6 +2,8 @@
 name = "tqsdk-session"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Shared async session and direct-query layer for tqsdk-core"
 readme = "README.md"
 
 [dependencies]

@@ -2,6 +2,8 @@
 name = "tqsdk-core"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Low-level async protocol substrate for Tianqin/TQSDK services"
 readme = "README.md"
 
 [dependencies]

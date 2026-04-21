@@ -2,6 +2,8 @@
 name = "tqsdk-wait"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Python-style wait_update facade built on tqsdk-core and tqsdk-session"
 readme = "README.md"
 
 [dependencies]
