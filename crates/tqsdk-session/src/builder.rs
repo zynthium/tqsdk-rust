@@ -11,6 +11,8 @@ use crate::{
     error::Result,
 };
 
+const DEFAULT_SCHEMA_BASE_URL: &str = "https://files.shinnytech.com";
+
 #[derive(Debug, Clone)]
 pub struct SessionClientBuilder {
     auth_user: String,
@@ -23,10 +25,16 @@ pub struct SessionClientBuilder {
 
 impl SessionClientBuilder {
     pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
+        let endpoints = EndpointConfig::from_env();
+        let endpoints = if endpoints.schema_url.is_some() {
+            endpoints
+        } else {
+            endpoints.with_schema_url(DEFAULT_SCHEMA_BASE_URL)
+        };
         Self {
             auth_user: auth_user.into(),
             auth_pass: auth_pass.into(),
-            endpoints: EndpointConfig::from_env(),
+            endpoints,
             facade_config: SessionFacadeConfig::default(),
             market_target: MarketSessionTarget::new(false, false),
             trade_targets: Vec::new(),

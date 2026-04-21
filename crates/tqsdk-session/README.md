@@ -17,4 +17,6 @@
 - `refresh_schema(...).await`
 - `refresh_schema_value(...).await`
 
+默认会预置官方静态文件域名 `https://files.shinnytech.com` 作为 schema/file-backed metadata 的基地址，因此文件型 schema/metadata 刷新不需要额外传入环境变量。
+
 它不直接定义高层用户 API，也不把某一种消费风格硬编码进核心。

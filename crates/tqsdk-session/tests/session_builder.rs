@@ -10,6 +10,16 @@ fn builder_keeps_explicit_facade_config() {
 }
 
 #[test]
+fn builder_uses_official_schema_base_by_default() {
+    let builder = SessionClientBuilder::new("user", "pass");
+
+    assert_eq!(
+        builder.endpoints().schema_url.as_deref(),
+        Some("https://files.shinnytech.com")
+    );
+}
+
+#[test]
 fn builder_accepts_explicit_query_schema_and_replay_urls() {
     let builder = SessionClientBuilder::new("user", "pass")
         .query_url("https://query.example.com/graphql")
