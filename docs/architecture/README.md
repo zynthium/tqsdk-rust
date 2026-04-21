@@ -85,6 +85,7 @@ V1 是：
   - shared session shell
   - lazy establish + route / pending-route 驱动原语
   - direct query / schema refresh 薄层入口
+  - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
   - 供 `wait` / 未来 `stream` 共同依赖
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
@@ -92,6 +93,7 @@ V1 是：
   - serial window 视图
   - 基于 shared session 的 live `wait_update()` 驱动链路
   - trade 命令的 wait 风格薄包装
+  - 允许通过 `session()` 落回同一个底层 `SessionClient`，但不复制 direct query API
 
 这两层当前仍然遵守同一个约束：
 
@@ -121,6 +123,7 @@ V1 是：
 对用户形态的含义也应明确：
 
 - `tqsdk-session` 不是只给 facade 内部用，用户也可以直接使用它来做 direct query / schema / metadata 访问
+- `tqsdk-wait` 即便提供 `session()` 访问底层 session，也只是复用路径，不改变 direct query 的 crate 归属
 - `tqsdk-stream` 将来不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
 - 对性能极致敏感的用户，仍然可以直接使用 `tqsdk-core + tqsdk-session`
 
