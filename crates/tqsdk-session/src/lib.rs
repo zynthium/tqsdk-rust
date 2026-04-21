@@ -1,9 +1,14 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+#[doc(hidden)]
 pub mod builder;
+#[doc(hidden)]
 pub mod client;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod direct_query;
+#[doc(hidden)]
 pub mod error;
 mod metadata;
 mod services;
