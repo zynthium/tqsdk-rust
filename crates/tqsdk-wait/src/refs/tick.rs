@@ -1,6 +1,6 @@
-use tqsdk_core::Tick;
+use tqsdk_core::{ChartId, ObjectKey, StatePath, Tick};
 
-use crate::{api::TqApi, views::TickWindow};
+use crate::{api::TqApi, change::ChangeTrackedRef, views::TickWindow};
 
 #[derive(Debug, Clone)]
 pub struct TickSerialRef {
@@ -57,5 +57,17 @@ impl TickSerialRef {
             self.chart_id.clone(),
             rows,
         ))
+    }
+}
+
+impl ChangeTrackedRef for TickSerialRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Chart {
+            chart_id: ChartId::new(self.chart_id.clone()),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new(["charts", self.chart_id.as_str()])
     }
 }

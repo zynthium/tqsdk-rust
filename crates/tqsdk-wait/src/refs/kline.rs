@@ -1,6 +1,6 @@
-use tqsdk_core::Kline;
+use tqsdk_core::{ChartId, Kline, ObjectKey, StatePath};
 
-use crate::{api::TqApi, views::KlineWindow};
+use crate::{api::TqApi, change::ChangeTrackedRef, views::KlineWindow};
 
 #[derive(Debug, Clone)]
 pub struct KlineSerialRef {
@@ -67,5 +67,17 @@ impl KlineSerialRef {
             self.chart_id.clone(),
             rows,
         ))
+    }
+}
+
+impl ChangeTrackedRef for KlineSerialRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Chart {
+            chart_id: ChartId::new(self.chart_id.clone()),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new(["charts", self.chart_id.as_str()])
     }
 }
