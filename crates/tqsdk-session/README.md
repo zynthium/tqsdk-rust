@@ -23,6 +23,11 @@
 - `query_graphql_value(...).await`
 - `refresh_schema(...).await`
 - `refresh_schema_value(...).await`
+- `query_symbol_info(...).await`
+- `query_quotes(...).await`
+- `query_cont_quotes(...).await`
+- `query_options(...).await`
+- `OptionQueryFilter`
 - `refresh_auth(...).await`
 - `refresh_auth_value(...).await`
 - `replay_step(...).await`
@@ -74,10 +79,10 @@
 
 这些接口仍然属于 `tqsdk-session`，因为它们只是一次性 request/response：
 
-- `query_symbol_info(...)`
-- `query_quotes(...)`
-- `query_cont_quotes(...)`
-- `query_options(...)`
+- `query_symbol_info(...)` 已实现
+- `query_quotes(...)` 已实现
+- `query_cont_quotes(...)` 已实现
+- `query_options(...)` 已实现
 - `query_atm_options(...)`
 - `query_all_level_options(...)`
 - `query_all_level_finance_options(...)`

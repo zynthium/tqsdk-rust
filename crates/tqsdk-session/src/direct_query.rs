@@ -1,7 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use serde_json::Value;
-use tqsdk_core::{CommandId, EdbIndexData, SymbolRanking, SymbolSettlement, TradingCalendarDay};
+use tqsdk_core::{
+    CommandId, EdbIndexData, Quote, SymbolRanking, SymbolSettlement, TradingCalendarDay,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolRankingType {
@@ -31,6 +33,16 @@ pub enum EdbDataFill {
     Backward,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OptionQueryFilter {
+    pub option_class: Option<String>,
+    pub exercise_year: Option<i32>,
+    pub exercise_month: Option<i32>,
+    pub strike_price: Option<f64>,
+    pub expired: Option<bool>,
+    pub has_a: Option<bool>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait SessionDirectQuery {
     async fn query_graphql(
@@ -52,6 +64,30 @@ pub trait SessionDirectQuery {
         schema_id: &str,
         path: &str,
     ) -> crate::error::Result<Value>;
+
+    async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>>;
+
+    async fn query_quotes(
+        &self,
+        ins_class: Option<&str>,
+        exchange_id: Option<&str>,
+        product_id: Option<&str>,
+        expired: Option<bool>,
+        has_night: Option<bool>,
+    ) -> crate::error::Result<Vec<String>>;
+
+    async fn query_cont_quotes(
+        &self,
+        exchange_id: Option<&str>,
+        product_id: Option<&str>,
+        has_night: Option<bool>,
+    ) -> crate::error::Result<Vec<String>>;
+
+    async fn query_options(
+        &self,
+        underlying_symbol: &str,
+        filter: &OptionQueryFilter,
+    ) -> crate::error::Result<Vec<String>>;
 
     async fn get_trading_calendar(
         &self,

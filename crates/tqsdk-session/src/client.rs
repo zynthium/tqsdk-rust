@@ -9,16 +9,18 @@ use tokio::time::{Instant, timeout};
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommandId, CommitScope,
     DefaultRouteConnector, EdbIndexData, InternalEvent, OutboundDispatch, OutboundFrame,
-    QueryCommand, QueryId, ReplayCommand, ReplayEvent, ReqwestHttpExecutor, RouteRequestExecutor,
-    Runtime, RuntimeCommand, RuntimeHandle, RuntimeReader, SchemaCommand, SchemaId,
-    SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopologyResolver,
-    SymbolRanking, SymbolSettlement, SystemCommand, TqAuthProvider, TradeSessionTarget,
-    TradingCalendarDay,
+    QueryCommand, QueryId, Quote, ReplayCommand, ReplayEvent, ReqwestHttpExecutor,
+    RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeReader, SchemaCommand,
+    SchemaId, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget,
+    SessionTopologyResolver, SymbolRanking, SymbolSettlement, SystemCommand, TqAuthProvider,
+    TradeSessionTarget, TradingCalendarDay,
 };
 
 use crate::config::SessionFacadeConfig;
-use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionDirectQuery, SymbolRankingType};
+use crate::direct_query::{
+    EdbDataAlign, EdbDataFill, OptionQueryFilter, SessionDirectQuery, SymbolRankingType,
+};
 use crate::services::SessionServiceEndpoints;
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
@@ -716,6 +718,39 @@ impl SessionDirectQuery for SessionClient {
         path: &str,
     ) -> crate::error::Result<Value> {
         SessionClient::refresh_schema_value(self, schema_id, path).await
+    }
+
+    async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>> {
+        SessionClient::query_symbol_info(self, symbols).await
+    }
+
+    async fn query_quotes(
+        &self,
+        ins_class: Option<&str>,
+        exchange_id: Option<&str>,
+        product_id: Option<&str>,
+        expired: Option<bool>,
+        has_night: Option<bool>,
+    ) -> crate::error::Result<Vec<String>> {
+        SessionClient::query_quotes(self, ins_class, exchange_id, product_id, expired, has_night)
+            .await
+    }
+
+    async fn query_cont_quotes(
+        &self,
+        exchange_id: Option<&str>,
+        product_id: Option<&str>,
+        has_night: Option<bool>,
+    ) -> crate::error::Result<Vec<String>> {
+        SessionClient::query_cont_quotes(self, exchange_id, product_id, has_night).await
+    }
+
+    async fn query_options(
+        &self,
+        underlying_symbol: &str,
+        filter: &OptionQueryFilter,
+    ) -> crate::error::Result<Vec<String>> {
+        SessionClient::query_options(self, underlying_symbol, filter).await
     }
 
     async fn get_trading_calendar(
