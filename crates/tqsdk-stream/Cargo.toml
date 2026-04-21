@@ -1,0 +1,18 @@
+[package]
+name = "tqsdk-stream"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust async stream facade built on tqsdk-core and tqsdk-session"
+documentation = "https://docs.rs/tqsdk-stream"
+readme = "README.md"
+
+[dependencies]
+futures.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+tqsdk-core = { path = "../tqsdk-core" }
+tqsdk-session = { path = "../tqsdk-session" }
+
+[dev-dependencies]
+serde_json.workspace = true

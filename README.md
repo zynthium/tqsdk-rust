@@ -9,10 +9,10 @@
 | `tqsdk-core` | `crates/tqsdk-core` | 面向官方服务交互的低层 async substrate |
 | `tqsdk-session` | `crates/tqsdk-session` | mode-agnostic 的共享 session / direct-query thin layer |
 | `tqsdk-wait` | `crates/tqsdk-wait` | Python 风格 single-owner wait facade，基于 core/session |
+| `tqsdk-stream` | `crates/tqsdk-stream` | Rust async-native multi-consumer commit stream facade，基于 core/session |
 
 后续计划继续在这个 workspace 下补充多种 V2 facade crate，例如：
 
-- `tqsdk-stream`：面向 Rust 异步流消费模型的 facade，暂缓到 `tqsdk-session + tqsdk-wait` 稳定之后。
 - `tqsdk-callback`：面向 callback / event handler 风格的 facade。
 
 ## 分层原则
@@ -29,6 +29,7 @@ crates/
   tqsdk-core/      # 当前 V1 核心基座
   tqsdk-session/   # 共享 session / direct-query 层
   tqsdk-wait/      # Python 风格 wait facade
+  tqsdk-stream/    # Rust 风格 stream facade
 docs/
   architecture/    # 架构说明、分层设计与验证矩阵
 ```
@@ -38,6 +39,7 @@ docs/
 - core crate 说明见 [crates/tqsdk-core/README.md](crates/tqsdk-core/README.md)
 - session crate 说明见 [crates/tqsdk-session/README.md](crates/tqsdk-session/README.md)
 - wait crate 说明见 [crates/tqsdk-wait/README.md](crates/tqsdk-wait/README.md)
+- stream crate 说明见 [crates/tqsdk-stream/README.md](crates/tqsdk-stream/README.md)
 - 仓库级路线图见 [ROADMAP.md](ROADMAP.md)
 - 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
 - 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
@@ -55,7 +57,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - V1 core 已独立为子 crate，可单独发布。
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
-- `tqsdk-stream` 明确后置，等 `tqsdk-session + tqsdk-wait` 稳定后再进入。
+- `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface；后续继续补对象级 stream 与 trade 可靠事件流。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
 

@@ -172,7 +172,8 @@ V1 是：
 | DIFF 协议的纯 merge 语义 | [diff-core.md](diff-core.md) |
 | runtime contract：命令、状态、commit、cursor、adapter | [runtime-core/overview.md](runtime-core/overview.md)、[runtime-core/modules.md](runtime-core/modules.md)、[runtime-core/protocol-flow.md](runtime-core/protocol-flow.md)、[runtime-core/data-contracts.md](runtime-core/data-contracts.md)、[runtime-core/type-system.md](runtime-core/type-system.md)、[runtime-core/session-auth.md](runtime-core/session-auth.md) |
 | Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
-| 未来 `wait_update` adapter | [api-wait.md](api-wait.md) |
+| `wait_update` facade | [api-wait.md](api-wait.md) |
+| stream facade | [api-stream.md](api-stream.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
 
 ## 建议的概念分层
@@ -211,8 +212,9 @@ V1 是：
 9. [当前 crate 边界审计](crate-boundaries.md)
 10. [未来 crate 蓝图与能力映射](crate-blueprint.md)
 11. [验收与测试矩阵](validation.md)
-12. [未来 wait adapter](api-wait.md)
-13. [演进路线](roadmap.md)
+12. [wait facade](api-wait.md)
+13. [stream facade](api-stream.md)
+14. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
