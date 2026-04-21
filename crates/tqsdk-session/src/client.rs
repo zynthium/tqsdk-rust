@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::Value;
 use tqsdk_core::{
     CommandId, OutboundDispatch, QueryCommand, QueryId, Runtime, RuntimeCommand, RuntimeHandle,
@@ -8,6 +10,8 @@ use tqsdk_core::{
 
 use crate::config::SessionFacadeConfig;
 use crate::direct_query::SessionDirectQuery;
+
+static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -82,7 +86,7 @@ impl SessionClient {
         Ok(self.handle.submit(command).await?)
     }
 
-    pub async fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
+    pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
         Ok(self.handle.drain_dispatches()?)
     }
 
@@ -92,7 +96,10 @@ impl SessionClient {
         variables: Option<Value>,
     ) -> crate::error::Result<CommandId> {
         self.submit(RuntimeCommand::Query(QueryCommand::Fetch {
-            query_id: QueryId::new(format!("query-{}", query.len())),
+            query_id: QueryId::new(format!(
+                "query-{}",
+                NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+            )),
             query: query.to_owned(),
             variables,
         }))
