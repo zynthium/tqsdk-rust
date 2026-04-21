@@ -14,10 +14,19 @@
 - `drive_route_once()`
 - `command_state()`
 - `command_status()`
+- `auth_context()`
+- `refreshed_auth()`
+- `replay_state()`
 - `query_graphql(...).await`
 - `query_graphql_value(...).await`
 - `refresh_schema(...).await`
 - `refresh_schema_value(...).await`
+- `refresh_auth(...).await`
+- `refresh_auth_value(...).await`
+- `replay_step(...).await`
+- `replay_step_value(...).await`
+- `replay_reset(...).await`
+- `replay_reset_value(...).await`
 
 默认会预置官方静态文件域名 `https://files.shinnytech.com` 作为 schema/file-backed metadata 的基地址，因此文件型 schema/metadata 刷新不需要额外传入环境变量。
 

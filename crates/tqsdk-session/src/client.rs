@@ -8,11 +8,11 @@ use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 use tqsdk_core::{
     AdapterRegistry, AuthEvent, AuthProvider, CommandId, CommitScope, DefaultRouteConnector,
-    InternalEvent, OutboundDispatch, OutboundFrame, QueryCommand, QueryId, ReplayEvent,
-    ReqwestHttpExecutor, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle,
+    InternalEvent, OutboundDispatch, OutboundFrame, QueryCommand, QueryId, ReplayCommand,
+    ReplayEvent, ReqwestHttpExecutor, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle,
     RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig, SessionRoute,
     SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps,
-    SessionTarget, SessionTopologyResolver, TqAuthProvider, TradeSessionTarget,
+    SessionTarget, SessionTopologyResolver, SystemCommand, TqAuthProvider, TradeSessionTarget,
 };
 
 use crate::config::SessionFacadeConfig;
@@ -383,6 +383,27 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
+    pub fn auth_context(&self) -> crate::error::Result<Option<Value>> {
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["system", "auth", "context"])
+            .map_err(Into::into)
+    }
+
+    pub fn refreshed_auth(&self) -> crate::error::Result<Option<Value>> {
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["system", "auth", "refreshed"])
+            .map_err(Into::into)
+    }
+
+    pub fn replay_state(&self, replay_id: &str) -> crate::error::Result<Option<Value>> {
+        let guard = self.reader.read();
+        guard
+            .decode_path::<Value>(&["replay", replay_id])
+            .map_err(Into::into)
+    }
+
     fn command_completed(&self, command_id: CommandId) -> crate::error::Result<bool> {
         let Some(command) = self.command_state(command_id)? else {
             return Ok(false);
@@ -494,6 +515,48 @@ impl SessionClient {
         self.schema_value(schema_id)?
             .ok_or(crate::error::SessionFacadeError::InvalidState(
                 "schema refresh completed without a schema payload",
+            ))
+    }
+
+    pub async fn refresh_auth(&self) -> crate::error::Result<CommandId> {
+        self.submit(RuntimeCommand::System(SystemCommand::RefreshAuth))
+            .await
+    }
+
+    pub async fn refresh_auth_value(&self) -> crate::error::Result<Value> {
+        let command_id = self.refresh_auth().await?;
+        self.drive_until_command_completed(command_id).await?;
+        self.refreshed_auth()?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "auth refresh completed without a refreshed auth payload",
+            ))
+    }
+
+    pub async fn replay_step(&self) -> crate::error::Result<CommandId> {
+        self.submit(RuntimeCommand::Replay(ReplayCommand::Step))
+            .await
+    }
+
+    pub async fn replay_step_value(&self, replay_id: &str) -> crate::error::Result<Value> {
+        let command_id = self.replay_step().await?;
+        self.drive_until_command_completed(command_id).await?;
+        self.replay_state(replay_id)?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "replay step completed without a replay state payload",
+            ))
+    }
+
+    pub async fn replay_reset(&self) -> crate::error::Result<CommandId> {
+        self.submit(RuntimeCommand::Replay(ReplayCommand::Reset))
+            .await
+    }
+
+    pub async fn replay_reset_value(&self, replay_id: &str) -> crate::error::Result<Value> {
+        let command_id = self.replay_reset().await?;
+        self.drive_until_command_completed(command_id).await?;
+        self.replay_state(replay_id)?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "replay reset completed without a replay state payload",
             ))
     }
 
@@ -721,9 +784,9 @@ mod tests {
     use tqsdk_core::{
         AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
         InputPayload, IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
-        ProtocolDomain, QueryCommand, QueryId, RawFrame, RouteRequestExecutor, Runtime,
-        RuntimeCommand, RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
-        SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
+        ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId, RouteRequestExecutor,
+        Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig,
+        SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
         SessionTopology, SessionTopologyResolver, Transport,
     };
 
@@ -1117,6 +1180,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, json!({ "version": 2 }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_auth_value_drives_system_route_and_returns_auth_payload() {
+        let handle = runtime_with_default_adapters();
+        let client = test_live_client(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+        );
+
+        let value = client.refresh_auth_value().await.unwrap();
+
+        assert_eq!(value.get("access_token"), Some(&json!("test-token")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replay_value_helpers_drive_replay_route_and_return_current_state() {
+        let handle = runtime_with_default_adapters();
+        let client = test_live_client(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "replay".to_string(),
+                target: SessionTarget::Replay(ReplaySessionId::new("rb-test")),
+                domains: vec![ProtocolDomain::Replay],
+                endpoint: SessionRouteEndpoint::Replay {
+                    label: "rb-test".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+        );
+
+        let stepped = client.replay_step_value("rb-test").await.unwrap();
+        assert_eq!(stepped, json!({ "state": "stepped" }));
+
+        let reset = client.replay_reset_value("rb-test").await.unwrap();
+        assert_eq!(reset, json!({ "state": "reset" }));
     }
 
     #[test]
