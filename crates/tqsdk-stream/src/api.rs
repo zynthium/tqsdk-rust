@@ -7,7 +7,10 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tqsdk_core::{CommitScope, ObjectKey, ProtocolDomain, Quote, StatePath};
+use tqsdk_core::{
+    Account, CommitScope, ObjectKey, Order, Position, PreInsertOrder, ProtocolDomain, Quote,
+    StatePath, Trade, TradingStatus,
+};
 
 use crate::driver::{DriverEvent, StreamDriver};
 use crate::filter::{
@@ -72,6 +75,57 @@ impl TqStream {
         symbol: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<Quote>> {
         self.path_stream(["quotes", symbol.as_ref()])
+    }
+
+    pub fn trading_status_stream(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<TradingStatus>> {
+        self.path_stream(["trading_status", symbol.as_ref()])
+    }
+
+    pub fn account_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Account>> {
+        self.path_stream(["trade", account_id.as_ref(), "accounts", "CNY"])
+    }
+
+    pub fn position_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Position>> {
+        self.path_stream(["trade", account_id.as_ref(), "positions", symbol.as_ref()])
+    }
+
+    pub fn pre_insert_order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<PreInsertOrder>> {
+        self.path_stream([
+            "trade",
+            account_id.as_ref(),
+            "pre_insert_orders",
+            order_id.as_ref(),
+        ])
+    }
+
+    pub fn order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Order>> {
+        self.path_stream(["trade", account_id.as_ref(), "orders", order_id.as_ref()])
+    }
+
+    pub fn trade_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trade_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Trade>> {
+        self.path_stream(["trade", account_id.as_ref(), "trades", trade_id.as_ref()])
     }
 
     #[must_use]

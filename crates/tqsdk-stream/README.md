@@ -7,7 +7,7 @@
 - 提供共享 session 驱动的 `TqStream`
 - 提供多消费者 raw commit fan-out
 - 提供基于 path / scope / domain / object / field 的轻量 commit 过滤
-- 提供建立在 commit 过滤之上的 typed path / quote stream
+- 提供建立在 commit 过滤之上的 typed path / quote / trading_status / 基础 trade object stream
 - 保留 `RuntimeReader` 与 `SessionClient` 作为高性能读面和 direct-query 逃生舱
 
 它明确不负责：
@@ -39,6 +39,12 @@
 - `CommitStream::filter_fields(...)`
 - `path_stream::<T>(...)`
 - `quote_stream(...)`
+- `trading_status_stream(...)`
+- `account_stream(...)`
+- `position_stream(...)`
+- `pre_insert_order_stream(...)`
+- `order_stream(...)`
+- `trade_stream(...)`
 - `reader()`
 - `session()`
 - `into_session()`
@@ -47,7 +53,7 @@
 
 - 第一版只提供 raw commit stream，不预先冻结对象级 stream 形状
 - 第二版增量先补 commit 级 path / scope / domain / object / field 过滤，不直接跳到对象级 stream
-- 当前第三步只补了最薄的 typed path / quote stream，还没有开始冻结更宽的对象级 family API
+- 当前第三步只补了最薄的 typed path / market/trade 单对象 stream，还没有开始冻结 serial/window 或更宽的 family API
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`

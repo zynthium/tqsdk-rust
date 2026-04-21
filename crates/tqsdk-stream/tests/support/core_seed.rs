@@ -92,3 +92,113 @@ pub fn seed_quote_fields_commit_on_domains_with_scope(
         .unwrap()
         .expect("seed quote commit should produce a commit");
 }
+
+#[allow(dead_code)]
+pub fn seed_trading_status_commit(stream: &TqStream, symbol: &str, trade_status: &str) {
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trading_status": {
+                            symbol: {
+                                "symbol": symbol,
+                                "trade_status": trade_status
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed trading status commit should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "accounts": {
+                                    "CNY": {
+                                        "user_id": account_id,
+                                        "currency": "CNY",
+                                        "balance": 100000.0,
+                                        "available": 80000.0
+                                    }
+                                },
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "pos_long_today": 1,
+                                        "volume_long_today": 1,
+                                        "volume_long": 1,
+                                        "pos": 1,
+                                        "pos_long": 1
+                                    }
+                                },
+                                "orders": {
+                                    "order-1": {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": "order-1",
+                                        "exchange_order_id": "exchange-order-1",
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "volume_orign": 1,
+                                        "volume_left": 0,
+                                        "limit_price": 618.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1713660000000000000_i64,
+                                        "status": "FINISHED",
+                                        "trade_price": 618.0
+                                    }
+                                },
+                                "trades": {
+                                    "trade-1": {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": "order-1",
+                                        "trade_id": "trade-1",
+                                        "exchange_trade_id": "exchange-trade-1",
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "price": 618.0,
+                                        "volume": 1,
+                                        "trade_date_time": 1713660000100000000_i64,
+                                        "commission": 1.2
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed trade snapshot should produce a commit");
+}

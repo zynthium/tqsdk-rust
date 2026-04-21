@@ -199,6 +199,30 @@ impl TqStream {
         S: Into<String>;
     pub fn quote_stream(&self, symbol: impl AsRef<str>)
         -> tqsdk_stream::Result<PathValueStream<Quote>>;
+    pub fn trading_status_stream(&self, symbol: impl AsRef<str>)
+        -> tqsdk_stream::Result<PathValueStream<TradingStatus>>;
+    pub fn account_stream(&self, account_id: impl AsRef<str>)
+        -> tqsdk_stream::Result<PathValueStream<Account>>;
+    pub fn position_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<Position>>;
+    pub fn pre_insert_order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<PreInsertOrder>>;
+    pub fn order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<Order>>;
+    pub fn trade_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trade_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<Trade>>;
 }
 ```
 
@@ -209,6 +233,8 @@ impl TqStream {
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
 - `path_stream()` 是最薄的 typed decode 便利层
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
+- `trading_status/account/position/pre_insert_order/order/trade` 这些 wrapper
+  也都只是固定 path 的薄包装，不引入新的 driver 或 cache
 
 ### commit stream
 
@@ -317,7 +343,6 @@ where
 
 - `kline_stream(...)`
 - `tick_stream(...)`
-- `order_stream(...)`
 - `trade_events(...)`
 - callback bridge
 - trade command thin wrappers
@@ -455,8 +480,8 @@ crates/tqsdk-stream/
 
 ### 第三批
 
-- `path_stream<T>()` 与 `quote_stream()` 这种最薄 typed stream 已经开始落地
-- 下一步是补 `trading_status` / `kline` / `tick` / `order` 等 typed stream family
+- `path_stream<T>()` 与 `quote/trading_status/basic trade object` 这种最薄 typed stream 已经开始落地
+- 下一步是补 `kline` / `tick` / `security trade object` / `notification` 等 typed stream family
 - futures / securities 对象级投影
 
 ### 第四批
