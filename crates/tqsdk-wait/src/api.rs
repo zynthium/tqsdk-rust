@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use tqsdk_session::SessionClient;
 
+use crate::change::{matches_any, matches_fields, ChangeTrackedRef};
 use crate::driver::{WaitDriver, WaitGuard};
+use crate::refs::QuoteRef;
 
 pub struct TqApi {
     pub(crate) driver: WaitDriver,
@@ -53,6 +55,30 @@ impl TqApi {
 
     pub fn last_commit(&self) -> Option<&tqsdk_core::CommitResult> {
         self.driver.last_commit.as_ref()
+    }
+
+    pub fn quote_ref(&self, symbol: &str) -> QuoteRef {
+        QuoteRef::new(symbol)
+    }
+
+    pub fn is_changing(&self, target: &impl ChangeTrackedRef) -> crate::error::Result<bool> {
+        Ok(self
+            .driver
+            .last_commit
+            .as_ref()
+            .is_some_and(|commit| matches_any(&commit.changes, target)))
+    }
+
+    pub fn is_changing_fields(
+        &self,
+        target: &impl ChangeTrackedRef,
+        fields: &[&str],
+    ) -> crate::error::Result<bool> {
+        Ok(self
+            .driver
+            .last_commit
+            .as_ref()
+            .is_some_and(|commit| matches_fields(&commit.changes, target, fields)))
     }
 
     #[doc(hidden)]

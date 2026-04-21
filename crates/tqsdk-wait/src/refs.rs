@@ -1,5 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-/// Placeholder for reference helpers.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Refs;
+mod quote;
+mod trade;
+mod trading_status;
+
+pub use quote::QuoteRef;
+pub use trade::{AccountRef, OrderRef, PositionRef, TradeRef};
+pub use trading_status::TradingStatusRef;
