@@ -1,8 +1,13 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use tqsdk_core::{RuntimeHandle, RuntimeReader, SessionBootstrap, SessionRuntime};
+use serde_json::Value;
+use tqsdk_core::{
+    CommandId, OutboundDispatch, QueryCommand, QueryId, Runtime, RuntimeCommand, RuntimeHandle,
+    RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap, SessionRuntime,
+};
 
 use crate::config::SessionFacadeConfig;
+use crate::direct_query::SessionDirectQuery;
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -65,8 +70,68 @@ impl SessionClient {
         &self.runtime
     }
 
+    pub fn reader_clone(&self) -> RuntimeReader {
+        self.reader.clone()
+    }
+
+    pub fn runtime_clone(&self) -> SessionRuntime {
+        self.runtime.clone()
+    }
+
+    pub async fn submit(&self, command: RuntimeCommand) -> crate::error::Result<CommandId> {
+        Ok(self.handle.submit(command).await?)
+    }
+
+    pub async fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
+        Ok(self.handle.drain_dispatches()?)
+    }
+
+    pub async fn query_graphql(
+        &self,
+        query: &str,
+        variables: Option<Value>,
+    ) -> crate::error::Result<CommandId> {
+        self.submit(RuntimeCommand::Query(QueryCommand::Fetch {
+            query_id: QueryId::new(format!("query-{}", query.len())),
+            query: query.to_owned(),
+            variables,
+        }))
+        .await
+    }
+
+    pub async fn refresh_schema(
+        &self,
+        schema_id: &str,
+        path: &str,
+    ) -> crate::error::Result<CommandId> {
+        self.submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
+            schema_id: SchemaId::new(schema_id),
+            path: path.to_owned(),
+        }))
+        .await
+    }
+
     pub fn facade_config(&self) -> &SessionFacadeConfig {
         &self.facade_config
+    }
+
+    #[doc(hidden)]
+    pub fn new_for_test_with_handle(
+        _handle: RuntimeHandle,
+        facade_config: SessionFacadeConfig,
+    ) -> Self {
+        let mut adapters = tqsdk_core::AdapterRegistry::new();
+        adapters.register_default_adapters();
+
+        Self::new(
+            RuntimeHandle::with_adapters(adapters),
+            facade_config,
+            SessionClientContext::new(
+                String::new(),
+                String::new(),
+                tqsdk_core::EndpointConfig::default(),
+            ),
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -82,6 +147,24 @@ impl SessionClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn endpoints(&self) -> &tqsdk_core::EndpointConfig {
         &self.context.endpoints
+    }
+}
+
+impl SessionDirectQuery for SessionClient {
+    async fn query_graphql(
+        &self,
+        query: &str,
+        variables: Option<Value>,
+    ) -> crate::error::Result<CommandId> {
+        SessionClient::query_graphql(self, query, variables).await
+    }
+
+    async fn refresh_schema(
+        &self,
+        schema_id: &str,
+        path: &str,
+    ) -> crate::error::Result<CommandId> {
+        SessionClient::refresh_schema(self, schema_id, path).await
     }
 }
 

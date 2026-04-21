@@ -9,4 +9,5 @@ pub mod error;
 pub use builder::SessionClientBuilder;
 pub use client::SessionClient;
 pub use config::SessionFacadeConfig;
+pub use direct_query::SessionDirectQuery;
 pub use error::{Result, SessionFacadeError};

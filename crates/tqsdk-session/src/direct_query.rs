@@ -1,5 +1,16 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-/// Placeholder for direct query helpers.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DirectQuery;
+use serde_json::Value;
+use tqsdk_core::CommandId;
+
+#[allow(async_fn_in_trait)]
+pub trait SessionDirectQuery {
+    async fn query_graphql(
+        &self,
+        query: &str,
+        variables: Option<Value>,
+    ) -> crate::error::Result<CommandId>;
+
+    async fn refresh_schema(&self, schema_id: &str, path: &str)
+        -> crate::error::Result<CommandId>;
+}
