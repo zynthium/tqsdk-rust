@@ -42,3 +42,51 @@
 - `tqsdk-session` 负责一次性 direct query / schema / metadata
 - `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
 - 未来 `tqsdk-stream` 负责 stream/event 风格的持续状态消费
+
+## 建议的 Direct Query 接口层次
+
+按当前分层，`tqsdk-session` 里的 direct query 再细分为三层：
+
+### 第一层：已经存在的原始入口
+
+- `query_graphql(...).await`
+- `query_graphql_value(...).await`
+- `refresh_schema(...).await`
+- `refresh_schema_value(...).await`
+
+这一层的目标是保证所有一次性 query/schema 都已经有可用底座。
+
+### 第二层：建议优先补齐的 typed/thin wrappers
+
+这些接口仍然属于 `tqsdk-session`，因为它们只是一次性 request/response：
+
+- `query_symbol_info(...)`
+- `query_quotes(...)`
+- `query_cont_quotes(...)`
+- `query_options(...)`
+- `query_atm_options(...)`
+- `query_all_level_options(...)`
+- `query_all_level_finance_options(...)`
+- `get_trading_calendar(...)`
+- `query_symbol_settlement(...)`
+- `query_symbol_ranking(...)`
+- `query_edb_data(...)`
+
+其中：
+
+- `get_trading_calendar(...)`
+- `query_symbol_settlement(...)`
+- `query_symbol_ranking(...)`
+- `query_edb_data(...)`
+
+最适合先补，因为它们和当前 core 里的 `TradingCalendarDay`、`SymbolSettlement`、`SymbolRanking`、`EdbIndexData` typed contract 直接对应。
+
+### 第三层：不应放进 `tqsdk-session` 的高层派生接口
+
+下面这些虽然在 Python 里也表现成“查询”，但已经不只是薄的 request/response 包装，更像研究工具层：
+
+- `query_his_cont_quotes(...)`
+- `query_option_greeks(...)`
+- 各种 DataFrame / polars 形状兼容接口
+
+这些更适合留给后续独立的 research/tools crate，而不是进入 `tqsdk-session`。

@@ -124,6 +124,30 @@ V1 是：
 - `tqsdk-stream` 将来不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
 - 对性能极致敏感的用户，仍然可以直接使用 `tqsdk-core + tqsdk-session`
 
+在 `tqsdk-session` 这一层里，建议再按“薄包装 vs 高层研究工具”继续收一刀：
+
+- 应当进入 `tqsdk-session` 的 thin wrapper：
+  - `query_symbol_info`
+  - `query_quotes`
+  - `query_cont_quotes`
+  - `query_options`
+  - `query_atm_options`
+  - `query_all_level_options`
+  - `query_all_level_finance_options`
+  - `get_trading_calendar`
+  - `query_symbol_settlement`
+  - `query_symbol_ranking`
+  - `query_edb_data`
+- 不应进入 `tqsdk-session` 的高层派生接口：
+  - `query_his_cont_quotes`
+  - `query_option_greeks`
+  - DataFrame / polars 形状兼容层
+
+原因也很简单：
+
+- 前一组仍然只是“远端请求 -> 一次性结果”的薄包装
+- 后一组已经开始包含研究工作流、衍生计算或 tabular/view 语义
+
 ## 参考仓库的使用方式
 - `tqsdk-python` 是语义基准
   - 尤其是提交边界、对象一致性、初始截面、命令可见性、回放推进这些语义

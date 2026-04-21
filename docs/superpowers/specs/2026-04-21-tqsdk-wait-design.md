@@ -249,6 +249,37 @@ tqsdk-wait              tqsdk-stream
   - 如果是，就属于 `wait` / `stream`
   - 如果不是，只是一次 `await` 请求/响应，就属于 `tqsdk-session`
 
+再具体到 Python / 现有 Rust 参考实现里的方法名，建议分成下面三档：
+
+### 应优先补进 `tqsdk-session` 的 thin wrappers
+
+- `query_symbol_info`
+- `query_quotes`
+- `query_cont_quotes`
+- `query_options`
+- `query_atm_options`
+- `query_all_level_options`
+- `query_all_level_finance_options`
+- `get_trading_calendar`
+- `query_symbol_settlement`
+- `query_symbol_ranking`
+- `query_edb_data`
+
+### 已有 raw substrate，暂时可只保留原始入口
+
+- `query_graphql`
+- `refresh_schema`
+
+原则是：如果某类查询的稳定返回形状、过滤参数和 typed contract 还没完全收敛，就先停留在 raw `query_graphql` / `refresh_schema`，不要急着在 facade 层做半成品 convenience API。
+
+### 不应放进 `tqsdk-session` 的研究/工具层接口
+
+- `query_his_cont_quotes`
+- `query_option_greeks`
+- DataFrame / polars 兼容包装
+
+这些接口已经不只是“薄的 request/response 包装”，而是在 direct query 结果之上叠加了研究工作流与派生计算语义。
+
 ### 高级工具层
 这些能力属于独立高级工具 crate，而不属于 `wait`/`stream`：
 
