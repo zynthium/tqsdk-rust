@@ -111,12 +111,15 @@ V1 是：
    - 将 market diff、trade、query/schema、replay、system 接入同一个 runtime
    - 只负责编解码与 mutation 归一化
    - 没有提交权
-4. `consumption-adapters`
+4. `shared session layer`
+   - 负责会话生命周期、query/schema/direct-query 封装，以及后续 facade 共享的 session 入口
+   - 是 `wait` / `stream` facade 之前的薄层
+5. `consumption facades`
    - `wait_update`
    - stream
    - callback
    - 都只是消费 `RuntimeReader` / `UpdateCursor` 的后续适配层
-5. `user facades`
+6. `user facades`
    - `TqApi`
    - typed views
    - task/tooling
@@ -154,5 +157,6 @@ user facades / tools
 ## 当前总判断
 - 真正的可复用底层不是原始 WebSocket 客户端，也不是某一种用户 API
 - 真正的可复用底层是：`统一命令模型 + 统一状态树 + 统一 commit/revision/change 模型 + reader-first 读契约`
+- `tqsdk-session` 会先承接 shared session、direct query、schema / metadata 这类薄层职责
 - `wait_update` 和 `stream/callback` 的差异只能体现在“怎么消费 commit / 怎么读取同一棵状态树”，不能体现在“怎么生成 commit”
 - V1 的完成标准是 contract 完整，不是 facade 完整

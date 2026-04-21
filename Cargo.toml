@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/tqsdk-core"]
-default-members = ["crates/tqsdk-core"]
+members = ["crates/tqsdk-core", "crates/tqsdk-session", "crates/tqsdk-wait"]
+default-members = ["crates/tqsdk-core", "crates/tqsdk-session", "crates/tqsdk-wait"]
 resolver = "3"
 
 [workspace.dependencies]

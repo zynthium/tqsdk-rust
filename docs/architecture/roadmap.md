@@ -49,7 +49,16 @@
 - 所有远端交互都进入统一 `command -> mutation -> commit -> reader` 链路
 - 不暴露任何用户态 facade
 
-### Phase 2：Consumption Adapters
+### Phase 2：Shared Session Layer
+包含：
+- `tqsdk-session`
+- direct query / schema / metadata / session setup
+
+目标：
+- 把 session 相关的共享逻辑从具体 facade 中抽出来
+- 为后续 `wait_update` / stream facade 提供同一条 session 入口
+
+### Phase 3：Consumption Adapters And Facades
 包含：
 - `wait_update` adapter
 - stream adapter
@@ -58,8 +67,9 @@
 
 目标：
 - 验证同一 reader / cursor 模型足以支撑多种消费风格
+- 其中 `tqsdk-wait` 先落地，`tqsdk-stream` 暂缓到 `tqsdk-session + tqsdk-wait` 稳定之后
 
-### Phase 3：Typed User Facades
+### Phase 4：Typed User Facades
 包含：
 - `TqApi`
 - typed views / snapshots
@@ -69,7 +79,7 @@
 目标：
 - 在不回改 runtime core 的前提下，构建面向策略作者的稳定 API
 
-### Phase 4：Higher-Level Tasks And Tooling
+### Phase 5：Higher-Level Tasks And Tooling
 包含：
 - `TargetPosTask`
 - 多账户编排
@@ -78,6 +88,11 @@
 
 目标：
 - 只在 facade 稳定后扩展高层能力
+
+## 当前落地顺序
+- `tqsdk-session` 先于 `tqsdk-wait` 落地，用来承接 direct query、schema / metadata 和共享 session setup。
+- `tqsdk-wait` 紧随其后，作为 Python 风格的单 owner wait facade。
+- `tqsdk-stream` 暂时后置，等 `tqsdk-session + tqsdk-wait` 的边界稳定后再进入。
 
 ## 实现建议
 1. 先锁定 `RuntimeCommand` / `RuntimeInput` / `NormalizedMutation` / `CommitResult`

@@ -1,17 +1,18 @@
 # `tqsdk-rust`
 
-这是一个 Cargo workspace，用来承载 Rust 版 TQSDK 的核心层与后续不同风格的 facade 层。
+这是一个 Cargo workspace，用来承载 Rust 版 TQSDK 的核心层、共享 session 层，以及后续不同风格的 facade 层。
 
-仓库当前已经落地的成员只有一个：
+仓库当前已经落地的成员如下：
 
 | Crate | 路径 | 角色 |
 | --- | --- | --- |
 | `tqsdk-core` | `crates/tqsdk-core` | 面向官方服务交互的低层 async substrate |
+| `tqsdk-session` | `crates/tqsdk-session` | mode-agnostic 的共享 session / direct-query thin layer |
+| `tqsdk-wait` | `crates/tqsdk-wait` | Python 风格 single-owner wait facade，基于 core/session |
 
 后续计划继续在这个 workspace 下补充多种 V2 facade crate，例如：
 
-- `tqsdk-wait`：贴近 Python `wait_update()` 语义的 facade。
-- `tqsdk-stream`：面向 Rust 异步流消费模型的 facade。
+- `tqsdk-stream`：面向 Rust 异步流消费模型的 facade，暂缓到 `tqsdk-session + tqsdk-wait` 稳定之后。
 - `tqsdk-callback`：面向 callback / event handler 风格的 facade。
 
 ## 分层原则
@@ -26,6 +27,8 @@
 ```text
 crates/
   tqsdk-core/      # 当前 V1 核心基座
+  tqsdk-session/   # 共享 session / direct-query 层
+  tqsdk-wait/      # Python 风格 wait facade
 docs/
   architecture/    # 架构说明、分层设计与验证矩阵
 ```
@@ -33,6 +36,8 @@ docs/
 ## 文档入口
 
 - core crate 说明见 [crates/tqsdk-core/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-core/README.md)
+- session crate 说明见 [crates/tqsdk-session/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-session/README.md)
+- wait crate 说明见 [crates/tqsdk-wait/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/crates/tqsdk-wait/README.md)
 - 架构总览见 [docs/architecture/README.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/docs/architecture/README.md)
 - 验证矩阵见 [docs/architecture/validation.md](/Users/joeslee/Projects/GitHub/tqsdk-rust/docs/architecture/validation.md)
 
@@ -47,6 +52,8 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 ## 当前状态
 
 - V1 core 已独立为子 crate，可单独发布。
+- `tqsdk-session` 与 `tqsdk-wait` 的骨架已加入 workspace，作为 V2 facades 的前置分层。
+- `tqsdk-stream` 明确后置，等 `tqsdk-session + tqsdk-wait` 稳定后再进入。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经下沉到 `crates/tqsdk-core/README.md`。
 
