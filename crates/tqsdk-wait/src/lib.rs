@@ -10,4 +10,5 @@ pub mod views;
 
 pub use api::TqApi;
 pub use builder::TqApiBuilder;
+pub use driver::WaitDriver;
 pub use error::{Result, WaitFacadeError};

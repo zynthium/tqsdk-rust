@@ -1,5 +1,62 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-/// Placeholder for wait facade driver logic.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Driver;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::error::{Result, WaitFacadeError};
+
+pub struct WaitDriver {
+    #[allow(dead_code)]
+    pub(crate) session: tqsdk_session::SessionClient,
+    #[allow(dead_code)]
+    pub(crate) reader: tqsdk_core::RuntimeReader,
+    #[allow(dead_code)]
+    pub(crate) cursor: tqsdk_core::UpdateCursor,
+    pub(crate) runtime: tqsdk_core::SessionRuntime,
+    pub(crate) deferred_commits: VecDeque<tqsdk_core::CommitResult>,
+    pub(crate) last_commit: Option<tqsdk_core::CommitResult>,
+    pub(crate) waiting: AtomicBool,
+    #[allow(dead_code)]
+    pub(crate) next_order_seq: AtomicU64,
+}
+
+impl WaitDriver {
+    pub(crate) fn begin_wait(&self) -> Result<WaitGuard<'_>> {
+        WaitGuard::new(&self.waiting)
+    }
+}
+
+#[doc(hidden)]
+pub struct WaitGuard<'a> {
+    waiting: &'a AtomicBool,
+}
+
+impl<'a> WaitGuard<'a> {
+    pub(crate) fn new(waiting: &'a AtomicBool) -> Result<Self> {
+        if waiting.swap(true, Ordering::AcqRel) {
+            return Err(WaitFacadeError::ConcurrentWaitUpdate);
+        }
+
+        Ok(Self { waiting })
+    }
+}
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        self.waiting.store(false, Ordering::Release);
+    }
+}
+
+impl std::fmt::Debug for WaitGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitGuard").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for WaitGuard<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.waiting, other.waiting)
+    }
+}
+
+impl Eq for WaitGuard<'_> {}
