@@ -9,6 +9,7 @@ readme = "README.md"
 
 [dependencies]
 futures.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 tqsdk-core = { path = "../tqsdk-core" }

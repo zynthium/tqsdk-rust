@@ -7,12 +7,13 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tqsdk_core::{CommitScope, ObjectKey, ProtocolDomain, StatePath};
+use tqsdk_core::{CommitScope, ObjectKey, ProtocolDomain, Quote, StatePath};
 
 use crate::driver::{DriverEvent, StreamDriver};
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
+use crate::typed::PathValueStream;
 
 const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -53,6 +54,24 @@ impl TqStream {
     #[must_use]
     pub fn reader(&self) -> &tqsdk_core::RuntimeReader {
         &self.reader
+    }
+
+    pub fn path_stream<T, I, S>(&self, path: I) -> crate::error::Result<PathValueStream<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let path = StatePath::new(path);
+        let commits = self.commit_stream()?.filter_paths([path.clone()]);
+        Ok(PathValueStream::new(commits, self.reader.clone(), path))
+    }
+
+    pub fn quote_stream(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Quote>> {
+        self.path_stream(["quotes", symbol.as_ref()])
     }
 
     #[must_use]

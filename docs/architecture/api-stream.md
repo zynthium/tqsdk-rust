@@ -192,6 +192,13 @@ impl TqStream {
     pub fn reader(&self) -> &RuntimeReader;
 
     pub fn commit_stream(&self) -> tqsdk_stream::Result<CommitStream>;
+    pub fn path_stream<T, I, S>(&self, path: I) -> tqsdk_stream::Result<PathValueStream<T>>
+    where
+        T: DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: Into<String>;
+    pub fn quote_stream(&self, symbol: impl AsRef<str>)
+        -> tqsdk_stream::Result<PathValueStream<Quote>>;
 }
 ```
 
@@ -200,6 +207,8 @@ impl TqStream {
 - `session()` 是 one-shot query / raw command / direct-query 的 escape hatch
 - `reader()` 保留高性能用户直接读共享状态树的权利
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
+- `path_stream()` 是最薄的 typed decode 便利层
+- `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 
 ### commit stream
 
@@ -268,6 +277,31 @@ pub enum StreamFacadeError {
 - `Lagged` 是 stream facade 自己的 fan-out lag，不是 `tqsdk-core` cursor lag
 - 这两者必须区分开
 
+### typed path stream
+
+```rust
+pub struct ValueUpdate<T> {
+    pub commit: CommitResult,
+    pub value: T,
+}
+
+pub struct PathValueStream<T> { /* private */ }
+
+impl<T> futures::Stream for PathValueStream<T>
+where
+    T: DeserializeOwned,
+{
+    type Item = tqsdk_stream::Result<ValueUpdate<T>>;
+}
+```
+
+设计意图：
+
+- 不引入第二棵状态树
+- 不把 typed stream 的推进点从 commit fan-out 分叉出去
+- typed stream 只是“收到匹配 commit 后，用同一个 `RuntimeReader` 立即 decode”
+- 若调用方需要更低开销或更细粒度控制，仍然可以直接使用 `CommitStream + reader()`
+
 ## 第一版实现边界
 
 ### 必须先实现
@@ -281,7 +315,6 @@ pub enum StreamFacadeError {
 
 ### 这一版先不实现
 
-- `quote_stream(...)`
 - `kline_stream(...)`
 - `tick_stream(...)`
 - `order_stream(...)`
@@ -422,7 +455,8 @@ crates/tqsdk-stream/
 
 ### 第三批
 
-- quote / kline / tick / trade live object stream facade
+- `path_stream<T>()` 与 `quote_stream()` 这种最薄 typed stream 已经开始落地
+- 下一步是补 `trading_status` / `kline` / `tick` / `order` 等 typed stream family
 - futures / securities 对象级投影
 
 ### 第四批
