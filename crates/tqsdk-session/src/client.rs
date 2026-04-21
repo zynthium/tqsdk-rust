@@ -19,7 +19,8 @@ use tqsdk_core::{
 
 use crate::config::SessionFacadeConfig;
 use crate::direct_query::{
-    EdbDataAlign, EdbDataFill, OptionQueryFilter, SessionDirectQuery, SymbolRankingType,
+    AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
+    OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SymbolRankingType,
 };
 use crate::services::SessionServiceEndpoints;
 
@@ -751,6 +752,30 @@ impl SessionDirectQuery for SessionClient {
         filter: &OptionQueryFilter,
     ) -> crate::error::Result<Vec<String>> {
         SessionClient::query_options(self, underlying_symbol, filter).await
+    }
+
+    async fn query_atm_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AtmOptionQuery,
+    ) -> crate::error::Result<Vec<Option<String>>> {
+        SessionClient::query_atm_options(self, underlying_symbol, query).await
+    }
+
+    async fn query_all_level_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AllLevelOptionQuery,
+    ) -> crate::error::Result<OptionLevelQuotes> {
+        SessionClient::query_all_level_options(self, underlying_symbol, query).await
+    }
+
+    async fn query_all_level_finance_options(
+        &self,
+        underlying_symbol: &str,
+        query: &FinanceOptionLevelQuery,
+    ) -> crate::error::Result<OptionLevelQuotes> {
+        SessionClient::query_all_level_finance_options(self, underlying_symbol, query).await
     }
 
     async fn get_trading_calendar(

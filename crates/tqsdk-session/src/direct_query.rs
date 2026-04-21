@@ -43,6 +43,40 @@ pub struct OptionQueryFilter {
     pub has_a: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AtmOptionQuery {
+    pub underlying_price: f64,
+    pub price_levels: Vec<i32>,
+    pub option_class: String,
+    pub exercise_year: Option<i32>,
+    pub exercise_month: Option<i32>,
+    pub has_a: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AllLevelOptionQuery {
+    pub underlying_price: f64,
+    pub option_class: String,
+    pub exercise_year: Option<i32>,
+    pub exercise_month: Option<i32>,
+    pub has_a: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FinanceOptionLevelQuery {
+    pub underlying_price: f64,
+    pub option_class: String,
+    pub nearbys: Vec<i32>,
+    pub has_a: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OptionLevelQuotes {
+    pub in_money: Vec<String>,
+    pub at_money: Vec<String>,
+    pub out_of_money: Vec<String>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait SessionDirectQuery {
     async fn query_graphql(
@@ -88,6 +122,24 @@ pub trait SessionDirectQuery {
         underlying_symbol: &str,
         filter: &OptionQueryFilter,
     ) -> crate::error::Result<Vec<String>>;
+
+    async fn query_atm_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AtmOptionQuery,
+    ) -> crate::error::Result<Vec<Option<String>>>;
+
+    async fn query_all_level_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AllLevelOptionQuery,
+    ) -> crate::error::Result<OptionLevelQuotes>;
+
+    async fn query_all_level_finance_options(
+        &self,
+        underlying_symbol: &str,
+        query: &FinanceOptionLevelQuery,
+    ) -> crate::error::Result<OptionLevelQuotes>;
 
     async fn get_trading_calendar(
         &self,

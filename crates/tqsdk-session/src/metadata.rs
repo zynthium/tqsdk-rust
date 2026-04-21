@@ -7,7 +7,10 @@ use serde_json::{Map, Value, json};
 use tqsdk_core::Quote;
 
 use crate::client::SessionClient;
-use crate::direct_query::OptionQueryFilter;
+use crate::direct_query::{
+    AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionLevelQuotes,
+    OptionQueryFilter,
+};
 use crate::error::{Result, SessionFacadeError};
 
 const FUTURE_EXCHANGES: &[&str] = &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
@@ -308,6 +311,153 @@ impl SessionClient {
             filter.has_a,
         ))
     }
+
+    pub async fn query_atm_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AtmOptionQuery,
+    ) -> Result<Vec<Option<String>>> {
+        if underlying_symbol.is_empty() {
+            return Err(validation("underlying_symbol must not be empty"));
+        }
+        validate_option_class(query.option_class.as_str())?;
+        validate_price_levels(&query.price_levels)?;
+
+        let payload = self
+            .query_graphql_value(
+                QUERY_OPTIONS,
+                Some(json!({
+                    "instrument_id": [underlying_symbol],
+                    "derivative_class": ["OPTION"],
+                })),
+            )
+            .await?;
+        let mut nodes = filter_option_nodes(
+            parse_option_nodes(&payload),
+            Some(query.option_class.as_str()),
+            query.exercise_year,
+            query.exercise_month,
+            query.has_a,
+            None,
+        );
+        if nodes.is_empty() {
+            return Ok(query.price_levels.iter().map(|_| None).collect());
+        }
+
+        let atm_index = sort_options_and_get_atm_index(
+            &mut nodes,
+            query.underlying_price,
+            query.option_class.as_str(),
+        )?;
+        let mut result = Vec::with_capacity(query.price_levels.len());
+        for price_level in &query.price_levels {
+            let index = atm_index as i64 - *price_level as i64;
+            if index >= 0 && (index as usize) < nodes.len() {
+                result.push(Some(nodes[index as usize].instrument_id.clone()));
+            } else {
+                result.push(None);
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn query_all_level_options(
+        &self,
+        underlying_symbol: &str,
+        query: &AllLevelOptionQuery,
+    ) -> Result<OptionLevelQuotes> {
+        if underlying_symbol.is_empty() {
+            return Err(validation("underlying_symbol must not be empty"));
+        }
+        validate_option_class(query.option_class.as_str())?;
+
+        let payload = self
+            .query_graphql_value(
+                QUERY_OPTIONS,
+                Some(json!({
+                    "instrument_id": [underlying_symbol],
+                    "derivative_class": ["OPTION"],
+                })),
+            )
+            .await?;
+        let mut nodes = filter_option_nodes(
+            parse_option_nodes(&payload),
+            Some(query.option_class.as_str()),
+            query.exercise_year,
+            query.exercise_month,
+            query.has_a,
+            None,
+        );
+        if nodes.is_empty() {
+            return Ok(OptionLevelQuotes::default());
+        }
+        let atm_index = sort_options_and_get_atm_index(
+            &mut nodes,
+            query.underlying_price,
+            query.option_class.as_str(),
+        )?;
+        Ok(OptionLevelQuotes {
+            in_money: nodes[..atm_index]
+                .iter()
+                .map(|node| node.instrument_id.clone())
+                .collect(),
+            at_money: vec![nodes[atm_index].instrument_id.clone()],
+            out_of_money: nodes[atm_index + 1..]
+                .iter()
+                .map(|node| node.instrument_id.clone())
+                .collect(),
+        })
+    }
+
+    pub async fn query_all_level_finance_options(
+        &self,
+        underlying_symbol: &str,
+        query: &FinanceOptionLevelQuery,
+    ) -> Result<OptionLevelQuotes> {
+        if underlying_symbol.is_empty() {
+            return Err(validation("underlying_symbol must not be empty"));
+        }
+        validate_finance_underlying(underlying_symbol)?;
+        validate_option_class(query.option_class.as_str())?;
+        validate_finance_nearbys(underlying_symbol, &query.nearbys)?;
+
+        let payload = self
+            .query_graphql_value(
+                QUERY_OPTIONS,
+                Some(json!({
+                    "instrument_id": [underlying_symbol],
+                    "derivative_class": ["OPTION"],
+                })),
+            )
+            .await?;
+        let mut nodes = filter_option_nodes(
+            parse_option_nodes(&payload),
+            Some(query.option_class.as_str()),
+            None,
+            None,
+            query.has_a,
+            Some(&query.nearbys),
+        );
+        if nodes.is_empty() {
+            return Ok(OptionLevelQuotes::default());
+        }
+        let atm_index = sort_options_and_get_atm_index(
+            &mut nodes,
+            query.underlying_price,
+            query.option_class.as_str(),
+        )?;
+        Ok(OptionLevelQuotes {
+            in_money: nodes[..atm_index]
+                .iter()
+                .map(|node| node.instrument_id.clone())
+                .collect(),
+            at_money: vec![nodes[atm_index].instrument_id.clone()],
+            out_of_money: nodes[atm_index + 1..]
+                .iter()
+                .map(|node| node.instrument_id.clone())
+                .collect(),
+        })
+    }
 }
 
 fn validation(message: impl Into<String>) -> SessionFacadeError {
@@ -458,6 +608,197 @@ fn parse_query_options_result(
         }
     }
     options
+}
+
+#[derive(Debug, Clone)]
+struct OptionNode {
+    instrument_id: String,
+    english_name: String,
+    call_or_put: String,
+    strike_price: f64,
+    expired: bool,
+    last_exercise_datetime: i64,
+    exercise_year: i32,
+    exercise_month: i32,
+}
+
+fn parse_option_nodes(payload: &Value) -> Vec<OptionNode> {
+    let mut nodes = Vec::new();
+    if let Some(result) = payload.get("result")
+        && let Some(symbols) = result.get("multi_symbol_info").and_then(Value::as_array)
+    {
+        for symbol in symbols {
+            if let Some(derivatives) = symbol.get("derivatives")
+                && let Some(edges) = derivatives.get("edges").and_then(Value::as_array)
+            {
+                for edge in edges {
+                    let Some(node) = edge.get("node").and_then(Value::as_object) else {
+                        continue;
+                    };
+                    let Some(instrument_id) = node.get("instrument_id").and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let Some(call_or_put) = node.get("call_or_put").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(strike_price) = node.get("strike_price").and_then(Value::as_f64)
+                    else {
+                        continue;
+                    };
+                    let Some(last_exercise_datetime) =
+                        node.get("last_exercise_datetime").and_then(Value::as_i64)
+                    else {
+                        continue;
+                    };
+                    let Some(datetime) = timestamp_nano_to_datetime(Some(last_exercise_datetime))
+                    else {
+                        continue;
+                    };
+                    nodes.push(OptionNode {
+                        instrument_id: instrument_id.to_string(),
+                        english_name: node
+                            .get("english_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        call_or_put: call_or_put.to_string(),
+                        strike_price,
+                        expired: node
+                            .get("expired")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        last_exercise_datetime,
+                        exercise_year: datetime.year(),
+                        exercise_month: datetime.month() as i32,
+                    });
+                }
+            }
+        }
+    }
+    nodes
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BisectPriority {
+    Left,
+    Right,
+}
+
+fn bisect_value_index(values: &[f64], target: f64, priority: BisectPriority) -> usize {
+    let insert_index = values.partition_point(|value| *value <= target);
+    if 0 < insert_index && insert_index < values.len() {
+        let left_distance = target - values[insert_index - 1];
+        let right_distance = values[insert_index] - target;
+        if left_distance == right_distance {
+            match priority {
+                BisectPriority::Left => insert_index - 1,
+                BisectPriority::Right => insert_index,
+            }
+        } else if left_distance < right_distance {
+            insert_index - 1
+        } else {
+            insert_index
+        }
+    } else if insert_index == 0 {
+        0
+    } else {
+        values.len().saturating_sub(1)
+    }
+}
+
+fn filter_option_nodes(
+    options: Vec<OptionNode>,
+    option_class: Option<&str>,
+    exercise_year: Option<i32>,
+    exercise_month: Option<i32>,
+    has_a: Option<bool>,
+    nearbys: Option<&[i32]>,
+) -> Vec<OptionNode> {
+    let mut filtered: Vec<OptionNode> = options
+        .into_iter()
+        .filter(|option| {
+            let mut matches = true;
+            if let Some(option_class) = option_class {
+                matches = matches && option.call_or_put == option_class;
+            }
+            if let Some(has_a) = has_a {
+                let count = option.english_name.matches('A').count();
+                matches = matches && ((has_a && count > 0) || (!has_a && count == 0));
+            }
+            if let Some(exercise_year) = exercise_year {
+                matches = matches && option.exercise_year == exercise_year;
+            }
+            if let Some(exercise_month) = exercise_month {
+                matches = matches && option.exercise_month == exercise_month;
+            }
+            matches
+        })
+        .collect();
+
+    if let Some(nearbys) = nearbys {
+        filtered.retain(|option| !option.expired);
+        let mut expiries: Vec<i64> = filtered
+            .iter()
+            .map(|option| option.last_exercise_datetime)
+            .collect();
+        expiries.sort_unstable();
+        expiries.dedup();
+        let selected: std::collections::HashSet<i64> = nearbys
+            .iter()
+            .filter_map(|index| expiries.get(*index as usize).copied())
+            .collect();
+        filtered.retain(|option| selected.contains(&option.last_exercise_datetime));
+    }
+
+    filtered
+}
+
+fn sort_options_and_get_atm_index(
+    options: &mut [OptionNode],
+    underlying_price: f64,
+    option_class: &str,
+) -> Result<usize> {
+    if options.is_empty() {
+        return Err(validation("options must not be empty"));
+    }
+
+    options.sort_by(|left, right| {
+        left.last_exercise_datetime
+            .cmp(&right.last_exercise_datetime)
+            .then_with(|| {
+                left.strike_price
+                    .partial_cmp(&right.strike_price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let strikes: Vec<f64> = options.iter().map(|option| option.strike_price).collect();
+    let priority = if option_class == "CALL" {
+        BisectPriority::Right
+    } else {
+        BisectPriority::Left
+    };
+    let atm_index = bisect_value_index(&strikes, underlying_price, priority);
+    let atm_instrument_id = options
+        .iter()
+        .find(|option| option.strike_price == strikes[atm_index])
+        .map(|option| option.instrument_id.clone())
+        .ok_or_else(|| validation("failed to locate ATM option instrument"))?;
+
+    if option_class == "PUT" {
+        options.sort_by(|left, right| {
+            right
+                .strike_price
+                .partial_cmp(&left.strike_price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    options
+        .iter()
+        .position(|option| option.instrument_id == atm_instrument_id)
+        .ok_or_else(|| validation("failed to locate ATM option index"))
 }
 
 fn parse_query_symbol_info_quotes(
@@ -736,9 +1077,93 @@ fn timestamp_nano_to_datetime(value: Option<i64>) -> Option<chrono::DateTime<Utc
     chrono::DateTime::<Utc>::from_timestamp(value / 1_000_000_000, (value % 1_000_000_000) as u32)
 }
 
+fn validate_option_class(option_class: &str) -> Result<()> {
+    if matches!(option_class, "CALL" | "PUT") {
+        Ok(())
+    } else {
+        Err(validation("option_class must be either `CALL` or `PUT`"))
+    }
+}
+
+fn validate_price_levels(price_levels: &[i32]) -> Result<()> {
+    if price_levels
+        .iter()
+        .all(|price_level| (-100..=100).contains(price_level))
+    {
+        Ok(())
+    } else {
+        Err(validation(
+            "price_levels must only contain integers in [-100, 100]",
+        ))
+    }
+}
+
+fn validate_finance_underlying(underlying_symbol: &str) -> Result<()> {
+    const ALLOWED: &[&str] = &[
+        "SSE.000300",
+        "SSE.510050",
+        "SSE.510300",
+        "SZSE.159919",
+        "SZSE.159915",
+        "SZSE.159922",
+        "SSE.510500",
+        "SSE.000016",
+        "SSE.000852",
+    ];
+    if ALLOWED.contains(&underlying_symbol) {
+        Ok(())
+    } else {
+        Err(validation("unsupported finance option underlying"))
+    }
+}
+
+fn validate_finance_nearbys(underlying_symbol: &str, nearbys: &[i32]) -> Result<()> {
+    let is_index = matches!(
+        underlying_symbol,
+        "SSE.000300" | "SSE.000852" | "SSE.000016"
+    );
+    if is_index {
+        if nearbys.iter().all(|value| matches!(value, 0..=5)) {
+            Ok(())
+        } else {
+            Err(validation(format!(
+                "index option nearbys for `{underlying_symbol}` must be in [0, 5]"
+            )))
+        }
+    } else if nearbys.iter().all(|value| matches!(value, 0..=3)) {
+        Ok(())
+    } else {
+        Err(validation(format!(
+            "ETF option nearbys for `{underlying_symbol}` must be in [0, 3]"
+        )))
+    }
+}
+
 fn strip_null_object_fields(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
         object.retain(|_, value| !value.is_null());
+    }
+}
+
+#[cfg(test)]
+fn make_option_for_test(
+    instrument_id: &str,
+    strike_price: f64,
+    call_or_put: &str,
+    last_exercise_datetime: i64,
+    english_name: &str,
+    expired: bool,
+) -> OptionNode {
+    let datetime = timestamp_nano_to_datetime(Some(last_exercise_datetime)).unwrap();
+    OptionNode {
+        instrument_id: instrument_id.to_string(),
+        english_name: english_name.to_string(),
+        call_or_put: call_or_put.to_string(),
+        strike_price,
+        expired,
+        last_exercise_datetime,
+        exercise_year: datetime.year(),
+        exercise_month: datetime.month() as i32,
     }
 }
 
@@ -748,8 +1173,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        BisectPriority, bisect_value_index, filter_option_nodes, make_option_for_test,
         parse_query_cont_quotes_result, parse_query_options_result, parse_query_quotes_result,
-        parse_query_symbol_info_quotes,
+        parse_query_symbol_info_quotes, sort_options_and_get_atm_index, validate_finance_nearbys,
+        validate_finance_underlying, validate_price_levels,
     };
 
     #[test]
@@ -920,5 +1347,86 @@ mod tests {
         assert_eq!(quotes[1].exercise_year, 2027);
         assert_eq!(quotes[1].exercise_month, 7);
         assert!(quotes[1].expire_rest_days.is_some());
+    }
+
+    #[test]
+    fn bisect_value_index_prefers_virtual_side_on_equal_distance() {
+        let values = vec![100.0, 110.0];
+        assert_eq!(
+            values[bisect_value_index(&values, 105.0, BisectPriority::Right)],
+            110.0
+        );
+        assert_eq!(
+            values[bisect_value_index(&values, 105.0, BisectPriority::Left)],
+            100.0
+        );
+    }
+
+    #[test]
+    fn sort_options_uses_virtual_contract_as_atm_when_distance_ties() {
+        let ts = Utc
+            .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp()
+            * 1_000_000_000;
+
+        let mut calls = vec![
+            make_option_for_test("C90", 90.0, "CALL", ts, "", false),
+            make_option_for_test("C110", 110.0, "CALL", ts, "", false),
+        ];
+        let call_index = sort_options_and_get_atm_index(&mut calls, 100.0, "CALL").unwrap();
+        assert_eq!(calls[call_index].instrument_id, "C110");
+
+        let mut puts = vec![
+            make_option_for_test("P90", 90.0, "PUT", ts, "", false),
+            make_option_for_test("P110", 110.0, "PUT", ts, "", false),
+        ];
+        let put_index = sort_options_and_get_atm_index(&mut puts, 100.0, "PUT").unwrap();
+        assert_eq!(puts[put_index].instrument_id, "P90");
+    }
+
+    #[test]
+    fn filter_option_nodes_keeps_requested_nearbys() {
+        let ts1 = Utc
+            .with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp()
+            * 1_000_000_000;
+        let ts2 = Utc
+            .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp()
+            * 1_000_000_000;
+        let filtered = filter_option_nodes(
+            vec![
+                make_option_for_test("A1", 100.0, "CALL", ts1, "", false),
+                make_option_for_test("A2", 110.0, "CALL", ts1, "", false),
+                make_option_for_test("B1", 100.0, "CALL", ts2, "", false),
+                make_option_for_test("B2", 110.0, "CALL", ts2, "", false),
+            ],
+            Some("CALL"),
+            None,
+            None,
+            None,
+            Some(&[1]),
+        );
+        let ids: std::collections::HashSet<String> = filtered
+            .into_iter()
+            .map(|option| option.instrument_id)
+            .collect();
+        assert!(ids.contains("B1"));
+        assert!(ids.contains("B2"));
+        assert!(!ids.contains("A1"));
+        assert!(!ids.contains("A2"));
+    }
+
+    #[test]
+    fn finance_option_validations_match_expected_ranges() {
+        validate_price_levels(&[-101]).unwrap_err();
+        validate_finance_underlying("SHFE.au2605").unwrap_err();
+        validate_finance_nearbys("SSE.000300", &[0, 5]).unwrap();
+        validate_finance_nearbys("SSE.000300", &[6]).unwrap_err();
+        validate_finance_nearbys("SSE.510300", &[0, 3]).unwrap();
+        validate_finance_nearbys("SSE.510300", &[4]).unwrap_err();
     }
 }

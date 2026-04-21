@@ -27,7 +27,14 @@
 - `query_quotes(...).await`
 - `query_cont_quotes(...).await`
 - `query_options(...).await`
+- `query_atm_options(...).await`
+- `query_all_level_options(...).await`
+- `query_all_level_finance_options(...).await`
 - `OptionQueryFilter`
+- `AtmOptionQuery`
+- `AllLevelOptionQuery`
+- `FinanceOptionLevelQuery`
+- `OptionLevelQuotes`
 - `refresh_auth(...).await`
 - `refresh_auth_value(...).await`
 - `replay_step(...).await`
@@ -83,9 +90,9 @@
 - `query_quotes(...)` 已实现
 - `query_cont_quotes(...)` 已实现
 - `query_options(...)` 已实现
-- `query_atm_options(...)`
-- `query_all_level_options(...)`
-- `query_all_level_finance_options(...)`
+- `query_atm_options(...)` 已实现
+- `query_all_level_options(...)` 已实现
+- `query_all_level_finance_options(...)` 已实现
 - `get_trading_calendar(...)` 已实现
 - `query_symbol_settlement(...)` 已实现
 - `query_symbol_ranking(...)` 已实现
