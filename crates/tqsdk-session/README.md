@@ -122,6 +122,12 @@
 
 `SessionDirectQuery` 只是把这三层统一组合成一个总 trait，便于上层在泛型约束里一次性声明完整 direct-query 能力。
 
+这些 request / response DTO 会保持薄结构，但按可发布 crate 的方式预留扩展空间：
+
+- `OptionQueryFilter` 可用 `new()` / `Default::default()` 构造，其他请求结构通过 `new(...)` 构造
+- 结构标记为 `non_exhaustive`，后续官方协议增加字段时可以扩展而不破坏用户代码
+- 参数合法性仍在发起请求前统一校验，避免在 DTO 层引入重逻辑
+
 ### 不应放进 `tqsdk-session` 的高层派生接口
 
 下面这些虽然在 Python 里也表现成“查询”，但已经不只是薄的 request/response 包装，更像研究工具层：

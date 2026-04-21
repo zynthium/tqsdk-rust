@@ -33,6 +33,7 @@ pub enum EdbDataFill {
     Backward,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OptionQueryFilter {
     pub option_class: Option<String>,
@@ -43,7 +44,15 @@ pub struct OptionQueryFilter {
     pub has_a: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+impl OptionQueryFilter {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AtmOptionQuery {
     pub underlying_price: f64,
     pub price_levels: Vec<i32>,
@@ -53,7 +62,26 @@ pub struct AtmOptionQuery {
     pub has_a: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+impl AtmOptionQuery {
+    #[must_use]
+    pub fn new(
+        underlying_price: f64,
+        price_levels: impl Into<Vec<i32>>,
+        option_class: impl Into<String>,
+    ) -> Self {
+        Self {
+            underlying_price,
+            price_levels: price_levels.into(),
+            option_class: option_class.into(),
+            exercise_year: None,
+            exercise_month: None,
+            has_a: None,
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AllLevelOptionQuery {
     pub underlying_price: f64,
     pub option_class: String,
@@ -62,7 +90,21 @@ pub struct AllLevelOptionQuery {
     pub has_a: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+impl AllLevelOptionQuery {
+    #[must_use]
+    pub fn new(underlying_price: f64, option_class: impl Into<String>) -> Self {
+        Self {
+            underlying_price,
+            option_class: option_class.into(),
+            exercise_year: None,
+            exercise_month: None,
+            has_a: None,
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FinanceOptionLevelQuery {
     pub underlying_price: f64,
     pub option_class: String,
@@ -70,6 +112,23 @@ pub struct FinanceOptionLevelQuery {
     pub has_a: Option<bool>,
 }
 
+impl FinanceOptionLevelQuery {
+    #[must_use]
+    pub fn new(
+        underlying_price: f64,
+        option_class: impl Into<String>,
+        nearbys: impl Into<Vec<i32>>,
+    ) -> Self {
+        Self {
+            underlying_price,
+            option_class: option_class.into(),
+            nearbys: nearbys.into(),
+            has_a: None,
+        }
+    }
+}
+
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionLevelQuotes {
     pub in_money: Vec<String>,
@@ -205,4 +264,34 @@ pub trait SessionDirectQuery: SessionRawQuery + SessionMetadataQuery + SessionSe
 impl<T> SessionDirectQuery for T where
     T: SessionRawQuery + SessionMetadataQuery + SessionServiceQuery
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionQueryFilter};
+
+    #[test]
+    fn option_filter_new_returns_empty_filter() {
+        assert_eq!(OptionQueryFilter::new(), OptionQueryFilter::default());
+    }
+
+    #[test]
+    fn option_request_constructors_preserve_required_fields() {
+        let atm = AtmOptionQuery::new(3188.0, [-2, 0, 2], "CALL");
+        assert_eq!(atm.underlying_price, 3188.0);
+        assert_eq!(atm.price_levels, vec![-2, 0, 2]);
+        assert_eq!(atm.option_class, "CALL");
+        assert_eq!(atm.exercise_year, None);
+
+        let all_level = AllLevelOptionQuery::new(3188.0, "PUT");
+        assert_eq!(all_level.underlying_price, 3188.0);
+        assert_eq!(all_level.option_class, "PUT");
+        assert_eq!(all_level.exercise_month, None);
+
+        let finance = FinanceOptionLevelQuery::new(3188.0, "CALL", [0, 3]);
+        assert_eq!(finance.underlying_price, 3188.0);
+        assert_eq!(finance.option_class, "CALL");
+        assert_eq!(finance.nearbys, vec![0, 3]);
+        assert_eq!(finance.has_a, None);
+    }
 }
