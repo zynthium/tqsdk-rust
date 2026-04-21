@@ -1,20 +1,23 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
-use chrono::{Datelike, Days, NaiveDate};
-use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use chrono::{Datelike, NaiveDate};
 use serde_json::{Value, json};
-use tqsdk_core::{AuthContext, EdbIndexData, SymbolRanking, SymbolSettlement, TradingCalendarDay};
-use url::Url;
+use tqsdk_core::{EdbIndexData, SymbolRanking, SymbolSettlement, TradingCalendarDay};
 
 use crate::client::SessionClient;
 use crate::direct_query::{EdbDataAlign, EdbDataFill, SymbolRankingType};
 use crate::error::{Result, SessionFacadeError};
 
-const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
+#[path = "services_helpers.rs"]
+mod helpers;
+
+use self::helpers::{
+    fetch_json_get, fetch_json_post, json_value_to_f64, next_day, parse_iso_date,
+    parse_service_url, ranking_value, split_symbol,
+};
+
 const DEFAULT_SETTLEMENT_URL: &str = "https://md-settlement-system-fc-api.shinnytech.com/mss";
 const DEFAULT_RANKING_URL: &str = "https://symbol-ranking-system-fc-api.shinnytech.com/srs";
 const DEFAULT_EDB_URL: &str = "https://edb.shinnytech.com/data/index_data";
@@ -485,168 +488,6 @@ impl SessionClient {
 
         Ok(result)
     }
-}
-
-fn split_symbol(symbol: &str) -> (&str, &str) {
-    symbol
-        .split_once('.')
-        .map_or(("", symbol), |(exchange, instrument)| {
-            (exchange, instrument)
-        })
-}
-
-fn ranking_value(row: &SymbolRanking, field: &str) -> f64 {
-    match field {
-        "volume_ranking" => row.volume_ranking,
-        "long_ranking" => row.long_ranking,
-        "short_ranking" => row.short_ranking,
-        _ => f64::NAN,
-    }
-}
-
-fn parse_service_url(url: &str, label: &str) -> Result<Url> {
-    Url::parse(url).map_err(|error| {
-        SessionFacadeError::from(tqsdk_core::ContractError::validation(format!(
-            "invalid {label} service url: {error}"
-        )))
-    })
-}
-
-fn parse_iso_date(value: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|error| {
-        SessionFacadeError::from(tqsdk_core::ContractError::validation(format!(
-            "invalid date string `{value}`: {error}"
-        )))
-    })
-}
-
-fn next_day(date: NaiveDate) -> Result<NaiveDate> {
-    date.checked_add_days(Days::new(1)).ok_or_else(|| {
-        SessionFacadeError::from(tqsdk_core::ContractError::validation(
-            "date overflow while advancing day",
-        ))
-    })
-}
-
-fn json_value_to_f64(value: &Value) -> f64 {
-    match value {
-        Value::Number(number) => number.as_f64().unwrap_or(f64::NAN),
-        Value::String(text) if matches!(text.as_str(), "NaN" | "-" | "") => f64::NAN,
-        Value::String(text) => text.parse().unwrap_or(f64::NAN),
-        Value::Null => f64::NAN,
-        _ => f64::NAN,
-    }
-}
-
-async fn fetch_json_get(client: &SessionClient, url: &str) -> Result<Value> {
-    fetch_json(client, "GET", url, None).await
-}
-
-async fn fetch_json_post(client: &SessionClient, url: &str, body: &Value) -> Result<Value> {
-    fetch_json(client, "POST", url, Some(body)).await
-}
-
-async fn fetch_json(
-    client: &SessionClient,
-    method: &'static str,
-    url: &str,
-    body: Option<&Value>,
-) -> Result<Value> {
-    require_tokio_runtime()?;
-
-    for force_refresh in [false, true] {
-        let auth = client.service_auth_context(force_refresh).await?;
-        let headers = auth_headers(&auth)?;
-        let request = match method {
-            "GET" => client.service_http().get(url).headers(headers),
-            "POST" => {
-                let Some(body) = body else {
-                    return Err(SessionFacadeError::from(
-                        tqsdk_core::ContractError::validation("post request requires a body"),
-                    ));
-                };
-                client.service_http().post(url).headers(headers).json(body)
-            }
-            _ => {
-                return Err(SessionFacadeError::from(
-                    tqsdk_core::ContractError::validation("unsupported service request method"),
-                ));
-            }
-        };
-
-        let response = request
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|error| {
-                SessionFacadeError::from(tqsdk_core::ContractError::transport(format!(
-                    "{method} {url} request failed: {error}"
-                )))
-            })?;
-
-        if response.status() == StatusCode::UNAUTHORIZED && !force_refresh {
-            continue;
-        }
-
-        return read_json_response(method, url, response).await;
-    }
-
-    Err(SessionFacadeError::from(tqsdk_core::ContractError::auth(
-        format!("{method} {url} authentication failed"),
-    )))
-}
-
-fn auth_headers(auth: &AuthContext) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
-    let authorization =
-        HeaderValue::from_str(&format!("Bearer {}", auth.access_token())).map_err(|error| {
-            SessionFacadeError::from(tqsdk_core::ContractError::auth(format!(
-                "invalid authorization header: {error}"
-            )))
-        })?;
-    headers.insert(AUTHORIZATION, authorization);
-    Ok(headers)
-}
-
-async fn read_json_response(method: &str, url: &str, response: reqwest::Response) -> Result<Value> {
-    let status = response.status();
-    let body = response.text().await.map_err(|error| {
-        SessionFacadeError::from(tqsdk_core::ContractError::transport(format!(
-            "{method} {url} failed while reading response body: {error}"
-        )))
-    })?;
-    if !status.is_success() {
-        return Err(SessionFacadeError::from(tqsdk_core::ContractError::http(
-            format!(
-                "{method} {url} failed with status {status}: {}",
-                truncate_body(&body)
-            ),
-        )));
-    }
-    serde_json::from_str(&body).map_err(|error| {
-        SessionFacadeError::from(tqsdk_core::ContractError::validation(format!(
-            "{method} {url} returned invalid json: {error}"
-        )))
-    })
-}
-
-fn truncate_body(body: &str) -> String {
-    const MAX_LEN: usize = 256;
-    if body.chars().count() <= MAX_LEN {
-        return body.to_string();
-    }
-    body.chars().take(MAX_LEN).collect::<String>() + "..."
-}
-
-fn require_tokio_runtime() -> Result<()> {
-    tokio::runtime::Handle::try_current().map_err(|_| {
-        SessionFacadeError::from(tqsdk_core::ContractError::validation(
-            "session direct service helpers require an active Tokio runtime",
-        ))
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]
