@@ -167,6 +167,8 @@ V1 是：
 | 主题 | 当前落点 |
 | :--- | :--- |
 | 总架构、阶段边界、路线图 | [README.md](README.md)、[roadmap.md](roadmap.md) |
+| 当前 workspace crate 边界审计 | [crate-boundaries.md](crate-boundaries.md) |
+| 未来 crate 蓝图与能力映射 | [crate-blueprint.md](crate-blueprint.md) |
 | DIFF 协议的纯 merge 语义 | [diff-core.md](diff-core.md) |
 | runtime contract：命令、状态、commit、cursor、adapter | [runtime-core/overview.md](runtime-core/overview.md)、[runtime-core/modules.md](runtime-core/modules.md)、[runtime-core/protocol-flow.md](runtime-core/protocol-flow.md)、[runtime-core/data-contracts.md](runtime-core/data-contracts.md)、[runtime-core/type-system.md](runtime-core/type-system.md)、[runtime-core/session-auth.md](runtime-core/session-auth.md) |
 | Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
@@ -206,9 +208,11 @@ V1 是：
 6. [数据契约](runtime-core/data-contracts.md)
 7. [类型约束](runtime-core/type-system.md)
 8. [Python / Rust facade 范式对比](facade-paradigms.md)
-9. [验收与测试矩阵](validation.md)
-10. [未来 wait adapter](api-wait.md)
-11. [演进路线](roadmap.md)
+9. [当前 crate 边界审计](crate-boundaries.md)
+10. [未来 crate 蓝图与能力映射](crate-blueprint.md)
+11. [验收与测试矩阵](validation.md)
+12. [未来 wait adapter](api-wait.md)
+13. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
