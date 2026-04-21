@@ -2,8 +2,10 @@
 
 use std::fmt::{Display, Formatter};
 
+/// Result alias for `tqsdk-session`.
 pub type Result<T> = std::result::Result<T, SessionFacadeError>;
 
+/// Errors returned by the shared session/direct-query facade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionFacadeError {
     Core(tqsdk_core::ContractError),

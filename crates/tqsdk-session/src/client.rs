@@ -128,6 +128,11 @@ impl SessionIoState {
 }
 
 #[derive(Clone)]
+/// Reusable async session facade shared by higher-level consumption styles.
+///
+/// [`SessionClient`] owns the live runtime handle plus one-shot direct-query,
+/// schema, replay, auth, and metadata/service helpers. It does not impose a
+/// `wait_update()` or stream/callback consumption model.
 pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,

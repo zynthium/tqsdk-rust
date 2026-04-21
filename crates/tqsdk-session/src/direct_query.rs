@@ -6,6 +6,7 @@ use tqsdk_core::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Ranking dimension accepted by the symbol ranking service.
 pub enum SymbolRankingType {
     Volume,
     Long,
@@ -23,11 +24,13 @@ impl SymbolRankingType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Alignment strategy for EDB series queries.
 pub enum EdbDataAlign {
     Day,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Missing-value fill strategy for EDB series queries.
 pub enum EdbDataFill {
     Forward,
     Backward,
@@ -35,6 +38,7 @@ pub enum EdbDataFill {
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq)]
+/// Optional filters forwarded to the official option metadata query.
 pub struct OptionQueryFilter {
     pub option_class: Option<String>,
     pub exercise_year: Option<i32>,
@@ -53,6 +57,7 @@ impl OptionQueryFilter {
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
+/// Parameters for the ATM option query helper.
 pub struct AtmOptionQuery {
     pub underlying_price: f64,
     pub price_levels: Vec<i32>,
@@ -82,6 +87,7 @@ impl AtmOptionQuery {
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
+/// Parameters for fetching all option levels around a target underlying price.
 pub struct AllLevelOptionQuery {
     pub underlying_price: f64,
     pub option_class: String,
@@ -105,6 +111,7 @@ impl AllLevelOptionQuery {
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
+/// Parameters for the finance-option all-level query helper.
 pub struct FinanceOptionLevelQuery {
     pub underlying_price: f64,
     pub option_class: String,
@@ -130,6 +137,7 @@ impl FinanceOptionLevelQuery {
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Grouped option symbols ordered by moneyness.
 pub struct OptionLevelQuotes {
     pub in_money: Vec<String>,
     pub at_money: Vec<String>,

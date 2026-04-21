@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+/// Session-level facade tuning shared by higher-layer crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionFacadeConfig {
     pub default_view_width: usize,

@@ -13,6 +13,10 @@ use crate::{
 
 const DEFAULT_SCHEMA_BASE_URL: &str = "https://files.shinnytech.com";
 
+/// Builder for a shared [`SessionClient`] substrate.
+///
+/// This builder owns endpoint selection and enabled protocol domains, but it
+/// deliberately stays below any wait/stream facade style.
 #[derive(Debug, Clone)]
 pub struct SessionClientBuilder {
     auth_user: String,
