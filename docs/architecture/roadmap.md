@@ -1,102 +1,12 @@
-# 分层成长路线
+# 发展路线
 
-## 先纠正优先级
-- V1 不是 `wait_update` 路线
-- V1 也不是 `stream/callback` 路线
-- V1 不应该先做 facade，再倒逼内核
-- V1 应先锁定 protocol-complete runtime contract
+仓库级的 canonical roadmap 已迁移到根目录：
 
-## 为什么要先做 runtime contract
-- 所有远端交互都必须进入统一提交链路
-- 未来 Python 风格和 Rust 风格 facade 都要复用同一个底座
-- 如果先做某一种 facade，后面大概率会把该 facade 的语义硬编码进内核
+- [ROADMAP.md](../../ROADMAP.md)
 
-## 演进路线
-### Phase 0：协议与语义基线
-包含：
-- DIFF merge 语义
-- transport / auth 测试桩
-- schema / query / replay / trade 的最小协议编解码分析
-- 状态树命名空间设计
-- command causality 草图
+这里不再维护第二份独立路线图，避免后续执行顺序与架构说明漂移。
 
-目标：
-- 锁定 V1 contract 的语义边界
-- 不引入高层 facade
+如需理解为什么这些阶段这样划分，请配合下面两份文档一起阅读：
 
-### Phase 1：Protocol-Complete Runtime Contract
-包含：
-- `RuntimeHandle`
-- `RuntimeReader`
-- `SnapshotReadGuard`
-- `StateReadView`
-- `RuntimeCommand`
-- `RuntimeInput`
-- `Revision`
-- `CommitResult`
-- `ChangeSet`
-- `UpdateCursor`
-- `StateSnapshot` / `CommitLog`（兼容与底层原语）
-- `CommandLedger`
-- `AdapterRegistry`
-- `SystemAdapter`
-- `MarketDiffAdapter`
-- `TradeAdapter`
-- `QueryAdapter`
-- `ReplayAdapter`
-
-目标：
-- 所有远端交互都进入统一 `command -> mutation -> commit -> reader` 链路
-- 不暴露任何用户态 facade
-
-### Phase 2：Shared Session Layer
-包含：
-- `tqsdk-session`
-- direct query / schema / metadata / session setup
-
-目标：
-- 把 session 相关的共享逻辑从具体 facade 中抽出来
-- 为后续 `wait_update` / stream facade 提供同一条 session 入口
-
-### Phase 3：Consumption Adapters And Facades
-包含：
-- `wait_update` adapter
-- stream adapter
-- callback adapter
-- backpressure / cursor consumption policy
-
-目标：
-- 验证同一 reader / cursor 模型足以支撑多种消费风格
-- 其中 `tqsdk-wait` 先落地，`tqsdk-stream` 暂缓到 `tqsdk-session + tqsdk-wait` 稳定之后
-
-### Phase 4：Typed User Facades
-包含：
-- `TqApi`
-- typed views / snapshots
-- `is_changing()` 类查询接口
-- facade 级错误语义
-
-目标：
-- 在不回改 runtime core 的前提下，构建面向策略作者的稳定 API
-
-### Phase 5：Higher-Level Tasks And Tooling
-包含：
-- `TargetPosTask`
-- 多账户编排
-- 下载器 / dataframe / polars
-- GUI / report / helper 工具层
-
-目标：
-- 只在 facade 稳定后扩展高层能力
-
-## 当前落地顺序
-- `tqsdk-session` 先于 `tqsdk-wait` 落地，用来承接 direct query、schema / metadata 和共享 session setup。
-- `tqsdk-wait` 紧随其后，作为 Python 风格的单 owner wait facade。
-- `tqsdk-stream` 暂时后置，等 `tqsdk-session + tqsdk-wait` 的边界稳定后再进入。
-
-## 实现建议
-1. 先锁定 `RuntimeCommand` / `RuntimeInput` / `NormalizedMutation` / `CommitResult`
-2. 再实现 session runtime、adapter registry、state store、commit assembler
-3. 再接入 market / trade / query / schema / replay 各协议域
-4. 完成 contract-level 测试后，再做 `wait_update` / stream / callback adapter
-5. facade 和任务系统最后再做
+- [当前 Crate 边界审计](crate-boundaries.md)
+- [未来 Crate 蓝图与能力映射](crate-blueprint.md)
