@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{Result, WaitFacadeError};
 
-pub struct WaitDriver {
+pub(crate) struct WaitDriver {
     #[allow(dead_code)]
     pub(crate) session: tqsdk_session::SessionClient,
     #[allow(dead_code)]

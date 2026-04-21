@@ -7,7 +7,7 @@ pub trait ChangeTrackedRef {
     fn state_path(&self) -> StatePath;
 }
 
-pub fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool {
+pub(crate) fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool {
     if let Some(key) = target.object_key()
         && changes.object_hits.contains(&key)
     {
@@ -20,7 +20,7 @@ pub fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool 
         .any(|path| path == &target.state_path())
 }
 
-pub fn matches_fields(
+pub(crate) fn matches_fields(
     changes: &ChangeSet,
     target: &impl ChangeTrackedRef,
     fields: &[&str],
