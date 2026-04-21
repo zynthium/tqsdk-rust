@@ -11,6 +11,5 @@ pub trait SessionDirectQuery {
         variables: Option<Value>,
     ) -> crate::error::Result<CommandId>;
 
-    async fn refresh_schema(&self, schema_id: &str, path: &str)
-        -> crate::error::Result<CommandId>;
+    async fn refresh_schema(&self, schema_id: &str, path: &str) -> crate::error::Result<CommandId>;
 }

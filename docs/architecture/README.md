@@ -79,6 +79,24 @@ V1 是：
 
 验证入口见 [validation.md](validation.md) 与 `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`。
 
+在 core 之上的第二层分拆也已经开始落地：
+
+- `tqsdk-session`
+  - shared session shell
+  - direct query / schema refresh 薄层入口
+  - 供 `wait` / 未来 `stream` 共同依赖
+- `tqsdk-wait`
+  - `TqApi` 单推进点 facade
+  - market/trade 对象引用
+  - serial window 视图
+  - trade 命令的 wait 风格薄包装
+
+这两层当前仍然遵守同一个约束：
+
+- 不反向修改 `tqsdk-core` 的 runtime contract
+- 不在 facade 层复制第二棵状态树
+- direct query 不重新塞回 `tqsdk-wait`
+
 ## 参考仓库的使用方式
 - `tqsdk-python` 是语义基准
   - 尤其是提交边界、对象一致性、初始截面、命令可见性、回放推进这些语义

@@ -1,15 +1,23 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tqsdk_core::{MarketChartCommand, MarketCommand, RuntimeCommand, Symbol};
+use serde_json::Value;
+use tqsdk_core::{
+    AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol, TradeCommand,
+    TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
+    TradeVolumeCondition,
+};
 use tqsdk_session::SessionClient;
 
-use crate::change::{matches_any, matches_fields, ChangeTrackedRef};
+use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
-use crate::refs::{KlineSerialRef, QuoteRef, TickSerialRef, TradingStatusRef};
+use crate::refs::{
+    AccountRef, KlineSerialRef, OrderRef, PositionRef, QuoteRef, TickSerialRef, TradeRef,
+    TradingStatusRef,
+};
 
 pub struct TqApi {
     pub(crate) driver: WaitDriver,
@@ -61,6 +69,22 @@ impl TqApi {
 
     pub fn quote_ref(&self, symbol: &str) -> QuoteRef {
         QuoteRef::new(symbol)
+    }
+
+    pub fn get_account(&self, account_id: &str) -> AccountRef {
+        AccountRef::new(account_id)
+    }
+
+    pub fn get_position(&self, account_id: &str, symbol: &str) -> PositionRef {
+        PositionRef::new(account_id, symbol)
+    }
+
+    pub fn get_order(&self, account_id: &str, order_id: &str) -> OrderRef {
+        OrderRef::new(account_id, order_id)
+    }
+
+    pub fn get_trade(&self, account_id: &str, trade_id: &str) -> TradeRef {
+        TradeRef::new(account_id, trade_id)
     }
 
     pub async fn get_quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {
@@ -135,22 +159,96 @@ impl TqApi {
         symbol: &str,
         data_length: usize,
     ) -> crate::error::Result<TickSerialRef> {
+        let chart_id = format!("wait-tick-{symbol}-{data_length}");
+
         self.driver
             .session
-            .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-                symbols: vec![Symbol::new(symbol)],
-            }))
+            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: vec![Symbol::new(symbol)],
+                    duration_ns: 0,
+                    view_width: data_length,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                },
+            )))
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
         let serial = TickSerialRef {
             symbol: symbol.to_string(),
             view_width: data_length,
+            chart_id,
         };
         self.wait_until_ready_for_test(|api| serial.is_ready(api))
             .await?;
 
         Ok(serial)
+    }
+
+    pub async fn insert_order(
+        &mut self,
+        account_id: &str,
+        symbol: &str,
+        direction: TradeDirection,
+        offset: Option<TradeOffset>,
+        volume: i64,
+        limit_price: Option<Value>,
+    ) -> crate::error::Result<OrderRef> {
+        let order_seq = self.driver.next_order_seq.fetch_add(1, Ordering::Relaxed);
+        let order_id = OrderId::new(format!("wait-order-{order_seq}"));
+
+        self.driver
+            .session
+            .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+                TradeInsertOrderCommand {
+                    account_id: AccountId::new(account_id),
+                    order_id: order_id.clone(),
+                    symbol: Symbol::new(symbol),
+                    direction,
+                    offset,
+                    volume,
+                    price_type: TradePriceType::Limit,
+                    limit_price,
+                    time_condition: TradeTimeCondition::Gfd,
+                    volume_condition: TradeVolumeCondition::Any,
+                },
+            )))
+            .await
+            .map_err(crate::error::WaitFacadeError::Session)?;
+
+        Ok(self.get_order(account_id, order_id.as_str()))
+    }
+
+    pub async fn cancel_order(
+        &mut self,
+        account_id: &str,
+        order_id: &str,
+    ) -> crate::error::Result<()> {
+        self.driver
+            .session
+            .submit(RuntimeCommand::Trade(TradeCommand::CancelOrder {
+                account_id: AccountId::new(account_id),
+                order_id: OrderId::new(order_id),
+            }))
+            .await
+            .map_err(crate::error::WaitFacadeError::Session)?;
+
+        Ok(())
+    }
+
+    pub async fn confirm_settlement(&mut self, account_id: &str) -> crate::error::Result<()> {
+        self.driver
+            .session
+            .submit(RuntimeCommand::Trade(TradeCommand::ConfirmSettlement {
+                account_id: AccountId::new(account_id),
+            }))
+            .await
+            .map_err(crate::error::WaitFacadeError::Session)?;
+
+        Ok(())
     }
 
     pub fn is_changing(&self, target: &impl ChangeTrackedRef) -> crate::error::Result<bool> {

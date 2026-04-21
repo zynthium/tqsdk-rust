@@ -52,7 +52,8 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 ## 当前状态
 
 - V1 core 已独立为子 crate，可单独发布。
-- `tqsdk-session` 与 `tqsdk-wait` 的骨架已加入 workspace，作为 V2 facades 的前置分层。
+- `tqsdk-session` 已承载共享 session shell 与 direct-query/schema 薄层入口。
+- `tqsdk-wait` 已具备 market/trade 对象引用、serial window、`wait_update()` 骨架与 trade 命令包装。
 - `tqsdk-stream` 明确后置，等 `tqsdk-session + tqsdk-wait` 稳定后再进入。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经下沉到 `crates/tqsdk-core/README.md`。

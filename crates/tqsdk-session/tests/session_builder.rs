@@ -44,10 +44,7 @@ fn facade_error_converts_core_errors_and_formats_messages() {
     let error =
         SessionFacadeError::from(tqsdk_core::ContractError::validation("bad session state"));
 
-    assert_eq!(
-        error.to_string(),
-        "validation error: bad session state"
-    );
+    assert_eq!(error.to_string(), "validation error: bad session state");
     assert!(std::error::Error::source(&error).is_some());
 
     let invalid_state = SessionFacadeError::InvalidState("missing session config");

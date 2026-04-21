@@ -29,9 +29,17 @@ impl KlineSerialRef {
         let guard = api.driver.reader.read();
         let mut rows = Vec::new();
         let duration_key = self.duration_ns.to_string();
-        let data_path = ["klines", self.symbol.as_str(), duration_key.as_str(), "data"];
+        let data_path = [
+            "klines",
+            self.symbol.as_str(),
+            duration_key.as_str(),
+            "data",
+        ];
 
-        if let Some(data) = guard.get_path(&data_path).and_then(|value| value.as_object()) {
+        if let Some(data) = guard
+            .get_path(&data_path)
+            .and_then(|value| value.as_object())
+        {
             let mut ids = data
                 .keys()
                 .filter_map(|key| key.parse::<i64>().ok())
@@ -52,6 +60,12 @@ impl KlineSerialRef {
             }
         }
 
-        Ok(KlineWindow::new(rows))
+        Ok(KlineWindow::new(
+            self.symbol.clone(),
+            self.duration_ns,
+            self.view_width,
+            self.chart_id.clone(),
+            rows,
+        ))
     }
 }

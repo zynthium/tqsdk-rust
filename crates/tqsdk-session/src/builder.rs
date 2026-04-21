@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use tqsdk_core::{EndpointConfig, RuntimeHandle};
+use tqsdk_core::{AdapterRegistry, EndpointConfig, RuntimeHandle};
 
 use crate::{
     client::{SessionClient, SessionClientContext},
@@ -17,10 +17,7 @@ pub struct SessionClientBuilder {
 }
 
 impl SessionClientBuilder {
-    pub fn new(
-        auth_user: impl Into<String>,
-        auth_pass: impl Into<String>,
-    ) -> Self {
+    pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
         Self {
             auth_user: auth_user.into(),
             auth_pass: auth_pass.into(),
@@ -64,7 +61,9 @@ impl SessionClientBuilder {
             endpoints,
             facade_config,
         } = self;
-        let handle = RuntimeHandle::new();
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let handle = RuntimeHandle::with_adapters(adapters);
         let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
         Ok(SessionClient::new(handle, facade_config, context))
     }

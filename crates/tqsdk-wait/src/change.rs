@@ -14,7 +14,10 @@ pub fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool 
         return true;
     }
 
-    changes.path_hits.iter().any(|path| path == &target.state_path())
+    changes
+        .path_hits
+        .iter()
+        .any(|path| path == &target.state_path())
 }
 
 pub fn matches_fields(

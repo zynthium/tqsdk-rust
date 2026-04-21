@@ -28,7 +28,9 @@ impl QuoteRef {
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<Quote> {
         self.snapshot(api)?
-            .ok_or(crate::error::WaitFacadeError::InvalidState("quote not ready"))
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "quote not ready",
+            ))
     }
 }
 

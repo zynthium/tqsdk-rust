@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-mod quote;
 mod kline;
+mod quote;
 mod tick;
 mod trade;
 mod trading_status;

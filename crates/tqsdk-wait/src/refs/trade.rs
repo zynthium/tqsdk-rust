@@ -17,13 +17,34 @@ impl AccountRef {
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<Account> {
-        api.driver
-            .reader
-            .read()
-            .decode_path::<Account>(&["trade", self.account_id.as_str(), "accounts", "CNY"])?
+        self.snapshot(api)?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "account not ready",
             ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Account>> {
+        api.driver
+            .reader
+            .read()
+            .decode_path::<Account>(&["trade", self.account_id.as_str(), "accounts", "CNY"])
+            .map_err(Into::into)
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for AccountRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Account {
+            account_id: self.account_id.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new(["trade", self.account_id.as_str(), "accounts", "CNY"])
     }
 }
 
@@ -42,6 +63,13 @@ impl PositionRef {
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<Position> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "position not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Position>> {
         api.driver
             .reader
             .read()
@@ -50,10 +78,30 @@ impl PositionRef {
                 self.account_id.as_str(),
                 "positions",
                 self.symbol.as_str(),
-            ])?
-            .ok_or(crate::error::WaitFacadeError::InvalidState(
-                "position not ready",
-            ))
+            ])
+            .map_err(Into::into)
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for PositionRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Position {
+            account_id: self.account_id.clone(),
+            symbol: self.symbol.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "positions",
+            self.symbol.as_str(),
+        ])
     }
 }
 
@@ -79,8 +127,20 @@ impl OrderRef {
         api.driver
             .reader
             .read()
-            .decode_path::<Order>(&["trade", self.account_id.as_str(), "orders", self.order_id.as_str()])
+            .decode_path::<Order>(&[
+                "trade",
+                self.account_id.as_str(),
+                "orders",
+                self.order_id.as_str(),
+            ])
             .map_err(Into::into)
+    }
+
+    pub fn load(&self, api: &TqApi) -> crate::error::Result<Order> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "order not ready",
+            ))
     }
 }
 
@@ -93,7 +153,12 @@ impl ChangeTrackedRef for OrderRef {
     }
 
     fn state_path(&self) -> StatePath {
-        StatePath::new(["trade", self.account_id.as_str(), "orders", self.order_id.as_str()])
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "orders",
+            self.order_id.as_str(),
+        ])
     }
 }
 
@@ -112,10 +177,44 @@ impl TradeRef {
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<Trade> {
+        self.snapshot(api)?
+            .ok_or(crate::error::WaitFacadeError::InvalidState(
+                "trade not ready",
+            ))
+    }
+
+    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Trade>> {
         api.driver
             .reader
             .read()
-            .decode_path::<Trade>(&["trade", self.account_id.as_str(), "trades", self.trade_id.as_str()])?
-            .ok_or(crate::error::WaitFacadeError::InvalidState("trade not ready"))
+            .decode_path::<Trade>(&[
+                "trade",
+                self.account_id.as_str(),
+                "trades",
+                self.trade_id.as_str(),
+            ])
+            .map_err(Into::into)
+    }
+
+    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        Ok(self.snapshot(api)?.is_some())
+    }
+}
+
+impl ChangeTrackedRef for TradeRef {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Trade {
+            account_id: self.account_id.clone(),
+            trade_id: self.trade_id.clone(),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new([
+            "trade",
+            self.account_id.as_str(),
+            "trades",
+            self.trade_id.as_str(),
+        ])
     }
 }

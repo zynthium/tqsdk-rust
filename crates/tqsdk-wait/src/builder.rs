@@ -8,10 +8,7 @@ pub struct TqApiBuilder {
 }
 
 impl TqApiBuilder {
-    pub fn new(
-        auth_user: impl Into<String>,
-        auth_pass: impl Into<String>,
-    ) -> Self {
+    pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
         Self {
             inner: tqsdk_session::SessionClientBuilder::new(auth_user, auth_pass),
         }

@@ -163,11 +163,7 @@ impl SessionDirectQuery for SessionClient {
         SessionClient::query_graphql(self, query, variables).await
     }
 
-    async fn refresh_schema(
-        &self,
-        schema_id: &str,
-        path: &str,
-    ) -> crate::error::Result<CommandId> {
+    async fn refresh_schema(&self, schema_id: &str, path: &str) -> crate::error::Result<CommandId> {
         SessionClient::refresh_schema(self, schema_id, path).await
     }
 }

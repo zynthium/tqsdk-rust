@@ -26,3 +26,18 @@ async fn get_kline_serial_waits_for_initial_ready_and_preserves_commit_for_user(
     assert!(serial.is_ready(&api).unwrap());
     assert!(api.wait_update(None).await.unwrap());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_user() {
+    let mut api = support::seeded_api();
+    support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 32);
+
+    let serial = api.get_tick_serial("SHFE.au2602", 32).await.unwrap();
+    let window = serial.load(&api).unwrap();
+
+    assert!(serial.is_ready(&api).unwrap());
+    assert_eq!(window.symbol(), "SHFE.au2602");
+    assert_eq!(window.view_width(), 32);
+    assert_eq!(window.last().unwrap().last_price, 618.5);
+    assert!(api.wait_update(None).await.unwrap());
+}
