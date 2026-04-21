@@ -79,6 +79,16 @@
 - `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
 - 未来 `tqsdk-stream` 负责 stream/event 风格的持续状态消费
 
+## 示例
+
+最小可编译示例见 [examples/query_symbol_info.rs](examples/query_symbol_info.rs)。
+
+这个示例展示的是最推荐的 direct-query 使用路径：
+
+- 调用方自带 Tokio runtime
+- 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
+- 直接通过 `SessionClient` 发起一次性 metadata query
+
 ## 建议的 Direct Query 接口层次
 
 按当前分层，`tqsdk-session` 里的 direct query 再细分为三层 trait：

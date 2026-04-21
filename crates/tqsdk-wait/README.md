@@ -77,6 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 完整可编译示例见 [examples/quote_wait.rs](examples/quote_wait.rs)。
 
+如果要证明 wait facade 可以复用同一个底层 session 做 direct query，而不需要额外建第二个 client，可参考 [examples/quote_wait_with_session_query.rs](examples/quote_wait_with_session_query.rs)。
+
 ## Builder 边界
 
 `TqApiBuilder` 只补一层和 wait facade 直接相关的便利配置，例如：

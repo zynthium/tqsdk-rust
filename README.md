@@ -58,6 +58,14 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经下沉到 `crates/tqsdk-core/README.md`。
 
+当前 workspace 里的最小可编译示例：
+
+- `crates/tqsdk-core/examples/live_probe.rs`
+- `crates/tqsdk-core/examples/live_market_history.rs`
+- `crates/tqsdk-session/examples/query_symbol_info.rs`
+- `crates/tqsdk-wait/examples/quote_wait.rs`
+- `crates/tqsdk-wait/examples/quote_wait_with_session_query.rs`
+
 ## 架构文档
 
 仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明：
