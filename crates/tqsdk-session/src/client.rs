@@ -7,16 +7,19 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 use tqsdk_core::{
-    AdapterRegistry, AuthEvent, AuthProvider, CommandId, CommitScope, DefaultRouteConnector,
-    InternalEvent, OutboundDispatch, OutboundFrame, QueryCommand, QueryId, ReplayCommand,
-    ReplayEvent, ReqwestHttpExecutor, RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle,
-    RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig, SessionRoute,
-    SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps,
-    SessionTarget, SessionTopologyResolver, SystemCommand, TqAuthProvider, TradeSessionTarget,
+    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommandId, CommitScope,
+    DefaultRouteConnector, EdbIndexData, InternalEvent, OutboundDispatch, OutboundFrame,
+    QueryCommand, QueryId, ReplayCommand, ReplayEvent, ReqwestHttpExecutor, RouteRequestExecutor,
+    Runtime, RuntimeCommand, RuntimeHandle, RuntimeReader, SchemaCommand, SchemaId,
+    SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopologyResolver,
+    SymbolRanking, SymbolSettlement, SystemCommand, TqAuthProvider, TradeSessionTarget,
+    TradingCalendarDay,
 };
 
 use crate::config::SessionFacadeConfig;
-use crate::direct_query::SessionDirectQuery;
+use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionDirectQuery, SymbolRankingType};
+use crate::services::SessionServiceEndpoints;
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 const PEEK_MESSAGE: &str = r#"{"aid":"peek_message"}"#;
@@ -32,6 +35,7 @@ pub(crate) struct SessionClientContext {
     auth_user: String,
     auth_pass: String,
     pub(crate) endpoints: tqsdk_core::EndpointConfig,
+    service_endpoints: SessionServiceEndpoints,
 }
 
 impl SessionClientContext {
@@ -44,6 +48,22 @@ impl SessionClientContext {
             auth_user,
             auth_pass,
             endpoints,
+            service_endpoints: SessionServiceEndpoints::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_services(
+        auth_user: impl Into<String>,
+        auth_pass: impl Into<String>,
+        endpoints: tqsdk_core::EndpointConfig,
+        service_endpoints: SessionServiceEndpoints,
+    ) -> Self {
+        Self {
+            auth_user: auth_user.into(),
+            auth_pass: auth_pass.into(),
+            endpoints,
+            service_endpoints,
         }
     }
 }
@@ -58,6 +78,7 @@ struct SessionIoState {
     adapters: AdapterRegistry,
     config: SessionConfig,
     run: Option<SessionRun>,
+    cached_auth: Option<AuthContext>,
     next_pending_route: usize,
     next_websocket_route: usize,
 }
@@ -87,6 +108,7 @@ impl SessionIoState {
             adapters,
             config,
             run: None,
+            cached_auth: None,
             next_pending_route: 0,
             next_websocket_route: 0,
         }
@@ -107,6 +129,7 @@ pub struct SessionClient {
     reader: RuntimeReader,
     runtime: SessionRuntime,
     facade_config: SessionFacadeConfig,
+    service_http: reqwest::Client,
     #[cfg_attr(not(test), allow(dead_code))]
     context: SessionClientContext,
     io: Option<Arc<Mutex<SessionIoState>>>,
@@ -159,6 +182,7 @@ impl SessionClient {
             reader,
             runtime,
             facade_config,
+            service_http: reqwest::Client::new(),
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
                 SessionIoComponents {
@@ -187,6 +211,7 @@ impl SessionClient {
             reader,
             runtime,
             facade_config,
+            service_http: reqwest::Client::new(),
             context,
             io: None,
         }
@@ -601,6 +626,37 @@ impl SessionClient {
         &self.facade_config
     }
 
+    pub(crate) fn service_http(&self) -> &reqwest::Client {
+        &self.service_http
+    }
+
+    pub(crate) fn service_endpoints(&self) -> &SessionServiceEndpoints {
+        &self.context.service_endpoints
+    }
+
+    pub(crate) async fn service_auth_context(
+        &self,
+        force_refresh: bool,
+    ) -> crate::error::Result<AuthContext> {
+        let Some(io) = self.io.as_ref() else {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "direct service helpers require a live session client",
+            ));
+        };
+
+        let auth_provider = {
+            let io = io.lock().await;
+            if !force_refresh && let Some(auth) = io.cached_auth.as_ref() {
+                return Ok(auth.clone());
+            }
+            io.auth_provider.clone()
+        };
+
+        let auth = auth_provider.authenticate().await?;
+        io.lock().await.cached_auth = Some(auth.clone());
+        Ok(auth)
+    }
+
     #[doc(hidden)]
     pub fn new_for_test_with_handle(
         handle: RuntimeHandle,
@@ -660,6 +716,46 @@ impl SessionDirectQuery for SessionClient {
         path: &str,
     ) -> crate::error::Result<Value> {
         SessionClient::refresh_schema_value(self, schema_id, path).await
+    }
+
+    async fn get_trading_calendar(
+        &self,
+        start_dt: chrono::NaiveDate,
+        end_dt: chrono::NaiveDate,
+    ) -> crate::error::Result<Vec<TradingCalendarDay>> {
+        SessionClient::get_trading_calendar(self, start_dt, end_dt).await
+    }
+
+    async fn query_symbol_settlement(
+        &self,
+        symbols: &[&str],
+        days: usize,
+        start_dt: Option<chrono::NaiveDate>,
+    ) -> crate::error::Result<Vec<SymbolSettlement>> {
+        SessionClient::query_symbol_settlement(self, symbols, days, start_dt).await
+    }
+
+    async fn query_symbol_ranking(
+        &self,
+        symbol: &str,
+        ranking_type: SymbolRankingType,
+        days: usize,
+        start_dt: Option<chrono::NaiveDate>,
+        broker: Option<&str>,
+    ) -> crate::error::Result<Vec<SymbolRanking>> {
+        SessionClient::query_symbol_ranking(self, symbol, ranking_type, days, start_dt, broker)
+            .await
+    }
+
+    async fn query_edb_data(
+        &self,
+        ids: &[i32],
+        start_dt: chrono::NaiveDate,
+        end_dt: chrono::NaiveDate,
+        align: Option<EdbDataAlign>,
+        fill: Option<EdbDataFill>,
+    ) -> crate::error::Result<Vec<EdbIndexData>> {
+        SessionClient::query_edb_data(self, ids, start_dt, end_dt, align, fill).await
     }
 }
 
@@ -1408,6 +1504,7 @@ mod tests {
             reader: handle.reader(),
             runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
             facade_config: SessionFacadeConfig::default(),
+            service_http: reqwest::Client::new(),
             context: SessionClientContext::new(
                 "demo-user".to_string(),
                 "demo-pass".to_string(),
