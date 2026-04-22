@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::Result;
 use crate::registry::{TaskId, TaskRegistry};
-use crate::target_pos::TargetPosBuilder;
+use crate::target_pos::{TargetPosBuilder, TargetPosStore};
 
 /// Single-owner task host built on a wait-style API.
 pub struct TaskHost {
     api: tqsdk_wait::TqApi,
     registry: Arc<Mutex<TaskRegistry>>,
+    target_tasks: Arc<Mutex<TargetPosStore>>,
 }
 
 impl TaskHost {
@@ -18,6 +19,7 @@ impl TaskHost {
         Self {
             api,
             registry: Arc::new(Mutex::new(TaskRegistry::default())),
+            target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
         }
     }
 
@@ -36,6 +38,17 @@ impl TaskHost {
         self.api
     }
 
+    pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
+        let updated = self.api.wait_update(deadline).await?;
+        if updated {
+            self.target_tasks
+                .lock()
+                .expect("target task store lock poisoned")
+                .process_wait_update();
+        }
+        Ok(updated)
+    }
+
     #[must_use]
     pub fn target_pos(
         &mut self,
@@ -44,6 +57,7 @@ impl TaskHost {
     ) -> TargetPosBuilder {
         TargetPosBuilder::new(
             Arc::clone(&self.registry),
+            Arc::clone(&self.target_tasks),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )

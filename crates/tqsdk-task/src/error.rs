@@ -15,6 +15,7 @@ pub enum TaskKind {
 /// Errors returned by task-level ownership and execution helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskError {
+    Wait(tqsdk_wait::WaitFacadeError),
     OwnershipConflict {
         account_id: String,
         symbol: String,
@@ -28,9 +29,16 @@ pub enum TaskError {
     InvalidState(&'static str),
 }
 
+impl From<tqsdk_wait::WaitFacadeError> for TaskError {
+    fn from(error: tqsdk_wait::WaitFacadeError) -> Self {
+        Self::Wait(error)
+    }
+}
+
 impl Display for TaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Wait(error) => write!(f, "{error}"),
             Self::OwnershipConflict {
                 account_id,
                 symbol,
@@ -52,4 +60,13 @@ impl Display for TaskError {
     }
 }
 
-impl std::error::Error for TaskError {}
+impl std::error::Error for TaskError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Wait(error) => Some(error),
+            Self::OwnershipConflict { .. }
+            | Self::ManualOrderBlocked { .. }
+            | Self::InvalidState(_) => None,
+        }
+    }
+}

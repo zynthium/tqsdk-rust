@@ -8,9 +8,10 @@ documentation = "https://docs.rs/tqsdk-task"
 readme = "README.md"
 
 [dependencies]
+tokio.workspace = true
 tqsdk-wait = { path = "../tqsdk-wait" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "time"] }
+serde_json.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
 tqsdk-session = { path = "../tqsdk-session" }
