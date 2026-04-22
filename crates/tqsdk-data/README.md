@@ -41,4 +41,8 @@
 
 当前更稳的做法，是先把能力边界固定在独立 crate 里，等具体实现时再按阶段逐步开放 API。
 
+## 示例
+
+最小可编译示例见 [examples/his_cont_quotes.rs](examples/his_cont_quotes.rs)。
+
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。
