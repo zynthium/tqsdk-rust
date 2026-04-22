@@ -36,6 +36,64 @@ async fn commit_stream_stays_idle_until_new_commit_arrives() {
     assert!(next.is_err());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn commit_stream_reports_closed_when_stream_facade_drops() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap();
+
+    drop(stream);
+
+    let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
+        .await
+        .expect("commit stream should observe a close after stream facade drop")
+        .expect("commit stream should yield a close item");
+
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn into_session_closes_existing_commit_receivers() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap();
+    let session = stream.into_session();
+
+    let err = session
+        .query_graphql_value("query { __typename }", None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SessionFacadeError::InvalidState("query value helper requires an enabled query route")
+    );
+
+    let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
+        .await
+        .expect("commit stream should observe a close after into_session")
+        .expect("commit stream should yield a close item");
+
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn commit_stream_returns_closed_after_driver_was_explicitly_closed() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap();
+
+    stream.close_driver_for_test();
+
+    let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
+        .await
+        .expect("commit stream should observe a close after driver shutdown")
+        .expect("commit stream should yield a close item");
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
+
+    let err = match stream.commit_stream() {
+        Ok(_) => panic!("commit_stream should stay closed after driver shutdown"),
+        Err(err) => err,
+    };
+    assert_eq!(err, StreamFacadeError::Closed);
+}
+
 #[test]
 fn commit_stream_can_retry_after_missing_runtime_error() {
     let stream = support::core_seed::seeded_stream();

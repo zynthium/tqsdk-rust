@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -20,6 +20,7 @@ pub(crate) struct StreamDriver {
     pub(crate) reader: tqsdk_core::RuntimeReader,
     pub(crate) sender: broadcast::Sender<DriverEvent>,
     pub(crate) started: AtomicBool,
+    pub(crate) closed: Arc<AtomicBool>,
     pub(crate) task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -35,6 +36,7 @@ impl StreamDriver {
             reader,
             sender,
             started: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             task: Mutex::new(None),
         }
     }
@@ -44,11 +46,18 @@ impl StreamDriver {
     }
 
     pub(crate) fn ensure_started(&self) -> crate::error::Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(crate::error::StreamFacadeError::Closed);
+        }
+
         if self
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            if self.closed.load(Ordering::Acquire) {
+                return Err(crate::error::StreamFacadeError::Closed);
+            }
             return Ok(());
         }
 
@@ -66,9 +75,11 @@ impl StreamDriver {
         let reader = self.reader.clone();
         let cursor = reader.cursor();
         let sender = self.sender.clone();
+        let closed = Arc::clone(&self.closed);
+        self.closed.store(false, Ordering::Release);
 
         let task = runtime.spawn(async move {
-            run_driver(session, reader, cursor, sender).await;
+            run_driver(session, reader, cursor, sender, closed).await;
         });
 
         let mut slot = self.task.lock().expect("stream driver task mutex poisoned");
@@ -80,8 +91,18 @@ impl StreamDriver {
     pub(crate) fn abort(&self) {
         let mut slot = self.task.lock().expect("stream driver task mutex poisoned");
         if let Some(task) = slot.take() {
+            emit_closed_once(&self.sender, self.closed.as_ref());
             task.abort();
         }
+    }
+}
+
+fn emit_closed_once(sender: &broadcast::Sender<DriverEvent>, closed: &AtomicBool) {
+    if closed
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let _ = sender.send(DriverEvent::Closed);
     }
 }
 
@@ -90,6 +111,7 @@ async fn run_driver(
     reader: tqsdk_core::RuntimeReader,
     mut cursor: tqsdk_core::UpdateCursor,
     sender: broadcast::Sender<DriverEvent>,
+    closed: Arc<AtomicBool>,
 ) {
     loop {
         if let Some(commit) = reader.next(&mut cursor) {
@@ -143,5 +165,5 @@ async fn run_driver(
         tokio::time::sleep(IDLE_POLL_BACKOFF).await;
     }
 
-    let _ = sender.send(DriverEvent::Closed);
+    emit_closed_once(&sender, closed.as_ref());
 }

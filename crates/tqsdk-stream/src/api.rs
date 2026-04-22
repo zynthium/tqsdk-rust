@@ -468,6 +468,11 @@ impl TqStream {
     pub fn emit_closed_for_test(&self) {
         let _ = self.driver.sender.send(DriverEvent::Closed);
     }
+
+    #[doc(hidden)]
+    pub fn close_driver_for_test(&self) {
+        self.driver.abort();
+    }
 }
 
 impl Drop for TqStream {
