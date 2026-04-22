@@ -4,12 +4,14 @@ members = [
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
     "crates/tqsdk-stream",
+    "crates/tqsdk-task",
 ]
 default-members = [
     "crates/tqsdk-core",
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
     "crates/tqsdk-stream",
+    "crates/tqsdk-task",
 ]
 resolver = "3"
 
