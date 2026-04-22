@@ -36,11 +36,12 @@
     - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
     - 同一请求在净持仓未变化前不会重复发单
     - 若挂单进入终态但持仓未变化，会在同一目标请求下重新发单
-    - 若当前 live order 与最新期望首笔委托不一致，会先发真实撤单，等待旧单终态后再按新价格/新计划重发
+    - 若当前 live order 与最新期望 batch 不一致，会先发真实撤单，等待旧单终态后再按新价格/新计划重发
     - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
-    - 当前执行策略仍是保守串行：
-      - 每次 `wait_update()` 最多推进一笔 planner order
-      - 只有持仓 diff 发生变化后才会继续下一笔
+    - 当前执行策略仍是保守串行 batch：
+      - 每次 `wait_update()` 最多提交一个 planner batch
+      - 同一 batch 内可连续提交多笔委托
+      - batch 与 batch 之间仍等待持仓或挂单状态推进后再继续
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`

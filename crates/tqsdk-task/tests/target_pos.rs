@@ -227,6 +227,16 @@ fn seed_position_detail_commit(
         .expect("seed detailed position commit should produce a commit");
 }
 
+#[derive(Clone, Copy)]
+struct OrderStatusSeed<'a> {
+    direction: &'a str,
+    offset: &'a str,
+    limit_price: f64,
+    status: &'a str,
+    volume_orign: i64,
+    volume_left: i64,
+}
+
 fn seed_order_status_commit(
     host: &TaskHost,
     account_id: &str,
@@ -235,6 +245,29 @@ fn seed_order_status_commit(
     status: &str,
     volume_orign: i64,
     volume_left: i64,
+) {
+    seed_order_status_commit_with_seed(
+        host,
+        account_id,
+        symbol,
+        order_id,
+        OrderStatusSeed {
+            direction: "BUY",
+            offset: "OPEN",
+            limit_price: 3678.0,
+            status,
+            volume_orign,
+            volume_left,
+        },
+    );
+}
+
+fn seed_order_status_commit_with_seed(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    order_id: &str,
+    seed: OrderStatusSeed<'_>,
 ) {
     let (exchange_id, instrument_id) = symbol
         .split_once('.')
@@ -258,16 +291,16 @@ fn seed_order_status_commit(
                                         "exchange_order_id": "exchange-order-1",
                                         "exchange_id": exchange_id,
                                         "instrument_id": instrument_id,
-                                        "direction": "BUY",
-                                        "offset": "OPEN",
-                                        "volume_orign": volume_orign,
-                                        "volume_left": volume_left,
-                                        "limit_price": 3678.0,
+                                        "direction": seed.direction,
+                                        "offset": seed.offset,
+                                        "volume_orign": seed.volume_orign,
+                                        "volume_left": seed.volume_left,
+                                        "limit_price": seed.limit_price,
                                         "price_type": "LIMIT",
                                         "volume_condition": "ANY",
                                         "time_condition": "GFD",
                                         "insert_date_time": 1_713_660_000_000_000_000_i64,
-                                        "status": status,
+                                        "status": seed.status,
                                     }
                                 }
                             }
@@ -1375,6 +1408,110 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume_for_test(), Some(-1));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() {
+    let mut host = seeded_host();
+    let task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();
+    task.set_target_volume(-1).unwrap();
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+    assert_eq!(
+        transport_payload(&dispatches[0].request)["order_id"],
+        "wait-order-1"
+    );
+    assert_eq!(
+        transport_payload(&dispatches[1].request)["order_id"],
+        "wait-order-2"
+    );
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 1, 0, 0);
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSETODAY",
+            limit_price: 3677.0,
+            status: "FINISHED",
+            volume_orign: 1,
+            volume_left: 0,
+        },
+    );
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-2",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSE",
+            limit_price: 3677.0,
+            status: "ALIVE",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3677.0, 3676.0, 3676.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-2");
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3676.0, 3675.0, 3675.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-2",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSE",
+            limit_price: 3677.0,
+            status: "FINISHED",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3675.0, 3674.0, 3674.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["order_id"], "wait-order-3");
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "CLOSE");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["limit_price"], 3674.0);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
 }
 
 #[tokio::test(flavor = "current_thread")]
