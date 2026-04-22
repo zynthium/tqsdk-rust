@@ -65,17 +65,18 @@
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
 - `TargetPosTask` 已接入最小真实 planner：
-  - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果逐笔推进
+  - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果推进
   - `PriceMode::Active / Passive` 会影响委托价格
   - `split_policy` 已接入最小确定性拆单
   - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
   - 同一请求序号在净持仓未变化前不会重复发单
   - 若挂单进入终态但持仓未变化，会在同一目标请求下重新发单
-  - 若 live order 与最新期望首笔委托不一致，会先发真实撤单，等旧单终态后在后续 `wait_update()` 里按新计划重发
+  - 若 live order 与最新期望 batch 不一致，会先发真实撤单，等旧单终态后在后续 `wait_update()` 里按新计划重发
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
-  - 当前实现仍是保守串行：
-    - 每次 `wait_update()` 最多推进一笔 planner order
-    - 只有持仓 diff 变化后才继续下一笔
+  - 当前实现仍是保守串行 batch：
+    - 每次 `wait_update()` 最多提交一个 planner batch
+    - 同一 batch 内可连续提交多笔委托
+    - batch 与 batch 之间仍等待持仓/挂单状态推进后再继续
 - `TargetPosScheduler` 当前最小执行语义：
   - 每个 step 都会创建并驱动内部无 ownership 的 `TargetPosTask`
   - 已支持 step 级 `price_mode`

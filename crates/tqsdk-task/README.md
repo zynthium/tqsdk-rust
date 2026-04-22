@@ -28,7 +28,9 @@
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
   - 最小真实 planner 已接入全部 offset priority：
-    - 基于当前净持仓与目标手数差额按 planner 结果逐笔发单
+    - 基于当前净持仓与目标手数差额按 planner 结果推进
+    - 每次 `wait_update()` 最多提交一个 planner batch，batch 内可连续提交多笔委托
+    - batch 与 batch 之间仍等待持仓或挂单状态推进
     - `Active/Passive` 价格模式生效
     - `split_policy` 已接入最小确定性拆单
     - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成

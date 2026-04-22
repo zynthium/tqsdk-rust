@@ -1205,12 +1205,17 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     assert!(updated);
 
     let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "CLOSETODAY");
-    assert_eq!(payload["volume"], 1);
-    assert_eq!(payload["limit_price"], 3677.0);
+    assert_eq!(dispatches.len(), 2);
+    let close_today = transport_payload(&dispatches[0].request);
+    assert_eq!(close_today["direction"], "SELL");
+    assert_eq!(close_today["offset"], "CLOSETODAY");
+    assert_eq!(close_today["volume"], 1);
+    assert_eq!(close_today["limit_price"], 3677.0);
+    let close_yesterday = transport_payload(&dispatches[1].request);
+    assert_eq!(close_yesterday["direction"], "SELL");
+    assert_eq!(close_yesterday["offset"], "CLOSE");
+    assert_eq!(close_yesterday["volume"], 1);
+    assert_eq!(close_yesterday["limit_price"], 3677.0);
 
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
@@ -1223,22 +1228,10 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
             .is_empty()
     );
 
-    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 1, 0, 0);
-    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
-    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
-    let updated = host.wait_update(None).await.unwrap();
-    assert!(updated);
-
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "CLOSE");
-    assert_eq!(payload["volume"], 1);
-
     seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 0, 0, 0);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 2, 1);
-    seed_quote_book_commit(&host, "SHFE.rb2601", 3681.0, 3680.0, 3680.5);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
@@ -1248,6 +1241,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     assert_eq!(payload["direction"], "SELL");
     assert_eq!(payload["offset"], "OPEN");
     assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["order_id"], "wait-order-3");
 
     seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 0, 0, 1);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 3, 1);
@@ -1271,12 +1265,17 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     assert!(updated);
 
     let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "CLOSE");
-    assert_eq!(payload["volume"], 1);
-    assert_eq!(payload["limit_price"], 3677.0);
+    assert_eq!(dispatches.len(), 2);
+    let first_close = transport_payload(&dispatches[0].request);
+    assert_eq!(first_close["direction"], "SELL");
+    assert_eq!(first_close["offset"], "CLOSE");
+    assert_eq!(first_close["volume"], 1);
+    assert_eq!(first_close["limit_price"], 3677.0);
+    let second_close = transport_payload(&dispatches[1].request);
+    assert_eq!(second_close["direction"], "SELL");
+    assert_eq!(second_close["offset"], "CLOSE");
+    assert_eq!(second_close["volume"], 1);
+    assert_eq!(second_close["limit_price"], 3677.0);
 
     seed_quote_book_commit(&host, "CFFEX.IF2606", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
@@ -1289,22 +1288,10 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
             .is_empty()
     );
 
-    seed_position_detail_commit(&host, "sim", "CFFEX.IF2606", 0, 1, 0, 0);
-    seed_wait_order_finished_commit(&host, "sim", "CFFEX.IF2606", 1, 1);
-    seed_quote_book_commit(&host, "CFFEX.IF2606", 3680.0, 3679.0, 3679.5);
-    let updated = host.wait_update(None).await.unwrap();
-    assert!(updated);
-
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "CLOSE");
-    assert_eq!(payload["volume"], 1);
-
     seed_position_detail_commit(&host, "sim", "CFFEX.IF2606", 0, 0, 0, 0);
+    seed_wait_order_finished_commit(&host, "sim", "CFFEX.IF2606", 1, 1);
     seed_wait_order_finished_commit(&host, "sim", "CFFEX.IF2606", 2, 1);
-    seed_quote_book_commit(&host, "CFFEX.IF2606", 3681.0, 3680.0, 3680.5);
+    seed_quote_book_commit(&host, "CFFEX.IF2606", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
@@ -1314,6 +1301,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     assert_eq!(payload["direction"], "SELL");
     assert_eq!(payload["offset"], "OPEN");
     assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["order_id"], "wait-order-3");
 
     seed_position_detail_commit(&host, "sim", "CFFEX.IF2606", 0, 0, 0, 1);
     seed_wait_order_finished_commit(&host, "sim", "CFFEX.IF2606", 3, 1);
@@ -1323,6 +1311,40 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume_for_test(), Some(-1));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn today_yesterday_then_open_target_pos_submits_open_in_same_batch() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::TodayYesterdayThenOpen)
+        .build()
+        .unwrap();
+    task.set_target_volume(-1).unwrap();
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 3);
+    let close_today = transport_payload(&dispatches[0].request);
+    assert_eq!(close_today["direction"], "SELL");
+    assert_eq!(close_today["offset"], "CLOSETODAY");
+    assert_eq!(close_today["volume"], 1);
+    let close_yesterday = transport_payload(&dispatches[1].request);
+    assert_eq!(close_yesterday["direction"], "SELL");
+    assert_eq!(close_yesterday["offset"], "CLOSE");
+    assert_eq!(close_yesterday["volume"], 1);
+    let open_order = transport_payload(&dispatches[2].request);
+    assert_eq!(open_order["direction"], "SELL");
+    assert_eq!(open_order["offset"], "OPEN");
+    assert_eq!(open_order["volume"], 1);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1341,12 +1363,17 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     assert!(updated);
 
     let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "CLOSE");
-    assert_eq!(payload["volume"], 2);
-    assert_eq!(payload["limit_price"], 3677.0);
+    assert_eq!(dispatches.len(), 2);
+    let close_order = transport_payload(&dispatches[0].request);
+    assert_eq!(close_order["direction"], "SELL");
+    assert_eq!(close_order["offset"], "CLOSE");
+    assert_eq!(close_order["volume"], 2);
+    assert_eq!(close_order["limit_price"], 3677.0);
+    let open_order = transport_payload(&dispatches[1].request);
+    assert_eq!(open_order["direction"], "SELL");
+    assert_eq!(open_order["offset"], "OPEN");
+    assert_eq!(open_order["volume"], 1);
+    assert_eq!(open_order["limit_price"], 3677.0);
 
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
@@ -1359,24 +1386,19 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
             .is_empty()
     );
 
-    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 0, 0, 0);
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 0, 1, 0);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 2, 1);
     seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
-    let payload = transport_payload(&dispatches[0].request);
-    assert_eq!(payload["direction"], "SELL");
-    assert_eq!(payload["offset"], "OPEN");
-    assert_eq!(payload["volume"], 1);
-
-    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 0, 0, 1);
-    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 2, 1);
-    seed_quote_book_commit(&host, "SHFE.rb2601", 3681.0, 3680.0, 3680.5);
-    let updated = host.wait_update(None).await.unwrap();
-    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume_for_test(), Some(0));

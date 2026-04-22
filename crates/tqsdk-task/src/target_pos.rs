@@ -77,6 +77,11 @@ struct DesiredOrder {
     limit_price: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct DesiredBatch {
+    orders: Vec<DesiredOrder>,
+}
+
 #[derive(Default)]
 pub(crate) struct TargetPosStore {
     tasks: HashMap<TaskId, Weak<TargetPosTaskInner>>,
@@ -441,13 +446,13 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        let desired_order = desired_order_for_target(api, self, target_volume, &current_position);
+        let desired_batch = desired_batch_for_target(api, self, target_volume, &current_position);
         let handled_live_orders = match self
             .handle_live_orders(
                 api,
                 current_net_position,
                 target_volume,
-                desired_order.as_ref(),
+                desired_batch.as_ref(),
             )
             .await
         {
@@ -477,42 +482,59 @@ impl TargetPosTaskInner {
             return;
         }
 
-        let Some(desired_order) = desired_order else {
+        let Some(desired_batch) = desired_batch else {
             return;
         };
 
-        match api
-            .insert_order(
-                &self.account_id,
-                &self.symbol,
-                desired_order.direction,
-                Some(desired_order.offset),
-                desired_order.volume,
-                Some(json!(desired_order.limit_price)),
-            )
-            .await
-        {
-            Ok(order_ref) => {
-                let order_id = order_ref.order_id().to_string();
-                self.track_order(order_ref);
-                self.record_insert_order(
-                    current_seq,
-                    &order_id,
+        self.submitted_request_seq
+            .store(current_seq, Ordering::SeqCst);
+        self.awaiting_progress.store(true, Ordering::SeqCst);
+        *self
+            .submitted_net_position
+            .lock()
+            .expect("target task submitted net position lock poisoned") =
+            Some(current_net_position);
+
+        let mut inserted_any = false;
+        for desired_order in desired_batch.orders {
+            match api
+                .insert_order(
+                    &self.account_id,
+                    &self.symbol,
                     desired_order.direction,
-                    desired_order.offset,
+                    Some(desired_order.offset),
                     desired_order.volume,
-                    desired_order.limit_price,
-                );
-                self.submitted_request_seq
-                    .store(current_seq, Ordering::SeqCst);
-                self.awaiting_progress.store(true, Ordering::SeqCst);
-                *self
-                    .submitted_net_position
-                    .lock()
-                    .expect("target task submitted net position lock poisoned") =
-                    Some(current_net_position);
+                    Some(json!(desired_order.limit_price)),
+                )
+                .await
+            {
+                Ok(order_ref) => {
+                    inserted_any = true;
+                    let order_id = order_ref.order_id().to_string();
+                    self.track_order(order_ref);
+                    self.record_insert_order(
+                        current_seq,
+                        &order_id,
+                        desired_order.direction,
+                        desired_order.offset,
+                        desired_order.volume,
+                        desired_order.limit_price,
+                    );
+                }
+                Err(error) if inserted_any => {
+                    *self
+                        .last_error
+                        .lock()
+                        .expect("target task last error lock poisoned") =
+                        Some(TaskError::from(error));
+                    self.cancel_requested.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Err(error) => {
+                    self.finish_with_error(TaskError::from(error));
+                    return;
+                }
             }
-            Err(error) => self.finish_with_error(TaskError::from(error)),
         }
     }
 
@@ -678,7 +700,7 @@ impl TargetPosTaskInner {
         api: &mut tqsdk_wait::TqApi,
         current_net_position: i64,
         target_volume: i64,
-        desired_order: Option<&DesiredOrder>,
+        desired_batch: Option<&DesiredBatch>,
     ) -> Result<bool> {
         let live_orders = self.live_orders(api);
         if live_orders.is_empty() {
@@ -687,7 +709,7 @@ impl TargetPosTaskInner {
 
         if should_cancel_for_replan(
             &live_orders,
-            desired_order,
+            desired_batch,
             current_net_position,
             target_volume,
         ) {
@@ -840,35 +862,39 @@ fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: 
         .unwrap_or_default()
 }
 
-fn desired_order_for_target(
+fn desired_batch_for_target(
     api: &tqsdk_wait::TqApi,
     task: &TargetPosTaskInner,
     target_volume: i64,
     current_position: &Position,
-) -> Option<DesiredOrder> {
+) -> Option<DesiredBatch> {
     let quote = api.quote_ref(&task.symbol).snapshot(api).ok().flatten()?;
     let exchange_id = quote_exchange_id(&quote, &task.symbol);
-    let order = compute_plan(
+    let batch = compute_plan(
         &exchange_id,
         current_position,
         target_volume,
         task.config.offset_priority,
     )
     .into_iter()
-    .flat_map(|batch| batch.orders.into_iter())
     .next()?;
 
-    Some(DesiredOrder {
-        direction: order.direction,
-        offset: order.offset,
-        volume: split_order_volume(order.volume, task.config.split_policy),
-        limit_price: resolve_limit_price(&quote, order.direction, task.config.price_mode)?,
-    })
+    let mut orders = Vec::with_capacity(batch.orders.len());
+    for order in batch.orders {
+        orders.push(DesiredOrder {
+            direction: order.direction,
+            offset: order.offset,
+            volume: split_order_volume(order.volume, task.config.split_policy),
+            limit_price: resolve_limit_price(&quote, order.direction, task.config.price_mode)?,
+        });
+    }
+
+    Some(DesiredBatch { orders })
 }
 
 fn should_cancel_for_replan(
     live_orders: &[Order],
-    desired_order: Option<&DesiredOrder>,
+    desired_batch: Option<&DesiredBatch>,
     current_net_position: i64,
     target_volume: i64,
 ) -> bool {
@@ -879,19 +905,35 @@ fn should_cancel_for_replan(
         return true;
     }
 
-    let Some(desired_order) = desired_order else {
+    let Some(desired_batch) = desired_batch else {
         return false;
     };
-    live_orders
-        .iter()
-        .any(|order| order_differs_from_desired(order, desired_order))
+    !live_orders_match_desired_batch(live_orders, desired_batch)
 }
 
-fn order_differs_from_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
-    order.direction != desired_order.direction.as_str()
-        || order.offset != desired_order.offset.as_str()
-        || order.volume_left != desired_order.volume
-        || order.limit_price != desired_order.limit_price
+fn live_orders_match_desired_batch(live_orders: &[Order], desired_batch: &DesiredBatch) -> bool {
+    if live_orders.len() != desired_batch.orders.len() {
+        return false;
+    }
+
+    let mut unmatched = desired_batch.orders.clone();
+    for order in live_orders {
+        let Some(index) = unmatched
+            .iter()
+            .position(|desired_order| order_matches_desired(order, desired_order))
+        else {
+            return false;
+        };
+        unmatched.remove(index);
+    }
+    unmatched.is_empty()
+}
+
+fn order_matches_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
+    order.direction == desired_order.direction.as_str()
+        && order.offset == desired_order.offset.as_str()
+        && order.volume_left == desired_order.volume
+        && order.limit_price == desired_order.limit_price
 }
 
 fn quote_exchange_id(quote: &Quote, symbol: &str) -> String {
