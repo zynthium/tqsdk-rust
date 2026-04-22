@@ -40,34 +40,40 @@
   - Python 风格单 owner `wait_update()` facade
   - live quote / trading status / kline / tick / futures account-position-order-trade / security account-position-order-trade / pre-insert order / risk / settlement / notification
   - trade command 的 wait 风格薄包装
-
-当前尚未进入但已经明确方向的上层：
-
 - `tqsdk-stream`
+  - shared-session multi-consumer commit stream facade
+  - commit/path/scope/domain/object/field filters
+  - typed path stream / ready kline-tick window / trade session event stream
 - `tqsdk-task`
+  - `TaskHost`
+  - `TargetPosTask`
+  - `TargetPosScheduler`
+  - ownership / guarded order / execution report
+
+当前尚未进入但已经明确方向的后续层：
+
 - `tqsdk-data`
 - 可选的 `tqsdk-backtest`
 - 可选的 `tqsdk-callback`
 
 ## 推荐执行顺序
 
-建议按下面顺序推进，而不是并行膨胀：
+原始的推荐顺序已经完成到 `tqsdk-stream` 与 `tqsdk-task`。
 
-1. 稳固当前 `core/session/wait`
-2. 实现 `tqsdk-stream`
-3. 实现 `tqsdk-task`
-4. 实现 `tqsdk-data`
-5. 视复杂度决定是否独立 `tqsdk-backtest`
-6. 最后再决定 `tqsdk-callback` 是否独立存在
+从当前时点继续推进，建议按下面顺序收敛：
+
+1. 继续稳固当前 `core/session/wait/stream/task`
+2. 实现 `tqsdk-data`
+3. 视复杂度决定是否独立 `tqsdk-backtest`
+4. 最后再决定 `tqsdk-callback` 是否独立存在
 
 原因：
 
-- `tqsdk-stream` 直接验证当前底座是否真的足以同时承载 Python 风格和 Rust 风格
-- `tqsdk-task` 是最容易污染底层边界的一层，必须在 stream/wait 边界稳定后再做
+- `tqsdk-stream` 与 `tqsdk-task` 已经落地，但仍属于最容易继续膨胀的两层，优先继续压实边界和回归
 - `tqsdk-data` 面向研究与离线分析，价值明确，但不应倒逼底层设计
 - `tqsdk-backtest` 与 `tqsdk-callback` 的独立价值，要等前面几层稳定后再判断
 
-## Phase 1：稳固当前基础层
+## Phase 1（已完成）：稳固当前基础层
 
 ### 目标
 
@@ -111,7 +117,7 @@
 - 核心示例足以证明当前底座可用于真实联机与基础交易
 - workspace 文档能清楚说明每一层职责
 
-## Phase 2：`tqsdk-stream`
+## Phase 2（已实现，继续稳固）：`tqsdk-stream`
 
 ### 目标
 
@@ -152,7 +158,7 @@
 - 可靠事件流与状态流的分层方式被锁定
 - 有 live 示例验证其基本可用性
 
-## Phase 3：`tqsdk-task`
+## Phase 3（已实现，继续稳固）：`tqsdk-task`
 
 ### 目标
 
