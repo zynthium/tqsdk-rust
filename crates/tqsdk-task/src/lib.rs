@@ -21,4 +21,6 @@ pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
     TargetPosSchedulerBuilder,
 };
-pub use target_pos::{TargetPosBuilder, TargetPosTask};
+pub use target_pos::{
+    TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
+};

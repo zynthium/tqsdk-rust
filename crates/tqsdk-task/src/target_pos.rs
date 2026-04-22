@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::json;
 use tokio::sync::watch;
-use tqsdk_core::{Order, Position, Quote, TradeDirection};
+use tqsdk_core::{Order, Position, Quote, TradeDirection, TradeOffset};
 use tqsdk_wait::OrderRef;
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
@@ -27,6 +27,26 @@ pub struct TargetPosBuilder {
 #[derive(Clone)]
 pub struct TargetPosTask {
     inner: Arc<TargetPosTaskInner>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetPosTaskExecutionEvent {
+    InsertOrder {
+        request_seq: u64,
+        order_id: String,
+        direction: TradeDirection,
+        offset: TradeOffset,
+        volume: i64,
+        limit_price: f64,
+    },
+    CancelOrder {
+        order_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TargetPosTaskExecutionReport {
+    pub events: Vec<TargetPosTaskExecutionEvent>,
 }
 
 #[derive(Default)]
@@ -51,6 +71,7 @@ struct TargetPosTaskInner {
     awaiting_progress: AtomicBool,
     tracked_orders: Mutex<Vec<OrderRef>>,
     cancel_requested_order_ids: Mutex<HashSet<String>>,
+    report: Mutex<TargetPosTaskExecutionReport>,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
@@ -130,6 +151,7 @@ impl TargetPosBuilder {
             awaiting_progress: AtomicBool::new(false),
             tracked_orders: Mutex::new(Vec::new()),
             cancel_requested_order_ids: Mutex::new(HashSet::new()),
+            report: Mutex::new(TargetPosTaskExecutionReport::default()),
             reached_tx,
             finished_tx,
             cancel_requested: AtomicBool::new(false),
@@ -182,6 +204,15 @@ impl TargetPosTask {
             .last_error
             .lock()
             .expect("target task last error lock poisoned")
+            .clone()
+    }
+
+    #[must_use]
+    pub fn execution_report(&self) -> TargetPosTaskExecutionReport {
+        self.inner
+            .report
+            .lock()
+            .expect("target task execution report lock poisoned")
             .clone()
     }
 
@@ -391,9 +422,11 @@ impl TargetPosTaskInner {
         .next() else {
             return;
         };
+        let order_direction = order.direction;
+        let order_offset = order.offset;
         let order_volume = split_order_volume(order.volume, self.config.split_policy);
         let Some(limit_price) =
-            resolve_limit_price(&quote, order.direction, self.config.price_mode)
+            resolve_limit_price(&quote, order_direction, self.config.price_mode)
         else {
             return;
         };
@@ -402,14 +435,23 @@ impl TargetPosTaskInner {
             .insert_order(
                 &self.account_id,
                 &self.symbol,
-                order.direction,
-                Some(order.offset),
+                order_direction,
+                Some(order_offset),
                 order_volume,
                 Some(json!(limit_price)),
             )
             .await
         {
+            let order_id = order_ref.order_id().to_string();
             self.track_order(order_ref);
+            self.record_insert_order(
+                current_seq,
+                &order_id,
+                order_direction,
+                order_offset,
+                order_volume,
+                limit_price,
+            );
             self.submitted_request_seq
                 .store(current_seq, Ordering::SeqCst);
             self.awaiting_progress.store(true, Ordering::SeqCst);
@@ -435,6 +477,39 @@ impl TargetPosTaskInner {
             .lock()
             .expect("target task tracked orders lock poisoned")
             .push(order_ref);
+    }
+
+    fn record_insert_order(
+        &self,
+        request_seq: u64,
+        order_id: &str,
+        direction: TradeDirection,
+        offset: TradeOffset,
+        volume: i64,
+        limit_price: f64,
+    ) {
+        self.report
+            .lock()
+            .expect("target task execution report lock poisoned")
+            .events
+            .push(TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq,
+                order_id: order_id.to_string(),
+                direction,
+                offset,
+                volume,
+                limit_price,
+            });
+    }
+
+    fn record_cancel_order(&self, order_id: &str) {
+        self.report
+            .lock()
+            .expect("target task execution report lock poisoned")
+            .events
+            .push(TargetPosTaskExecutionEvent::CancelOrder {
+                order_id: order_id.to_string(),
+            });
     }
 
     fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
@@ -479,6 +554,7 @@ impl TargetPosTaskInner {
                     .remove(&order_id);
                 return Err(TaskError::from(error));
             }
+            self.record_cancel_order(&order_id);
         }
         Ok(())
     }

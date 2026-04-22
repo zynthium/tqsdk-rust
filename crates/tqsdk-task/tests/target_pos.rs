@@ -3,11 +3,12 @@ use std::time::Duration;
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
-    ProtocolDomain, RuntimeHandle, RuntimeInput,
+    ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
-    OffsetPriority, PriceMode, TargetPosConfig, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
+    OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent, TaskError, TaskHost,
+    TaskKind, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -740,6 +741,64 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     assert!(task.is_finished());
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after live order finishes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_execution_report_records_insert_and_cancel_requests() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    assert_eq!(
+        task.execution_report().events,
+        vec![TargetPosTaskExecutionEvent::InsertOrder {
+            request_seq: 1,
+            order_id: "wait-order-1".to_string(),
+            direction: TradeDirection::Buy,
+            offset: TradeOffset::Open,
+            volume: 2,
+            limit_price: 3678.0,
+        }]
+    );
+
+    task.cancel().await.unwrap();
+    seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 2, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    assert_eq!(
+        task.execution_report().events,
+        vec![
+            TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq: 1,
+                order_id: "wait-order-1".to_string(),
+                direction: TradeDirection::Buy,
+                offset: TradeOffset::Open,
+                volume: 2,
+                limit_price: 3678.0,
+            },
+            TargetPosTaskExecutionEvent::CancelOrder {
+                order_id: "wait-order-1".to_string(),
+            },
+        ]
+    );
+
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    task.wait_finished().await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

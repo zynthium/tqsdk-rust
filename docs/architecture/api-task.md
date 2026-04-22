@@ -54,6 +54,7 @@
 - `TargetPosTask`
 - guarded `insert_order` / `cancel_order`
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
+- `TargetPosTask::execution_report()` 已暴露最小 command-level 事件流
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
 - `TargetPosTask` 已接入最小真实 planner：
@@ -265,8 +266,8 @@ impl TargetPosTask {
     pub fn symbol(&self) -> &str;
     pub fn account_id(&self) -> &str;
     pub fn is_finished(&self) -> bool;
-    pub fn last_error(&self) -> Option<&TaskError>;
-    pub fn trades(&self) -> &[tqsdk_core::Trade];
+    pub fn last_error(&self) -> Option<TaskError>;
+    pub fn execution_report(&self) -> TargetPosTaskExecutionReport;
 
     pub fn set_target_volume(&self, volume: i64) -> tqsdk_task::Result<()>;
     pub fn current_target_volume(&self) -> Option<i64>;
