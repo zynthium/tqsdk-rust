@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::Result;
-use crate::config::{OffsetPriority, TargetPosSchedulerConfig, VolumeSplitPolicy};
+use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
 use crate::target_pos::{TargetPosBuilder, TargetPosStore, TargetPosTask};
 
@@ -16,6 +16,27 @@ use crate::target_pos::{TargetPosBuilder, TargetPosStore, TargetPosTask};
 pub struct TargetPosScheduleStep {
     pub interval: Duration,
     pub target_volume: i64,
+    pub price_mode: Option<PriceMode>,
+}
+
+impl TargetPosScheduleStep {
+    #[must_use]
+    pub fn target(interval: Duration, target_volume: i64, price_mode: PriceMode) -> Self {
+        Self {
+            interval,
+            target_volume,
+            price_mode: Some(price_mode),
+        }
+    }
+
+    #[must_use]
+    pub fn pause(interval: Duration) -> Self {
+        Self {
+            interval,
+            target_volume: 0,
+            price_mode: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,16 +247,17 @@ impl TargetPosSchedulerInner {
             };
             self.ensure_step_started(step_index);
 
-            let Some(task) = self.active_task() else {
-                return;
-            };
-            task.process_wait_update(api).await;
-
             let step = self.steps[step_index].clone();
-            if step_index + 1 == self.steps.len() {
-                if task.applied_target_volume() == Some(step.target_volume) {
+            if let Some(task) = self.active_task() {
+                task.process_wait_update(api).await;
+                if step_index + 1 == self.steps.len()
+                    && task.applied_target_volume() == Some(step.target_volume)
+                {
                     self.finish();
+                    return;
                 }
+            } else if step.price_mode.is_none() && step_index + 1 == self.steps.len() {
+                self.finish();
                 return;
             }
 
@@ -243,7 +265,7 @@ impl TargetPosSchedulerInner {
                 return;
             }
 
-            task.cancel_internal();
+            self.cancel_active_task();
             if !self.advance_step() {
                 return;
             }
@@ -251,41 +273,52 @@ impl TargetPosSchedulerInner {
     }
 
     fn ensure_step_started(&self, step_index: usize) {
-        if self.active_task().is_some() {
+        if self
+            .current_step_started_at
+            .lock()
+            .expect("scheduler started-at lock poisoned")
+            .is_some()
+        {
             return;
         }
 
         let step = self.steps[step_index].clone();
-        let task = self.build_step_task(step.target_volume);
+        *self
+            .current_step_started_at
+            .lock()
+            .expect("scheduler started-at lock poisoned") = Some(Instant::now());
+        self.report
+            .lock()
+            .expect("scheduler report lock poisoned")
+            .applied_steps
+            .push(TargetPosExecutionStep {
+                step_index,
+                target_volume: step.target_volume,
+            });
+
+        let Some(price_mode) = step.price_mode else {
+            return;
+        };
+
+        let task = self.build_step_task(step.target_volume, price_mode);
         if let Ok(task) = task {
-            *self
-                .current_step_started_at
-                .lock()
-                .expect("scheduler started-at lock poisoned") = Some(Instant::now());
             *self
                 .active_task
                 .lock()
                 .expect("scheduler active task lock poisoned") = Some(task);
-            self.report
-                .lock()
-                .expect("scheduler report lock poisoned")
-                .applied_steps
-                .push(TargetPosExecutionStep {
-                    step_index,
-                    target_volume: step.target_volume,
-                });
         } else {
             self.finish();
         }
     }
 
-    fn build_step_task(&self, target_volume: i64) -> Result<TargetPosTask> {
+    fn build_step_task(&self, target_volume: i64, price_mode: PriceMode) -> Result<TargetPosTask> {
         let mut builder = TargetPosBuilder::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
             self.account_id.clone(),
             self.symbol.clone(),
         )
+        .price_mode(price_mode)
         .offset_priority(self.config.offset_priority);
         if let Some(policy) = self.config.split_policy {
             builder = builder.split_policy(policy);

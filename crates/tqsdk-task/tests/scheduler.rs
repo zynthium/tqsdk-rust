@@ -7,8 +7,9 @@ use tqsdk_core::{
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
-    OffsetPriority, TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep,
-    TargetPosScheduler, TargetPosSchedulerConfig, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
+    OffsetPriority, PriceMode, TargetPosExecutionReport, TargetPosExecutionStep,
+    TargetPosScheduleStep, TargetPosScheduler, TargetPosSchedulerConfig, TaskError, TaskHost,
+    TaskKind, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -21,6 +22,16 @@ fn seeded_host() -> TaskHost {
 }
 
 fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
+    seed_quote_book_commit(host, symbol, last_price, last_price, last_price);
+}
+
+fn seed_quote_book_commit(
+    host: &TaskHost,
+    symbol: &str,
+    ask_price1: f64,
+    bid_price1: f64,
+    last_price: f64,
+) {
     host.api()
         .handle_for_test()
         .ingest(
@@ -33,6 +44,8 @@ fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
                         "quotes": {
                             symbol: {
                                 "instrument_id": symbol,
+                                "ask_price1": ask_price1,
+                                "bid_price1": bid_price1,
                                 "last_price": last_price,
                             }
                         }
@@ -123,14 +136,8 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     let scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
         .steps(vec![
-            TargetPosScheduleStep {
-                interval: Duration::from_millis(20),
-                target_volume: 3,
-            },
-            TargetPosScheduleStep {
-                interval: Duration::from_millis(20),
-                target_volume: 0,
-            },
+            TargetPosScheduleStep::target(Duration::from_millis(20), 3, PriceMode::Active),
+            TargetPosScheduleStep::target(Duration::from_millis(20), 0, PriceMode::Active),
         ])
         .build()
         .unwrap();
@@ -187,10 +194,11 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
     let mut host = seeded_host();
     let scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
-        .steps(vec![TargetPosScheduleStep {
-            interval: Duration::from_secs(60),
-            target_volume: 2,
-        }])
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            2,
+            PriceMode::Active,
+        )])
         .build()
         .unwrap();
 
@@ -230,14 +238,156 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn scheduler_uses_step_passive_price_mode_for_internal_target_task() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Passive,
+        )])
+        .build()
+        .unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["limit_price"], 3677.0);
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
+    seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    scheduler.wait_finished().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![
+            TargetPosScheduleStep::pause(Duration::from_millis(20)),
+            TargetPosScheduleStep::target(Duration::from_secs(60), 1, PriceMode::Active),
+        ])
+        .build()
+        .unwrap();
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![TargetPosExecutionStep {
+                step_index: 0,
+                target_volume: 0,
+            }],
+        }
+    );
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.1);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(scheduler.execution_report().applied_steps.len(), 1);
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![
+                TargetPosExecutionStep {
+                    step_index: 0,
+                    target_volume: 0,
+                },
+                TargetPosExecutionStep {
+                    step_index: 1,
+                    target_volume: 1,
+                },
+            ],
+        }
+    );
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
+    seed_quote_commit(&host, "SHFE.rb2601", 3680.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    scheduler.wait_finished().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::pause(Duration::from_secs(60))])
+        .build()
+        .unwrap();
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    scheduler.wait_finished().await.unwrap();
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![TargetPosExecutionStep {
+                step_index: 0,
+                target_volume: 0,
+            }],
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn scheduler_blocks_guarded_manual_orders_while_active() {
     let mut host = seeded_host();
     let _scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
-        .steps(vec![TargetPosScheduleStep {
-            interval: Duration::from_secs(60),
-            target_volume: 1,
-        }])
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
         .build()
         .unwrap();
 
@@ -268,10 +418,11 @@ async fn scheduler_cancel_releases_ownership_and_wait_finished() {
     let mut host = seeded_host();
     let scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
-        .steps(vec![TargetPosScheduleStep {
-            interval: Duration::from_secs(60),
-            target_volume: 1,
-        }])
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
         .build()
         .unwrap();
 

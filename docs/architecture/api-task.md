@@ -66,13 +66,13 @@
     - 只有持仓 diff 变化后才继续下一笔
 - `TargetPosScheduler` 当前最小执行语义：
   - 每个 step 都会创建并驱动内部无 ownership 的 `TargetPosTask`
+  - 已支持 step 级 `price_mode`
+  - 已支持 pause step
   - 非最后一步按 wall-clock interval 到期切换到下一步
   - 最后一步要等目标持仓真正达到后才 finished
-  - 当前 step 下单价格仍固定为 `PriceMode::Active`
 
 当前还未落地：
 
-- scheduler step 级别的 `price_mode` / pause step
 - `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
 - 非最后一步的真实撤单与挂单清理

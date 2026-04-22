@@ -33,19 +33,19 @@
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
+  - 支持 step 级 `price_mode`
+  - 支持 pause step
   - 非最后一步按 interval 到期切换到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
   - 取消与 ownership 释放
   - 保留 `offset_priority / split_policy` 配置 surface
-  - 当前 step 下单价格仍固定为 `PriceMode::Active`
 - 内部 registry
   - 阻止重复 ownership
   - 阻止任务运行期间的手动下单
 
 当前仍未完成：
 
-- scheduler step 级别的 `price_mode` / pause step
 - `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
 - 非最后一步的真实撤单与挂单清理
