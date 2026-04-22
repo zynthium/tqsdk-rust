@@ -319,8 +319,8 @@ impl TargetPosScheduler {
 
 - scheduler 是 `TargetPosTask` 的编排器，不应与单步调仓任务混为一个类型
 - execution report 属于任务自身，不应写回 runtime state tree
-- 当前第一版骨架已实现 `steps()` / `build()` / `cancel()` / `wait_finished()` / `execution_report()`
-- `offset_priority` / `split_policy` 与真实调仓执行仍留待后续阶段
+- 当前第一版已实现 `steps()` / `build()` / `cancel()` / `wait_finished()` / `execution_report()`
+- `offset_priority` / `split_policy` 已进入真实最小执行路径
 
 ## ownership 与冲突策略
 
@@ -328,7 +328,7 @@ impl TargetPosScheduler {
 
 1. 同一 `account_id + symbol` 同时最多一个活动中的 target task / scheduler。
 2. 当某个 symbol 被 scheduler 或 target task 占有时，guarded manual order 默认拒绝。
-3. 取消任务后 ownership 需要显式释放，不能依赖 drop 时机碰运气。
+3. 取消任务后 ownership 需要通过后续 `wait_update()` 显式释放，不能依赖 drop 时机碰运气。
 
 推荐最小 registry 信息：
 

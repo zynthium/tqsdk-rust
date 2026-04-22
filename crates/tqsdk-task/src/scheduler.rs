@@ -79,7 +79,6 @@ pub(crate) struct TargetPosSchedulerStore {
 struct TargetPosSchedulerInner {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
-    store: Arc<Mutex<TargetPosSchedulerStore>>,
     task_id: TaskId,
     account_id: String,
     symbol: String,
@@ -91,6 +90,7 @@ struct TargetPosSchedulerInner {
     active_task: Mutex<Option<TargetPosTask>>,
     report: Mutex<TargetPosExecutionReport>,
     finished_tx: watch::Sender<bool>,
+    cancel_requested: AtomicBool,
     finished: AtomicBool,
 }
 
@@ -142,7 +142,6 @@ impl TargetPosSchedulerBuilder {
         let inner = Arc::new(TargetPosSchedulerInner {
             registry: Arc::clone(&self.registry),
             target_tasks: Arc::clone(&self.target_tasks),
-            store: Arc::clone(&self.store),
             task_id: task.id,
             account_id: self.account_id,
             symbol: self.symbol,
@@ -154,6 +153,7 @@ impl TargetPosSchedulerBuilder {
             active_task: Mutex::new(None),
             report: Mutex::new(TargetPosExecutionReport::default()),
             finished_tx,
+            cancel_requested: AtomicBool::new(false),
             finished: AtomicBool::new(false),
         });
 
@@ -202,12 +202,10 @@ impl TargetPosScheduler {
     }
 
     pub async fn cancel(&self) -> Result<()> {
-        self.inner.finish();
-        self.inner
-            .store
-            .lock()
-            .expect("scheduler store lock poisoned")
-            .unregister(self.inner.task_id);
+        if self.is_finished() {
+            return Ok(());
+        }
+        self.inner.cancel_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -235,10 +233,6 @@ impl TargetPosSchedulerStore {
             .insert(scheduler.task_id, Arc::downgrade(&scheduler));
     }
 
-    fn unregister(&mut self, task_id: TaskId) {
-        self.schedulers.remove(&task_id);
-    }
-
     fn live_schedulers(&mut self) -> Vec<Arc<TargetPosSchedulerInner>> {
         self.schedulers.retain(|_, weak| weak.strong_count() > 0);
         self.schedulers.values().filter_map(Weak::upgrade).collect()
@@ -248,6 +242,20 @@ impl TargetPosSchedulerStore {
 impl TargetPosSchedulerInner {
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
         if self.is_finished() {
+            return;
+        }
+
+        if self.cancel_requested.load(Ordering::SeqCst) {
+            if let Some(task) = self.active_task() {
+                if task.cancel_pending_orders(api).await.is_err() {
+                    return;
+                }
+                if task.has_live_orders(api) {
+                    return;
+                }
+                task.cancel_internal();
+            }
+            self.finish();
             return;
         }
 

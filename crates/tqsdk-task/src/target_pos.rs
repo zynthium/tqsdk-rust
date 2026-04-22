@@ -52,6 +52,7 @@ struct TargetPosTaskInner {
     cancel_requested_order_ids: Mutex<HashSet<String>>,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
+    cancel_requested: AtomicBool,
     finished: AtomicBool,
 }
 
@@ -129,6 +130,7 @@ impl TargetPosBuilder {
             cancel_requested_order_ids: Mutex::new(HashSet::new()),
             reached_tx,
             finished_tx,
+            cancel_requested: AtomicBool::new(false),
             finished: AtomicBool::new(false),
         });
         if managed_by_host {
@@ -185,6 +187,11 @@ impl TargetPosTask {
         if self.is_finished() {
             return Err(TaskError::InvalidState(
                 "target position task already finished",
+            ));
+        }
+        if self.inner.cancel_requested.load(Ordering::SeqCst) {
+            return Err(TaskError::InvalidState(
+                "target position task cancellation already requested",
             ));
         }
 
@@ -261,7 +268,10 @@ impl TargetPosTask {
     }
 
     pub async fn cancel(&self) -> Result<()> {
-        self.inner.finish();
+        if self.is_finished() {
+            return self.inner.failure_result();
+        }
+        self.inner.cancel_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -314,6 +324,17 @@ impl TargetPosStore {
 
 impl TargetPosTaskInner {
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
+        if self.cancel_requested.load(Ordering::SeqCst) {
+            if self.cancel_pending_orders(api).await.is_err() {
+                return;
+            }
+            if self.has_live_orders(api) {
+                return;
+            }
+            self.finish();
+            return;
+        }
+
         let current_seq = self.next_request_seq.load(Ordering::SeqCst);
         if current_seq == 0 || *self.reached_tx.borrow() >= current_seq {
             return;

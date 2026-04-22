@@ -539,11 +539,82 @@ async fn scheduler_cancel_releases_ownership_and_wait_finished() {
         .unwrap();
 
     scheduler.cancel().await.unwrap();
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
     scheduler.wait_finished().await.unwrap();
     assert!(scheduler.is_finished());
 
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler cancellation");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_ownership() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
+        .build()
+        .unwrap();
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert_eq!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    scheduler.cancel().await.unwrap();
+    let pending = tokio::time::timeout(Duration::from_millis(10), scheduler.wait_finished()).await;
+    assert!(pending.is_err());
+
+    seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 1, 1);
+    seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(!scheduler.is_finished());
+    assert!(
+        host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+            .is_err()
+    );
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3680.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(!scheduler.is_finished());
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
+    seed_quote_commit(&host, "SHFE.rb2601", 3681.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    scheduler.wait_finished().await.unwrap();
+    assert!(scheduler.is_finished());
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released after scheduler live order finishes");
 }
 
 #[test]

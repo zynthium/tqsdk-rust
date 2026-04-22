@@ -19,6 +19,7 @@
   - 注册 `account_id + symbol` ownership
   - `set_target_volume()` 与 `wait_target_reached()`
   - `cancel()` 与 `wait_finished()`
+    - `cancel()` 只登记取消请求，实际撤单与结束仍由后续 `TaskHost::wait_update()` 推进
   - `last_error()`
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
@@ -40,7 +41,7 @@
   - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
-  - 取消与 ownership 释放
+  - `cancel()` 同样遵循 `wait_update()` 驱动的撤单后收尾语义
   - 保留 `offset_priority / split_policy` 配置 surface
 - 内部 registry
   - 阻止重复 ownership
