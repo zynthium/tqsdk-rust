@@ -97,6 +97,44 @@ async fn scope_commit_stream_skips_other_scopes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn scope_commit_stream_matches_any_of_multiple_scopes() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream
+        .commit_stream()
+        .unwrap()
+        .filter_scopes([CommitScope::QueryRefresh, CommitScope::InitialReady]);
+
+    support::core_seed::seed_quote_commit_with_scope(
+        &stream,
+        "SHFE.au2602",
+        622.5,
+        CommitScope::RealtimeUpdate,
+    );
+    support::core_seed::seed_quote_commit_with_scope(
+        &stream,
+        "SHFE.au2602",
+        623.0,
+        CommitScope::InitialReady,
+    );
+
+    let commit = commits
+        .next()
+        .await
+        .expect("multi-scope stream should yield a matching commit")
+        .expect("matching scope should arrive without filter errors");
+
+    let snapshot = stream.reader().read();
+    let quote = snapshot
+        .decode_path::<Quote>(&["quotes", "SHFE.au2602"])
+        .unwrap()
+        .expect("quote snapshot should be readable after multi-scope match");
+
+    assert_eq!(commit.scope, CommitScope::InitialReady);
+    assert_eq!(commit.revision, snapshot.revision());
+    assert_eq!(quote.last_price, 623.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn object_commit_stream_matches_object_hits() {
     let stream = support::core_seed::seeded_stream();
     let mut commits = stream
@@ -123,6 +161,37 @@ async fn object_commit_stream_matches_object_hits() {
 
     assert_eq!(commit.revision, snapshot.revision());
     assert_eq!(quote.last_price, 623.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn object_commit_stream_matches_any_of_multiple_objects() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap().filter_objects([
+        ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.au2602"),
+        },
+        ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.ag2606"),
+        },
+    ]);
+
+    support::core_seed::seed_quote_commit(&stream, "DCE.i2609", 712.0);
+    support::core_seed::seed_quote_commit(&stream, "SHFE.ag2606", 5103.0);
+
+    let commit = commits
+        .next()
+        .await
+        .expect("multi-object stream should yield a matching commit")
+        .expect("matching object should arrive without filter errors");
+
+    let snapshot = stream.reader().read();
+    let quote = snapshot
+        .decode_path::<Quote>(&["quotes", "SHFE.ag2606"])
+        .unwrap()
+        .expect("multi-object quote should be readable");
+
+    assert_eq!(commit.revision, snapshot.revision());
+    assert_eq!(quote.last_price, 5103.0);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -170,3 +170,19 @@ async fn trade_session_event_stream_reports_closed_when_stream_facade_drops() {
 
     assert!(matches!(update, Err(StreamFacadeError::Closed)));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn trade_session_event_stream_reports_closed_after_into_session() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream.trade_session_event_stream("sim").unwrap();
+
+    let session = stream.into_session();
+    drop(session);
+
+    let update = tokio::time::timeout(Duration::from_millis(50), events.next())
+        .await
+        .expect("trade session event stream should observe a close after into_session")
+        .expect("trade session event stream should yield a close item");
+
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
+}
