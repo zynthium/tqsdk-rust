@@ -10,6 +10,8 @@
 | `tqsdk-session` | `crates/tqsdk-session` | mode-agnostic 的共享 session / direct-query thin layer |
 | `tqsdk-wait` | `crates/tqsdk-wait` | Python 风格 single-owner wait facade，基于 core/session |
 | `tqsdk-stream` | `crates/tqsdk-stream` | Rust async-native multi-consumer commit stream facade，基于 core/session |
+| `tqsdk-task` | `crates/tqsdk-task` | 建立在 wait facade 之上的执行工具层 |
+| `tqsdk-data` | `crates/tqsdk-data` | 研究 / 离线数据与批量查询能力的独立落点 |
 
 后续计划继续在这个 workspace 下补充多种 V2 facade crate，例如：
 
@@ -30,6 +32,8 @@ crates/
   tqsdk-session/   # 共享 session / direct-query 层
   tqsdk-wait/      # Python 风格 wait facade
   tqsdk-stream/    # Rust 风格 stream facade
+  tqsdk-task/      # 执行工具层
+  tqsdk-data/      # 研究 / 离线数据层
 docs/
   architecture/    # 架构说明、分层设计与验证矩阵
 ```
@@ -40,6 +44,8 @@ docs/
 - session crate 说明见 [crates/tqsdk-session/README.md](crates/tqsdk-session/README.md)
 - wait crate 说明见 [crates/tqsdk-wait/README.md](crates/tqsdk-wait/README.md)
 - stream crate 说明见 [crates/tqsdk-stream/README.md](crates/tqsdk-stream/README.md)
+- task crate 说明见 [crates/tqsdk-task/README.md](crates/tqsdk-task/README.md)
+- data crate 说明见 [crates/tqsdk-data/README.md](crates/tqsdk-data/README.md)
 - 仓库级路线图见 [ROADMAP.md](ROADMAP.md)
 - 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
 - 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
@@ -58,6 +64,8 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`；后续重点转向 notification/transport-error 级 trade session 事件流。
+- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、ownership / guarded order / execution report。
+- `tqsdk-data` 已落地独立 crate 骨架、`DataClient` 与第一条 research-style 一次性接口 `query_his_cont_quotes`。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
 
@@ -68,6 +76,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `crates/tqsdk-session/examples/query_symbol_info.rs`
 - `crates/tqsdk-wait/examples/quote_wait.rs`
 - `crates/tqsdk-wait/examples/quote_wait_with_session_query.rs`
+- `crates/tqsdk-data/examples/his_cont_quotes.rs`
 
 ## 架构文档
 
