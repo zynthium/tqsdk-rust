@@ -59,6 +59,7 @@
 - `TargetPosTask` 已接入最小真实 planner：
   - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果逐笔推进
   - `PriceMode::Active / Passive` 会影响委托价格
+  - `split_policy` 已接入最小确定性拆单
   - 同一请求序号在净持仓未变化前不会重复发单
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行：
@@ -73,7 +74,6 @@
 
 当前还未落地：
 
-- `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
 - 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划

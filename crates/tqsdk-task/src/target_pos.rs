@@ -102,6 +102,9 @@ impl TargetPosBuilder {
     }
 
     fn build_with_task_id(self, task_id: TaskId, managed_by_host: bool) -> Result<TargetPosTask> {
+        if let Some(policy) = self.config.split_policy {
+            policy.validate()?;
+        }
         let (reached_tx, _) = watch::channel(0_u64);
         let (finished_tx, _) = watch::channel(false);
 
@@ -346,6 +349,7 @@ impl TargetPosTaskInner {
         .next() else {
             return;
         };
+        let order_volume = split_order_volume(order.volume, self.config.split_policy);
         let Some(limit_price) =
             resolve_limit_price(&quote, order.direction, self.config.price_mode)
         else {
@@ -358,7 +362,7 @@ impl TargetPosTaskInner {
                 &self.symbol,
                 order.direction,
                 Some(order.offset),
-                order.volume,
+                order_volume,
                 Some(json!(limit_price)),
             )
             .await
@@ -470,6 +474,21 @@ fn first_finite(primary: f64, secondary: f64, fallback: f64) -> Option<f64> {
         Some(secondary)
     } else {
         fallback.is_finite().then_some(fallback)
+    }
+}
+
+fn split_order_volume(volume: i64, split_policy: Option<VolumeSplitPolicy>) -> i64 {
+    match split_policy {
+        None => volume,
+        Some(policy) if volume < policy.max_volume => volume,
+        Some(policy) => {
+            let tail = volume - policy.max_volume;
+            if tail > 0 && tail < policy.min_volume {
+                volume - policy.min_volume
+            } else {
+                policy.max_volume
+            }
+        }
     }
 }
 

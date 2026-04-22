@@ -316,6 +316,25 @@ fn target_pos_builder_preserves_explicit_config() {
     );
 }
 
+#[test]
+fn target_pos_builder_rejects_invalid_split_policy() {
+    let mut host = seeded_host();
+    let err = host
+        .target_pos("sim", "SHFE.rb2601")
+        .split_policy(VolumeSplitPolicy {
+            min_volume: 5,
+            max_volume: 4,
+        })
+        .build()
+        .err()
+        .expect("invalid split policy should be rejected");
+
+    assert_eq!(
+        err,
+        TaskError::Unsupported("split policy min_volume must not exceed max_volume")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn open_only_target_pos_submits_buy_open_order_with_active_price() {
     let mut host = seeded_host();
@@ -370,6 +389,52 @@ async fn open_only_target_pos_uses_passive_price_for_buy_orders() {
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3677.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_splits_large_orders_by_split_policy() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .split_policy(VolumeSplitPolicy {
+            min_volume: 5,
+            max_volume: 10,
+        })
+        .build()
+        .unwrap();
+    task.set_target_volume(11).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 6);
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 6);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 5);
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 11);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    task.wait_target_reached().await.unwrap();
+    assert_eq!(task.applied_target_volume_for_test(), Some(11));
 }
 
 #[tokio::test(flavor = "current_thread")]

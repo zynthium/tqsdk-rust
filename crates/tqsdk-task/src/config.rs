@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use crate::{Result, TaskError};
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum PriceMode {
@@ -34,6 +36,22 @@ impl OffsetPriority {
 pub struct VolumeSplitPolicy {
     pub min_volume: i64,
     pub max_volume: i64,
+}
+
+impl VolumeSplitPolicy {
+    pub(crate) fn validate(self) -> Result<()> {
+        if self.min_volume <= 0 || self.max_volume <= 0 {
+            return Err(TaskError::Unsupported(
+                "split policy volumes must be positive",
+            ));
+        }
+        if self.min_volume > self.max_volume {
+            return Err(TaskError::Unsupported(
+                "split policy min_volume must not exceed max_volume",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

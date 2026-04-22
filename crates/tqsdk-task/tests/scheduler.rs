@@ -458,3 +458,27 @@ fn scheduler_builder_preserves_explicit_config() {
         }
     );
 }
+
+#[test]
+fn scheduler_builder_rejects_invalid_split_policy() {
+    let mut host = seeded_host();
+    let err = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(1),
+            1,
+            PriceMode::Active,
+        )])
+        .split_policy(VolumeSplitPolicy {
+            min_volume: 5,
+            max_volume: 4,
+        })
+        .build()
+        .err()
+        .expect("invalid split policy should be rejected");
+
+    assert_eq!(
+        err,
+        TaskError::Unsupported("split policy min_volume must not exceed max_volume")
+    );
+}

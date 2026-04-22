@@ -122,6 +122,9 @@ impl TargetPosSchedulerBuilder {
     }
 
     pub fn build(self) -> Result<TargetPosScheduler> {
+        if let Some(policy) = self.config.split_policy {
+            policy.validate()?;
+        }
         let task = self
             .registry
             .lock()

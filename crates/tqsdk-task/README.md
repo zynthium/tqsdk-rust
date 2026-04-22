@@ -25,6 +25,7 @@
   - 最小真实 planner 已接入全部 offset priority：
     - 基于当前净持仓与目标手数差额按 planner 结果逐笔发单
     - `Active/Passive` 价格模式生效
+    - `split_policy` 已接入最小确定性拆单
     - 同一请求在净持仓未变化前不会重复发单
     - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
     - 当前执行策略仍是保守串行：
@@ -46,7 +47,6 @@
 
 当前仍未完成：
 
-- `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
 - 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划
