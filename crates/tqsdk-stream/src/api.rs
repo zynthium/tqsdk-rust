@@ -2,15 +2,17 @@
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
-    Account, CommitScope, Notification, ObjectKey, Order, Position, PreInsertOrder, ProtocolDomain,
-    Quote, RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder,
-    SecurityPosition, SecurityTrade, SettlementInfo, StatePath, Trade, TradingStatus,
+    Account, CommitScope, MarketChartCommand, MarketCommand, Notification, ObjectKey, Order,
+    Position, PreInsertOrder, ProtocolDomain, Quote, RiskManagementData, RiskManagementRule,
+    RuntimeCommand, SecurityAccount, SecurityOrder, SecurityPosition, SecurityTrade,
+    SettlementInfo, StatePath, Symbol, Trade, TradingStatus,
 };
 
 use crate::driver::{DriverEvent, StreamDriver};
@@ -18,8 +20,15 @@ use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
 use crate::typed::PathValueStream;
+use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_chart_id};
 
 const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
+
+fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
+    i64::try_from(duration.as_nanos()).map_err(|_| {
+        crate::error::StreamFacadeError::InvalidState("kline duration exceeds i64 nanoseconds")
+    })
+}
 
 /// Shared-session stream facade over [`tqsdk_session::SessionClient`].
 ///
@@ -83,6 +92,80 @@ impl TqStream {
         symbol: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<TradingStatus>> {
         self.path_stream(["trading_status", symbol.as_ref()])
+    }
+
+    pub async fn kline_stream(
+        &self,
+        symbol: impl AsRef<str>,
+        duration: Duration,
+        data_length: usize,
+    ) -> crate::error::Result<KlineWindowStream> {
+        let symbol = symbol.as_ref().to_owned();
+        let duration_ns = duration_to_ns(duration)?;
+        let duration_key = duration_ns.to_string();
+        let chart_id = kline_chart_id(symbol.as_str(), duration_ns, data_length);
+        let commits = self.commit_stream()?.filter_paths([
+            StatePath::new(["charts", chart_id.as_str()]),
+            StatePath::new(["klines", symbol.as_str(), duration_key.as_str(), "data"]),
+        ]);
+
+        self.session()
+            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: vec![Symbol::new(symbol.clone())],
+                    duration_ns,
+                    view_width: data_length,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                },
+            )))
+            .await?;
+
+        Ok(KlineWindowStream::new(
+            commits,
+            self.reader.clone(),
+            symbol,
+            duration_ns,
+            data_length,
+            chart_id,
+        ))
+    }
+
+    pub async fn tick_stream(
+        &self,
+        symbol: impl AsRef<str>,
+        data_length: usize,
+    ) -> crate::error::Result<TickWindowStream> {
+        let symbol = symbol.as_ref().to_owned();
+        let chart_id = tick_chart_id(symbol.as_str(), data_length);
+        let commits = self.commit_stream()?.filter_paths([
+            StatePath::new(["charts", chart_id.as_str()]),
+            StatePath::new(["ticks", symbol.as_str(), "data"]),
+        ]);
+
+        self.session()
+            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: vec![Symbol::new(symbol.clone())],
+                    duration_ns: 0,
+                    view_width: data_length,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                },
+            )))
+            .await?;
+
+        Ok(TickWindowStream::new(
+            commits,
+            self.reader.clone(),
+            symbol,
+            data_length,
+            chart_id,
+        ))
     }
 
     pub fn account_stream(

@@ -5,8 +5,9 @@
 //! This crate owns diff-backed continuous consumption in multi-consumer stream
 //! form. The current minimal surface exposes a shared-session [`TqStream`],
 //! raw commit fan-out via [`CommitStream`], typed path decoding via
-//! [`PathValueStream`], and direct access to the shared
-//! [`tqsdk_core::RuntimeReader`].
+//! [`PathValueStream`], ready-window market streams via
+//! [`KlineWindowStream`] / [`TickWindowStream`], and direct access to the
+//! shared [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
 //! helpers remain in [`tqsdk_session`]. Use [`TqStream::session`] when a
@@ -24,6 +25,7 @@ mod driver;
 mod error;
 mod filter;
 mod typed;
+mod window;
 
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
@@ -32,3 +34,4 @@ pub use filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
 pub use typed::{PathValueStream, ValueUpdate};
+pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};

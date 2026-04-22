@@ -1,11 +1,26 @@
+use std::time::Duration;
+
 use futures::StreamExt;
+use serde_json::Value;
 use tqsdk_core::{
-    Account, Notification, Order, Position, PreInsertOrder, Quote, RiskManagementData,
-    RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition, SecurityTrade,
-    SettlementInfo, Trade, TradingStatus,
+    Account, Notification, Order, OutboundFrame, OutboundRequest, Position, PreInsertOrder,
+    ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder,
+    SecurityPosition, SecurityTrade, SettlementInfo, Trade, TradingStatus,
 };
+use tqsdk_stream::{KlineWindow, TickWindow};
 
 mod support;
+
+fn transport_payload(request: &OutboundRequest) -> Value {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport frame should contain valid json payload")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
+            .expect("transport frame should contain valid json payload"),
+        other => panic!("expected transport request, got {other:?}"),
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn quote_stream_decodes_matching_quote_and_skips_other_symbols() {
@@ -208,4 +223,94 @@ async fn security_wrappers_decode_security_trade_objects() {
     let _: SecurityOrder = order.value;
     assert_eq!(trade.value.trade_id, "stock-trade-1");
     let _: SecurityTrade = trade.value;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
+    let stream = support::core_seed::seeded_stream();
+    let mut windows = stream
+        .kline_stream("SHFE.au2602", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+    assert!(
+        dispatches
+            .iter()
+            .all(|dispatch| dispatch.domain == ProtocolDomain::Market)
+    );
+
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("kline stream should submit a set_chart request");
+    assert_eq!(payload["aid"], "set_chart");
+    assert_eq!(
+        payload["chart_id"],
+        "stream-kline-SHFE.au2602-60000000000-64"
+    );
+    assert_eq!(payload["ins_list"], "SHFE.au2602");
+    assert_eq!(payload["duration"], 60_000_000_000_i64);
+    assert_eq!(payload["view_width"], 64);
+
+    support::core_seed::seed_ready_kline_chart(&stream, "SHFE.au2602", 60_000_000_000_i64, 64);
+
+    let update = windows
+        .next()
+        .await
+        .expect("kline window stream should yield an update")
+        .expect("kline window stream should decode the ready chart");
+
+    assert_eq!(update.value.symbol(), "SHFE.au2602");
+    assert_eq!(update.value.duration_ns(), 60_000_000_000_i64);
+    assert_eq!(update.value.view_width(), 64);
+    assert_eq!(
+        update.value.chart_id(),
+        "stream-kline-SHFE.au2602-60000000000-64"
+    );
+    assert_eq!(update.value.len(), 2);
+    assert_eq!(update.value.last().unwrap().close, 620.0);
+    let _: KlineWindow = update.value;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
+    let stream = support::core_seed::seeded_stream();
+    let mut windows = stream.tick_stream("SHFE.au2602", 32).await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+    assert!(
+        dispatches
+            .iter()
+            .all(|dispatch| dispatch.domain == ProtocolDomain::Market)
+    );
+
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("tick stream should submit a set_chart request");
+    assert_eq!(payload["aid"], "set_chart");
+    assert_eq!(payload["chart_id"], "stream-tick-SHFE.au2602-32");
+    assert_eq!(payload["ins_list"], "SHFE.au2602");
+    assert_eq!(payload["duration"], 0);
+    assert_eq!(payload["view_width"], 32);
+
+    support::core_seed::seed_ready_tick_chart(&stream, "SHFE.au2602", 32);
+
+    let update = windows
+        .next()
+        .await
+        .expect("tick window stream should yield an update")
+        .expect("tick window stream should decode the ready chart");
+
+    assert_eq!(update.value.symbol(), "SHFE.au2602");
+    assert_eq!(update.value.view_width(), 32);
+    assert_eq!(update.value.chart_id(), "stream-tick-SHFE.au2602-32");
+    assert_eq!(update.value.len(), 2);
+    assert_eq!(update.value.last().unwrap().last_price, 618.5);
+    let _: TickWindow = update.value;
 }

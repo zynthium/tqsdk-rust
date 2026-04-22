@@ -197,6 +197,17 @@ impl TqStream {
         T: DeserializeOwned,
         I: IntoIterator<Item = S>,
         S: Into<String>;
+    pub async fn kline_stream(
+        &self,
+        symbol: impl AsRef<str>,
+        duration: Duration,
+        data_length: usize,
+    ) -> tqsdk_stream::Result<KlineWindowStream>;
+    pub async fn tick_stream(
+        &self,
+        symbol: impl AsRef<str>,
+        data_length: usize,
+    ) -> tqsdk_stream::Result<TickWindowStream>;
     pub fn quote_stream(&self, symbol: impl AsRef<str>)
         -> tqsdk_stream::Result<PathValueStream<Quote>>;
     pub fn trading_status_stream(&self, symbol: impl AsRef<str>)
@@ -266,6 +277,7 @@ impl TqStream {
 - `reader()` 保留高性能用户直接读共享状态树的权利
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
 - `path_stream()` 是最薄的 typed decode 便利层
+- `kline_stream()/tick_stream()` 是最薄的 ready-window stream 包装：内部仍然只是提交 `set_chart`，然后基于同一条 commit fan-out 读取共享状态树
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
@@ -363,6 +375,30 @@ where
 - typed stream 只是“收到匹配 commit 后，用同一个 `RuntimeReader` 立即 decode”
 - 若调用方需要更低开销或更细粒度控制，仍然可以直接使用 `CommitStream + reader()`
 
+### ready-window stream
+
+```rust
+pub struct KlineWindow { /* owned rows */ }
+pub struct TickWindow { /* owned rows */ }
+pub struct KlineWindowStream { /* private */ }
+pub struct TickWindowStream { /* private */ }
+
+impl futures::Stream for KlineWindowStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<KlineWindow>>;
+}
+
+impl futures::Stream for TickWindowStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<TickWindow>>;
+}
+```
+
+设计意图：
+
+- 不复刻 `tqsdk-wait` 的同步 `wait_until_ready`
+- stream 侧的 `kline/tick` 仍然通过 `MarketCommand::SetChart` 建立远端订阅
+- 只有当 `charts/{chart_id}` 进入 ready 且 `more_data == false` 时才产出 window
+- window 本身是基于共享状态树现读现投影的 owned snapshot，不额外维护本地 serial cache
+
 ## 第一版实现边界
 
 ### 必须先实现
@@ -376,16 +412,15 @@ where
 
 ### 这一版先不实现
 
-- `kline_stream(...)`
-- `tick_stream(...)`
 - `trade_events(...)`
 - callback bridge
 - trade command thin wrappers
 
 其中：
 
-- path / scope / domain / object / field 过滤现在已经可以作为 commit stream 的薄组合层实现
-- 对象级 stream 与可靠事件流仍应等 commit 级过滤语义先稳定，再继续叠加
+- path / scope / domain / object / field 过滤已经作为 commit stream 的薄组合层落地
+- typed path、基础对象 stream、ready-window `kline/tick` stream 已落地
+- 可靠事件流仍应等当前对象/窗口语义先稳定，再继续叠加
 
 ## 内部驱动模型
 
@@ -473,6 +508,7 @@ crates/tqsdk-stream/
     api.rs
     driver.rs
     error.rs
+    window.rs
   tests/
     stream_surface.rs
     stream_commit_flow.rs
@@ -491,6 +527,8 @@ crates/tqsdk-stream/
   - 启动/关闭/单实例保护
 - `error.rs`
   - facade 级错误类型
+- `window.rs`
+  - ready-window `kline/tick` 投影
 - `tests/*`
   - surface / driver / lag 语义
 
@@ -515,9 +553,9 @@ crates/tqsdk-stream/
 
 ### 第三批
 
-- `path_stream<T>()` 与 `quote/trading_status/basic trade object` 这种最薄 typed stream 已经开始落地
-- 下一步是补 `kline` / `tick` / `security trade object` / `notification` 等 typed stream family
-- futures / securities 对象级投影
+- `path_stream<T>()`、基础对象 stream、`notification`、security trade object 与 ready-window `kline/tick` 已落地
+- 下一步更自然的是补 trade 可靠事件流与更宽的 family API
+- futures / securities 对象级投影仍保持“固定 path 或固定 window”的薄包装原则
 
 ### 第四批
 

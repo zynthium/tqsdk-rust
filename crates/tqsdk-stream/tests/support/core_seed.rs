@@ -30,6 +30,141 @@ pub fn seed_quote_commit(stream: &TqStream, symbol: &str, last_price: f64) {
 }
 
 #[allow(dead_code)]
+pub fn seed_ready_kline_chart(
+    stream: &TqStream,
+    symbol: &str,
+    duration_ns: i64,
+    view_width: usize,
+) {
+    let chart_id = format!("stream-kline-{symbol}-{duration_ns}-{view_width}");
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": duration_ns,
+                                },
+                                "left_id": 100,
+                                "right_id": 101,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "klines": {
+                            symbol: {
+                                duration_ns.to_string(): {
+                                    "data": {
+                                        "100": {
+                                            "datetime": 1_713_660_000_000_000_000_i64,
+                                            "open": 618.0,
+                                            "high": 620.0,
+                                            "low": 617.0,
+                                            "close": 619.0,
+                                            "volume": 12,
+                                            "open_oi": 100,
+                                            "close_oi": 101
+                                        },
+                                        "101": {
+                                            "datetime": 1_713_660_060_000_000_000_i64,
+                                            "open": 619.0,
+                                            "high": 621.0,
+                                            "low": 618.0,
+                                            "close": 620.0,
+                                            "volume": 15,
+                                            "open_oi": 101,
+                                            "close_oi": 103
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready kline chart should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize) {
+    let chart_id = format!("stream-tick-{symbol}-{view_width}");
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                },
+                                "left_id": 200,
+                                "right_id": 201,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "data": {
+                                    "200": {
+                                        "datetime": 1_713_660_000_000_000_000_i64,
+                                        "last_price": 618.0,
+                                        "average": 618.2,
+                                        "highest": 619.0,
+                                        "lowest": 617.5,
+                                        "ask_price1": 618.2,
+                                        "ask_volume1": 4,
+                                        "bid_price1": 618.0,
+                                        "bid_volume1": 5,
+                                        "volume": 12,
+                                        "amount": 7416.0,
+                                        "open_interest": 101
+                                    },
+                                    "201": {
+                                        "datetime": 1_713_660_000_500_000_000_i64,
+                                        "last_price": 618.5,
+                                        "average": 618.3,
+                                        "highest": 619.2,
+                                        "lowest": 617.5,
+                                        "ask_price1": 618.6,
+                                        "ask_volume1": 3,
+                                        "bid_price1": 618.4,
+                                        "bid_volume1": 6,
+                                        "volume": 15,
+                                        "amount": 9277.5,
+                                        "open_interest": 102
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready tick chart should produce a commit");
+}
+
+#[allow(dead_code)]
 pub fn seed_quote_commit_with_scope(
     stream: &TqStream,
     symbol: &str,
