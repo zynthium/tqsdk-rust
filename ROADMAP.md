@@ -50,7 +50,7 @@
   - `TargetPosScheduler`
   - ownership / guarded order / execution report
 
-当前尚未进入但已经明确方向的后续层：
+当前尚未进入稳定实现、但已经完成方向冻结的后续层：
 
 - `tqsdk-data`
 - 可选的 `tqsdk-backtest`
@@ -325,7 +325,7 @@
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
 1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在当前五层边界稳定后，再进入 Phase 4，给 `tqsdk-data` 写最小架构文档与 crate 脚手架
+2. 在 `tqsdk-data` 已完成最小架构文档与 crate 脚手架后，开始推进 history/query substrate 的第一批最小实现
 
 如果目标是先把底座做得更稳，优先选 1。
 如果目标是开始给研究型能力准备独立落点，再选 2。

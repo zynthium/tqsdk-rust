@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tqsdk-core",
+    "crates/tqsdk-data",
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
     "crates/tqsdk-stream",
@@ -8,6 +9,7 @@ members = [
 ]
 default-members = [
     "crates/tqsdk-core",
+    "crates/tqsdk-data",
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
     "crates/tqsdk-stream",

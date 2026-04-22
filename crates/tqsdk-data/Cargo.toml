@@ -1,0 +1,10 @@
+[package]
+name = "tqsdk-data"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Research and offline data tooling for tqsdk-rust"
+documentation = "https://docs.rs/tqsdk-data"
+readme = "README.md"
+
+[dependencies]

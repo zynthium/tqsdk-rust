@@ -184,6 +184,7 @@ V1 是：
 | `wait_update` facade | [api-wait.md](api-wait.md) |
 | stream facade | [api-stream.md](api-stream.md) |
 | task facade / execution tool | [api-task.md](api-task.md) |
+| data facade / research tooling | [api-data.md](api-data.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
 
 ## 建议的概念分层
@@ -225,7 +226,8 @@ V1 是：
 12. [wait facade](api-wait.md)
 13. [stream facade](api-stream.md)
 14. [task facade](api-task.md)
-15. [演进路线](roadmap.md)
+15. [data facade](api-data.md)
+16. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
