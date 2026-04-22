@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::Result;
+use crate::config::{OffsetPriority, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub struct TargetPosSchedulerBuilder {
     account_id: String,
     symbol: String,
     steps: Vec<TargetPosScheduleStep>,
+    config: TargetPosSchedulerConfig,
 }
 
 #[derive(Clone)]
@@ -52,6 +54,7 @@ struct TargetPosSchedulerInner {
     account_id: String,
     symbol: String,
     steps: Vec<TargetPosScheduleStep>,
+    config: TargetPosSchedulerConfig,
     next_step_index: Mutex<usize>,
     current_step_started_at: Mutex<Option<Instant>>,
     report: Mutex<TargetPosExecutionReport>,
@@ -72,11 +75,22 @@ impl TargetPosSchedulerBuilder {
             account_id,
             symbol,
             steps: Vec::new(),
+            config: TargetPosSchedulerConfig::default(),
         }
     }
 
     pub fn steps(mut self, steps: Vec<TargetPosScheduleStep>) -> Self {
         self.steps = steps;
+        self
+    }
+
+    pub fn offset_priority(mut self, priority: OffsetPriority) -> Self {
+        self.config.offset_priority = priority;
+        self
+    }
+
+    pub fn split_policy(mut self, policy: VolumeSplitPolicy) -> Self {
+        self.config.split_policy = Some(policy);
         self
     }
 
@@ -95,6 +109,7 @@ impl TargetPosSchedulerBuilder {
             account_id: self.account_id,
             symbol: self.symbol,
             steps: self.steps,
+            config: self.config,
             next_step_index: Mutex::new(0),
             current_step_started_at: Mutex::new(None),
             report: Mutex::new(TargetPosExecutionReport::default()),
@@ -125,6 +140,11 @@ impl TargetPosScheduler {
     #[must_use]
     pub fn symbol(&self) -> &str {
         &self.inner.symbol
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &TargetPosSchedulerConfig {
+        &self.inner.config
     }
 
     #[must_use]

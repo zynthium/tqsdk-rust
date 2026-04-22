@@ -54,12 +54,13 @@
 - `TargetPosTask`
 - guarded `insert_order` / `cancel_order`
 - 最小 `TargetPosScheduler` 骨架与 step report
+- `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 
 当前还未落地：
 
 - 实际调仓规划器
 - 交易时段感知的 scheduler deadline
-- quote hint / offset priority / split policy
+- quote hint 与配置驱动的真实执行语义
 - trades buffer 驱动的完整 execution report
 
 ## 为什么它必须独立成 crate

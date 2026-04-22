@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::watch;
 
+use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
 use crate::{Result, TaskError};
 
@@ -15,6 +16,7 @@ pub struct TargetPosBuilder {
     store: Arc<Mutex<TargetPosStore>>,
     account_id: String,
     symbol: String,
+    config: TargetPosConfig,
 }
 
 /// Minimal target position task shell.
@@ -34,6 +36,7 @@ struct TargetPosTaskInner {
     task_id: TaskId,
     account_id: String,
     symbol: String,
+    config: TargetPosConfig,
     target_volume: Mutex<Option<i64>>,
     applied_target_volume: Mutex<Option<i64>>,
     next_request_seq: AtomicU64,
@@ -54,7 +57,23 @@ impl TargetPosBuilder {
             store,
             account_id,
             symbol,
+            config: TargetPosConfig::default(),
         }
+    }
+
+    pub fn price_mode(mut self, mode: PriceMode) -> Self {
+        self.config.price_mode = mode;
+        self
+    }
+
+    pub fn offset_priority(mut self, priority: OffsetPriority) -> Self {
+        self.config.offset_priority = priority;
+        self
+    }
+
+    pub fn split_policy(mut self, policy: VolumeSplitPolicy) -> Self {
+        self.config.split_policy = Some(policy);
+        self
     }
 
     pub fn build(self) -> Result<TargetPosTask> {
@@ -72,6 +91,7 @@ impl TargetPosBuilder {
             task_id: task.id,
             account_id: self.account_id,
             symbol: self.symbol,
+            config: self.config,
             target_volume: Mutex::new(None),
             applied_target_volume: Mutex::new(None),
             next_request_seq: AtomicU64::new(0),
@@ -97,6 +117,11 @@ impl TargetPosTask {
     #[must_use]
     pub fn symbol(&self) -> &str {
         &self.inner.symbol
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &TargetPosConfig {
+        &self.inner.config
     }
 
     #[must_use]

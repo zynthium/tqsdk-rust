@@ -6,7 +6,9 @@ use tqsdk_core::{
     RuntimeInput,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
-use tqsdk_task::{TaskError, TaskHost, TaskKind};
+use tqsdk_task::{
+    OffsetPriority, PriceMode, TargetPosConfig, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
+};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {
@@ -147,4 +149,31 @@ async fn target_pos_task_wait_finished_resolves_after_cancel() {
 
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after cancellation");
+}
+
+#[test]
+fn target_pos_builder_preserves_explicit_config() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .price_mode(PriceMode::Passive)
+        .offset_priority(OffsetPriority::OpenOnly)
+        .split_policy(VolumeSplitPolicy {
+            min_volume: 2,
+            max_volume: 10,
+        })
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        task.config(),
+        &TargetPosConfig {
+            price_mode: PriceMode::Passive,
+            offset_priority: OffsetPriority::OpenOnly,
+            split_policy: Some(VolumeSplitPolicy {
+                min_volume: 2,
+                max_volume: 10,
+            }),
+        }
+    );
 }

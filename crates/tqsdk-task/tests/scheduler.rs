@@ -7,8 +7,8 @@ use tqsdk_core::{
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
-    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
-    TaskError, TaskHost, TaskKind,
+    OffsetPriority, TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep,
+    TargetPosScheduler, TargetPosSchedulerConfig, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -185,4 +185,29 @@ async fn scheduler_cancel_releases_ownership_and_wait_finished() {
 
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler cancellation");
+}
+
+#[test]
+fn scheduler_builder_preserves_explicit_config() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::YesterdayThenOpen)
+        .split_policy(VolumeSplitPolicy {
+            min_volume: 1,
+            max_volume: 4,
+        })
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        scheduler.config(),
+        &TargetPosSchedulerConfig {
+            offset_priority: OffsetPriority::YesterdayThenOpen,
+            split_policy: Some(VolumeSplitPolicy {
+                min_volume: 1,
+                max_volume: 4,
+            }),
+        }
+    );
 }
