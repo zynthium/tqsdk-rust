@@ -49,10 +49,8 @@ impl TaskHost {
 
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
         let updated = self.api.wait_update(deadline).await?;
-        if updated {
-            process_target_tasks_wait_update(&self.target_tasks, &mut self.api).await;
-            process_schedulers_wait_update(&self.schedulers, &mut self.api).await;
-        }
+        process_target_tasks_wait_update(&self.target_tasks, &mut self.api).await;
+        process_schedulers_wait_update(&self.schedulers, &mut self.api).await;
         Ok(updated)
     }
 

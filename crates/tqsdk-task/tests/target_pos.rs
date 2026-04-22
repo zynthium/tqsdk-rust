@@ -381,6 +381,45 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn host_wait_update_timeout_still_advances_target_pos_with_existing_quote() {
+    let mut host = seeded_host();
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    let updated = host
+        .wait_update(Some(
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        ))
+        .await
+        .unwrap();
+    assert!(!updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 2);
+    assert_eq!(payload["limit_price"], 3678.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn host_wait_update_applies_latest_target_request_only() {
     let mut host = seeded_host();
     let task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();

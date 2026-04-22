@@ -787,6 +787,78 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
+    let mut host = seeded_host();
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![
+            TargetPosScheduleStep::pause(Duration::from_millis(20)),
+            TargetPosScheduleStep::target(Duration::from_secs(60), 1, PriceMode::Active),
+        ])
+        .build()
+        .unwrap();
+
+    let updated = host
+        .wait_update(Some(
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        ))
+        .await
+        .unwrap();
+    assert!(!updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let updated = host
+        .wait_update(Some(
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        ))
+        .await
+        .unwrap();
+    assert!(!updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["limit_price"], 3678.0);
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![
+                TargetPosExecutionStep {
+                    step_index: 0,
+                    target_volume: 0,
+                },
+                TargetPosExecutionStep {
+                    step_index: 1,
+                    target_volume: 1,
+                },
+            ],
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
     let mut host = seeded_host();
     let scheduler = host

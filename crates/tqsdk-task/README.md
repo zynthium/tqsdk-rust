@@ -14,6 +14,7 @@
 
 - `TaskHost`
   - 托管单一 `wait_update()` 推进点
+  - 每次 `wait_update()` 调用都会推进 task/scheduler，即使底层 `api.wait_update()` 本轮返回 `false`
   - 提供 guarded `insert_order` / `cancel_order`
 - `TargetPosTask`
   - 注册 `account_id + symbol` ownership

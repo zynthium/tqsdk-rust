@@ -53,6 +53,8 @@
 - `TaskHost`
 - `TargetPosTask`
 - guarded `insert_order` / `cancel_order`
+- `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
+  - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
 - `TargetPosTask::execution_report()` 已暴露最小 command-level 事件流
   - 当前包含 insert/cancel/trade/order finished/target reached
