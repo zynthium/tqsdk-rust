@@ -9,3 +9,8 @@ readme = "README.md"
 
 [dependencies]
 tqsdk-wait = { path = "../tqsdk-wait" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "time"] }
+tqsdk-core = { path = "../tqsdk-core" }
+tqsdk-session = { path = "../tqsdk-session" }

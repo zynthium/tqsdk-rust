@@ -8,6 +8,8 @@
 mod error;
 mod host;
 mod registry;
+mod target_pos;
 
 pub use error::{Result, TaskError, TaskKind};
 pub use host::TaskHost;
+pub use target_pos::{TargetPosBuilder, TargetPosTask};

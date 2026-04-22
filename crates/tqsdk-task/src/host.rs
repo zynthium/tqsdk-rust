@@ -1,12 +1,15 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::sync::{Arc, Mutex};
+
 use crate::Result;
 use crate::registry::{TaskId, TaskRegistry};
+use crate::target_pos::TargetPosBuilder;
 
 /// Single-owner task host built on a wait-style API.
 pub struct TaskHost {
     api: tqsdk_wait::TqApi,
-    registry: TaskRegistry,
+    registry: Arc<Mutex<TaskRegistry>>,
 }
 
 impl TaskHost {
@@ -14,7 +17,7 @@ impl TaskHost {
     pub fn new(api: tqsdk_wait::TqApi) -> Self {
         Self {
             api,
-            registry: TaskRegistry::default(),
+            registry: Arc::new(Mutex::new(TaskRegistry::default())),
         }
     }
 
@@ -33,6 +36,19 @@ impl TaskHost {
         self.api
     }
 
+    #[must_use]
+    pub fn target_pos(
+        &mut self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> TargetPosBuilder {
+        TargetPosBuilder::new(
+            Arc::clone(&self.registry),
+            account_id.as_ref().to_owned(),
+            symbol.as_ref().to_owned(),
+        )
+    }
+
     #[doc(hidden)]
     pub fn register_target_owner_for_test(
         &mut self,
@@ -40,6 +56,8 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> Result<u64> {
         self.registry
+            .lock()
+            .expect("task registry lock poisoned")
             .register_target_task(account_id, symbol)
             .map(|task| task.id.0)
     }
@@ -51,6 +69,8 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> Result<u64> {
         self.registry
+            .lock()
+            .expect("task registry lock poisoned")
             .register_scheduler(account_id, symbol)
             .map(|task| task.id.0)
     }
@@ -61,11 +81,17 @@ impl TaskHost {
         account_id: impl AsRef<str>,
         symbol: impl AsRef<str>,
     ) -> Result<()> {
-        self.registry.check_manual_order_allowed(account_id, symbol)
+        self.registry
+            .lock()
+            .expect("task registry lock poisoned")
+            .check_manual_order_allowed(account_id, symbol)
     }
 
     #[doc(hidden)]
     pub fn unregister_task_for_test(&mut self, task_id: u64) -> bool {
-        self.registry.unregister_task(TaskId(task_id))
+        self.registry
+            .lock()
+            .expect("task registry lock poisoned")
+            .unregister_task(TaskId(task_id))
     }
 }
