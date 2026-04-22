@@ -53,7 +53,7 @@
 - `TaskHost`
 - `TargetPosTask`
 - guarded `insert_order` / `cancel_order`
-- 最小 `TargetPosScheduler` 骨架与 step report
+- `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
 - `TargetPosTask` 已接入最小真实 planner：
@@ -64,12 +64,18 @@
   - 当前实现仍是保守串行：
     - 每次 `wait_update()` 最多推进一笔 planner order
     - 只有持仓 diff 变化后才继续下一笔
+- `TargetPosScheduler` 当前最小执行语义：
+  - 每个 step 都会创建并驱动内部无 ownership 的 `TargetPosTask`
+  - 非最后一步按 wall-clock interval 到期切换到下一步
+  - 最后一步要等目标持仓真正达到后才 finished
+  - 当前 step 下单价格仍固定为 `PriceMode::Active`
 
 当前还未落地：
 
-- `TargetPosScheduler` 驱动真实 `TargetPosTask`
+- scheduler step 级别的 `price_mode` / pause step
 - `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
+- 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划
 - 交易时段感知的 scheduler deadline
 - trades buffer 驱动的完整 execution report

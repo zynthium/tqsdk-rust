@@ -29,6 +29,11 @@ pub(crate) struct TaskRegistry {
 }
 
 impl TaskRegistry {
+    pub(crate) fn allocate_task_id(&mut self) -> TaskId {
+        self.next_task_id += 1;
+        TaskId(self.next_task_id)
+    }
+
     pub(crate) fn register_target_task(
         &mut self,
         account_id: impl AsRef<str>,
@@ -92,9 +97,8 @@ impl TaskRegistry {
             });
         }
 
-        self.next_task_id += 1;
         let task = RegisteredTask {
-            id: TaskId(self.next_task_id),
+            id: self.allocate_task_id(),
             kind,
             account_id: key.account_id.clone(),
             symbol: key.symbol.clone(),

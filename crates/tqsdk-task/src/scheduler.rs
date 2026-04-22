@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use crate::Result;
 use crate::config::{OffsetPriority, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
+use crate::target_pos::{TargetPosBuilder, TargetPosStore, TargetPosTask};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetPosScheduleStep {
@@ -30,6 +31,7 @@ pub struct TargetPosExecutionReport {
 
 pub struct TargetPosSchedulerBuilder {
     registry: Arc<Mutex<TaskRegistry>>,
+    target_tasks: Arc<Mutex<TargetPosStore>>,
     store: Arc<Mutex<TargetPosSchedulerStore>>,
     account_id: String,
     symbol: String,
@@ -49,6 +51,7 @@ pub(crate) struct TargetPosSchedulerStore {
 
 struct TargetPosSchedulerInner {
     registry: Arc<Mutex<TaskRegistry>>,
+    target_tasks: Arc<Mutex<TargetPosStore>>,
     store: Arc<Mutex<TargetPosSchedulerStore>>,
     task_id: TaskId,
     account_id: String,
@@ -57,6 +60,7 @@ struct TargetPosSchedulerInner {
     config: TargetPosSchedulerConfig,
     next_step_index: Mutex<usize>,
     current_step_started_at: Mutex<Option<Instant>>,
+    active_task: Mutex<Option<TargetPosTask>>,
     report: Mutex<TargetPosExecutionReport>,
     finished_tx: watch::Sender<bool>,
     finished: AtomicBool,
@@ -65,12 +69,14 @@ struct TargetPosSchedulerInner {
 impl TargetPosSchedulerBuilder {
     pub(crate) fn new(
         registry: Arc<Mutex<TaskRegistry>>,
+        target_tasks: Arc<Mutex<TargetPosStore>>,
         store: Arc<Mutex<TargetPosSchedulerStore>>,
         account_id: String,
         symbol: String,
     ) -> Self {
         Self {
             registry,
+            target_tasks,
             store,
             account_id,
             symbol,
@@ -104,6 +110,7 @@ impl TargetPosSchedulerBuilder {
 
         let inner = Arc::new(TargetPosSchedulerInner {
             registry: Arc::clone(&self.registry),
+            target_tasks: Arc::clone(&self.target_tasks),
             store: Arc::clone(&self.store),
             task_id: task.id,
             account_id: self.account_id,
@@ -112,6 +119,7 @@ impl TargetPosSchedulerBuilder {
             config: self.config,
             next_step_index: Mutex::new(0),
             current_step_started_at: Mutex::new(None),
+            active_task: Mutex::new(None),
             report: Mutex::new(TargetPosExecutionReport::default()),
             finished_tx,
             finished: AtomicBool::new(false),
@@ -199,77 +207,165 @@ impl TargetPosSchedulerStore {
         self.schedulers.remove(&task_id);
     }
 
-    pub(crate) fn process_wait_update(&mut self) {
-        self.schedulers.retain(|_, weak| {
-            let Some(scheduler) = weak.upgrade() else {
-                return false;
-            };
-            scheduler.process_wait_update();
-            !scheduler.is_finished()
-        });
+    fn live_schedulers(&mut self) -> Vec<Arc<TargetPosSchedulerInner>> {
+        self.schedulers.retain(|_, weak| weak.strong_count() > 0);
+        self.schedulers.values().filter_map(Weak::upgrade).collect()
     }
 }
 
 impl TargetPosSchedulerInner {
-    fn process_wait_update(&self) {
+    async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
         if self.is_finished() {
             return;
         }
 
-        let now = Instant::now();
+        loop {
+            let Some(step_index) = self.current_step_index() else {
+                self.finish();
+                return;
+            };
+            self.ensure_step_started(step_index);
+
+            let Some(task) = self.active_task() else {
+                return;
+            };
+            task.process_wait_update(api).await;
+
+            let step = self.steps[step_index].clone();
+            if step_index + 1 == self.steps.len() {
+                if task.applied_target_volume() == Some(step.target_volume) {
+                    self.finish();
+                }
+                return;
+            }
+
+            if !self.step_deadline_elapsed(step_index) {
+                return;
+            }
+
+            task.cancel_internal();
+            if !self.advance_step() {
+                return;
+            }
+        }
+    }
+
+    fn ensure_step_started(&self, step_index: usize) {
+        if self.active_task().is_some() {
+            return;
+        }
+
+        let step = self.steps[step_index].clone();
+        let task = self.build_step_task(step.target_volume);
+        if let Ok(task) = task {
+            *self
+                .current_step_started_at
+                .lock()
+                .expect("scheduler started-at lock poisoned") = Some(Instant::now());
+            *self
+                .active_task
+                .lock()
+                .expect("scheduler active task lock poisoned") = Some(task);
+            self.report
+                .lock()
+                .expect("scheduler report lock poisoned")
+                .applied_steps
+                .push(TargetPosExecutionStep {
+                    step_index,
+                    target_volume: step.target_volume,
+                });
+        } else {
+            self.finish();
+        }
+    }
+
+    fn build_step_task(&self, target_volume: i64) -> Result<TargetPosTask> {
+        let mut builder = TargetPosBuilder::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.target_tasks),
+            self.account_id.clone(),
+            self.symbol.clone(),
+        )
+        .offset_priority(self.config.offset_priority);
+        if let Some(policy) = self.config.split_policy {
+            builder = builder.split_policy(policy);
+        }
+
+        let task = builder.build_internal()?;
+        task.set_target_volume(target_volume)?;
+        Ok(task)
+    }
+
+    fn current_step_index(&self) -> Option<usize> {
+        let next_step_index = *self
+            .next_step_index
+            .lock()
+            .expect("scheduler next step lock poisoned");
+        (next_step_index < self.steps.len()).then_some(next_step_index)
+    }
+
+    fn active_task(&self) -> Option<TargetPosTask> {
+        self.active_task
+            .lock()
+            .expect("scheduler active task lock poisoned")
+            .clone()
+    }
+
+    fn step_deadline_elapsed(&self, step_index: usize) -> bool {
+        let started_at = *self
+            .current_step_started_at
+            .lock()
+            .expect("scheduler started-at lock poisoned");
+        let Some(started_at) = started_at else {
+            return false;
+        };
+        Instant::now().duration_since(started_at) >= self.steps[step_index].interval
+    }
+
+    fn advance_step(&self) -> bool {
+        *self
+            .active_task
+            .lock()
+            .expect("scheduler active task lock poisoned") = None;
+        *self
+            .current_step_started_at
+            .lock()
+            .expect("scheduler started-at lock poisoned") = None;
+
         let mut next_step_index = self
             .next_step_index
             .lock()
             .expect("scheduler next step lock poisoned");
-        let mut current_step_started_at = self
-            .current_step_started_at
-            .lock()
-            .expect("scheduler started-at lock poisoned");
-
-        if let Some(started_at) = *current_step_started_at {
-            let active_step = &self.steps[*next_step_index];
-            if now.duration_since(started_at) < active_step.interval {
-                return;
-            }
-
-            *next_step_index += 1;
-            *current_step_started_at = None;
-            if *next_step_index >= self.steps.len() {
-                drop(current_step_started_at);
-                drop(next_step_index);
-                self.finish();
-                return;
-            }
-        }
-
-        let step_index = *next_step_index;
-        let step = self.steps[step_index].clone();
-        self.report
-            .lock()
-            .expect("scheduler report lock poisoned")
-            .applied_steps
-            .push(TargetPosExecutionStep {
-                step_index,
-                target_volume: step.target_volume,
-            });
-
-        if step_index + 1 == self.steps.len() {
-            *next_step_index = self.steps.len();
-            *current_step_started_at = None;
-            drop(current_step_started_at);
+        *next_step_index += 1;
+        if *next_step_index >= self.steps.len() {
             drop(next_step_index);
             self.finish();
-            return;
+            return false;
         }
-
-        *current_step_started_at = Some(now);
+        true
     }
 
     fn is_finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
     }
 
+    fn cancel_active_task(&self) {
+        if let Some(task) = self
+            .active_task
+            .lock()
+            .expect("scheduler active task lock poisoned")
+            .take()
+        {
+            task.cancel_internal();
+        }
+        *self
+            .current_step_started_at
+            .lock()
+            .expect("scheduler started-at lock poisoned") = None;
+    }
+
     fn finish(&self) {
+        self.cancel_active_task();
         if self.finished.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -284,6 +380,15 @@ impl TargetPosSchedulerInner {
 
 impl Drop for TargetPosSchedulerInner {
     fn drop(&mut self) {
+        if let Some(task) = self
+            .active_task
+            .lock()
+            .expect("scheduler active task lock poisoned")
+            .take()
+        {
+            task.cancel_internal();
+        }
+
         if self.finished.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -293,5 +398,18 @@ impl Drop for TargetPosSchedulerInner {
             .lock()
             .expect("task registry lock poisoned")
             .unregister_task(self.task_id);
+    }
+}
+
+pub(crate) async fn process_schedulers_wait_update(
+    store: &Arc<Mutex<TargetPosSchedulerStore>>,
+    api: &mut tqsdk_wait::TqApi,
+) {
+    let schedulers = store
+        .lock()
+        .expect("scheduler store lock poisoned")
+        .live_schedulers();
+    for scheduler in schedulers {
+        scheduler.process_wait_update(api).await;
     }
 }

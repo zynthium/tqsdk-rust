@@ -8,7 +8,9 @@ use tqsdk_core::{Order, TradeDirection, TradeOffset};
 use crate::Result;
 use crate::TaskError;
 use crate::registry::{TaskId, TaskRegistry};
-use crate::scheduler::{TargetPosSchedulerBuilder, TargetPosSchedulerStore};
+use crate::scheduler::{
+    TargetPosSchedulerBuilder, TargetPosSchedulerStore, process_schedulers_wait_update,
+};
 use crate::target_pos::{TargetPosBuilder, TargetPosStore, process_target_tasks_wait_update};
 
 /// Single-owner task host built on a wait-style API.
@@ -49,10 +51,7 @@ impl TaskHost {
         let updated = self.api.wait_update(deadline).await?;
         if updated {
             process_target_tasks_wait_update(&self.target_tasks, &mut self.api).await;
-            self.schedulers
-                .lock()
-                .expect("scheduler store lock poisoned")
-                .process_wait_update();
+            process_schedulers_wait_update(&self.schedulers, &mut self.api).await;
         }
         Ok(updated)
     }
@@ -79,6 +78,7 @@ impl TaskHost {
     ) -> TargetPosSchedulerBuilder {
         TargetPosSchedulerBuilder::new(
             Arc::clone(&self.registry),
+            Arc::clone(&self.target_tasks),
             Arc::clone(&self.schedulers),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),

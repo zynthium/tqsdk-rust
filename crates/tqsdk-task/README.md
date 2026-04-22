@@ -32,19 +32,23 @@
       - 只有持仓 diff 发生变化后才会继续下一笔
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
+  - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
+  - 非最后一步按 interval 到期切换到下一步
+  - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
   - 取消与 ownership 释放
   - 保留 `offset_priority / split_policy` 配置 surface
-  - 目前仍未真正驱动内部 `TargetPosTask` 执行
+  - 当前 step 下单价格仍固定为 `PriceMode::Active`
 - 内部 registry
   - 阻止重复 ownership
   - 阻止任务运行期间的手动下单
 
 当前仍未完成：
 
-- `TargetPosScheduler` 驱动真实 `TargetPosTask`
+- scheduler step 级别的 `price_mode` / pause step
 - `split_policy` 驱动的真实拆单执行
 - 多笔同批次并发提交
+- 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划
 - 基于交易时段的 deadline 计算
 - trades buffer / execution report 细化

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
-    RuntimeInput, TradeDirection, TradeOffset,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
+    ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
@@ -44,6 +44,55 @@ fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
         )
         .unwrap()
         .expect("seed quote commit should produce a commit");
+}
+
+fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i64) {
+    let (pos_long, pos_short) = if pos >= 0 { (pos, 0) } else { (0, -pos) };
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("symbol should contain exchange");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "pos": pos,
+                                        "pos_long": pos_long,
+                                        "pos_short": pos_short,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed position commit should produce a commit");
+}
+
+fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport frame should contain valid json payload")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
+            .expect("transport frame should contain valid json payload"),
+        other => panic!("expected transport request, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -131,6 +180,53 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert!(scheduler.is_finished());
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after the last scheduler step");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep {
+            interval: Duration::from_secs(60),
+            target_volume: 2,
+        }])
+        .build()
+        .unwrap();
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(!scheduler.is_finished());
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![TargetPosExecutionStep {
+                step_index: 0,
+                target_volume: 2,
+            }],
+        }
+    );
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["user_id"], "sim");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 2);
+    assert_eq!(payload["limit_price"], 3678.0);
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    scheduler.wait_finished().await.unwrap();
+    assert!(scheduler.is_finished());
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released once the last step reaches target");
 }
 
 #[tokio::test(flavor = "current_thread")]

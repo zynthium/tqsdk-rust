@@ -36,6 +36,7 @@ pub(crate) struct TargetPosStore {
 struct TargetPosTaskInner {
     registry: Arc<Mutex<TaskRegistry>>,
     store: Arc<Mutex<TargetPosStore>>,
+    managed_by_host: bool,
     task_id: TaskId,
     account_id: String,
     symbol: String,
@@ -88,13 +89,27 @@ impl TargetPosBuilder {
             .lock()
             .expect("task registry lock poisoned")
             .register_target_task(&self.account_id, &self.symbol)?;
+        self.build_with_task_id(task.id, true)
+    }
+
+    pub(crate) fn build_internal(self) -> Result<TargetPosTask> {
+        let task_id = self
+            .registry
+            .lock()
+            .expect("task registry lock poisoned")
+            .allocate_task_id();
+        self.build_with_task_id(task_id, false)
+    }
+
+    fn build_with_task_id(self, task_id: TaskId, managed_by_host: bool) -> Result<TargetPosTask> {
         let (reached_tx, _) = watch::channel(0_u64);
         let (finished_tx, _) = watch::channel(false);
 
         let inner = Arc::new(TargetPosTaskInner {
             registry: Arc::clone(&self.registry),
             store: Arc::clone(&self.store),
-            task_id: task.id,
+            managed_by_host,
+            task_id,
             account_id: self.account_id,
             symbol: self.symbol,
             config: self.config,
@@ -108,10 +123,12 @@ impl TargetPosBuilder {
             finished_tx,
             finished: AtomicBool::new(false),
         });
-        self.store
-            .lock()
-            .expect("target task store lock poisoned")
-            .register(Arc::clone(&inner));
+        if managed_by_host {
+            self.store
+                .lock()
+                .expect("target task store lock poisoned")
+                .register(Arc::clone(&inner));
+        }
 
         Ok(TargetPosTask { inner })
     }
@@ -240,14 +257,27 @@ impl TargetPosTask {
         Ok(())
     }
 
-    #[doc(hidden)]
+    pub(crate) async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
+        self.inner.process_wait_update(api).await;
+    }
+
     #[must_use]
-    pub fn applied_target_volume_for_test(&self) -> Option<i64> {
+    pub(crate) fn applied_target_volume(&self) -> Option<i64> {
         *self
             .inner
             .applied_target_volume
             .lock()
             .expect("applied target volume lock poisoned")
+    }
+
+    pub(crate) fn cancel_internal(&self) {
+        self.inner.finish();
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn applied_target_volume_for_test(&self) -> Option<i64> {
+        self.applied_target_volume()
     }
 }
 
@@ -362,10 +392,12 @@ impl TargetPosTaskInner {
             .lock()
             .expect("task registry lock poisoned")
             .unregister_task(self.task_id);
-        self.store
-            .lock()
-            .expect("target task store lock poisoned")
-            .unregister(self.task_id);
+        if self.managed_by_host {
+            self.store
+                .lock()
+                .expect("target task store lock poisoned")
+                .unregister(self.task_id);
+        }
     }
 
     fn failure_result(&self) -> Result<()> {
@@ -452,9 +484,11 @@ impl Drop for TargetPosTaskInner {
             .lock()
             .expect("task registry lock poisoned")
             .unregister_task(self.task_id);
-        self.store
-            .lock()
-            .expect("target task store lock poisoned")
-            .unregister(self.task_id);
+        if self.managed_by_host {
+            self.store
+                .lock()
+                .expect("target task store lock poisoned")
+                .unregister(self.task_id);
+        }
     }
 }
