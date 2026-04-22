@@ -16,7 +16,12 @@ use tqsdk_core::{
 };
 
 use crate::driver::{DriverEvent, StreamDriver};
-use crate::event::{OrderEventStream, TradeEventStream};
+use crate::event::{
+    OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
+    RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
+    SecurityPositionEventStream, SecurityTradeEventStream, SettlementInfoEventStream,
+    TradeEventStream,
+};
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
@@ -226,11 +231,66 @@ impl TqStream {
         ))
     }
 
+    pub fn position_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<PositionEventStream> {
+        Ok(PositionEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn pre_insert_order_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<PreInsertOrderEventStream> {
+        Ok(PreInsertOrderEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
     pub fn trade_event_stream(
         &self,
         account_id: impl AsRef<str>,
     ) -> crate::error::Result<TradeEventStream> {
         Ok(TradeEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn risk_management_rule_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<RiskManagementRuleEventStream> {
+        Ok(RiskManagementRuleEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn risk_management_data_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<RiskManagementDataEventStream> {
+        Ok(RiskManagementDataEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn settlement_info_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<SettlementInfoEventStream> {
+        Ok(SettlementInfoEventStream::new(
             self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
             self.reader.clone(),
             account_id.as_ref().to_owned(),
@@ -312,6 +372,39 @@ impl TqStream {
         trade_id: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<SecurityTrade>> {
         self.path_stream(["trade", account_id.as_ref(), "trades", trade_id.as_ref()])
+    }
+
+    pub fn security_position_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<SecurityPositionEventStream> {
+        Ok(SecurityPositionEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn security_order_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<SecurityOrderEventStream> {
+        Ok(SecurityOrderEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn security_trade_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<SecurityTradeEventStream> {
+        Ok(SecurityTradeEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
     }
 
     #[must_use]

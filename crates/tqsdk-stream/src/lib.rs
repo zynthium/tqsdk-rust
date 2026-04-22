@@ -7,8 +7,9 @@
 //! raw commit fan-out via [`CommitStream`], typed path decoding via
 //! [`PathValueStream`], ready-window market streams via
 //! [`KlineWindowStream`] / [`TickWindowStream`], minimal commit-backed trade
-//! event streams via [`OrderEventStream`] / [`TradeEventStream`], and direct
-//! access to the shared [`tqsdk_core::RuntimeReader`].
+//! event streams via [`OrderEventStream`] / [`TradeEventStream`] and related
+//! account-scoped wrappers, and direct access to the shared
+//! [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
 //! helpers remain in [`tqsdk_session`]. Use [`TqStream::session`] when a
@@ -32,7 +33,12 @@ mod window;
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
 pub use error::{Result, StreamFacadeError};
-pub use event::{OrderEventStream, TradeEventStream};
+pub use event::{
+    OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
+    RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
+    SecurityPositionEventStream, SecurityTradeEventStream, SettlementInfoEventStream,
+    TradeEventStream,
+};
 pub use filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
