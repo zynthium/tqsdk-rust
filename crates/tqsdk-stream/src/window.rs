@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{Kline, SnapshotReadGuard, Tick};
+use tqsdk_core::{Kline, MarketCommand, RuntimeCommand, SnapshotReadGuard, Tick};
 
 use crate::{PathCommitStream, Result, ValueUpdate};
 
@@ -214,11 +214,14 @@ where
 /// Commit-driven stream of ready kline windows.
 pub struct KlineWindowStream {
     inner: ProjectedValueStream<KlineWindow, KlineWindowSpec>,
+    session: tqsdk_session::SessionClient,
+    chart_id: String,
 }
 
 impl KlineWindowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
+        session: tqsdk_session::SessionClient,
         reader: tqsdk_core::RuntimeReader,
         symbol: String,
         duration_ns: i64,
@@ -233,11 +236,27 @@ impl KlineWindowStream {
                     symbol,
                     duration_ns,
                     view_width,
-                    chart_id,
+                    chart_id: chart_id.clone(),
                 },
                 project_kline_window,
             ),
+            session,
+            chart_id,
         }
+    }
+
+    #[must_use]
+    pub fn chart_id(&self) -> &str {
+        &self.chart_id
+    }
+
+    pub async fn close(self) -> Result<()> {
+        self.session
+            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
+                chart_id: self.chart_id,
+            }))
+            .await?;
+        Ok(())
     }
 }
 
@@ -253,11 +272,14 @@ impl Stream for KlineWindowStream {
 /// Commit-driven stream of ready tick windows.
 pub struct TickWindowStream {
     inner: ProjectedValueStream<TickWindow, TickWindowSpec>,
+    session: tqsdk_session::SessionClient,
+    chart_id: String,
 }
 
 impl TickWindowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
+        session: tqsdk_session::SessionClient,
         reader: tqsdk_core::RuntimeReader,
         symbol: String,
         view_width: usize,
@@ -270,11 +292,27 @@ impl TickWindowStream {
                 TickWindowSpec {
                     symbol,
                     view_width,
-                    chart_id,
+                    chart_id: chart_id.clone(),
                 },
                 project_tick_window,
             ),
+            session,
+            chart_id,
         }
+    }
+
+    #[must_use]
+    pub fn chart_id(&self) -> &str {
+        &self.chart_id
+    }
+
+    pub async fn close(self) -> Result<()> {
+        self.session
+            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
+                chart_id: self.chart_id,
+            }))
+            .await?;
+        Ok(())
     }
 }
 

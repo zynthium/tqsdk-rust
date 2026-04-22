@@ -126,6 +126,7 @@ impl TqStream {
 
         Ok(KlineWindowStream::new(
             commits,
+            self.session().clone(),
             self.reader.clone(),
             symbol,
             duration_ns,
@@ -162,6 +163,7 @@ impl TqStream {
 
         Ok(TickWindowStream::new(
             commits,
+            self.session().clone(),
             self.reader.clone(),
             symbol,
             data_length,

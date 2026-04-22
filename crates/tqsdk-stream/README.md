@@ -48,6 +48,8 @@
 - `trading_status_stream(...)`
 - `kline_stream(...)`
 - `tick_stream(...)`
+- `KlineWindowStream::close()`
+- `TickWindowStream::close()`
 - `notification_stream(...)`
 - `account_stream(...)`
 - `position_stream(...)`
@@ -72,6 +74,7 @@
 - 第一版只提供 raw commit stream，不预先冻结对象级 stream 形状
 - 第二版增量先补 commit 级 path / scope / domain / object / field 过滤，不直接跳到对象级 stream
 - 当前第三步已经补到 typed path、ready-window、最小 trade 事件流，以及 market/system/trade/security 单对象 stream；更宽的 family API 与更完整的 event family 仍未冻结
+- `kline/tick` 的远端 chart 生命周期当前采用显式 `close()`，不做隐式 async drop
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`

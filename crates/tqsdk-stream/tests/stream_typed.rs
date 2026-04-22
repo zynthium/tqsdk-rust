@@ -313,6 +313,21 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(update.value.len(), 2);
     assert_eq!(update.value.last().unwrap().last_price, 618.5);
     let _: TickWindow = update.value;
+
+    windows.close().await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("tick window close should submit a cancel_chart request");
+    assert_eq!(payload["chart_id"], "stream-tick-SHFE.au2602-32");
+    assert_eq!(payload["ins_list"], "");
+    assert_eq!(payload["duration"], 0);
+    assert_eq!(payload["view_width"], 32);
 }
 
 #[tokio::test(flavor = "current_thread")]

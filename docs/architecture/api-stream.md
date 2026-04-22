@@ -407,6 +407,7 @@ impl futures::Stream for TickWindowStream {
 - stream 侧的 `kline/tick` 仍然通过 `MarketCommand::SetChart` 建立远端订阅
 - 只有当 `charts/{chart_id}` 进入 ready 且 `more_data == false` 时才产出 window
 - window 本身是基于共享状态树现读现投影的 owned snapshot，不额外维护本地 serial cache
+- 当前 chart 生命周期采用显式 `close()` 提交 `cancel_chart`，不在 `Drop` 中做隐式 async 清理
 
 ### minimal trade event stream
 
