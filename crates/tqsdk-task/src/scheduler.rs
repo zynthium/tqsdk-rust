@@ -496,24 +496,24 @@ impl TargetPosSchedulerInner {
         let Some(task) = self.active_task() else {
             return;
         };
-        let report = task.execution_report();
         let mut report_len = self
             .active_task_report_len
             .lock()
             .expect("scheduler active task report len lock poisoned");
-        if *report_len >= report.events.len() {
+        let (next_report_len, new_events) = task.execution_events_since(*report_len);
+        if new_events.is_empty() {
             return;
         }
 
-        let new_events = report.events[*report_len..]
-            .iter()
-            .cloned()
-            .map(|event| TargetPosSchedulerExecutionEvent { step_index, event });
         self.events
             .lock()
             .expect("scheduler events lock poisoned")
-            .extend(new_events);
-        *report_len = report.events.len();
+            .extend(
+                new_events
+                    .into_iter()
+                    .map(|event| TargetPosSchedulerExecutionEvent { step_index, event }),
+            );
+        *report_len = next_report_len;
     }
 
     fn finish(&self) {
