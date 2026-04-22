@@ -45,6 +45,7 @@ struct TargetPosTaskInner {
     last_error: Mutex<Option<TaskError>>,
     next_request_seq: AtomicU64,
     submitted_request_seq: AtomicU64,
+    submitted_net_position: Mutex<Option<i64>>,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
     finished: AtomicBool,
@@ -102,6 +103,7 @@ impl TargetPosBuilder {
             last_error: Mutex::new(None),
             next_request_seq: AtomicU64::new(0),
             submitted_request_seq: AtomicU64::new(0),
+            submitted_net_position: Mutex::new(None),
             reached_tx,
             finished_tx,
             finished: AtomicBool::new(false),
@@ -171,6 +173,11 @@ impl TargetPosTask {
             .last_error
             .lock()
             .expect("target task last error lock poisoned") = None;
+        *self
+            .inner
+            .submitted_net_position
+            .lock()
+            .expect("target task submitted net position lock poisoned") = None;
         self.inner.next_request_seq.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -283,12 +290,13 @@ impl TargetPosTaskInner {
             return;
         }
 
-        if self.config.offset_priority != OffsetPriority::OpenOnly {
-            self.mark_reached(current_seq, target_volume);
-            return;
-        }
-
-        if self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq {
+        if self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq
+            && *self
+                .submitted_net_position
+                .lock()
+                .expect("target task submitted net position lock poisoned")
+                == Some(current_net_position)
+        {
             return;
         }
 
@@ -328,6 +336,11 @@ impl TargetPosTaskInner {
         {
             self.submitted_request_seq
                 .store(current_seq, Ordering::SeqCst);
+            *self
+                .submitted_net_position
+                .lock()
+                .expect("target task submitted net position lock poisoned") =
+                Some(current_net_position);
         }
     }
 

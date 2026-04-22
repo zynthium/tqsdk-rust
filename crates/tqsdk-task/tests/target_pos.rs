@@ -103,6 +103,58 @@ fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i6
         .expect("seed position commit should produce a commit");
 }
 
+fn seed_position_detail_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    pos_long_today: i64,
+    pos_long_his: i64,
+    pos_short_today: i64,
+    pos_short_his: i64,
+) {
+    let pos_long = pos_long_today + pos_long_his;
+    let pos_short = pos_short_today + pos_short_his;
+    let pos = pos_long - pos_short;
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("symbol should contain exchange");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "pos": pos,
+                                        "pos_long": pos_long,
+                                        "pos_short": pos_short,
+                                        "pos_long_today": pos_long_today,
+                                        "pos_long_his": pos_long_his,
+                                        "pos_short_today": pos_short_today,
+                                        "pos_short_his": pos_short_his,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed detailed position commit should produce a commit");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn target_pos_task_owns_symbol_until_cancelled() {
     let mut host = seeded_host();
@@ -171,6 +223,20 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 5);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume_for_test(), Some(5));
@@ -185,6 +251,20 @@ async fn host_wait_update_applies_latest_target_request_only() {
     task.set_target_volume(8).unwrap();
     seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
 
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 8);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 8);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
@@ -377,4 +457,67 @@ async fn open_only_target_pos_uses_opposite_open_order_to_reduce_net_position() 
     assert_eq!(payload["offset"], "OPEN");
     assert_eq!(payload["volume"], 1);
     assert_eq!(payload["limit_price"], 3677.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
+    let mut host = seeded_host();
+    let task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();
+    task.set_target_volume(-1).unwrap();
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "CLOSETODAY");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["limit_price"], 3677.0);
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "CLOSE");
+    assert_eq!(payload["volume"], 1);
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 0, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3681.0, 3680.0, 3680.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 0, 0, 1);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3682.0, 3681.0, 3681.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    task.wait_target_reached().await.unwrap();
+    assert_eq!(task.applied_target_volume_for_test(), Some(-1));
 }
