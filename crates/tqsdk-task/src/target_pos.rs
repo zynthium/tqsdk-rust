@@ -1,12 +1,13 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::json;
 use tokio::sync::watch;
-use tqsdk_core::{Position, Quote, TradeDirection};
+use tqsdk_core::{Order, Position, Quote, TradeDirection};
+use tqsdk_wait::OrderRef;
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::plan::{compute_plan, net_position};
@@ -47,6 +48,8 @@ struct TargetPosTaskInner {
     next_request_seq: AtomicU64,
     submitted_request_seq: AtomicU64,
     submitted_net_position: Mutex<Option<i64>>,
+    tracked_orders: Mutex<Vec<OrderRef>>,
+    cancel_requested_order_ids: Mutex<HashSet<String>>,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
     finished: AtomicBool,
@@ -122,6 +125,8 @@ impl TargetPosBuilder {
             next_request_seq: AtomicU64::new(0),
             submitted_request_seq: AtomicU64::new(0),
             submitted_net_position: Mutex::new(None),
+            tracked_orders: Mutex::new(Vec::new()),
+            cancel_requested_order_ids: Mutex::new(HashSet::new()),
             reached_tx,
             finished_tx,
             finished: AtomicBool::new(false),
@@ -277,6 +282,14 @@ impl TargetPosTask {
         self.inner.finish();
     }
 
+    pub(crate) async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
+        self.inner.cancel_pending_orders(api).await
+    }
+
+    pub(crate) fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
+        self.inner.has_live_orders(api)
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub fn applied_target_volume_for_test(&self) -> Option<i64> {
@@ -318,8 +331,7 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        if current_net_position == target_volume {
-            self.mark_reached(current_seq, target_volume);
+        if self.has_live_orders(api) {
             return;
         }
 
@@ -330,6 +342,11 @@ impl TargetPosTaskInner {
                 .expect("target task submitted net position lock poisoned")
                 == Some(current_net_position)
         {
+            return;
+        }
+
+        if current_net_position == target_volume {
+            self.mark_reached(current_seq, target_volume);
             return;
         }
 
@@ -356,7 +373,7 @@ impl TargetPosTaskInner {
             return;
         };
 
-        if api
+        if let Ok(order_ref) = api
             .insert_order(
                 &self.account_id,
                 &self.symbol,
@@ -366,8 +383,8 @@ impl TargetPosTaskInner {
                 Some(json!(limit_price)),
             )
             .await
-            .is_ok()
         {
+            self.track_order(order_ref);
             self.submitted_request_seq
                 .store(current_seq, Ordering::SeqCst);
             *self
@@ -384,6 +401,85 @@ impl TargetPosTaskInner {
             .lock()
             .expect("applied target volume lock poisoned") = Some(target_volume);
         self.reached_tx.send_replace(current_seq);
+    }
+
+    fn track_order(&self, order_ref: OrderRef) {
+        self.tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned")
+            .push(order_ref);
+    }
+
+    fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
+        self.prune_terminal_orders(api);
+        !self
+            .tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned")
+            .is_empty()
+    }
+
+    async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
+        self.prune_terminal_orders(api);
+
+        let tracked_orders = self
+            .tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned")
+            .clone();
+
+        for order_ref in tracked_orders {
+            let order_id = order_ref.order_id().to_string();
+            let should_cancel = {
+                let mut cancel_requested_order_ids = self
+                    .cancel_requested_order_ids
+                    .lock()
+                    .expect("target task cancel requested orders lock poisoned");
+                if cancel_requested_order_ids.contains(&order_id) {
+                    false
+                } else {
+                    cancel_requested_order_ids.insert(order_id.clone());
+                    true
+                }
+            };
+            if !should_cancel {
+                continue;
+            }
+            if let Err(error) = api.cancel_order(order_ref.account_id(), &order_id).await {
+                self.cancel_requested_order_ids
+                    .lock()
+                    .expect("target task cancel requested orders lock poisoned")
+                    .remove(&order_id);
+                return Err(TaskError::from(error));
+            }
+        }
+        Ok(())
+    }
+
+    fn prune_terminal_orders(&self, api: &tqsdk_wait::TqApi) {
+        let mut tracked_orders = self
+            .tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned");
+        let finished_order_ids = tracked_orders
+            .iter()
+            .filter_map(|order_ref| {
+                order_ref
+                    .snapshot(api)
+                    .ok()
+                    .flatten()
+                    .filter(order_is_terminal)
+                    .map(|order| order.order_id)
+            })
+            .collect::<HashSet<_>>();
+        tracked_orders.retain(|order_ref| !finished_order_ids.contains(order_ref.order_id()));
+
+        if !finished_order_ids.is_empty() {
+            self.cancel_requested_order_ids
+                .lock()
+                .expect("target task cancel requested orders lock poisoned")
+                .retain(|order_id| !finished_order_ids.contains(order_id));
+        }
     }
 
     fn finish(&self) {
@@ -490,6 +586,10 @@ fn split_order_volume(volume: i64, split_policy: Option<VolumeSplitPolicy>) -> i
             }
         }
     }
+}
+
+fn order_is_terminal(order: &Order) -> bool {
+    order.status == "FINISHED"
 }
 
 impl Drop for TargetPosTaskInner {

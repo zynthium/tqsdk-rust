@@ -191,6 +191,16 @@ impl OrderRef {
         }
     }
 
+    #[must_use]
+    pub fn account_id(&self) -> &str {
+        self.account_id.as_str()
+    }
+
+    #[must_use]
+    pub fn order_id(&self) -> &str {
+        self.order_id.as_str()
+    }
+
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
         Ok(self.snapshot(api)?.is_some())
     }

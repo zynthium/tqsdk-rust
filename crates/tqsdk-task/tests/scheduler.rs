@@ -97,6 +97,80 @@ fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i6
         .expect("seed position commit should produce a commit");
 }
 
+fn seed_order_status_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    order_id: &str,
+    status: &str,
+    volume_orign: i64,
+    volume_left: i64,
+) {
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("symbol should contain exchange");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "orders": {
+                                    order_id: {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": order_id,
+                                        "exchange_order_id": "exchange-order-1",
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "volume_orign": volume_orign,
+                                        "volume_left": volume_left,
+                                        "limit_price": 3678.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "status": status,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed order status commit should produce a commit");
+}
+
+fn seed_wait_order_finished_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    order_seq: u64,
+    volume_orign: i64,
+) {
+    let order_id = format!("wait-order-{order_seq}");
+    seed_order_status_commit(
+        host,
+        account_id,
+        symbol,
+        &order_id,
+        "FINISHED",
+        volume_orign,
+        0,
+    );
+}
+
 fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
     match request {
         OutboundRequest::Transport(OutboundFrame::Text(text)) => {
@@ -162,9 +236,44 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
         }
     );
     assert!(!scheduler.is_finished());
+    assert_eq!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
 
     tokio::time::sleep(Duration::from_millis(25)).await;
+    seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 3, 3);
     seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(!scheduler.is_finished());
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+    assert_eq!(scheduler.execution_report().applied_steps.len(), 1);
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3679.1);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(!scheduler.is_finished());
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(scheduler.execution_report().applied_steps.len(), 1);
+
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 3);
+    seed_quote_commit(&host, "SHFE.rb2601", 3680.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
@@ -227,6 +336,7 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
     assert_eq!(payload["limit_price"], 3678.0);
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
     seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
@@ -260,6 +370,7 @@ async fn scheduler_uses_step_passive_price_mode_for_internal_target_task() {
     assert_eq!(payload["limit_price"], 3677.0);
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
     seed_quote_commit(&host, "SHFE.rb2601", 3679.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
@@ -339,6 +450,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     );
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
     seed_quote_commit(&host, "SHFE.rb2601", 3680.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);

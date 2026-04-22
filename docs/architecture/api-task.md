@@ -60,6 +60,7 @@
   - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果逐笔推进
   - `PriceMode::Active / Passive` 会影响委托价格
   - `split_policy` 已接入最小确定性拆单
+  - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
   - 同一请求序号在净持仓未变化前不会重复发单
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行：
@@ -69,13 +70,12 @@
   - 每个 step 都会创建并驱动内部无 ownership 的 `TargetPosTask`
   - 已支持 step 级 `price_mode`
   - 已支持 pause step
-  - 非最后一步按 wall-clock interval 到期切换到下一步
+  - 非最后一步按 wall-clock interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步要等目标持仓真正达到后才 finished
 
 当前还未落地：
 
 - 多笔同批次并发提交
-- 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划
 - 交易时段感知的 scheduler deadline
 - trades buffer 驱动的完整 execution report

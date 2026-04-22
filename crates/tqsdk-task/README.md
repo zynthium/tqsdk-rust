@@ -26,6 +26,7 @@
     - 基于当前净持仓与目标手数差额按 planner 结果逐笔发单
     - `Active/Passive` 价格模式生效
     - `split_policy` 已接入最小确定性拆单
+    - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
     - 同一请求在净持仓未变化前不会重复发单
     - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
     - 当前执行策略仍是保守串行：
@@ -36,7 +37,7 @@
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
   - 支持 step 级 `price_mode`
   - 支持 pause step
-  - 非最后一步按 interval 到期切换到下一步
+  - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
   - 取消与 ownership 释放
@@ -48,7 +49,6 @@
 当前仍未完成：
 
 - 多笔同批次并发提交
-- 非最后一步的真实撤单与挂单清理
 - 挂单重报与撤单后重规划
 - 基于交易时段的 deadline 计算
 - trades buffer / execution report 细化

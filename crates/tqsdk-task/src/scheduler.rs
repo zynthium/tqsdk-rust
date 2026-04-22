@@ -45,6 +45,12 @@ pub struct TargetPosExecutionStep {
     pub target_volume: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveStepPhase {
+    Running,
+    Cancelling,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetPosExecutionReport {
     pub applied_steps: Vec<TargetPosExecutionStep>,
@@ -81,6 +87,7 @@ struct TargetPosSchedulerInner {
     config: TargetPosSchedulerConfig,
     next_step_index: Mutex<usize>,
     current_step_started_at: Mutex<Option<Instant>>,
+    current_step_phase: Mutex<ActiveStepPhase>,
     active_task: Mutex<Option<TargetPosTask>>,
     report: Mutex<TargetPosExecutionReport>,
     finished_tx: watch::Sender<bool>,
@@ -143,6 +150,7 @@ impl TargetPosSchedulerBuilder {
             config: self.config,
             next_step_index: Mutex::new(0),
             current_step_started_at: Mutex::new(None),
+            current_step_phase: Mutex::new(ActiveStepPhase::Running),
             active_task: Mutex::new(None),
             report: Mutex::new(TargetPosExecutionReport::default()),
             finished_tx,
@@ -251,24 +259,39 @@ impl TargetPosSchedulerInner {
             self.ensure_step_started(step_index);
 
             let step = self.steps[step_index].clone();
-            if let Some(task) = self.active_task() {
-                task.process_wait_update(api).await;
-                if step_index + 1 == self.steps.len()
-                    && task.applied_target_volume() == Some(step.target_volume)
-                {
+            let phase = self.current_step_phase();
+            let is_last_step = step_index + 1 == self.steps.len();
+
+            if is_last_step {
+                if let Some(task) = self.active_task() {
+                    task.process_wait_update(api).await;
+                    if task.applied_target_volume() == Some(step.target_volume) {
+                        self.finish();
+                    }
+                } else if step.price_mode.is_none() {
                     self.finish();
+                }
+                return;
+            }
+
+            if matches!(phase, ActiveStepPhase::Running) && !self.step_deadline_elapsed(step_index)
+            {
+                if let Some(task) = self.active_task() {
+                    task.process_wait_update(api).await;
+                }
+                return;
+            }
+
+            self.mark_current_step_cancelling();
+
+            if let Some(task) = self.active_task() {
+                task.cancel_pending_orders(api).await.ok();
+                if task.has_live_orders(api) {
                     return;
                 }
-            } else if step.price_mode.is_none() && step_index + 1 == self.steps.len() {
-                self.finish();
-                return;
+                task.cancel_internal();
             }
 
-            if !self.step_deadline_elapsed(step_index) {
-                return;
-            }
-
-            self.cancel_active_task();
             if !self.advance_step() {
                 return;
             }
@@ -290,6 +313,10 @@ impl TargetPosSchedulerInner {
             .current_step_started_at
             .lock()
             .expect("scheduler started-at lock poisoned") = Some(Instant::now());
+        *self
+            .current_step_phase
+            .lock()
+            .expect("scheduler step phase lock poisoned") = ActiveStepPhase::Running;
         self.report
             .lock()
             .expect("scheduler report lock poisoned")
@@ -358,6 +385,20 @@ impl TargetPosSchedulerInner {
         Instant::now().duration_since(started_at) >= self.steps[step_index].interval
     }
 
+    fn current_step_phase(&self) -> ActiveStepPhase {
+        *self
+            .current_step_phase
+            .lock()
+            .expect("scheduler step phase lock poisoned")
+    }
+
+    fn mark_current_step_cancelling(&self) {
+        *self
+            .current_step_phase
+            .lock()
+            .expect("scheduler step phase lock poisoned") = ActiveStepPhase::Cancelling;
+    }
+
     fn advance_step(&self) -> bool {
         *self
             .active_task
@@ -367,6 +408,10 @@ impl TargetPosSchedulerInner {
             .current_step_started_at
             .lock()
             .expect("scheduler started-at lock poisoned") = None;
+        *self
+            .current_step_phase
+            .lock()
+            .expect("scheduler step phase lock poisoned") = ActiveStepPhase::Running;
 
         let mut next_step_index = self
             .next_step_index
