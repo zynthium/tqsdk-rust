@@ -2,3 +2,5 @@ target/
 Cargo.lock
 docs/superpowers/plans/
 .DS_Store
+# Added by code-review-graph
+.code-review-graph/
