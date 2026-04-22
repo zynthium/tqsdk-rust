@@ -8,6 +8,7 @@ use tqsdk_core::{Order, TradeDirection, TradeOffset};
 use crate::Result;
 use crate::TaskError;
 use crate::registry::{TaskId, TaskRegistry};
+use crate::scheduler::{TargetPosSchedulerBuilder, TargetPosSchedulerStore};
 use crate::target_pos::{TargetPosBuilder, TargetPosStore};
 
 /// Single-owner task host built on a wait-style API.
@@ -15,6 +16,7 @@ pub struct TaskHost {
     api: tqsdk_wait::TqApi,
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
+    schedulers: Arc<Mutex<TargetPosSchedulerStore>>,
 }
 
 impl TaskHost {
@@ -24,6 +26,7 @@ impl TaskHost {
             api,
             registry: Arc::new(Mutex::new(TaskRegistry::default())),
             target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
+            schedulers: Arc::new(Mutex::new(TargetPosSchedulerStore::default())),
         }
     }
 
@@ -49,6 +52,10 @@ impl TaskHost {
                 .lock()
                 .expect("target task store lock poisoned")
                 .process_wait_update();
+            self.schedulers
+                .lock()
+                .expect("scheduler store lock poisoned")
+                .process_wait_update();
         }
         Ok(updated)
     }
@@ -62,6 +69,20 @@ impl TaskHost {
         TargetPosBuilder::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
+            account_id.as_ref().to_owned(),
+            symbol.as_ref().to_owned(),
+        )
+    }
+
+    #[must_use]
+    pub fn target_pos_scheduler(
+        &mut self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> TargetPosSchedulerBuilder {
+        TargetPosSchedulerBuilder::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.schedulers),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )

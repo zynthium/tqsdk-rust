@@ -48,6 +48,20 @@
 - Python 官方语义也是绑定在 `wait_update()` 心智上的
 - 这类能力一旦放进 `wait` 或 `stream`，会立刻把 facade 从“消费层”污染成“执行层”
 
+当前仓库里的落地状态：
+
+- `TaskHost`
+- `TargetPosTask`
+- guarded `insert_order` / `cancel_order`
+- 最小 `TargetPosScheduler` 骨架与 step report
+
+当前还未落地：
+
+- 实际调仓规划器
+- 交易时段感知的 scheduler deadline
+- quote hint / offset priority / split policy
+- trades buffer 驱动的完整 execution report
+
 ## 为什么它必须独立成 crate
 
 ### 不是协议层
@@ -287,6 +301,8 @@ impl TargetPosScheduler {
 
 - scheduler 是 `TargetPosTask` 的编排器，不应与单步调仓任务混为一个类型
 - execution report 属于任务自身，不应写回 runtime state tree
+- 当前第一版骨架已实现 `steps()` / `build()` / `cancel()` / `wait_finished()` / `execution_report()`
+- `offset_priority` / `split_policy` 与真实调仓执行仍留待后续阶段
 
 ## ownership 与冲突策略
 

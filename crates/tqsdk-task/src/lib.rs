@@ -1,15 +1,19 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 //! Task and execution tooling built on [`tqsdk_wait`].
 //!
-//! This crate is the future home of `TargetPosTask`, schedulers, and task
-//! ownership. The current milestone only scaffolds the host shell and the
-//! internal registry boundary.
+//! This crate hosts task ownership, guarded command entrypoints, and host-driven
+//! execution helpers built on the wait-style facade.
 
 mod error;
 mod host;
 mod registry;
+mod scheduler;
 mod target_pos;
 
 pub use error::{Result, TaskError, TaskKind};
 pub use host::TaskHost;
+pub use scheduler::{
+    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
+    TargetPosSchedulerBuilder,
+};
 pub use target_pos::{TargetPosBuilder, TargetPosTask};
