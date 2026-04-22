@@ -642,6 +642,42 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_resubmits_after_terminal_order_without_position_change() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 2);
+
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 2);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_ownership() {
     let mut host = seeded_host();
     let task = host

@@ -29,6 +29,7 @@
     - `split_policy` 已接入最小确定性拆单
     - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
     - 同一请求在净持仓未变化前不会重复发单
+    - 若挂单进入终态但持仓未变化，会在同一目标请求下重新发单
     - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
     - 当前执行策略仍是保守串行：
       - 每次 `wait_update()` 最多推进一笔 planner order
@@ -50,7 +51,7 @@
 当前仍未完成：
 
 - 多笔同批次并发提交
-- 挂单重报与撤单后重规划
+- 主动撤单后的重定价 / 重规划
 - 基于交易时段的 deadline 计算
 - trades buffer / execution report 细化
 

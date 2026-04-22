@@ -48,6 +48,7 @@ struct TargetPosTaskInner {
     next_request_seq: AtomicU64,
     submitted_request_seq: AtomicU64,
     submitted_net_position: Mutex<Option<i64>>,
+    awaiting_progress: AtomicBool,
     tracked_orders: Mutex<Vec<OrderRef>>,
     cancel_requested_order_ids: Mutex<HashSet<String>>,
     reached_tx: watch::Sender<u64>,
@@ -126,6 +127,7 @@ impl TargetPosBuilder {
             next_request_seq: AtomicU64::new(0),
             submitted_request_seq: AtomicU64::new(0),
             submitted_net_position: Mutex::new(None),
+            awaiting_progress: AtomicBool::new(false),
             tracked_orders: Mutex::new(Vec::new()),
             cancel_requested_order_ids: Mutex::new(HashSet::new()),
             reached_tx,
@@ -210,6 +212,7 @@ impl TargetPosTask {
             .submitted_net_position
             .lock()
             .expect("target task submitted net position lock poisoned") = None;
+        self.inner.awaiting_progress.store(false, Ordering::SeqCst);
         self.inner.next_request_seq.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -356,7 +359,8 @@ impl TargetPosTaskInner {
             return;
         }
 
-        if self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq
+        if self.awaiting_progress.load(Ordering::SeqCst)
+            && self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq
             && *self
                 .submitted_net_position
                 .lock()
@@ -408,6 +412,7 @@ impl TargetPosTaskInner {
             self.track_order(order_ref);
             self.submitted_request_seq
                 .store(current_seq, Ordering::SeqCst);
+            self.awaiting_progress.store(true, Ordering::SeqCst);
             *self
                 .submitted_net_position
                 .lock()
@@ -421,6 +426,7 @@ impl TargetPosTaskInner {
             .applied_target_volume
             .lock()
             .expect("applied target volume lock poisoned") = Some(target_volume);
+        self.awaiting_progress.store(false, Ordering::SeqCst);
         self.reached_tx.send_replace(current_seq);
     }
 
@@ -494,6 +500,9 @@ impl TargetPosTaskInner {
             })
             .collect::<HashSet<_>>();
         tracked_orders.retain(|order_ref| !finished_order_ids.contains(order_ref.order_id()));
+        if tracked_orders.is_empty() {
+            self.awaiting_progress.store(false, Ordering::SeqCst);
+        }
 
         if !finished_order_ids.is_empty() {
             self.cancel_requested_order_ids
