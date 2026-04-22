@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tqsdk_session::SessionFacadeError;
-use tqsdk_stream::{SessionReconnectEvent, TradeSessionEvent, TradeSessionEventUpdate};
+use tqsdk_stream::{
+    SessionReconnectEvent, StreamFacadeError, TradeSessionEvent, TradeSessionEventUpdate,
+};
 
 mod support;
 
@@ -116,4 +118,40 @@ async fn trade_session_event_stream_emits_session_error_without_commit() {
         }
         other => panic!("unexpected trade session event variant: {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trade_session_event_stream_reports_lagged_when_receiver_falls_behind() {
+    let stream = support::core_seed::seeded_stream_with_capacity(1);
+    let mut events = stream.trade_session_event_stream("sim").unwrap();
+
+    support::core_seed::seed_notification_commit_for_user(&stream, "notify-1", "sim");
+    support::core_seed::seed_notification_commit_for_user(&stream, "notify-2", "sim");
+    support::core_seed::seed_notification_commit_for_user(&stream, "notify-3", "sim");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let update = events
+        .next()
+        .await
+        .expect("trade session event stream should yield lag information");
+
+    assert!(matches!(
+        update,
+        Err(StreamFacadeError::Lagged { skipped }) if skipped >= 1
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trade_session_event_stream_reports_closed_when_driver_closes() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream.trade_session_event_stream("sim").unwrap();
+
+    stream.emit_closed_for_test();
+
+    let update = events
+        .next()
+        .await
+        .expect("trade session event stream should yield a closed error");
+
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
 }

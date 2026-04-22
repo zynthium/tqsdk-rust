@@ -463,6 +463,11 @@ impl TqStream {
     pub fn emit_session_error_for_test(&self, error: tqsdk_session::SessionFacadeError) {
         let _ = self.driver.sender.send(DriverEvent::Error(error));
     }
+
+    #[doc(hidden)]
+    pub fn emit_closed_for_test(&self) {
+        let _ = self.driver.sender.send(DriverEvent::Closed);
+    }
 }
 
 impl Drop for TqStream {
