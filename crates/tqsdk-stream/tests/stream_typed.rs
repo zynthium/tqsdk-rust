@@ -314,3 +314,47 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(update.value.last().unwrap().last_price, 618.5);
     let _: TickWindow = update.value;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn order_event_stream_emits_matching_account_updates_only() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream.order_event_stream("sim").unwrap();
+
+    support::core_seed::seed_trade_snapshot(&stream, "paper", "SHFE.au2602");
+
+    let idle = tokio::time::timeout(Duration::from_millis(10), events.next()).await;
+    assert!(idle.is_err());
+
+    support::core_seed::seed_trade_snapshot(&stream, "sim", "SHFE.au2602");
+
+    let update = events
+        .next()
+        .await
+        .expect("order event stream should yield an update")
+        .expect("order event stream should decode the order object");
+
+    assert_eq!(update.value.order_id, "order-1");
+    assert_eq!(update.value.user_id, "sim");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trade_event_stream_emits_matching_account_trades_only() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream.trade_event_stream("sim").unwrap();
+
+    support::core_seed::seed_trade_snapshot(&stream, "paper", "SHFE.au2602");
+
+    let idle = tokio::time::timeout(Duration::from_millis(10), events.next()).await;
+    assert!(idle.is_err());
+
+    support::core_seed::seed_trade_snapshot(&stream, "sim", "SHFE.au2602");
+
+    let update = events
+        .next()
+        .await
+        .expect("trade event stream should yield an update")
+        .expect("trade event stream should decode the trade object");
+
+    assert_eq!(update.value.trade_id, "trade-1");
+    assert_eq!(update.value.user_id, "sim");
+}

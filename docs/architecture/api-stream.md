@@ -236,6 +236,14 @@ impl TqStream {
         account_id: impl AsRef<str>,
         trade_id: impl AsRef<str>,
     ) -> tqsdk_stream::Result<PathValueStream<Trade>>;
+    pub fn order_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<OrderEventStream>;
+    pub fn trade_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<TradeEventStream>;
     pub fn risk_management_rule_stream(
         &self,
         account_id: impl AsRef<str>,
@@ -278,6 +286,7 @@ impl TqStream {
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
 - `path_stream()` 是最薄的 typed decode 便利层
 - `kline_stream()/tick_stream()` 是最薄的 ready-window stream 包装：内部仍然只是提交 `set_chart`，然后基于同一条 commit fan-out 读取共享状态树
+- `order_event_stream()/trade_event_stream()` 是最薄的账户级 trade 事件流包装：内部只是按 commit 的 `object_hits` 解释 order/trade 对象更新
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
@@ -399,6 +408,29 @@ impl futures::Stream for TickWindowStream {
 - 只有当 `charts/{chart_id}` 进入 ready 且 `more_data == false` 时才产出 window
 - window 本身是基于共享状态树现读现投影的 owned snapshot，不额外维护本地 serial cache
 
+### minimal trade event stream
+
+```rust
+pub struct OrderEventStream { /* private */ }
+pub struct TradeEventStream { /* private */ }
+
+impl futures::Stream for OrderEventStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<Order>>;
+}
+
+impl futures::Stream for TradeEventStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<Trade>>;
+}
+```
+
+设计意图：
+
+- 先不照搬 `tqsdk-rs` 的独立 event journal
+- 事件语义仍然直接来源于 trade 域 commit 的 `object_hits`
+- `order_event_stream()` 只为匹配账户的 `ObjectKey::Order` 产出事件
+- `trade_event_stream()` 只为匹配账户的 `ObjectKey::Trade` 产出事件
+- 如果同一个 commit 命中多个 order/trade 对象，就顺序产出多个 `ValueUpdate<T>`
+
 ## 第一版实现边界
 
 ### 必须先实现
@@ -412,15 +444,15 @@ impl futures::Stream for TickWindowStream {
 
 ### 这一版先不实现
 
-- `trade_events(...)`
+- `notification` / `transport error` / all-in-one trade event family
 - callback bridge
 - trade command thin wrappers
 
 其中：
 
 - path / scope / domain / object / field 过滤已经作为 commit stream 的薄组合层落地
-- typed path、基础对象 stream、ready-window `kline/tick` stream 已落地
-- 可靠事件流仍应等当前对象/窗口语义先稳定，再继续叠加
+- typed path、基础对象 stream、ready-window `kline/tick` stream、最小账户级 order/trade 事件流已落地
+- 更宽的可靠事件流 family 仍应等当前对象/窗口语义先稳定，再继续叠加
 
 ## 内部驱动模型
 
@@ -508,6 +540,7 @@ crates/tqsdk-stream/
     api.rs
     driver.rs
     error.rs
+    event.rs
     window.rs
   tests/
     stream_surface.rs
@@ -527,6 +560,8 @@ crates/tqsdk-stream/
   - 启动/关闭/单实例保护
 - `error.rs`
   - facade 级错误类型
+- `event.rs`
+  - commit-backed trade event 投影
 - `window.rs`
   - ready-window `kline/tick` 投影
 - `tests/*`
@@ -553,13 +588,13 @@ crates/tqsdk-stream/
 
 ### 第三批
 
-- `path_stream<T>()`、基础对象 stream、`notification`、security trade object 与 ready-window `kline/tick` 已落地
-- 下一步更自然的是补 trade 可靠事件流与更宽的 family API
+- `path_stream<T>()`、基础对象 stream、`notification`、security trade object、ready-window `kline/tick` 与最小账户级 order/trade 事件流已落地
+- 下一步更自然的是补更宽的 trade event family 与更宽的 family API
 - futures / securities 对象级投影仍保持“固定 path 或固定 window”的薄包装原则
 
 ### 第四批
 
-- trade 可靠事件流
+- 更宽的 trade 可靠事件流
 - callback bridge
 
 这个顺序的核心原则是：

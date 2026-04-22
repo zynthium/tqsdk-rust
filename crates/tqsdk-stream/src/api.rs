@@ -16,6 +16,7 @@ use tqsdk_core::{
 };
 
 use crate::driver::{DriverEvent, StreamDriver};
+use crate::event::{OrderEventStream, TradeEventStream};
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
@@ -210,6 +211,28 @@ impl TqStream {
         trade_id: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<Trade>> {
         self.path_stream(["trade", account_id.as_ref(), "trades", trade_id.as_ref()])
+    }
+
+    pub fn order_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<OrderEventStream> {
+        Ok(OrderEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn trade_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<TradeEventStream> {
+        Ok(TradeEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
     }
 
     pub fn notification_stream(
