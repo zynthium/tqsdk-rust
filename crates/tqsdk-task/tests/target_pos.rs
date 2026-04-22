@@ -799,6 +799,78 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
     task.wait_finished().await.unwrap();
+
+    assert_eq!(
+        task.execution_report().events,
+        vec![
+            TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq: 1,
+                order_id: "wait-order-1".to_string(),
+                direction: TradeDirection::Buy,
+                offset: TradeOffset::Open,
+                volume: 2,
+                limit_price: 3678.0,
+            },
+            TargetPosTaskExecutionEvent::CancelOrder {
+                order_id: "wait-order-1".to_string(),
+            },
+            TargetPosTaskExecutionEvent::OrderFinished {
+                order_id: "wait-order-1".to_string(),
+                status: "FINISHED".to_string(),
+                filled_volume: 2,
+                remaining_volume: 0,
+                last_msg: String::new(),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_execution_report_records_terminal_order_and_target_reached() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    task.wait_target_reached().await.unwrap();
+
+    assert_eq!(
+        task.execution_report().events,
+        vec![
+            TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq: 1,
+                order_id: "wait-order-1".to_string(),
+                direction: TradeDirection::Buy,
+                offset: TradeOffset::Open,
+                volume: 2,
+                limit_price: 3678.0,
+            },
+            TargetPosTaskExecutionEvent::OrderFinished {
+                order_id: "wait-order-1".to_string(),
+                status: "FINISHED".to_string(),
+                filled_volume: 2,
+                remaining_volume: 0,
+                last_msg: String::new(),
+            },
+            TargetPosTaskExecutionEvent::TargetReached {
+                request_seq: 1,
+                target_volume: 2,
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

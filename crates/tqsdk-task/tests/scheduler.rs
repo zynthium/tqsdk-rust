@@ -365,6 +365,39 @@ async fn scheduler_execution_events_include_internal_task_commands() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
     scheduler.wait_finished().await.unwrap();
+
+    assert_eq!(
+        scheduler.execution_events(),
+        vec![
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::InsertOrder {
+                    request_seq: 1,
+                    order_id: "wait-order-1".to_string(),
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 3,
+                    limit_price: 3678.0,
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::CancelOrder {
+                    order_id: "wait-order-1".to_string(),
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::OrderFinished {
+                    order_id: "wait-order-1".to_string(),
+                    status: "FINISHED".to_string(),
+                    filled_volume: 3,
+                    remaining_volume: 0,
+                    last_msg: String::new(),
+                },
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -412,6 +445,39 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
 
     scheduler.wait_finished().await.unwrap();
     assert!(scheduler.is_finished());
+    assert_eq!(
+        scheduler.execution_events(),
+        vec![
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::InsertOrder {
+                    request_seq: 1,
+                    order_id: "wait-order-1".to_string(),
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 2,
+                    limit_price: 3678.0,
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::OrderFinished {
+                    order_id: "wait-order-1".to_string(),
+                    status: "FINISHED".to_string(),
+                    filled_volume: 2,
+                    remaining_volume: 0,
+                    last_msg: String::new(),
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::TargetReached {
+                    request_seq: 1,
+                    target_volume: 2,
+                },
+            },
+        ]
+    );
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released once the last step reaches target");
 }

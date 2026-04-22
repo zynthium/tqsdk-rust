@@ -42,6 +42,17 @@ pub enum TargetPosTaskExecutionEvent {
     CancelOrder {
         order_id: String,
     },
+    OrderFinished {
+        order_id: String,
+        status: String,
+        filled_volume: i64,
+        remaining_volume: i64,
+        last_msg: String,
+    },
+    TargetReached {
+        request_seq: u64,
+        target_volume: i64,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -469,6 +480,7 @@ impl TargetPosTaskInner {
             .lock()
             .expect("applied target volume lock poisoned") = Some(target_volume);
         self.awaiting_progress.store(false, Ordering::SeqCst);
+        self.record_target_reached(current_seq, target_volume);
         self.reached_tx.send_replace(current_seq);
     }
 
@@ -509,6 +521,31 @@ impl TargetPosTaskInner {
             .events
             .push(TargetPosTaskExecutionEvent::CancelOrder {
                 order_id: order_id.to_string(),
+            });
+    }
+
+    fn record_order_finished(&self, order: &Order) {
+        self.report
+            .lock()
+            .expect("target task execution report lock poisoned")
+            .events
+            .push(TargetPosTaskExecutionEvent::OrderFinished {
+                order_id: order.order_id.clone(),
+                status: order.status.clone(),
+                filled_volume: order.volume_orign - order.volume_left,
+                remaining_volume: order.volume_left,
+                last_msg: order.last_msg.clone(),
+            });
+    }
+
+    fn record_target_reached(&self, request_seq: u64, target_volume: i64) {
+        self.report
+            .lock()
+            .expect("target task execution report lock poisoned")
+            .events
+            .push(TargetPosTaskExecutionEvent::TargetReached {
+                request_seq,
+                target_volume,
             });
     }
 
@@ -564,7 +601,7 @@ impl TargetPosTaskInner {
             .tracked_orders
             .lock()
             .expect("target task tracked orders lock poisoned");
-        let finished_order_ids = tracked_orders
+        let finished_orders = tracked_orders
             .iter()
             .filter_map(|order_ref| {
                 order_ref
@@ -572,8 +609,14 @@ impl TargetPosTaskInner {
                     .ok()
                     .flatten()
                     .filter(order_is_terminal)
-                    .map(|order| order.order_id)
             })
+            .collect::<Vec<_>>();
+        for order in &finished_orders {
+            self.record_order_finished(order);
+        }
+        let finished_order_ids = finished_orders
+            .into_iter()
+            .map(|order| order.order_id)
             .collect::<HashSet<_>>();
         tracked_orders.retain(|order_ref| !finished_order_ids.contains(order_ref.order_id()));
         if tracked_orders.is_empty() {
