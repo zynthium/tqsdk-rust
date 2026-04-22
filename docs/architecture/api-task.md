@@ -66,6 +66,7 @@
   - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
   - 同一请求序号在净持仓未变化前不会重复发单
   - 若挂单进入终态但持仓未变化，会在同一目标请求下重新发单
+  - 若 live order 与最新期望首笔委托不一致，会先发真实撤单，等旧单终态后在后续 `wait_update()` 里按新计划重发
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行：
     - 每次 `wait_update()` 最多推进一笔 planner order
@@ -80,7 +81,7 @@
 当前还未落地：
 
 - 多笔同批次并发提交
-- 主动撤单后的重定价 / 重规划
+- 更复杂的多单/多批次主动撤单后重规划
 - 交易时段感知的 scheduler deadline
 - trades buffer 驱动的完整 execution report
 

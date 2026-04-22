@@ -558,6 +558,116 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
+    let mut host = seeded_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            2,
+            PriceMode::Active,
+        )])
+        .build()
+        .unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+    assert_eq!(payload["limit_price"], 3678.0);
+
+    seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 2, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "FINISHED",
+        2,
+        2,
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3681.0, 3680.0, 3680.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["order_id"], "wait-order-2");
+    assert_eq!(payload["limit_price"], 3681.0);
+
+    assert_eq!(
+        scheduler.execution_events(),
+        vec![
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::InsertOrder {
+                    request_seq: 1,
+                    order_id: "wait-order-1".to_string(),
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 2,
+                    limit_price: 3678.0,
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::CancelOrder {
+                    order_id: "wait-order-1".to_string(),
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::OrderFinished {
+                    order_id: "wait-order-1".to_string(),
+                    status: "FINISHED".to_string(),
+                    filled_volume: 0,
+                    remaining_volume: 2,
+                    last_msg: String::new(),
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::InsertOrder {
+                    request_seq: 1,
+                    order_id: "wait-order-2".to_string(),
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 2,
+                    limit_price: 3681.0,
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn scheduler_uses_step_passive_price_mode_for_internal_target_task() {
     let mut host = seeded_host();
     let scheduler = host

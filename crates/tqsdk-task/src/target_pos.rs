@@ -69,6 +69,14 @@ pub struct TargetPosTaskExecutionReport {
     pub events: Vec<TargetPosTaskExecutionEvent>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DesiredOrder {
+    direction: TradeDirection,
+    offset: TradeOffset,
+    volume: i64,
+    limit_price: f64,
+}
+
 #[derive(Default)]
 pub(crate) struct TargetPosStore {
     tasks: HashMap<TaskId, Weak<TargetPosTaskInner>>,
@@ -412,7 +420,16 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        if self.has_live_orders(api) {
+        let desired_order = desired_order_for_target(api, self, target_volume, &current_position);
+        if self
+            .handle_live_orders(
+                api,
+                current_net_position,
+                target_volume,
+                desired_order.as_ref(),
+            )
+            .await
+        {
             return;
         }
 
@@ -432,28 +449,7 @@ impl TargetPosTaskInner {
             return;
         }
 
-        let quote = match api.quote_ref(&self.symbol).snapshot(api).ok().flatten() {
-            Some(quote) => quote,
-            None => return,
-        };
-        let exchange_id = quote_exchange_id(&quote, &self.symbol);
-        let Some(order) = compute_plan(
-            &exchange_id,
-            &current_position,
-            target_volume,
-            self.config.offset_priority,
-        )
-        .into_iter()
-        .flat_map(|batch| batch.orders.into_iter())
-        .next() else {
-            return;
-        };
-        let order_direction = order.direction;
-        let order_offset = order.offset;
-        let order_volume = split_order_volume(order.volume, self.config.split_policy);
-        let Some(limit_price) =
-            resolve_limit_price(&quote, order_direction, self.config.price_mode)
-        else {
+        let Some(desired_order) = desired_order else {
             return;
         };
 
@@ -461,10 +457,10 @@ impl TargetPosTaskInner {
             .insert_order(
                 &self.account_id,
                 &self.symbol,
-                order_direction,
-                Some(order_offset),
-                order_volume,
-                Some(json!(limit_price)),
+                desired_order.direction,
+                Some(desired_order.offset),
+                desired_order.volume,
+                Some(json!(desired_order.limit_price)),
             )
             .await
         {
@@ -473,10 +469,10 @@ impl TargetPosTaskInner {
             self.record_insert_order(
                 current_seq,
                 &order_id,
-                order_direction,
-                order_offset,
-                order_volume,
-                limit_price,
+                desired_order.direction,
+                desired_order.offset,
+                desired_order.volume,
+                desired_order.limit_price,
             );
             self.submitted_request_seq
                 .store(current_seq, Ordering::SeqCst);
@@ -646,6 +642,29 @@ impl TargetPosTaskInner {
             .is_empty()
     }
 
+    async fn handle_live_orders(
+        &self,
+        api: &mut tqsdk_wait::TqApi,
+        current_net_position: i64,
+        target_volume: i64,
+        desired_order: Option<&DesiredOrder>,
+    ) -> bool {
+        let live_orders = self.live_orders(api);
+        if live_orders.is_empty() {
+            return false;
+        }
+
+        if should_cancel_for_replan(
+            &live_orders,
+            desired_order,
+            current_net_position,
+            target_volume,
+        ) {
+            let _ = self.cancel_pending_orders(api).await;
+        }
+        true
+    }
+
     async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
         self.prune_terminal_orders(api);
 
@@ -719,6 +738,17 @@ impl TargetPosTaskInner {
         }
     }
 
+    fn live_orders(&self, api: &tqsdk_wait::TqApi) -> Vec<Order> {
+        self.prune_terminal_orders(api);
+        self.tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned")
+            .iter()
+            .filter_map(|order_ref| order_ref.snapshot(api).ok().flatten())
+            .filter(|order| !order_is_terminal(order))
+            .collect()
+    }
+
     fn finish(&self) {
         if self.finished.swap(true, Ordering::SeqCst) {
             return;
@@ -769,6 +799,60 @@ fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: 
         .ok()
         .flatten()
         .unwrap_or_default()
+}
+
+fn desired_order_for_target(
+    api: &tqsdk_wait::TqApi,
+    task: &TargetPosTaskInner,
+    target_volume: i64,
+    current_position: &Position,
+) -> Option<DesiredOrder> {
+    let quote = api.quote_ref(&task.symbol).snapshot(api).ok().flatten()?;
+    let exchange_id = quote_exchange_id(&quote, &task.symbol);
+    let order = compute_plan(
+        &exchange_id,
+        current_position,
+        target_volume,
+        task.config.offset_priority,
+    )
+    .into_iter()
+    .flat_map(|batch| batch.orders.into_iter())
+    .next()?;
+
+    Some(DesiredOrder {
+        direction: order.direction,
+        offset: order.offset,
+        volume: split_order_volume(order.volume, task.config.split_policy),
+        limit_price: resolve_limit_price(&quote, order.direction, task.config.price_mode)?,
+    })
+}
+
+fn should_cancel_for_replan(
+    live_orders: &[Order],
+    desired_order: Option<&DesiredOrder>,
+    current_net_position: i64,
+    target_volume: i64,
+) -> bool {
+    if live_orders.is_empty() {
+        return false;
+    }
+    if current_net_position == target_volume {
+        return true;
+    }
+
+    let Some(desired_order) = desired_order else {
+        return false;
+    };
+    live_orders
+        .iter()
+        .any(|order| order_differs_from_desired(order, desired_order))
+}
+
+fn order_differs_from_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
+    order.direction != desired_order.direction.as_str()
+        || order.offset != desired_order.offset.as_str()
+        || order.volume_left != desired_order.volume
+        || order.limit_price != desired_order.limit_price
 }
 
 fn quote_exchange_id(quote: &Quote, symbol: &str) -> String {
