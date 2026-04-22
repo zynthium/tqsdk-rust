@@ -7,7 +7,7 @@
 
 - 官方 `tqsdk-python` 的 `wait_update()` 范式到底强在哪里，代价又是什么？
 - 现有 `tqsdk-rs` 的 async subscription / event-driven 范式到底做了哪些取舍？
-- 这两种范式里，哪些应当进入未来的 `tqsdk-wait`，哪些应当保留给未来的 `tqsdk-stream` / `tqsdk-callback`？
+- 这两种范式里，哪些应当进入当前的 `tqsdk-wait`，哪些应当保留给当前的 `tqsdk-stream` / 可能的 `tqsdk-callback`？
 - 哪些经验只能停留在 facade 层，不能反向污染 `tqsdk-core`？
 
 ## 调研范围
@@ -237,7 +237,7 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 - 状态流与可靠事件流分层
 - 多消费者订阅生命周期管理
 
-但这些能力应出现在未来的 `tqsdk-stream` / `tqsdk-callback`，而不是抢占 `tqsdk-wait` 的第一优先级。
+但这些能力应出现在 `tqsdk-stream` / 可能的 `tqsdk-callback`，而不是抢占 `tqsdk-wait` 的第一优先级。
 
 这里还需要明确一条边界：
 
@@ -280,7 +280,7 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 
 如果目标是做一个“给高并发、多消费者、异步系统集成方用”的 facade，优先级应该是：
 
-1. 后续再做 `tqsdk-stream`
+1. 使用 `tqsdk-stream`
 2. 参考 `tqsdk-rs` 的 subscription / event-driven 经验
 3. 但仍然从 `tqsdk-core` 的 commit/revision 读面导出
 

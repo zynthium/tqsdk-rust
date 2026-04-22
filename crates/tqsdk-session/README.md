@@ -77,7 +77,7 @@
 
 - `tqsdk-session` 负责一次性 direct query / schema / metadata
 - `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
-- 未来 `tqsdk-stream` 负责 stream/event 风格的持续状态消费
+- `tqsdk-stream` 负责 stream/event 风格的持续状态消费
 
 ## 示例
 

@@ -1,18 +1,18 @@
 # 当前 Crate 边界审计
 
 ## 文档定位
-本文档用于审计当前 workspace 三个子 crate 的职责边界是否合理，以及它们是否足以承载后续继续对齐 `tqsdk-python` 与现有 `tqsdk-rs` 的能力。
+本文档用于审计当前 workspace 五个已落地子 crate 的职责边界是否合理，以及它们是否足以承载后续继续对齐 `tqsdk-python` 与现有 `tqsdk-rs` 的能力。
 
 讨论的不是“现在还能加什么功能”，而是下面几个更关键的问题：
 
 - 当前边界是否符合高性能底座的目标
 - 常见用户场景会不会把能力推向错误的 crate
-- 哪些能力应继续留在当前三层
+- 哪些能力应继续留在当前五层
 - 哪些能力应明确后移到未来新 crate
 
 ## 当前结论
 
-当前三层边界整体判断为：
+当前五层边界整体判断为：
 
 - 方向正确
 - 可以继续稳定演进
@@ -24,8 +24,10 @@
 - `tqsdk-core` 是 protocol-complete runtime substrate
 - `tqsdk-session` 是 shared session + one-shot request/response
 - `tqsdk-wait` 是 Python 风格单推进点的 continuous-consumption facade
+- `tqsdk-stream` 是 shared-session multi-consumer stream facade
+- `tqsdk-task` 是高层执行工具与任务编排层
 
-这三层是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。
+这五层依然是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。
 
 ## 审计标准
 
@@ -35,7 +37,7 @@
 - 是否让高性能用户可以停留在足够低的层面
 - 是否让 Python 风格用户可以获得稳定的 `wait_update()` 心智
 - 是否避免把研究工具、执行任务系统和 protocol substrate 混在一起
-- 是否为未来 `tqsdk-stream`、`TargetPosTask`、downloader 等留出清晰落点
+- 是否为 `tqsdk-stream`、`tqsdk-task`、downloader 等能力留出清晰落点
 
 ## `tqsdk-core`
 
@@ -211,6 +213,67 @@
 
 后续最大的风险不是“功能不够”，而是重新把 Python 单体 `TqApi` 的其他便利接口全部塞回来。
 
+## `tqsdk-stream`
+
+### 正确职责
+
+`tqsdk-stream` 当前的职责也已经清楚：
+
+- shared-session 多消费者 commit fan-out
+- path / scope / domain / object / field 过滤
+- typed path stream
+- kline / tick window stream
+- trade 相关事件流
+
+它的价值不在于“再造一套 runtime”，而在于让高性能、多消费者、异步系统集成方可以直接消费同一套 commit 语义。
+
+### 不应吸收的能力
+
+`tqsdk-stream` 不应继续吸收：
+
+- GraphQL / HTTP direct query
+- schema / metadata facade
+- downloader
+- `TargetPosTask`
+- DataFrame / polars
+- 本地 overlay 状态树
+
+### 判断
+
+这一层已经有明确而健康的落点。
+
+真正要继续防止的，是把它重新做成一个宽而胖的“第二个总入口”。
+
+## `tqsdk-task`
+
+### 正确职责
+
+`tqsdk-task` 当前应继续承担：
+
+- `TaskHost`
+- `TargetPosTask`
+- `TargetPosScheduler`
+- ownership / guarded order
+- execution report
+- 规划与执行之间的本地任务状态机
+
+它是执行工具层，不是消费 facade，也不是协议 substrate。
+
+### 不应吸收的能力
+
+`tqsdk-task` 不应继续吸收：
+
+- direct query / schema / metadata
+- downloader / DataFrame / polars
+- 回测报告 / GUI
+- 反向要求 `tqsdk-core` 改写提交模型
+
+### 判断
+
+这一层当前边界也是合理的。
+
+后续主要工作不是继续拓宽 public surface，而是继续稳固 planner、ownership 和执行报告语义。
+
 ## 常见场景下的边界合理性
 
 ### 场景 1：高性能 live 交易用户
@@ -226,7 +289,7 @@
 合理路径：
 
 - `tqsdk-core + tqsdk-session`
-- 如需现成但仍很薄的用户 API，再加未来 `tqsdk-stream`
+- 如需现成但仍很薄的用户 API，再加 `tqsdk-stream`
 
 判断：
 
@@ -263,12 +326,12 @@
 合理路径：
 
 - `tqsdk-session`
-- 未来 `tqsdk-stream`
+- `tqsdk-stream`
 
 判断：
 
 - 当前边界合理
-- 但仍缺一层 stream facade
+- 已经有合适的 stream facade 落点
 
 ### 场景 4：只做 metadata / calendar / settlement / ranking 查询
 
@@ -296,7 +359,7 @@
 
 合理路径：
 
-- 未来独立 task crate
+- `tqsdk-task`
 
 判断：
 
@@ -366,5 +429,7 @@ Python 的问题是：
 - `tqsdk-core` 继续只做底层统一 contract
 - `tqsdk-session` 继续做 shared session + one-shot control/query
 - `tqsdk-wait` 继续做 Python 风格单推进点 continuous-consumption facade
+- `tqsdk-stream` 继续做多消费者 continuous-consumption facade
+- `tqsdk-task` 继续做执行工具层
 
-未来真正要补的不是重新划分这三个 crate，而是新增上层 crate，承接 task、stream、data/research 等能力。
+接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固 `stream/task`，并在合适时新增 `data/research` 等更上层 crate。

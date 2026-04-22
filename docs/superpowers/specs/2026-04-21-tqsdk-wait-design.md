@@ -3,6 +3,12 @@
 ## 文档定位
 本文档用于锁定 Rust 版 TQSDK 在 V2 facade 层的职责边界，避免后续实现时再次把 facade 语义反向压进 `tqsdk-core`。
 
+状态说明：
+
+- 这份文档形成于 `tqsdk-stream` 与 `tqsdk-task` 落地之前
+- 当前 `tqsdk-wait`、`tqsdk-stream`、`tqsdk-session`、`tqsdk-task` 都已实现
+- 文中涉及“未来 `tqsdk-stream`”的表述，代表的是实现前的设计判断
+
 这份设计文档只回答三类问题：
 
 - `tqsdk-core` 之上应该再分出哪些 crate，各自负责什么
@@ -31,7 +37,7 @@
 ## 总体目标
 
 ### 目标 1
-让 `tqsdk-wait` 和未来的 `tqsdk-stream` 都只是 `tqsdk-core` 之上的便利包装，而不是新的底层。
+让 `tqsdk-wait` 和 `tqsdk-stream` 都只是 `tqsdk-core` 之上的便利包装，而不是新的底层。
 
 ### 目标 2
 把“状态化 diff 消费接口”和“一次性 direct query 接口”彻底分开，不混入同一个 facade 语义里。
@@ -88,7 +94,7 @@
 这里需要再强调一层：
 
 - 它们的 crate 归属应当固定在 `tqsdk-session`
-- `tqsdk-wait` 和未来的 `tqsdk-stream` 都只复用 `tqsdk-session` 提供的 direct query 能力，不重新包装成自己的主 surface
+- `tqsdk-wait` 和 `tqsdk-stream` 都只复用 `tqsdk-session` 提供的 direct query 能力，不重新包装成自己的主 surface
 
 ### 判断 2：需要一个模式无关的共享薄层
 如果 `tqsdk-wait` 和 `tqsdk-stream` 都各自重复 auth、bootstrap、query、schema、session 装配，就会出现两类问题：
@@ -168,7 +174,7 @@ tqsdk-wait              tqsdk-stream
 它也应当成为两类用户的共享 direct-query 入口：
 
 - 研究员主要用 `tqsdk-wait`，但做 metadata/query 时直接调用 `tqsdk-session`
-- 高性能用户主要用未来的 `tqsdk-stream`，但做 metadata/query 时同样直接调用 `tqsdk-session`
+- 高性能用户主要用 `tqsdk-stream`，但做 metadata/query 时同样直接调用 `tqsdk-session`
 
 #### `tqsdk-session` 不应提供
 - `wait_update`
@@ -557,7 +563,7 @@ crates/tqsdk-wait/
 - 能建立 live session
 - 能对外提供 direct query / schema / metadata 接口
 - 不暴露 `wait_update` / stream 风格方法
-- 能被 `tqsdk-wait` 和未来 `tqsdk-stream` 共同依赖
+- 能被 `tqsdk-wait` 和 `tqsdk-stream` 共同依赖
 
 ### `tqsdk-wait`
 首版完成标准：
@@ -570,7 +576,7 @@ crates/tqsdk-wait/
 - `insert_order()/cancel_order()/confirm_settlement()` 跑通
 - 内部 helper 消费到的 commit 不会被吞掉
 
-### 未来 `tqsdk-stream`
+### `tqsdk-stream`
 完成标准：
 
 - 不回改 `tqsdk-core`
@@ -606,7 +612,7 @@ crates/tqsdk-wait/
 
 1. `tqsdk-core` 继续只做 substrate
 2. direct query / schema / metadata 放进共享薄层 `tqsdk-session`
-3. `tqsdk-wait` 和未来 `tqsdk-stream` 只处理 diff-backed 状态消费形状
+3. `tqsdk-wait` 和 `tqsdk-stream` 只处理 diff-backed 状态消费形状
 4. downloader、`TargetPosTask` 等能力保持为更高层独立工具 crate
 
 这能同时满足三个目标：

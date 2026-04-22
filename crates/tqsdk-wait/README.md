@@ -78,7 +78,7 @@
 - `insert_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
-- 未来 `tqsdk-stream` 也只会承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
+- `tqsdk-stream` 也只承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
 
 ## 示例
 

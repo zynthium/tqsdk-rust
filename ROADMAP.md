@@ -6,7 +6,7 @@
 
 它回答的不是“最终想做多少功能”，而是：
 
-- 未来应按什么顺序推进
+- 接下来应按什么顺序推进
 - 每一阶段的目标是什么
 - 哪些能力应该进入哪个 crate
 - 哪些能力当前明确不该做
@@ -18,7 +18,7 @@
 
 - 优先保护 `tqsdk-core` 的稳定、高性能、纯 async substrate 边界。
 - 共享 session 与 one-shot request/response 能力继续集中在 `tqsdk-session`。
-- diff-backed continuous consumption 能力只进入 `tqsdk-wait` 和未来的 `tqsdk-stream`。
+- diff-backed continuous consumption 能力只进入 `tqsdk-wait` 和 `tqsdk-stream`。
 - `TargetPosTask`、downloader、DataFrame/polars、回测报告、GUI 都不应倒灌到底层。
 - 每一阶段都要求：
   - 清晰 crate 边界
@@ -77,7 +77,7 @@
 
 ### 目标
 
-把当前已经落地的 `tqsdk-core`、`tqsdk-session`、`tqsdk-wait` 收敛成一个长期稳定、适合继续叠加 facade 的底座。
+把当前已经落地的 `tqsdk-core`、`tqsdk-session`、`tqsdk-wait`、`tqsdk-stream`、`tqsdk-task` 收敛成一个长期稳定、适合继续叠加 facade 的底座。
 
 ### 本阶段应完成
 
@@ -97,14 +97,12 @@
 
 接下来的重点不再是继续扩 public surface，而是：
 
-- 继续审计 wait/session/core 的职责边界
+- 继续审计 `core/session/wait/stream/task` 的职责边界
 - 补更多真实联机示例
-- 评估 `tqsdk-stream` 的最小稳定 API
+- 继续压实 `tqsdk-stream` 的最小稳定 API 与 `tqsdk-task` 的执行边界
 
 ### 本阶段明确不做
 
-- `tqsdk-stream`
-- `TargetPosTask`
 - downloader
 - DataFrame / polars
 - callback facade
@@ -112,8 +110,8 @@
 
 ### 进入下一阶段的退出条件
 
-- `core/session/wait` 的 crate 边界不再频繁变化
-- `tqsdk-wait` 已覆盖当前 core 中最关键的 diff-backed live 对象
+- `core/session/wait/stream/task` 的 crate 边界不再频繁变化
+- `tqsdk-wait` 与 `tqsdk-stream` 已覆盖当前 core 中最关键的 diff-backed live 对象
 - 核心示例足以证明当前底座可用于真实联机与基础交易
 - workspace 文档能清楚说明每一层职责
 
@@ -324,10 +322,10 @@
 
 ## 当前建议的下一步
 
-如果按当前优先级继续推进，建议下一轮实际开发从下面二选一开始：
+如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
-1. 继续 Phase 1，把 `tqsdk-wait` 对 core 中现有 diff-backed 对象的覆盖补齐
-2. 开始 Phase 2，先写 `tqsdk-stream` 的最小架构文档与 API 草图，再进入实现
+1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
+2. 在当前五层边界稳定后，再进入 Phase 4，给 `tqsdk-data` 写最小架构文档与 crate 脚手架
 
 如果目标是先把底座做得更稳，优先选 1。
-如果目标是尽快验证当前底座能否同时承载 Python 风格和 Rust 风格，优先选 2。
+如果目标是开始给研究型能力准备独立落点，再选 2。

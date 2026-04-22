@@ -57,7 +57,7 @@ V1 是：
   - 提供 cursor 创建、commit 消费、zero-copy 状态读取
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
-  - 为未来 `wait_update` 与 stream/callback facade 提供共同读面
+  - 为 `wait_update`、stream/callback facade 提供共同读面
 - `UpdateCursor`
   - 独立推进的 commit 消费游标
 
@@ -87,7 +87,7 @@ V1 是：
   - direct query / schema refresh 薄层入口
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
   - 保持“纯 async substrate，调用方自带 Tokio runtime”的约束
-  - 供 `wait` / 未来 `stream` 共同依赖
+  - 供 `wait` / `stream` 共同依赖
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
   - market/trade 对象引用
@@ -95,6 +95,15 @@ V1 是：
   - 基于 shared session 的 live `wait_update()` 驱动链路
   - trade 命令的 wait 风格薄包装
   - 允许通过 `session()` 落回同一个底层 `SessionClient`，但不复制 direct query API
+- `tqsdk-stream`
+  - shared-session multi-consumer commit stream facade
+  - commit/path/scope/domain/object/field filters
+  - typed path stream / ready kline-tick window / trade session events
+- `tqsdk-task`
+  - `TaskHost`
+  - `TargetPosTask`
+  - `TargetPosScheduler`
+  - ownership / guarded order / execution report
 
 这两层当前仍然遵守同一个约束：
 
@@ -104,7 +113,7 @@ V1 是：
 
 ## API 归属总表
 
-为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或未来的 `stream`，当前架构采用下面这条硬边界：
+为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或 `stream`，当前架构采用下面这条硬边界：
 
 - `tqsdk-session` 负责所有一次性 request/response 接口
 - `tqsdk-wait` 和 `tqsdk-stream` 只负责 diff-backed 持续状态消费接口
@@ -125,7 +134,7 @@ V1 是：
 
 - `tqsdk-session` 不是只给 facade 内部用，用户也可以直接使用它来做 direct query / schema / metadata 访问
 - `tqsdk-wait` 即便提供 `session()` 访问底层 session，也只是复用路径，不改变 direct query 的 crate 归属
-- `tqsdk-stream` 将来不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
+- `tqsdk-stream` 现在也不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
 - 对性能极致敏感的用户，仍然可以直接使用 `tqsdk-core + tqsdk-session`
 
 在 `tqsdk-session` 这一层里，建议再按“薄包装 vs 高层研究工具”继续收一刀：
