@@ -183,7 +183,11 @@ impl TaskHost {
     pub async fn insert_order_guarded(
         &mut self,
         account_id: impl AsRef<str>,
-        command: tqsdk_core::TradeInsertOrderCommand,
+        symbol: impl AsRef<str>,
+        direction: tqsdk_core::TradeDirection,
+        offset: Option<tqsdk_core::TradeOffset>,
+        volume: i64,
+        limit_price: Option<serde_json::Value>,
     ) -> tqsdk_task::Result<tqsdk_wait::OrderRef>;
 
     pub async fn cancel_order_guarded(
@@ -199,6 +203,7 @@ impl TaskHost {
 - `TaskHost` 拥有单一推进点
 - 用户继续通过 `api()` 读取 live refs
 - 任务相关命令通过 host 本身走，便于做 ownership guard
+- guarded cancel 需要先从本地状态解析订单对应 symbol；若订单尚未进入状态树，第一版应保守拒绝
 - 不要求 `tqsdk-wait` 反向感知 task registry
 
 `api_mut()` 只是 escape hatch，不应成为常规命令入口。

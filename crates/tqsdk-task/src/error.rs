@@ -26,6 +26,10 @@ pub enum TaskError {
         symbol: String,
         active_task_kind: TaskKind,
     },
+    OrderNotReady {
+        account_id: String,
+        order_id: String,
+    },
     InvalidState(&'static str),
 }
 
@@ -55,6 +59,13 @@ impl Display for TaskError {
                 f,
                 "manual order blocked by active task on account={account_id} symbol={symbol} active_task_kind={active_task_kind:?}"
             ),
+            Self::OrderNotReady {
+                account_id,
+                order_id,
+            } => write!(
+                f,
+                "order snapshot not ready for guarded command on account={account_id} order_id={order_id}"
+            ),
             Self::InvalidState(message) => write!(f, "invalid task state: {message}"),
         }
     }
@@ -66,6 +77,7 @@ impl std::error::Error for TaskError {
             Self::Wait(error) => Some(error),
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
+            | Self::OrderNotReady { .. }
             | Self::InvalidState(_) => None,
         }
     }

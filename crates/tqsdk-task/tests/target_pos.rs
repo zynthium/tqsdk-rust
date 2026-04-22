@@ -132,3 +132,19 @@ async fn host_wait_update_applies_latest_target_request_only() {
     assert_eq!(task.applied_target_volume_for_test(), Some(8));
     assert_eq!(task.current_target_volume(), Some(8));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_task_wait_finished_resolves_after_cancel() {
+    let mut host = seeded_host();
+    let task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_finished()).await;
+    assert!(pending.is_err());
+
+    task.cancel().await.unwrap();
+    task.wait_finished().await.unwrap();
+    assert!(task.is_finished());
+
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released after cancellation");
+}

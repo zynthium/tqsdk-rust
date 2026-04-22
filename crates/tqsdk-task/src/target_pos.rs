@@ -162,6 +162,23 @@ impl TargetPosTask {
         }
     }
 
+    pub async fn wait_finished(&self) -> Result<()> {
+        if self.is_finished() {
+            return Ok(());
+        }
+
+        let mut finished_rx = self.inner.finished_tx.subscribe();
+        loop {
+            if *finished_rx.borrow() {
+                return Ok(());
+            }
+
+            finished_rx.changed().await.map_err(|_| {
+                TaskError::InvalidState("target position task finished channel closed")
+            })?;
+        }
+    }
+
     pub async fn cancel(&self) -> Result<()> {
         self.inner.finish();
         Ok(())
