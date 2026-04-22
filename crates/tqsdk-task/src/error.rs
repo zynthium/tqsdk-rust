@@ -30,6 +30,7 @@ pub enum TaskError {
         account_id: String,
         order_id: String,
     },
+    Unsupported(&'static str),
     InvalidState(&'static str),
 }
 
@@ -66,6 +67,7 @@ impl Display for TaskError {
                 f,
                 "order snapshot not ready for guarded command on account={account_id} order_id={order_id}"
             ),
+            Self::Unsupported(message) => write!(f, "unsupported task operation: {message}"),
             Self::InvalidState(message) => write!(f, "invalid task state: {message}"),
         }
     }
@@ -78,6 +80,7 @@ impl std::error::Error for TaskError {
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }
+            | Self::Unsupported(_)
             | Self::InvalidState(_) => None,
         }
     }

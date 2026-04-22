@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
-    RuntimeInput,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
+    ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
@@ -19,7 +19,28 @@ fn seeded_host() -> TaskHost {
     TaskHost::new(TqApi::new(session))
 }
 
+fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport frame should contain valid json payload")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
+            .expect("transport frame should contain valid json payload"),
+        other => panic!("expected transport request, got {other:?}"),
+    }
+}
+
 fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
+    seed_quote_book_commit(host, symbol, last_price + 1.0, last_price - 1.0, last_price);
+}
+
+fn seed_quote_book_commit(
+    host: &TaskHost,
+    symbol: &str,
+    ask_price1: f64,
+    bid_price1: f64,
+    last_price: f64,
+) {
     host.api()
         .handle_for_test()
         .ingest(
@@ -32,6 +53,8 @@ fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
                         "quotes": {
                             symbol: {
                                 "instrument_id": symbol,
+                                "ask_price1": ask_price1,
+                                "bid_price1": bid_price1,
                                 "last_price": last_price,
                             }
                         }
@@ -43,6 +66,41 @@ fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
         )
         .unwrap()
         .expect("seed quote commit should produce a commit");
+}
+
+fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i64) {
+    let (pos_long, pos_short) = if pos >= 0 { (pos, 0) } else { (0, -pos) };
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": symbol.split_once('.').expect("symbol should contain exchange").0,
+                                        "instrument_id": symbol.split_once('.').expect("symbol should contain exchange").1,
+                                        "pos": pos,
+                                        "pos_long": pos_long,
+                                        "pos_short": pos_short,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed position commit should produce a commit");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -176,4 +234,158 @@ fn target_pos_builder_preserves_explicit_config() {
             }),
         }
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_submits_buy_open_order_with_active_price() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["user_id"], "sim");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 2);
+    assert_eq!(payload["limit_price"], 3678.0);
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    task.wait_target_reached().await.unwrap();
+    assert_eq!(task.applied_target_volume_for_test(), Some(2));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_uses_passive_price_for_buy_orders() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .price_mode(PriceMode::Passive)
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(1).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["limit_price"], 3677.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_does_not_submit_order_when_position_already_matches_target() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    task.wait_target_reached().await.unwrap();
+    assert_eq!(task.applied_target_volume_for_test(), Some(2));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_does_not_resubmit_same_request_on_later_updates() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert_eq!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_fails_when_request_would_reduce_existing_net_position() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(1).unwrap();
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        task.wait_target_reached().await.unwrap_err(),
+        TaskError::Unsupported("open-only planner cannot reduce or flip existing net position")
+    );
+    assert_eq!(
+        task.last_error(),
+        Some(TaskError::Unsupported(
+            "open-only planner cannot reduce or flip existing net position"
+        ))
+    );
+    assert!(task.is_finished());
 }

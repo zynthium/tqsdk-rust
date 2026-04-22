@@ -9,7 +9,7 @@ use crate::Result;
 use crate::TaskError;
 use crate::registry::{TaskId, TaskRegistry};
 use crate::scheduler::{TargetPosSchedulerBuilder, TargetPosSchedulerStore};
-use crate::target_pos::{TargetPosBuilder, TargetPosStore};
+use crate::target_pos::{TargetPosBuilder, TargetPosStore, process_target_tasks_wait_update};
 
 /// Single-owner task host built on a wait-style API.
 pub struct TaskHost {
@@ -48,10 +48,7 @@ impl TaskHost {
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
         let updated = self.api.wait_update(deadline).await?;
         if updated {
-            self.target_tasks
-                .lock()
-                .expect("target task store lock poisoned")
-                .process_wait_update();
+            process_target_tasks_wait_update(&self.target_tasks, &mut self.api).await;
             self.schedulers
                 .lock()
                 .expect("scheduler store lock poisoned")

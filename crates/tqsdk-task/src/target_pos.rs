@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use serde_json::json;
 use tokio::sync::watch;
+use tqsdk_core::{Quote, TradeDirection, TradeOffset};
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
@@ -39,7 +41,9 @@ struct TargetPosTaskInner {
     config: TargetPosConfig,
     target_volume: Mutex<Option<i64>>,
     applied_target_volume: Mutex<Option<i64>>,
+    last_error: Mutex<Option<TaskError>>,
     next_request_seq: AtomicU64,
+    submitted_request_seq: AtomicU64,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
     finished: AtomicBool,
@@ -94,7 +98,9 @@ impl TargetPosBuilder {
             config: self.config,
             target_volume: Mutex::new(None),
             applied_target_volume: Mutex::new(None),
+            last_error: Mutex::new(None),
             next_request_seq: AtomicU64::new(0),
+            submitted_request_seq: AtomicU64::new(0),
             reached_tx,
             finished_tx,
             finished: AtomicBool::new(false),
@@ -138,6 +144,15 @@ impl TargetPosTask {
             .expect("target volume lock poisoned")
     }
 
+    #[must_use]
+    pub fn last_error(&self) -> Option<TaskError> {
+        self.inner
+            .last_error
+            .lock()
+            .expect("target task last error lock poisoned")
+            .clone()
+    }
+
     pub fn set_target_volume(&self, volume: i64) -> Result<()> {
         if self.is_finished() {
             return Err(TaskError::InvalidState(
@@ -150,6 +165,11 @@ impl TargetPosTask {
             .target_volume
             .lock()
             .expect("target volume lock poisoned") = Some(volume);
+        *self
+            .inner
+            .last_error
+            .lock()
+            .expect("target task last error lock poisoned") = None;
         self.inner.next_request_seq.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -167,9 +187,12 @@ impl TargetPosTask {
                 return Ok(());
             }
             if *finished_rx.borrow() {
-                return Err(TaskError::InvalidState(
-                    "target position task finished before reaching target",
-                ));
+                return match self.inner.failure_result() {
+                    Ok(()) => Err(TaskError::InvalidState(
+                        "target position task finished before reaching target",
+                    )),
+                    Err(error) => Err(error),
+                };
             }
 
             tokio::select! {
@@ -189,13 +212,13 @@ impl TargetPosTask {
 
     pub async fn wait_finished(&self) -> Result<()> {
         if self.is_finished() {
-            return Ok(());
+            return self.inner.failure_result();
         }
 
         let mut finished_rx = self.inner.finished_tx.subscribe();
         loop {
             if *finished_rx.borrow() {
-                return Ok(());
+                return self.inner.failure_result();
             }
 
             finished_rx.changed().await.map_err(|_| {
@@ -229,19 +252,14 @@ impl TargetPosStore {
         self.tasks.remove(&task_id);
     }
 
-    pub(crate) fn process_wait_update(&mut self) {
-        self.tasks.retain(|_, weak| {
-            let Some(task) = weak.upgrade() else {
-                return false;
-            };
-            task.process_wait_update();
-            true
-        });
+    fn live_tasks(&mut self) -> Vec<Arc<TargetPosTaskInner>> {
+        self.tasks.retain(|_, weak| weak.strong_count() > 0);
+        self.tasks.values().filter_map(Weak::upgrade).collect()
     }
 }
 
 impl TargetPosTaskInner {
-    fn process_wait_update(&self) {
+    async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
         let current_seq = self.next_request_seq.load(Ordering::SeqCst);
         if current_seq == 0 || *self.reached_tx.borrow() >= current_seq {
             return;
@@ -256,6 +274,56 @@ impl TargetPosTaskInner {
         else {
             return;
         };
+
+        let current_position = current_position(api, &self.account_id, &self.symbol);
+        if current_position == target_volume {
+            self.mark_reached(current_seq, target_volume);
+            return;
+        }
+
+        if self.config.offset_priority != OffsetPriority::OpenOnly {
+            self.mark_reached(current_seq, target_volume);
+            return;
+        }
+
+        if self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq {
+            return;
+        }
+
+        let delta = target_volume - current_position;
+        let plan = match open_only_plan(current_position, target_volume, delta) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let (direction, volume) = plan;
+        let Some(limit_price) =
+            quote_limit_price(api, &self.symbol, direction, self.config.price_mode)
+        else {
+            return;
+        };
+
+        if api
+            .insert_order(
+                &self.account_id,
+                &self.symbol,
+                direction,
+                Some(TradeOffset::Open),
+                volume,
+                Some(json!(limit_price)),
+            )
+            .await
+            .is_ok()
+        {
+            self.submitted_request_seq
+                .store(current_seq, Ordering::SeqCst);
+        }
+    }
+
+    fn mark_reached(&self, current_seq: u64, target_volume: i64) {
         *self
             .applied_target_volume
             .lock()
@@ -277,6 +345,115 @@ impl TargetPosTaskInner {
             .lock()
             .expect("target task store lock poisoned")
             .unregister(self.task_id);
+    }
+
+    fn fail(&self, error: TaskError) {
+        *self
+            .last_error
+            .lock()
+            .expect("target task last error lock poisoned") = Some(error);
+        self.finish();
+    }
+
+    fn failure_result(&self) -> Result<()> {
+        if let Some(error) = self
+            .last_error
+            .lock()
+            .expect("target task last error lock poisoned")
+            .clone()
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn process_target_tasks_wait_update(
+    store: &Arc<Mutex<TargetPosStore>>,
+    api: &mut tqsdk_wait::TqApi,
+) {
+    let tasks = store
+        .lock()
+        .expect("target task store lock poisoned")
+        .live_tasks();
+    for task in tasks {
+        task.process_wait_update(api).await;
+    }
+}
+
+fn current_position(api: &tqsdk_wait::TqApi, account_id: &str, symbol: &str) -> i64 {
+    api.get_position(account_id, symbol)
+        .snapshot(api)
+        .ok()
+        .flatten()
+        .map_or(0, |position| position.pos)
+}
+
+fn open_only_plan(
+    current_position: i64,
+    target_volume: i64,
+    delta: i64,
+) -> Result<Option<(TradeDirection, i64)>> {
+    if delta == 0 {
+        return Ok(None);
+    }
+
+    let current_sign = current_position.signum();
+    let target_sign = target_volume.signum();
+    let is_reducing_same_side = current_position != 0
+        && current_sign == target_sign
+        && target_volume.abs() < current_position.abs();
+    if target_volume == 0
+        || current_sign != 0 && current_sign != target_sign
+        || is_reducing_same_side
+    {
+        return Err(TaskError::Unsupported(
+            "open-only planner cannot reduce or flip existing net position",
+        ));
+    }
+
+    Ok(Some(if delta > 0 {
+        (TradeDirection::Buy, delta)
+    } else {
+        (TradeDirection::Sell, -delta)
+    }))
+}
+
+fn quote_limit_price(
+    api: &tqsdk_wait::TqApi,
+    symbol: &str,
+    direction: TradeDirection,
+    mode: PriceMode,
+) -> Option<f64> {
+    let quote = api.quote_ref(symbol).snapshot(api).ok().flatten()?;
+    resolve_limit_price(&quote, direction, mode)
+}
+
+fn resolve_limit_price(quote: &Quote, direction: TradeDirection, mode: PriceMode) -> Option<f64> {
+    let active_price = match direction {
+        TradeDirection::Buy => first_finite(quote.ask_price1, quote.bid_price1, quote.last_price),
+        TradeDirection::Sell => first_finite(quote.bid_price1, quote.ask_price1, quote.last_price),
+    };
+    let passive_price = match direction {
+        TradeDirection::Buy => first_finite(quote.bid_price1, quote.ask_price1, quote.last_price),
+        TradeDirection::Sell => first_finite(quote.ask_price1, quote.bid_price1, quote.last_price),
+    };
+
+    let price = match mode {
+        PriceMode::Active => active_price?,
+        PriceMode::Passive => passive_price?,
+    };
+
+    Some(price)
+}
+
+fn first_finite(primary: f64, secondary: f64, fallback: f64) -> Option<f64> {
+    if primary.is_finite() {
+        Some(primary)
+    } else if secondary.is_finite() {
+        Some(secondary)
+    } else {
+        fallback.is_finite().then_some(fallback)
     }
 }
 

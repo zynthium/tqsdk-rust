@@ -55,10 +55,14 @@
 - guarded `insert_order` / `cancel_order`
 - 最小 `TargetPosScheduler` 骨架与 step report
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
+- `TargetPosTask` 在 `OffsetPriority::OpenOnly` 下已接入最小真实 planner：
+  - 按当前净持仓与目标手数差额发一笔 `OPEN` 委托
+  - `PriceMode::Active / Passive` 会影响委托价格
+  - 同一请求序号不会重复发单
 
 当前还未落地：
 
-- 实际调仓规划器
+- `今昨,开` / `今昨开` / `昨开` 的真实调仓规划器
 - 交易时段感知的 scheduler deadline
 - quote hint 与配置驱动的真实执行语义
 - trades buffer 驱动的完整 execution report
