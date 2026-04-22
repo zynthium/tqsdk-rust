@@ -30,7 +30,7 @@
 
 1. 先冻结 crate 边界和依赖方向
 2. 先提供 compileable crate 骨架
-3. 暂时不要对 downloader / DataFrame / polars 形状做过早承诺
+3. 先只开放最薄的一次性研究接口，再逐步扩展
 
 换句话说，当前最稳定的做法不是急着导出一堆研究接口，而是先明确：
 
@@ -82,11 +82,14 @@
 
 ## 第一阶段推荐范围
 
-第一阶段的 `tqsdk-data` 应只做：
+当前已经落地的第一阶段范围是：
 
 - crate skeleton
 - README 与 crate-level docs
 - 后续实现的依赖方向约束
+- `DataClient`
+- `query_his_cont_quotes(symbols, days, end_date)`
+- `HistoricalContQuotesRow`
 
 当前明确先不做：
 
@@ -95,6 +98,7 @@
 - 历史数据缓存格式
 - 并发下载调度器
 - Python 兼容层
+- `query_option_greeks`
 
 ## 后续能力落点
 
@@ -106,7 +110,7 @@
 2. batch fetch surface
    - `get_kline_data_series`
    - `get_tick_data_series`
-   - `query_his_cont_quotes`
+   - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
 3. local materialization
    - 文件缓存
@@ -140,18 +144,18 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 ## 当前落地策略
 
-当前仓库里，`tqsdk-data` 先只以 compileable 空 crate 形式存在。
+当前仓库里，`tqsdk-data` 已经以“窄 public surface”的方式落地。
 
 这样做的收益是：
 
 - 先给研究/下载能力一个明确落点
-- 不用为了“先有 crate”而过早冻结宽 API
+- 不用为了继续扩功能而过早冻结宽 API
 - 后续实现时不需要重新讨论能力归属
 
 ## 最终判断
 
 `tqsdk-data` 值得独立存在，但当前阶段最合理的动作是：
 
-1. 先起 crate 骨架
-2. 先写清楚边界
-3. 再按 history/query -> batch fetch -> materialization 的顺序迭代
+1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
+2. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
+3. 避免为了兼容 DataFrame 形状而提前做宽 surface

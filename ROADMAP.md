@@ -50,9 +50,15 @@
   - `TargetPosScheduler`
   - ownership / guarded order / execution report
 
-当前尚未进入稳定实现、但已经完成方向冻结的后续层：
+当前已进入架构与第一批实现的后续层：
 
 - `tqsdk-data`
+  - crate skeleton
+  - `DataClient`
+  - `query_his_cont_quotes`
+
+当前仍未进入实现、但已经明确方向的后续层：
+
 - 可选的 `tqsdk-backtest`
 - 可选的 `tqsdk-callback`
 
@@ -325,7 +331,7 @@
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
 1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在 `tqsdk-data` 已完成最小架构文档与 crate 脚手架后，开始推进 history/query substrate 的第一批最小实现
+2. 在 `query_his_cont_quotes` 已落地后，继续推进更通用的 history/query substrate，并审慎评估 `query_option_greeks` 的最小低层抽象
 
 如果目标是先把底座做得更稳，优先选 1。
 如果目标是开始给研究型能力准备独立落点，再选 2。

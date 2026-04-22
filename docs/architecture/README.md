@@ -104,6 +104,11 @@ V1 是：
   - `TargetPosTask`
   - `TargetPosScheduler`
   - ownership / guarded order / execution report
+- `tqsdk-data`
+  - research/offline data crate
+  - `DataClient`
+  - `query_his_cont_quotes`
+  - `HistoricalContQuotesRow`
 
 这两层当前仍然遵守同一个约束：
 

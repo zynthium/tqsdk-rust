@@ -2,7 +2,11 @@
 
 `tqsdk-data` 是 `tqsdk-rust` workspace 里预留给研究、离线数据和批量拉取能力的 crate。
 
-当前阶段它故意保持为空骨架，只冻结 crate 边界，不提前承诺宽 public API。
+当前阶段它只先开放一条最薄的一次性研究接口：
+
+- `DataClient::query_his_cont_quotes(...)`
+
+除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 
 ## 未来应承接的能力
 
@@ -21,6 +25,7 @@
 - `wait_update()` facade
 - stream/event facade
 - task runtime
+- `query_option_greeks`
 - 回测报告与 GUI
 
 ## 为什么现在先保持为空

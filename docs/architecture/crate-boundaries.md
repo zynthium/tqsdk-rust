@@ -376,7 +376,7 @@
 
 合理路径：
 
-- 未来独立 data / research crate
+- `tqsdk-data`
 
 判断：
 

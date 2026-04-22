@@ -152,4 +152,4 @@
 - `query_option_greeks(...)`
 - 各种 DataFrame / polars 形状兼容接口
 
-这些更适合留给后续独立的 research/tools crate，而不是进入 `tqsdk-session`。
+这些更适合留给独立的 `tqsdk-data`，而不是进入 `tqsdk-session`。
