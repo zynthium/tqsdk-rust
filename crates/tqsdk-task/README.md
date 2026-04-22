@@ -20,26 +20,33 @@
   - `set_target_volume()` 与 `wait_target_reached()`
   - `cancel()` 与 `wait_finished()`
   - `last_error()`
-  - 保留 `price_mode / offset_priority / split_policy` 配置壳
+  - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
-  - `OpenOnly` 下已接入最小真实 planner：
-    - 按净持仓差额发一笔 `OPEN` 委托
+  - 最小真实 planner 已接入全部 offset priority：
+    - 基于当前净持仓与目标手数差额按 planner 结果逐笔发单
     - `Active/Passive` 价格模式生效
-    - 同一请求不会重复发单
+    - 同一请求在净持仓未变化前不会重复发单
+    - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
+    - 当前执行策略仍是保守串行：
+      - 每次 `wait_update()` 最多推进一笔 planner order
+      - 只有持仓 diff 发生变化后才会继续下一笔
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
   - 独立 execution report
   - 取消与 ownership 释放
-  - 保留 `offset_priority / split_policy` 配置壳
+  - 保留 `offset_priority / split_policy` 配置 surface
+  - 目前仍未真正驱动内部 `TargetPosTask` 执行
 - 内部 registry
   - 阻止重复 ownership
   - 阻止任务运行期间的手动下单
 
 当前仍未完成：
 
-- `今昨,开` / `今昨开` / `昨开` 的真实开平规划
-- 多批次拆单与挂单重报
+- `TargetPosScheduler` 驱动真实 `TargetPosTask`
+- `split_policy` 驱动的真实拆单执行
+- 多笔同批次并发提交
+- 挂单重报与撤单后重规划
 - 基于交易时段的 deadline 计算
-- quote hint 与非 `OpenOnly` 配置驱动的真实执行语义
+- trades buffer / execution report 细化
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

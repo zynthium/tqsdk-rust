@@ -56,16 +56,22 @@
 - 最小 `TargetPosScheduler` 骨架与 step report
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
-- `TargetPosTask` 在 `OffsetPriority::OpenOnly` 下已接入最小真实 planner：
-  - 按当前净持仓与目标手数差额发一笔 `OPEN` 委托
+- `TargetPosTask` 已接入最小真实 planner：
+  - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果逐笔推进
   - `PriceMode::Active / Passive` 会影响委托价格
-  - 同一请求序号不会重复发单
+  - 同一请求序号在净持仓未变化前不会重复发单
+  - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
+  - 当前实现仍是保守串行：
+    - 每次 `wait_update()` 最多推进一笔 planner order
+    - 只有持仓 diff 变化后才继续下一笔
 
 当前还未落地：
 
-- `今昨,开` / `今昨开` / `昨开` 的真实调仓规划器
+- `TargetPosScheduler` 驱动真实 `TargetPosTask`
+- `split_policy` 驱动的真实拆单执行
+- 多笔同批次并发提交
+- 挂单重报与撤单后重规划
 - 交易时段感知的 scheduler deadline
-- quote hint 与非 `OpenOnly` 配置驱动的真实执行语义
 - trades buffer 驱动的完整 execution report
 
 ## 为什么它必须独立成 crate
