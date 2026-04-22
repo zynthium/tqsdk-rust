@@ -427,6 +427,11 @@ pub fn seed_trade_extended_snapshot(stream: &TqStream, account_id: &str, symbol:
 
 #[allow(dead_code)]
 pub fn seed_notification_commit(stream: &TqStream, notification_id: &str) {
+    seed_notification_commit_for_user(stream, notification_id, "sim");
+}
+
+#[allow(dead_code)]
+pub fn seed_notification_commit_for_user(stream: &TqStream, notification_id: &str, user_id: &str) {
     stream
         .handle_for_test()
         .ingest(
@@ -443,7 +448,7 @@ pub fn seed_notification_commit(stream: &TqStream, notification_id: &str) {
                                 "type": "MESSAGE",
                                 "content": "connected",
                                 "bid": "system",
-                                "user_id": "sim"
+                                "user_id": user_id
                             }
                         }
                     }]
@@ -454,6 +459,24 @@ pub fn seed_notification_commit(stream: &TqStream, notification_id: &str) {
         )
         .unwrap()
         .expect("seed notification commit should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_session_reconnect_commit(stream: &TqStream, reason: &str) {
+    stream
+        .handle_for_test()
+        .record_session_reconnect(
+            1,
+            250,
+            Some(5),
+            false,
+            Some(json!({
+                "reason": reason,
+            })),
+            vec![],
+        )
+        .unwrap()
+        .expect("seed session reconnect commit should produce a commit");
 }
 
 #[allow(dead_code)]

@@ -20,7 +20,7 @@ use crate::event::{
     OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
     RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
     SecurityPositionEventStream, SecurityTradeEventStream, SettlementInfoEventStream,
-    TradeEventStream, TradeObjectEventStream,
+    TradeEventStream, TradeObjectEventStream, TradeSessionEventStream,
 };
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
@@ -264,6 +264,19 @@ impl TqStream {
         ))
     }
 
+    pub fn trade_session_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<TradeSessionEventStream> {
+        let receiver = self.driver.subscribe();
+        self.driver.ensure_started()?;
+        Ok(TradeSessionEventStream::new(
+            receiver,
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
     pub fn trade_event_stream(
         &self,
         account_id: impl AsRef<str>,
@@ -444,6 +457,11 @@ impl TqStream {
     #[doc(hidden)]
     pub fn handle_for_test(&self) -> tqsdk_core::RuntimeHandle {
         self.session().handle().clone()
+    }
+
+    #[doc(hidden)]
+    pub fn emit_session_error_for_test(&self, error: tqsdk_session::SessionFacadeError) {
+        let _ = self.driver.sender.send(DriverEvent::Error(error));
     }
 }
 
