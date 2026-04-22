@@ -21,6 +21,7 @@
   - `cancel()` 与 `wait_finished()`
   - `last_error()`
   - 保留 `price_mode / offset_priority / split_policy` 配置壳
+  - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
   - `OpenOnly` 下已接入最小真实 planner：
     - 按净持仓差额发一笔 `OPEN` 委托
     - `Active/Passive` 价格模式生效
@@ -39,6 +40,6 @@
 - `今昨,开` / `今昨开` / `昨开` 的真实开平规划
 - 多批次拆单与挂单重报
 - 基于交易时段的 deadline 计算
-- quote hint 与配置驱动的真实执行语义
+- quote hint 与非 `OpenOnly` 配置驱动的真实执行语义
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

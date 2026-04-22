@@ -7,6 +7,7 @@
 mod config;
 mod error;
 mod host;
+mod plan;
 mod registry;
 mod scheduler;
 mod target_pos;

@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::json;
 use tokio::sync::watch;
-use tqsdk_core::{Quote, TradeDirection, TradeOffset};
+use tqsdk_core::{Position, Quote, TradeDirection};
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
+use crate::plan::{compute_plan, net_position};
 use crate::registry::{TaskId, TaskRegistry};
 use crate::{Result, TaskError};
 
@@ -275,8 +276,9 @@ impl TargetPosTaskInner {
             return;
         };
 
-        let current_position = current_position(api, &self.account_id, &self.symbol);
-        if current_position == target_volume {
+        let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
+        let current_net_position = net_position(&current_position);
+        if current_net_position == target_volume {
             self.mark_reached(current_seq, target_volume);
             return;
         }
@@ -290,18 +292,24 @@ impl TargetPosTaskInner {
             return;
         }
 
-        let delta = target_volume - current_position;
-        let plan = match open_only_plan(current_position, target_volume, delta) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => return,
-            Err(error) => {
-                self.fail(error);
-                return;
-            }
+        let quote = match api.quote_ref(&self.symbol).snapshot(api).ok().flatten() {
+            Some(quote) => quote,
+            None => return,
         };
-        let (direction, volume) = plan;
+        let exchange_id = quote_exchange_id(&quote, &self.symbol);
+        let Some(order) = compute_plan(
+            &exchange_id,
+            &current_position,
+            target_volume,
+            self.config.offset_priority,
+        )
+        .into_iter()
+        .flat_map(|batch| batch.orders.into_iter())
+        .next() else {
+            return;
+        };
         let Some(limit_price) =
-            quote_limit_price(api, &self.symbol, direction, self.config.price_mode)
+            resolve_limit_price(&quote, order.direction, self.config.price_mode)
         else {
             return;
         };
@@ -310,9 +318,9 @@ impl TargetPosTaskInner {
             .insert_order(
                 &self.account_id,
                 &self.symbol,
-                direction,
-                Some(TradeOffset::Open),
-                volume,
+                order.direction,
+                Some(order.offset),
+                order.volume,
                 Some(json!(limit_price)),
             )
             .await
@@ -347,14 +355,6 @@ impl TargetPosTaskInner {
             .unregister(self.task_id);
     }
 
-    fn fail(&self, error: TaskError) {
-        *self
-            .last_error
-            .lock()
-            .expect("target task last error lock poisoned") = Some(error);
-        self.finish();
-    }
-
     fn failure_result(&self) -> Result<()> {
         if let Some(error) = self
             .last_error
@@ -381,52 +381,23 @@ pub(crate) async fn process_target_tasks_wait_update(
     }
 }
 
-fn current_position(api: &tqsdk_wait::TqApi, account_id: &str, symbol: &str) -> i64 {
+fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: &str) -> Position {
     api.get_position(account_id, symbol)
         .snapshot(api)
         .ok()
         .flatten()
-        .map_or(0, |position| position.pos)
+        .unwrap_or_default()
 }
 
-fn open_only_plan(
-    current_position: i64,
-    target_volume: i64,
-    delta: i64,
-) -> Result<Option<(TradeDirection, i64)>> {
-    if delta == 0 {
-        return Ok(None);
+fn quote_exchange_id(quote: &Quote, symbol: &str) -> String {
+    if !quote.exchange_id.is_empty() {
+        return quote.exchange_id.clone();
     }
 
-    let current_sign = current_position.signum();
-    let target_sign = target_volume.signum();
-    let is_reducing_same_side = current_position != 0
-        && current_sign == target_sign
-        && target_volume.abs() < current_position.abs();
-    if target_volume == 0
-        || current_sign != 0 && current_sign != target_sign
-        || is_reducing_same_side
-    {
-        return Err(TaskError::Unsupported(
-            "open-only planner cannot reduce or flip existing net position",
-        ));
-    }
-
-    Ok(Some(if delta > 0 {
-        (TradeDirection::Buy, delta)
-    } else {
-        (TradeDirection::Sell, -delta)
-    }))
-}
-
-fn quote_limit_price(
-    api: &tqsdk_wait::TqApi,
-    symbol: &str,
-    direction: TradeDirection,
-    mode: PriceMode,
-) -> Option<f64> {
-    let quote = api.quote_ref(symbol).snapshot(api).ok().flatten()?;
-    resolve_limit_price(&quote, direction, mode)
+    symbol
+        .split_once('.')
+        .map(|(exchange_id, _)| exchange_id.to_string())
+        .unwrap_or_default()
 }
 
 fn resolve_limit_price(quote: &Quote, direction: TradeDirection, mode: PriceMode) -> Option<f64> {

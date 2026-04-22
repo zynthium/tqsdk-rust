@@ -356,7 +356,7 @@ async fn open_only_target_pos_does_not_resubmit_same_request_on_later_updates() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn open_only_target_pos_fails_when_request_would_reduce_existing_net_position() {
+async fn open_only_target_pos_uses_opposite_open_order_to_reduce_net_position() {
     let mut host = seeded_host();
     let task = host
         .target_pos("sim", "SHFE.rb2601")
@@ -370,22 +370,11 @@ async fn open_only_target_pos_fails_when_request_would_reduce_existing_net_posit
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    assert!(
-        host.api()
-            .handle_for_test()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        task.wait_target_reached().await.unwrap_err(),
-        TaskError::Unsupported("open-only planner cannot reduce or flip existing net position")
-    );
-    assert_eq!(
-        task.last_error(),
-        Some(TaskError::Unsupported(
-            "open-only planner cannot reduce or flip existing net position"
-        ))
-    );
-    assert!(task.is_finished());
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["limit_price"], 3677.0);
 }
