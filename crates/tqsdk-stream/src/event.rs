@@ -8,9 +8,9 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use tqsdk_core::{
-    CommitResult, ObjectKey, Order, Position, PreInsertOrder, RiskManagementData,
-    RiskManagementRule, SecurityOrder, SecurityPosition, SecurityTrade, SettlementInfo,
-    SnapshotReadGuard, Trade,
+    Account, CommitResult, ObjectKey, Order, Position, PreInsertOrder, RiskManagementData,
+    RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition, SecurityTrade,
+    SettlementInfo, SnapshotReadGuard, Trade,
 };
 
 use crate::{DomainCommitStream, Result, ValueUpdate};
@@ -27,7 +27,7 @@ struct AccountScopedSpec {
     account_id: String,
 }
 
-struct TradeObjectEventStream<T, C> {
+struct CollectedEventStream<T, C> {
     inner: DomainCommitStream,
     reader: tqsdk_core::RuntimeReader,
     context: C,
@@ -36,7 +36,7 @@ struct TradeObjectEventStream<T, C> {
     marker: PhantomData<fn() -> T>,
 }
 
-impl<T, C> TradeObjectEventStream<T, C> {
+impl<T, C> CollectedEventStream<T, C> {
     fn new(
         inner: DomainCommitStream,
         reader: tqsdk_core::RuntimeReader,
@@ -54,7 +54,7 @@ impl<T, C> TradeObjectEventStream<T, C> {
     }
 }
 
-impl<T, C> Stream for TradeObjectEventStream<T, C>
+impl<T, C> Stream for CollectedEventStream<T, C>
 where
     T: Unpin,
     C: Unpin,
@@ -87,11 +87,59 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum TradeObjectEvent {
+    Account(Account),
+    SecurityAccount(SecurityAccount),
+    Position(Position),
+    SecurityPosition(SecurityPosition),
+    PreInsertOrder(PreInsertOrder),
+    Order(Order),
+    SecurityOrder(SecurityOrder),
+    Trade(Trade),
+    SecurityTrade(SecurityTrade),
+    RiskManagementRule(RiskManagementRule),
+    RiskManagementData(RiskManagementData),
+    SettlementInfo(SettlementInfo),
+}
+
+/// Commit-backed unified trade object event stream for one account.
+pub struct TradeObjectEventStream {
+    inner: CollectedEventStream<TradeObjectEvent, AccountScopedSpec>,
+}
+
+impl TradeObjectEventStream {
+    pub(crate) fn new(
+        inner: DomainCommitStream,
+        reader: tqsdk_core::RuntimeReader,
+        account_id: String,
+    ) -> Self {
+        Self {
+            inner: CollectedEventStream::new(
+                inner,
+                reader,
+                AccountScopedSpec { account_id },
+                collect_trade_object_events,
+            ),
+        }
+    }
+}
+
+impl Stream for TradeObjectEventStream {
+    type Item = Result<ValueUpdate<TradeObjectEvent>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_next(cx)
+    }
+}
+
 macro_rules! define_account_event_stream {
     ($(#[$meta:meta])* $name:ident, $value:ty, $collector:expr) => {
         $(#[$meta])*
         pub struct $name {
-            inner: TradeObjectEventStream<$value, AccountScopedSpec>,
+            inner: CollectedEventStream<$value, AccountScopedSpec>,
         }
 
         impl $name {
@@ -101,7 +149,7 @@ macro_rules! define_account_event_stream {
                 account_id: String,
             ) -> Self {
                 Self {
-                    inner: TradeObjectEventStream::new(
+                    inner: CollectedEventStream::new(
                         inner,
                         reader,
                         AccountScopedSpec { account_id },
@@ -197,6 +245,211 @@ where
             commit: commit.clone(),
             value,
         });
+    }
+
+    Ok(())
+}
+
+fn push_trade_object_event(
+    commit: &CommitResult,
+    pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
+    value: TradeObjectEvent,
+) {
+    pending.push_back(ValueUpdate {
+        commit: commit.clone(),
+        value,
+    });
+}
+
+fn push_decoded_trade_object<T>(
+    commit: &CommitResult,
+    snapshot: &SnapshotReadGuard<'_>,
+    pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
+    path: &[&str],
+    map_value: fn(T) -> TradeObjectEvent,
+) -> Result<()>
+where
+    T: DeserializeOwned,
+{
+    if let Some(value) = snapshot.decode_path::<T>(path)? {
+        push_trade_object_event(commit, pending, map_value(value));
+    }
+
+    Ok(())
+}
+
+fn path_object_has_field(snapshot: &SnapshotReadGuard<'_>, path: &[&str], field: &str) -> bool {
+    snapshot
+        .get_path(path)
+        .and_then(|value| value.as_object())
+        .is_some_and(|object| object.contains_key(field))
+}
+
+fn collect_trade_object_events(
+    commit: &CommitResult,
+    snapshot: &SnapshotReadGuard<'_>,
+    spec: &AccountScopedSpec,
+    pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
+) -> Result<()> {
+    for object in &commit.changes.object_hits {
+        match object {
+            ObjectKey::Account { account_id } if account_id.as_str() == spec.account_id => {
+                let path = ["trade", account_id.as_str(), "accounts", "CNY"];
+                if path_object_has_field(snapshot, &path, "asset") {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::SecurityAccount,
+                    )?;
+                } else {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::Account,
+                    )?;
+                }
+            }
+            ObjectKey::Position { account_id, symbol }
+                if account_id.as_str() == spec.account_id =>
+            {
+                let path = ["trade", account_id.as_str(), "positions", symbol.as_str()];
+                if path_object_has_field(snapshot, &path, "create_date") {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::SecurityPosition,
+                    )?;
+                } else {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::Position,
+                    )?;
+                }
+            }
+            ObjectKey::PreInsertOrder {
+                account_id,
+                order_id,
+            } if account_id.as_str() == spec.account_id => {
+                push_decoded_trade_object(
+                    commit,
+                    snapshot,
+                    pending,
+                    &[
+                        "trade",
+                        account_id.as_str(),
+                        "pre_insert_orders",
+                        order_id.as_str(),
+                    ],
+                    TradeObjectEvent::PreInsertOrder,
+                )?;
+            }
+            ObjectKey::Order {
+                account_id,
+                order_id,
+            } if account_id.as_str() == spec.account_id => {
+                let path = ["trade", account_id.as_str(), "orders", order_id.as_str()];
+                if path_object_has_field(snapshot, &path, "frozen_fee") {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::SecurityOrder,
+                    )?;
+                } else {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::Order,
+                    )?;
+                }
+            }
+            ObjectKey::Trade {
+                account_id,
+                trade_id,
+            } if account_id.as_str() == spec.account_id => {
+                let path = ["trade", account_id.as_str(), "trades", trade_id.as_str()];
+                if path_object_has_field(snapshot, &path, "fee") {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::SecurityTrade,
+                    )?;
+                } else {
+                    push_decoded_trade_object(
+                        commit,
+                        snapshot,
+                        pending,
+                        &path,
+                        TradeObjectEvent::Trade,
+                    )?;
+                }
+            }
+            ObjectKey::RiskManagementRule {
+                account_id,
+                exchange_id,
+            } if account_id.as_str() == spec.account_id => {
+                push_decoded_trade_object(
+                    commit,
+                    snapshot,
+                    pending,
+                    &[
+                        "trade",
+                        account_id.as_str(),
+                        "risk_management_rule",
+                        exchange_id.as_str(),
+                    ],
+                    TradeObjectEvent::RiskManagementRule,
+                )?;
+            }
+            ObjectKey::RiskManagementData { account_id, symbol }
+                if account_id.as_str() == spec.account_id =>
+            {
+                push_decoded_trade_object(
+                    commit,
+                    snapshot,
+                    pending,
+                    &[
+                        "trade",
+                        account_id.as_str(),
+                        "risk_management_data",
+                        symbol.as_str(),
+                    ],
+                    TradeObjectEvent::RiskManagementData,
+                )?;
+            }
+            ObjectKey::Settlement {
+                account_id,
+                trading_day,
+            } if account_id.as_str() == spec.account_id => {
+                push_decoded_trade_object(
+                    commit,
+                    snapshot,
+                    pending,
+                    &[
+                        "trade",
+                        account_id.as_str(),
+                        "his_settlements",
+                        trading_day.as_str(),
+                    ],
+                    TradeObjectEvent::SettlementInfo,
+                )?;
+            }
+            _ => {}
+        }
     }
 
     Ok(())

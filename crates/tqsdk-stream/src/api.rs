@@ -20,7 +20,7 @@ use crate::event::{
     OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
     RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
     SecurityPositionEventStream, SecurityTradeEventStream, SettlementInfoEventStream,
-    TradeEventStream,
+    TradeEventStream, TradeObjectEventStream,
 };
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
@@ -247,6 +247,17 @@ impl TqStream {
         account_id: impl AsRef<str>,
     ) -> crate::error::Result<PreInsertOrderEventStream> {
         Ok(PreInsertOrderEventStream::new(
+            self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
+            self.reader.clone(),
+            account_id.as_ref().to_owned(),
+        ))
+    }
+
+    pub fn trade_object_event_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<TradeObjectEventStream> {
+        Ok(TradeObjectEventStream::new(
             self.commit_stream()?.filter_domain(ProtocolDomain::Trade),
             self.reader.clone(),
             account_id.as_ref().to_owned(),
