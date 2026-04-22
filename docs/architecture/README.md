@@ -107,7 +107,7 @@ V1 是：
 为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或未来的 `stream`，当前架构采用下面这条硬边界：
 
 - `tqsdk-session` 负责所有一次性 request/response 接口
-- `tqsdk-wait` 和未来的 `tqsdk-stream` 只负责 diff-backed 持续状态消费接口
+- `tqsdk-wait` 和 `tqsdk-stream` 只负责 diff-backed 持续状态消费接口
 
 | 接口类别 | 应归属的 crate | 原因 |
 | :--- | :--- | :--- |

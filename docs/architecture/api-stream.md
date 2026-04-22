@@ -201,6 +201,8 @@ impl TqStream {
         -> tqsdk_stream::Result<PathValueStream<Quote>>;
     pub fn trading_status_stream(&self, symbol: impl AsRef<str>)
         -> tqsdk_stream::Result<PathValueStream<TradingStatus>>;
+    pub fn notification_stream(&self, notification_id: impl AsRef<str>)
+        -> tqsdk_stream::Result<PathValueStream<Notification>>;
     pub fn account_stream(&self, account_id: impl AsRef<str>)
         -> tqsdk_stream::Result<PathValueStream<Account>>;
     pub fn position_stream(
@@ -223,6 +225,38 @@ impl TqStream {
         account_id: impl AsRef<str>,
         trade_id: impl AsRef<str>,
     ) -> tqsdk_stream::Result<PathValueStream<Trade>>;
+    pub fn risk_management_rule_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        exchange_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<RiskManagementRule>>;
+    pub fn risk_management_data_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<RiskManagementData>>;
+    pub fn settlement_info_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trading_day: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<SettlementInfo>>;
+    pub fn security_account_stream(&self, account_id: impl AsRef<str>)
+        -> tqsdk_stream::Result<PathValueStream<SecurityAccount>>;
+    pub fn security_position_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<SecurityPosition>>;
+    pub fn security_order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<SecurityOrder>>;
+    pub fn security_trade_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trade_id: impl AsRef<str>,
+    ) -> tqsdk_stream::Result<PathValueStream<SecurityTrade>>;
 }
 ```
 
@@ -233,7 +267,8 @@ impl TqStream {
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
 - `path_stream()` 是最薄的 typed decode 便利层
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
-- `trading_status/account/position/pre_insert_order/order/trade` 这些 wrapper
+- `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
+- `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
   也都只是固定 path 的薄包装，不引入新的 driver 或 cache
 
 ### commit stream

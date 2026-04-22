@@ -8,8 +8,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
-    Account, CommitScope, ObjectKey, Order, Position, PreInsertOrder, ProtocolDomain, Quote,
-    StatePath, Trade, TradingStatus,
+    Account, CommitScope, Notification, ObjectKey, Order, Position, PreInsertOrder, ProtocolDomain,
+    Quote, RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder,
+    SecurityPosition, SecurityTrade, SettlementInfo, StatePath, Trade, TradingStatus,
 };
 
 use crate::driver::{DriverEvent, StreamDriver};
@@ -125,6 +126,83 @@ impl TqStream {
         account_id: impl AsRef<str>,
         trade_id: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<Trade>> {
+        self.path_stream(["trade", account_id.as_ref(), "trades", trade_id.as_ref()])
+    }
+
+    pub fn notification_stream(
+        &self,
+        notification_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<Notification>> {
+        self.path_stream(["system", "notify", notification_id.as_ref()])
+    }
+
+    pub fn risk_management_rule_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        exchange_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<RiskManagementRule>> {
+        self.path_stream([
+            "trade",
+            account_id.as_ref(),
+            "risk_management_rule",
+            exchange_id.as_ref(),
+        ])
+    }
+
+    pub fn risk_management_data_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<RiskManagementData>> {
+        self.path_stream([
+            "trade",
+            account_id.as_ref(),
+            "risk_management_data",
+            symbol.as_ref(),
+        ])
+    }
+
+    pub fn settlement_info_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trading_day: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<SettlementInfo>> {
+        self.path_stream([
+            "trade",
+            account_id.as_ref(),
+            "his_settlements",
+            trading_day.as_ref(),
+        ])
+    }
+
+    pub fn security_account_stream(
+        &self,
+        account_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<SecurityAccount>> {
+        self.path_stream(["trade", account_id.as_ref(), "accounts", "CNY"])
+    }
+
+    pub fn security_position_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<SecurityPosition>> {
+        self.path_stream(["trade", account_id.as_ref(), "positions", symbol.as_ref()])
+    }
+
+    pub fn security_order_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        order_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<SecurityOrder>> {
+        self.path_stream(["trade", account_id.as_ref(), "orders", order_id.as_ref()])
+    }
+
+    pub fn security_trade_stream(
+        &self,
+        account_id: impl AsRef<str>,
+        trade_id: impl AsRef<str>,
+    ) -> crate::error::Result<PathValueStream<SecurityTrade>> {
         self.path_stream(["trade", account_id.as_ref(), "trades", trade_id.as_ref()])
     }
 

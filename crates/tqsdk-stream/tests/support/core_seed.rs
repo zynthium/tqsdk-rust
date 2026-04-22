@@ -202,3 +202,197 @@ pub fn seed_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
         .unwrap()
         .expect("seed trade snapshot should produce a commit");
 }
+
+#[allow(dead_code)]
+pub fn seed_trade_extended_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "pre_insert_orders": {
+                                    "pre-1": {
+                                        "user_id": account_id,
+                                        "order_id": "pre-1",
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "direction": "BUY",
+                                        "pre_margin": 1234.5
+                                    }
+                                },
+                                "risk_management_rule": {
+                                    "SSE": {
+                                        "user_id": account_id,
+                                        "exchange_id": "SSE",
+                                        "enable": true,
+                                        "self_trade": {
+                                            "count_limit": 3
+                                        },
+                                        "frequent_cancellation": {
+                                            "insert_order_count_limit": 10,
+                                            "cancel_order_count_limit": 2,
+                                            "cancel_order_percent_limit": 5.0
+                                        },
+                                        "trade_position_ratio": {
+                                            "trade_units_limit": 100,
+                                            "trade_position_ratio_limit": 70.0
+                                        }
+                                    }
+                                },
+                                "risk_management_data": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": "ao2602",
+                                        "self_trade": {
+                                            "highest_buy_price": 618.0,
+                                            "lowest_sell_price": 617.0,
+                                            "self_trade_count": 1,
+                                            "rejected_count": 0
+                                        },
+                                        "frequent_cancellation": {
+                                            "insert_order_count": 2,
+                                            "cancel_order_count": 1,
+                                            "cancel_order_percent": 50.0,
+                                            "rejected_count": 0
+                                        },
+                                        "trade_position_ratio": {
+                                            "trade_units": 12,
+                                            "net_position_units": 4,
+                                            "trade_position_ratio": 300.0,
+                                            "rejected_count": 1
+                                        }
+                                    }
+                                },
+                                "his_settlements": {
+                                    "20260420": {
+                                        "content": "line-1\nline-2"
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed extended trade snapshot should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_notification_commit(stream: &TqStream, notification_id: &str) {
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market.shared".to_string(),
+                domains: vec![ProtocolDomain::System],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "notify": {
+                            notification_id: {
+                                "code": "INFO",
+                                "level": "INFO",
+                                "type": "MESSAGE",
+                                "content": "connected",
+                                "bid": "system",
+                                "user_id": "sim"
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed notification commit should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_security_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
+    stream
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "accounts": {
+                                    "CNY": {
+                                        "user_id": account_id,
+                                        "currency": "CNY",
+                                        "market_value": 12345.0,
+                                        "asset": 20000.0,
+                                        "available": 15000.0
+                                    }
+                                },
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "create_date": "20260422",
+                                        "volume": 100,
+                                        "volume_his": 100,
+                                        "market_value": 12345.0
+                                    }
+                                },
+                                "orders": {
+                                    "stock-order-1": {
+                                        "user_id": account_id,
+                                        "order_id": "stock-order-1",
+                                        "exchange_order_id": "stock-exchange-order-1",
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "direction": "BUY",
+                                        "volume_orign": 100,
+                                        "volume_left": 0,
+                                        "price_type": "LIMIT",
+                                        "limit_price": 123.45,
+                                        "frozen_fee": 2.0,
+                                        "insert_date_time": 1713660000000000000_i64,
+                                        "status": "FINISHED",
+                                        "last_msg": "accepted"
+                                    }
+                                },
+                                "trades": {
+                                    "stock-trade-1": {
+                                        "user_id": account_id,
+                                        "trade_id": "stock-trade-1",
+                                        "exchange_id": "SSE",
+                                        "instrument_id": "600000",
+                                        "order_id": "stock-order-1",
+                                        "exchange_order_id": "stock-exchange-order-1",
+                                        "direction": "BUY",
+                                        "volume": 100,
+                                        "price": 123.45,
+                                        "balance": 12345.0,
+                                        "fee": 2.0,
+                                        "trade_date_time": 1713660000100000000_i64
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed security trade snapshot should produce a commit");
+}
