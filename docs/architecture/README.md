@@ -174,6 +174,7 @@ V1 是：
 | Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
 | `wait_update` facade | [api-wait.md](api-wait.md) |
 | stream facade | [api-stream.md](api-stream.md) |
+| task facade / execution tool | [api-task.md](api-task.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
 
 ## 建议的概念分层
@@ -214,7 +215,8 @@ V1 是：
 11. [验收与测试矩阵](validation.md)
 12. [wait facade](api-wait.md)
 13. [stream facade](api-stream.md)
-14. [演进路线](roadmap.md)
+14. [task facade](api-task.md)
+15. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
