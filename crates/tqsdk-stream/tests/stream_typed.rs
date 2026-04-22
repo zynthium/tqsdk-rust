@@ -249,7 +249,7 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(payload["aid"], "set_chart");
     assert_eq!(
         payload["chart_id"],
-        "stream-kline-SHFE.au2602-60000000000-64"
+        "stream-kline-SHFE_au2602-60000000000-64"
     );
     assert_eq!(payload["ins_list"], "SHFE.au2602");
     assert_eq!(payload["duration"], 60_000_000_000_i64);
@@ -268,7 +268,7 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(update.value.view_width(), 64);
     assert_eq!(
         update.value.chart_id(),
-        "stream-kline-SHFE.au2602-60000000000-64"
+        "stream-kline-SHFE_au2602-60000000000-64"
     );
     assert_eq!(update.value.len(), 2);
     assert_eq!(update.value.last().unwrap().close, 620.0);
@@ -294,7 +294,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
         .find(|payload| payload["aid"] == "set_chart")
         .expect("tick stream should submit a set_chart request");
     assert_eq!(payload["aid"], "set_chart");
-    assert_eq!(payload["chart_id"], "stream-tick-SHFE.au2602-32");
+    assert_eq!(payload["chart_id"], "stream-tick-SHFE_au2602-32");
     assert_eq!(payload["ins_list"], "SHFE.au2602");
     assert_eq!(payload["duration"], 0);
     assert_eq!(payload["view_width"], 32);
@@ -309,7 +309,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
 
     assert_eq!(update.value.symbol(), "SHFE.au2602");
     assert_eq!(update.value.view_width(), 32);
-    assert_eq!(update.value.chart_id(), "stream-tick-SHFE.au2602-32");
+    assert_eq!(update.value.chart_id(), "stream-tick-SHFE_au2602-32");
     assert_eq!(update.value.len(), 2);
     assert_eq!(update.value.last().unwrap().last_price, 618.5);
     let _: TickWindow = update.value;
@@ -324,7 +324,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
         .map(|dispatch| transport_payload(&dispatch.request))
         .find(|payload| payload["aid"] == "set_chart")
         .expect("tick window close should submit a cancel_chart request");
-    assert_eq!(payload["chart_id"], "stream-tick-SHFE.au2602-32");
+    assert_eq!(payload["chart_id"], "stream-tick-SHFE_au2602-32");
     assert_eq!(payload["ins_list"], "");
     assert_eq!(payload["duration"], 0);
     assert_eq!(payload["view_width"], 32);

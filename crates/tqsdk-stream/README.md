@@ -119,4 +119,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+更多 live 示例：
+
+- `examples/quote_stream.rs`
+- `examples/kline_stream.rs`
+
 更完整的架构说明见 [../../docs/architecture/api-stream.md](../../docs/architecture/api-stream.md)。

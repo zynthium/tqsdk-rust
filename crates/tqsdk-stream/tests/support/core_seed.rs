@@ -36,7 +36,10 @@ pub fn seed_ready_kline_chart(
     duration_ns: i64,
     view_width: usize,
 ) {
-    let chart_id = format!("stream-kline-{symbol}-{duration_ns}-{view_width}");
+    let chart_id = format!(
+        "stream-kline-{}-{duration_ns}-{view_width}",
+        sanitize_chart_token(symbol)
+    );
     stream
         .handle_for_test()
         .ingest(
@@ -98,7 +101,7 @@ pub fn seed_ready_kline_chart(
 
 #[allow(dead_code)]
 pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize) {
-    let chart_id = format!("stream-tick-{symbol}-{view_width}");
+    let chart_id = format!("stream-tick-{}-{view_width}", sanitize_chart_token(symbol));
     stream
         .handle_for_test()
         .ingest(
@@ -530,4 +533,10 @@ pub fn seed_security_trade_snapshot(stream: &TqStream, account_id: &str, symbol:
         )
         .unwrap()
         .expect("seed security trade snapshot should produce a commit");
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }

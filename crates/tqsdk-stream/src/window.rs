@@ -326,11 +326,20 @@ impl Stream for TickWindowStream {
 }
 
 pub(crate) fn kline_chart_id(symbol: &str, duration_ns: i64, view_width: usize) -> String {
-    format!("stream-kline-{symbol}-{duration_ns}-{view_width}")
+    format!(
+        "stream-kline-{}-{duration_ns}-{view_width}",
+        sanitize_chart_token(symbol)
+    )
 }
 
 pub(crate) fn tick_chart_id(symbol: &str, view_width: usize) -> String {
-    format!("stream-tick-{symbol}-{view_width}")
+    format!("stream-tick-{}-{view_width}", sanitize_chart_token(symbol))
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn project_kline_window(
