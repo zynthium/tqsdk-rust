@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
-    ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, MarketAdapter, OutboundFrame,
+    OutboundRequest, ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
@@ -15,6 +15,14 @@ use tqsdk_wait::TqApi;
 fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
+    let handle = RuntimeHandle::with_adapters(adapters);
+    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    TaskHost::new(TqApi::new(session))
+}
+
+fn market_only_host() -> TaskHost {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_adapter(MarketAdapter::default());
     let handle = RuntimeHandle::with_adapters(adapters);
     let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
     TaskHost::new(TqApi::new(session))
@@ -1089,6 +1097,37 @@ async fn target_pos_execution_report_records_trade_events_from_commit_deltas() {
             },
         ]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_wait_target_reached_returns_error_when_insert_order_submission_fails() {
+    let mut host = market_only_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(1).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(task.is_finished());
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
+    assert!(matches!(
+        task.wait_target_reached().await,
+        Err(TaskError::Wait(_))
+    ));
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released after task submit failure");
 }
 
 #[tokio::test(flavor = "current_thread")]

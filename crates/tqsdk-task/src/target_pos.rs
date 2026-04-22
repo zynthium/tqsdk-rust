@@ -407,7 +407,8 @@ impl TargetPosTaskInner {
         self.record_commit_trades(api);
 
         if self.cancel_requested.load(Ordering::SeqCst) {
-            if self.cancel_pending_orders(api).await.is_err() {
+            if let Err(error) = self.cancel_pending_orders(api).await {
+                self.finish_with_error(error);
                 return;
             }
             if self.has_live_orders(api) {
@@ -435,7 +436,7 @@ impl TargetPosTaskInner {
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
         let desired_order = desired_order_for_target(api, self, target_volume, &current_position);
-        if self
+        let handled_live_orders = match self
             .handle_live_orders(
                 api,
                 current_net_position,
@@ -444,6 +445,13 @@ impl TargetPosTaskInner {
             )
             .await
         {
+            Ok(handled) => handled,
+            Err(error) => {
+                self.finish_with_error(error);
+                return;
+            }
+        };
+        if handled_live_orders {
             return;
         }
 
@@ -467,7 +475,7 @@ impl TargetPosTaskInner {
             return;
         };
 
-        if let Ok(order_ref) = api
+        match api
             .insert_order(
                 &self.account_id,
                 &self.symbol,
@@ -478,24 +486,27 @@ impl TargetPosTaskInner {
             )
             .await
         {
-            let order_id = order_ref.order_id().to_string();
-            self.track_order(order_ref);
-            self.record_insert_order(
-                current_seq,
-                &order_id,
-                desired_order.direction,
-                desired_order.offset,
-                desired_order.volume,
-                desired_order.limit_price,
-            );
-            self.submitted_request_seq
-                .store(current_seq, Ordering::SeqCst);
-            self.awaiting_progress.store(true, Ordering::SeqCst);
-            *self
-                .submitted_net_position
-                .lock()
-                .expect("target task submitted net position lock poisoned") =
-                Some(current_net_position);
+            Ok(order_ref) => {
+                let order_id = order_ref.order_id().to_string();
+                self.track_order(order_ref);
+                self.record_insert_order(
+                    current_seq,
+                    &order_id,
+                    desired_order.direction,
+                    desired_order.offset,
+                    desired_order.volume,
+                    desired_order.limit_price,
+                );
+                self.submitted_request_seq
+                    .store(current_seq, Ordering::SeqCst);
+                self.awaiting_progress.store(true, Ordering::SeqCst);
+                *self
+                    .submitted_net_position
+                    .lock()
+                    .expect("target task submitted net position lock poisoned") =
+                    Some(current_net_position);
+            }
+            Err(error) => self.finish_with_error(TaskError::from(error)),
         }
     }
 
@@ -662,10 +673,10 @@ impl TargetPosTaskInner {
         current_net_position: i64,
         target_volume: i64,
         desired_order: Option<&DesiredOrder>,
-    ) -> bool {
+    ) -> Result<bool> {
         let live_orders = self.live_orders(api);
         if live_orders.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         if should_cancel_for_replan(
@@ -674,9 +685,9 @@ impl TargetPosTaskInner {
             current_net_position,
             target_volume,
         ) {
-            let _ = self.cancel_pending_orders(api).await;
+            self.cancel_pending_orders(api).await?;
         }
-        true
+        Ok(true)
     }
 
     async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
@@ -791,6 +802,14 @@ impl TargetPosTaskInner {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn finish_with_error(&self, error: TaskError) {
+        *self
+            .last_error
+            .lock()
+            .expect("target task last error lock poisoned") = Some(error);
+        self.finish();
     }
 }
 

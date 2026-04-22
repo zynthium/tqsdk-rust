@@ -23,6 +23,7 @@
   - `execution_report()`
     - 暴露最小 command-level 事件流，当前包含 insert/cancel/trade/order finished/target reached
   - `last_error()`
+    - 若委托/撤单命令本地提交失败，会记录错误并结束任务，不做静默重试
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
   - 最小真实 planner 已接入全部 offset priority：
@@ -47,6 +48,8 @@
   - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
+  - `last_error()`
+    - 若内部 step task 的命令本地提交失败，错误会向 scheduler 冒泡
   - `cancel()` 同样遵循 `wait_update()` 驱动的撤单后收尾语义
   - 保留 `offset_priority / split_policy` 配置 surface
 - 内部 registry

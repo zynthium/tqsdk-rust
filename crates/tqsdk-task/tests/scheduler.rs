@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
-    ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, MarketAdapter, OutboundFrame,
+    OutboundRequest, ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
@@ -17,6 +17,14 @@ use tqsdk_wait::TqApi;
 fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
+    let handle = RuntimeHandle::with_adapters(adapters);
+    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    TaskHost::new(TqApi::new(session))
+}
+
+fn market_only_host() -> TaskHost {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_adapter(MarketAdapter::default());
     let handle = RuntimeHandle::with_adapters(adapters);
     let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
     TaskHost::new(TqApi::new(session))
@@ -960,6 +968,40 @@ fn scheduler_builder_preserves_explicit_config() {
             }),
         }
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_wait_finished_returns_error_when_step_insert_order_submission_fails() {
+    let mut host = market_only_host();
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
+        .build()
+        .unwrap();
+
+    seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(scheduler.is_finished());
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(scheduler.last_error(), Some(TaskError::Wait(_))));
+    assert!(matches!(
+        scheduler.wait_finished().await,
+        Err(TaskError::Wait(_))
+    ));
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released after scheduler submit failure");
 }
 
 #[test]

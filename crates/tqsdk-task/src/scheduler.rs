@@ -99,6 +99,7 @@ struct TargetPosSchedulerInner {
     active_task_report_len: Mutex<usize>,
     report: Mutex<TargetPosExecutionReport>,
     events: Mutex<Vec<TargetPosSchedulerExecutionEvent>>,
+    last_error: Mutex<Option<crate::TaskError>>,
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
@@ -164,6 +165,7 @@ impl TargetPosSchedulerBuilder {
             active_task_report_len: Mutex::new(0),
             report: Mutex::new(TargetPosExecutionReport::default()),
             events: Mutex::new(Vec::new()),
+            last_error: Mutex::new(None),
             finished_tx,
             cancel_requested: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -222,6 +224,15 @@ impl TargetPosScheduler {
             .clone()
     }
 
+    #[must_use]
+    pub fn last_error(&self) -> Option<crate::TaskError> {
+        self.inner
+            .last_error
+            .lock()
+            .expect("scheduler last error lock poisoned")
+            .clone()
+    }
+
     pub async fn cancel(&self) -> Result<()> {
         if self.is_finished() {
             return Ok(());
@@ -232,13 +243,13 @@ impl TargetPosScheduler {
 
     pub async fn wait_finished(&self) -> Result<()> {
         if self.is_finished() {
-            return Ok(());
+            return self.inner.failure_result();
         }
 
         let mut finished_rx = self.inner.finished_tx.subscribe();
         loop {
             if *finished_rx.borrow() {
-                return Ok(());
+                return self.inner.failure_result();
             }
 
             finished_rx.changed().await.map_err(|_| {
@@ -268,7 +279,8 @@ impl TargetPosSchedulerInner {
 
         if self.cancel_requested.load(Ordering::SeqCst) {
             if let Some(task) = self.active_task() {
-                if task.cancel_pending_orders(api).await.is_err() {
+                if let Err(error) = task.cancel_pending_orders(api).await {
+                    self.finish_with_error(error);
                     return;
                 }
                 if let Some(step_index) = self.current_step_index() {
@@ -289,6 +301,9 @@ impl TargetPosSchedulerInner {
                 return;
             };
             self.ensure_step_started(step_index);
+            if self.is_finished() {
+                return;
+            }
 
             let step = self.steps[step_index].clone();
             let phase = self.current_step_phase();
@@ -298,6 +313,10 @@ impl TargetPosSchedulerInner {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
                     self.collect_active_task_events(step_index);
+                    if let Some(error) = task_failure(&task) {
+                        self.finish_with_error(error);
+                        return;
+                    }
                     if task.applied_target_volume() == Some(step.target_volume) {
                         self.finish();
                     }
@@ -312,6 +331,9 @@ impl TargetPosSchedulerInner {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
                     self.collect_active_task_events(step_index);
+                    if let Some(error) = task_failure(&task) {
+                        self.finish_with_error(error);
+                    }
                 }
                 return;
             }
@@ -319,7 +341,10 @@ impl TargetPosSchedulerInner {
             self.mark_current_step_cancelling();
 
             if let Some(task) = self.active_task() {
-                task.cancel_pending_orders(api).await.ok();
+                if let Err(error) = task.cancel_pending_orders(api).await {
+                    self.finish_with_error(error);
+                    return;
+                }
                 self.collect_active_task_events(step_index);
                 if task.has_live_orders(api) {
                     return;
@@ -369,14 +394,14 @@ impl TargetPosSchedulerInner {
             return;
         };
 
-        let task = self.build_step_task(step.target_volume, price_mode);
-        if let Ok(task) = task {
-            *self
-                .active_task
-                .lock()
-                .expect("scheduler active task lock poisoned") = Some(task);
-        } else {
-            self.finish();
+        match self.build_step_task(step.target_volume, price_mode) {
+            Ok(task) => {
+                *self
+                    .active_task
+                    .lock()
+                    .expect("scheduler active task lock poisoned") = Some(task);
+            }
+            Err(error) => self.finish_with_error(error),
         }
     }
 
@@ -528,6 +553,30 @@ impl TargetPosSchedulerInner {
             .expect("task registry lock poisoned")
             .unregister_task(self.task_id);
     }
+
+    fn finish_with_error(&self, error: crate::TaskError) {
+        *self
+            .last_error
+            .lock()
+            .expect("scheduler last error lock poisoned") = Some(error);
+        self.finish();
+    }
+
+    fn failure_result(&self) -> Result<()> {
+        if let Some(error) = self
+            .last_error
+            .lock()
+            .expect("scheduler last error lock poisoned")
+            .clone()
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+fn task_failure(task: &TargetPosTask) -> Option<crate::TaskError> {
+    task.is_finished().then(|| task.last_error()).flatten()
 }
 
 impl Drop for TargetPosSchedulerInner {

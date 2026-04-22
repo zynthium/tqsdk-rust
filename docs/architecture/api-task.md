@@ -56,7 +56,10 @@
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
 - `TargetPosTask::execution_report()` 已暴露最小 command-level 事件流
   - 当前包含 insert/cancel/trade/order finished/target reached
+- `TargetPosTask::last_error()` 会暴露本地命令提交失败
+  - 第一版不对本地提交失败做静默重试，而是记录错误并结束任务
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
+- `TargetPosScheduler::last_error()` 会向外冒泡内部 step task 的本地提交失败
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
 - `TargetPosTask` 已接入最小真实 planner：
@@ -316,6 +319,7 @@ impl TargetPosScheduler {
     pub fn is_finished(&self) -> bool;
     pub fn execution_report(&self) -> TargetPosExecutionReport;
     pub fn execution_events(&self) -> Vec<TargetPosSchedulerExecutionEvent>;
+    pub fn last_error(&self) -> Option<TaskError>;
     pub async fn cancel(&self) -> tqsdk_task::Result<()>;
     pub async fn wait_finished(&self) -> tqsdk_task::Result<()>;
 }
