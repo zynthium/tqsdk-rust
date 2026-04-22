@@ -10,7 +10,9 @@ use tokio::sync::watch;
 use crate::Result;
 use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
-use crate::target_pos::{TargetPosBuilder, TargetPosStore, TargetPosTask};
+use crate::target_pos::{
+    TargetPosBuilder, TargetPosStore, TargetPosTask, TargetPosTaskExecutionEvent,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetPosScheduleStep {
@@ -56,6 +58,12 @@ pub struct TargetPosExecutionReport {
     pub applied_steps: Vec<TargetPosExecutionStep>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetPosSchedulerExecutionEvent {
+    pub step_index: usize,
+    pub event: TargetPosTaskExecutionEvent,
+}
+
 pub struct TargetPosSchedulerBuilder {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
@@ -88,7 +96,9 @@ struct TargetPosSchedulerInner {
     current_step_started_at: Mutex<Option<Instant>>,
     current_step_phase: Mutex<ActiveStepPhase>,
     active_task: Mutex<Option<TargetPosTask>>,
+    active_task_report_len: Mutex<usize>,
     report: Mutex<TargetPosExecutionReport>,
+    events: Mutex<Vec<TargetPosSchedulerExecutionEvent>>,
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
@@ -151,7 +161,9 @@ impl TargetPosSchedulerBuilder {
             current_step_started_at: Mutex::new(None),
             current_step_phase: Mutex::new(ActiveStepPhase::Running),
             active_task: Mutex::new(None),
+            active_task_report_len: Mutex::new(0),
             report: Mutex::new(TargetPosExecutionReport::default()),
+            events: Mutex::new(Vec::new()),
             finished_tx,
             cancel_requested: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -198,6 +210,15 @@ impl TargetPosScheduler {
             .report
             .lock()
             .expect("scheduler report lock poisoned")
+            .clone()
+    }
+
+    #[must_use]
+    pub fn execution_events(&self) -> Vec<TargetPosSchedulerExecutionEvent> {
+        self.inner
+            .events
+            .lock()
+            .expect("scheduler events lock poisoned")
             .clone()
     }
 
@@ -250,6 +271,9 @@ impl TargetPosSchedulerInner {
                 if task.cancel_pending_orders(api).await.is_err() {
                     return;
                 }
+                if let Some(step_index) = self.current_step_index() {
+                    self.collect_active_task_events(step_index);
+                }
                 if task.has_live_orders(api) {
                     return;
                 }
@@ -273,6 +297,7 @@ impl TargetPosSchedulerInner {
             if is_last_step {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
+                    self.collect_active_task_events(step_index);
                     if task.applied_target_volume() == Some(step.target_volume) {
                         self.finish();
                     }
@@ -286,6 +311,7 @@ impl TargetPosSchedulerInner {
             {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
+                    self.collect_active_task_events(step_index);
                 }
                 return;
             }
@@ -294,6 +320,7 @@ impl TargetPosSchedulerInner {
 
             if let Some(task) = self.active_task() {
                 task.cancel_pending_orders(api).await.ok();
+                self.collect_active_task_events(step_index);
                 if task.has_live_orders(api) {
                     return;
                 }
@@ -325,6 +352,10 @@ impl TargetPosSchedulerInner {
             .current_step_phase
             .lock()
             .expect("scheduler step phase lock poisoned") = ActiveStepPhase::Running;
+        *self
+            .active_task_report_len
+            .lock()
+            .expect("scheduler active task report len lock poisoned") = 0;
         self.report
             .lock()
             .expect("scheduler report lock poisoned")
@@ -413,6 +444,10 @@ impl TargetPosSchedulerInner {
             .lock()
             .expect("scheduler active task lock poisoned") = None;
         *self
+            .active_task_report_len
+            .lock()
+            .expect("scheduler active task report len lock poisoned") = 0;
+        *self
             .current_step_started_at
             .lock()
             .expect("scheduler started-at lock poisoned") = None;
@@ -448,9 +483,37 @@ impl TargetPosSchedulerInner {
             task.cancel_internal();
         }
         *self
+            .active_task_report_len
+            .lock()
+            .expect("scheduler active task report len lock poisoned") = 0;
+        *self
             .current_step_started_at
             .lock()
             .expect("scheduler started-at lock poisoned") = None;
+    }
+
+    fn collect_active_task_events(&self, step_index: usize) {
+        let Some(task) = self.active_task() else {
+            return;
+        };
+        let report = task.execution_report();
+        let mut report_len = self
+            .active_task_report_len
+            .lock()
+            .expect("scheduler active task report len lock poisoned");
+        if *report_len >= report.events.len() {
+            return;
+        }
+
+        let new_events = report.events[*report_len..]
+            .iter()
+            .cloned()
+            .map(|event| TargetPosSchedulerExecutionEvent { step_index, event });
+        self.events
+            .lock()
+            .expect("scheduler events lock poisoned")
+            .extend(new_events);
+        *report_len = report.events.len();
     }
 
     fn finish(&self) {

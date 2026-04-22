@@ -39,6 +39,8 @@
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
+  - `execution_events()`
+    - 聚合内部 task 的最小 command-level 事件流，并带 `step_index`
   - 支持 step 级 `price_mode`
   - 支持 pause step
   - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
