@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, MarketAdapter, OutboundFrame,
-    OutboundRequest, ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
+    AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, MarketAdapter,
+    NormalizedMutation, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
+    RuntimeCommand, RuntimeHandle, RuntimeInput, TradeAdapter, TradeCommand, TradeDirection,
+    TradeOffset,
 };
 use tqsdk_session::{SessionClient, SessionFacadeConfig};
 use tqsdk_task::{
@@ -28,6 +30,67 @@ fn market_only_host() -> TaskHost {
     let handle = RuntimeHandle::with_adapters(adapters);
     let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
     TaskHost::new(TqApi::new(session))
+}
+
+fn host_with_trade_adapter<A>(trade_adapter: A) -> TaskHost
+where
+    A: ProtocolAdapter + 'static,
+{
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+    adapters.register_adapter(trade_adapter);
+    let handle = RuntimeHandle::with_adapters(adapters);
+    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    TaskHost::new(TqApi::new(session))
+}
+
+#[derive(Debug, Default)]
+struct FailNthTradeInsertAdapter {
+    inner: TradeAdapter,
+    fail_on_insert: usize,
+    seen_insert_orders: usize,
+}
+
+impl FailNthTradeInsertAdapter {
+    fn new(fail_on_insert: usize) -> Self {
+        Self {
+            inner: TradeAdapter,
+            fail_on_insert,
+            seen_insert_orders: 0,
+        }
+    }
+}
+
+impl ProtocolAdapter for FailNthTradeInsertAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        ProtocolDomain::Trade
+    }
+
+    fn accepts_command(&self, cmd: &RuntimeCommand) -> bool {
+        self.inner.accepts_command(cmd)
+    }
+
+    fn encode(&mut self, cmd: &RuntimeCommand) -> tqsdk_core::Result<Vec<OutboundRequest>> {
+        if matches!(cmd, RuntimeCommand::Trade(TradeCommand::InsertOrder(_))) {
+            self.seen_insert_orders += 1;
+            if self.seen_insert_orders == self.fail_on_insert {
+                return Err(ContractError::validation(format!(
+                    "injected trade insert failure at batch order {}",
+                    self.seen_insert_orders
+                )));
+            }
+        }
+
+        self.inner.encode(cmd)
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        self.inner.accepts_input(input)
+    }
+
+    fn decode(&mut self, input: &RuntimeInput) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
+        self.inner.decode(input)
+    }
 }
 
 fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {
@@ -104,6 +167,58 @@ fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i6
         )
         .unwrap()
         .expect("seed position commit should produce a commit");
+}
+
+fn seed_position_detail_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    pos_long_today: i64,
+    pos_long_his: i64,
+    pos_short_today: i64,
+    pos_short_his: i64,
+) {
+    let pos_long = pos_long_today + pos_long_his;
+    let pos_short = pos_short_today + pos_short_his;
+    let pos = pos_long - pos_short;
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("symbol should contain exchange");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "positions": {
+                                    symbol: {
+                                        "user_id": account_id,
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "pos": pos,
+                                        "pos_long": pos_long,
+                                        "pos_short": pos_short,
+                                        "pos_long_today": pos_long_today,
+                                        "pos_long_his": pos_long_his,
+                                        "pos_short_today": pos_short_today,
+                                        "pos_short_his": pos_short_his,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed detailed position commit should produce a commit");
 }
 
 fn seed_order_status_commit(
@@ -1074,6 +1189,102 @@ async fn scheduler_wait_finished_returns_error_when_step_insert_order_submission
     ));
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler submit failure");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partially_fails() {
+    let mut host = host_with_trade_adapter(FailNthTradeInsertAdapter::new(2));
+    let scheduler = host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            -1,
+            PriceMode::Active,
+        )])
+        .build()
+        .unwrap();
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(!scheduler.is_finished());
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["direction"], "SELL");
+    assert_eq!(payload["offset"], "CLOSETODAY");
+    assert_eq!(payload["order_id"], "wait-order-1");
+    assert_eq!(
+        scheduler.execution_events(),
+        vec![TargetPosSchedulerExecutionEvent {
+            step_index: 0,
+            event: TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq: 1,
+                order_id: "wait-order-1".to_string(),
+                direction: TradeDirection::Sell,
+                offset: TradeOffset::CloseToday,
+                volume: 1,
+                limit_price: 3677.0,
+            },
+        }]
+    );
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(!scheduler.is_finished());
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+    assert_eq!(
+        scheduler.execution_events(),
+        vec![
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::InsertOrder {
+                    request_seq: 1,
+                    order_id: "wait-order-1".to_string(),
+                    direction: TradeDirection::Sell,
+                    offset: TradeOffset::CloseToday,
+                    volume: 1,
+                    limit_price: 3677.0,
+                },
+            },
+            TargetPosSchedulerExecutionEvent {
+                step_index: 0,
+                event: TargetPosTaskExecutionEvent::CancelOrder {
+                    order_id: "wait-order-1".to_string(),
+                },
+            },
+        ]
+    );
+
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "FINISHED",
+        1,
+        1,
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert!(scheduler.is_finished());
+    assert!(matches!(scheduler.last_error(), Some(TaskError::Wait(_))));
+    assert!(matches!(
+        scheduler.wait_finished().await,
+        Err(TaskError::Wait(_))
+    ));
+    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        .expect("ownership should be released after scheduler partial batch submission failure");
 }
 
 #[test]
