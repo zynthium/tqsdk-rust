@@ -331,6 +331,34 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn kline_window_close_submits_cancel_chart_request() {
+    let stream = support::core_seed::seeded_stream();
+    let windows = stream
+        .kline_stream("SHFE.au2602", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+
+    stream.session().drain_dispatches().unwrap();
+    windows.close().await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("kline window close should submit a cancel_chart request");
+    assert_eq!(
+        payload["chart_id"],
+        "stream-kline-SHFE_au2602-60000000000-64"
+    );
+    assert_eq!(payload["ins_list"], "");
+    assert_eq!(payload["duration"], 60_000_000_000_i64);
+    assert_eq!(payload["view_width"], 64);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn order_event_stream_emits_matching_account_updates_only() {
     let stream = support::core_seed::seeded_stream();
     let mut events = stream.order_event_stream("sim").unwrap();

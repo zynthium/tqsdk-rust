@@ -32,6 +32,33 @@ async fn path_commit_stream_skips_unmatched_commits_and_matches_prefix() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn path_commit_stream_matches_any_of_multiple_prefixes() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap().filter_paths([
+        tqsdk_core::StatePath::new(["quotes", "SHFE.au2602"]),
+        tqsdk_core::StatePath::new(["quotes", "SHFE.ag2606"]),
+    ]);
+
+    support::core_seed::seed_quote_commit(&stream, "DCE.i2609", 712.0);
+    support::core_seed::seed_quote_commit(&stream, "SHFE.ag2606", 5102.5);
+
+    let commit = commits
+        .next()
+        .await
+        .expect("multi-path stream should yield a matching commit")
+        .expect("matching multi-path commit should arrive without filter errors");
+
+    let snapshot = stream.reader().read();
+    let quote = snapshot
+        .decode_path::<Quote>(&["quotes", "SHFE.ag2606"])
+        .unwrap()
+        .expect("matched multi-path quote should be readable");
+
+    assert_eq!(commit.revision, snapshot.revision());
+    assert_eq!(quote.last_price, 5102.5);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn scope_commit_stream_skips_other_scopes() {
     let stream = support::core_seed::seeded_stream();
     let mut commits = stream
@@ -136,6 +163,46 @@ async fn domain_commit_stream_matches_commit_domains() {
         vec![ProtocolDomain::Market, ProtocolDomain::System]
     );
     assert_eq!(quote.last_price, 624.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn domain_commit_stream_matches_any_of_multiple_domains() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream
+        .commit_stream()
+        .unwrap()
+        .filter_domains([ProtocolDomain::System, ProtocolDomain::Trade]);
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 624.5);
+    support::core_seed::seed_quote_fields_commit_on_domains_with_scope(
+        &stream,
+        "SHFE.au2602",
+        json!({
+            "instrument_id": "SHFE.au2602",
+            "last_price": 625.0
+        }),
+        vec![ProtocolDomain::Market, ProtocolDomain::Trade],
+        CommitScope::RealtimeUpdate,
+    );
+
+    let commit = commits
+        .next()
+        .await
+        .expect("multi-domain stream should yield a matching commit")
+        .expect("matching multi-domain commit should arrive without filter errors");
+
+    let snapshot = stream.reader().read();
+    let quote = snapshot
+        .decode_path::<Quote>(&["quotes", "SHFE.au2602"])
+        .unwrap()
+        .expect("multi-domain quote should be readable");
+
+    assert_eq!(commit.revision, snapshot.revision());
+    assert_eq!(
+        commit.domains,
+        vec![ProtocolDomain::Market, ProtocolDomain::Trade]
+    );
+    assert_eq!(quote.last_price, 625.0);
 }
 
 #[tokio::test(flavor = "current_thread")]
