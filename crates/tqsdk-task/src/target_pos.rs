@@ -385,6 +385,12 @@ impl TargetPosTask {
     pub fn applied_target_volume_for_test(&self) -> Option<i64> {
         self.applied_target_volume()
     }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn track_order_for_test(&self, order_ref: OrderRef) {
+        self.inner.track_order(order_ref);
+    }
 }
 
 impl TargetPosStore {
@@ -963,5 +969,44 @@ impl Drop for TargetPosTaskInner {
                 .expect("target task store lock poisoned")
                 .unregister(self.task_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
+    use tqsdk_session::{SessionClient, SessionFacadeConfig};
+    use tqsdk_wait::TqApi;
+
+    fn market_only_api() -> TqApi {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_adapter(MarketAdapter::default());
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let session =
+            SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+        TqApi::new(session)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_requested_task_records_error_when_cancel_submission_fails() {
+        let registry = Arc::new(Mutex::new(TaskRegistry::default()));
+        let store = Arc::new(Mutex::new(TargetPosStore::default()));
+        let task = TargetPosBuilder::new(
+            Arc::clone(&registry),
+            Arc::clone(&store),
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .build_internal()
+        .expect("internal task should build");
+        let mut api = market_only_api();
+        task.inner.track_order(api.get_order("sim", "unit-order-1"));
+        task.inner.cancel_requested.store(true, Ordering::SeqCst);
+
+        task.inner.process_wait_update(&mut api).await;
+
+        assert!(task.is_finished());
+        assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
     }
 }

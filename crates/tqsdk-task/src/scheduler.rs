@@ -614,3 +614,68 @@ pub(crate) async fn process_schedulers_wait_update(
         scheduler.process_wait_update(api).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
+    use tqsdk_session::{SessionClient, SessionFacadeConfig};
+    use tqsdk_wait::TqApi;
+
+    fn market_only_api() -> TqApi {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_adapter(MarketAdapter::default());
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let session =
+            SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+        TqApi::new(session)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_scheduler_records_error_when_internal_cancel_submission_fails() {
+        let registry = Arc::new(Mutex::new(TaskRegistry::default()));
+        let target_tasks = Arc::new(Mutex::new(TargetPosStore::default()));
+        let schedulers = Arc::new(Mutex::new(TargetPosSchedulerStore::default()));
+        let scheduler = TargetPosSchedulerBuilder::new(
+            Arc::clone(&registry),
+            Arc::clone(&target_tasks),
+            Arc::clone(&schedulers),
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
+        .build()
+        .expect("scheduler should build");
+        let task = TargetPosBuilder::new(
+            Arc::clone(&registry),
+            Arc::clone(&target_tasks),
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .build_internal()
+        .expect("internal target task should build");
+        let mut api = market_only_api();
+        task.track_order_for_test(api.get_order("sim", "unit-order-1"));
+        *scheduler
+            .inner
+            .active_task
+            .lock()
+            .expect("scheduler active task lock poisoned") = Some(task);
+        scheduler
+            .inner
+            .cancel_requested
+            .store(true, Ordering::SeqCst);
+
+        scheduler.inner.process_wait_update(&mut api).await;
+
+        assert!(scheduler.is_finished());
+        assert!(matches!(
+            scheduler.last_error(),
+            Some(crate::TaskError::Wait(_))
+        ));
+    }
+}
