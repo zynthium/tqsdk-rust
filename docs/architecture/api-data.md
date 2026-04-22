@@ -88,6 +88,7 @@
 - README 与 crate-level docs
 - 后续实现的依赖方向约束
 - `DataClient`
+- `DataClient::new()`
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `HistoricalContQuotesRow`
 

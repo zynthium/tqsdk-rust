@@ -4,7 +4,7 @@
 
 当前阶段它只先开放一条最薄的一次性研究接口：
 
-- `DataClient::query_his_cont_quotes(...)`
+- `DataClient::new().query_his_cont_quotes(...)`
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 

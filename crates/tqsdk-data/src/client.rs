@@ -40,30 +40,46 @@ pub struct HistoricalContQuotesRow {
 
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
 pub struct DataClient {
-    session: tqsdk_session::SessionClient,
+    session: Option<tqsdk_session::SessionClient>,
     http: reqwest::Client,
     endpoints: DataServiceEndpoints,
 }
 
+impl Default for DataClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DataClient {
     #[must_use]
-    pub fn new(session: tqsdk_session::SessionClient) -> Self {
+    pub fn new() -> Self {
         Self {
-            session,
+            session: None,
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints::default(),
         }
     }
 
+    #[must_use]
+    pub fn from_session(session: tqsdk_session::SessionClient) -> Self {
+        Self::new().with_session(session)
+    }
+
+    #[must_use]
+    pub fn with_session(mut self, session: tqsdk_session::SessionClient) -> Self {
+        self.session = Some(session);
+        self
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub fn new_for_test_with_urls(
-        session: tqsdk_session::SessionClient,
         holiday_url: impl Into<String>,
         continuous_table_url: impl Into<String>,
     ) -> Self {
         Self {
-            session,
+            session: None,
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints {
                 holiday_url: holiday_url.into(),
@@ -73,12 +89,12 @@ impl DataClient {
     }
 
     #[must_use]
-    pub fn session(&self) -> &tqsdk_session::SessionClient {
-        &self.session
+    pub fn session(&self) -> Option<&tqsdk_session::SessionClient> {
+        self.session.as_ref()
     }
 
     #[must_use]
-    pub fn into_session(self) -> tqsdk_session::SessionClient {
+    pub fn into_session(self) -> Option<tqsdk_session::SessionClient> {
         self.session
     }
 
@@ -332,9 +348,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    use tqsdk_core::{AdapterRegistry, RuntimeHandle};
-    use tqsdk_session::{SessionClient, SessionFacadeConfig};
-
     use super::*;
 
     #[test]
@@ -371,7 +384,6 @@ mod tests {
             });
 
             let client = DataClient::new_for_test_with_urls(
-                test_session(),
                 format!("http://{addr}/holiday.json"),
                 format!("http://{addr}/continuous_table.json"),
             );
@@ -403,7 +415,7 @@ mod tests {
     #[test]
     fn query_his_cont_quotes_rejects_invalid_inputs() {
         run_on_tokio(async {
-            let client = DataClient::new(test_session());
+            let client = DataClient::new();
 
             let err = client
                 .query_his_cont_quotes(&[], 1, Some(NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()))
@@ -437,13 +449,6 @@ mod tests {
                 matches!(err, DataError::Validation(message) if message == "days must be greater than zero")
             );
         });
-    }
-
-    fn test_session() -> SessionClient {
-        let mut adapters = AdapterRegistry::new();
-        adapters.register_default_adapters();
-        let handle = RuntimeHandle::with_adapters(adapters);
-        SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default())
     }
 
     fn run_on_tokio<F>(future: F)
