@@ -55,7 +55,7 @@
 - guarded `insert_order` / `cancel_order`
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
 - `TargetPosTask::execution_report()` 已暴露最小 command-level 事件流
-  - 当前包含 insert/cancel/order finished/target reached
+  - 当前包含 insert/cancel/trade/order finished/target reached
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义

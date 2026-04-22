@@ -211,6 +211,57 @@ fn seed_order_status_commit(
         .expect("seed order status commit should produce a commit");
 }
 
+fn seed_trade_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    order_id: &str,
+    trade_id: &str,
+    volume: i64,
+    price: f64,
+) {
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("symbol should contain exchange");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "trades": {
+                                    trade_id: {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": order_id,
+                                        "trade_id": trade_id,
+                                        "exchange_trade_id": "exchange-trade-1",
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "price": price,
+                                        "volume": volume,
+                                        "trade_date_time": 1_713_660_000_000_000_000_i64,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed trade commit should produce a commit");
+}
+
 fn seed_wait_order_finished_commit(
     host: &TaskHost,
     account_id: &str,
@@ -868,6 +919,57 @@ async fn target_pos_execution_report_records_terminal_order_and_target_reached()
             TargetPosTaskExecutionEvent::TargetReached {
                 request_seq: 1,
                 target_volume: 2,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_execution_report_records_trade_events_from_commit_deltas() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_trade_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "trade-1",
+        1,
+        3678.0,
+    );
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    assert_eq!(
+        task.execution_report().events,
+        vec![
+            TargetPosTaskExecutionEvent::InsertOrder {
+                request_seq: 1,
+                order_id: "wait-order-1".to_string(),
+                direction: TradeDirection::Buy,
+                offset: TradeOffset::Open,
+                volume: 2,
+                limit_price: 3678.0,
+            },
+            TargetPosTaskExecutionEvent::Trade {
+                trade_id: "trade-1".to_string(),
+                order_id: "wait-order-1".to_string(),
+                direction: "BUY".to_string(),
+                offset: "OPEN".to_string(),
+                volume: 1,
+                price: 3678.0,
+                trade_date_time: 1_713_660_000_000_000_000_i64,
             },
         ]
     );

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::json;
 use tokio::sync::watch;
-use tqsdk_core::{Order, Position, Quote, TradeDirection, TradeOffset};
+use tqsdk_core::{ObjectKey, Order, Position, Quote, Trade, TradeDirection, TradeOffset};
 use tqsdk_wait::OrderRef;
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
@@ -49,6 +49,15 @@ pub enum TargetPosTaskExecutionEvent {
         remaining_volume: i64,
         last_msg: String,
     },
+    Trade {
+        trade_id: String,
+        order_id: String,
+        direction: String,
+        offset: String,
+        volume: i64,
+        price: f64,
+        trade_date_time: i64,
+    },
     TargetReached {
         request_seq: u64,
         target_volume: i64,
@@ -81,7 +90,9 @@ struct TargetPosTaskInner {
     submitted_net_position: Mutex<Option<i64>>,
     awaiting_progress: AtomicBool,
     tracked_orders: Mutex<Vec<OrderRef>>,
+    known_order_ids: Mutex<HashSet<String>>,
     cancel_requested_order_ids: Mutex<HashSet<String>>,
+    seen_trade_ids: Mutex<HashSet<String>>,
     report: Mutex<TargetPosTaskExecutionReport>,
     reached_tx: watch::Sender<u64>,
     finished_tx: watch::Sender<bool>,
@@ -161,7 +172,9 @@ impl TargetPosBuilder {
             submitted_net_position: Mutex::new(None),
             awaiting_progress: AtomicBool::new(false),
             tracked_orders: Mutex::new(Vec::new()),
+            known_order_ids: Mutex::new(HashSet::new()),
             cancel_requested_order_ids: Mutex::new(HashSet::new()),
+            seen_trade_ids: Mutex::new(HashSet::new()),
             report: Mutex::new(TargetPosTaskExecutionReport::default()),
             reached_tx,
             finished_tx,
@@ -369,6 +382,8 @@ impl TargetPosStore {
 
 impl TargetPosTaskInner {
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
+        self.record_commit_trades(api);
+
         if self.cancel_requested.load(Ordering::SeqCst) {
             if self.cancel_pending_orders(api).await.is_err() {
                 return;
@@ -485,6 +500,10 @@ impl TargetPosTaskInner {
     }
 
     fn track_order(&self, order_ref: OrderRef) {
+        self.known_order_ids
+            .lock()
+            .expect("target task known order ids lock poisoned")
+            .insert(order_ref.order_id().to_string());
         self.tracked_orders
             .lock()
             .expect("target task tracked orders lock poisoned")
@@ -547,6 +566,75 @@ impl TargetPosTaskInner {
                 request_seq,
                 target_volume,
             });
+    }
+
+    fn record_trade(&self, trade: &Trade) {
+        self.report
+            .lock()
+            .expect("target task execution report lock poisoned")
+            .events
+            .push(TargetPosTaskExecutionEvent::Trade {
+                trade_id: trade.trade_id.clone(),
+                order_id: trade.order_id.clone(),
+                direction: trade.direction.clone(),
+                offset: trade.offset.clone(),
+                volume: trade.volume,
+                price: trade.price,
+                trade_date_time: trade.trade_date_time,
+            });
+    }
+
+    fn record_commit_trades(&self, api: &tqsdk_wait::TqApi) {
+        let Some(commit) = api.last_commit() else {
+            return;
+        };
+        let trade_ids = commit
+            .changes
+            .object_hits
+            .iter()
+            .filter_map(|object| match object {
+                ObjectKey::Trade {
+                    account_id,
+                    trade_id,
+                } if account_id.as_str() == self.account_id => Some(trade_id.as_str().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if trade_ids.is_empty() {
+            return;
+        }
+
+        let known_order_ids = self
+            .known_order_ids
+            .lock()
+            .expect("target task known order ids lock poisoned")
+            .clone();
+        if known_order_ids.is_empty() {
+            return;
+        }
+
+        for trade_id in trade_ids {
+            let Some(trade) = api
+                .get_trade(&self.account_id, &trade_id)
+                .snapshot(api)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if !known_order_ids.contains(&trade.order_id) {
+                continue;
+            }
+
+            let inserted = self
+                .seen_trade_ids
+                .lock()
+                .expect("target task seen trade ids lock poisoned")
+                .insert(trade.trade_id.clone());
+            if inserted {
+                self.record_trade(&trade);
+            }
+        }
     }
 
     fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {

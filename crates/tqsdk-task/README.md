@@ -21,7 +21,7 @@
   - `cancel()` 与 `wait_finished()`
     - `cancel()` 只登记取消请求，实际撤单与结束仍由后续 `TaskHost::wait_update()` 推进
   - `execution_report()`
-    - 暴露最小 command-level 事件流，当前包含 insert/cancel/order finished/target reached
+    - 暴露最小 command-level 事件流，当前包含 insert/cancel/trade/order finished/target reached
   - `last_error()`
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
