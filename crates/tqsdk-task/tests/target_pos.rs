@@ -791,6 +791,61 @@ async fn open_only_target_pos_resubmits_after_terminal_order_without_position_ch
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_order() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
+    seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 2, 1);
+    task.set_target_volume(1).unwrap();
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3676.0, 3677.0);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "cancel_order");
+    assert_eq!(payload["order_id"], "wait-order-1");
+
+    let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
+    assert!(pending.is_err());
+
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "FINISHED",
+        2,
+        1,
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3675.0, 3676.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+
+    task.wait_target_reached().await.unwrap();
+    assert_eq!(task.applied_target_volume_for_test(), Some(1));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_ownership() {
     let mut host = seeded_host();
     let task = host
