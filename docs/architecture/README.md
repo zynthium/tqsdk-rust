@@ -85,6 +85,7 @@ V1 是：
   - shared session shell
   - lazy establish + route / pending-route 驱动原语
   - `progress_once()` 这个最小 substrate 推进原语
+  - `wait_command_completed()` 这个最小 control-plane 等待原语
   - direct query / schema refresh 薄层入口
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
   - 保持“纯 async substrate，调用方自带 Tokio runtime”的约束
@@ -100,6 +101,7 @@ V1 是：
   - shared-session multi-consumer commit stream facade
   - commit/path/scope/domain/object/field filters
   - typed path stream / ready kline-tick window / trade session events
+  - `stream.session()` 仍然是一次性 direct query 的逃生舱，但不改变 direct query 的 crate 归属
 - `tqsdk-task`
   - `TaskHost`
   - `TargetPosTask`
