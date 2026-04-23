@@ -84,10 +84,13 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `crates/tqsdk-stream/examples/quote_stream_with_session_query.rs`
 - `crates/tqsdk-stream/examples/kline_stream.rs`
 - `crates/tqsdk-stream/examples/trade_session_events.rs`
+- `crates/tqsdk-task/examples/target_pos.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
 - `crates/tqsdk-data/examples/kline_data_page.rs`
 - `crates/tqsdk-data/examples/kline_data_series.rs`
 - `crates/tqsdk-data/examples/kline_data_download.rs`
+- `crates/tqsdk-data/examples/kline_export_csv.rs`
+- `crates/tqsdk-data/examples/option_greeks.rs`
 
 ## 架构文档
 
