@@ -11,6 +11,7 @@
 - `DataClient::from_session(...).get_tick_data_series(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
+- `DataClient::from_session(...).query_option_greeks(...)`
 
 其中：
 
@@ -18,6 +19,7 @@
 - `get_*_data_page` 是最底层的 chart/history page substrate
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`
 - `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程
+- `query_option_greeks` 是一次性 owned 研究接口，内部会临时拉起 live quote snapshot 并做本地 Black-Scholes / 隐波计算
 - 当 session 的 auth context 已知但缺少 `tq_dl` 时，history page / series / download 接口会明确拒绝
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
@@ -39,6 +41,9 @@
 - `KlineDataDownloadPage`
 - `TickDataDownload`
 - `TickDataDownloadPage`
+- `OptionGreeksRequest`
+- `OptionGreeksResult`
+- `OptionGreeksRow`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -63,7 +68,6 @@
 ## 后续仍应承接的能力
 
 - `query_his_cont_quotes`
-- `query_option_greeks`
 - 文件缓存、导出、落盘
 - 可选的 DataFrame / polars 适配层
 
@@ -73,8 +77,18 @@
 - `wait_update()` facade
 - stream/event facade
 - task runtime
-- `query_option_greeks`
 - 回测报告与 GUI
+
+## 当前关于 live quote snapshot 的取舍
+
+`query_option_greeks` 依赖一次性 live quote snapshot，但这块底层能力目前仍然保持为 crate 内部实现，没有单独冻结为 public API。
+
+原因是现在的 quote 订阅 contract 还是 shared-session 全局集合语义：
+
+- 内部 helper 可以安全地为 `query_option_greeks` 服务
+- 但如果直接公开成通用 snapshot API，就必须同时明确“临时订阅是否自动撤销”“与其他 live consumer 如何共存”这类更稳定的语义
+
+当前阶段先把研究接口落地，而不提前承诺一层还不够干净的通用 market snapshot surface。
 
 ## 为什么现在先保持极窄
 
@@ -98,5 +112,7 @@ session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/k
 session-backed 的时间范围历史示例见 [examples/kline_data_series.rs](examples/kline_data_series.rs)。
 
 session-backed 的按页下载示例见 [examples/kline_data_download.rs](examples/kline_data_download.rs)。
+
+session-backed 的期权 Greeks 示例见 [examples/option_greeks.rs](examples/option_greeks.rs)。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

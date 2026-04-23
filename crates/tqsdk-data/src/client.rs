@@ -9,6 +9,10 @@ use serde_json::Value;
 use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Symbol, Tick};
 
 use crate::error::{DataError, Result};
+use crate::greeks::{
+    OptionGreeksRequest, OptionGreeksResult, build_option_greeks_row, validate_option_metadata,
+};
+use crate::live_quote::await_quote_snapshots;
 
 const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_holiday.json";
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
@@ -1129,6 +1133,58 @@ impl DataClient {
         ))
     }
 
+    pub async fn query_option_greeks(
+        &self,
+        request: OptionGreeksRequest,
+    ) -> Result<OptionGreeksResult> {
+        let spec = request.validate()?;
+        let session =
+            self.require_session("query_option_greeks requires a session-backed data client")?;
+
+        let symbol_refs = spec.symbols.iter().map(String::as_str).collect::<Vec<_>>();
+        let metadata_quotes = session.query_symbol_info(&symbol_refs).await?;
+        let mut live_symbols = dedup_symbols_preserve_order(spec.symbols.iter().cloned());
+
+        for (symbol, metadata) in spec.symbols.iter().zip(metadata_quotes.iter()) {
+            validate_option_metadata(symbol, metadata)?;
+            live_symbols.push(metadata.underlying_symbol.clone());
+        }
+        let live_symbols = dedup_symbols_preserve_order(live_symbols);
+        let live_quotes = await_quote_snapshots(session, &live_symbols, spec.timeout).await?;
+
+        let mut rows = Vec::with_capacity(spec.symbols.len());
+        for (index, (symbol, metadata)) in
+            spec.symbols.iter().zip(metadata_quotes.iter()).enumerate()
+        {
+            let option_quote = live_quotes.get(symbol).ok_or_else(|| {
+                DataError::InvalidResponse(format!("missing live quote snapshot for {symbol}"))
+            })?;
+            let underlying_quote = live_quotes
+                .get(metadata.underlying_symbol.as_str())
+                .ok_or_else(|| {
+                    DataError::InvalidResponse(format!(
+                        "missing live quote snapshot for underlying {} of {symbol}",
+                        metadata.underlying_symbol
+                    ))
+                })?;
+            let explicit_volatility = spec
+                .volatilities
+                .as_ref()
+                .and_then(|volatilities| volatilities.get(index))
+                .copied();
+            rows.push(build_option_greeks_row(
+                symbol,
+                metadata,
+                option_quote,
+                underlying_quote,
+                explicit_volatility,
+                spec.risk_free_rate,
+            )?);
+        }
+
+        Ok(OptionGreeksResult::new(rows))
+    }
+
     async fn await_kline_data_page(
         &self,
         session: &tqsdk_session::SessionClient,
@@ -1561,6 +1617,17 @@ fn dedup_sort_ticks_by_id(rows: Vec<Tick>) -> Vec<Tick> {
         by_id.insert(row.id, row);
     }
     by_id.into_values().collect()
+}
+
+fn dedup_symbols_preserve_order(symbols: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in symbols {
+        if seen.insert(symbol.clone()) {
+            deduped.push(symbol);
+        }
+    }
+    deduped
 }
 
 fn sanitize_chart_token(raw: &str) -> String {
@@ -2123,6 +2190,22 @@ mod tests {
     }
 
     #[test]
+    fn query_option_greeks_requires_session_backed_client() {
+        run_on_tokio(async {
+            let err = DataClient::new()
+                .query_option_greeks(OptionGreeksRequest::new(["SHFE.au2606C720"]))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::InvalidState(message)
+                    if message == "query_option_greeks requires a session-backed data client"
+            ));
+        });
+    }
+
+    #[test]
     fn get_kline_data_series_requires_tq_dl_when_auth_context_is_known() {
         run_on_tokio(async {
             let (session, handle) = test_session_and_handle();
@@ -2260,6 +2343,31 @@ mod tests {
     }
 
     #[test]
+    fn query_option_greeks_rejects_invalid_requests() {
+        run_on_tokio(async {
+            let client = DataClient::new();
+
+            let err = client
+                .query_option_greeks(OptionGreeksRequest::new(Vec::<String>::new()))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "symbols must not be empty")
+            );
+
+            let err = client
+                .query_option_greeks(
+                    OptionGreeksRequest::new(["SHFE.au2606C720"]).with_volatilities(vec![0.2, 0.3]),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "volatilities length must match symbols length")
+            );
+        });
+    }
+
+    #[test]
     fn query_his_cont_quotes_rejects_invalid_inputs() {
         run_on_tokio(async {
             let client = DataClient::new();
@@ -2296,6 +2404,26 @@ mod tests {
                 matches!(err, DataError::Validation(message) if message == "days must be greater than zero")
             );
         });
+    }
+
+    #[test]
+    fn dedup_symbols_preserve_order_keeps_first_occurrence() {
+        let symbols = dedup_symbols_preserve_order(vec![
+            "SHFE.au2606C720".to_string(),
+            "SHFE.au2606".to_string(),
+            "SHFE.au2606C720".to_string(),
+            "SHFE.au2606".to_string(),
+            "SHFE.au2608".to_string(),
+        ]);
+
+        assert_eq!(
+            symbols,
+            vec![
+                "SHFE.au2606C720".to_string(),
+                "SHFE.au2606".to_string(),
+                "SHFE.au2608".to_string(),
+            ]
+        );
     }
 
     fn run_on_tokio<F, T>(future: F) -> T

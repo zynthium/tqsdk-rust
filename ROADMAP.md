@@ -341,7 +341,7 @@
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
 1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在 `query_his_cont_quotes`、`data_page`、`data_series` 已落地后，继续推进 downloader substrate，并审慎评估 `query_option_greeks` 的最小低层抽象
+2. 在 `query_his_cont_quotes`、`data_page`、`data_series`、`data_download`、`query_option_greeks` 已落地后，继续推进 `tqsdk-data` 的 materialization 层，例如文件导出、缓存与可选 tabular adapter
 
 如果目标是先把底座做得更稳，优先选 1。
 如果目标是开始给研究型能力准备独立落点，再选 2。

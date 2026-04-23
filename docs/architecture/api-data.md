@@ -100,6 +100,7 @@
 - `get_tick_data_series(TickDataSeriesRequest)`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
+- `query_option_greeks(OptionGreeksRequest)`
 - `KlineDataPage`
 - `KlineDataPageRequest`
 - `TickDataPage`
@@ -113,6 +114,9 @@
 - `KlineDataDownloadPage`
 - `TickDataDownload`
 - `TickDataDownloadPage`
+- `OptionGreeksRequest`
+- `OptionGreeksResult`
+- `OptionGreeksRow`
 
 当前明确先不做：
 
@@ -121,7 +125,6 @@
 - CSV / writer public API
 - 后台 downloader task
 - Python 兼容层
-- `query_option_greeks`
 
 ## 后续能力落点
 
@@ -179,11 +182,13 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
+- `query_option_greeks` 也已经落在 `tqsdk-data`
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 - `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
+- `query_option_greeks` 内部复用了 session-backed 的一次性 live quote snapshot，但暂时没有把这层 snapshot helper 冻结成新的 public surface
 - 当 session auth context 已知且不含 `tq_dl` 时，history 相关入口会在 facade 层尽早拒绝
 
 这样做的意义是：

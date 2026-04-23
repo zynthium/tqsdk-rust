@@ -13,6 +13,7 @@
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
+//! - `DataClient::from_session(...).query_option_greeks(...)`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -20,6 +21,8 @@
 mod client;
 mod download;
 mod error;
+mod greeks;
+mod live_quote;
 
 pub use client::{
     DataClient, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
@@ -31,3 +34,4 @@ pub use download::{
     TickDataDownloadPage,
 };
 pub use error::{DataError, Result};
+pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
