@@ -118,6 +118,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 3. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
 4. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
 5. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
+6. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
+   只有显式设置 `TQ_SMOKE_ALLOW_ORDER=1` 且提供 `TQ_SMOKE_ORDER_SYMBOL` / `TQ_SMOKE_ORDER_LIMIT_PRICE` 时才会真正发单
 
 ## V2+ adapter 验收基线
 ### wait adapter
