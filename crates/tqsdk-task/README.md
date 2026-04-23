@@ -74,6 +74,7 @@
 当前提供一个最小 task example：
 
 - [examples/target_pos.rs](examples/target_pos.rs)
+- [examples/target_pos_scheduler.rs](examples/target_pos_scheduler.rs)
 
 运行它需要：
 
@@ -101,3 +102,12 @@
 
 - `TQ_TASK_SYMBOL`
 - `TQ_TASK_TIMEOUT_SECS`
+
+`target_pos_scheduler.rs` 默认不会下单，而是先演示一个 pause-only scheduler step，验证 `TaskHost::wait_update()` 即使在没有新 diff 时也会推进 scheduler。
+
+如果显式设置：
+
+- `TQ_TASK_ALLOW_ORDERS=1`
+- `TQ_TARGET_VOLUME=<目标手数>`
+
+它会改为演示“先 pause，再进入一个 target step”的最小 scheduler 路径。

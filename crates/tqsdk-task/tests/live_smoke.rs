@@ -5,7 +5,9 @@ use tqsdk_core::{
     AccountId, RuntimeCommand, TradeAccountType, TradeCommand, TradeDirection, TradeLoginCommand,
     TradeOffset,
 };
-use tqsdk_task::TaskHost;
+use tqsdk_task::{
+    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TaskHost,
+};
 use tqsdk_wait::TqApiBuilder;
 
 type ExplicitTradeOverride = (String, String, String);
@@ -183,6 +185,57 @@ async fn live_insert_cancel_guarded_smoke() {
         .expect("guarded cancel_order should succeed");
     let order_status = wait_for_order_snapshot(&mut host, &order, Duration::from_secs(30)).await;
     assert_ne!(order_status, "ALIVE");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and validates that TaskHost::wait_update advances scheduler pause steps without fresh diffs"]
+async fn live_scheduler_pause_step_smoke() {
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+
+    let api = TqApiBuilder::new(auth_user, auth_pass)
+        .futures_market()
+        .build()
+        .await
+        .expect("live wait api should build");
+    let mut host = TaskHost::new(api);
+    let scheduler = host
+        .target_pos_scheduler("dry-run", "SHFE.ao2609")
+        .steps(vec![TargetPosScheduleStep::pause(Duration::from_millis(
+            50,
+        ))])
+        .build()
+        .expect("pause-only scheduler should build");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !scheduler.is_finished() {
+        let now = tokio::time::Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for pause-only scheduler to finish"
+        );
+        host.wait_update(Some(now + Duration::from_millis(50)))
+            .await
+            .expect("TaskHost::wait_update should succeed");
+    }
+
+    scheduler
+        .wait_finished()
+        .await
+        .expect("pause-only scheduler should finish cleanly");
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![TargetPosExecutionStep {
+                step_index: 0,
+                target_volume: 0,
+            }],
+        }
+    );
 }
 
 async fn login_trade_account(
