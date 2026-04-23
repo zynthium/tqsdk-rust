@@ -71,7 +71,7 @@ fn session_bootstrap_establish_with_resolver_returns_topology() {
     registry.register_domain(ProtocolDomain::Schema);
 
     let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
-        .with_market_target(MarketSessionTarget::new(false, false))
+        .with_market_target(MarketSessionTarget::futures_live())
         .add_trade_target(TradeSessionTarget::new("9999", AccountId::new("simnow")))
         .enable_domain(ProtocolDomain::Market)
         .enable_domain(ProtocolDomain::Trade)
@@ -145,7 +145,7 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
                 .with_query_url("https://query.example/graphql")
                 .with_schema_url("https://schema.example"),
         )
-        .with_market_target(MarketSessionTarget::new(false, true))
+        .with_market_target(MarketSessionTarget::futures_backtest())
         .add_trade_target(TradeSessionTarget::new("9999", AccountId::new("simnow")))
         .enable_domain(ProtocolDomain::System)
         .enable_domain(ProtocolDomain::Market)
@@ -277,7 +277,7 @@ fn tq_auth_provider_resolves_query_to_websocket_without_explicit_query_url() {
         let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
             .with_name_service_url(format!("http://{ns_addr}/ns"));
         let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
-            .with_market_target(MarketSessionTarget::new(false, false))
+            .with_market_target(MarketSessionTarget::futures_live())
             .enable_domain(ProtocolDomain::Query);
         let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
 
@@ -338,7 +338,7 @@ fn tq_auth_provider_merges_query_into_market_websocket_without_explicit_query_ur
         let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
             .with_name_service_url(format!("http://{ns_addr}/ns"));
         let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
-            .with_market_target(MarketSessionTarget::new(false, false))
+            .with_market_target(MarketSessionTarget::futures_live())
             .enable_domain(ProtocolDomain::Market)
             .enable_domain(ProtocolDomain::Query);
         let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));

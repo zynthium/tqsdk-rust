@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provider = TqAuthProvider::new(PasswordCredentials::new(username, password));
     let config = SessionConfig::new(EndpointConfig::new("https://auth.shinnytech.com"))
-        .with_market_target(MarketSessionTarget::new(false, false))
+        .with_market_target(MarketSessionTarget::futures_live())
         .enable_domain(ProtocolDomain::Market);
 
     let auth = provider.authenticate().await?;

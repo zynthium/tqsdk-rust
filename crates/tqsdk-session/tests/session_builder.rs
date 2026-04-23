@@ -1,3 +1,4 @@
+use tqsdk_core::MarketSessionTarget;
 use tqsdk_session::{SessionClientBuilder, SessionFacadeConfig, SessionFacadeError};
 
 #[test]
@@ -23,23 +24,31 @@ fn builder_uses_official_schema_base_by_default() {
 fn builder_defaults_to_official_stock_live_market_target() {
     let builder = SessionClientBuilder::new("user", "pass");
 
-    assert!(builder.market_target_ref().stock);
-    assert!(!builder.market_target_ref().backtest);
+    assert_eq!(
+        builder.market_target_ref(),
+        &MarketSessionTarget::stock_live()
+    );
 }
 
 #[test]
 fn builder_named_market_target_shortcuts_are_explicit() {
     let futures_live = SessionClientBuilder::new("user", "pass").futures_market();
-    assert!(!futures_live.market_target_ref().stock);
-    assert!(!futures_live.market_target_ref().backtest);
+    assert_eq!(
+        futures_live.market_target_ref(),
+        &MarketSessionTarget::futures_live()
+    );
 
     let stock_backtest = SessionClientBuilder::new("user", "pass").stock_backtest_market();
-    assert!(stock_backtest.market_target_ref().stock);
-    assert!(stock_backtest.market_target_ref().backtest);
+    assert_eq!(
+        stock_backtest.market_target_ref(),
+        &MarketSessionTarget::stock_backtest()
+    );
 
     let futures_backtest = SessionClientBuilder::new("user", "pass").futures_backtest_market();
-    assert!(!futures_backtest.market_target_ref().stock);
-    assert!(futures_backtest.market_target_ref().backtest);
+    assert_eq!(
+        futures_backtest.market_target_ref(),
+        &MarketSessionTarget::futures_backtest()
+    );
 }
 
 #[test]

@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let connector = DefaultRouteConnector::default();
     let adapters = default_adapters();
     let config = SessionConfig::new(EndpointConfig::from_env())
-        .with_market_target(MarketSessionTarget::new(false, false))
+        .with_market_target(MarketSessionTarget::futures_live())
         .enable_domain(ProtocolDomain::Market);
 
     let run = runtime

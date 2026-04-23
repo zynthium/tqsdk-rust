@@ -1944,7 +1944,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn query_value_helper_rejects_non_stock_websocket_query_without_http_override() {
         let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
-            .market_target(false, false)
+            .futures_market()
             .enable_query()
             .build()
             .expect("builder should construct a thin session client");

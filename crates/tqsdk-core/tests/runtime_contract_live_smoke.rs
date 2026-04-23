@@ -27,7 +27,7 @@ fn live_auth_market_contract_smoke() {
         let handle = runtime_with_default_adapters();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
         let config = SessionConfig::new(EndpointConfig::new("https://auth.shinnytech.com"))
-            .with_market_target(MarketSessionTarget::new(false, false))
+            .with_market_target(MarketSessionTarget::futures_live())
             .enable_domain(ProtocolDomain::Market);
         let connector = DefaultRouteConnector::default();
         let adapters = adapter_registry();

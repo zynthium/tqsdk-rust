@@ -159,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connector = DefaultRouteConnector::default();
     let bootstrap_adapters = default_adapters();
     let config = SessionConfig::new(EndpointConfig::from_env())
-        .with_market_target(MarketSessionTarget::new(false, false))
+        .with_market_target(MarketSessionTarget::futures_live())
         .enable_domain(ProtocolDomain::Market)
         .enable_domain(ProtocolDomain::Schema);
 

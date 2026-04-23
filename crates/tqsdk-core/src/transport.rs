@@ -387,17 +387,30 @@ pub struct MarketSessionTarget {
 }
 
 impl MarketSessionTarget {
-    pub fn new(stock: bool, backtest: bool) -> Self {
+    pub const fn new(stock: bool, backtest: bool) -> Self {
         Self { stock, backtest }
+    }
+
+    pub const fn stock_live() -> Self {
+        Self::new(true, false)
+    }
+
+    pub const fn futures_live() -> Self {
+        Self::new(false, false)
+    }
+
+    pub const fn stock_backtest() -> Self {
+        Self::new(true, true)
+    }
+
+    pub const fn futures_backtest() -> Self {
+        Self::new(false, true)
     }
 }
 
 impl Default for MarketSessionTarget {
     fn default() -> Self {
-        Self {
-            stock: true,
-            backtest: false,
-        }
+        Self::stock_live()
     }
 }
 
@@ -987,10 +1000,30 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        InputPayload, IoEvent, ProtocolDomain, RawFrame, RuntimeInput, SessionRoute,
-        SessionRouteEndpoint, SessionTarget, map_raw_frame_to_input, parse_binary_payload,
-        parse_text_payload,
+        InputPayload, IoEvent, MarketSessionTarget, ProtocolDomain, RawFrame, RuntimeInput,
+        SessionRoute, SessionRouteEndpoint, SessionTarget, map_raw_frame_to_input,
+        parse_binary_payload, parse_text_payload,
     };
+
+    #[test]
+    fn market_session_target_named_constructors_are_explicit() {
+        assert_eq!(
+            MarketSessionTarget::stock_live(),
+            MarketSessionTarget::new(true, false)
+        );
+        assert_eq!(
+            MarketSessionTarget::futures_live(),
+            MarketSessionTarget::new(false, false)
+        );
+        assert_eq!(
+            MarketSessionTarget::stock_backtest(),
+            MarketSessionTarget::new(true, true)
+        );
+        assert_eq!(
+            MarketSessionTarget::futures_backtest(),
+            MarketSessionTarget::new(false, true)
+        );
+    }
 
     #[test]
     fn parse_text_payload_decodes_json_when_possible() {

@@ -113,7 +113,7 @@ mod tests {
         );
         assert_eq!(
             builder.inner.market_target_ref(),
-            &MarketSessionTarget::new(true, false)
+            &MarketSessionTarget::stock_live()
         );
         assert_eq!(builder.inner.trade_targets_ref().len(), 1);
         assert_eq!(builder.inner.trade_targets_ref()[0].broker_id, "9999");
@@ -137,7 +137,7 @@ mod tests {
 
         assert_eq!(
             builder.inner.market_target_ref(),
-            &MarketSessionTarget::new(true, true)
+            &MarketSessionTarget::stock_backtest()
         );
         assert_eq!(builder.inner.trade_targets_ref().len(), 2);
         assert_eq!(builder.inner.trade_targets_ref()[0].broker_id, "9999");
@@ -166,20 +166,20 @@ mod tests {
         let futures_live = TqStreamBuilder::new("demo-user", "demo-pass").futures_market();
         assert_eq!(
             futures_live.inner.market_target_ref(),
-            &MarketSessionTarget::new(false, false)
+            &MarketSessionTarget::futures_live()
         );
 
         let stock_backtest = TqStreamBuilder::new("demo-user", "demo-pass").stock_backtest_market();
         assert_eq!(
             stock_backtest.inner.market_target_ref(),
-            &MarketSessionTarget::new(true, true)
+            &MarketSessionTarget::stock_backtest()
         );
 
         let futures_backtest =
             TqStreamBuilder::new("demo-user", "demo-pass").futures_backtest_market();
         assert_eq!(
             futures_backtest.inner.market_target_ref(),
-            &MarketSessionTarget::new(false, true)
+            &MarketSessionTarget::futures_backtest()
         );
     }
 }

@@ -43,7 +43,7 @@ impl SessionClientBuilder {
             endpoints,
             query_enabled: false,
             facade_config: SessionFacadeConfig::default(),
-            market_target: MarketSessionTarget::new(true, false),
+            market_target: MarketSessionTarget::stock_live(),
             trade_targets: Vec::new(),
         }
     }
@@ -97,22 +97,34 @@ impl SessionClientBuilder {
 
     #[must_use]
     pub fn stock_market(self) -> Self {
-        self.market_target(true, false)
+        Self {
+            market_target: MarketSessionTarget::stock_live(),
+            ..self
+        }
     }
 
     #[must_use]
     pub fn futures_market(self) -> Self {
-        self.market_target(false, false)
+        Self {
+            market_target: MarketSessionTarget::futures_live(),
+            ..self
+        }
     }
 
     #[must_use]
     pub fn stock_backtest_market(self) -> Self {
-        self.market_target(true, true)
+        Self {
+            market_target: MarketSessionTarget::stock_backtest(),
+            ..self
+        }
     }
 
     #[must_use]
     pub fn futures_backtest_market(self) -> Self {
-        self.market_target(false, true)
+        Self {
+            market_target: MarketSessionTarget::futures_backtest(),
+            ..self
+        }
     }
 
     #[must_use]
