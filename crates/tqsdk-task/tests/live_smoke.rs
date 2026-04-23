@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 use serde_json::json;
-use tqsdk_core::{
-    AccountId, RuntimeCommand, TradeAccountType, TradeCommand, TradeDirection, TradeLoginCommand,
-    TradeOffset,
-};
+use tqsdk_core::{RuntimeCommand, TradeCommand, TradeDirection, TradeOffset};
 use tqsdk_task::TaskHost;
 use tqsdk_wait::TqApiBuilder;
 
+#[path = "../examples/support/live_trade_login.rs"]
+mod live_trade_login;
+
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and SIMNOW_USER_0/SIMNOW_PASS_0"]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and defaults to the official built-in TqKq account"]
 async fn live_task_host_trade_account_ready_smoke() {
     let Some(auth_user) = read_env("TQ_AUTH_USER") else {
         return;
@@ -17,15 +17,12 @@ async fn live_task_host_trade_account_ready_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let Some(account_id) = read_env("SIMNOW_USER_0") else {
-        return;
-    };
-    let Some(trade_password) = read_env("SIMNOW_PASS_0") else {
-        return;
-    };
+    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
+        .await
+        .expect("live trade login should resolve");
 
     let api = TqApiBuilder::new(auth_user, auth_pass)
-        .trade_target("simnow", account_id.clone())
+        .trade_target(trade_login.broker_id(), trade_login.account_id())
         .build()
         .await
         .expect("live wait api should build");
@@ -34,21 +31,12 @@ async fn live_task_host_trade_account_ready_smoke() {
     host.api()
         .session()
         .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            TradeLoginCommand {
-                account_id: AccountId::new(account_id.clone()),
-                broker_id: "simnow".to_string(),
-                password: trade_password,
-                account_type: TradeAccountType::Future,
-                front_broker: None,
-                front_url: None,
-                client_app_id: None,
-                client_system_info: None,
-            },
+            trade_login.login_command(),
         )))
         .await
         .expect("TradeLoginCommand should submit successfully");
 
-    let account = host.api().get_account(account_id.as_str());
+    let account = host.api().get_account(trade_login.account_id());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let now = tokio::time::Instant::now();
@@ -69,14 +57,14 @@ async fn live_task_host_trade_account_ready_smoke() {
             continue;
         };
 
-        assert_eq!(snapshot.user_id, account_id);
+        assert_eq!(snapshot.user_id, trade_login.account_id());
         assert_eq!(snapshot.currency, "CNY");
         return;
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "live order smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, SIMNOW_USER_0/SIMNOW_PASS_0, and explicit TQ_SMOKE_ALLOW_ORDER=1 with TQ_SMOKE_ORDER_SYMBOL/TQ_SMOKE_ORDER_LIMIT_PRICE"]
+#[ignore = "live order smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, defaults to the official built-in TqKq account, and needs explicit TQ_SMOKE_ALLOW_ORDER=1 with TQ_SMOKE_ORDER_SYMBOL/TQ_SMOKE_ORDER_LIMIT_PRICE"]
 async fn live_insert_cancel_guarded_smoke() {
     if std::env::var_os("TQ_SMOKE_ALLOW_ORDER").is_none() {
         return;
@@ -88,12 +76,9 @@ async fn live_insert_cancel_guarded_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let Some(account_id) = read_env("SIMNOW_USER_0") else {
-        return;
-    };
-    let Some(trade_password) = read_env("SIMNOW_PASS_0") else {
-        return;
-    };
+    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
+        .await
+        .expect("live trade login should resolve");
     let symbol = require_env("TQ_SMOKE_ORDER_SYMBOL")
         .expect("TQ_SMOKE_ORDER_SYMBOL is required when TQ_SMOKE_ALLOW_ORDER=1");
     let limit_price = require_f64_env("TQ_SMOKE_ORDER_LIMIT_PRICE")
@@ -101,22 +86,22 @@ async fn live_insert_cancel_guarded_smoke() {
     let volume = require_i64_env("TQ_SMOKE_ORDER_VOLUME").unwrap_or(1);
 
     let api = TqApiBuilder::new(auth_user, auth_pass)
-        .trade_target("simnow", account_id.clone())
+        .trade_target(trade_login.broker_id(), trade_login.account_id())
         .build()
         .await
         .expect("live wait api should build");
     let mut host = TaskHost::new(api);
 
-    login_trade_account(&host, account_id.as_str(), trade_password.as_str())
+    login_trade_account(&host, &trade_login)
         .await
         .expect("trade login should submit");
-    wait_for_trade_account_ready(&mut host, account_id.as_str(), Duration::from_secs(30))
+    wait_for_trade_account_ready(&mut host, trade_login.account_id(), Duration::from_secs(30))
         .await
         .expect("trade account should become ready");
 
     let order = host
         .insert_order_guarded(
-            account_id.as_str(),
+            trade_login.account_id(),
             symbol.as_str(),
             TradeDirection::Buy,
             Some(TradeOffset::Open),
@@ -131,7 +116,7 @@ async fn live_insert_cancel_guarded_smoke() {
         return;
     }
 
-    host.cancel_order_guarded(account_id.as_str(), order.order_id())
+    host.cancel_order_guarded(trade_login.account_id(), order.order_id())
         .await
         .expect("guarded cancel_order should succeed");
     let order_status = wait_for_order_snapshot(&mut host, &order, Duration::from_secs(30)).await;
@@ -140,22 +125,12 @@ async fn live_insert_cancel_guarded_smoke() {
 
 async fn login_trade_account(
     host: &TaskHost,
-    account_id: &str,
-    trade_password: &str,
+    trade_login: &live_trade_login::LiveTradeLogin,
 ) -> Result<(), String> {
     host.api()
         .session()
         .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            TradeLoginCommand {
-                account_id: AccountId::new(account_id.to_string()),
-                broker_id: "simnow".to_string(),
-                password: trade_password.to_string(),
-                account_type: TradeAccountType::Future,
-                front_broker: None,
-                front_url: None,
-                client_app_id: None,
-                client_system_info: None,
-            },
+            trade_login.login_command(),
         )))
         .await
         .map(|_| ())

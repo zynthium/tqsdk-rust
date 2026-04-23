@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 const IDLE_POLL_BACKOFF: Duration = Duration::from_millis(1);
+const ROUTE_DRIVE_BUDGET: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DriverEvent {
@@ -151,7 +152,10 @@ async fn run_driver(
             continue;
         }
 
-        let drove_route = match session.drive_route_once(None).await {
+        let drove_route = match session
+            .drive_route_once(Some(tokio::time::Instant::now() + ROUTE_DRIVE_BUDGET))
+            .await
+        {
             Ok(drove_route) => drove_route,
             Err(error) => {
                 let _ = sender.send(DriverEvent::Error(error));

@@ -17,6 +17,7 @@ pub mod runtime;
 pub mod session_runtime;
 pub mod state;
 pub mod tq_auth;
+pub mod tqkq;
 pub mod transport;
 pub mod types;
 
@@ -56,6 +57,7 @@ pub use state::{
     StateReadView, StateSnapshot, UpdateCursor,
 };
 pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
+pub use tqkq::TqKqAccountConfig;
 pub use transport::{
     BootstrapResult, ConnectedSessionRoute, ConnectedTopology, DefaultRouteConnector,
     DispatchReceipt, EndpointConfig, HeartbeatPolicy, MarketSessionTarget, RawFrame,

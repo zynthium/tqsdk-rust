@@ -2,8 +2,11 @@ use std::error::Error;
 use std::time::Duration;
 
 use futures::StreamExt;
-use tqsdk_core::{AccountId, RuntimeCommand, TradeAccountType, TradeCommand, TradeLoginCommand};
+use tqsdk_core::{RuntimeCommand, TradeCommand};
 use tqsdk_stream::{TqStreamBuilder, TradeSessionEvent};
+
+#[path = "support/live_trade_login.rs"]
+mod live_trade_login;
 
 fn read_env(key: &str) -> Result<String, Box<dyn Error>> {
     std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
@@ -20,33 +23,23 @@ fn read_u64_env(key: &str, default: u64) -> Result<u64, Box<dyn Error>> {
 async fn main() -> Result<(), Box<dyn Error>> {
     let user = read_env("TQ_AUTH_USER")?;
     let pass = read_env("TQ_AUTH_PASS")?;
-    let account_id = read_env("SIMNOW_USER_0")?;
-    let trade_password = read_env("SIMNOW_PASS_0")?;
+    let trade_login = live_trade_login::resolve_live_trade_login(&user, &pass).await?;
     let timeout_secs = read_u64_env("TQ_STREAM_TIMEOUT_SECS", 30)?;
     let stream_once = std::env::var_os("TQ_STREAM_ONCE").is_some();
 
     let stream = TqStreamBuilder::new(user, pass)
-        .trade_target("simnow", account_id.clone())
+        .trade_target(trade_login.broker_id(), trade_login.account_id())
         .build()
         .await?;
 
     stream
         .session()
         .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            TradeLoginCommand {
-                account_id: AccountId::new(account_id.clone()),
-                broker_id: "simnow".to_string(),
-                password: trade_password,
-                account_type: TradeAccountType::Future,
-                front_broker: None,
-                front_url: None,
-                client_app_id: None,
-                client_system_info: None,
-            },
+            trade_login.login_command(),
         )))
         .await?;
 
-    let mut events = stream.trade_session_event_stream(&account_id)?;
+    let mut events = stream.trade_session_event_stream(trade_login.account_id())?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {

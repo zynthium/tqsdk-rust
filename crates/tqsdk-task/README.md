@@ -79,10 +79,18 @@
 
 - `TQ_AUTH_USER`
 - `TQ_AUTH_PASS`
-- `SIMNOW_USER_0`
-- `SIMNOW_PASS_0`
 
-它默认只做 trade login 和账户 ready 检查，不会下单。
+它默认会使用官方内置的 `TqKq` 主模拟账户做 trade login 和账户 ready 检查，不会下单。
+
+如需切换辅模拟账户，可选设置：
+
+- `TQ_TRADE_ACCOUNT_NO=<1..99>`
+
+如需显式覆盖为其他交易账户，也可以同时设置：
+
+- `TQ_TRADE_BROKER_ID`
+- `TQ_TRADE_ACCOUNT_ID`
+- `TQ_TRADE_PASSWORD`
 
 只有显式设置下面两个环境变量时，才会真正创建 `TargetPosTask` 并进入调仓循环：
 

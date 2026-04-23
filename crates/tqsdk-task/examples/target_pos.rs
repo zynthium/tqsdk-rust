@@ -1,23 +1,25 @@
 use std::error::Error;
 use std::time::Duration;
 
-use tqsdk_core::{AccountId, RuntimeCommand, TradeAccountType, TradeCommand, TradeLoginCommand};
+use tqsdk_core::{RuntimeCommand, TradeCommand};
 use tqsdk_task::TaskHost;
 use tqsdk_wait::TqApiBuilder;
+
+#[path = "support/live_trade_login.rs"]
+mod live_trade_login;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let auth_user = read_env("TQ_AUTH_USER")?;
     let auth_pass = read_env("TQ_AUTH_PASS")?;
-    let account_id = read_env("SIMNOW_USER_0")?;
-    let trade_password = read_env("SIMNOW_PASS_0")?;
+    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass).await?;
     let symbol = read_optional_env("TQ_TASK_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
     let timeout_secs = read_u64_env("TQ_TASK_TIMEOUT_SECS", 30)?;
     let allow_orders = std::env::var_os("TQ_TASK_ALLOW_ORDERS").is_some();
 
     let api = TqApiBuilder::new(auth_user, auth_pass)
         .futures_market()
-        .trade_target("simnow", account_id.clone())
+        .trade_target(trade_login.broker_id(), trade_login.account_id())
         .build()
         .await?;
     let mut host = TaskHost::new(api);
@@ -25,32 +27,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     host.api()
         .session()
         .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            TradeLoginCommand {
-                account_id: AccountId::new(account_id.clone()),
-                broker_id: "simnow".to_string(),
-                password: trade_password,
-                account_type: TradeAccountType::Future,
-                front_broker: None,
-                front_url: None,
-                client_app_id: None,
-                client_system_info: None,
-            },
+            trade_login.login_command(),
         )))
         .await?;
 
-    wait_for_trade_account_ready(&mut host, account_id.as_str(), timeout_secs).await?;
+    wait_for_trade_account_ready(&mut host, trade_login.account_id(), timeout_secs).await?;
 
     if !allow_orders {
         println!(
             "trade account is ready for {}. dry-run only; set TQ_TASK_ALLOW_ORDERS=1 and TQ_TARGET_VOLUME to start TargetPosTask",
-            account_id
+            trade_login.account_id()
         );
         return Ok(());
     }
 
     let target_volume = read_i64_env("TQ_TARGET_VOLUME")?;
     let task = host
-        .target_pos(account_id.as_str(), symbol.as_str())
+        .target_pos(trade_login.account_id(), symbol.as_str())
         .build()?;
     task.set_target_volume(target_volume)?;
 

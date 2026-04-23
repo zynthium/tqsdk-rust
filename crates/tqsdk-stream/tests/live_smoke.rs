@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use tqsdk_core::{
-    AccountId, MarketCommand, RuntimeCommand, Symbol, TradeAccountType, TradeCommand,
-    TradeLoginCommand,
-};
+use tqsdk_core::{MarketCommand, RuntimeCommand, Symbol, TradeCommand};
 use tqsdk_stream::{TqStreamBuilder, TradeSessionEvent};
+
+#[path = "../examples/support/live_trade_login.rs"]
+mod live_trade_login;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and market access"]
@@ -44,7 +44,7 @@ async fn live_quote_stream_smoke() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and SIMNOW_USER_0/SIMNOW_PASS_0"]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and defaults to the official built-in TqKq account"]
 async fn live_trade_session_event_smoke() {
     let Some(auth_user) = read_env("TQ_AUTH_USER") else {
         return;
@@ -52,35 +52,23 @@ async fn live_trade_session_event_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let Some(account_id) = read_env("SIMNOW_USER_0") else {
-        return;
-    };
-    let Some(trade_password) = read_env("SIMNOW_PASS_0") else {
-        return;
-    };
+    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
+        .await
+        .expect("live trade login should resolve");
 
     let stream = TqStreamBuilder::new(auth_user, auth_pass)
-        .trade_target("simnow", account_id.clone())
+        .trade_target(trade_login.broker_id(), trade_login.account_id())
         .build()
         .await
         .expect("live stream facade should build");
     let mut events = stream
-        .trade_session_event_stream(account_id.as_str())
+        .trade_session_event_stream(trade_login.account_id())
         .expect("trade_session_event_stream should construct");
 
     stream
         .session()
         .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            TradeLoginCommand {
-                account_id: AccountId::new(account_id.clone()),
-                broker_id: "simnow".to_string(),
-                password: trade_password,
-                account_type: TradeAccountType::Future,
-                front_broker: None,
-                front_url: None,
-                client_app_id: None,
-                client_system_info: None,
-            },
+            trade_login.login_command(),
         )))
         .await
         .expect("TradeLoginCommand should submit successfully");
@@ -103,7 +91,7 @@ async fn live_trade_session_event_smoke() {
             }
             TradeSessionEvent::Notification(notification) => {
                 assert!(update.commit.is_some());
-                assert_eq!(notification.user_id, account_id);
+                assert_eq!(notification.user_id, trade_login.account_id());
                 return;
             }
             TradeSessionEvent::Reconnect(_) => continue,
