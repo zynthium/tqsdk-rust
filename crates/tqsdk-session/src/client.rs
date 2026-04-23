@@ -15,7 +15,7 @@ use tqsdk_core::{
     SchemaId, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
     SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget,
     SessionTopologyResolver, SymbolRanking, SymbolSettlement, SystemCommand, TqAuthProvider,
-    TradeSessionTarget, TradingCalendarDay,
+    TqKqAccountConfig, TradeLoginCommand, TradeSessionTarget, TradingCalendarDay,
 };
 
 use crate::config::SessionFacadeConfig;
@@ -619,6 +619,29 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
+    pub async fn tqkq_login_command(&self) -> crate::error::Result<TradeLoginCommand> {
+        self.tqkq_login_command_with_number(None).await
+    }
+
+    pub async fn tqkq_login_command_numbered(
+        &self,
+        number: u8,
+    ) -> crate::error::Result<TradeLoginCommand> {
+        self.tqkq_login_command_with_number(Some(number)).await
+    }
+
+    pub async fn tqkq_stock_login_command(&self) -> crate::error::Result<TradeLoginCommand> {
+        self.tqkq_stock_login_command_with_number(None).await
+    }
+
+    pub async fn tqkq_stock_login_command_numbered(
+        &self,
+        number: u8,
+    ) -> crate::error::Result<TradeLoginCommand> {
+        self.tqkq_stock_login_command_with_number(Some(number))
+            .await
+    }
+
     pub async fn has_feature(&self, feature: &str) -> crate::error::Result<bool> {
         let auth = self.service_auth_context(false).await?;
         Ok(has_auth_feature(auth.features(), feature))
@@ -690,6 +713,47 @@ impl SessionClient {
                 "replay value helper requires an enabled replay route",
             ))
         }
+    }
+
+    async fn tqkq_login_command_with_number(
+        &self,
+        number: Option<u8>,
+    ) -> crate::error::Result<TradeLoginCommand> {
+        let auth_id = self.established_auth_id().await?;
+        let config = if let Some(number) = number {
+            TqKqAccountConfig::future_numbered(auth_id.as_str(), number)?
+        } else {
+            TqKqAccountConfig::future(auth_id.as_str())
+        };
+        Ok(config.login_command())
+    }
+
+    async fn tqkq_stock_login_command_with_number(
+        &self,
+        number: Option<u8>,
+    ) -> crate::error::Result<TradeLoginCommand> {
+        let auth_id = self.established_auth_id().await?;
+        let config = if let Some(number) = number {
+            TqKqAccountConfig::stock_numbered(auth_id.as_str(), number)?
+        } else {
+            TqKqAccountConfig::stock(auth_id.as_str())
+        };
+        Ok(config.login_command())
+    }
+
+    async fn established_auth_id(&self) -> crate::error::Result<String> {
+        self.ensure_established().await?;
+        let auth = self
+            .auth_context()?
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "session established without a system auth context payload",
+            ))?;
+        auth.get("auth_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "system auth context is missing auth_id",
+            ))
     }
 
     async fn drive_until_command_completed(
@@ -1270,12 +1334,13 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{Duration, Instant};
     use tqsdk_core::{
-        AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
-        InputPayload, IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
-        ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId, RouteRequestExecutor,
-        Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig,
-        SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
-        SessionTopology, SessionTopologyResolver, Transport,
+        AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractFuture,
+        EndpointConfig, InputPayload, IoEvent, MarketCommand, OutboundDispatch, OutboundFrame,
+        OutboundRequest, ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId,
+        RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
+        SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+        SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, TradeAccountType,
+        Transport,
     };
 
     use super::{
@@ -1287,13 +1352,22 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct TestAuthProvider {
+        auth_id: Option<String>,
         features: Vec<String>,
     }
 
     impl TestAuthProvider {
         fn with_features(features: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
+                auth_id: None,
                 features: features.into_iter().map(str::to_string).collect(),
+            }
+        }
+
+        fn with_auth_id(auth_id: impl Into<String>) -> Self {
+            Self {
+                auth_id: Some(auth_id.into()),
+                features: Vec::new(),
             }
         }
     }
@@ -1301,6 +1375,9 @@ mod tests {
     impl AuthProvider for TestAuthProvider {
         fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
             let mut auth = AuthContext::new("test-token");
+            if let Some(auth_id) = &self.auth_id {
+                auth = auth.with_auth_id(AuthId::new(auth_id.clone()));
+            }
             for feature in &self.features {
                 auth = auth.with_feature(feature.clone());
             }
@@ -2040,6 +2117,36 @@ mod tests {
 
         assert!(client.has_feature("futr").await.unwrap());
         assert!(!client.has_feature("sec").await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tqkq_login_helpers_derive_login_from_established_auth_context() {
+        let client = test_live_client_with_auth(
+            runtime_with_default_adapters(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(TestAuthProvider::with_auth_id("auth-1")),
+        );
+
+        let futures = client.tqkq_login_command_numbered(7).await.unwrap();
+        assert_eq!(futures.broker_id, "快期模拟");
+        assert_eq!(futures.account_id.as_str(), "auth-1007");
+        assert_eq!(futures.password, "shinnytech007");
+        assert_eq!(futures.account_type, TradeAccountType::Future);
+
+        let stock = client.tqkq_stock_login_command().await.unwrap();
+        assert_eq!(stock.broker_id, "快期股票模拟");
+        assert_eq!(stock.account_id.as_str(), "auth-1-sim-securities");
+        assert_eq!(stock.password, "auth-1");
+        assert_eq!(stock.account_type, TradeAccountType::Spot);
     }
 
     #[tokio::test(flavor = "current_thread")]

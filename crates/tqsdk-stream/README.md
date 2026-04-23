@@ -145,9 +145,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `stock_backtest_market()`
 - `futures_backtest_market()`
 - `trade_target(...)`
+- `trade_target_tqkq()`
+- `trade_target_tqkq_numbered(<1..99>)`
+- `trade_target_tqkq_stock()`
+- `trade_target_tqkq_stock_numbered(<1..99>)`
 - `trade_target_with_url(...)`
 - `replay_url(...)`
 
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqStreamBuilder::from_session_builder(...)` 包装成 stream facade。
+
+如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
+
+- `stream.session().tqkq_login_command().await`
+- `stream.session().tqkq_login_command_numbered(<1..99>).await`
+- `stream.session().tqkq_stock_login_command().await`
+- `stream.session().tqkq_stock_login_command_numbered(<1..99>).await`

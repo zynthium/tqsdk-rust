@@ -141,6 +141,32 @@ impl SessionClientBuilder {
     }
 
     #[must_use]
+    pub fn trade_target_tqkq(mut self) -> Self {
+        self.trade_targets.push(TradeSessionTarget::tqkq());
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_numbered(mut self, number: u8) -> Self {
+        self.trade_targets
+            .push(TradeSessionTarget::tqkq_numbered(number));
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_stock(mut self) -> Self {
+        self.trade_targets.push(TradeSessionTarget::tqkq_stock());
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_stock_numbered(mut self, number: u8) -> Self {
+        self.trade_targets
+            .push(TradeSessionTarget::tqkq_stock_numbered(number));
+        self
+    }
+
+    #[must_use]
     pub fn trade_target_with_url(
         mut self,
         broker_id: impl Into<String>,

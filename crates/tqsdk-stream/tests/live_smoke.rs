@@ -1,11 +1,13 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use tqsdk_core::{MarketCommand, RuntimeCommand, Symbol, TradeCommand};
+use tqsdk_core::{
+    AccountId, MarketCommand, RuntimeCommand, Symbol, TradeAccountType, TradeCommand,
+    TradeLoginCommand,
+};
 use tqsdk_stream::{TqStreamBuilder, TradeSessionEvent};
 
-#[path = "../examples/support/live_trade_login.rs"]
-mod live_trade_login;
+type ExplicitTradeOverride = (String, String, String);
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and market access"]
@@ -52,24 +54,53 @@ async fn live_trade_session_event_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
-        .await
-        .expect("live trade login should resolve");
+    let explicit_trade = explicit_trade_override().expect("explicit trade override should parse");
+    let account_number = read_u8_env("TQ_TRADE_ACCOUNT_NO").expect("account number should parse");
 
-    let stream = TqStreamBuilder::new(auth_user, auth_pass)
-        .trade_target(trade_login.broker_id(), trade_login.account_id())
-        .build()
-        .await
-        .expect("live stream facade should build");
+    let builder = TqStreamBuilder::new(auth_user, auth_pass);
+    let stream = if let Some((broker_id, account_id, _password)) = explicit_trade.as_ref() {
+        builder.trade_target(broker_id.clone(), account_id.clone())
+    } else if let Some(number) = account_number {
+        builder.trade_target_tqkq_numbered(number)
+    } else {
+        builder.trade_target_tqkq()
+    }
+    .build()
+    .await
+    .expect("live stream facade should build");
+
+    let trade_login = if let Some((broker_id, account_id, password)) = explicit_trade {
+        TradeLoginCommand {
+            account_id: AccountId::new(account_id),
+            broker_id,
+            password,
+            account_type: TradeAccountType::Future,
+            front_broker: None,
+            front_url: None,
+            client_app_id: None,
+            client_system_info: None,
+        }
+    } else if let Some(number) = account_number {
+        stream
+            .session()
+            .tqkq_login_command_numbered(number)
+            .await
+            .expect("numbered tqkq login should resolve")
+    } else {
+        stream
+            .session()
+            .tqkq_login_command()
+            .await
+            .expect("tqkq login should resolve")
+    };
+    let account_id = trade_login.account_id.as_str().to_string();
     let mut events = stream
-        .trade_session_event_stream(trade_login.account_id())
+        .trade_session_event_stream(account_id.as_str())
         .expect("trade_session_event_stream should construct");
 
     stream
         .session()
-        .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            trade_login.login_command(),
-        )))
+        .submit(RuntimeCommand::Trade(TradeCommand::Login(trade_login)))
         .await
         .expect("TradeLoginCommand should submit successfully");
 
@@ -91,7 +122,7 @@ async fn live_trade_session_event_smoke() {
             }
             TradeSessionEvent::Notification(notification) => {
                 assert!(update.commit.is_some());
-                assert_eq!(notification.user_id, trade_login.account_id());
+                assert_eq!(notification.user_id, account_id);
                 return;
             }
             TradeSessionEvent::Reconnect(_) => continue,
@@ -121,4 +152,30 @@ fn read_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn read_u8_env(name: &str) -> Result<Option<u8>, String> {
+    let Some(raw) = read_env(name) else {
+        return Ok(None);
+    };
+    raw.parse::<u8>()
+        .map(Some)
+        .map_err(|error| format!("invalid {name}: {error}"))
+}
+
+fn explicit_trade_override() -> Result<Option<ExplicitTradeOverride>, String> {
+    match (
+        read_env("TQ_TRADE_BROKER_ID"),
+        read_env("TQ_TRADE_ACCOUNT_ID"),
+        read_env("TQ_TRADE_PASSWORD"),
+    ) {
+        (Some(broker_id), Some(account_id), Some(password)) => {
+            Ok(Some((broker_id, account_id, password)))
+        }
+        (None, None, None) => Ok(None),
+        _ => Err(
+            "TQ_TRADE_BROKER_ID/TQ_TRADE_ACCOUNT_ID/TQ_TRADE_PASSWORD must be set together"
+                .to_string(),
+        ),
+    }
 }

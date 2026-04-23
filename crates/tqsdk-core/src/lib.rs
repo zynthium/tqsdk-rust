@@ -59,9 +59,9 @@ pub use state::{
 pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
 pub use tqkq::TqKqAccountConfig;
 pub use transport::{
-    BootstrapResult, ConnectedSessionRoute, ConnectedTopology, DefaultRouteConnector,
-    DispatchReceipt, EndpointConfig, HeartbeatPolicy, MarketSessionTarget, RawFrame,
-    ReconnectPolicy, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
+    AuthDerivedTradeTarget, BootstrapResult, ConnectedSessionRoute, ConnectedTopology,
+    DefaultRouteConnector, DispatchReceipt, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
+    RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
     SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
     SessionTopologyResolver, TradeSessionTarget, Transport, WebSocketConnectOptions,
     WebSocketRouteConnector, WebSocketTransport,

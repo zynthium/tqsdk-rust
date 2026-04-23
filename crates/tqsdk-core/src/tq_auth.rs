@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::auth::{AuthContext, AuthProvider, ContractFuture};
 use crate::ids::ProtocolDomain;
+use crate::tqkq::TqKqAccountConfig;
 use crate::transport::{
     SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
     SessionTopologyResolver, WebSocketConnectOptions,
@@ -423,6 +424,38 @@ impl SessionTopologyResolver for TqAuthProvider {
                 }
 
                 for target in &config.trade_targets {
+                    let resolved_account_id = if let Some(auth_derived) = target.auth_derived {
+                        let auth_id = auth
+                            .auth_id()
+                            .ok_or_else(|| {
+                                ContractError::auth(
+                                    "auth response missing auth_id for auth-derived trade target",
+                                )
+                            })?
+                            .as_str();
+                        match auth_derived {
+                            crate::AuthDerivedTradeTarget::TqKqFuture { number } => {
+                                if let Some(number) = number {
+                                    TqKqAccountConfig::future_numbered(auth_id, number)?
+                                        .account_id()
+                                        .clone()
+                                } else {
+                                    TqKqAccountConfig::future(auth_id).account_id().clone()
+                                }
+                            }
+                            crate::AuthDerivedTradeTarget::TqKqStock { number } => {
+                                if let Some(number) = number {
+                                    TqKqAccountConfig::stock_numbered(auth_id, number)?
+                                        .account_id()
+                                        .clone()
+                                } else {
+                                    TqKqAccountConfig::stock(auth_id).account_id().clone()
+                                }
+                            }
+                        }
+                    } else {
+                        target.account_id.clone()
+                    };
                     let trade_url = if let Some(url) = &target.trade_url {
                         url.clone()
                     } else if let Some(url) = &config.endpoints.trade_url {
@@ -431,15 +464,15 @@ impl SessionTopologyResolver for TqAuthProvider {
                         self.request_trade_broker(
                             auth,
                             &target.broker_id,
-                            target.account_id.as_str(),
+                            resolved_account_id.as_str(),
                         )
                         .await?
                         .url
                     };
 
                     topology = topology.with_route(SessionRoute {
-                        label: format!("trade:{}", target.account_id.as_str()),
-                        target: SessionTarget::Account(target.account_id.clone()),
+                        label: format!("trade:{}", resolved_account_id.as_str()),
+                        target: SessionTarget::Account(resolved_account_id),
                         domains: vec![ProtocolDomain::Trade],
                         endpoint: SessionRouteEndpoint::WebSocket {
                             url: trade_url,

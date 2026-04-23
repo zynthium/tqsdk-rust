@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use serde_json::json;
-use tqsdk_core::{RuntimeCommand, TradeCommand, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    AccountId, RuntimeCommand, TradeAccountType, TradeCommand, TradeDirection, TradeLoginCommand,
+    TradeOffset,
+};
 use tqsdk_task::TaskHost;
 use tqsdk_wait::TqApiBuilder;
 
-#[path = "../examples/support/live_trade_login.rs"]
-mod live_trade_login;
+type ExplicitTradeOverride = (String, String, String);
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and defaults to the official built-in TqKq account"]
@@ -17,26 +19,55 @@ async fn live_task_host_trade_account_ready_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
-        .await
-        .expect("live trade login should resolve");
+    let explicit_trade = explicit_trade_override().expect("explicit trade override should parse");
+    let account_number = read_u8_env("TQ_TRADE_ACCOUNT_NO").expect("account number should parse");
 
-    let api = TqApiBuilder::new(auth_user, auth_pass)
-        .trade_target(trade_login.broker_id(), trade_login.account_id())
-        .build()
-        .await
-        .expect("live wait api should build");
+    let builder = TqApiBuilder::new(auth_user, auth_pass);
+    let api = if let Some((broker_id, account_id, _password)) = explicit_trade.as_ref() {
+        builder.trade_target(broker_id.clone(), account_id.clone())
+    } else if let Some(number) = account_number {
+        builder.trade_target_tqkq_numbered(number)
+    } else {
+        builder.trade_target_tqkq()
+    }
+    .build()
+    .await
+    .expect("live wait api should build");
     let mut host = TaskHost::new(api);
+
+    let trade_login = if let Some((broker_id, account_id, password)) = explicit_trade {
+        TradeLoginCommand {
+            account_id: AccountId::new(account_id),
+            broker_id,
+            password,
+            account_type: TradeAccountType::Future,
+            front_broker: None,
+            front_url: None,
+            client_app_id: None,
+            client_system_info: None,
+        }
+    } else if let Some(number) = account_number {
+        host.api()
+            .session()
+            .tqkq_login_command_numbered(number)
+            .await
+            .expect("numbered tqkq login should resolve")
+    } else {
+        host.api()
+            .session()
+            .tqkq_login_command()
+            .await
+            .expect("tqkq login should resolve")
+    };
+    let account_id = trade_login.account_id.as_str().to_string();
 
     host.api()
         .session()
-        .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            trade_login.login_command(),
-        )))
+        .submit(RuntimeCommand::Trade(TradeCommand::Login(trade_login)))
         .await
         .expect("TradeLoginCommand should submit successfully");
 
-    let account = host.api().get_account(trade_login.account_id());
+    let account = host.api().get_account(account_id.as_str());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let now = tokio::time::Instant::now();
@@ -57,7 +88,7 @@ async fn live_task_host_trade_account_ready_smoke() {
             continue;
         };
 
-        assert_eq!(snapshot.user_id, trade_login.account_id());
+        assert_eq!(snapshot.user_id, account_id);
         assert_eq!(snapshot.currency, "CNY");
         return;
     }
@@ -76,32 +107,63 @@ async fn live_insert_cancel_guarded_smoke() {
     let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
         return;
     };
-    let trade_login = live_trade_login::resolve_live_trade_login(&auth_user, &auth_pass)
-        .await
-        .expect("live trade login should resolve");
+    let explicit_trade = explicit_trade_override().expect("explicit trade override should parse");
+    let account_number = read_u8_env("TQ_TRADE_ACCOUNT_NO").expect("account number should parse");
     let symbol = require_env("TQ_SMOKE_ORDER_SYMBOL")
         .expect("TQ_SMOKE_ORDER_SYMBOL is required when TQ_SMOKE_ALLOW_ORDER=1");
     let limit_price = require_f64_env("TQ_SMOKE_ORDER_LIMIT_PRICE")
         .expect("TQ_SMOKE_ORDER_LIMIT_PRICE is required when TQ_SMOKE_ALLOW_ORDER=1");
     let volume = require_i64_env("TQ_SMOKE_ORDER_VOLUME").unwrap_or(1);
 
-    let api = TqApiBuilder::new(auth_user, auth_pass)
-        .trade_target(trade_login.broker_id(), trade_login.account_id())
-        .build()
-        .await
-        .expect("live wait api should build");
+    let builder = TqApiBuilder::new(auth_user, auth_pass);
+    let api = if let Some((broker_id, account_id, _password)) = explicit_trade.as_ref() {
+        builder.trade_target(broker_id.clone(), account_id.clone())
+    } else if let Some(number) = account_number {
+        builder.trade_target_tqkq_numbered(number)
+    } else {
+        builder.trade_target_tqkq()
+    }
+    .build()
+    .await
+    .expect("live wait api should build");
     let mut host = TaskHost::new(api);
 
-    login_trade_account(&host, &trade_login)
+    let trade_login = if let Some((broker_id, account_id, password)) = explicit_trade {
+        TradeLoginCommand {
+            account_id: AccountId::new(account_id),
+            broker_id,
+            password,
+            account_type: TradeAccountType::Future,
+            front_broker: None,
+            front_url: None,
+            client_app_id: None,
+            client_system_info: None,
+        }
+    } else if let Some(number) = account_number {
+        host.api()
+            .session()
+            .tqkq_login_command_numbered(number)
+            .await
+            .expect("numbered tqkq login should resolve")
+    } else {
+        host.api()
+            .session()
+            .tqkq_login_command()
+            .await
+            .expect("tqkq login should resolve")
+    };
+    let account_id = trade_login.account_id.as_str().to_string();
+
+    login_trade_account(&host, trade_login)
         .await
         .expect("trade login should submit");
-    wait_for_trade_account_ready(&mut host, trade_login.account_id(), Duration::from_secs(30))
+    wait_for_trade_account_ready(&mut host, account_id.as_str(), Duration::from_secs(30))
         .await
         .expect("trade account should become ready");
 
     let order = host
         .insert_order_guarded(
-            trade_login.account_id(),
+            account_id.as_str(),
             symbol.as_str(),
             TradeDirection::Buy,
             Some(TradeOffset::Open),
@@ -116,7 +178,7 @@ async fn live_insert_cancel_guarded_smoke() {
         return;
     }
 
-    host.cancel_order_guarded(trade_login.account_id(), order.order_id())
+    host.cancel_order_guarded(account_id.as_str(), order.order_id())
         .await
         .expect("guarded cancel_order should succeed");
     let order_status = wait_for_order_snapshot(&mut host, &order, Duration::from_secs(30)).await;
@@ -125,13 +187,11 @@ async fn live_insert_cancel_guarded_smoke() {
 
 async fn login_trade_account(
     host: &TaskHost,
-    trade_login: &live_trade_login::LiveTradeLogin,
+    trade_login: TradeLoginCommand,
 ) -> Result<(), String> {
     host.api()
         .session()
-        .submit(RuntimeCommand::Trade(TradeCommand::Login(
-            trade_login.login_command(),
-        )))
+        .submit(RuntimeCommand::Trade(TradeCommand::Login(trade_login)))
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -194,6 +254,32 @@ fn read_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn read_u8_env(name: &str) -> Result<Option<u8>, String> {
+    let Some(raw) = read_env(name) else {
+        return Ok(None);
+    };
+    raw.parse::<u8>()
+        .map(Some)
+        .map_err(|error| format!("invalid {name}: {error}"))
+}
+
+fn explicit_trade_override() -> Result<Option<ExplicitTradeOverride>, String> {
+    match (
+        read_env("TQ_TRADE_BROKER_ID"),
+        read_env("TQ_TRADE_ACCOUNT_ID"),
+        read_env("TQ_TRADE_PASSWORD"),
+    ) {
+        (Some(broker_id), Some(account_id), Some(password)) => {
+            Ok(Some((broker_id, account_id, password)))
+        }
+        (None, None, None) => Ok(None),
+        _ => Err(
+            "TQ_TRADE_BROKER_ID/TQ_TRADE_ACCOUNT_ID/TQ_TRADE_PASSWORD must be set together"
+                .to_string(),
+        ),
+    }
 }
 
 fn require_env(name: &str) -> Result<String, String> {

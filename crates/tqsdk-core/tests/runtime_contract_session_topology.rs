@@ -254,6 +254,66 @@ fn tq_auth_provider_resolves_shared_market_and_account_trade_routes() {
 }
 
 #[test]
+fn tq_auth_provider_resolves_auth_derived_tqkq_trade_targets() {
+    run_on_tokio(async {
+        let td_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let td_addr = td_listener.local_addr().unwrap();
+        let broker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let broker_addr = broker_listener.local_addr().unwrap();
+
+        let broker_server = std::thread::spawn(move || {
+            let (mut stream, _) = broker_listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let normalized = request.to_ascii_lowercase();
+
+            assert!(request.starts_with("GET /%E5%BF%AB%E6%9C%9F%E6%A8%A1%E6%8B%9F.json?account_id=auth-1007&auth=demo HTTP/1.1"));
+            assert!(
+                normalized.contains("authorization: bearer test-access-token"),
+                "{request}"
+            );
+            write_http_ok(
+                &mut stream,
+                &format!(
+                    r#"{{"快期模拟":{{"category":["TQ","FUTURE"],"url":"ws://{td_addr}/trade","broker_type":"FUTURE"}}}}"#
+                ),
+            );
+        });
+
+        let provider = TqAuthProvider::new(PasswordCredentials::new("demo", "secret"))
+            .with_broker_base_url(format!("http://{broker_addr}"));
+        let config = SessionConfig::new(EndpointConfig::new("https://auth.example"))
+            .add_trade_target(TradeSessionTarget::tqkq_numbered(7))
+            .enable_domain(ProtocolDomain::Trade);
+        let auth = AuthContext::new("test-access-token").with_auth_id(AuthId::new("auth-1"));
+
+        let topology = provider
+            .resolve_topology(&auth, &config, &[ProtocolDomain::Trade])
+            .await
+            .unwrap();
+
+        assert_eq!(topology.routes.len(), 1);
+        assert_eq!(topology.routes[0].label, "trade:auth-1007");
+        assert_eq!(
+            topology.routes[0].target,
+            SessionTarget::Account(AccountId::new("auth-1007"))
+        );
+        assert_eq!(topology.routes[0].domains, vec![ProtocolDomain::Trade]);
+
+        match &topology.routes[0].endpoint {
+            SessionRouteEndpoint::WebSocket { url, connect } => {
+                assert_eq!(url, &format!("ws://{td_addr}/trade"));
+                assert!(connect.headers.iter().any(|(name, value)| {
+                    name == "Authorization" && value == "Bearer test-access-token"
+                }));
+            }
+            other => panic!("expected trade websocket route, got {other:?}"),
+        }
+
+        broker_server.join().unwrap();
+    });
+}
+
+#[test]
 fn tq_auth_provider_resolves_query_to_websocket_without_explicit_query_url() {
     run_on_tokio(async {
         let md_listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -82,6 +82,35 @@ fn builder_can_enable_query_without_explicit_query_url() {
 }
 
 #[test]
+fn builder_accepts_auth_derived_tqkq_trade_targets() {
+    let builder = SessionClientBuilder::new("user", "pass")
+        .trade_target_tqkq()
+        .trade_target_tqkq_numbered(7)
+        .trade_target_tqkq_stock()
+        .trade_target_tqkq_stock_numbered(8);
+
+    assert_eq!(builder.trade_targets_ref().len(), 4);
+    assert_eq!(builder.trade_targets_ref()[0].broker_id, "快期模拟");
+    assert_eq!(
+        builder.trade_targets_ref()[0].auth_derived,
+        Some(tqsdk_core::AuthDerivedTradeTarget::TqKqFuture { number: None })
+    );
+    assert_eq!(
+        builder.trade_targets_ref()[1].auth_derived,
+        Some(tqsdk_core::AuthDerivedTradeTarget::TqKqFuture { number: Some(7) })
+    );
+    assert_eq!(builder.trade_targets_ref()[2].broker_id, "快期股票模拟");
+    assert_eq!(
+        builder.trade_targets_ref()[2].auth_derived,
+        Some(tqsdk_core::AuthDerivedTradeTarget::TqKqStock { number: None })
+    );
+    assert_eq!(
+        builder.trade_targets_ref()[3].auth_derived,
+        Some(tqsdk_core::AuthDerivedTradeTarget::TqKqStock { number: Some(8) })
+    );
+}
+
+#[test]
 fn facade_config_clamps_zero_view_width_to_one() {
     let config = SessionFacadeConfig::default().with_default_view_width(0);
 

@@ -119,6 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `stock_backtest_market()`
 - `futures_backtest_market()`
 - `trade_target(...)`
+- `trade_target_tqkq()`
+- `trade_target_tqkq_numbered(<1..99>)`
+- `trade_target_tqkq_stock()`
+- `trade_target_tqkq_stock_numbered(<1..99>)`
 - `trade_target_with_url(...)`
 - `replay_url(...)`
 
@@ -127,3 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqApiBuilder::from_session_builder(...)` 包装成 wait facade。
 
 如果已经持有 `TqApi`，但某个路径上又需要一次性 direct query / schema / metadata 调用，不需要再额外建立第二个 client，可以直接通过 `api.session()` 复用同一个底层 session。
+
+如果 trade 侧默认就走官方内置模拟账户，实际登录命令也建议直接复用底层 session helper：
+
+- `api.session().tqkq_login_command().await`
+- `api.session().tqkq_login_command_numbered(<1..99>).await`
+- `api.session().tqkq_stock_login_command().await`
+- `api.session().tqkq_stock_login_command_numbered(<1..99>).await`

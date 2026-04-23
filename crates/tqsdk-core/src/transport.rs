@@ -419,6 +419,13 @@ pub struct TradeSessionTarget {
     pub broker_id: String,
     pub account_id: AccountId,
     pub trade_url: Option<String>,
+    pub auth_derived: Option<AuthDerivedTradeTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDerivedTradeTarget {
+    TqKqFuture { number: Option<u8> },
+    TqKqStock { number: Option<u8> },
 }
 
 impl TradeSessionTarget {
@@ -427,12 +434,62 @@ impl TradeSessionTarget {
             broker_id: broker_id.into(),
             account_id,
             trade_url: None,
+            auth_derived: None,
         }
     }
 
     pub fn with_trade_url(mut self, trade_url: impl Into<String>) -> Self {
         self.trade_url = Some(trade_url.into());
         self
+    }
+
+    #[must_use]
+    pub fn tqkq() -> Self {
+        Self {
+            broker_id: "快期模拟".to_string(),
+            account_id: AccountId::new(String::new()),
+            trade_url: None,
+            auth_derived: Some(AuthDerivedTradeTarget::TqKqFuture { number: None }),
+        }
+    }
+
+    #[must_use]
+    pub fn tqkq_numbered(number: u8) -> Self {
+        Self {
+            broker_id: "快期模拟".to_string(),
+            account_id: AccountId::new(String::new()),
+            trade_url: None,
+            auth_derived: Some(AuthDerivedTradeTarget::TqKqFuture {
+                number: Some(number),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn tqkq_stock() -> Self {
+        Self {
+            broker_id: "快期股票模拟".to_string(),
+            account_id: AccountId::new(String::new()),
+            trade_url: None,
+            auth_derived: Some(AuthDerivedTradeTarget::TqKqStock { number: None }),
+        }
+    }
+
+    #[must_use]
+    pub fn tqkq_stock_numbered(number: u8) -> Self {
+        Self {
+            broker_id: "快期股票模拟".to_string(),
+            account_id: AccountId::new(String::new()),
+            trade_url: None,
+            auth_derived: Some(AuthDerivedTradeTarget::TqKqStock {
+                number: Some(number),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_auth_derived(&self) -> bool {
+        self.auth_derived.is_some()
     }
 }
 

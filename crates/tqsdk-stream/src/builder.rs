@@ -65,6 +65,30 @@ impl TqStreamBuilder {
     }
 
     #[must_use]
+    pub fn trade_target_tqkq(mut self) -> Self {
+        self.inner = self.inner.trade_target_tqkq();
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_numbered(mut self, number: u8) -> Self {
+        self.inner = self.inner.trade_target_tqkq_numbered(number);
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_stock(mut self) -> Self {
+        self.inner = self.inner.trade_target_tqkq_stock();
+        self
+    }
+
+    #[must_use]
+    pub fn trade_target_tqkq_stock_numbered(mut self, number: u8) -> Self {
+        self.inner = self.inner.trade_target_tqkq_stock_numbered(number);
+        self
+    }
+
+    #[must_use]
     pub fn trade_target_with_url(
         mut self,
         broker_id: impl Into<String>,
@@ -158,6 +182,44 @@ mod tests {
         assert_eq!(
             builder.inner.endpoints().replay_url.as_deref(),
             Some("replay-driver")
+        );
+    }
+
+    #[test]
+    fn tqkq_trade_methods_forward_to_inner_session_builder() {
+        let builder = TqStreamBuilder::new("demo-user", "demo-pass")
+            .trade_target_tqkq()
+            .trade_target_tqkq_numbered(7);
+
+        assert_eq!(builder.inner.trade_targets_ref().len(), 2);
+        assert_eq!(builder.inner.trade_targets_ref()[0].broker_id, "快期模拟");
+        assert!(builder.inner.trade_targets_ref()[0].is_auth_derived());
+        assert_eq!(builder.inner.trade_targets_ref()[1].broker_id, "快期模拟");
+        assert_eq!(
+            builder.inner.trade_targets_ref()[1].auth_derived,
+            Some(tqsdk_core::AuthDerivedTradeTarget::TqKqFuture { number: Some(7) })
+        );
+    }
+
+    #[test]
+    fn tqkq_stock_trade_methods_forward_to_inner_session_builder() {
+        let builder = TqStreamBuilder::new("demo-user", "demo-pass")
+            .trade_target_tqkq_stock()
+            .trade_target_tqkq_stock_numbered(7);
+
+        assert_eq!(builder.inner.trade_targets_ref().len(), 2);
+        assert_eq!(
+            builder.inner.trade_targets_ref()[0].broker_id,
+            "快期股票模拟"
+        );
+        assert!(builder.inner.trade_targets_ref()[0].is_auth_derived());
+        assert_eq!(
+            builder.inner.trade_targets_ref()[1].broker_id,
+            "快期股票模拟"
+        );
+        assert_eq!(
+            builder.inner.trade_targets_ref()[1].auth_derived,
+            Some(tqsdk_core::AuthDerivedTradeTarget::TqKqStock { number: Some(7) })
         );
     }
 

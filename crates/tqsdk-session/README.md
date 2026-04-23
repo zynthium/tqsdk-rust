@@ -79,8 +79,21 @@
 - `futures_market()`
 - `stock_backtest_market()`
 - `futures_backtest_market()`
+- `trade_target_tqkq()`
+- `trade_target_tqkq_numbered(<1..99>)`
+- `trade_target_tqkq_stock()`
+- `trade_target_tqkq_stock_numbered(<1..99>)`
 
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
+
+如果使用官方内置 `TqKq` / `TqKqStock` 账户，还可以在 session 已建立后直接生成对应登录命令：
+
+- `session.tqkq_login_command().await`
+- `session.tqkq_login_command_numbered(<1..99>).await`
+- `session.tqkq_stock_login_command().await`
+- `session.tqkq_stock_login_command_numbered(<1..99>).await`
+
+这样上层 facade 或 example 不需要再额外手写一遍 `auth_id -> account_id/password` 的派生逻辑。
 
 如果调用方需要在进入 live 行情订阅前做权限护栏，可以直接用：
 
