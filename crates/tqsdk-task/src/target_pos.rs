@@ -18,6 +18,7 @@ use crate::{Result, TaskError};
 pub struct TargetPosBuilder {
     registry: Arc<Mutex<TaskRegistry>>,
     store: Arc<Mutex<TargetPosStore>>,
+    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
     account_id: String,
     symbol: String,
     config: TargetPosConfig,
@@ -132,6 +133,7 @@ pub(crate) struct TargetPosStore {
 struct TargetPosTaskInner {
     registry: Arc<Mutex<TaskRegistry>>,
     store: Arc<Mutex<TargetPosStore>>,
+    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
     managed_by_host: bool,
     task_id: TaskId,
     account_id: String,
@@ -159,12 +161,14 @@ impl TargetPosBuilder {
     pub(crate) fn new(
         registry: Arc<Mutex<TaskRegistry>>,
         store: Arc<Mutex<TargetPosStore>>,
+        quote_subscriptions: Arc<Mutex<HashSet<String>>>,
         account_id: String,
         symbol: String,
     ) -> Self {
         Self {
             registry,
             store,
+            quote_subscriptions,
             account_id,
             symbol,
             config: TargetPosConfig::default(),
@@ -214,6 +218,7 @@ impl TargetPosBuilder {
         let inner = Arc::new(TargetPosTaskInner {
             registry: Arc::clone(&self.registry),
             store: Arc::clone(&self.store),
+            quote_subscriptions: Arc::clone(&self.quote_subscriptions),
             managed_by_host,
             task_id,
             account_id: self.account_id,
@@ -619,6 +624,11 @@ impl TargetPosTaskInner {
             return;
         };
 
+        if let Err(error) = self.ensure_quote_subscription(api).await {
+            self.finish_with_error(error);
+            return;
+        }
+
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
         let desired_batch = desired_batch_for_target(api, self, target_volume, &current_position);
@@ -835,6 +845,35 @@ impl TargetPosTaskInner {
                 self.record_trade(&trade);
             }
         }
+    }
+
+    async fn ensure_quote_subscription(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
+        if api
+            .quote_ref(&self.symbol)
+            .snapshot(api)
+            .ok()
+            .flatten()
+            .as_ref()
+            .is_some_and(quote_supports_pricing)
+        {
+            return Ok(());
+        }
+
+        let already_subscribed = self
+            .quote_subscriptions
+            .lock()
+            .expect("target task quote subscriptions lock poisoned")
+            .contains(&self.symbol);
+        if already_subscribed {
+            return Ok(());
+        }
+
+        api.get_quote(&self.symbol).await.map_err(TaskError::from)?;
+        self.quote_subscriptions
+            .lock()
+            .expect("target task quote subscriptions lock poisoned")
+            .insert(self.symbol.clone());
+        Ok(())
     }
 
     fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
@@ -1105,6 +1144,10 @@ fn quote_exchange_id(quote: &Quote, symbol: &str) -> String {
         .unwrap_or_default()
 }
 
+fn quote_supports_pricing(quote: &Quote) -> bool {
+    quote.ask_price1.is_finite() || quote.bid_price1.is_finite() || quote.last_price.is_finite()
+}
+
 fn resolve_limit_price(quote: &Quote, direction: TradeDirection, mode: PriceMode) -> Option<f64> {
     let active_price = match direction {
         TradeDirection::Buy => first_finite(quote.ask_price1, quote.bid_price1, quote.last_price),
@@ -1191,9 +1234,11 @@ mod tests {
     async fn cancel_requested_task_records_error_when_cancel_submission_fails() {
         let registry = Arc::new(Mutex::new(TaskRegistry::default()));
         let store = Arc::new(Mutex::new(TargetPosStore::default()));
+        let quote_subscriptions = Arc::new(Mutex::new(HashSet::new()));
         let task = TargetPosBuilder::new(
             Arc::clone(&registry),
             Arc::clone(&store),
+            Arc::clone(&quote_subscriptions),
             "sim".to_string(),
             "SHFE.rb2601".to_string(),
         )

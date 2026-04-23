@@ -59,6 +59,7 @@
 - `TargetPosTask::execution_report()` 已暴露稳定 execution report
   - 原始 command-level 事件流当前包含 insert/cancel/trade/order finished/target reached
   - 同时维护 trades buffer、per-order outcome report、委托/撤单/终态订单计数、累计成交手数/成交额、最后一次 target reached
+- `TargetPosTask` 在缺少可定价 quote 时，会按 symbol 自动发起一次 `subscribe_quote`
 - `TargetPosTask::last_error()` 会暴露本地命令提交失败
   - 第一版不对本地提交失败做静默重试，而是记录错误并结束任务
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
@@ -82,6 +83,7 @@
     - batch 与 batch 之间仍等待持仓/挂单状态推进后再继续
 - `TargetPosScheduler` 当前最小执行语义：
   - 每个 step 都会创建并驱动内部无 ownership 的 `TargetPosTask`
+  - 因此也继承内部 task 的按需 quote 自动订阅语义
   - 已支持 step 级 `price_mode`
   - 已支持 pause step
   - 非最后一步按 wall-clock interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步

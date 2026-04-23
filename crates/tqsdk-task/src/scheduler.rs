@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -95,6 +95,7 @@ pub struct TargetPosSchedulerBuilder {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
     store: Arc<Mutex<TargetPosSchedulerStore>>,
+    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
     account_id: String,
     symbol: String,
     steps: Vec<TargetPosScheduleStep>,
@@ -114,6 +115,7 @@ pub(crate) struct TargetPosSchedulerStore {
 struct TargetPosSchedulerInner {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
+    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
     task_id: TaskId,
     account_id: String,
     symbol: String,
@@ -137,6 +139,7 @@ impl TargetPosSchedulerBuilder {
         registry: Arc<Mutex<TaskRegistry>>,
         target_tasks: Arc<Mutex<TargetPosStore>>,
         store: Arc<Mutex<TargetPosSchedulerStore>>,
+        quote_subscriptions: Arc<Mutex<HashSet<String>>>,
         account_id: String,
         symbol: String,
     ) -> Self {
@@ -144,6 +147,7 @@ impl TargetPosSchedulerBuilder {
             registry,
             target_tasks,
             store,
+            quote_subscriptions,
             account_id,
             symbol,
             steps: Vec::new(),
@@ -180,6 +184,7 @@ impl TargetPosSchedulerBuilder {
         let inner = Arc::new(TargetPosSchedulerInner {
             registry: Arc::clone(&self.registry),
             target_tasks: Arc::clone(&self.target_tasks),
+            quote_subscriptions: Arc::clone(&self.quote_subscriptions),
             task_id: task.id,
             account_id: self.account_id,
             symbol: self.symbol,
@@ -530,6 +535,7 @@ impl TargetPosSchedulerInner {
         let mut builder = TargetPosBuilder::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
+            Arc::clone(&self.quote_subscriptions),
             self.account_id.clone(),
             self.symbol.clone(),
         )
@@ -754,10 +760,12 @@ mod tests {
         let registry = Arc::new(Mutex::new(TaskRegistry::default()));
         let target_tasks = Arc::new(Mutex::new(TargetPosStore::default()));
         let schedulers = Arc::new(Mutex::new(TargetPosSchedulerStore::default()));
+        let quote_subscriptions = Arc::new(Mutex::new(HashSet::new()));
         let scheduler = TargetPosSchedulerBuilder::new(
             Arc::clone(&registry),
             Arc::clone(&target_tasks),
             Arc::clone(&schedulers),
+            Arc::clone(&quote_subscriptions),
             "sim".to_string(),
             "SHFE.rb2601".to_string(),
         )
@@ -771,6 +779,7 @@ mod tests {
         let task = TargetPosBuilder::new(
             Arc::clone(&registry),
             Arc::clone(&target_tasks),
+            Arc::clone(&quote_subscriptions),
             "sim".to_string(),
             "SHFE.rb2601".to_string(),
         )

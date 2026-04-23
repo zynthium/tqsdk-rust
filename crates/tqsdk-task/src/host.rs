@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -19,6 +20,7 @@ pub struct TaskHost {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
     schedulers: Arc<Mutex<TargetPosSchedulerStore>>,
+    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl TaskHost {
@@ -29,6 +31,7 @@ impl TaskHost {
             registry: Arc::new(Mutex::new(TaskRegistry::default())),
             target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
             schedulers: Arc::new(Mutex::new(TargetPosSchedulerStore::default())),
+            quote_subscriptions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -63,6 +66,7 @@ impl TaskHost {
         TargetPosBuilder::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
+            Arc::clone(&self.quote_subscriptions),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )
@@ -78,6 +82,7 @@ impl TaskHost {
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
             Arc::clone(&self.schedulers),
+            Arc::clone(&self.quote_subscriptions),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )

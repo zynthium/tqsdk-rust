@@ -34,6 +34,7 @@
   - `last_error()`
     - 若委托/撤单命令本地提交失败，会记录错误并结束任务，不做静默重试
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
+  - 若本地还没有该 symbol 的可定价 quote，会自动发起一次 `subscribe_quote`
   - 内部纯规划器已覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 语义
   - 最小真实 planner 已接入全部 offset priority：
     - 基于当前净持仓与目标手数差额按 planner 结果推进
@@ -54,6 +55,7 @@
 - `TargetPosScheduler`
   - 基于 `TaskHost::wait_update()` 的 step 驱动推进
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
+    - 因此也继承内部 task 的按需 quote 自动订阅语义
   - `execution_events()`
     - 聚合内部 task 的最小 command-level 事件流，并带 `step_index`
   - `execution_events_since()` / `execution_trades_since()`
