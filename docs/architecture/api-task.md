@@ -73,7 +73,8 @@
   - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
   - 同一请求序号在净持仓未变化前不会重复发单
   - 若挂单进入终态但持仓未变化，会在同一目标请求下重新发单
-  - 若 live order 与最新期望 batch 不一致，会先发真实撤单，等旧单终态后在后续 `wait_update()` 里按新计划重发
+  - 若 live order 与最新期望 batch 不一致，会优先只撤 stale 子集，保留仍匹配新计划的 live order
+  - stale live order 进入终态后，再在后续 `wait_update()` 里按新计划补齐或重发
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行 batch：
     - 每次 `wait_update()` 最多提交一个 planner batch

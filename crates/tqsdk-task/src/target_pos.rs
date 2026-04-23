@@ -803,18 +803,41 @@ impl TargetPosTaskInner {
             return Ok(false);
         }
 
-        if should_cancel_for_replan(
-            &live_orders,
-            desired_batch,
-            current_net_position,
-            target_volume,
-        ) {
+        if current_net_position == target_volume {
             self.cancel_pending_orders(api).await?;
+            return Ok(true);
+        }
+
+        let Some(desired_batch) = desired_batch else {
+            return Ok(true);
+        };
+
+        let stale_order_ids = stale_live_order_ids(&live_orders, desired_batch);
+        if !stale_order_ids.is_empty() {
+            self.cancel_pending_orders_by_id(api, &stale_order_ids)
+                .await?;
         }
         Ok(true)
     }
 
     async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
+        self.cancel_pending_orders_filtered(api, None).await
+    }
+
+    async fn cancel_pending_orders_by_id(
+        &self,
+        api: &mut tqsdk_wait::TqApi,
+        order_ids: &HashSet<String>,
+    ) -> Result<()> {
+        self.cancel_pending_orders_filtered(api, Some(order_ids))
+            .await
+    }
+
+    async fn cancel_pending_orders_filtered(
+        &self,
+        api: &mut tqsdk_wait::TqApi,
+        order_ids: Option<&HashSet<String>>,
+    ) -> Result<()> {
         self.prune_terminal_orders(api);
 
         let tracked_orders = self
@@ -825,6 +848,11 @@ impl TargetPosTaskInner {
 
         for order_ref in tracked_orders {
             let order_id = order_ref.order_id().to_string();
+            if let Some(order_ids) = order_ids
+                && !order_ids.contains(&order_id)
+            {
+                continue;
+            }
             let should_cancel = {
                 let mut cancel_requested_order_ids = self
                     .cancel_requested_order_ids
@@ -988,41 +1016,20 @@ fn desired_batch_for_target(
     Some(DesiredBatch { orders })
 }
 
-fn should_cancel_for_replan(
-    live_orders: &[Order],
-    desired_batch: Option<&DesiredBatch>,
-    current_net_position: i64,
-    target_volume: i64,
-) -> bool {
-    if live_orders.is_empty() {
-        return false;
-    }
-    if current_net_position == target_volume {
-        return true;
-    }
-
-    let Some(desired_batch) = desired_batch else {
-        return false;
-    };
-    !live_orders_match_desired_batch(live_orders, desired_batch)
-}
-
-fn live_orders_match_desired_batch(live_orders: &[Order], desired_batch: &DesiredBatch) -> bool {
-    if live_orders.len() != desired_batch.orders.len() {
-        return false;
-    }
-
+fn stale_live_order_ids(live_orders: &[Order], desired_batch: &DesiredBatch) -> HashSet<String> {
     let mut unmatched = desired_batch.orders.clone();
+    let mut stale_order_ids = HashSet::new();
     for order in live_orders {
-        let Some(index) = unmatched
+        if let Some(index) = unmatched
             .iter()
             .position(|desired_order| order_matches_desired(order, desired_order))
-        else {
-            return false;
+        {
+            unmatched.remove(index);
+        } else {
+            stale_order_ids.insert(order.order_id.clone());
         };
-        unmatched.remove(index);
     }
-    unmatched.is_empty()
+    stale_order_ids
 }
 
 fn order_matches_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
