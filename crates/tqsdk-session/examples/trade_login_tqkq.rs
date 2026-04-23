@@ -79,13 +79,11 @@ async fn wait_for_trade_account_ready(
             return Err("timed out waiting for trade account snapshot".into());
         }
 
-        let mut progress = session.flush_outbound().await?;
-        progress |= session.drive_pending_once().await?;
-        progress |= session
-            .drive_route_once(Some(now + Duration::from_millis(250)))
+        let progress = session
+            .progress_once(Some(now + Duration::from_millis(250)))
             .await?;
 
-        if !progress {
+        if !progress.is_progress() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

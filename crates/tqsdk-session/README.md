@@ -17,6 +17,7 @@
 - `SessionClientBuilder`
 - `SessionClient`
 - lazy establish 的 live session owner
+- `progress_once(deadline).await`
 - `flush_outbound()`
 - `drive_pending_once()`
 - `drive_route_once()`
@@ -128,7 +129,7 @@
 
 - 用 `SessionClientBuilder::trade_target_tqkq*()` 预声明 trade route
 - 用 `SessionClient::tqkq_login_command*()` 从当前 auth context 派生官方内置模拟账户登录命令
-- 仅靠 `flush_outbound()` / `drive_pending_once()` / `drive_route_once()` 推进到底层 trade state tree，而不引入 `wait_update()` facade
+- 仅靠 `progress_once()` 推进到底层 trade state tree，而不引入 `wait_update()` facade
 
 ## 建议的 Direct Query 接口层次
 

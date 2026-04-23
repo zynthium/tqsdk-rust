@@ -164,6 +164,26 @@ async fn prime_route_with_recover(
     }
 }
 
+/// Outcome of one substrate-level session progress step.
+///
+/// This models only transport/runtime progression. It does not consume commit
+/// cursors and does not impose `wait_update()` semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProgress {
+    Idle,
+    FlushedOutbound,
+    DrovePending,
+    DroveRoute,
+}
+
+impl SessionProgress {
+    /// Returns true when the session made any observable transport/runtime progress.
+    #[must_use]
+    pub fn is_progress(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+}
+
 #[derive(Clone)]
 /// Reusable async session facade shared by higher-level consumption styles.
 ///
@@ -345,24 +365,7 @@ impl SessionClient {
             return Ok(false);
         };
         let mut io = io.lock().await;
-        if io.run.is_none() {
-            return Ok(false);
-        }
-        let receipts = match self
-            .runtime
-            .flush_outbound(io.run.as_mut().expect("run checked above"))
-            .await
-        {
-            Ok(receipts) => receipts,
-            Err(tqsdk_core::ContractError::Transport(_)) => {
-                recover_run(&mut io, &self.runtime).await?;
-                self.runtime
-                    .flush_outbound(io.run.as_mut().expect("run recovered"))
-                    .await?
-            }
-            Err(err) => return Err(err.into()),
-        };
-        Ok(!receipts.is_empty())
+        self.flush_outbound_locked(&mut io).await
     }
 
     pub async fn drive_pending_once(&self) -> crate::error::Result<bool> {
@@ -371,40 +374,7 @@ impl SessionClient {
             return Ok(false);
         };
         let mut io = io.lock().await;
-        let Some(route_label) = io.next_pending_route_label() else {
-            return Ok(false);
-        };
-        let Some(route) = io.run.as_ref().and_then(|run| {
-            run.connected
-                .routes
-                .iter()
-                .find(|route| route.route.label == route_label)
-                .map(|route| route.route.clone())
-        }) else {
-            return Ok(false);
-        };
-        let Some(executor) = (match route.endpoint {
-            SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
-            SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
-            SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
-            SessionRouteEndpoint::WebSocket { .. } => None,
-        }) else {
-            return Ok(false);
-        };
-        let Some(run) = io.run.as_mut() else {
-            return Ok(false);
-        };
-        let outcome = self
-            .runtime
-            .drive_pending_route_once(
-                run,
-                route_label.as_str(),
-                executor.as_ref(),
-                Vec::new(),
-                CommitScope::RealtimeUpdate,
-            )
-            .await?;
-        Ok(!outcome.requests.is_empty() || !outcome.commits.is_empty())
+        self.drive_pending_once_locked(&mut io).await
     }
 
     async fn drive_pending_route_label_once(
@@ -455,51 +425,35 @@ impl SessionClient {
             return Ok(false);
         };
         let mut io = io.lock().await;
-        let Some(route_label) = io.next_websocket_route_label() else {
-            return Ok(false);
-        };
-        prime_route_with_recover(&mut io, &self.runtime, route_label.as_str()).await?;
+        self.drive_route_once_locked(&mut io, deadline).await
+    }
 
-        let SessionIoState {
-            auth_provider,
-            topology_resolver,
-            route_connector,
-            adapters,
-            config,
-            run,
-            ..
-        } = &mut *io;
-        let Some(run) = run.as_mut() else {
-            return Ok(false);
+    /// Performs one substrate-level progress step across outbound flush,
+    /// pending-route execution, and one websocket-route drive attempt.
+    ///
+    /// Callers should still drain commit cursors themselves if they need
+    /// commit-first semantics. This helper only advances the live session.
+    pub async fn progress_once(
+        &self,
+        deadline: Option<Instant>,
+    ) -> crate::error::Result<SessionProgress> {
+        self.ensure_established().await?;
+        let Some(io) = self.io.as_ref() else {
+            return Ok(SessionProgress::Idle);
         };
-        let deps = SessionRuntimeDeps::new(
-            auth_provider.as_ref(),
-            topology_resolver.as_ref(),
-            route_connector.as_ref(),
-            config,
-            adapters,
-        );
-        let future = self.runtime.drive_route_once(
-            run,
-            route_label.as_str(),
-            Vec::new(),
-            CommitScope::RealtimeUpdate,
-            deps,
-        );
-        let outcome = if let Some(deadline) = deadline {
-            let budget = deadline.saturating_duration_since(Instant::now());
-            if budget.is_zero() {
-                return Ok(false);
-            }
-            match timeout(budget, future).await {
-                Ok(result) => result?,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            future.await?
-        };
+        let mut io = io.lock().await;
 
-        Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
+        if self.flush_outbound_locked(&mut io).await? {
+            return Ok(SessionProgress::FlushedOutbound);
+        }
+        if self.drive_pending_once_locked(&mut io).await? {
+            return Ok(SessionProgress::DrovePending);
+        }
+        if self.drive_route_once_locked(&mut io, deadline).await? {
+            return Ok(SessionProgress::DroveRoute);
+        }
+
+        Ok(SessionProgress::Idle)
     }
 
     async fn drive_route_label_once(
@@ -810,6 +764,119 @@ impl SessionClient {
                 ));
             }
         }
+    }
+
+    async fn flush_outbound_locked(&self, io: &mut SessionIoState) -> crate::error::Result<bool> {
+        if io.run.is_none() {
+            return Ok(false);
+        }
+        let receipts = match self
+            .runtime
+            .flush_outbound(io.run.as_mut().expect("run checked above"))
+            .await
+        {
+            Ok(receipts) => receipts,
+            Err(tqsdk_core::ContractError::Transport(_)) => {
+                recover_run(io, &self.runtime).await?;
+                self.runtime
+                    .flush_outbound(io.run.as_mut().expect("run recovered"))
+                    .await?
+            }
+            Err(err) => return Err(err.into()),
+        };
+        Ok(!receipts.is_empty())
+    }
+
+    async fn drive_pending_once_locked(
+        &self,
+        io: &mut SessionIoState,
+    ) -> crate::error::Result<bool> {
+        let Some(route_label) = io.next_pending_route_label() else {
+            return Ok(false);
+        };
+        let Some(route) = io.run.as_ref().and_then(|run| {
+            run.connected
+                .routes
+                .iter()
+                .find(|route| route.route.label == route_label)
+                .map(|route| route.route.clone())
+        }) else {
+            return Ok(false);
+        };
+        let Some(executor) = (match route.endpoint {
+            SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
+            SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
+            SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
+            SessionRouteEndpoint::WebSocket { .. } => None,
+        }) else {
+            return Ok(false);
+        };
+        let Some(run) = io.run.as_mut() else {
+            return Ok(false);
+        };
+        let outcome = self
+            .runtime
+            .drive_pending_route_once(
+                run,
+                route_label.as_str(),
+                executor.as_ref(),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .await?;
+        Ok(!outcome.requests.is_empty() || !outcome.commits.is_empty())
+    }
+
+    async fn drive_route_once_locked(
+        &self,
+        io: &mut SessionIoState,
+        deadline: Option<Instant>,
+    ) -> crate::error::Result<bool> {
+        let Some(route_label) = io.next_websocket_route_label() else {
+            return Ok(false);
+        };
+        prime_route_with_recover(io, &self.runtime, route_label.as_str()).await?;
+
+        let SessionIoState {
+            auth_provider,
+            topology_resolver,
+            route_connector,
+            adapters,
+            config,
+            run,
+            ..
+        } = io;
+        let Some(run) = run.as_mut() else {
+            return Ok(false);
+        };
+        let deps = SessionRuntimeDeps::new(
+            auth_provider.as_ref(),
+            topology_resolver.as_ref(),
+            route_connector.as_ref(),
+            config,
+            adapters,
+        );
+        let future = self.runtime.drive_route_once(
+            run,
+            route_label.as_str(),
+            Vec::new(),
+            CommitScope::RealtimeUpdate,
+            deps,
+        );
+        let outcome = if let Some(deadline) = deadline {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            if budget.is_zero() {
+                return Ok(false);
+            }
+            match timeout(budget, future).await {
+                Ok(result) => result?,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            future.await?
+        };
+
+        Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
     }
 
     pub async fn query_graphql(
@@ -1345,8 +1412,8 @@ mod tests {
 
     use super::{
         SessionClient, SessionClientContext, SessionInternalExecutor, SessionIoComponents,
-        SessionIoState, SessionReplayExecutor, SharedAuthProvider, SharedRouteConnector,
-        SharedRouteExecutor, SharedTopologyResolver,
+        SessionIoState, SessionProgress, SessionReplayExecutor, SharedAuthProvider,
+        SharedRouteConnector, SharedRouteExecutor, SharedTopologyResolver,
     };
     use crate::config::SessionFacadeConfig;
 
@@ -1729,6 +1796,125 @@ mod tests {
         assert_eq!(
             handle.latest_snapshot().get(["query", "query-1", "quotes"]),
             Some(&json!(["SHFE.au2602"]))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_client_progress_once_reports_flush_then_pending_for_http_query() {
+        let handle = runtime_with_default_adapters();
+        let executor: SharedRouteExecutor = Arc::new(RecordingExecutor::default().with_response(
+            "query",
+            vec![RuntimeInput::Io(IoEvent {
+                route: "query".to_string(),
+                domains: vec![ProtocolDomain::Query],
+                payload: InputPayload::Json(json!({
+                    "query_id": "query-1",
+                    "data": { "quotes": ["SHFE.au2602"] }
+                })),
+            })],
+        ));
+        let client = test_live_client(
+            handle.clone(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "query".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://query.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            executor,
+        );
+
+        handle
+            .submit(RuntimeCommand::Query(QueryCommand::Fetch {
+                query_id: QueryId::new("query-1"),
+                query: "query { quotes }".to_string(),
+                variables: None,
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.progress_once(None).await.unwrap(),
+            SessionProgress::FlushedOutbound
+        );
+        assert_eq!(
+            client.progress_once(None).await.unwrap(),
+            SessionProgress::DrovePending
+        );
+        assert_eq!(
+            handle.latest_snapshot().get(["query", "query-1", "quotes"]),
+            Some(&json!(["SHFE.au2602"]))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_client_progress_once_reports_route_progress_for_websocket_input() {
+        let handle = runtime_with_default_adapters();
+        let client = test_live_client(
+            handle.clone(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://market.example".to_string(),
+                    connect: tqsdk_core::WebSocketConnectOptions::default(),
+                },
+            }),
+            QueueTransport::with_frame(RawFrame::Text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "instrument_id": "au2602",
+                                "last_price": 618.5
+                            }
+                        }
+                    }]
+                })
+                .to_string(),
+            )),
+            Arc::new(RecordingExecutor::default()),
+        );
+
+        assert_eq!(
+            client
+                .progress_once(Some(Instant::now() + Duration::from_millis(20)))
+                .await
+                .unwrap(),
+            SessionProgress::DroveRoute
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["quotes", "SHFE.au2602", "last_price"]),
+            Some(&json!(618.5))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_client_progress_once_reports_idle_when_no_route_has_work() {
+        let client = test_live_client(
+            runtime_with_default_adapters(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "query".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://query.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+        );
+
+        assert_eq!(
+            client.progress_once(None).await.unwrap(),
+            SessionProgress::Idle
         );
     }
 

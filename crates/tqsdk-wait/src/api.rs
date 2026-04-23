@@ -75,43 +75,13 @@ impl TqApi {
                 return Ok(true);
             }
 
-            let flushed = self
+            let progress = self
                 .driver
                 .session
-                .flush_outbound()
+                .progress_once(deadline)
                 .await
                 .map_err(crate::error::WaitFacadeError::Session)?;
-            if flushed {
-                continue;
-            }
-
-            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
-                self.driver.last_commit = Some(commit);
-                return Ok(true);
-            }
-
-            let drove_pending = self
-                .driver
-                .session
-                .drive_pending_once()
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
-            if drove_pending {
-                continue;
-            }
-
-            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
-                self.driver.last_commit = Some(commit);
-                return Ok(true);
-            }
-
-            let drove_route = self
-                .driver
-                .session
-                .drive_route_once(deadline)
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
-            if !drove_route {
+            if !progress.is_progress() {
                 return Ok(false);
             }
         }

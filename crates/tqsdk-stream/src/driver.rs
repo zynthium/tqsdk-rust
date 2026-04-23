@@ -120,49 +120,17 @@ async fn run_driver(
             continue;
         }
 
-        let flushed = match session.flush_outbound().await {
-            Ok(flushed) => flushed,
-            Err(error) => {
-                let _ = sender.send(DriverEvent::Error(error));
-                break;
-            }
-        };
-        if flushed {
-            continue;
-        }
-
-        if let Some(commit) = reader.next(&mut cursor) {
-            let _ = sender.send(DriverEvent::Commit(commit));
-            continue;
-        }
-
-        let drove_pending = match session.drive_pending_once().await {
-            Ok(drove_pending) => drove_pending,
-            Err(error) => {
-                let _ = sender.send(DriverEvent::Error(error));
-                break;
-            }
-        };
-        if drove_pending {
-            continue;
-        }
-
-        if let Some(commit) = reader.next(&mut cursor) {
-            let _ = sender.send(DriverEvent::Commit(commit));
-            continue;
-        }
-
-        let drove_route = match session
-            .drive_route_once(Some(tokio::time::Instant::now() + ROUTE_DRIVE_BUDGET))
+        let progress = match session
+            .progress_once(Some(tokio::time::Instant::now() + ROUTE_DRIVE_BUDGET))
             .await
         {
-            Ok(drove_route) => drove_route,
+            Ok(progress) => progress,
             Err(error) => {
                 let _ = sender.send(DriverEvent::Error(error));
                 break;
             }
         };
-        if drove_route {
+        if progress.is_progress() {
             continue;
         }
 
