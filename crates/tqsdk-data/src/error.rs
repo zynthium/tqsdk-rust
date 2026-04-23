@@ -16,6 +16,7 @@ pub enum DataError {
     InvalidResponse(String),
     Timeout(Duration),
     Http(reqwest::Error),
+    Io(std::io::Error),
 }
 
 impl From<tqsdk_session::SessionFacadeError> for DataError {
@@ -27,6 +28,12 @@ impl From<tqsdk_session::SessionFacadeError> for DataError {
 impl From<reqwest::Error> for DataError {
     fn from(error: reqwest::Error) -> Self {
         Self::Http(error)
+    }
+}
+
+impl From<std::io::Error> for DataError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }
 
@@ -44,6 +51,7 @@ impl Display for DataError {
                 write!(f, "data request timed out after {timeout:?}")
             }
             Self::Http(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "{error}"),
         }
     }
 }
@@ -53,6 +61,7 @@ impl std::error::Error for DataError {
         match self {
             Self::Session(error) => Some(error),
             Self::Http(error) => Some(error),
+            Self::Io(error) => Some(error),
             Self::PermissionDenied(_)
             | Self::Validation(_)
             | Self::InvalidState(_)

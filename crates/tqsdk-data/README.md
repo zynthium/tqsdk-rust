@@ -12,6 +12,8 @@
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
 - `DataClient::from_session(...).query_option_greeks(...)`
+- `DataClient::from_session(...).export_kline_data_csv(...)`
+- `DataClient::from_session(...).export_tick_data_csv(...)`
 
 其中：
 
@@ -20,6 +22,7 @@
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`
 - `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程
 - `query_option_greeks` 是一次性 owned 研究接口，内部会临时拉起 live quote snapshot 并做本地 Black-Scholes / 隐波计算
+- `export_*_csv` 是建立在 `*_data_download` 之上的纯 async materialization helper，要求调用方提供 `AsyncWrite`
 - 当 session 的 auth context 已知但缺少 `tq_dl` 时，history page / series / download 接口会明确拒绝
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
@@ -44,6 +47,8 @@
 - `OptionGreeksRequest`
 - `OptionGreeksResult`
 - `OptionGreeksRow`
+- `KlineCsvExportSummary`
+- `TickCsvExportSummary`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -70,6 +75,13 @@
 - `query_his_cont_quotes`
 - 文件缓存、导出、落盘
 - 可选的 DataFrame / polars 适配层
+
+这里的“文件导出、落盘”目前已经有最薄的一层：
+
+- `export_kline_data_csv`
+- `export_tick_data_csv`
+
+但它仍然只负责把下载结果写入调用方给定的 `AsyncWrite`，不负责路径管理、后台任务或缓存策略。
 
 ## 当前明确不做
 

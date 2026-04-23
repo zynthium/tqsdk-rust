@@ -101,6 +101,8 @@
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `query_option_greeks(OptionGreeksRequest)`
+- `export_kline_data_csv(KlineDataSeriesRequest, &mut impl AsyncWrite)`
+- `export_tick_data_csv(TickDataSeriesRequest, &mut impl AsyncWrite)`
 - `KlineDataPage`
 - `KlineDataPageRequest`
 - `TickDataPage`
@@ -117,6 +119,8 @@
 - `OptionGreeksRequest`
 - `OptionGreeksResult`
 - `OptionGreeksRow`
+- `KlineCsvExportSummary`
+- `TickCsvExportSummary`
 
 当前明确先不做：
 
@@ -189,6 +193,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 - `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
 - `query_option_greeks` 内部复用了 session-backed 的一次性 live quote snapshot，但暂时没有把这层 snapshot helper 冻结成新的 public surface
+- `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - 当 session auth context 已知且不含 `tq_dl` 时，history 相关入口会在 facade 层尽早拒绝
 
 这样做的意义是：
