@@ -116,6 +116,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
 2. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
 3. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
+4. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
+5. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
 
 ## V2+ adapter 验收基线
 ### wait adapter
