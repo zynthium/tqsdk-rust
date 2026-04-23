@@ -6,6 +6,7 @@
 
 - `DataClient::new().query_his_cont_quotes(...)`
 - `DataClient::from_session(...).get_kline_data_series(...)`
+- `DataClient::from_session(...).get_tick_data_series(...)`
 
 其中：
 
@@ -20,12 +21,15 @@
 - `HistoricalContQuotesRow`
 - `KlineDataSeriesRequest`
 - `KlineDataSeries`
+- `TickDataSeriesRequest`
+- `TickDataSeries`
 
 ## `get_kline_data_series` 的定位
 
 这条接口适合承接：
 
 - 历史 K 线一次性拉取
+- 历史 tick 一次性拉取
 - research/offline 侧的批量读
 - 后续更高层 DataFrame / polars / downloader 的底座
 
@@ -42,7 +46,6 @@
 
 - downloader
 - 历史数据批量拉取
-- `get_tick_data_series`
 - `query_his_cont_quotes`
 - `query_option_greeks`
 - 文件缓存、导出、落盘

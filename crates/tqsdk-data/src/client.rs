@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, Days, FixedOffset, NaiveDate, Utc};
 use serde_json::Value;
-use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Symbol};
+use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Symbol, Tick};
 
 use crate::error::{DataError, Result};
 
@@ -14,7 +14,7 @@ const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_h
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
 const DEFAULT_KLINE_DATA_TIMEOUT: Duration = Duration::from_secs(30);
 
-static NEXT_KLINE_SERIES_CHART_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_HISTORY_SERIES_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct DataServiceEndpoints {
@@ -208,6 +208,122 @@ impl KlineDataSeries {
     }
 }
 
+/// Request for a one-shot owned tick history window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickDataSeriesRequest {
+    symbol: String,
+    data_length: usize,
+    timeout: Duration,
+}
+
+impl TickDataSeriesRequest {
+    #[must_use]
+    pub fn new(symbol: impl Into<String>, data_length: usize) -> Self {
+        Self {
+            symbol: symbol.into(),
+            data_length,
+            timeout: DEFAULT_KLINE_DATA_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn data_length(&self) -> usize {
+        self.data_length
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.symbol.is_empty() {
+            return Err(DataError::Validation(
+                "symbol must not be empty".to_string(),
+            ));
+        }
+        if self.data_length == 0 {
+            return Err(DataError::Validation(
+                "data_length must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Owned result of a one-shot tick history request.
+#[derive(Debug, Clone, Default)]
+pub struct TickDataSeries {
+    symbol: String,
+    requested_length: usize,
+    rows: Vec<Tick>,
+}
+
+impl TickDataSeries {
+    fn new(symbol: String, requested_length: usize, rows: Vec<Tick>) -> Self {
+        Self {
+            symbol,
+            requested_length,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn requested_length(&self) -> usize {
+        self.requested_length
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&Tick> {
+        self.rows.last()
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Tick> {
+        self.rows.get(index)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Tick> + DoubleEndedIterator {
+        self.rows.iter()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Tick] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Tick> {
+        self.rows
+    }
+}
+
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
 pub struct DataClient {
     session: Option<tqsdk_session::SessionClient>,
@@ -367,6 +483,31 @@ impl DataClient {
         result
     }
 
+    pub async fn get_tick_data_series(
+        &self,
+        request: TickDataSeriesRequest,
+    ) -> Result<TickDataSeries> {
+        request.validate()?;
+        let Some(session) = self.session.as_ref() else {
+            return Err(DataError::InvalidState(
+                "get_tick_data_series requires a session-backed data client",
+            ));
+        };
+
+        let chart_id = next_tick_data_series_chart_id(request.symbol());
+        let result = self
+            .await_tick_data_series(session, &request, chart_id.as_str())
+            .await;
+
+        let _ = session
+            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
+                chart_id,
+            }))
+            .await;
+
+        result
+    }
+
     async fn await_kline_data_series(
         &self,
         session: &tqsdk_session::SessionClient,
@@ -388,43 +529,36 @@ impl DataClient {
             )))
             .await?;
         let reader = session.reader_clone();
-        let deadline = tokio::time::Instant::now() + request.timeout();
+        wait_for_ready_chart(session, &reader, chart_id, command_id, request.timeout()).await?;
+        read_ready_kline_data_series(&reader, request, duration_ns, chart_id)?.ok_or_else(|| {
+            DataError::InvalidResponse("ready kline chart snapshot missing".to_string())
+        })
+    }
 
-        loop {
-            if let Some(series) =
-                try_read_ready_kline_data_series(&reader, request, duration_ns, chart_id)?
-            {
-                return Ok(series);
-            }
-
-            if let Some(status) = session.command_status(command_id)?
-                && matches!(status.as_str(), "rejected" | "failed" | "cancelled")
-            {
-                return Err(DataError::InvalidResponse(format!(
-                    "set chart command reached terminal status {status}"
-                )));
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(DataError::Timeout(request.timeout()));
-            }
-
-            let mut progress = false;
-            progress |= session.flush_outbound().await?;
-            progress |= session.drive_pending_once().await?;
-            progress |= session.drive_route_once(Some(deadline)).await?;
-
-            if progress {
-                continue;
-            }
-
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(DataError::Timeout(request.timeout()));
-            }
-
-            tokio::time::sleep(remaining.min(Duration::from_millis(1))).await;
-        }
+    async fn await_tick_data_series(
+        &self,
+        session: &tqsdk_session::SessionClient,
+        request: &TickDataSeriesRequest,
+        chart_id: &str,
+    ) -> Result<TickDataSeries> {
+        let command_id = session
+            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                MarketChartCommand {
+                    chart_id: chart_id.to_string(),
+                    symbols: vec![Symbol::new(request.symbol())],
+                    duration_ns: 0,
+                    view_width: request.data_length(),
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                },
+            )))
+            .await?;
+        let reader = session.reader_clone();
+        wait_for_ready_chart(session, &reader, chart_id, command_id, request.timeout()).await?;
+        read_ready_tick_data_series(&reader, request, chart_id)?.ok_or_else(|| {
+            DataError::InvalidResponse("ready tick chart snapshot missing".to_string())
+        })
     }
 
     async fn trading_days(
@@ -549,7 +683,62 @@ impl DataClient {
     }
 }
 
-fn try_read_ready_kline_data_series(
+async fn wait_for_ready_chart(
+    session: &tqsdk_session::SessionClient,
+    reader: &tqsdk_core::RuntimeReader,
+    chart_id: &str,
+    command_id: tqsdk_core::CommandId,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if chart_is_ready(reader, chart_id)? {
+            return Ok(());
+        }
+
+        if let Some(status) = session.command_status(command_id)?
+            && matches!(status.as_str(), "rejected" | "failed" | "cancelled")
+        {
+            return Err(DataError::InvalidResponse(format!(
+                "set chart command reached terminal status {status}"
+            )));
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DataError::Timeout(timeout));
+        }
+
+        let mut progress = false;
+        progress |= session.flush_outbound().await?;
+        progress |= session.drive_pending_once().await?;
+        progress |= session.drive_route_once(Some(deadline)).await?;
+
+        if progress {
+            continue;
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(DataError::Timeout(timeout));
+        }
+
+        tokio::time::sleep(remaining.min(Duration::from_millis(1))).await;
+    }
+}
+
+fn chart_is_ready(reader: &tqsdk_core::RuntimeReader, chart_id: &str) -> Result<bool> {
+    let snapshot = reader.read();
+    let Some(chart) = snapshot
+        .decode_path::<Chart>(&["charts", chart_id])
+        .map_err(contract_error_into_data)?
+    else {
+        return Ok(false);
+    };
+    Ok(chart.ready && !chart.more_data)
+}
+
+fn read_ready_kline_data_series(
     reader: &tqsdk_core::RuntimeReader,
     request: &KlineDataSeriesRequest,
     duration_ns: i64,
@@ -609,12 +798,66 @@ fn try_read_ready_kline_data_series(
     )))
 }
 
+fn read_ready_tick_data_series(
+    reader: &tqsdk_core::RuntimeReader,
+    request: &TickDataSeriesRequest,
+    chart_id: &str,
+) -> Result<Option<TickDataSeries>> {
+    let snapshot = reader.read();
+    let Some(chart) = snapshot
+        .decode_path::<Chart>(&["charts", chart_id])
+        .map_err(contract_error_into_data)?
+    else {
+        return Ok(None);
+    };
+    if !chart.ready || chart.more_data {
+        return Ok(None);
+    }
+
+    let mut ids = snapshot
+        .get_path(&["ticks", request.symbol(), "data"])
+        .and_then(|value| value.as_object())
+        .map(|data| {
+            data.keys()
+                .filter_map(|key| key.parse::<i64>().ok())
+                .filter(|id| chart.left_id <= *id && *id <= chart.right_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ids.sort_unstable();
+    if ids.len() > request.data_length() {
+        ids.drain(0..ids.len() - request.data_length());
+    }
+
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id_key = id.to_string();
+        if let Some(row) = snapshot
+            .decode_path::<Tick>(&["ticks", request.symbol(), "data", id_key.as_str()])
+            .map_err(contract_error_into_data)?
+        {
+            rows.push(row);
+        }
+    }
+
+    Ok(Some(TickDataSeries::new(
+        request.symbol().to_string(),
+        request.data_length(),
+        rows,
+    )))
+}
+
 fn next_kline_series_chart_id(symbol: &str, duration_ns: i64) -> String {
-    let sequence = NEXT_KLINE_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    let sequence = NEXT_HISTORY_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
     format!(
         "data-kline-{}-{duration_ns}-{sequence}",
         sanitize_chart_token(symbol)
     )
+}
+
+fn next_tick_data_series_chart_id(symbol: &str) -> String {
+    let sequence = NEXT_HISTORY_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    format!("data-tick-{}-{sequence}", sanitize_chart_token(symbol))
 }
 
 fn sanitize_chart_token(raw: &str) -> String {
@@ -794,6 +1037,35 @@ mod tests {
     }
 
     #[test]
+    fn await_tick_data_series_returns_ready_rows_within_chart_bounds() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            let client = DataClient::from_session(session.clone());
+            let request = TickDataSeriesRequest::new("SHFE.ao2609", 2)
+                .with_timeout(Duration::from_millis(100));
+
+            let seed_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                seed_ready_tick_chart(&handle, "data-tick-test", "SHFE.ao2609", 200, 201);
+            });
+
+            let series = client
+                .await_tick_data_series(&session, &request, "data-tick-test")
+                .await
+                .unwrap();
+
+            assert_eq!(series.symbol(), "SHFE.ao2609");
+            assert_eq!(series.requested_length(), 2);
+            assert_eq!(series.len(), 2);
+            assert_eq!(series.rows()[0].id, 200);
+            assert_eq!(series.rows()[1].id, 201);
+            assert_eq!(series.last().map(|row| row.last_price), Some(618.5));
+
+            seed_thread.join().unwrap();
+        });
+    }
+
+    #[test]
     fn get_kline_data_series_requires_session_backed_client() {
         run_on_tokio(async {
             let err = DataClient::new()
@@ -815,6 +1087,22 @@ mod tests {
     }
 
     #[test]
+    fn get_tick_data_series_requires_session_backed_client() {
+        run_on_tokio(async {
+            let err = DataClient::new()
+                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 2))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::InvalidState(message)
+                    if message == "get_tick_data_series requires a session-backed data client"
+            ));
+        });
+    }
+
+    #[test]
     fn get_kline_data_series_times_out_without_ready_chart() {
         run_on_tokio(async {
             let (session, _handle) = test_session_and_handle();
@@ -823,6 +1111,26 @@ mod tests {
             let err = client
                 .get_kline_data_series(
                     KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                        .with_timeout(Duration::from_millis(10)),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
+            );
+        });
+    }
+
+    #[test]
+    fn get_tick_data_series_times_out_without_ready_chart() {
+        run_on_tokio(async {
+            let (session, _handle) = test_session_and_handle();
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_tick_data_series(
+                    TickDataSeriesRequest::new("SHFE.ao2609", 2)
                         .with_timeout(Duration::from_millis(10)),
                 )
                 .await
@@ -869,6 +1177,29 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(err, DataError::Validation(message) if message == "duration must be greater than zero")
+            );
+        });
+    }
+
+    #[test]
+    fn get_tick_data_series_rejects_invalid_requests() {
+        run_on_tokio(async {
+            let client = DataClient::new();
+
+            let err = client
+                .get_tick_data_series(TickDataSeriesRequest::new("", 2))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "symbol must not be empty")
+            );
+
+            let err = client
+                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 0))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "data_length must be greater than zero")
             );
         });
     }
@@ -1023,6 +1354,109 @@ mod tests {
             )
             .unwrap()
             .expect("seed ready kline chart should produce a commit");
+    }
+
+    fn seed_ready_tick_chart(
+        handle: &RuntimeHandle,
+        chart_id: &str,
+        symbol: &str,
+        left_id: i64,
+        right_id: i64,
+    ) {
+        handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "charts": {
+                                chart_id: {
+                                    "state": {
+                                        "ins_list": symbol,
+                                        "duration": 0,
+                                    },
+                                    "left_id": left_id,
+                                    "right_id": right_id,
+                                    "more_data": false,
+                                    "ready": true,
+                                }
+                            },
+                            "ticks": {
+                                symbol: {
+                                    "data": {
+                                        "199": {
+                                            "id": 199,
+                                            "datetime": 1_713_659_999_500_000_000_i64,
+                                            "last_price": 617.8,
+                                            "average": 617.9,
+                                            "highest": 618.0,
+                                            "lowest": 617.5,
+                                            "ask_price1": 617.9,
+                                            "ask_volume1": 2,
+                                            "bid_price1": 617.8,
+                                            "bid_volume1": 3,
+                                            "volume": 10,
+                                            "amount": 6178.0,
+                                            "open_interest": 100
+                                        },
+                                        "200": {
+                                            "id": 200,
+                                            "datetime": 1_713_660_000_000_000_000_i64,
+                                            "last_price": 618.0,
+                                            "average": 618.2,
+                                            "highest": 619.0,
+                                            "lowest": 617.5,
+                                            "ask_price1": 618.2,
+                                            "ask_volume1": 4,
+                                            "bid_price1": 618.0,
+                                            "bid_volume1": 5,
+                                            "volume": 12,
+                                            "amount": 7416.0,
+                                            "open_interest": 101
+                                        },
+                                        "201": {
+                                            "id": 201,
+                                            "datetime": 1_713_660_000_500_000_000_i64,
+                                            "last_price": 618.5,
+                                            "average": 618.3,
+                                            "highest": 619.2,
+                                            "lowest": 617.5,
+                                            "ask_price1": 618.6,
+                                            "ask_volume1": 3,
+                                            "bid_price1": 618.4,
+                                            "bid_volume1": 6,
+                                            "volume": 15,
+                                            "amount": 9277.5,
+                                            "open_interest": 102
+                                        },
+                                        "202": {
+                                            "id": 202,
+                                            "datetime": 1_713_660_001_000_000_000_i64,
+                                            "last_price": 619.0,
+                                            "average": 618.5,
+                                            "highest": 619.5,
+                                            "lowest": 617.5,
+                                            "ask_price1": 619.1,
+                                            "ask_volume1": 5,
+                                            "bid_price1": 618.9,
+                                            "bid_volume1": 4,
+                                            "volume": 18,
+                                            "amount": 11142.0,
+                                            "open_interest": 103
+                                        }
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .expect("seed ready tick chart should produce a commit");
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

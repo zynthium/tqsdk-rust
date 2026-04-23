@@ -93,8 +93,11 @@
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `HistoricalContQuotesRow`
 - `get_kline_data_series(KlineDataSeriesRequest)`
+- `get_tick_data_series(TickDataSeriesRequest)`
 - `KlineDataSeries`
 - `KlineDataSeriesRequest`
+- `TickDataSeries`
+- `TickDataSeriesRequest`
 
 当前明确先不做：
 
@@ -153,9 +156,10 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 其中比较关键的一个点是：
 
 - `get_kline_data_series` 已经落在 `tqsdk-data`
+- `get_tick_data_series` 也已经落在 `tqsdk-data`
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
-- 它只是对 `SetChart -> ready chart -> owned rows -> CancelChart` 这条底层 contract 的一次性封装
+- 它们只是对 `SetChart -> ready chart -> owned rows -> CancelChart` 这条底层 contract 的一次性封装
 
 这样做的意义是：
 
@@ -174,6 +178,6 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 `tqsdk-data` 值得独立存在，但当前阶段最合理的动作是：
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
-2. 在此基础上继续保持 `DataClient + get_kline_data_series` 也只是一层 one-shot substrate
+2. 在此基础上继续保持 `DataClient + get_kline_data_series + get_tick_data_series` 也只是一层 one-shot substrate
 3. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface
