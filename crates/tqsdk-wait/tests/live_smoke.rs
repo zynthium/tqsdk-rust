@@ -1,0 +1,64 @@
+use std::time::Duration;
+
+use tqsdk_wait::TqApiBuilder;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and market access"]
+async fn live_quote_wait_smoke() {
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let symbol = read_env("TQ_TEST_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
+
+    let mut api = build_api_for_symbol(auth_user, auth_pass, symbol.as_str())
+        .build()
+        .await
+        .expect("live wait api should build");
+    let quote = api
+        .get_quote(symbol.as_str())
+        .await
+        .expect("get_quote should subscribe successfully");
+
+    for _ in 0..12 {
+        let ready = api
+            .wait_update(Some(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .await
+            .expect("wait_update should not fail");
+        if !ready {
+            continue;
+        }
+        if !api.is_changing(&quote).expect("is_changing should succeed") {
+            continue;
+        }
+
+        let snapshot = quote.load(&api).expect("quote snapshot should decode");
+        assert!(!snapshot.instrument_id.is_empty());
+        assert!(!snapshot.datetime.is_empty());
+        return;
+    }
+
+    panic!("live quote wait smoke did not observe a quote update before timeout");
+}
+
+fn build_api_for_symbol(auth_user: String, auth_pass: String, symbol: &str) -> TqApiBuilder {
+    let builder = TqApiBuilder::new(auth_user, auth_pass);
+    if is_stock_symbol(symbol) {
+        builder.stock_market()
+    } else {
+        builder.futures_market()
+    }
+}
+
+fn is_stock_symbol(symbol: &str) -> bool {
+    symbol.starts_with("SSE.") || symbol.starts_with("SZSE.") || symbol.starts_with("BSE.")
+}
+
+fn read_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}

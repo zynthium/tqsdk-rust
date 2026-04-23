@@ -111,6 +111,12 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 2. `cargo test -p tqsdk-core -q --test runtime_contract_reader_surface --test runtime_contract_surface`
 3. `cargo test -p tqsdk-core -q`
 
+可选的联机 smoke 入口：
+
+1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
+2. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
+3. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
+
 ## V2+ adapter 验收基线
 ### wait adapter
 - 能只靠 `RuntimeReader` / `SnapshotReadGuard` / `UpdateCursor` 实现 `wait_update()`
