@@ -542,6 +542,65 @@ impl SessionClient {
         }))
     }
 
+    /// Drives the substrate until the specified command reaches a completed
+    /// terminal status.
+    ///
+    /// This helper only advances transport/runtime state for the submitted
+    /// command. It does not impose `wait_update()` semantics or consume commit
+    /// cursors on behalf of the caller.
+    pub async fn wait_command_completed(&self, command_id: CommandId) -> crate::error::Result<()> {
+        let started_at = Instant::now();
+        loop {
+            if self.command_completed(command_id)? {
+                return Ok(());
+            }
+
+            let mut progress = false;
+
+            progress |= self.flush_outbound().await?;
+            if self.command_completed(command_id)? {
+                return Ok(());
+            }
+
+            if let Some(route_label) = self.command_route_label(command_id)? {
+                progress |= self
+                    .drive_pending_route_label_once(route_label.as_str())
+                    .await?;
+                if self.command_completed(command_id)? {
+                    return Ok(());
+                }
+
+                let websocket_progress = self
+                    .drive_route_label_once(
+                        route_label.as_str(),
+                        Some(Instant::now() + WEBSOCKET_COMMAND_POLL_BUDGET),
+                        vec![command_id],
+                    )
+                    .await?;
+                progress |= websocket_progress;
+                if !websocket_progress && started_at.elapsed() < WEBSOCKET_COMMAND_MAX_WAIT {
+                    progress = true;
+                }
+            } else {
+                progress |= self.drive_pending_once().await?;
+                if self.command_completed(command_id)? {
+                    return Ok(());
+                }
+
+                progress |= self.drive_route_once(None).await?;
+            }
+            if self.command_completed(command_id)? {
+                return Ok(());
+            }
+
+            if !progress {
+                return Err(crate::error::SessionFacadeError::InvalidState(
+                    "command did not reach a terminal state",
+                ));
+            }
+        }
+    }
+
     fn command_route_label(&self, command_id: CommandId) -> crate::error::Result<Option<String>> {
         Ok(self.command_state(command_id)?.and_then(|command| {
             command
@@ -710,62 +769,6 @@ impl SessionClient {
             ))
     }
 
-    async fn drive_until_command_completed(
-        &self,
-        command_id: CommandId,
-    ) -> crate::error::Result<()> {
-        let started_at = Instant::now();
-        loop {
-            if self.command_completed(command_id)? {
-                return Ok(());
-            }
-
-            let mut progress = false;
-
-            progress |= self.flush_outbound().await?;
-            if self.command_completed(command_id)? {
-                return Ok(());
-            }
-
-            if let Some(route_label) = self.command_route_label(command_id)? {
-                progress |= self
-                    .drive_pending_route_label_once(route_label.as_str())
-                    .await?;
-                if self.command_completed(command_id)? {
-                    return Ok(());
-                }
-
-                let websocket_progress = self
-                    .drive_route_label_once(
-                        route_label.as_str(),
-                        Some(Instant::now() + WEBSOCKET_COMMAND_POLL_BUDGET),
-                        vec![command_id],
-                    )
-                    .await?;
-                progress |= websocket_progress;
-                if !websocket_progress && started_at.elapsed() < WEBSOCKET_COMMAND_MAX_WAIT {
-                    progress = true;
-                }
-            } else {
-                progress |= self.drive_pending_once().await?;
-                if self.command_completed(command_id)? {
-                    return Ok(());
-                }
-
-                progress |= self.drive_route_once(None).await?;
-            }
-            if self.command_completed(command_id)? {
-                return Ok(());
-            }
-
-            if !progress {
-                return Err(crate::error::SessionFacadeError::InvalidState(
-                    "command did not reach a terminal state",
-                ));
-            }
-        }
-    }
-
     async fn flush_outbound_locked(&self, io: &mut SessionIoState) -> crate::error::Result<bool> {
         if io.run.is_none() {
             return Ok(false);
@@ -919,7 +922,7 @@ impl SessionClient {
             }))
             .await?;
 
-        self.drive_until_command_completed(command_id).await?;
+        self.wait_command_completed(command_id).await?;
         let value = self.query_result(query_id.as_str())?.ok_or(
             crate::error::SessionFacadeError::InvalidState(
                 "query command completed without a result payload",
@@ -941,7 +944,7 @@ impl SessionClient {
             }))
             .await?;
 
-        self.drive_until_command_completed(command_id).await?;
+        self.wait_command_completed(command_id).await?;
         self.schema_value(schema_id)?
             .ok_or(crate::error::SessionFacadeError::InvalidState(
                 "schema refresh completed without a schema payload",
@@ -955,7 +958,7 @@ impl SessionClient {
 
     pub async fn refresh_auth_value(&self) -> crate::error::Result<Value> {
         let command_id = self.refresh_auth().await?;
-        self.drive_until_command_completed(command_id).await?;
+        self.wait_command_completed(command_id).await?;
         self.refreshed_auth()?
             .ok_or(crate::error::SessionFacadeError::InvalidState(
                 "auth refresh completed without a refreshed auth payload",
@@ -970,7 +973,7 @@ impl SessionClient {
     pub async fn replay_step_value(&self, replay_id: &str) -> crate::error::Result<Value> {
         self.require_replay_value_route().await?;
         let command_id = self.replay_step().await?;
-        self.drive_until_command_completed(command_id).await?;
+        self.wait_command_completed(command_id).await?;
         self.replay_state(replay_id)?
             .ok_or(crate::error::SessionFacadeError::InvalidState(
                 "replay step completed without a replay state payload",
@@ -985,7 +988,7 @@ impl SessionClient {
     pub async fn replay_reset_value(&self, replay_id: &str) -> crate::error::Result<Value> {
         self.require_replay_value_route().await?;
         let command_id = self.replay_reset().await?;
-        self.drive_until_command_completed(command_id).await?;
+        self.wait_command_completed(command_id).await?;
         self.replay_state(replay_id)?
             .ok_or(crate::error::SessionFacadeError::InvalidState(
                 "replay reset completed without a replay state payload",
@@ -1915,6 +1918,70 @@ mod tests {
         assert_eq!(
             client.progress_once(None).await.unwrap(),
             SessionProgress::Idle
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_command_completed_drives_http_query_command_to_completion() {
+        let handle = runtime_with_default_adapters();
+        let executor: SharedRouteExecutor = Arc::new(
+            RecordingExecutor::default()
+                .with_query_value("query", json!({ "quotes": ["SHFE.au2602"] })),
+        );
+        let client = test_live_client(
+            handle.clone(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "query".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::Http {
+                    url: "https://query.example".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            executor,
+        );
+
+        let command_id = client
+            .submit(RuntimeCommand::Query(QueryCommand::Fetch {
+                query_id: QueryId::new("query-1"),
+                query: "query { quotes }".to_string(),
+                variables: None,
+            }))
+            .await
+            .unwrap();
+
+        client.wait_command_completed(command_id).await.unwrap();
+
+        assert_eq!(
+            client.command_status(command_id).unwrap(),
+            Some("completed".to_string())
+        );
+        assert_eq!(
+            handle.latest_snapshot().get(["query", "query-1", "quotes"]),
+            Some(&json!(["SHFE.au2602"]))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_command_completed_errors_when_command_cannot_reach_terminal_state() {
+        let handle = runtime_with_default_adapters();
+        let client =
+            SessionClient::new_for_test_with_handle(handle.clone(), SessionFacadeConfig::default());
+        let command_id = handle
+            .submit(RuntimeCommand::Query(QueryCommand::Fetch {
+                query_id: QueryId::new("query-1"),
+                query: "query { quotes }".to_string(),
+                variables: None,
+            }))
+            .await
+            .unwrap();
+
+        let error = client.wait_command_completed(command_id).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: command did not reach a terminal state"
         );
     }
 

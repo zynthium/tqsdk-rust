@@ -21,6 +21,7 @@
 - `flush_outbound()`
 - `drive_pending_once()`
 - `drive_route_once()`
+- `wait_command_completed(command_id).await`
 - `command_state()`
 - `command_status()`
 - `auth_context()`
@@ -125,6 +126,7 @@
 - 调用方自带 Tokio runtime
 - 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
 - 直接通过 `SessionClient` 发起一次性 metadata query
+- 如果调用方自己提交了底层 `RuntimeCommand`，可以用 `wait_command_completed(command_id).await` 只等待该命令完成，而不引入更高层 facade 语义
 
 而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
 
