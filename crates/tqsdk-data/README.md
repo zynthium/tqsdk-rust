@@ -18,6 +18,7 @@
 - `get_*_data_page` 是最底层的 chart/history page substrate
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`
 - `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程
+- 当 session 的 auth context 已知但缺少 `tq_dl` 时，history page / series / download 接口会明确拒绝
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 

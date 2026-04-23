@@ -10,6 +10,7 @@ pub type Result<T> = std::result::Result<T, DataError>;
 #[derive(Debug)]
 pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
+    PermissionDenied(String),
     Validation(String),
     InvalidState(&'static str),
     InvalidResponse(String),
@@ -33,6 +34,7 @@ impl Display for DataError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Session(error) => write!(f, "{error}"),
+            Self::PermissionDenied(message) => write!(f, "{message}"),
             Self::Validation(message) => write!(f, "invalid data query input: {message}"),
             Self::InvalidState(message) => write!(f, "invalid data client state: {message}"),
             Self::InvalidResponse(message) => {
@@ -51,7 +53,8 @@ impl std::error::Error for DataError {
         match self {
             Self::Session(error) => Some(error),
             Self::Http(error) => Some(error),
-            Self::Validation(_)
+            Self::PermissionDenied(_)
+            | Self::Validation(_)
             | Self::InvalidState(_)
             | Self::InvalidResponse(_)
             | Self::Timeout(_) => None,

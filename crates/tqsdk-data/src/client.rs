@@ -15,6 +15,7 @@ const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continu
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
 const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
+const HISTORY_DOWNLOAD_PERMISSION_MESSAGE: &str = "history data download requires tq_dl permission; upgrade: https://www.shinnytech.com/tqsdk-buy/";
 
 static NEXT_HISTORY_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -891,6 +892,29 @@ impl DataClient {
         self.session.is_some()
     }
 
+    pub(crate) fn require_history_download_permission(&self) -> Result<()> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let Some(auth_context) = session.auth_context()? else {
+            return Ok(());
+        };
+        let Some(features) = auth_context.get("features").and_then(Value::as_array) else {
+            return Ok(());
+        };
+        if features
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|feature| feature == "tq_dl")
+        {
+            Ok(())
+        } else {
+            Err(DataError::PermissionDenied(
+                HISTORY_DOWNLOAD_PERMISSION_MESSAGE.to_string(),
+            ))
+        }
+    }
+
     pub async fn query_his_cont_quotes(
         &self,
         symbols: &[&str],
@@ -972,6 +996,7 @@ impl DataClient {
         let spec = request.validate()?;
         let session =
             self.require_session("get_kline_data_page requires a session-backed data client")?;
+        self.require_history_download_permission()?;
         let chart_id = next_kline_page_chart_id(request.symbol(), spec.duration_ns);
         let result = self
             .await_kline_data_page(session, &request, spec, chart_id.as_str())
@@ -984,6 +1009,7 @@ impl DataClient {
         let spec = request.validate()?;
         let session =
             self.require_session("get_tick_data_page requires a session-backed data client")?;
+        self.require_history_download_permission()?;
         let chart_id = next_tick_page_chart_id(request.symbol());
         let result = self
             .await_tick_data_page(session, &request, spec, chart_id.as_str())
@@ -998,6 +1024,7 @@ impl DataClient {
     ) -> Result<KlineDataSeries> {
         let spec = request.validate()?;
         self.require_session("get_kline_data_series requires a session-backed data client")?;
+        self.require_history_download_permission()?;
 
         let mut rows = Vec::new();
         let mut last_next_left_kline_id = None;
@@ -1056,6 +1083,7 @@ impl DataClient {
     ) -> Result<TickDataSeries> {
         let spec = request.validate()?;
         self.require_session("get_tick_data_series requires a session-backed data client")?;
+        self.require_history_download_permission()?;
 
         let mut rows = Vec::new();
         let mut last_next_left_id = None;
@@ -1792,6 +1820,30 @@ mod tests {
     }
 
     #[test]
+    fn get_kline_data_page_requires_tq_dl_when_auth_context_is_known() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            seed_auth_features(&handle, &["query"]);
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_kline_data_page(KlineDataPageRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    2,
+                ))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::PermissionDenied(message)
+                    if message.contains("tq_dl permission")
+            ));
+        });
+    }
+
+    #[test]
     fn get_kline_data_page_times_out_without_ready_chart() {
         run_on_tokio(async {
             let (session, _handle) = test_session_and_handle();
@@ -2068,6 +2120,53 @@ mod tests {
                     if message == "get_tick_data_series requires a session-backed data client"
             ));
         });
+    }
+
+    #[test]
+    fn get_kline_data_series_requires_tq_dl_when_auth_context_is_known() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            seed_auth_features(&handle, &["query"]);
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    0,
+                    10,
+                ))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::PermissionDenied(message)
+                    if message.contains("tq_dl permission")
+            ));
+        });
+    }
+
+    #[test]
+    fn kline_data_download_requires_tq_dl_when_auth_context_is_known() {
+        let (session, handle) = test_session_and_handle();
+        seed_auth_features(&handle, &["query"]);
+        let client = DataClient::from_session(session);
+
+        let err = client
+            .kline_data_download(KlineDataSeriesRequest::new(
+                "SHFE.ao2609",
+                Duration::from_secs(60),
+                0,
+                10,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            DataError::PermissionDenied(message)
+                if message.contains("tq_dl permission")
+        ));
     }
 
     #[test]
@@ -2413,6 +2512,30 @@ mod tests {
             )
             .unwrap()
             .expect("seed ready tick chart should produce a commit");
+    }
+
+    fn seed_auth_features(handle: &RuntimeHandle, features: &[&str]) {
+        handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "system".to_string(),
+                    domains: vec![ProtocolDomain::System],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "auth": {
+                                "context": {
+                                    "features": features,
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .expect("seed auth features should produce a commit");
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

@@ -600,6 +600,7 @@ impl DataClient {
                 "kline_data_download requires a session-backed data client",
             ));
         }
+        self.require_history_download_permission()?;
         Ok(KlineDataDownload { inner })
     }
 
@@ -616,6 +617,7 @@ impl DataClient {
                 "tick_data_download requires a session-backed data client",
             ));
         }
+        self.require_history_download_permission()?;
         Ok(TickDataDownload { inner })
     }
 }

@@ -184,6 +184,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 - `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
+- 当 session auth context 已知且不含 `tq_dl` 时，history 相关入口会在 facade 层尽早拒绝
 
 这样做的意义是：
 
