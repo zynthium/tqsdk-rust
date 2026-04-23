@@ -62,6 +62,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 
 - V1 core 已独立为子 crate，可单独发布。
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
+- `tqsdk-session` 现已提供 `progress_once()` 这个最小 session 推进原语，并用真实联机示例验证了纯 substrate 的行情订阅与 `TqKq` trade 登录路径。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`；后续重点转向 notification/transport-error 级 trade session 事件流。
 - `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、ownership / guarded order / execution report。
@@ -74,6 +75,8 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `crates/tqsdk-core/examples/live_probe.rs`
 - `crates/tqsdk-core/examples/live_market_history.rs`
 - `crates/tqsdk-session/examples/query_symbol_info.rs`
+- `crates/tqsdk-session/examples/quote_progress.rs`
+- `crates/tqsdk-session/examples/trade_login_tqkq.rs`
 - `crates/tqsdk-wait/examples/quote_wait.rs`
 - `crates/tqsdk-wait/examples/quote_wait_with_session_query.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
