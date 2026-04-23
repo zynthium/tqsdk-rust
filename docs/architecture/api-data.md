@@ -59,6 +59,8 @@
 
 如果把下面这些能力继续塞进去：
 
+- `get_kline_data_page`
+- `get_tick_data_page`
 - `get_kline_data_series`
 - `get_tick_data_series`
 - `query_his_cont_quotes`
@@ -92,8 +94,14 @@
 - `DataClient::from_session(...)`
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `HistoricalContQuotesRow`
+- `get_kline_data_page(KlineDataPageRequest)`
+- `get_tick_data_page(TickDataPageRequest)`
 - `get_kline_data_series(KlineDataSeriesRequest)`
 - `get_tick_data_series(TickDataSeriesRequest)`
+- `KlineDataPage`
+- `KlineDataPageRequest`
+- `TickDataPage`
+- `TickDataPageRequest`
 - `KlineDataSeries`
 - `KlineDataSeriesRequest`
 - `TickDataSeries`
@@ -116,6 +124,9 @@
    - 复用 `tqsdk-session` 的 one-shot query
    - 复用 `tqsdk-core` 的 market history/chart contract
 2. batch fetch surface
+   - `get_kline_data_page`
+   - `get_tick_data_page`
+   - `get_kline_data_series`
    - `get_tick_data_series`
    - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
@@ -155,16 +166,19 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 其中比较关键的一个点是：
 
+- `get_kline_data_page` / `get_tick_data_page` 已经落在 `tqsdk-data`
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
-- 它们只是对 `SetChart -> ready chart -> owned rows -> CancelChart` 这条底层 contract 的一次性封装
+- `data_page` 是对底层 chart/history contract 的显式单页封装
+- `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 
 这样做的意义是：
 
 - 不把研究/批量历史接口继续塞进 `tqsdk-session`
 - 不把历史数据读取和 `wait_update()` / stream 模式耦合在一起
+- 给 downloader 预留稳定的 `page -> series -> downloader` 递进路径
 - 后续可以在 `tqsdk-data` 上继续叠加 downloader、tabular adapters、缓存与导出，而不污染 core/session/live facade 的边界
 
 这样做的收益是：
@@ -178,6 +192,6 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 `tqsdk-data` 值得独立存在，但当前阶段最合理的动作是：
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
-2. 在此基础上继续保持 `DataClient + get_kline_data_series + get_tick_data_series` 也只是一层 one-shot substrate
+2. 在此基础上继续保持 `DataClient + data_page + data_series` 也只是 one-shot substrate
 3. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface

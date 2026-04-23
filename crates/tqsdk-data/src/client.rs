@@ -12,9 +12,11 @@ use crate::error::{DataError, Result};
 
 const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_holiday.json";
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
-const DEFAULT_KLINE_DATA_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
+const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
 
-static NEXT_HISTORY_SERIES_CHART_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_HISTORY_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct DataServiceEndpoints {
@@ -44,31 +46,47 @@ pub struct HistoricalContQuotesRow {
     pub underlyings: BTreeMap<String, String>,
 }
 
-/// Request for a one-shot owned kline history window.
+/// Request for a one-shot owned kline history page backed by the market chart contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KlineDataSeriesRequest {
+pub struct KlineDataPageRequest {
     symbol: String,
     duration: Duration,
-    data_length: usize,
+    view_width: usize,
     left_kline_id: Option<i64>,
+    focus_datetime_ns: Option<i64>,
+    focus_position: Option<usize>,
     timeout: Duration,
 }
 
-impl KlineDataSeriesRequest {
+impl KlineDataPageRequest {
     #[must_use]
-    pub fn new(symbol: impl Into<String>, duration: Duration, data_length: usize) -> Self {
+    pub fn new(symbol: impl Into<String>, duration: Duration, view_width: usize) -> Self {
         Self {
             symbol: symbol.into(),
             duration,
-            data_length,
+            view_width,
             left_kline_id: None,
-            timeout: DEFAULT_KLINE_DATA_TIMEOUT,
+            focus_datetime_ns: None,
+            focus_position: None,
+            timeout: DEFAULT_HISTORY_REQUEST_TIMEOUT,
         }
     }
 
     #[must_use]
     pub fn with_left_kline_id(mut self, left_kline_id: i64) -> Self {
         self.left_kline_id = Some(left_kline_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_focus_datetime_ns(mut self, focus_datetime_ns: i64) -> Self {
+        self.focus_datetime_ns = Some(focus_datetime_ns);
+        self
+    }
+
+    #[must_use]
+    pub fn with_focus_position(mut self, focus_position: usize) -> Self {
+        self.focus_position = Some(focus_position);
         self
     }
 
@@ -89,8 +107,8 @@ impl KlineDataSeriesRequest {
     }
 
     #[must_use]
-    pub fn data_length(&self) -> usize {
-        self.data_length
+    pub fn view_width(&self) -> usize {
+        self.view_width
     }
 
     #[must_use]
@@ -99,19 +117,41 @@ impl KlineDataSeriesRequest {
     }
 
     #[must_use]
+    pub fn focus_datetime_ns(&self) -> Option<i64> {
+        self.focus_datetime_ns
+    }
+
+    #[must_use]
+    pub fn focus_position(&self) -> Option<usize> {
+        self.focus_position
+    }
+
+    #[must_use]
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
 
-    fn validate(&self) -> Result<i64> {
+    fn validate(&self) -> Result<KlineDataPageSpec> {
         if self.symbol.is_empty() {
             return Err(DataError::Validation(
                 "symbol must not be empty".to_string(),
             ));
         }
-        if self.data_length == 0 {
+        if self.left_kline_id.is_some() && self.focus_datetime_ns.is_some() {
             return Err(DataError::Validation(
-                "data_length must be greater than zero".to_string(),
+                "left_kline_id and focus_datetime_ns cannot both be set".to_string(),
+            ));
+        }
+        if self.focus_position.is_some() && self.focus_datetime_ns.is_none() {
+            return Err(DataError::Validation(
+                "focus_position requires focus_datetime_ns".to_string(),
+            ));
+        }
+        if let Some(left_kline_id) = self.left_kline_id
+            && left_kline_id < 0
+        {
+            return Err(DataError::Validation(
+                "left_kline_id must be greater than or equal to zero".to_string(),
             ));
         }
         let duration_ns = i64::try_from(self.duration.as_nanos()).map_err(|_| {
@@ -122,33 +162,39 @@ impl KlineDataSeriesRequest {
                 "duration must be greater than zero".to_string(),
             ));
         }
-        Ok(duration_ns)
+        Ok(KlineDataPageSpec {
+            duration_ns,
+            view_width: normalize_history_view_width(self.view_width)?,
+        })
     }
 }
 
-/// Owned result of a one-shot kline history request.
+/// Owned result of a one-shot kline history page.
 #[derive(Debug, Clone, Default)]
-pub struct KlineDataSeries {
+pub struct KlineDataPage {
     symbol: String,
     duration_ns: i64,
-    requested_length: usize,
-    left_kline_id: Option<i64>,
+    view_width: usize,
+    chart_left_id: i64,
+    chart_right_id: i64,
     rows: Vec<Kline>,
 }
 
-impl KlineDataSeries {
+impl KlineDataPage {
     fn new(
         symbol: String,
         duration_ns: i64,
-        requested_length: usize,
-        left_kline_id: Option<i64>,
+        view_width: usize,
+        chart_left_id: i64,
+        chart_right_id: i64,
         rows: Vec<Kline>,
     ) -> Self {
         Self {
             symbol,
             duration_ns,
-            requested_length,
-            left_kline_id,
+            view_width,
+            chart_left_id,
+            chart_right_id,
             rows,
         }
     }
@@ -164,13 +210,27 @@ impl KlineDataSeries {
     }
 
     #[must_use]
-    pub fn requested_length(&self) -> usize {
-        self.requested_length
+    pub fn view_width(&self) -> usize {
+        self.view_width
     }
 
     #[must_use]
-    pub fn left_kline_id(&self) -> Option<i64> {
-        self.left_kline_id
+    pub fn chart_left_id(&self) -> i64 {
+        self.chart_left_id
+    }
+
+    #[must_use]
+    pub fn chart_right_id(&self) -> i64 {
+        self.chart_right_id
+    }
+
+    #[must_use]
+    pub fn next_left_kline_id(&self) -> Option<i64> {
+        if self.chart_right_id < 0 {
+            None
+        } else {
+            self.chart_right_id.checked_add(1)
+        }
     }
 
     #[must_use]
@@ -208,22 +268,46 @@ impl KlineDataSeries {
     }
 }
 
-/// Request for a one-shot owned tick history window.
+/// Request for a one-shot owned tick history page backed by the market chart contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TickDataSeriesRequest {
+pub struct TickDataPageRequest {
     symbol: String,
-    data_length: usize,
+    view_width: usize,
+    left_id: Option<i64>,
+    focus_datetime_ns: Option<i64>,
+    focus_position: Option<usize>,
     timeout: Duration,
 }
 
-impl TickDataSeriesRequest {
+impl TickDataPageRequest {
     #[must_use]
-    pub fn new(symbol: impl Into<String>, data_length: usize) -> Self {
+    pub fn new(symbol: impl Into<String>, view_width: usize) -> Self {
         Self {
             symbol: symbol.into(),
-            data_length,
-            timeout: DEFAULT_KLINE_DATA_TIMEOUT,
+            view_width,
+            left_id: None,
+            focus_datetime_ns: None,
+            focus_position: None,
+            timeout: DEFAULT_HISTORY_REQUEST_TIMEOUT,
         }
+    }
+
+    #[must_use]
+    pub fn with_left_id(mut self, left_id: i64) -> Self {
+        self.left_id = Some(left_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_focus_datetime_ns(mut self, focus_datetime_ns: i64) -> Self {
+        self.focus_datetime_ns = Some(focus_datetime_ns);
+        self
+    }
+
+    #[must_use]
+    pub fn with_focus_position(mut self, focus_position: usize) -> Self {
+        self.focus_position = Some(focus_position);
+        self
     }
 
     #[must_use]
@@ -238,8 +322,23 @@ impl TickDataSeriesRequest {
     }
 
     #[must_use]
-    pub fn data_length(&self) -> usize {
-        self.data_length
+    pub fn view_width(&self) -> usize {
+        self.view_width
+    }
+
+    #[must_use]
+    pub fn left_id(&self) -> Option<i64> {
+        self.left_id
+    }
+
+    #[must_use]
+    pub fn focus_datetime_ns(&self) -> Option<i64> {
+        self.focus_datetime_ns
+    }
+
+    #[must_use]
+    pub fn focus_position(&self) -> Option<usize> {
+        self.focus_position
     }
 
     #[must_use]
@@ -247,34 +346,58 @@ impl TickDataSeriesRequest {
         self.timeout
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<TickDataPageSpec> {
         if self.symbol.is_empty() {
             return Err(DataError::Validation(
                 "symbol must not be empty".to_string(),
             ));
         }
-        if self.data_length == 0 {
+        if self.left_id.is_some() && self.focus_datetime_ns.is_some() {
             return Err(DataError::Validation(
-                "data_length must be greater than zero".to_string(),
+                "left_id and focus_datetime_ns cannot both be set".to_string(),
             ));
         }
-        Ok(())
+        if self.focus_position.is_some() && self.focus_datetime_ns.is_none() {
+            return Err(DataError::Validation(
+                "focus_position requires focus_datetime_ns".to_string(),
+            ));
+        }
+        if let Some(left_id) = self.left_id
+            && left_id < 0
+        {
+            return Err(DataError::Validation(
+                "left_id must be greater than or equal to zero".to_string(),
+            ));
+        }
+        Ok(TickDataPageSpec {
+            view_width: normalize_history_view_width(self.view_width)?,
+        })
     }
 }
 
-/// Owned result of a one-shot tick history request.
+/// Owned result of a one-shot tick history page.
 #[derive(Debug, Clone, Default)]
-pub struct TickDataSeries {
+pub struct TickDataPage {
     symbol: String,
-    requested_length: usize,
+    view_width: usize,
+    chart_left_id: i64,
+    chart_right_id: i64,
     rows: Vec<Tick>,
 }
 
-impl TickDataSeries {
-    fn new(symbol: String, requested_length: usize, rows: Vec<Tick>) -> Self {
+impl TickDataPage {
+    fn new(
+        symbol: String,
+        view_width: usize,
+        chart_left_id: i64,
+        chart_right_id: i64,
+        rows: Vec<Tick>,
+    ) -> Self {
         Self {
             symbol,
-            requested_length,
+            view_width,
+            chart_left_id,
+            chart_right_id,
             rows,
         }
     }
@@ -285,8 +408,27 @@ impl TickDataSeries {
     }
 
     #[must_use]
-    pub fn requested_length(&self) -> usize {
-        self.requested_length
+    pub fn view_width(&self) -> usize {
+        self.view_width
+    }
+
+    #[must_use]
+    pub fn chart_left_id(&self) -> i64 {
+        self.chart_left_id
+    }
+
+    #[must_use]
+    pub fn chart_right_id(&self) -> i64 {
+        self.chart_right_id
+    }
+
+    #[must_use]
+    pub fn next_left_id(&self) -> Option<i64> {
+        if self.chart_right_id < 0 {
+            None
+        } else {
+            self.chart_right_id.checked_add(1)
+        }
     }
 
     #[must_use]
@@ -322,6 +464,360 @@ impl TickDataSeries {
     pub fn into_rows(self) -> Vec<Tick> {
         self.rows
     }
+}
+
+/// Request for a one-shot owned kline history series in `[start_datetime_ns, end_datetime_ns)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KlineDataSeriesRequest {
+    symbol: String,
+    duration: Duration,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    page_view_width: usize,
+    timeout: Duration,
+}
+
+impl KlineDataSeriesRequest {
+    #[must_use]
+    pub fn new(
+        symbol: impl Into<String>,
+        duration: Duration,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            duration,
+            start_datetime_ns,
+            end_datetime_ns,
+            page_view_width: DEFAULT_HISTORY_PAGE_VIEW_WIDTH,
+            timeout: DEFAULT_HISTORY_REQUEST_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_page_view_width(mut self, page_view_width: usize) -> Self {
+        self.page_view_width = page_view_width;
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    #[must_use]
+    pub fn start_datetime_ns(&self) -> i64 {
+        self.start_datetime_ns
+    }
+
+    #[must_use]
+    pub fn end_datetime_ns(&self) -> i64 {
+        self.end_datetime_ns
+    }
+
+    #[must_use]
+    pub fn page_view_width(&self) -> usize {
+        self.page_view_width
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn validate(&self) -> Result<KlineDataSeriesSpec> {
+        if self.symbol.is_empty() {
+            return Err(DataError::Validation(
+                "symbol must not be empty".to_string(),
+            ));
+        }
+        let duration_ns = i64::try_from(self.duration.as_nanos()).map_err(|_| {
+            DataError::Validation("duration is too large to encode as i64 nanoseconds".to_string())
+        })?;
+        if duration_ns <= 0 {
+            return Err(DataError::Validation(
+                "duration must be greater than zero".to_string(),
+            ));
+        }
+        if self.end_datetime_ns <= self.start_datetime_ns {
+            return Err(DataError::Validation(
+                "end_datetime_ns must be greater than start_datetime_ns".to_string(),
+            ));
+        }
+        Ok(KlineDataSeriesSpec {
+            duration_ns,
+            start_datetime_ns: self.start_datetime_ns,
+            end_datetime_ns: self.end_datetime_ns,
+            page_view_width: normalize_history_view_width(self.page_view_width)?,
+        })
+    }
+}
+
+/// Owned result of a one-shot kline history series.
+#[derive(Debug, Clone, Default)]
+pub struct KlineDataSeries {
+    symbol: String,
+    duration_ns: i64,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    rows: Vec<Kline>,
+}
+
+impl KlineDataSeries {
+    fn new(
+        symbol: String,
+        duration_ns: i64,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+        rows: Vec<Kline>,
+    ) -> Self {
+        Self {
+            symbol,
+            duration_ns,
+            start_datetime_ns,
+            end_datetime_ns,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn duration_ns(&self) -> i64 {
+        self.duration_ns
+    }
+
+    #[must_use]
+    pub fn start_datetime_ns(&self) -> i64 {
+        self.start_datetime_ns
+    }
+
+    #[must_use]
+    pub fn end_datetime_ns(&self) -> i64 {
+        self.end_datetime_ns
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&Kline> {
+        self.rows.last()
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Kline> {
+        self.rows.get(index)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Kline> + DoubleEndedIterator {
+        self.rows.iter()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Kline] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Kline> {
+        self.rows
+    }
+}
+
+/// Request for a one-shot owned tick history series in `[start_datetime_ns, end_datetime_ns)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickDataSeriesRequest {
+    symbol: String,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    page_view_width: usize,
+    timeout: Duration,
+}
+
+impl TickDataSeriesRequest {
+    #[must_use]
+    pub fn new(symbol: impl Into<String>, start_datetime_ns: i64, end_datetime_ns: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            start_datetime_ns,
+            end_datetime_ns,
+            page_view_width: DEFAULT_HISTORY_PAGE_VIEW_WIDTH,
+            timeout: DEFAULT_HISTORY_REQUEST_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_page_view_width(mut self, page_view_width: usize) -> Self {
+        self.page_view_width = page_view_width;
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn start_datetime_ns(&self) -> i64 {
+        self.start_datetime_ns
+    }
+
+    #[must_use]
+    pub fn end_datetime_ns(&self) -> i64 {
+        self.end_datetime_ns
+    }
+
+    #[must_use]
+    pub fn page_view_width(&self) -> usize {
+        self.page_view_width
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn validate(&self) -> Result<TickDataSeriesSpec> {
+        if self.symbol.is_empty() {
+            return Err(DataError::Validation(
+                "symbol must not be empty".to_string(),
+            ));
+        }
+        if self.end_datetime_ns <= self.start_datetime_ns {
+            return Err(DataError::Validation(
+                "end_datetime_ns must be greater than start_datetime_ns".to_string(),
+            ));
+        }
+        Ok(TickDataSeriesSpec {
+            start_datetime_ns: self.start_datetime_ns,
+            end_datetime_ns: self.end_datetime_ns,
+            page_view_width: normalize_history_view_width(self.page_view_width)?,
+        })
+    }
+}
+
+/// Owned result of a one-shot tick history series.
+#[derive(Debug, Clone, Default)]
+pub struct TickDataSeries {
+    symbol: String,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    rows: Vec<Tick>,
+}
+
+impl TickDataSeries {
+    fn new(symbol: String, start_datetime_ns: i64, end_datetime_ns: i64, rows: Vec<Tick>) -> Self {
+        Self {
+            symbol,
+            start_datetime_ns,
+            end_datetime_ns,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn start_datetime_ns(&self) -> i64 {
+        self.start_datetime_ns
+    }
+
+    #[must_use]
+    pub fn end_datetime_ns(&self) -> i64 {
+        self.end_datetime_ns
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&Tick> {
+        self.rows.last()
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Tick> {
+        self.rows.get(index)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Tick> + DoubleEndedIterator {
+        self.rows.iter()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Tick] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Tick> {
+        self.rows
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KlineDataPageSpec {
+    duration_ns: i64,
+    view_width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TickDataPageSpec {
+    view_width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KlineDataSeriesSpec {
+    duration_ns: i64,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    page_view_width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TickDataSeriesSpec {
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    page_view_width: usize,
 }
 
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
@@ -382,6 +878,12 @@ impl DataClient {
     #[must_use]
     pub fn into_session(self) -> Option<tqsdk_session::SessionClient> {
         self.session
+    }
+
+    fn require_session(&self, message: &'static str) -> Result<&tqsdk_session::SessionClient> {
+        self.session
+            .as_ref()
+            .ok_or(DataError::InvalidState(message))
     }
 
     pub async fn query_his_cont_quotes(
@@ -458,107 +960,199 @@ impl DataClient {
         Ok(rows)
     }
 
+    pub async fn get_kline_data_page(
+        &self,
+        request: KlineDataPageRequest,
+    ) -> Result<KlineDataPage> {
+        let spec = request.validate()?;
+        let session =
+            self.require_session("get_kline_data_page requires a session-backed data client")?;
+        let chart_id = next_kline_page_chart_id(request.symbol(), spec.duration_ns);
+        let result = self
+            .await_kline_data_page(session, &request, spec, chart_id.as_str())
+            .await;
+        cancel_chart_best_effort(session, chart_id).await;
+        result
+    }
+
+    pub async fn get_tick_data_page(&self, request: TickDataPageRequest) -> Result<TickDataPage> {
+        let spec = request.validate()?;
+        let session =
+            self.require_session("get_tick_data_page requires a session-backed data client")?;
+        let chart_id = next_tick_page_chart_id(request.symbol());
+        let result = self
+            .await_tick_data_page(session, &request, spec, chart_id.as_str())
+            .await;
+        cancel_chart_best_effort(session, chart_id).await;
+        result
+    }
+
     pub async fn get_kline_data_series(
         &self,
         request: KlineDataSeriesRequest,
     ) -> Result<KlineDataSeries> {
-        let duration_ns = request.validate()?;
-        let Some(session) = self.session.as_ref() else {
-            return Err(DataError::InvalidState(
-                "get_kline_data_series requires a session-backed data client",
-            ));
-        };
+        let spec = request.validate()?;
+        self.require_session("get_kline_data_series requires a session-backed data client")?;
 
-        let chart_id = next_kline_series_chart_id(request.symbol(), duration_ns);
-        let result = self
-            .await_kline_data_series(session, &request, duration_ns, chart_id.as_str())
-            .await;
+        let mut rows = Vec::new();
+        let mut last_next_left_kline_id = None;
+        let mut next_left_kline_id = None;
+        let mut use_focus = true;
 
-        let _ = session
-            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
-                chart_id,
-            }))
-            .await;
+        loop {
+            let mut page_request = KlineDataPageRequest::new(
+                request.symbol(),
+                request.duration(),
+                spec.page_view_width,
+            )
+            .with_timeout(request.timeout());
+            if use_focus {
+                page_request = page_request
+                    .with_focus_datetime_ns(spec.start_datetime_ns)
+                    .with_focus_position(0);
+            } else if let Some(left_kline_id) = next_left_kline_id {
+                page_request = page_request.with_left_kline_id(left_kline_id);
+            }
 
-        result
+            let page = self.get_kline_data_page(page_request).await?;
+            let page_len = page.len();
+            let Some(new_next_left_kline_id) = extend_kline_rows_in_window(
+                &mut rows,
+                page.into_rows(),
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+            ) else {
+                break;
+            };
+
+            if last_next_left_kline_id == Some(new_next_left_kline_id)
+                || page_len < spec.page_view_width
+            {
+                break;
+            }
+
+            last_next_left_kline_id = Some(new_next_left_kline_id);
+            next_left_kline_id = Some(new_next_left_kline_id);
+            use_focus = false;
+        }
+
+        Ok(KlineDataSeries::new(
+            request.symbol().to_string(),
+            spec.duration_ns,
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+            dedup_sort_klines_by_id(rows),
+        ))
     }
 
     pub async fn get_tick_data_series(
         &self,
         request: TickDataSeriesRequest,
     ) -> Result<TickDataSeries> {
-        request.validate()?;
-        let Some(session) = self.session.as_ref() else {
-            return Err(DataError::InvalidState(
-                "get_tick_data_series requires a session-backed data client",
-            ));
-        };
+        let spec = request.validate()?;
+        self.require_session("get_tick_data_series requires a session-backed data client")?;
 
-        let chart_id = next_tick_data_series_chart_id(request.symbol());
-        let result = self
-            .await_tick_data_series(session, &request, chart_id.as_str())
-            .await;
+        let mut rows = Vec::new();
+        let mut last_next_left_id = None;
+        let mut next_left_id = None;
+        let mut use_focus = true;
 
-        let _ = session
-            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
-                chart_id,
-            }))
-            .await;
+        loop {
+            let mut page_request = TickDataPageRequest::new(request.symbol(), spec.page_view_width)
+                .with_timeout(request.timeout());
+            if use_focus {
+                page_request = page_request
+                    .with_focus_datetime_ns(spec.start_datetime_ns)
+                    .with_focus_position(0);
+            } else if let Some(left_id) = next_left_id {
+                page_request = page_request.with_left_id(left_id);
+            }
 
-        result
+            let page = self.get_tick_data_page(page_request).await?;
+            let page_len = page.len();
+            let Some(new_next_left_id) = extend_tick_rows_in_window(
+                &mut rows,
+                page.into_rows(),
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+            ) else {
+                break;
+            };
+
+            if last_next_left_id == Some(new_next_left_id) || page_len < spec.page_view_width {
+                break;
+            }
+
+            last_next_left_id = Some(new_next_left_id);
+            next_left_id = Some(new_next_left_id);
+            use_focus = false;
+        }
+
+        Ok(TickDataSeries::new(
+            request.symbol().to_string(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+            dedup_sort_ticks_by_id(rows),
+        ))
     }
 
-    async fn await_kline_data_series(
+    async fn await_kline_data_page(
         &self,
         session: &tqsdk_session::SessionClient,
-        request: &KlineDataSeriesRequest,
-        duration_ns: i64,
+        request: &KlineDataPageRequest,
+        spec: KlineDataPageSpec,
         chart_id: &str,
-    ) -> Result<KlineDataSeries> {
+    ) -> Result<KlineDataPage> {
         let command_id = session
             .submit(RuntimeCommand::Market(MarketCommand::SetChart(
                 MarketChartCommand {
                     chart_id: chart_id.to_string(),
                     symbols: vec![Symbol::new(request.symbol())],
-                    duration_ns,
-                    view_width: request.data_length(),
+                    duration_ns: spec.duration_ns,
+                    view_width: spec.view_width,
                     left_kline_id: request.left_kline_id(),
-                    focus_datetime_ns: None,
-                    focus_position: None,
+                    focus_datetime_ns: request.focus_datetime_ns(),
+                    focus_position: request.focus_position(),
                 },
             )))
             .await?;
         let reader = session.reader_clone();
         wait_for_ready_chart(session, &reader, chart_id, command_id, request.timeout()).await?;
-        read_ready_kline_data_series(&reader, request, duration_ns, chart_id)?.ok_or_else(|| {
-            DataError::InvalidResponse("ready kline chart snapshot missing".to_string())
-        })
+        read_ready_kline_data_page(
+            &reader,
+            request.symbol(),
+            spec.duration_ns,
+            spec.view_width,
+            chart_id,
+        )?
+        .ok_or_else(|| DataError::InvalidResponse("ready kline chart snapshot missing".to_string()))
     }
 
-    async fn await_tick_data_series(
+    async fn await_tick_data_page(
         &self,
         session: &tqsdk_session::SessionClient,
-        request: &TickDataSeriesRequest,
+        request: &TickDataPageRequest,
+        spec: TickDataPageSpec,
         chart_id: &str,
-    ) -> Result<TickDataSeries> {
+    ) -> Result<TickDataPage> {
         let command_id = session
             .submit(RuntimeCommand::Market(MarketCommand::SetChart(
                 MarketChartCommand {
                     chart_id: chart_id.to_string(),
                     symbols: vec![Symbol::new(request.symbol())],
                     duration_ns: 0,
-                    view_width: request.data_length(),
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
+                    view_width: spec.view_width,
+                    left_kline_id: request.left_id(),
+                    focus_datetime_ns: request.focus_datetime_ns(),
+                    focus_position: request.focus_position(),
                 },
             )))
             .await?;
         let reader = session.reader_clone();
         wait_for_ready_chart(session, &reader, chart_id, command_id, request.timeout()).await?;
-        read_ready_tick_data_series(&reader, request, chart_id)?.ok_or_else(|| {
-            DataError::InvalidResponse("ready tick chart snapshot missing".to_string())
-        })
+        read_ready_tick_data_page(&reader, request.symbol(), spec.view_width, chart_id)?.ok_or_else(
+            || DataError::InvalidResponse("ready tick chart snapshot missing".to_string()),
+        )
     }
 
     async fn trading_days(
@@ -738,12 +1332,13 @@ fn chart_is_ready(reader: &tqsdk_core::RuntimeReader, chart_id: &str) -> Result<
     Ok(chart.ready && !chart.more_data)
 }
 
-fn read_ready_kline_data_series(
+fn read_ready_kline_data_page(
     reader: &tqsdk_core::RuntimeReader,
-    request: &KlineDataSeriesRequest,
+    symbol: &str,
     duration_ns: i64,
+    view_width: usize,
     chart_id: &str,
-) -> Result<Option<KlineDataSeries>> {
+) -> Result<Option<KlineDataPage>> {
     let snapshot = reader.read();
     let Some(chart) = snapshot
         .decode_path::<Chart>(&["charts", chart_id])
@@ -756,7 +1351,7 @@ fn read_ready_kline_data_series(
     }
 
     let duration_key = duration_ns.to_string();
-    let data_path = ["klines", request.symbol(), duration_key.as_str(), "data"];
+    let data_path = ["klines", symbol, duration_key.as_str(), "data"];
     let mut ids = snapshot
         .get_path(&data_path)
         .and_then(|value| value.as_object())
@@ -768,8 +1363,8 @@ fn read_ready_kline_data_series(
         })
         .unwrap_or_default();
     ids.sort_unstable();
-    if ids.len() > request.data_length() {
-        ids.drain(0..ids.len() - request.data_length());
+    if ids.len() > view_width {
+        ids.drain(0..ids.len() - view_width);
     }
 
     let mut rows = Vec::with_capacity(ids.len());
@@ -778,7 +1373,7 @@ fn read_ready_kline_data_series(
         if let Some(row) = snapshot
             .decode_path::<Kline>(&[
                 "klines",
-                request.symbol(),
+                symbol,
                 duration_key.as_str(),
                 "data",
                 id_key.as_str(),
@@ -789,20 +1384,22 @@ fn read_ready_kline_data_series(
         }
     }
 
-    Ok(Some(KlineDataSeries::new(
-        request.symbol().to_string(),
+    Ok(Some(KlineDataPage::new(
+        symbol.to_string(),
         duration_ns,
-        request.data_length(),
-        request.left_kline_id(),
+        view_width,
+        chart.left_id,
+        chart.right_id,
         rows,
     )))
 }
 
-fn read_ready_tick_data_series(
+fn read_ready_tick_data_page(
     reader: &tqsdk_core::RuntimeReader,
-    request: &TickDataSeriesRequest,
+    symbol: &str,
+    view_width: usize,
     chart_id: &str,
-) -> Result<Option<TickDataSeries>> {
+) -> Result<Option<TickDataPage>> {
     let snapshot = reader.read();
     let Some(chart) = snapshot
         .decode_path::<Chart>(&["charts", chart_id])
@@ -815,7 +1412,7 @@ fn read_ready_tick_data_series(
     }
 
     let mut ids = snapshot
-        .get_path(&["ticks", request.symbol(), "data"])
+        .get_path(&["ticks", symbol, "data"])
         .and_then(|value| value.as_object())
         .map(|data| {
             data.keys()
@@ -825,39 +1422,112 @@ fn read_ready_tick_data_series(
         })
         .unwrap_or_default();
     ids.sort_unstable();
-    if ids.len() > request.data_length() {
-        ids.drain(0..ids.len() - request.data_length());
+    if ids.len() > view_width {
+        ids.drain(0..ids.len() - view_width);
     }
 
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
         let id_key = id.to_string();
         if let Some(row) = snapshot
-            .decode_path::<Tick>(&["ticks", request.symbol(), "data", id_key.as_str()])
+            .decode_path::<Tick>(&["ticks", symbol, "data", id_key.as_str()])
             .map_err(contract_error_into_data)?
         {
             rows.push(row);
         }
     }
 
-    Ok(Some(TickDataSeries::new(
-        request.symbol().to_string(),
-        request.data_length(),
+    Ok(Some(TickDataPage::new(
+        symbol.to_string(),
+        view_width,
+        chart.left_id,
+        chart.right_id,
         rows,
     )))
 }
 
-fn next_kline_series_chart_id(symbol: &str, duration_ns: i64) -> String {
-    let sequence = NEXT_HISTORY_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
+fn next_kline_page_chart_id(symbol: &str, duration_ns: i64) -> String {
+    let sequence = NEXT_HISTORY_CHART_ID.fetch_add(1, Ordering::Relaxed);
     format!(
-        "data-kline-{}-{duration_ns}-{sequence}",
+        "data-kline-page-{}-{duration_ns}-{sequence}",
         sanitize_chart_token(symbol)
     )
 }
 
-fn next_tick_data_series_chart_id(symbol: &str) -> String {
-    let sequence = NEXT_HISTORY_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
-    format!("data-tick-{}-{sequence}", sanitize_chart_token(symbol))
+fn next_tick_page_chart_id(symbol: &str) -> String {
+    let sequence = NEXT_HISTORY_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    format!("data-tick-page-{}-{sequence}", sanitize_chart_token(symbol))
+}
+
+fn normalize_history_view_width(view_width: usize) -> Result<usize> {
+    if view_width == 0 {
+        return Err(DataError::Validation(
+            "view_width must be greater than zero".to_string(),
+        ));
+    }
+    Ok(view_width.min(MAX_HISTORY_VIEW_WIDTH))
+}
+
+async fn cancel_chart_best_effort(session: &tqsdk_session::SessionClient, chart_id: String) {
+    let _ = session
+        .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
+            chart_id,
+        }))
+        .await;
+}
+
+fn extend_kline_rows_in_window(
+    target: &mut Vec<Kline>,
+    page: Vec<Kline>,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+) -> Option<i64> {
+    let mut next_left_kline_id = None;
+    for row in page {
+        if row.datetime == 0 || row.datetime >= end_datetime_ns {
+            break;
+        }
+        next_left_kline_id = row.id.checked_add(1);
+        if row.datetime >= start_datetime_ns {
+            target.push(row);
+        }
+    }
+    next_left_kline_id
+}
+
+fn extend_tick_rows_in_window(
+    target: &mut Vec<Tick>,
+    page: Vec<Tick>,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+) -> Option<i64> {
+    let mut next_left_id = None;
+    for row in page {
+        if row.datetime == 0 || row.datetime >= end_datetime_ns {
+            break;
+        }
+        next_left_id = row.id.checked_add(1);
+        if row.datetime >= start_datetime_ns {
+            target.push(row);
+        }
+    }
+    next_left_id
+}
+
+fn dedup_sort_klines_by_id(rows: Vec<Kline>) -> Vec<Kline> {
+    let mut by_id = BTreeMap::new();
+    for row in rows {
+        by_id.insert(row.id, row);
+    }
+    by_id.into_values().collect()
+}
+
+fn dedup_sort_ticks_by_id(rows: Vec<Tick>) -> Vec<Tick> {
+    let mut by_id = BTreeMap::new();
+    for row in rows {
+        by_id.insert(row.id, row);
+    }
+    by_id.into_values().collect()
 }
 
 fn sanitize_chart_token(raw: &str) -> String {
@@ -997,14 +1667,14 @@ mod tests {
     }
 
     #[test]
-    fn await_kline_data_series_returns_ready_rows_within_chart_bounds() {
+    fn get_kline_data_page_returns_ready_rows_within_chart_bounds() {
         run_on_tokio(async {
             let (session, handle) = test_session_and_handle();
             let client = DataClient::from_session(session.clone());
-            let request = KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+            let request = KlineDataPageRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
                 .with_left_kline_id(100)
                 .with_timeout(Duration::from_millis(100));
-            let duration_ns = request.validate().unwrap();
+            let duration_ns = request.validate().unwrap().duration_ns;
 
             let seed_thread = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(5));
@@ -1018,58 +1688,73 @@ mod tests {
                 );
             });
 
-            let series = client
-                .await_kline_data_series(&session, &request, duration_ns, "data-kline-test")
+            let page = client
+                .await_kline_data_page(
+                    &session,
+                    &request,
+                    request.validate().unwrap(),
+                    "data-kline-test",
+                )
                 .await
                 .unwrap();
 
-            assert_eq!(series.symbol(), "SHFE.ao2609");
-            assert_eq!(series.duration_ns(), duration_ns);
-            assert_eq!(series.requested_length(), 2);
-            assert_eq!(series.left_kline_id(), Some(100));
-            assert_eq!(series.len(), 2);
-            assert_eq!(series.rows()[0].id, 100);
-            assert_eq!(series.rows()[1].id, 101);
-            assert_eq!(series.last().map(|row| row.close), Some(620.0));
+            assert_eq!(page.symbol(), "SHFE.ao2609");
+            assert_eq!(page.duration_ns(), duration_ns);
+            assert_eq!(page.view_width(), 2);
+            assert_eq!(page.chart_left_id(), 100);
+            assert_eq!(page.chart_right_id(), 101);
+            assert_eq!(page.next_left_kline_id(), Some(102));
+            assert_eq!(page.len(), 2);
+            assert_eq!(page.rows()[0].id, 100);
+            assert_eq!(page.rows()[1].id, 101);
+            assert_eq!(page.last().map(|row| row.close), Some(620.0));
 
             seed_thread.join().unwrap();
         });
     }
 
     #[test]
-    fn await_tick_data_series_returns_ready_rows_within_chart_bounds() {
+    fn get_tick_data_page_returns_ready_rows_within_chart_bounds() {
         run_on_tokio(async {
             let (session, handle) = test_session_and_handle();
             let client = DataClient::from_session(session.clone());
-            let request = TickDataSeriesRequest::new("SHFE.ao2609", 2)
-                .with_timeout(Duration::from_millis(100));
+            let request =
+                TickDataPageRequest::new("SHFE.ao2609", 2).with_timeout(Duration::from_millis(100));
 
             let seed_thread = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(5));
                 seed_ready_tick_chart(&handle, "data-tick-test", "SHFE.ao2609", 200, 201);
             });
 
-            let series = client
-                .await_tick_data_series(&session, &request, "data-tick-test")
+            let page = client
+                .await_tick_data_page(
+                    &session,
+                    &request,
+                    request.validate().unwrap(),
+                    "data-tick-test",
+                )
                 .await
                 .unwrap();
 
-            assert_eq!(series.symbol(), "SHFE.ao2609");
-            assert_eq!(series.requested_length(), 2);
-            assert_eq!(series.len(), 2);
-            assert_eq!(series.rows()[0].id, 200);
-            assert_eq!(series.rows()[1].id, 201);
-            assert_eq!(series.last().map(|row| row.last_price), Some(618.5));
+            assert_eq!(page.symbol(), "SHFE.ao2609");
+            assert_eq!(page.view_width(), 2);
+            assert_eq!(page.chart_left_id(), 200);
+            assert_eq!(page.chart_right_id(), 201);
+            assert_eq!(page.next_left_id(), Some(202));
+            assert_eq!(page.len(), 2);
+            assert_eq!(page.rows()[0].id, 200);
+            assert_eq!(page.rows()[1].id, 201);
+            assert_eq!(page.last().map(|row| row.last_price), Some(618.5));
 
             seed_thread.join().unwrap();
         });
     }
 
     #[test]
-    fn get_kline_data_series_requires_session_backed_client() {
+    fn get_kline_data_page_requires_session_backed_client() {
         run_on_tokio(async {
             let err = DataClient::new()
-                .get_kline_data_series(KlineDataSeriesRequest::new(
+                .get_kline_data_page(KlineDataPageRequest::new(
                     "SHFE.ao2609",
                     Duration::from_secs(60),
                     2,
@@ -1080,8 +1765,286 @@ mod tests {
             assert!(matches!(
                 err,
                 DataError::InvalidState(message)
-                    if message
-                        == "get_kline_data_series requires a session-backed data client"
+                    if message == "get_kline_data_page requires a session-backed data client"
+            ));
+        });
+    }
+
+    #[test]
+    fn get_tick_data_page_requires_session_backed_client() {
+        run_on_tokio(async {
+            let err = DataClient::new()
+                .get_tick_data_page(TickDataPageRequest::new("SHFE.ao2609", 2))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::InvalidState(message)
+                    if message == "get_tick_data_page requires a session-backed data client"
+            ));
+        });
+    }
+
+    #[test]
+    fn get_kline_data_page_times_out_without_ready_chart() {
+        run_on_tokio(async {
+            let (session, _handle) = test_session_and_handle();
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_kline_data_page(
+                    KlineDataPageRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                        .with_timeout(Duration::from_millis(10)),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
+            );
+        });
+    }
+
+    #[test]
+    fn get_tick_data_page_times_out_without_ready_chart() {
+        run_on_tokio(async {
+            let (session, _handle) = test_session_and_handle();
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_tick_data_page(
+                    TickDataPageRequest::new("SHFE.ao2609", 2)
+                        .with_timeout(Duration::from_millis(10)),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
+            );
+        });
+    }
+
+    #[test]
+    fn get_kline_data_page_rejects_invalid_requests() {
+        run_on_tokio(async {
+            let client = DataClient::new();
+
+            let err = client
+                .get_kline_data_page(KlineDataPageRequest::new("", Duration::from_secs(60), 2))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "symbol must not be empty")
+            );
+
+            let err = client
+                .get_kline_data_page(KlineDataPageRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    0,
+                ))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "view_width must be greater than zero")
+            );
+
+            let err = client
+                .get_kline_data_page(KlineDataPageRequest::new("SHFE.ao2609", Duration::ZERO, 2))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "duration must be greater than zero")
+            );
+
+            let err = client
+                .get_kline_data_page(
+                    KlineDataPageRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                        .with_left_kline_id(1)
+                        .with_focus_datetime_ns(1),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "left_kline_id and focus_datetime_ns cannot both be set")
+            );
+        });
+    }
+
+    #[test]
+    fn get_tick_data_page_rejects_invalid_requests() {
+        run_on_tokio(async {
+            let client = DataClient::new();
+
+            let err = client
+                .get_tick_data_page(TickDataPageRequest::new("", 2))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "symbol must not be empty")
+            );
+
+            let err = client
+                .get_tick_data_page(TickDataPageRequest::new("SHFE.ao2609", 0))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "view_width must be greater than zero")
+            );
+
+            let err = client
+                .get_tick_data_page(
+                    TickDataPageRequest::new("SHFE.ao2609", 2)
+                        .with_left_id(1)
+                        .with_focus_datetime_ns(1),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "left_id and focus_datetime_ns cannot both be set")
+            );
+        });
+    }
+
+    #[test]
+    fn extend_kline_rows_in_window_applies_bounds_and_next_id() {
+        let mut rows = Vec::new();
+        let next_left_kline_id = extend_kline_rows_in_window(
+            &mut rows,
+            vec![
+                Kline {
+                    id: 100,
+                    datetime: 10,
+                    close: 1.0,
+                    ..Kline::default()
+                },
+                Kline {
+                    id: 101,
+                    datetime: 20,
+                    close: 2.0,
+                    ..Kline::default()
+                },
+                Kline {
+                    id: 102,
+                    datetime: 30,
+                    close: 3.0,
+                    ..Kline::default()
+                },
+            ],
+            15,
+            30,
+        );
+
+        assert_eq!(next_left_kline_id, Some(102));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 101);
+    }
+
+    #[test]
+    fn extend_tick_rows_in_window_applies_bounds_and_next_id() {
+        let mut rows = Vec::new();
+        let next_left_id = extend_tick_rows_in_window(
+            &mut rows,
+            vec![
+                Tick {
+                    id: 200,
+                    datetime: 10,
+                    last_price: 1.0,
+                    ..Tick::default()
+                },
+                Tick {
+                    id: 201,
+                    datetime: 20,
+                    last_price: 2.0,
+                    ..Tick::default()
+                },
+                Tick {
+                    id: 202,
+                    datetime: 30,
+                    last_price: 3.0,
+                    ..Tick::default()
+                },
+            ],
+            15,
+            30,
+        );
+
+        assert_eq!(next_left_id, Some(202));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 201);
+    }
+
+    #[test]
+    fn dedup_sort_kline_rows_by_id_keeps_latest_row_per_id() {
+        let rows = dedup_sort_klines_by_id(vec![
+            Kline {
+                id: 2,
+                close: 2.0,
+                ..Kline::default()
+            },
+            Kline {
+                id: 1,
+                close: 1.0,
+                ..Kline::default()
+            },
+            Kline {
+                id: 2,
+                close: 20.0,
+                ..Kline::default()
+            },
+        ]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
+        assert_eq!(rows[1].close, 20.0);
+    }
+
+    #[test]
+    fn dedup_sort_tick_rows_by_id_keeps_latest_row_per_id() {
+        let rows = dedup_sort_ticks_by_id(vec![
+            Tick {
+                id: 2,
+                last_price: 2.0,
+                ..Tick::default()
+            },
+            Tick {
+                id: 1,
+                last_price: 1.0,
+                ..Tick::default()
+            },
+            Tick {
+                id: 2,
+                last_price: 20.0,
+                ..Tick::default()
+            },
+        ]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
+        assert_eq!(rows[1].last_price, 20.0);
+    }
+
+    #[test]
+    fn get_kline_data_series_requires_session_backed_client() {
+        run_on_tokio(async {
+            let err = DataClient::new()
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    0,
+                    10,
+                ))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::InvalidState(message)
+                    if message == "get_kline_data_series requires a session-backed data client"
             ));
         });
     }
@@ -1090,7 +2053,7 @@ mod tests {
     fn get_tick_data_series_requires_session_backed_client() {
         run_on_tokio(async {
             let err = DataClient::new()
-                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 2))
+                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 0, 10))
                 .await
                 .unwrap_err();
 
@@ -1103,52 +2066,17 @@ mod tests {
     }
 
     #[test]
-    fn get_kline_data_series_times_out_without_ready_chart() {
-        run_on_tokio(async {
-            let (session, _handle) = test_session_and_handle();
-            let client = DataClient::from_session(session);
-
-            let err = client
-                .get_kline_data_series(
-                    KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
-                        .with_timeout(Duration::from_millis(10)),
-                )
-                .await
-                .unwrap_err();
-
-            assert!(
-                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
-            );
-        });
-    }
-
-    #[test]
-    fn get_tick_data_series_times_out_without_ready_chart() {
-        run_on_tokio(async {
-            let (session, _handle) = test_session_and_handle();
-            let client = DataClient::from_session(session);
-
-            let err = client
-                .get_tick_data_series(
-                    TickDataSeriesRequest::new("SHFE.ao2609", 2)
-                        .with_timeout(Duration::from_millis(10)),
-                )
-                .await
-                .unwrap_err();
-
-            assert!(
-                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
-            );
-        });
-    }
-
-    #[test]
     fn get_kline_data_series_rejects_invalid_requests() {
         run_on_tokio(async {
             let client = DataClient::new();
 
             let err = client
-                .get_kline_data_series(KlineDataSeriesRequest::new("", Duration::from_secs(60), 2))
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "",
+                    Duration::from_secs(60),
+                    0,
+                    10,
+                ))
                 .await
                 .unwrap_err();
             assert!(
@@ -1158,25 +2086,38 @@ mod tests {
             let err = client
                 .get_kline_data_series(KlineDataSeriesRequest::new(
                     "SHFE.ao2609",
-                    Duration::from_secs(60),
-                    0,
-                ))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, DataError::Validation(message) if message == "data_length must be greater than zero")
-            );
-
-            let err = client
-                .get_kline_data_series(KlineDataSeriesRequest::new(
-                    "SHFE.ao2609",
                     Duration::ZERO,
-                    2,
+                    0,
+                    10,
                 ))
                 .await
                 .unwrap_err();
             assert!(
                 matches!(err, DataError::Validation(message) if message == "duration must be greater than zero")
+            );
+
+            let err = client
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    10,
+                    10,
+                ))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "end_datetime_ns must be greater than start_datetime_ns")
+            );
+
+            let err = client
+                .get_kline_data_series(
+                    KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 0, 10)
+                        .with_page_view_width(0),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "view_width must be greater than zero")
             );
         });
     }
@@ -1187,7 +2128,7 @@ mod tests {
             let client = DataClient::new();
 
             let err = client
-                .get_tick_data_series(TickDataSeriesRequest::new("", 2))
+                .get_tick_data_series(TickDataSeriesRequest::new("", 0, 10))
                 .await
                 .unwrap_err();
             assert!(
@@ -1195,11 +2136,21 @@ mod tests {
             );
 
             let err = client
-                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 0))
+                .get_tick_data_series(TickDataSeriesRequest::new("SHFE.ao2609", 10, 10))
                 .await
                 .unwrap_err();
             assert!(
-                matches!(err, DataError::Validation(message) if message == "data_length must be greater than zero")
+                matches!(err, DataError::Validation(message) if message == "end_datetime_ns must be greater than start_datetime_ns")
+            );
+
+            let err = client
+                .get_tick_data_series(
+                    TickDataSeriesRequest::new("SHFE.ao2609", 0, 10).with_page_view_width(0),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "view_width must be greater than zero")
             );
         });
     }

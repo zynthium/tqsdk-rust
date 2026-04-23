@@ -56,6 +56,10 @@
   - crate skeleton
   - `DataClient`
   - `query_his_cont_quotes`
+  - `get_kline_data_page`
+  - `get_tick_data_page`
+  - `get_kline_data_series`
+  - `get_tick_data_series`
 
 当前仍未进入实现、但已经明确方向的后续层：
 
@@ -211,6 +215,8 @@
 
 - downloader
 - 历史数据批量拉取
+- `get_kline_data_page`
+- `get_tick_data_page`
 - `get_kline_data_series`
 - `get_tick_data_series`
 - `query_his_cont_quotes`
@@ -331,7 +337,7 @@
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
 1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在 `query_his_cont_quotes` 已落地后，继续推进更通用的 history/query substrate，并审慎评估 `query_option_greeks` 的最小低层抽象
+2. 在 `query_his_cont_quotes`、`data_page`、`data_series` 已落地后，继续推进 downloader substrate，并审慎评估 `query_option_greeks` 的最小低层抽象
 
 如果目标是先把底座做得更稳，优先选 1。
 如果目标是开始给研究型能力准备独立落点，再选 2。
