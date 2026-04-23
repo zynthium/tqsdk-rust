@@ -6,8 +6,8 @@ use tqsdk_core::{
     TradeOffset,
 };
 use tqsdk_task::{
-    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosTask,
-    TaskHost,
+    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
+    TargetPosTask, TaskHost,
 };
 use tqsdk_wait::TqApiBuilder;
 
@@ -341,6 +341,111 @@ async fn live_target_pos_roundtrip_smoke() {
         .expect("task should finish cleanly after cancel");
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live scheduler smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, defaults to the official built-in TqKq account, and needs explicit TQ_SMOKE_ALLOW_ORDER=1"]
+async fn live_target_pos_scheduler_roundtrip_smoke() {
+    if std::env::var_os("TQ_SMOKE_ALLOW_ORDER").is_none() {
+        return;
+    }
+
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let explicit_trade = explicit_trade_override().expect("explicit trade override should parse");
+    let account_number = read_u8_env("TQ_TRADE_ACCOUNT_NO").expect("account number should parse");
+    let symbol = read_env("TQ_SMOKE_TASK_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
+    let target_delta = require_i64_env("TQ_SMOKE_TARGET_DELTA").unwrap_or(1);
+    let timeout_secs = require_u64_env("TQ_SMOKE_TIMEOUT_SECS").unwrap_or(90);
+    let step_hold_secs = require_u64_env("TQ_SMOKE_SCHEDULER_STEP_SECS").unwrap_or(15);
+
+    let builder = TqApiBuilder::new(auth_user, auth_pass).futures_market();
+    let api = if let Some((broker_id, account_id, _password)) = explicit_trade.as_ref() {
+        builder.trade_target(broker_id.clone(), account_id.clone())
+    } else if let Some(number) = account_number {
+        builder.trade_target_tqkq_numbered(number)
+    } else {
+        builder.trade_target_tqkq()
+    }
+    .build()
+    .await
+    .expect("live wait api should build");
+    let mut host = TaskHost::new(api);
+
+    let trade_login = if let Some((broker_id, account_id, password)) = explicit_trade {
+        TradeLoginCommand {
+            account_id: AccountId::new(account_id),
+            broker_id,
+            password,
+            account_type: TradeAccountType::Future,
+            front_broker: None,
+            front_url: None,
+            client_app_id: None,
+            client_system_info: None,
+        }
+    } else if let Some(number) = account_number {
+        host.api()
+            .session()
+            .tqkq_login_command_numbered(number)
+            .await
+            .expect("numbered tqkq login should resolve")
+    } else {
+        host.api()
+            .session()
+            .tqkq_login_command()
+            .await
+            .expect("tqkq login should resolve")
+    };
+    let account_id = trade_login.account_id.as_str().to_string();
+
+    login_trade_account(&host, trade_login)
+        .await
+        .expect("trade login should submit");
+    wait_for_trade_account_ready(&mut host, account_id.as_str(), Duration::from_secs(30))
+        .await
+        .expect("trade account should become ready");
+
+    let baseline = current_net_position(&host, account_id.as_str(), symbol.as_str())
+        .expect("position snapshot should decode");
+    let first_target = baseline + target_delta;
+    let scheduler = host
+        .target_pos_scheduler(account_id.as_str(), symbol.as_str())
+        .steps(vec![
+            TargetPosScheduleStep::target(
+                Duration::from_secs(step_hold_secs.max(1)),
+                first_target,
+                tqsdk_task::PriceMode::Active,
+            ),
+            TargetPosScheduleStep::target(
+                Duration::from_secs(timeout_secs.max(1)),
+                baseline,
+                tqsdk_task::PriceMode::Active,
+            ),
+        ])
+        .build()
+        .expect("TargetPosScheduler should build");
+
+    wait_for_scheduler_finished(
+        &mut host,
+        &scheduler,
+        Duration::from_secs(timeout_secs.max(step_hold_secs) + step_hold_secs + 30),
+    )
+    .await
+    .expect("scheduler should finish cleanly");
+
+    let report = scheduler.execution_report();
+    assert_eq!(report.applied_steps.len(), 2);
+    assert_eq!(report.step_outcomes.len(), 2);
+    assert!(report.step_outcomes[0].target_reached);
+    assert!(report.step_outcomes[1].target_reached);
+    assert_eq!(
+        current_net_position(&host, account_id.as_str(), symbol.as_str()),
+        Ok(baseline)
+    );
+}
+
 async fn login_trade_account(
     host: &TaskHost,
     trade_login: TradeLoginCommand,
@@ -453,6 +558,35 @@ async fn wait_for_task_finished(
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err("timed out waiting for task finish".to_string());
+        }
+
+        host.wait_update(Some(now + Duration::from_secs(5)))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+async fn wait_for_scheduler_finished(
+    host: &mut TaskHost,
+    scheduler: &TargetPosScheduler,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(error) = scheduler.last_error() {
+            return Err(error.to_string());
+        }
+        if scheduler.is_finished() {
+            scheduler
+                .wait_finished()
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err("timed out waiting for scheduler finish".to_string());
         }
 
         host.wait_update(Some(now + Duration::from_secs(5)))
