@@ -16,7 +16,6 @@
 
 mod builder;
 mod client;
-mod config;
 mod direct_query;
 mod error;
 mod metadata;
@@ -24,7 +23,6 @@ mod services;
 
 pub use builder::SessionClientBuilder;
 pub use client::{SessionClient, SessionProgress};
-pub use config::SessionFacadeConfig;
 pub use direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
     OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SessionMetadataQuery,

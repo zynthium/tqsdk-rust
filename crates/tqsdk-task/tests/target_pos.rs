@@ -7,7 +7,7 @@ use tqsdk_core::{
     RuntimeCommand, RuntimeHandle, RuntimeInput, TradeAdapter, TradeCommand, TradeDirection,
     TradeOffset,
 };
-use tqsdk_session::{SessionClient, SessionFacadeConfig};
+use tqsdk_session::SessionClient;
 use tqsdk_task::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent, TaskError, TaskHost,
     TaskKind, VolumeSplitPolicy,
@@ -18,7 +18,7 @@ fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle);
     TaskHost::new(TqApi::new(session))
 }
 
@@ -26,7 +26,7 @@ fn market_only_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_adapter(MarketAdapter::default());
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle);
     TaskHost::new(TqApi::new(session))
 }
 
@@ -38,7 +38,7 @@ where
     adapters.register_default_adapters();
     adapters.register_adapter(trade_adapter);
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle);
     TaskHost::new(TqApi::new(session))
 }
 

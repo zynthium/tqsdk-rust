@@ -3,7 +3,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
     ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
-use tqsdk_session::{SessionClient, SessionFacadeConfig};
+use tqsdk_session::SessionClient;
 use tqsdk_task::{TaskError, TaskHost, TaskKind};
 use tqsdk_wait::TqApi;
 
@@ -11,7 +11,7 @@ fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle);
     TaskHost::new(TqApi::new(session))
 }
 

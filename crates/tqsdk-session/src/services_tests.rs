@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use tqsdk_core::{AdapterRegistry, EndpointConfig, RuntimeHandle, SessionConfig};
 
 use crate::{
-    SessionClient, SessionFacadeConfig,
+    SessionClient,
     client::SessionClientContext,
     direct_query::{EdbDataAlign, EdbDataFill, SymbolRankingType},
 };
@@ -344,14 +344,7 @@ fn test_client(auth_url: String, service_endpoints: SessionServiceEndpoints) -> 
         endpoints.clone(),
         service_endpoints,
     );
-    SessionClient::new_live(
-        handle,
-        SessionFacadeConfig::default(),
-        context,
-        SessionConfig::new(endpoints),
-        Vec::new(),
-    )
-    .unwrap()
+    SessionClient::new_live(handle, context, SessionConfig::new(endpoints), Vec::new()).unwrap()
 }
 
 fn token_response_body() -> &'static str {

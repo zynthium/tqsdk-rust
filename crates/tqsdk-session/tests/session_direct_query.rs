@@ -2,7 +2,7 @@ use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, OutboundRequest, ProtocolDomain, Revision, RuntimeHandle, SessionPhase,
 };
-use tqsdk_session::{SessionClient, SessionFacadeConfig};
+use tqsdk_session::SessionClient;
 
 fn runtime_handle_with_default_adapters() -> RuntimeHandle {
     let mut adapters = AdapterRegistry::new();
@@ -14,7 +14,7 @@ fn runtime_handle_with_default_adapters() -> RuntimeHandle {
 fn test_only_session_client_keeps_handle_and_reader_aligned() {
     let handle = RuntimeHandle::new();
     let shared_handle = handle.clone();
-    let client = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let client = SessionClient::new_for_test_with_handle(handle);
 
     shared_handle
         .record_session_phase(SessionPhase::Running, None, vec![])
@@ -30,7 +30,7 @@ fn test_only_session_client_keeps_handle_and_reader_aligned() {
 #[test]
 fn graphql_fetch_submits_query_command() {
     let handle = runtime_handle_with_default_adapters();
-    let client = SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+    let client = SessionClient::new_for_test_with_handle(handle);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

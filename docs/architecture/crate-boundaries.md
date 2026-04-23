@@ -142,14 +142,14 @@
 - `query_his_cont_quotes`
 - `query_option_greeks`
 
-### 当前边界异味
+### 当前边界提醒
 
-当前最值得注意的边界异味是 `SessionFacadeConfig`。
+此前 `tqsdk-session` 里曾出现过 `SessionFacadeConfig/default_view_width` 这类更像 consumer facade 的配置项。
 
-它包含 `default_view_width` 这类更像 consumer facade 的概念，而不是 session 本体概念。这一项目前影响不大，但应当视为提醒：
+这部分已经被移出 session substrate。后续仍应继续保持同一条约束：
 
 - `tqsdk-session` 不应演化成“大家都顺手塞一点公共配置”的地方
-- 后续如果出现更多 wait / stream 共用的消费层配置，应单独提炼，而不是无限堆积在 session config 中
+- 如果出现更多 wait / stream 共用的消费层配置，应在消费层单独提炼，而不是回灌到 session
 
 ### 判断
 

@@ -4,7 +4,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
     RuntimeInput,
 };
-use tqsdk_session::{SessionClient, SessionFacadeConfig};
+use tqsdk_session::SessionClient;
 use tqsdk_stream::TqStream;
 
 #[allow(dead_code)]
@@ -18,8 +18,7 @@ pub fn seeded_stream_with_capacity(capacity: usize) -> TqStream {
     adapters.register_default_adapters();
 
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session =
-        SessionClient::new_for_test_with_handle(handle.clone(), SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle.clone());
 
     TqStream::new_for_test_with_capacity(session, capacity)
 }

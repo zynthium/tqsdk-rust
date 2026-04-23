@@ -1,14 +1,5 @@
 use tqsdk_core::MarketSessionTarget;
-use tqsdk_session::{SessionClientBuilder, SessionFacadeConfig, SessionFacadeError};
-
-#[test]
-fn builder_keeps_explicit_facade_config() {
-    let config = SessionFacadeConfig::default().with_default_view_width(256);
-
-    let builder = SessionClientBuilder::new("user", "pass").facade_config(config);
-
-    assert_eq!(builder.facade_config_ref().default_view_width, 256);
-}
+use tqsdk_session::{SessionClientBuilder, SessionFacadeError};
 
 #[test]
 fn builder_uses_official_schema_base_by_default() {
@@ -108,13 +99,6 @@ fn builder_accepts_auth_derived_tqkq_trade_targets() {
         builder.trade_targets_ref()[3].auth_derived,
         Some(tqsdk_core::AuthDerivedTradeTarget::TqKqStock { number: Some(8) })
     );
-}
-
-#[test]
-fn facade_config_clamps_zero_view_width_to_one() {
-    let config = SessionFacadeConfig::default().with_default_view_width(0);
-
-    assert_eq!(config.default_view_width, 1);
 }
 
 #[test]

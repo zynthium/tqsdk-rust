@@ -18,7 +18,6 @@ use tqsdk_core::{
     TqKqAccountConfig, TradeLoginCommand, TradeSessionTarget, TradingCalendarDay,
 };
 
-use crate::config::SessionFacadeConfig;
 use crate::direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
     OptionLevelQuotes, OptionQueryFilter, SessionMetadataQuery, SessionRawQuery,
@@ -194,7 +193,6 @@ pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,
     runtime: SessionRuntime,
-    facade_config: SessionFacadeConfig,
     service_http: reqwest::Client,
     #[cfg_attr(not(test), allow(dead_code))]
     context: SessionClientContext,
@@ -230,7 +228,6 @@ impl SessionClient {
 
     pub(crate) fn new_live(
         handle: RuntimeHandle,
-        facade_config: SessionFacadeConfig,
         context: SessionClientContext,
         config: SessionConfig,
         trade_targets: Vec<TradeSessionTarget>,
@@ -266,7 +263,6 @@ impl SessionClient {
             handle,
             reader,
             runtime,
-            facade_config,
             service_http: reqwest::Client::new(),
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
@@ -284,18 +280,13 @@ impl SessionClient {
         })
     }
 
-    fn new_without_io(
-        handle: RuntimeHandle,
-        facade_config: SessionFacadeConfig,
-        context: SessionClientContext,
-    ) -> Self {
+    fn new_without_io(handle: RuntimeHandle, context: SessionClientContext) -> Self {
         let reader = handle.reader();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
         Self {
             handle,
             reader,
             runtime,
-            facade_config,
             service_http: reqwest::Client::new(),
             context,
             io: None,
@@ -995,11 +986,6 @@ impl SessionClient {
             ))
     }
 
-    #[must_use]
-    pub fn facade_config(&self) -> &SessionFacadeConfig {
-        &self.facade_config
-    }
-
     pub(crate) fn service_http(&self) -> &reqwest::Client {
         &self.service_http
     }
@@ -1032,13 +1018,9 @@ impl SessionClient {
     }
 
     #[doc(hidden)]
-    pub fn new_for_test_with_handle(
-        handle: RuntimeHandle,
-        facade_config: SessionFacadeConfig,
-    ) -> Self {
+    pub fn new_for_test_with_handle(handle: RuntimeHandle) -> Self {
         Self::new_without_io(
             handle,
-            facade_config,
             SessionClientContext::new(
                 String::new(),
                 String::new(),
@@ -1418,8 +1400,6 @@ mod tests {
         SessionIoState, SessionProgress, SessionReplayExecutor, SharedAuthProvider,
         SharedRouteConnector, SharedRouteExecutor, SharedTopologyResolver,
     };
-    use crate::config::SessionFacadeConfig;
-
     #[derive(Clone, Default)]
     struct TestAuthProvider {
         auth_id: Option<String>,
@@ -1966,8 +1946,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn wait_command_completed_errors_when_command_cannot_reach_terminal_state() {
         let handle = runtime_with_default_adapters();
-        let client =
-            SessionClient::new_for_test_with_handle(handle.clone(), SessionFacadeConfig::default());
+        let client = SessionClient::new_for_test_with_handle(handle.clone());
         let command_id = handle
             .submit(RuntimeCommand::Query(QueryCommand::Fetch {
                 query_id: QueryId::new("query-1"),
@@ -2255,10 +2234,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_value_helper_requires_enabled_query_route() {
-        let client = SessionClient::new_for_test_with_handle(
-            runtime_with_default_adapters(),
-            SessionFacadeConfig::default(),
-        );
+        let client = SessionClient::new_for_test_with_handle(runtime_with_default_adapters());
 
         let error = client
             .query_graphql_value("query { ping }", None)
@@ -2292,10 +2268,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn replay_value_helpers_require_explicit_replay_route() {
-        let client = SessionClient::new_for_test_with_handle(
-            runtime_with_default_adapters(),
-            SessionFacadeConfig::default(),
-        );
+        let client = SessionClient::new_for_test_with_handle(runtime_with_default_adapters());
 
         let error = client.replay_step_value("rb-test").await.unwrap_err();
 
@@ -2550,7 +2523,6 @@ mod tests {
             handle: handle.clone(),
             reader: handle.reader(),
             runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
-            facade_config: SessionFacadeConfig::default(),
             service_http: reqwest::Client::new(),
             context: SessionClientContext::new(
                 "demo-user".to_string(),

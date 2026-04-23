@@ -1018,15 +1018,14 @@ impl Drop for TargetPosTaskInner {
 mod tests {
     use super::*;
     use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
-    use tqsdk_session::{SessionClient, SessionFacadeConfig};
+    use tqsdk_session::SessionClient;
     use tqsdk_wait::TqApi;
 
     fn market_only_api() -> TqApi {
         let mut adapters = AdapterRegistry::new();
         adapters.register_adapter(MarketAdapter::default());
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session =
-            SessionClient::new_for_test_with_handle(handle, SessionFacadeConfig::default());
+        let session = SessionClient::new_for_test_with_handle(handle);
         TqApi::new(session)
     }
 

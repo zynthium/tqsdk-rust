@@ -3,7 +3,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
     RuntimeInput,
 };
-use tqsdk_session::{SessionClient, SessionFacadeConfig};
+use tqsdk_session::SessionClient;
 use tqsdk_wait::TqApi;
 
 #[allow(dead_code)]
@@ -12,8 +12,7 @@ pub fn seeded_api() -> TqApi {
     adapters.register_default_adapters();
 
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session =
-        SessionClient::new_for_test_with_handle(handle.clone(), SessionFacadeConfig::default());
+    let session = SessionClient::new_for_test_with_handle(handle.clone());
 
     TqApi::new_for_test(handle, session)
 }

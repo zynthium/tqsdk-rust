@@ -7,7 +7,6 @@ use tqsdk_core::{
 
 use crate::{
     client::{SessionClient, SessionClientContext},
-    config::SessionFacadeConfig,
     error::Result,
 };
 
@@ -23,7 +22,6 @@ pub struct SessionClientBuilder {
     auth_pass: String,
     endpoints: EndpointConfig,
     query_enabled: bool,
-    facade_config: SessionFacadeConfig,
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
 }
@@ -42,21 +40,9 @@ impl SessionClientBuilder {
             auth_pass: auth_pass.into(),
             endpoints,
             query_enabled: false,
-            facade_config: SessionFacadeConfig::default(),
             market_target: MarketSessionTarget::stock_live(),
             trade_targets: Vec::new(),
         }
-    }
-
-    #[must_use]
-    pub fn facade_config(mut self, facade_config: SessionFacadeConfig) -> Self {
-        self.facade_config = facade_config;
-        self
-    }
-
-    #[must_use]
-    pub fn facade_config_ref(&self) -> &SessionFacadeConfig {
-        &self.facade_config
     }
 
     #[must_use]
@@ -201,7 +187,6 @@ impl SessionClientBuilder {
             auth_pass,
             endpoints,
             query_enabled,
-            facade_config,
             market_target,
             trade_targets,
         } = self;
@@ -215,7 +200,7 @@ impl SessionClientBuilder {
             market_target,
             &trade_targets,
         );
-        SessionClient::new_live(handle, facade_config, context, config, trade_targets)
+        SessionClient::new_live(handle, context, config, trade_targets)
     }
 }
 
