@@ -58,7 +58,7 @@
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
 - `TargetPosTask::execution_report()` 已暴露稳定 execution report
   - 原始 command-level 事件流当前包含 insert/cancel/trade/order finished/target reached
-  - 同时维护 trades buffer、委托/撤单/终态订单计数、累计成交手数/成交额、最后一次 target reached
+  - 同时维护 trades buffer、per-order outcome report、委托/撤单/终态订单计数、累计成交手数/成交额、最后一次 target reached
 - `TargetPosTask::last_error()` 会暴露本地命令提交失败
   - 第一版不对本地提交失败做静默重试，而是记录错误并结束任务
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
@@ -92,7 +92,7 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 交易时段感知的 scheduler deadline
-- 更细的 per-order / per-step outcome report
+- 更细的 per-step outcome report
 
 ## 为什么它必须独立成 crate
 

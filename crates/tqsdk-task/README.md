@@ -25,6 +25,7 @@
     - 暴露 command-level 事件流，当前包含 insert/cancel/trade/order finished/target reached
     - 同时提供稳定聚合摘要：
       - trades buffer
+      - per-order outcome report
       - 已提交委托/撤单/终态订单计数
       - 累计成交手数与成交额
       - 最后一次 target reached 记录
@@ -76,7 +77,7 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 基于交易时段的 deadline 计算
-- 更细的 per-order / per-step outcome report
+- 更细的 per-step outcome report
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

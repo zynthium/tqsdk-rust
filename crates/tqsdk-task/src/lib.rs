@@ -23,5 +23,5 @@ pub use scheduler::{
 };
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
-    TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
+    TargetPosTaskOrderReport, TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
 };

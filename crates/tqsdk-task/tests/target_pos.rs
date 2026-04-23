@@ -10,8 +10,8 @@ use tqsdk_core::{
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent,
-    TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind,
-    VolumeSplitPolicy,
+    TargetPosTaskOrderReport, TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError,
+    TaskHost, TaskKind, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -1134,6 +1134,24 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
             },
         ]
     );
+    assert_eq!(
+        task.execution_report().orders,
+        vec![TargetPosTaskOrderReport {
+            request_seq: 1,
+            order_id: "wait-order-1".to_string(),
+            direction: TradeDirection::Buy,
+            offset: TradeOffset::Open,
+            requested_volume: 2,
+            limit_price: 3678.0,
+            cancel_requested: true,
+            status: Some("FINISHED".to_string()),
+            filled_volume: 2,
+            remaining_volume: 0,
+            last_msg: Some(String::new()),
+            trade_count: 0,
+            filled_turnover: 0.0,
+        }]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1316,6 +1334,24 @@ async fn target_pos_execution_report_accumulates_trade_buffer_and_summary() {
                 trade_date_time: 1_713_660_000_000_000_000_i64,
             },
         ]
+    );
+    assert_eq!(
+        report.orders,
+        vec![TargetPosTaskOrderReport {
+            request_seq: 1,
+            order_id: "wait-order-1".to_string(),
+            direction: TradeDirection::Buy,
+            offset: TradeOffset::Open,
+            requested_volume: 2,
+            limit_price: 3678.0,
+            cancel_requested: false,
+            status: Some("FINISHED".to_string()),
+            filled_volume: 2,
+            remaining_volume: 0,
+            last_msg: Some(String::new()),
+            trade_count: 2,
+            filled_turnover: 7357.0,
+        }]
     );
 }
 

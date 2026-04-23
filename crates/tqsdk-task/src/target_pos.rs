@@ -81,10 +81,28 @@ pub struct TargetPosTaskReachedTarget {
     pub target_volume: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetPosTaskOrderReport {
+    pub request_seq: u64,
+    pub order_id: String,
+    pub direction: TradeDirection,
+    pub offset: TradeOffset,
+    pub requested_volume: i64,
+    pub limit_price: f64,
+    pub cancel_requested: bool,
+    pub status: Option<String>,
+    pub filled_volume: i64,
+    pub remaining_volume: i64,
+    pub last_msg: Option<String>,
+    pub trade_count: usize,
+    pub filled_turnover: f64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetPosTaskExecutionReport {
     pub events: Vec<TargetPosTaskExecutionEvent>,
     pub trades: Vec<TargetPosTaskTradeFill>,
+    pub orders: Vec<TargetPosTaskOrderReport>,
     pub submitted_order_count: usize,
     pub cancel_request_count: usize,
     pub finished_order_count: usize,
@@ -465,6 +483,12 @@ impl From<&Trade> for TargetPosTaskTradeFill {
 }
 
 impl TargetPosTaskExecutionReport {
+    fn order_report_mut(&mut self, order_id: &str) -> Option<&mut TargetPosTaskOrderReport> {
+        self.orders
+            .iter_mut()
+            .find(|report| report.order_id == order_id)
+    }
+
     fn record_insert_order(
         &mut self,
         request_seq: u64,
@@ -475,6 +499,21 @@ impl TargetPosTaskExecutionReport {
         limit_price: f64,
     ) {
         self.submitted_order_count += 1;
+        self.orders.push(TargetPosTaskOrderReport {
+            request_seq,
+            order_id: order_id.to_string(),
+            direction,
+            offset,
+            requested_volume: volume,
+            limit_price,
+            cancel_requested: false,
+            status: None,
+            filled_volume: 0,
+            remaining_volume: volume,
+            last_msg: None,
+            trade_count: 0,
+            filled_turnover: 0.0,
+        });
         self.events.push(TargetPosTaskExecutionEvent::InsertOrder {
             request_seq,
             order_id: order_id.to_string(),
@@ -487,6 +526,9 @@ impl TargetPosTaskExecutionReport {
 
     fn record_cancel_order(&mut self, order_id: &str) {
         self.cancel_request_count += 1;
+        if let Some(order_report) = self.order_report_mut(order_id) {
+            order_report.cancel_requested = true;
+        }
         self.events.push(TargetPosTaskExecutionEvent::CancelOrder {
             order_id: order_id.to_string(),
         });
@@ -494,6 +536,12 @@ impl TargetPosTaskExecutionReport {
 
     fn record_order_finished(&mut self, order: &Order) {
         self.finished_order_count += 1;
+        if let Some(order_report) = self.order_report_mut(&order.order_id) {
+            order_report.status = Some(order.status.clone());
+            order_report.filled_volume = order.volume_orign - order.volume_left;
+            order_report.remaining_volume = order.volume_left;
+            order_report.last_msg = Some(order.last_msg.clone());
+        }
         self.events
             .push(TargetPosTaskExecutionEvent::OrderFinished {
                 order_id: order.order_id.clone(),
@@ -520,6 +568,13 @@ impl TargetPosTaskExecutionReport {
         let fill = TargetPosTaskTradeFill::from(trade);
         self.filled_volume += fill.volume;
         self.filled_turnover += fill.price * fill.volume as f64;
+        if let Some(order_report) = self.order_report_mut(&fill.order_id) {
+            order_report.trade_count += 1;
+            order_report.filled_volume += fill.volume;
+            order_report.remaining_volume =
+                (order_report.requested_volume - order_report.filled_volume).max(0);
+            order_report.filled_turnover += fill.price * fill.volume as f64;
+        }
         self.events.push(TargetPosTaskExecutionEvent::Trade {
             trade_id: fill.trade_id.clone(),
             order_id: fill.order_id.clone(),
