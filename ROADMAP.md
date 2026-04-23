@@ -60,6 +60,8 @@
   - `get_tick_data_page`
   - `get_kline_data_series`
   - `get_tick_data_series`
+  - `kline_data_download`
+  - `tick_data_download`
 
 当前仍未进入实现、但已经明确方向的后续层：
 
@@ -219,6 +221,8 @@
 - `get_tick_data_page`
 - `get_kline_data_series`
 - `get_tick_data_series`
+- `kline_data_download`
+- `tick_data_download`
 - `query_his_cont_quotes`
 - `query_option_greeks`
 - pandas/polars/DataFrame 兼容层

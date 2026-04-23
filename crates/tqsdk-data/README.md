@@ -2,19 +2,22 @@
 
 `tqsdk-data` 是 `tqsdk-rust` workspace 里预留给研究、离线数据和批量拉取能力的 crate。
 
-当前阶段它只开放三层很窄的能力：
+当前阶段它只开放四层很窄的能力：
 
 - `DataClient::new().query_his_cont_quotes(...)`
 - `DataClient::from_session(...).get_kline_data_page(...)`
 - `DataClient::from_session(...).get_tick_data_page(...)`
 - `DataClient::from_session(...).get_kline_data_series(...)`
 - `DataClient::from_session(...).get_tick_data_series(...)`
+- `DataClient::from_session(...).kline_data_download(...)`
+- `DataClient::from_session(...).tick_data_download(...)`
 
 其中：
 
 - `query_his_cont_quotes` 是纯 HTTP 的一次性 direct query，不需要 live session
 - `get_*_data_page` 是最底层的 chart/history page substrate
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`
+- `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 
@@ -30,16 +33,22 @@
 - `KlineDataSeries`
 - `TickDataSeriesRequest`
 - `TickDataSeries`
+- `DataDownloadProgress`
+- `KlineDataDownload`
+- `KlineDataDownloadPage`
+- `TickDataDownload`
+- `TickDataDownloadPage`
 
-## `data_page` 与 `data_series` 的定位
+## `data_page` / `data_series` / `data_download` 的定位
 
-这两层接口适合承接：
+这三层接口适合承接：
 
 - 历史 K 线 / tick 一次性拉取
 - page 级分页读取
 - 按时间范围组装完整历史序列
-- research/offline 侧的批量读
-- 后续更高层 DataFrame / polars / downloader 的底座
+- 大时间范围按页推进的批量读
+- research/offline 侧的渐进式 materialization
+- 后续更高层 CSV writer / DataFrame / polars / downloader tool 的底座
 
 它当前明确不做：
 
@@ -50,10 +59,8 @@
 
 这些仍然属于 `tqsdk-wait` / `tqsdk-stream`。
 
-## 未来应承接的能力
+## 后续仍应承接的能力
 
-- downloader
-- 历史数据批量拉取
 - `query_his_cont_quotes`
 - `query_option_greeks`
 - 文件缓存、导出、落盘
@@ -88,5 +95,7 @@
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 
 session-backed 的时间范围历史示例见 [examples/kline_data_series.rs](examples/kline_data_series.rs)。
+
+session-backed 的按页下载示例见 [examples/kline_data_download.rs](examples/kline_data_download.rs)。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

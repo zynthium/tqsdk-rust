@@ -98,6 +98,8 @@
 - `get_tick_data_page(TickDataPageRequest)`
 - `get_kline_data_series(KlineDataSeriesRequest)`
 - `get_tick_data_series(TickDataSeriesRequest)`
+- `kline_data_download(KlineDataSeriesRequest)`
+- `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataPage`
 - `KlineDataPageRequest`
 - `TickDataPage`
@@ -106,13 +108,18 @@
 - `KlineDataSeriesRequest`
 - `TickDataSeries`
 - `TickDataSeriesRequest`
+- `DataDownloadProgress`
+- `KlineDataDownload`
+- `KlineDataDownloadPage`
+- `TickDataDownload`
+- `TickDataDownloadPage`
 
 当前明确先不做：
 
-- downloader public API
 - DataFrame / polars public API
 - 历史数据缓存格式
-- 并发下载调度器
+- CSV / writer public API
+- 后台 downloader task
 - Python 兼容层
 - `query_option_greeks`
 
@@ -128,6 +135,8 @@
    - `get_tick_data_page`
    - `get_kline_data_series`
    - `get_tick_data_series`
+   - `kline_data_download`
+   - `tick_data_download`
    - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
 3. local materialization
@@ -169,17 +178,19 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `get_kline_data_page` / `get_tick_data_page` 已经落在 `tqsdk-data`
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
+- `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
+- `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
 
 这样做的意义是：
 
 - 不把研究/批量历史接口继续塞进 `tqsdk-session`
 - 不把历史数据读取和 `wait_update()` / stream 模式耦合在一起
-- 给 downloader 预留稳定的 `page -> series -> downloader` 递进路径
-- 后续可以在 `tqsdk-data` 上继续叠加 downloader、tabular adapters、缓存与导出，而不污染 core/session/live facade 的边界
+- 给 file writer / export / dataframe 预留稳定的 `page -> download -> materialization` 递进路径
+- 后续可以在 `tqsdk-data` 上继续叠加 CSV writer、tabular adapters、缓存与导出，而不污染 core/session/live facade 的边界
 
 这样做的收益是：
 
@@ -192,6 +203,6 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 `tqsdk-data` 值得独立存在，但当前阶段最合理的动作是：
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
-2. 在此基础上继续保持 `DataClient + data_page + data_series` 也只是 one-shot substrate
+2. 在此基础上继续保持 `DataClient + data_page + data_series + data_download` 也只是底层 substrate
 3. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface

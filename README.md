@@ -65,7 +65,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`；后续重点转向 notification/transport-error 级 trade session 事件流。
 - `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、ownership / guarded order / execution report。
-- `tqsdk-data` 已落地独立 crate 骨架、`DataClient` 与第一条 research-style 一次性接口 `query_his_cont_quotes`。
+- `tqsdk-data` 已落地独立 crate 骨架、`DataClient`、`query_his_cont_quotes`、history `data_page` / `data_series` 与 pull-based `data_download` substrate。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
 
@@ -77,6 +77,9 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `crates/tqsdk-wait/examples/quote_wait.rs`
 - `crates/tqsdk-wait/examples/quote_wait_with_session_query.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
+- `crates/tqsdk-data/examples/kline_data_page.rs`
+- `crates/tqsdk-data/examples/kline_data_series.rs`
+- `crates/tqsdk-data/examples/kline_data_download.rs`
 
 ## 架构文档
 

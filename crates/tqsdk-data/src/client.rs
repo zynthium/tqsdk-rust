@@ -181,7 +181,7 @@ pub struct KlineDataPage {
 }
 
 impl KlineDataPage {
-    fn new(
+    pub(crate) fn new(
         symbol: String,
         duration_ns: i64,
         view_width: usize,
@@ -386,7 +386,7 @@ pub struct TickDataPage {
 }
 
 impl TickDataPage {
-    fn new(
+    pub(crate) fn new(
         symbol: String,
         view_width: usize,
         chart_left_id: i64,
@@ -821,6 +821,7 @@ struct TickDataSeriesSpec {
 }
 
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
+#[derive(Clone)]
 pub struct DataClient {
     session: Option<tqsdk_session::SessionClient>,
     http: reqwest::Client,
@@ -884,6 +885,10 @@ impl DataClient {
         self.session
             .as_ref()
             .ok_or(DataError::InvalidState(message))
+    }
+
+    pub(crate) fn is_session_backed(&self) -> bool {
+        self.session.is_some()
     }
 
     pub async fn query_his_cont_quotes(
