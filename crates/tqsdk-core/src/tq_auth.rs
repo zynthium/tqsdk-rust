@@ -22,6 +22,20 @@ const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
 
+fn add_route_domain(topology: &mut SessionTopology, label: &str, domain: ProtocolDomain) -> bool {
+    let Some(route) = topology
+        .routes
+        .iter_mut()
+        .find(|route| route.label == label)
+    else {
+        return false;
+    };
+    if !route.domains.contains(&domain) {
+        route.domains.push(domain);
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordCredentials {
     pub username: String,
@@ -443,6 +457,9 @@ impl SessionTopologyResolver for TqAuthProvider {
                         domains: vec![ProtocolDomain::Query],
                         endpoint: SessionRouteEndpoint::Http { url: query_url },
                     });
+                } else if enabled_domains.contains(&ProtocolDomain::Market)
+                    && add_route_domain(&mut topology, "market", ProtocolDomain::Query)
+                {
                 } else {
                     let query_market_url = if let Some(url) = market_url.clone() {
                         url

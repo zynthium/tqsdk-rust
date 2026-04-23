@@ -8,7 +8,7 @@ use tqsdk_session::SessionClientBuilder;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let auth_user = std::env::var("TQ_AUTH_USER")?;
-    let auth_pass = std::env::var("TQ_AUTH_PASSWORD")?;
+    let auth_pass = std::env::var("TQ_AUTH_PASS")?;
     let symbol = std::env::var("TQ_TEST_SYMBOL").unwrap_or_else(|_| "SHFE.ao2609".to_string());
     let seconds = std::env::var("TQ_KLINE_SECONDS")
         .ok()
@@ -23,7 +23,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(128);
 
-    let session = SessionClientBuilder::new(auth_user, auth_pass).build()?;
+    let session = SessionClientBuilder::new(auth_user, auth_pass)
+        .market_target(false, false)
+        .build()?;
     let client = DataClient::from_session(session);
     let end_dt = Utc::now();
     let start_dt = end_dt - ChronoDuration::minutes(lookback_minutes);

@@ -20,6 +20,14 @@ fn builder_uses_official_schema_base_by_default() {
 }
 
 #[test]
+fn builder_defaults_to_official_stock_live_market_target() {
+    let builder = SessionClientBuilder::new("user", "pass");
+
+    assert!(builder.market_target_ref().stock);
+    assert!(!builder.market_target_ref().backtest);
+}
+
+#[test]
 fn builder_accepts_explicit_query_schema_and_replay_urls() {
     let builder = SessionClientBuilder::new("user", "pass")
         .query_url("https://query.example.com/graphql")

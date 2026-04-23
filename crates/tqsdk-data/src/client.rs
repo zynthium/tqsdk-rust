@@ -19,6 +19,7 @@ const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continu
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
 const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
+const MARKET_POLL_BUDGET: Duration = Duration::from_millis(250);
 const HISTORY_DOWNLOAD_PERMISSION_MESSAGE: &str = "history data download requires tq_dl permission; upgrade: https://www.shinnytech.com/tqsdk-buy/";
 
 static NEXT_HISTORY_CHART_ID: AtomicU64 = AtomicU64::new(1);
@@ -919,6 +920,39 @@ impl DataClient {
         }
     }
 
+    pub(crate) async fn require_history_download_permission_async(
+        &self,
+        session: &tqsdk_session::SessionClient,
+    ) -> Result<()> {
+        if let Some(auth_context) = session.auth_context()? {
+            let has_tq_dl = auth_context
+                .get("features")
+                .and_then(Value::as_array)
+                .is_some_and(|features| {
+                    features
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|feature| feature == "tq_dl")
+                });
+            return if has_tq_dl {
+                Ok(())
+            } else {
+                Err(DataError::PermissionDenied(
+                    HISTORY_DOWNLOAD_PERMISSION_MESSAGE.to_string(),
+                ))
+            };
+        }
+
+        match session.has_feature("tq_dl").await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(DataError::PermissionDenied(
+                HISTORY_DOWNLOAD_PERMISSION_MESSAGE.to_string(),
+            )),
+            Err(tqsdk_session::SessionFacadeError::InvalidState(_)) => Ok(()),
+            Err(error) => Err(session_error_into_data(error)),
+        }
+    }
+
     pub async fn query_his_cont_quotes(
         &self,
         symbols: &[&str],
@@ -1000,7 +1034,8 @@ impl DataClient {
         let spec = request.validate()?;
         let session =
             self.require_session("get_kline_data_page requires a session-backed data client")?;
-        self.require_history_download_permission()?;
+        self.require_history_download_permission_async(session)
+            .await?;
         let chart_id = next_kline_page_chart_id(request.symbol(), spec.duration_ns);
         let result = self
             .await_kline_data_page(session, &request, spec, chart_id.as_str())
@@ -1013,7 +1048,8 @@ impl DataClient {
         let spec = request.validate()?;
         let session =
             self.require_session("get_tick_data_page requires a session-backed data client")?;
-        self.require_history_download_permission()?;
+        self.require_history_download_permission_async(session)
+            .await?;
         let chart_id = next_tick_page_chart_id(request.symbol());
         let result = self
             .await_tick_data_page(session, &request, spec, chart_id.as_str())
@@ -1027,8 +1063,10 @@ impl DataClient {
         request: KlineDataSeriesRequest,
     ) -> Result<KlineDataSeries> {
         let spec = request.validate()?;
-        self.require_session("get_kline_data_series requires a session-backed data client")?;
-        self.require_history_download_permission()?;
+        let session =
+            self.require_session("get_kline_data_series requires a session-backed data client")?;
+        self.require_history_download_permission_async(session)
+            .await?;
 
         let mut rows = Vec::new();
         let mut last_next_left_kline_id = None;
@@ -1086,8 +1124,10 @@ impl DataClient {
         request: TickDataSeriesRequest,
     ) -> Result<TickDataSeries> {
         let spec = request.validate()?;
-        self.require_session("get_tick_data_series requires a session-backed data client")?;
-        self.require_history_download_permission()?;
+        let session =
+            self.require_session("get_tick_data_series requires a session-backed data client")?;
+        self.require_history_download_permission_async(session)
+            .await?;
 
         let mut rows = Vec::new();
         let mut last_next_left_id = None;
@@ -1150,6 +1190,11 @@ impl DataClient {
             live_symbols.push(metadata.underlying_symbol.clone());
         }
         let live_symbols = dedup_symbols_preserve_order(live_symbols);
+        let live_symbol_refs = live_symbols.iter().map(String::as_str).collect::<Vec<_>>();
+        session
+            .check_md_grants(&live_symbol_refs)
+            .await
+            .map_err(session_error_into_data)?;
         let live_quotes = await_quote_snapshots(session, &live_symbols, spec.timeout).await?;
 
         let mut rows = Vec::with_capacity(spec.symbols.len());
@@ -1395,7 +1440,11 @@ async fn wait_for_ready_chart(
         let mut progress = false;
         progress |= session.flush_outbound().await?;
         progress |= session.drive_pending_once().await?;
-        progress |= session.drive_route_once(Some(deadline)).await?;
+        progress |= session
+            .drive_route_once(Some(
+                (tokio::time::Instant::now() + MARKET_POLL_BUDGET).min(deadline),
+            ))
+            .await?;
 
         if progress {
             continue;
@@ -1418,7 +1467,9 @@ fn chart_is_ready(reader: &tqsdk_core::RuntimeReader, chart_id: &str) -> Result<
     else {
         return Ok(false);
     };
-    Ok(chart.ready && !chart.more_data)
+    // For history windows, `more_data` means there are more pages to paginate, not
+    // that the current chart snapshot is unreadable.
+    Ok(chart.ready)
 }
 
 fn read_ready_kline_data_page(
@@ -1435,7 +1486,7 @@ fn read_ready_kline_data_page(
     else {
         return Ok(None);
     };
-    if !chart.ready || chart.more_data {
+    if !chart.ready {
         return Ok(None);
     }
 
@@ -1496,7 +1547,7 @@ fn read_ready_tick_data_page(
     else {
         return Ok(None);
     };
-    if !chart.ready || chart.more_data {
+    if !chart.ready {
         return Ok(None);
     }
 
@@ -1638,6 +1689,15 @@ fn sanitize_chart_token(raw: &str) -> String {
 
 fn contract_error_into_data(error: tqsdk_core::ContractError) -> DataError {
     DataError::Session(tqsdk_session::SessionFacadeError::from(error))
+}
+
+fn session_error_into_data(error: tqsdk_session::SessionFacadeError) -> DataError {
+    match error {
+        tqsdk_session::SessionFacadeError::Core(tqsdk_core::ContractError::Auth(message)) => {
+            DataError::PermissionDenied(message)
+        }
+        other => DataError::Session(other),
+    }
 }
 
 fn current_cst_date() -> NaiveDate {
@@ -1845,6 +1905,85 @@ mod tests {
             assert_eq!(page.rows()[0].id, 200);
             assert_eq!(page.rows()[1].id, 201);
             assert_eq!(page.last().map(|row| row.last_price), Some(618.5));
+
+            seed_thread.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn get_kline_data_page_allows_ready_chart_with_more_data_true() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            let client = DataClient::from_session(session.clone());
+            let request = KlineDataPageRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                .with_left_kline_id(100)
+                .with_timeout(Duration::from_millis(100));
+            let duration_ns = request.validate().unwrap().duration_ns;
+
+            let seed_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                seed_kline_chart(
+                    &handle,
+                    "data-kline-more-data",
+                    "SHFE.ao2609",
+                    duration_ns,
+                    100,
+                    101,
+                    true,
+                );
+            });
+
+            let page = client
+                .await_kline_data_page(
+                    &session,
+                    &request,
+                    request.validate().unwrap(),
+                    "data-kline-more-data",
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(page.chart_left_id(), 100);
+            assert_eq!(page.chart_right_id(), 101);
+            assert_eq!(page.len(), 2);
+
+            seed_thread.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn get_tick_data_page_allows_ready_chart_with_more_data_true() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            let client = DataClient::from_session(session.clone());
+            let request =
+                TickDataPageRequest::new("SHFE.ao2609", 2).with_timeout(Duration::from_millis(100));
+
+            let seed_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                seed_tick_chart(
+                    &handle,
+                    "data-tick-more-data",
+                    "SHFE.ao2609",
+                    200,
+                    201,
+                    true,
+                );
+            });
+
+            let page = client
+                .await_tick_data_page(
+                    &session,
+                    &request,
+                    request.validate().unwrap(),
+                    "data-tick-more-data",
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(page.chart_left_id(), 200);
+            assert_eq!(page.chart_right_id(), 201);
+            assert_eq!(page.len(), 2);
 
             seed_thread.join().unwrap();
         });
@@ -2457,6 +2596,26 @@ mod tests {
         left_id: i64,
         right_id: i64,
     ) {
+        seed_kline_chart(
+            handle,
+            chart_id,
+            symbol,
+            duration_ns,
+            left_id,
+            right_id,
+            false,
+        );
+    }
+
+    fn seed_kline_chart(
+        handle: &RuntimeHandle,
+        chart_id: &str,
+        symbol: &str,
+        duration_ns: i64,
+        left_id: i64,
+        right_id: i64,
+        more_data: bool,
+    ) {
         handle
             .ingest(
                 RuntimeInput::Io(IoEvent {
@@ -2473,7 +2632,7 @@ mod tests {
                                     },
                                     "left_id": left_id,
                                     "right_id": right_id,
-                                    "more_data": false,
+                                    "more_data": more_data,
                                     "ready": true,
                                 }
                             },
@@ -2546,6 +2705,17 @@ mod tests {
         left_id: i64,
         right_id: i64,
     ) {
+        seed_tick_chart(handle, chart_id, symbol, left_id, right_id, false);
+    }
+
+    fn seed_tick_chart(
+        handle: &RuntimeHandle,
+        chart_id: &str,
+        symbol: &str,
+        left_id: i64,
+        right_id: i64,
+        more_data: bool,
+    ) {
         handle
             .ingest(
                 RuntimeInput::Io(IoEvent {
@@ -2562,7 +2732,7 @@ mod tests {
                                     },
                                     "left_id": left_id,
                                     "right_id": right_id,
-                                    "more_data": false,
+                                    "more_data": more_data,
                                     "ready": true,
                                 }
                             },

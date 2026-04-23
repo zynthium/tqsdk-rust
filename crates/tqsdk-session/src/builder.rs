@@ -43,7 +43,7 @@ impl SessionClientBuilder {
             endpoints,
             query_enabled: false,
             facade_config: SessionFacadeConfig::default(),
-            market_target: MarketSessionTarget::new(false, false),
+            market_target: MarketSessionTarget::new(true, false),
             trade_targets: Vec::new(),
         }
     }

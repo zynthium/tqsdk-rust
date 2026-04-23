@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use super::helpers::{
     default_nan, default_neg_one, default_true, deserialize_f64_or_nan, deserialize_i64_or_zero,
+    deserialize_option_i64_or_none, deserialize_vec_or_default,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -17,7 +18,9 @@ pub struct CategoryInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TradingTime {
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub day: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub night: Vec<Vec<String>>,
 }
 
@@ -97,16 +100,27 @@ pub struct Quote {
     pub pre_close: f64,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub price_tick: f64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub price_decs: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub volume_multiple: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub open_limit: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub max_limit_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub max_market_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub min_limit_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub min_market_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub open_max_market_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub open_max_limit_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub open_min_market_order_volume: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub open_min_limit_order_volume: i64,
     pub underlying_symbol: String,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
@@ -119,28 +133,40 @@ pub struct Quote {
     pub expired: bool,
     #[serde(default)]
     pub trading_time: TradingTime,
+    #[serde(default, deserialize_with = "deserialize_option_i64_or_none")]
     pub expire_datetime: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub delivery_year: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub delivery_month: i64,
+    #[serde(default, deserialize_with = "deserialize_option_i64_or_none")]
     pub last_exercise_datetime: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub exercise_year: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub exercise_month: i64,
     pub option_class: String,
     pub exercise_type: String,
     pub product_id: String,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub iopv: f64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub public_float_share_quantity: i64,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub stock_dividend_ratio: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub cash_dividend_ratio: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_option_i64_or_none")]
     pub expire_rest_days: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub categories: Vec<CategoryInfo>,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub position_limit: i64,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub change: f64,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub change_percent: f64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_zero")]
     pub pre_volume: i64,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub margin: f64,
@@ -150,6 +176,7 @@ pub struct Quote {
     pub underlying_product: String,
     pub py: String,
     #[serde(default, rename = "_epoch", skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_option_i64_or_none")]
     pub epoch: Option<i64>,
 }
 

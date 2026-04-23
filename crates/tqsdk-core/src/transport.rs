@@ -866,9 +866,15 @@ fn map_raw_frame_to_input(route: &SessionRoute, frame: RawFrame) -> Result<Optio
         RawFrame::Binary(bytes) => Ok(Some(RuntimeInput::Io(IoEvent {
             route: route.label.clone(),
             domains: route.domains.clone(),
-            payload: InputPayload::Binary(bytes),
+            payload: parse_binary_payload(bytes)?,
         }))),
-        RawFrame::Ping => Ok(None),
+        RawFrame::Ping => Ok(Some(RuntimeInput::Internal(InternalEvent {
+            label: "transport-ping",
+            payload: Some(json!({
+                "route": route.label,
+                "domains": route.domains.iter().copied().map(ProtocolDomain::as_str).collect::<Vec<_>>(),
+            })),
+        }))),
         RawFrame::Pong => Ok(Some(RuntimeInput::Internal(InternalEvent {
             label: "transport-pong",
             payload: Some(json!({
@@ -890,6 +896,13 @@ fn parse_text_payload(text: String) -> Result<InputPayload> {
     match serde_json::from_str::<Value>(&text) {
         Ok(value) => Ok(InputPayload::Json(value)),
         Err(_) => Ok(InputPayload::Text(text)),
+    }
+}
+
+fn parse_binary_payload(bytes: Vec<u8>) -> Result<InputPayload> {
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => Ok(InputPayload::Json(value)),
+        Err(_) => Ok(InputPayload::Binary(bytes)),
     }
 }
 
@@ -966,5 +979,64 @@ impl SessionBootstrap {
 
             Ok(connected)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        InputPayload, IoEvent, ProtocolDomain, RawFrame, RuntimeInput, SessionRoute,
+        SessionRouteEndpoint, SessionTarget, map_raw_frame_to_input, parse_binary_payload,
+        parse_text_payload,
+    };
+
+    #[test]
+    fn parse_text_payload_decodes_json_when_possible() {
+        let payload = parse_text_payload(r#"{"aid":"rtn_data"}"#.to_string()).unwrap();
+        assert_eq!(payload, InputPayload::Json(json!({ "aid": "rtn_data" })));
+    }
+
+    #[test]
+    fn parse_binary_payload_decodes_json_when_possible() {
+        let payload = parse_binary_payload(br#"{"aid":"rtn_data"}"#.to_vec()).unwrap();
+        assert_eq!(payload, InputPayload::Json(json!({ "aid": "rtn_data" })));
+    }
+
+    #[test]
+    fn parse_binary_payload_preserves_non_json_bytes() {
+        let payload = parse_binary_payload(vec![0_u8, 1, 2, 3]).unwrap();
+        assert_eq!(payload, InputPayload::Binary(vec![0_u8, 1, 2, 3]));
+    }
+
+    #[test]
+    fn map_raw_binary_frame_to_json_io_when_payload_is_json() {
+        let route = SessionRoute {
+            label: "market".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Market],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "wss://market.example".to_string(),
+                connect: super::WebSocketConnectOptions::default(),
+            },
+        };
+
+        let input = map_raw_frame_to_input(
+            &route,
+            RawFrame::Binary(
+                br#"{"aid":"rtn_data","data":[{"quotes":{"SHFE.au2602":{"last_price":618.5}}}]}"#
+                    .to_vec(),
+            ),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            input,
+            Some(RuntimeInput::Io(IoEvent {
+                payload: InputPayload::Json(_),
+                ..
+            }))
+        ));
     }
 }

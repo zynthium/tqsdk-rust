@@ -23,7 +23,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(128);
 
-    let session = SessionClientBuilder::new(auth_user, auth_pass).build()?;
+    let session = SessionClientBuilder::new(auth_user, auth_pass)
+        .market_target(false, false)
+        .build()?;
     let client = DataClient::from_session(session);
     let focus_datetime_ns = Utc::now()
         .timestamp_nanos_opt()

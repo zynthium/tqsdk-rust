@@ -7,6 +7,8 @@ use tqsdk_core::{MarketCommand, Quote, RuntimeCommand, RuntimeReader, Symbol};
 
 use crate::error::{DataError, Result};
 
+const MARKET_POLL_BUDGET: Duration = Duration::from_millis(250);
+
 pub(crate) async fn await_quote_snapshots(
     session: &tqsdk_session::SessionClient,
     symbols: &[String],
@@ -61,7 +63,11 @@ async fn wait_for_ready_quotes(
         let mut progress = false;
         progress |= session.flush_outbound().await?;
         progress |= session.drive_pending_once().await?;
-        progress |= session.drive_route_once(Some(deadline)).await?;
+        progress |= session
+            .drive_route_once(Some(
+                (tokio::time::Instant::now() + MARKET_POLL_BUDGET).min(deadline),
+            ))
+            .await?;
 
         if progress {
             continue;

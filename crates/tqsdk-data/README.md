@@ -23,7 +23,10 @@
 - `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程
 - `query_option_greeks` 是一次性 owned 研究接口，内部会临时拉起 live quote snapshot 并做本地 Black-Scholes / 隐波计算
 - `export_*_csv` 是建立在 `*_data_download` 之上的纯 async materialization helper，要求调用方提供 `AsyncWrite`
-- 当 session 的 auth context 已知但缺少 `tq_dl` 时，history page / series / download 接口会明确拒绝
+- async history 入口会主动拉取 auth context 并校验 `tq_dl`，避免把权限错误拖到 websocket timeout
+- `kline_data_download` / `tick_data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 history 读取会在首个 async page/export 调用时再次强校验
+- 当 `query_option_greeks` 依赖的 live quote symbols 缺少行情权限时，也会在 facade 层尽早拒绝，而不是等到订阅超时
+- `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到买一卖一中间价 / 单边盘口 / `pre_close`
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 
@@ -117,9 +120,14 @@
 
 ## 示例
 
-最小可编译示例见 [examples/his_cont_quotes.rs](examples/his_cont_quotes.rs)。
+最小可编译示例见：
+
+- [examples/his_cont_quotes.rs](examples/his_cont_quotes.rs)
+- [examples/kline_data_download.rs](examples/kline_data_download.rs)
+- [examples/kline_export_csv.rs](examples/kline_export_csv.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
+默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::market_target(false, false)` 走 futures market route。
 
 session-backed 的时间范围历史示例见 [examples/kline_data_series.rs](examples/kline_data_series.rs)。
 

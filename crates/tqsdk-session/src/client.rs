@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -27,6 +28,9 @@ use crate::services::SessionServiceEndpoints;
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 const PEEK_MESSAGE: &str = r#"{"aid":"peek_message"}"#;
+const WEBSOCKET_COMMAND_POLL_BUDGET: Duration = Duration::from_millis(250);
+const WEBSOCKET_COMMAND_MAX_WAIT: Duration = Duration::from_secs(60);
+const LIMITED_INDEX_SYMBOLS: &[&str] = &["SSE.000016", "SSE.000300", "SSE.000905", "SSE.000852"];
 
 type SharedAuthProvider = Arc<dyn AuthProvider>;
 type SharedTopologyResolver = Arc<dyn SessionTopologyResolver>;
@@ -127,6 +131,39 @@ impl SessionIoState {
     }
 }
 
+async fn recover_run(
+    io: &mut SessionIoState,
+    runtime: &SessionRuntime,
+) -> crate::error::Result<()> {
+    let run = runtime
+        .recover(
+            io.auth_provider.as_ref(),
+            io.topology_resolver.as_ref(),
+            io.route_connector.as_ref(),
+            &io.config,
+            &io.adapters,
+        )
+        .await?;
+    io.run = Some(run);
+    prime_all_websocket_routes(io).await?;
+    Ok(())
+}
+
+async fn prime_route_with_recover(
+    io: &mut SessionIoState,
+    runtime: &SessionRuntime,
+    route_label: &str,
+) -> crate::error::Result<()> {
+    match prime_route(io, route_label).await {
+        Ok(()) => Ok(()),
+        Err(crate::error::SessionFacadeError::Core(tqsdk_core::ContractError::Transport(_))) => {
+            recover_run(io, runtime).await?;
+            prime_route(io, route_label).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
 #[derive(Clone)]
 /// Reusable async session facade shared by higher-level consumption styles.
 ///
@@ -145,6 +182,25 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
+    fn validate_query_payload(value: &Value) -> crate::error::Result<()> {
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(crate::error::SessionFacadeError::from(
+                tqsdk_core::ContractError::validation(format!("graphql query failed: {error}")),
+            ));
+        }
+        if let Some(errors) = value.get("errors").and_then(Value::as_array)
+            && !errors.is_empty()
+        {
+            return Err(crate::error::SessionFacadeError::from(
+                tqsdk_core::ContractError::validation(format!(
+                    "graphql query failed: {}",
+                    Value::Array(errors.clone())
+                )),
+            ));
+        }
+        Ok(())
+    }
+
     fn next_query_id() -> QueryId {
         QueryId::new(format!(
             "query-{}",
@@ -289,10 +345,23 @@ impl SessionClient {
             return Ok(false);
         };
         let mut io = io.lock().await;
-        let Some(run) = io.run.as_mut() else {
+        if io.run.is_none() {
             return Ok(false);
+        }
+        let receipts = match self
+            .runtime
+            .flush_outbound(io.run.as_mut().expect("run checked above"))
+            .await
+        {
+            Ok(receipts) => receipts,
+            Err(tqsdk_core::ContractError::Transport(_)) => {
+                recover_run(&mut io, &self.runtime).await?;
+                self.runtime
+                    .flush_outbound(io.run.as_mut().expect("run recovered"))
+                    .await?
+            }
+            Err(err) => return Err(err.into()),
         };
-        let receipts = self.runtime.flush_outbound(run).await?;
         Ok(!receipts.is_empty())
     }
 
@@ -338,6 +407,48 @@ impl SessionClient {
         Ok(!outcome.requests.is_empty() || !outcome.commits.is_empty())
     }
 
+    async fn drive_pending_route_label_once(
+        &self,
+        route_label: &str,
+    ) -> crate::error::Result<bool> {
+        self.ensure_established().await?;
+        let Some(io) = self.io.as_ref() else {
+            return Ok(false);
+        };
+        let mut io = io.lock().await;
+        let Some(route) = io.run.as_ref().and_then(|run| {
+            run.connected
+                .routes
+                .iter()
+                .find(|route| route.route.label == route_label)
+                .map(|route| route.route.clone())
+        }) else {
+            return Ok(false);
+        };
+        let Some(executor) = (match route.endpoint {
+            SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
+            SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
+            SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
+            SessionRouteEndpoint::WebSocket { .. } => None,
+        }) else {
+            return Ok(false);
+        };
+        let Some(run) = io.run.as_mut() else {
+            return Ok(false);
+        };
+        let outcome = self
+            .runtime
+            .drive_pending_route_once(
+                run,
+                route_label,
+                executor.as_ref(),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .await?;
+        Ok(!outcome.requests.is_empty() || !outcome.commits.is_empty())
+    }
+
     pub async fn drive_route_once(&self, deadline: Option<Instant>) -> crate::error::Result<bool> {
         self.ensure_established().await?;
         let Some(io) = self.io.as_ref() else {
@@ -347,7 +458,7 @@ impl SessionClient {
         let Some(route_label) = io.next_websocket_route_label() else {
             return Ok(false);
         };
-        prime_route(&mut io, route_label.as_str()).await?;
+        prime_route_with_recover(&mut io, &self.runtime, route_label.as_str()).await?;
 
         let SessionIoState {
             auth_provider,
@@ -391,6 +502,68 @@ impl SessionClient {
         Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
     }
 
+    async fn drive_route_label_once(
+        &self,
+        route_label: &str,
+        deadline: Option<Instant>,
+        caused_by: Vec<CommandId>,
+    ) -> crate::error::Result<bool> {
+        self.ensure_established().await?;
+        let Some(io) = self.io.as_ref() else {
+            return Ok(false);
+        };
+        let mut io = io.lock().await;
+        if io
+            .run
+            .as_ref()
+            .is_none_or(|run| !run.connected.has_route(route_label))
+        {
+            return Ok(false);
+        }
+        prime_route_with_recover(&mut io, &self.runtime, route_label).await?;
+
+        let SessionIoState {
+            auth_provider,
+            topology_resolver,
+            route_connector,
+            adapters,
+            config,
+            run,
+            ..
+        } = &mut *io;
+        let Some(run) = run.as_mut() else {
+            return Ok(false);
+        };
+        let deps = SessionRuntimeDeps::new(
+            auth_provider.as_ref(),
+            topology_resolver.as_ref(),
+            route_connector.as_ref(),
+            config,
+            adapters,
+        );
+        let future = self.runtime.drive_route_once(
+            run,
+            route_label,
+            caused_by,
+            CommitScope::RealtimeUpdate,
+            deps,
+        );
+        let outcome = if let Some(deadline) = deadline {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            if budget.is_zero() {
+                return Ok(false);
+            }
+            match timeout(budget, future).await {
+                Ok(result) => result?,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            future.await?
+        };
+
+        Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
+    }
+
     pub fn query_result(&self, query_id: &str) -> crate::error::Result<Option<Value>> {
         let guard = self.reader.read();
         guard
@@ -410,6 +583,16 @@ impl SessionClient {
         Ok(self.command_state(command_id)?.and_then(|command| {
             command
                 .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }))
+    }
+
+    fn command_route_label(&self, command_id: CommandId) -> crate::error::Result<Option<String>> {
+        Ok(self.command_state(command_id)?.and_then(|command| {
+            command
+                .get("detail")
+                .and_then(|detail| detail.get("route"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         }))
@@ -436,6 +619,16 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
+    pub async fn has_feature(&self, feature: &str) -> crate::error::Result<bool> {
+        let auth = self.service_auth_context(false).await?;
+        Ok(has_auth_feature(auth.features(), feature))
+    }
+
+    pub async fn check_md_grants(&self, symbols: &[&str]) -> crate::error::Result<()> {
+        let auth = self.service_auth_context(false).await?;
+        check_md_grants_for_features(auth.features(), symbols)
+    }
+
     pub fn replay_state(&self, replay_id: &str) -> crate::error::Result<Option<Value>> {
         let guard = self.reader.read();
         guard
@@ -459,20 +652,27 @@ impl SessionClient {
     }
 
     async fn require_query_value_route(&self) -> crate::error::Result<()> {
-        if let Some(io) = self.io.as_ref()
-            && io
-                .lock()
-                .await
-                .config
-                .enabled_domains()
-                .contains(&tqsdk_core::ProtocolDomain::Query)
-        {
-            Ok(())
-        } else {
-            Err(crate::error::SessionFacadeError::InvalidState(
+        let Some(io) = self.io.as_ref() else {
+            return Err(crate::error::SessionFacadeError::InvalidState(
                 "query value helper requires an enabled query route",
-            ))
+            ));
+        };
+        let io = io.lock().await;
+        if !io
+            .config
+            .enabled_domains()
+            .contains(&tqsdk_core::ProtocolDomain::Query)
+        {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "query value helper requires an enabled query route",
+            ));
         }
+        if io.config.endpoints.query_url.is_none() && !io.config.market_target.stock {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "websocket query helpers require stock market_target when query_url is not configured",
+            ));
+        }
+        Ok(())
     }
 
     async fn require_replay_value_route(&self) -> crate::error::Result<()> {
@@ -496,6 +696,7 @@ impl SessionClient {
         &self,
         command_id: CommandId,
     ) -> crate::error::Result<()> {
+        let started_at = Instant::now();
         loop {
             if self.command_completed(command_id)? {
                 return Ok(());
@@ -508,12 +709,33 @@ impl SessionClient {
                 return Ok(());
             }
 
-            progress |= self.drive_pending_once().await?;
-            if self.command_completed(command_id)? {
-                return Ok(());
-            }
+            if let Some(route_label) = self.command_route_label(command_id)? {
+                progress |= self
+                    .drive_pending_route_label_once(route_label.as_str())
+                    .await?;
+                if self.command_completed(command_id)? {
+                    return Ok(());
+                }
 
-            progress |= self.drive_route_once(None).await?;
+                let websocket_progress = self
+                    .drive_route_label_once(
+                        route_label.as_str(),
+                        Some(Instant::now() + WEBSOCKET_COMMAND_POLL_BUDGET),
+                        vec![command_id],
+                    )
+                    .await?;
+                progress |= websocket_progress;
+                if !websocket_progress && started_at.elapsed() < WEBSOCKET_COMMAND_MAX_WAIT {
+                    progress = true;
+                }
+            } else {
+                progress |= self.drive_pending_once().await?;
+                if self.command_completed(command_id)? {
+                    return Ok(());
+                }
+
+                progress |= self.drive_route_once(None).await?;
+            }
             if self.command_completed(command_id)? {
                 return Ok(());
             }
@@ -567,10 +789,13 @@ impl SessionClient {
             .await?;
 
         self.drive_until_command_completed(command_id).await?;
-        self.query_result(query_id.as_str())?
-            .ok_or(crate::error::SessionFacadeError::InvalidState(
+        let value = self.query_result(query_id.as_str())?.ok_or(
+            crate::error::SessionFacadeError::InvalidState(
                 "query command completed without a result payload",
-            ))
+            ),
+        )?;
+        Self::validate_query_payload(&value)?;
+        Ok(value)
     }
 
     pub async fn refresh_schema_value(
@@ -982,6 +1207,60 @@ async fn prime_route(io: &mut SessionIoState, route_label: &str) -> crate::error
     Ok(())
 }
 
+fn has_auth_feature(features: &[String], feature: &str) -> bool {
+    features.iter().any(|item| item == feature)
+}
+
+fn check_md_grants_for_features(features: &[String], symbols: &[&str]) -> crate::error::Result<()> {
+    for symbol in symbols {
+        let prefix = symbol.split('.').next().unwrap_or_default();
+
+        if LIMITED_INDEX_SYMBOLS.contains(symbol) {
+            if has_auth_feature(features, "sec") || has_auth_feature(features, "lmt_idx") {
+                continue;
+            }
+            return Err(crate::error::SessionFacadeError::from(
+                tqsdk_core::ContractError::auth(format!(
+                    "your account does not support market data for {symbol}"
+                )),
+            ));
+        }
+
+        if matches!(
+            prefix,
+            "CFFEX" | "SHFE" | "DCE" | "CZCE" | "INE" | "GFEX" | "SSWE" | "KQ" | "KQD"
+        ) {
+            if has_auth_feature(features, "futr") {
+                continue;
+            }
+            return Err(crate::error::SessionFacadeError::from(
+                tqsdk_core::ContractError::auth(format!(
+                    "your account does not support futures market data for {symbol}"
+                )),
+            ));
+        }
+
+        if prefix == "CSI" || matches!(prefix, "SSE" | "SZSE") {
+            if has_auth_feature(features, "sec") {
+                continue;
+            }
+            return Err(crate::error::SessionFacadeError::from(
+                tqsdk_core::ContractError::auth(format!(
+                    "your account does not support stock market data for {symbol}"
+                )),
+            ));
+        }
+
+        return Err(crate::error::SessionFacadeError::from(
+            tqsdk_core::ContractError::auth(format!(
+                "unsupported market-data symbol namespace for {symbol}"
+            )),
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
@@ -1006,12 +1285,26 @@ mod tests {
     };
     use crate::config::SessionFacadeConfig;
 
-    #[derive(Clone)]
-    struct TestAuthProvider;
+    #[derive(Clone, Default)]
+    struct TestAuthProvider {
+        features: Vec<String>,
+    }
+
+    impl TestAuthProvider {
+        fn with_features(features: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                features: features.into_iter().map(str::to_string).collect(),
+            }
+        }
+    }
 
     impl AuthProvider for TestAuthProvider {
         fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
-            Box::pin(async { Ok(AuthContext::new("test-token")) })
+            let mut auth = AuthContext::new("test-token");
+            for feature in &self.features {
+                auth = auth.with_feature(feature.clone());
+            }
+            Box::pin(async move { Ok(auth) })
         }
     }
 
@@ -1092,6 +1385,94 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    struct QueryResultTransport {
+        sent: Arc<Mutex<Vec<OutboundFrame>>>,
+        emit_ping_first: bool,
+        emitted_ping: Arc<Mutex<bool>>,
+        emitted_result: Arc<Mutex<bool>>,
+    }
+
+    impl QueryResultTransport {
+        fn new(emit_ping_first: bool) -> Self {
+            Self {
+                emit_ping_first,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Transport for QueryResultTransport {
+        fn connect(&mut self) -> ContractFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+            let sent = Arc::clone(&self.sent);
+            let emitted_ping = Arc::clone(&self.emitted_ping);
+            let emitted_result = Arc::clone(&self.emitted_result);
+            let emit_ping_first = self.emit_ping_first;
+            Box::pin(async move {
+                if emit_ping_first && !*emitted_ping.lock().unwrap() {
+                    *emitted_ping.lock().unwrap() = true;
+                    return Ok(RawFrame::Ping);
+                }
+
+                if !*emitted_result.lock().unwrap() {
+                    let Some(query_id) = sent.lock().unwrap().iter().find_map(outbound_query_id)
+                    else {
+                        return Ok(RawFrame::Pong);
+                    };
+                    *emitted_result.lock().unwrap() = true;
+                    return Ok(RawFrame::Text(
+                        json!({
+                            "aid": "rtn_data",
+                            "data": [{
+                                "symbols": {
+                                    query_id: {
+                                        "result": {
+                                            "quotes": ["SHFE.au2602"]
+                                        }
+                                    }
+                                }
+                            }]
+                        })
+                        .to_string(),
+                    ));
+                }
+
+                Ok(RawFrame::Pong)
+            })
+        }
+
+        fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+            let sent = Arc::clone(&self.sent);
+            Box::pin(async move {
+                sent.lock().unwrap().push(frame);
+                Ok(())
+            })
+        }
+
+        fn close(&mut self) -> ContractFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct QueryResultConnector {
+        transport: QueryResultTransport,
+    }
+
+    impl SessionRouteConnector for QueryResultConnector {
+        fn connect_route<'a>(
+            &'a self,
+            _route: &'a SessionRoute,
+        ) -> ContractFuture<'a, Box<dyn Transport>> {
+            let transport = self.transport.clone();
+            Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+        }
+    }
+
+    #[derive(Clone, Default)]
     struct RecordingExecutor {
         responses: Arc<Mutex<BTreeMap<String, Vec<RuntimeInput>>>>,
         query_values: Arc<Mutex<BTreeMap<String, Value>>>,
@@ -1158,6 +1539,18 @@ mod tests {
                 "data": value,
             })),
         })])
+    }
+
+    fn outbound_query_id(frame: &OutboundFrame) -> Option<String> {
+        let text = match frame {
+            OutboundFrame::Text(text) => text,
+            OutboundFrame::Binary(_) | OutboundFrame::Ping | OutboundFrame::Close => return None,
+        };
+        serde_json::from_str::<Value>(text)
+            .ok()?
+            .get("query_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1289,6 +1682,98 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, json!({ "quotes": ["SHFE.au2602"] }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_graphql_value_works_over_market_websocket_when_query_is_cohosted() {
+        let handle = runtime_with_default_adapters();
+        let client = test_live_client_with_components(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market, ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://market.example".to_string(),
+                    connect: tqsdk_core::WebSocketConnectOptions::default(),
+                },
+            }),
+            SessionIoComponents {
+                auth_provider: Arc::new(TestAuthProvider::default()),
+                topology_resolver: Arc::new(StaticTopologyResolver {
+                    topology: SessionTopology::default().with_route(SessionRoute {
+                        label: "market".to_string(),
+                        target: SessionTarget::Shared,
+                        domains: vec![ProtocolDomain::Market, ProtocolDomain::Query],
+                        endpoint: SessionRouteEndpoint::WebSocket {
+                            url: "wss://market.example".to_string(),
+                            connect: tqsdk_core::WebSocketConnectOptions::default(),
+                        },
+                    }),
+                }),
+                route_connector: Arc::new(QueryResultConnector {
+                    transport: QueryResultTransport::new(false),
+                }),
+                http_executor: Arc::new(RecordingExecutor::default()),
+                internal_executor: Arc::new(SessionInternalExecutor::new(Arc::new(
+                    TestAuthProvider::default(),
+                ))),
+                replay_executor: Arc::new(SessionReplayExecutor),
+            },
+        );
+
+        let value = client
+            .query_graphql_value("query { quotes }", None)
+            .await
+            .unwrap();
+
+        assert_eq!(value, json!({ "result": { "quotes": ["SHFE.au2602"] } }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_graphql_value_tolerates_server_ping_before_query_result() {
+        let handle = runtime_with_default_adapters();
+        let client = test_live_client_with_components(
+            handle,
+            SessionTopology::default().with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market, ProtocolDomain::Query],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://market.example".to_string(),
+                    connect: tqsdk_core::WebSocketConnectOptions::default(),
+                },
+            }),
+            SessionIoComponents {
+                auth_provider: Arc::new(TestAuthProvider::default()),
+                topology_resolver: Arc::new(StaticTopologyResolver {
+                    topology: SessionTopology::default().with_route(SessionRoute {
+                        label: "market".to_string(),
+                        target: SessionTarget::Shared,
+                        domains: vec![ProtocolDomain::Market, ProtocolDomain::Query],
+                        endpoint: SessionRouteEndpoint::WebSocket {
+                            url: "wss://market.example".to_string(),
+                            connect: tqsdk_core::WebSocketConnectOptions::default(),
+                        },
+                    }),
+                }),
+                route_connector: Arc::new(QueryResultConnector {
+                    transport: QueryResultTransport::new(true),
+                }),
+                http_executor: Arc::new(RecordingExecutor::default()),
+                internal_executor: Arc::new(SessionInternalExecutor::new(Arc::new(
+                    TestAuthProvider::default(),
+                ))),
+                replay_executor: Arc::new(SessionReplayExecutor),
+            },
+        );
+
+        let value = client
+            .query_graphql_value("query { quotes }", None)
+            .await
+            .unwrap();
+
+        assert_eq!(value, json!({ "result": { "quotes": ["SHFE.au2602"] } }));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1457,6 +1942,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn query_value_helper_rejects_non_stock_websocket_query_without_http_override() {
+        let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
+            .market_target(false, false)
+            .enable_query()
+            .build()
+            .expect("builder should construct a thin session client");
+
+        let error = client
+            .query_graphql_value("query { ping }", None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: websocket query helpers require stock market_target when query_url is not configured"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn replay_value_helpers_require_explicit_replay_route() {
         let client = SessionClient::new_for_test_with_handle(
             runtime_with_default_adapters(),
@@ -1517,13 +2021,100 @@ mod tests {
         assert!(enabled.contains(&ProtocolDomain::Query));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn has_feature_reads_auth_context_features() {
+        let client = test_live_client_with_auth(
+            runtime_with_default_adapters(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(TestAuthProvider::with_features(["futr", "opt"])),
+        );
+
+        assert!(client.has_feature("futr").await.unwrap());
+        assert!(!client.has_feature("sec").await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_md_grants_allows_futures_with_futr_feature() {
+        let client = test_live_client_with_auth(
+            runtime_with_default_adapters(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(TestAuthProvider::with_features(["futr"])),
+        );
+
+        client
+            .check_md_grants(&["SHFE.au2606", "SHFE.au2606C720"])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_md_grants_rejects_stock_without_sec_feature() {
+        let client = test_live_client_with_auth(
+            runtime_with_default_adapters(),
+            SessionTopology::default().with_route(SessionRoute {
+                label: "system".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::System],
+                endpoint: SessionRouteEndpoint::Internal {
+                    label: "system-driver".to_string(),
+                },
+            }),
+            QueueTransport::default(),
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(TestAuthProvider::with_features(["opt"])),
+        );
+
+        let error = client
+            .check_md_grants(&["SSE.510300", "SSE.10010989"])
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "auth error: your account does not support stock market data for SSE.510300"
+        );
+    }
+
     fn test_live_client(
         handle: RuntimeHandle,
         topology: SessionTopology,
         transport: QueueTransport,
         http_executor: SharedRouteExecutor,
     ) -> SessionClient {
-        let auth_provider: SharedAuthProvider = Arc::new(TestAuthProvider);
+        test_live_client_with_auth(
+            handle,
+            topology,
+            transport,
+            http_executor,
+            Arc::new(TestAuthProvider::default()),
+        )
+    }
+
+    fn test_live_client_with_auth(
+        handle: RuntimeHandle,
+        topology: SessionTopology,
+        transport: QueueTransport,
+        http_executor: SharedRouteExecutor,
+        auth_provider: SharedAuthProvider,
+    ) -> SessionClient {
         let topology_resolver: SharedTopologyResolver = Arc::new(StaticTopologyResolver {
             topology: topology.clone(),
         });
@@ -1531,6 +2122,26 @@ mod tests {
         let internal_executor: SharedRouteExecutor =
             Arc::new(SessionInternalExecutor::new(auth_provider.clone()));
         let replay_executor: SharedRouteExecutor = Arc::new(SessionReplayExecutor);
+
+        test_live_client_with_components(
+            handle,
+            topology,
+            SessionIoComponents {
+                auth_provider,
+                topology_resolver,
+                route_connector,
+                http_executor,
+                internal_executor,
+                replay_executor,
+            },
+        )
+    }
+
+    fn test_live_client_with_components(
+        handle: RuntimeHandle,
+        topology: SessionTopology,
+        components: SessionIoComponents,
+    ) -> SessionClient {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let mut endpoints = EndpointConfig::new("https://auth.example");
@@ -1587,16 +2198,7 @@ mod tests {
                 endpoints,
             ),
             io: Some(Arc::new(TokioMutex::new(SessionIoState::new(
-                SessionIoComponents {
-                    auth_provider,
-                    topology_resolver,
-                    route_connector,
-                    http_executor,
-                    internal_executor,
-                    replay_executor,
-                },
-                adapters,
-                config,
+                components, adapters, config,
             )))),
         }
     }

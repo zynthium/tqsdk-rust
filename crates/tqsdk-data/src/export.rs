@@ -48,6 +48,10 @@ impl DataClient {
     where
         W: AsyncWrite + Unpin,
     {
+        if let Some(session) = self.session() {
+            self.require_history_download_permission_async(session)
+                .await?;
+        }
         let mut download = self.kline_data_download(request)?;
 
         writer.write_all(KLINE_CSV_HEADER.as_bytes()).await?;
@@ -80,6 +84,10 @@ impl DataClient {
     where
         W: AsyncWrite + Unpin,
     {
+        if let Some(session) = self.session() {
+            self.require_history_download_permission_async(session)
+                .await?;
+        }
         let mut download = self.tick_data_download(request)?;
 
         writer.write_all(TICK_CSV_HEADER.as_bytes()).await?;

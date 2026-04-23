@@ -24,6 +24,8 @@
 - `command_status()`
 - `auth_context()`
 - `refreshed_auth()`
+- `has_feature(...).await`
+- `check_md_grants(...).await`
 - `replay_state()`
 - `query_graphql(...).await`
 - `query_graphql_value(...).await`
@@ -70,6 +72,14 @@
 
 `query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
 如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
+
+如果调用方需要在进入 live 行情订阅前做权限护栏，可以直接用：
+
+- `has_feature("futr").await`
+- `has_feature("sec").await`
+- `check_md_grants(&["SHFE.au2606", "SSE.510300"]).await`
+
+这样上层 crate 就不需要再各自重复一份权限判断逻辑。
 
 它不直接定义高层 diff-backed 用户 API，也不把某一种消费风格硬编码进核心。
 

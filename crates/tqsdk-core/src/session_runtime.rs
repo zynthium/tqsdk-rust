@@ -983,7 +983,7 @@ impl SessionRuntime {
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
         let query_id = detail.get("query_id").and_then(Value::as_str)?;
-        if !commit_touches_path(commit, ["query", query_id]) {
+        if !commit_touches_path_prefix(commit, ["query", query_id]) {
             return None;
         }
         snapshot.get(["query", query_id])?;
@@ -1461,4 +1461,20 @@ where
     S: Into<String>,
 {
     commit.changes.path_hits.contains(&StatePath::new(path))
+}
+
+fn commit_touches_path_prefix<I, S>(commit: &CommitResult, path: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let prefix = path.into_iter().map(Into::into).collect::<Vec<_>>();
+    commit.changes.path_hits.iter().any(|hit| {
+        let segments = hit.segments();
+        segments.len() >= prefix.len()
+            && segments
+                .iter()
+                .zip(prefix.iter())
+                .all(|(left, right)| left == right)
+    })
 }

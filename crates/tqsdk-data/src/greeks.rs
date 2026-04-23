@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use chrono::{FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{FixedOffset, NaiveDateTime, TimeZone, Utc};
 use tqsdk_core::Quote;
 
 use crate::error::{DataError, Result};
@@ -262,16 +262,18 @@ pub(crate) fn build_option_greeks_row(
             "option metadata for {symbol} missing expire_datetime"
         ))
     })?;
+    let quote_datetime = effective_quote_datetime(option_quote, underlying_quote);
+    let option_last_price = effective_quote_price(option_quote);
+    let underlying_last_price = effective_quote_price(underlying_quote);
     let time_to_expiry_years =
-        time_to_expiry_years_from_quote_datetime(&option_quote.datetime, expire_datetime);
-    let expire_rest_days =
-        expire_rest_days_from_quote_datetime(&option_quote.datetime, expire_datetime)
-            .or(metadata.expire_rest_days);
+        time_to_expiry_years_from_quote_datetime(&quote_datetime, expire_datetime);
+    let expire_rest_days = expire_rest_days_from_quote_datetime(&quote_datetime, expire_datetime)
+        .or(metadata.expire_rest_days);
 
     let metrics = build_greeks_metrics(
         metadata.option_class.as_str(),
-        underlying_quote.last_price,
-        option_quote.last_price,
+        underlying_last_price,
+        option_last_price,
         metadata.strike_price,
         risk_free_rate,
         time_to_expiry_years.unwrap_or(f64::NAN),
@@ -286,14 +288,14 @@ pub(crate) fn build_option_greeks_row(
             metadata.instrument_id.clone()
         },
         instrument_name: metadata.instrument_name.clone(),
-        quote_datetime: option_quote.datetime.clone(),
+        quote_datetime,
         option_class: metadata.option_class.clone(),
         expire_rest_days,
         expire_datetime: metadata.expire_datetime,
         underlying_symbol: metadata.underlying_symbol.clone(),
         strike_price: metadata.strike_price,
-        option_last_price: option_quote.last_price,
-        underlying_last_price: underlying_quote.last_price,
+        option_last_price,
+        underlying_last_price,
         volatility: metrics.volatility,
         delta: metrics.delta,
         gamma: metrics.gamma,
@@ -301,6 +303,52 @@ pub(crate) fn build_option_greeks_row(
         vega: metrics.vega,
         rho: metrics.rho,
     })
+}
+
+fn effective_quote_datetime(quote: &Quote, fallback: &Quote) -> String {
+    if !quote.datetime.is_empty() {
+        return quote.datetime.clone();
+    }
+    if !fallback.datetime.is_empty() {
+        return fallback.datetime.clone();
+    }
+
+    let Some(offset) = cst_offset() else {
+        return String::new();
+    };
+    Utc::now()
+        .with_timezone(&offset)
+        .format("%Y-%m-%d %H:%M:%S%.6f")
+        .to_string()
+}
+
+fn effective_quote_price(quote: &Quote) -> f64 {
+    if quote.last_price.is_finite() && quote.last_price > 0.0 {
+        return quote.last_price;
+    }
+
+    let bid = finite_non_negative_price(quote.bid_price1);
+    let ask = finite_non_negative_price(quote.ask_price1);
+    match (bid, ask) {
+        (Some(bid), Some(ask)) => return (bid + ask) / 2.0,
+        (Some(bid), None) => return bid,
+        (None, Some(ask)) => return ask,
+        (None, None) => {}
+    }
+
+    if quote.last_price.is_finite() && quote.last_price >= 0.0 {
+        return quote.last_price;
+    }
+
+    if quote.pre_close.is_finite() && quote.pre_close > 0.0 {
+        quote.pre_close
+    } else {
+        f64::NAN
+    }
+}
+
+fn finite_non_negative_price(value: f64) -> Option<f64> {
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 fn build_greeks_metrics(
@@ -712,5 +760,49 @@ mod tests {
         .unwrap();
 
         assert!((row.volatility - 0.2).abs() < 1e-6, "{}", row.volatility);
+    }
+
+    #[test]
+    fn build_option_greeks_row_falls_back_to_mid_price_and_underlying_datetime() {
+        let start = cst_offset()
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .unwrap();
+        let expire = start + ChronoDuration::days(180);
+        let metadata = Quote {
+            ins_class: "OPTION".to_string(),
+            instrument_id: "SHFE.au2606C720".to_string(),
+            option_class: "CALL".to_string(),
+            underlying_symbol: "SHFE.au2606".to_string(),
+            strike_price: 100.0,
+            expire_datetime: Some(expire.timestamp()),
+            ..Quote::default()
+        };
+        let option_quote = Quote {
+            ask_price1: 10.6,
+            bid_price1: 10.4,
+            ..Quote::default()
+        };
+        let underlying_quote = Quote {
+            datetime: "2026-01-01 00:00:00.000000".to_string(),
+            ask_price1: 100.2,
+            bid_price1: 99.8,
+            ..Quote::default()
+        };
+
+        let row = build_option_greeks_row(
+            "SHFE.au2606C720",
+            &metadata,
+            &option_quote,
+            &underlying_quote,
+            Some(0.2),
+            0.05,
+        )
+        .unwrap();
+
+        assert_eq!(row.quote_datetime, "2026-01-01 00:00:00.000000");
+        assert!((row.option_last_price - 10.5).abs() < 1e-9);
+        assert!((row.underlying_last_price - 100.0).abs() < 1e-9);
     }
 }

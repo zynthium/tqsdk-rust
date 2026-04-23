@@ -34,6 +34,46 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
     assert_eq!(quote.trading_time.day.len(), 1);
     assert_eq!(quote.categories.len(), 1);
 
+    let quote_numeric_floats = serde_json::from_value::<Quote>(json!({
+        "instrument_id": "SSE.510300",
+        "volume_multiple": 1000.0,
+        "max_market_order_volume": 100.0,
+        "min_limit_order_volume": 1.0,
+        "expire_datetime": 1776844800000000000.0,
+        "last_exercise_datetime": 1776844800000000000.0,
+        "public_float_share_quantity": 1000000.0
+    }))
+    .expect("quote integer-compatible floats should deserialize");
+    assert_eq!(quote_numeric_floats.volume_multiple, 1000);
+    assert_eq!(quote_numeric_floats.max_market_order_volume, 100);
+    assert_eq!(quote_numeric_floats.min_limit_order_volume, 1);
+    assert_eq!(
+        quote_numeric_floats.expire_datetime,
+        Some(1776844800000000000_i64)
+    );
+    assert_eq!(
+        quote_numeric_floats.last_exercise_datetime,
+        Some(1776844800000000000_i64)
+    );
+    assert_eq!(quote_numeric_floats.public_float_share_quantity, 1_000_000);
+
+    let quote_nullable_vectors = serde_json::from_value::<Quote>(json!({
+        "instrument_id": "SSE.510300",
+        "trading_time": {
+            "day": null,
+            "night": null
+        },
+        "stock_dividend_ratio": null,
+        "cash_dividend_ratio": null,
+        "categories": null
+    }))
+    .expect("quote null vectors should deserialize");
+    assert!(quote_nullable_vectors.trading_time.day.is_empty());
+    assert!(quote_nullable_vectors.trading_time.night.is_empty());
+    assert!(quote_nullable_vectors.stock_dividend_ratio.is_empty());
+    assert!(quote_nullable_vectors.cash_dividend_ratio.is_empty());
+    assert!(quote_nullable_vectors.categories.is_empty());
+
     let tick = serde_json::from_value::<Tick>(json!({
         "datetime": 1776646800000000000_i64,
         "last_price": 618.5,

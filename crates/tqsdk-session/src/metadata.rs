@@ -52,7 +52,7 @@ const QUERY_OPTIONS: &str = r#"query($instrument_id:[String], $derivative_class:
         edges {
           node {
             ... on basic {
-              class_
+              class
               instrument_id
               exchange_id
               english_name
@@ -229,11 +229,22 @@ impl SessionClient {
         expired: Option<bool>,
         has_night: Option<bool>,
     ) -> Result<Vec<String>> {
-        let mut variables = Map::new();
-        if let Some(ins_class) = non_empty_str(ins_class, "ins_class")? {
+        let ins_class = non_empty_str(ins_class, "ins_class")?;
+        let exchange_id = non_empty_str(exchange_id, "exchange_id")?;
+        let product_id = non_empty_str(product_id, "product_id")?;
+
+        let mut variables = Map::from_iter([
+            ("class_".to_string(), Value::Null),
+            ("exchange_id".to_string(), Value::Null),
+            ("product_id".to_string(), Value::Null),
+            ("expired".to_string(), Value::Null),
+            ("has_night".to_string(), Value::Null),
+        ]);
+
+        if let Some(ins_class) = ins_class {
             variables.insert("class_".to_string(), json!([ins_class]));
         }
-        if let Some(exchange_id) = non_empty_str(exchange_id, "exchange_id")? {
+        if let Some(exchange_id) = exchange_id {
             let is_future_exchange = FUTURE_EXCHANGES.contains(&exchange_id);
             let need_pass_exchange = match ins_class {
                 Some(class) => !matches!(class, "INDEX" | "CONT") || !is_future_exchange,
@@ -243,7 +254,7 @@ impl SessionClient {
                 variables.insert("exchange_id".to_string(), json!([exchange_id]));
             }
         }
-        if let Some(product_id) = non_empty_str(product_id, "product_id")? {
+        if let Some(product_id) = product_id {
             variables.insert("product_id".to_string(), json!([product_id]));
         }
         if let Some(expired) = expired {
