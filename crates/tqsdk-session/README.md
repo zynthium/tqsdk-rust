@@ -117,6 +117,7 @@
 最小可编译示例见：
 
 - [examples/query_symbol_info.rs](examples/query_symbol_info.rs)
+- [examples/quote_progress.rs](examples/quote_progress.rs)
 - [examples/trade_login_tqkq.rs](examples/trade_login_tqkq.rs)
 
 这个示例展示的是最推荐的 direct-query 使用路径：
@@ -124,6 +125,13 @@
 - 调用方自带 Tokio runtime
 - 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
 - 直接通过 `SessionClient` 发起一次性 metadata query
+
+而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
+
+- 直接通过 `RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })` 提交订阅
+- 用 `SessionClient::progress_once()` 推进 live session
+- 用 `RuntimeReader::cursor()` / `RuntimeReader::next()` 自己消费 commit 边界
+- 用 `SnapshotReadGuard::decode_path::<Quote>()` 读取最新快照
 
 而 `trade_login_tqkq.rs` 展示的是同一层 substrate 的另一条典型路径：
 

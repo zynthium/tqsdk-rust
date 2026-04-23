@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tqsdk_core::{Account, RuntimeCommand, TradeCommand};
+use tqsdk_core::{Account, MarketCommand, Quote, RuntimeCommand, Symbol, TradeCommand};
 use tqsdk_session::SessionClientBuilder;
 
 #[tokio::test(flavor = "current_thread")]
@@ -31,6 +31,33 @@ async fn live_query_symbol_info_smoke() {
     assert!(!quote.instrument_id.is_empty());
     assert!(!quote.ins_class.is_empty());
     assert!(quote.price_tick.is_finite());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and market access"]
+async fn live_quote_progress_smoke() {
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let symbol = read_env("TQ_TEST_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
+
+    let session = build_market_session(auth_user, auth_pass, symbol.as_str());
+    session
+        .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new(symbol.clone())],
+        }))
+        .await
+        .expect("SubscribeQuotes should submit successfully");
+
+    let quote = wait_for_quote_update(&session, symbol.as_str(), Duration::from_secs(30))
+        .await
+        .expect("quote should become ready");
+
+    assert!(!quote.instrument_id.is_empty());
+    assert!(!quote.datetime.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -94,6 +121,62 @@ fn read_u8_env(name: &str) -> Result<Option<u8>, String> {
     raw.parse::<u8>()
         .map(Some)
         .map_err(|error| format!("invalid {name}: {error}"))
+}
+
+fn build_market_session(
+    auth_user: String,
+    auth_pass: String,
+    symbol: &str,
+) -> tqsdk_session::SessionClient {
+    let builder = SessionClientBuilder::new(auth_user, auth_pass);
+    if is_stock_symbol(symbol) {
+        builder.stock_market()
+    } else {
+        builder.futures_market()
+    }
+    .build()
+    .expect("live session should build")
+}
+
+fn is_stock_symbol(symbol: &str) -> bool {
+    symbol.starts_with("SSE.") || symbol.starts_with("SZSE.") || symbol.starts_with("BSE.")
+}
+
+async fn wait_for_quote_update(
+    session: &tqsdk_session::SessionClient,
+    symbol: &str,
+    timeout: Duration,
+) -> Result<Quote, String> {
+    let reader = session.reader().clone();
+    let mut cursor = reader.cursor();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        while reader.next(&mut cursor).is_some() {
+            if let Some(quote) = reader
+                .read()
+                .decode_path::<Quote>(&["quotes", symbol])
+                .map_err(|error| error.to_string())?
+                && !quote.datetime.is_empty()
+            {
+                return Ok(quote);
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("timed out waiting for quote snapshot".to_string());
+        }
+
+        let progress = session
+            .progress_once(Some(now + Duration::from_millis(250)))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if !progress.is_progress() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 async fn wait_for_trade_account_ready(
