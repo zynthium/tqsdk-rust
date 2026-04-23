@@ -28,6 +28,21 @@ fn builder_defaults_to_official_stock_live_market_target() {
 }
 
 #[test]
+fn builder_named_market_target_shortcuts_are_explicit() {
+    let futures_live = SessionClientBuilder::new("user", "pass").futures_market();
+    assert!(!futures_live.market_target_ref().stock);
+    assert!(!futures_live.market_target_ref().backtest);
+
+    let stock_backtest = SessionClientBuilder::new("user", "pass").stock_backtest_market();
+    assert!(stock_backtest.market_target_ref().stock);
+    assert!(stock_backtest.market_target_ref().backtest);
+
+    let futures_backtest = SessionClientBuilder::new("user", "pass").futures_backtest_market();
+    assert!(!futures_backtest.market_target_ref().stock);
+    assert!(futures_backtest.market_target_ref().backtest);
+}
+
+#[test]
 fn builder_accepts_explicit_query_schema_and_replay_urls() {
     let builder = SessionClientBuilder::new("user", "pass")
         .query_url("https://query.example.com/graphql")

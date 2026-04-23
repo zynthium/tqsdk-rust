@@ -85,7 +85,7 @@ fn live_export_kline_csv_smoke() {
         let start_dt = end_dt - ChronoDuration::minutes(30);
 
         let session = SessionClientBuilder::new(auth_user, auth_pass)
-            .market_target(false, false)
+            .futures_market()
             .build()
             .expect("live session should build");
         if !session

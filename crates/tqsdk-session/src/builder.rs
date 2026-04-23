@@ -96,6 +96,26 @@ impl SessionClientBuilder {
     }
 
     #[must_use]
+    pub fn stock_market(self) -> Self {
+        self.market_target(true, false)
+    }
+
+    #[must_use]
+    pub fn futures_market(self) -> Self {
+        self.market_target(false, false)
+    }
+
+    #[must_use]
+    pub fn stock_backtest_market(self) -> Self {
+        self.market_target(true, true)
+    }
+
+    #[must_use]
+    pub fn futures_backtest_market(self) -> Self {
+        self.market_target(false, true)
+    }
+
+    #[must_use]
     pub fn trade_target(
         mut self,
         broker_id: impl Into<String>,

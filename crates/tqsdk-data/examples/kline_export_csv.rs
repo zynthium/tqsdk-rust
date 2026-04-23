@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let start_dt = end_dt - ChronoDuration::minutes(60);
 
     let session = SessionClientBuilder::new(auth_user, auth_pass)
-        .market_target(false, false)
+        .futures_market()
         .build()?;
     let client = DataClient::from_session(session);
     let mut file = File::create(output_path.as_str()).await?;

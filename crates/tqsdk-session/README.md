@@ -73,6 +73,15 @@
 `query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
 如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
 
+`SessionClientBuilder` 还提供了命名明确的 market-target 快捷方法：
+
+- `stock_market()`
+- `futures_market()`
+- `stock_backtest_market()`
+- `futures_backtest_market()`
+
+优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
+
 如果调用方需要在进入 live 行情订阅前做权限护栏，可以直接用：
 
 - `has_feature("futr").await`

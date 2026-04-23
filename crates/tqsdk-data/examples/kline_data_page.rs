@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(128);
 
     let session = SessionClientBuilder::new(auth_user, auth_pass)
-        .market_target(false, false)
+        .futures_market()
         .build()?;
     let client = DataClient::from_session(session);
     let focus_datetime_ns = Utc::now()

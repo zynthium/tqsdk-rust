@@ -127,7 +127,7 @@
 - [examples/kline_export_csv.rs](examples/kline_export_csv.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
-默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::market_target(false, false)` 走 futures market route。
+默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。
 
 session-backed 的时间范围历史示例见 [examples/kline_data_series.rs](examples/kline_data_series.rs)。
 

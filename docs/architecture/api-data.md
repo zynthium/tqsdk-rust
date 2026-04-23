@@ -198,7 +198,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - async history 相关入口会主动获取 auth context 并校验 `tq_dl`，避免把权限问题拖到 chart/websocket timeout
 - `data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 async 读取阶段会再次强校验
-- 默认 SHFE 历史示例会显式切到 `market_target(false, false)`，避免把 futures history 请求发到 stock market route
+- 默认 SHFE 历史示例会显式切到 `futures_market()`，避免把 futures history 请求发到 stock market route
 
 这样做的意义是：
 
