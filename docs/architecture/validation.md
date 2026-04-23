@@ -118,9 +118,10 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 3. `cargo test -p tqsdk-session live_tqkq_trade_login_smoke -- --ignored --nocapture`
 4. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
 5. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
-6. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
-7. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
-8. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
+6. `cargo test -p tqsdk-stream live_quote_stream_with_session_query_smoke -- --ignored --nocapture`
+7. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
+8. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
+9. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
    默认走官方内置 `TqKq` 主模拟账户；可选用 `TQ_TRADE_ACCOUNT_NO=<1..99>` 切到辅模拟账户，或同时设置 `TQ_TRADE_BROKER_ID` / `TQ_TRADE_ACCOUNT_ID` / `TQ_TRADE_PASSWORD` 显式覆盖
    只有显式设置 `TQ_SMOKE_ALLOW_ORDER=1` 且提供 `TQ_SMOKE_ORDER_SYMBOL` / `TQ_SMOKE_ORDER_LIMIT_PRICE` 时才会真正发单
 

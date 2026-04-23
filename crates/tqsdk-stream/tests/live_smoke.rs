@@ -5,6 +5,7 @@ use tqsdk_core::{
     AccountId, MarketCommand, RuntimeCommand, Symbol, TradeAccountType, TradeCommand,
     TradeLoginCommand,
 };
+use tqsdk_session::SessionClientBuilder;
 use tqsdk_stream::{TqStreamBuilder, TradeSessionEvent};
 
 type ExplicitTradeOverride = (String, String, String);
@@ -24,6 +25,60 @@ async fn live_quote_stream_smoke() {
         .build()
         .await
         .expect("live stream facade should build");
+    stream
+        .session()
+        .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new(symbol.clone())],
+        }))
+        .await
+        .expect("SubscribeQuotes should succeed");
+
+    let mut quotes = stream
+        .quote_stream(symbol.as_str())
+        .expect("quote_stream should construct");
+    let update = tokio::time::timeout(Duration::from_secs(30), quotes.next())
+        .await
+        .expect("quote stream should produce an item before timeout")
+        .expect("quote stream should stay open")
+        .expect("quote stream item should decode");
+
+    assert!(!update.value.instrument_id.is_empty());
+    assert!(!update.value.datetime.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, stock market access, and validates stream.session() direct-query reuse"]
+async fn live_quote_stream_with_session_query_smoke() {
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let symbol = read_env("TQ_QUERY_SYMBOL").unwrap_or_else(|| "SSE.000300".to_string());
+    assert!(
+        is_stock_symbol(symbol.as_str()),
+        "TQ_QUERY_SYMBOL must be a stock symbol when query rides the official stock websocket"
+    );
+
+    let session_builder = SessionClientBuilder::new(auth_user, auth_pass)
+        .stock_market()
+        .enable_query();
+    let stream = TqStreamBuilder::from_session_builder(session_builder)
+        .build()
+        .await
+        .expect("live stream facade should build");
+
+    let metadata = stream
+        .session()
+        .query_symbol_info(&[symbol.as_str()])
+        .await
+        .expect("query_symbol_info should succeed over the shared session");
+    let instrument = metadata
+        .first()
+        .expect("query_symbol_info should return at least one row");
+    assert!(!instrument.instrument_id.is_empty());
+
     stream
         .session()
         .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
