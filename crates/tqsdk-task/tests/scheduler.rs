@@ -11,8 +11,8 @@ use tqsdk_session::SessionClient;
 use tqsdk_task::{
     OffsetPriority, PriceMode, TargetPosExecutionReport, TargetPosExecutionStep,
     TargetPosScheduleStep, TargetPosScheduler, TargetPosSchedulerConfig,
-    TargetPosSchedulerExecutionEvent, TargetPosTaskExecutionEvent, TaskError, TaskHost, TaskKind,
-    VolumeSplitPolicy,
+    TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill, TargetPosTaskExecutionEvent,
+    TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -405,7 +405,8 @@ async fn empty_scheduler_finishes_immediately_and_releases_ownership() {
     assert_eq!(
         scheduler.execution_report(),
         TargetPosExecutionReport {
-            applied_steps: vec![]
+            applied_steps: vec![],
+            ..TargetPosExecutionReport::default()
         }
     );
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
@@ -427,7 +428,8 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert_eq!(
         scheduler.execution_report(),
         TargetPosExecutionReport {
-            applied_steps: vec![]
+            applied_steps: vec![],
+            ..TargetPosExecutionReport::default()
         }
     );
 
@@ -441,6 +443,8 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
                 step_index: 0,
                 target_volume: 3,
             }],
+            submitted_order_count: 1,
+            ..TargetPosExecutionReport::default()
         }
     );
     assert!(!scheduler.is_finished());
@@ -499,6 +503,10 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
                     target_volume: 0,
                 },
             ],
+            submitted_order_count: 1,
+            cancel_request_count: 1,
+            finished_order_count: 1,
+            ..TargetPosExecutionReport::default()
         }
     );
     assert!(scheduler.is_finished());
@@ -605,6 +613,13 @@ async fn scheduler_execution_events_include_internal_task_commands() {
             },
         ]
     );
+    let report = scheduler.execution_report();
+    assert_eq!(report.submitted_order_count, 1);
+    assert_eq!(report.cancel_request_count, 1);
+    assert_eq!(report.finished_order_count, 1);
+    assert!(report.trades.is_empty());
+    assert_eq!(report.filled_volume, 0);
+    assert_eq!(report.filled_turnover, 0.0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -631,6 +646,8 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
                 step_index: 0,
                 target_volume: 2,
             }],
+            submitted_order_count: 1,
+            ..TargetPosExecutionReport::default()
         }
     );
 
@@ -708,6 +725,32 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
                 },
             },
         ]
+    );
+    assert_eq!(
+        scheduler.execution_report(),
+        TargetPosExecutionReport {
+            applied_steps: vec![TargetPosExecutionStep {
+                step_index: 0,
+                target_volume: 2,
+            }],
+            trades: vec![TargetPosSchedulerTradeFill {
+                step_index: 0,
+                trade: TargetPosTaskTradeFill {
+                    trade_id: "trade-1".to_string(),
+                    order_id: "wait-order-1".to_string(),
+                    direction: "BUY".to_string(),
+                    offset: "OPEN".to_string(),
+                    volume: 2,
+                    price: 3678.0,
+                    trade_date_time: 1_713_660_000_000_000_000_i64,
+                },
+            }],
+            submitted_order_count: 1,
+            cancel_request_count: 0,
+            finished_order_count: 1,
+            filled_volume: 2,
+            filled_turnover: 7356.0,
+        }
     );
     host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
         .expect("ownership should be released once the last step reaches target");
@@ -1077,6 +1120,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
                 step_index: 0,
                 target_volume: 0,
             }],
+            ..TargetPosExecutionReport::default()
         }
     );
 
@@ -1116,6 +1160,8 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
                     target_volume: 1,
                 },
             ],
+            submitted_order_count: 1,
+            ..TargetPosExecutionReport::default()
         }
     );
 
@@ -1196,6 +1242,8 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
                     target_volume: 1,
                 },
             ],
+            submitted_order_count: 1,
+            ..TargetPosExecutionReport::default()
         }
     );
 }
@@ -1228,6 +1276,7 @@ async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
                 step_index: 0,
                 target_volume: 0,
             }],
+            ..TargetPosExecutionReport::default()
         }
     );
 }

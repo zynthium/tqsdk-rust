@@ -19,8 +19,9 @@ pub use error::{Result, TaskError, TaskKind};
 pub use host::TaskHost;
 pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
-    TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent,
+    TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,
 };
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
+    TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
 };

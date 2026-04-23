@@ -106,7 +106,7 @@ V1 是：
   - `TaskHost`
   - `TargetPosTask`
   - `TargetPosScheduler`
-  - ownership / guarded order / execution report
+  - ownership / guarded order / execution report（事件流 + 聚合摘要）
 - `tqsdk-data`
   - research/offline data crate
   - `DataClient`

@@ -64,9 +64,33 @@ pub enum TargetPosTaskExecutionEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetPosTaskTradeFill {
+    pub trade_id: String,
+    pub order_id: String,
+    pub direction: String,
+    pub offset: String,
+    pub volume: i64,
+    pub price: f64,
+    pub trade_date_time: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetPosTaskReachedTarget {
+    pub request_seq: u64,
+    pub target_volume: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetPosTaskExecutionReport {
     pub events: Vec<TargetPosTaskExecutionEvent>,
+    pub trades: Vec<TargetPosTaskTradeFill>,
+    pub submitted_order_count: usize,
+    pub cancel_request_count: usize,
+    pub finished_order_count: usize,
+    pub filled_volume: i64,
+    pub filled_turnover: f64,
+    pub last_reached_target: Option<TargetPosTaskReachedTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -413,6 +437,89 @@ impl TargetPosStore {
     }
 }
 
+impl From<&Trade> for TargetPosTaskTradeFill {
+    fn from(trade: &Trade) -> Self {
+        Self {
+            trade_id: trade.trade_id.clone(),
+            order_id: trade.order_id.clone(),
+            direction: trade.direction.clone(),
+            offset: trade.offset.clone(),
+            volume: trade.volume,
+            price: trade.price,
+            trade_date_time: trade.trade_date_time,
+        }
+    }
+}
+
+impl TargetPosTaskExecutionReport {
+    fn record_insert_order(
+        &mut self,
+        request_seq: u64,
+        order_id: &str,
+        direction: TradeDirection,
+        offset: TradeOffset,
+        volume: i64,
+        limit_price: f64,
+    ) {
+        self.submitted_order_count += 1;
+        self.events.push(TargetPosTaskExecutionEvent::InsertOrder {
+            request_seq,
+            order_id: order_id.to_string(),
+            direction,
+            offset,
+            volume,
+            limit_price,
+        });
+    }
+
+    fn record_cancel_order(&mut self, order_id: &str) {
+        self.cancel_request_count += 1;
+        self.events.push(TargetPosTaskExecutionEvent::CancelOrder {
+            order_id: order_id.to_string(),
+        });
+    }
+
+    fn record_order_finished(&mut self, order: &Order) {
+        self.finished_order_count += 1;
+        self.events
+            .push(TargetPosTaskExecutionEvent::OrderFinished {
+                order_id: order.order_id.clone(),
+                status: order.status.clone(),
+                filled_volume: order.volume_orign - order.volume_left,
+                remaining_volume: order.volume_left,
+                last_msg: order.last_msg.clone(),
+            });
+    }
+
+    fn record_target_reached(&mut self, request_seq: u64, target_volume: i64) {
+        self.last_reached_target = Some(TargetPosTaskReachedTarget {
+            request_seq,
+            target_volume,
+        });
+        self.events
+            .push(TargetPosTaskExecutionEvent::TargetReached {
+                request_seq,
+                target_volume,
+            });
+    }
+
+    fn record_trade(&mut self, trade: &Trade) {
+        let fill = TargetPosTaskTradeFill::from(trade);
+        self.filled_volume += fill.volume;
+        self.filled_turnover += fill.price * fill.volume as f64;
+        self.events.push(TargetPosTaskExecutionEvent::Trade {
+            trade_id: fill.trade_id.clone(),
+            order_id: fill.order_id.clone(),
+            direction: fill.direction.clone(),
+            offset: fill.offset.clone(),
+            volume: fill.volume,
+            price: fill.price,
+            trade_date_time: fill.trade_date_time,
+        });
+        self.trades.push(fill);
+    }
+}
+
 impl TargetPosTaskInner {
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
         self.record_commit_trades(api);
@@ -571,66 +678,42 @@ impl TargetPosTaskInner {
         self.report
             .lock()
             .expect("target task execution report lock poisoned")
-            .events
-            .push(TargetPosTaskExecutionEvent::InsertOrder {
+            .record_insert_order(
                 request_seq,
-                order_id: order_id.to_string(),
+                order_id,
                 direction,
                 offset,
                 volume,
                 limit_price,
-            });
+            );
     }
 
     fn record_cancel_order(&self, order_id: &str) {
         self.report
             .lock()
             .expect("target task execution report lock poisoned")
-            .events
-            .push(TargetPosTaskExecutionEvent::CancelOrder {
-                order_id: order_id.to_string(),
-            });
+            .record_cancel_order(order_id);
     }
 
     fn record_order_finished(&self, order: &Order) {
         self.report
             .lock()
             .expect("target task execution report lock poisoned")
-            .events
-            .push(TargetPosTaskExecutionEvent::OrderFinished {
-                order_id: order.order_id.clone(),
-                status: order.status.clone(),
-                filled_volume: order.volume_orign - order.volume_left,
-                remaining_volume: order.volume_left,
-                last_msg: order.last_msg.clone(),
-            });
+            .record_order_finished(order);
     }
 
     fn record_target_reached(&self, request_seq: u64, target_volume: i64) {
         self.report
             .lock()
             .expect("target task execution report lock poisoned")
-            .events
-            .push(TargetPosTaskExecutionEvent::TargetReached {
-                request_seq,
-                target_volume,
-            });
+            .record_target_reached(request_seq, target_volume);
     }
 
     fn record_trade(&self, trade: &Trade) {
         self.report
             .lock()
             .expect("target task execution report lock poisoned")
-            .events
-            .push(TargetPosTaskExecutionEvent::Trade {
-                trade_id: trade.trade_id.clone(),
-                order_id: trade.order_id.clone(),
-                direction: trade.direction.clone(),
-                offset: trade.offset.clone(),
-                volume: trade.volume,
-                price: trade.price,
-                trade_date_time: trade.trade_date_time,
-            });
+            .record_trade(trade);
     }
 
     fn record_commit_trades(&self, api: &tqsdk_wait::TqApi) {

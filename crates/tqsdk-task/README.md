@@ -22,7 +22,12 @@
   - `cancel()` 与 `wait_finished()`
     - `cancel()` 只登记取消请求，实际撤单与结束仍由后续 `TaskHost::wait_update()` 推进
   - `execution_report()`
-    - 暴露最小 command-level 事件流，当前包含 insert/cancel/trade/order finished/target reached
+    - 暴露 command-level 事件流，当前包含 insert/cancel/trade/order finished/target reached
+    - 同时提供稳定聚合摘要：
+      - trades buffer
+      - 已提交委托/撤单/终态订单计数
+      - 累计成交手数与成交额
+      - 最后一次 target reached 记录
   - `last_error()`
     - 若委托/撤单命令本地提交失败，会记录错误并结束任务，不做静默重试
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
@@ -52,6 +57,7 @@
   - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
+    - 聚合 step 内部 task 的 trades buffer 与命令计数摘要
   - `last_error()`
     - 若内部 step task 的命令本地提交失败，错误会向 scheduler 冒泡
   - `cancel()` 同样遵循 `wait_update()` 驱动的撤单后收尾语义
@@ -65,7 +71,7 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 基于交易时段的 deadline 计算
-- trades buffer / execution report 细化
+- 更细的 per-order / per-step outcome report
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

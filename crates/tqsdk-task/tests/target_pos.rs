@@ -9,8 +9,9 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
-    OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent, TaskError, TaskHost,
-    TaskKind, VolumeSplitPolicy,
+    OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent,
+    TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind,
+    VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -1228,6 +1229,90 @@ async fn target_pos_execution_report_records_trade_events_from_commit_deltas() {
                 offset: "OPEN".to_string(),
                 volume: 1,
                 price: 3678.0,
+                trade_date_time: 1_713_660_000_000_000_000_i64,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn target_pos_execution_report_accumulates_trade_buffer_and_summary() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_trade_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "trade-1",
+        1,
+        3678.0,
+    );
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    seed_trade_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "trade-2",
+        1,
+        3679.0,
+    );
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
+    seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    task.wait_target_reached().await.unwrap();
+
+    let report = task.execution_report();
+    assert_eq!(report.submitted_order_count, 1);
+    assert_eq!(report.cancel_request_count, 0);
+    assert_eq!(report.finished_order_count, 1);
+    assert_eq!(report.filled_volume, 2);
+    assert_eq!(report.filled_turnover, 7357.0);
+    assert_eq!(
+        report.last_reached_target,
+        Some(TargetPosTaskReachedTarget {
+            request_seq: 1,
+            target_volume: 2,
+        })
+    );
+    assert_eq!(
+        report.trades,
+        vec![
+            TargetPosTaskTradeFill {
+                trade_id: "trade-1".to_string(),
+                order_id: "wait-order-1".to_string(),
+                direction: "BUY".to_string(),
+                offset: "OPEN".to_string(),
+                volume: 1,
+                price: 3678.0,
+                trade_date_time: 1_713_660_000_000_000_000_i64,
+            },
+            TargetPosTaskTradeFill {
+                trade_id: "trade-2".to_string(),
+                order_id: "wait-order-1".to_string(),
+                direction: "BUY".to_string(),
+                offset: "OPEN".to_string(),
+                volume: 1,
+                price: 3679.0,
                 trade_date_time: 1_713_660_000_000_000_000_i64,
             },
         ]

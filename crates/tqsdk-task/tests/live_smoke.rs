@@ -234,6 +234,7 @@ async fn live_scheduler_pause_step_smoke() {
                 step_index: 0,
                 target_volume: 0,
             }],
+            ..TargetPosExecutionReport::default()
         }
     );
 }

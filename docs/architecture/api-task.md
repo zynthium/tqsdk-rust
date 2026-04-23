@@ -40,7 +40,7 @@
   - `TargetPosScheduler`
   - task registry / symbol ownership
   - 手动下单冲突保护
-  - 最小 execution report
+  - 事件流 + 稳定聚合摘要的 execution report
 
 原因很直接：
 
@@ -56,11 +56,13 @@
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
-- `TargetPosTask::execution_report()` 已暴露最小 command-level 事件流
-  - 当前包含 insert/cancel/trade/order finished/target reached
+- `TargetPosTask::execution_report()` 已暴露稳定 execution report
+  - 原始 command-level 事件流当前包含 insert/cancel/trade/order finished/target reached
+  - 同时维护 trades buffer、委托/撤单/终态订单计数、累计成交手数/成交额、最后一次 target reached
 - `TargetPosTask::last_error()` 会暴露本地命令提交失败
   - 第一版不对本地提交失败做静默重试，而是记录错误并结束任务
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
+- `TargetPosScheduler::execution_report()` 已聚合内部 step task 的 trades buffer 与命令计数摘要
 - `TargetPosScheduler::last_error()` 会向外冒泡内部 step task 的本地提交失败
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
@@ -89,7 +91,7 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 交易时段感知的 scheduler deadline
-- trades buffer 驱动的完整 execution report
+- 更细的 per-order / per-step outcome report
 
 ## 为什么它必须独立成 crate
 

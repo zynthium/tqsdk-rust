@@ -12,6 +12,7 @@ use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeS
 use crate::registry::{TaskId, TaskRegistry};
 use crate::target_pos::{
     TargetPosBuilder, TargetPosStore, TargetPosTask, TargetPosTaskExecutionEvent,
+    TargetPosTaskTradeFill,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,15 +54,27 @@ enum ActiveStepPhase {
     Cancelling,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetPosExecutionReport {
     pub applied_steps: Vec<TargetPosExecutionStep>,
+    pub trades: Vec<TargetPosSchedulerTradeFill>,
+    pub submitted_order_count: usize,
+    pub cancel_request_count: usize,
+    pub finished_order_count: usize,
+    pub filled_volume: i64,
+    pub filled_turnover: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetPosSchedulerExecutionEvent {
     pub step_index: usize,
     pub event: TargetPosTaskExecutionEvent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetPosSchedulerTradeFill {
+    pub step_index: usize,
+    pub trade: TargetPosTaskTradeFill,
 }
 
 pub struct TargetPosSchedulerBuilder {
@@ -268,6 +281,47 @@ impl TargetPosSchedulerStore {
     fn live_schedulers(&mut self) -> Vec<Arc<TargetPosSchedulerInner>> {
         self.schedulers.retain(|_, weak| weak.strong_count() > 0);
         self.schedulers.values().filter_map(Weak::upgrade).collect()
+    }
+}
+
+impl TargetPosExecutionReport {
+    fn record_step_event(&mut self, step_index: usize, event: &TargetPosTaskExecutionEvent) {
+        match event {
+            TargetPosTaskExecutionEvent::InsertOrder { .. } => {
+                self.submitted_order_count += 1;
+            }
+            TargetPosTaskExecutionEvent::CancelOrder { .. } => {
+                self.cancel_request_count += 1;
+            }
+            TargetPosTaskExecutionEvent::OrderFinished { .. } => {
+                self.finished_order_count += 1;
+            }
+            TargetPosTaskExecutionEvent::Trade {
+                trade_id,
+                order_id,
+                direction,
+                offset,
+                volume,
+                price,
+                trade_date_time,
+            } => {
+                self.filled_volume += *volume;
+                self.filled_turnover += *price * *volume as f64;
+                self.trades.push(TargetPosSchedulerTradeFill {
+                    step_index,
+                    trade: TargetPosTaskTradeFill {
+                        trade_id: trade_id.clone(),
+                        order_id: order_id.clone(),
+                        direction: direction.clone(),
+                        offset: offset.clone(),
+                        volume: *volume,
+                        price: *price,
+                        trade_date_time: *trade_date_time,
+                    },
+                });
+            }
+            TargetPosTaskExecutionEvent::TargetReached { .. } => {}
+        }
     }
 }
 
@@ -530,14 +584,12 @@ impl TargetPosSchedulerInner {
             return;
         }
 
-        self.events
-            .lock()
-            .expect("scheduler events lock poisoned")
-            .extend(
-                new_events
-                    .into_iter()
-                    .map(|event| TargetPosSchedulerExecutionEvent { step_index, event }),
-            );
+        let mut report = self.report.lock().expect("scheduler report lock poisoned");
+        let mut events = self.events.lock().expect("scheduler events lock poisoned");
+        for event in new_events {
+            report.record_step_event(step_index, &event);
+            events.push(TargetPosSchedulerExecutionEvent { step_index, event });
+        }
         *report_len = next_report_len;
     }
 
