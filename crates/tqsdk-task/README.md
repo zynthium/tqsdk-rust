@@ -28,6 +28,8 @@
       - 已提交委托/撤单/终态订单计数
       - 累计成交手数与成交额
       - 最后一次 target reached 记录
+  - `execution_events_since()` / `execution_trades_since()`
+    - 提供 cursor-style 增量读取，避免高频轮询时反复 clone 整份 report
   - `last_error()`
     - 若委托/撤单命令本地提交失败，会记录错误并结束任务，不做静默重试
   - `price_mode / offset_priority / split_policy` 配置 surface 已冻结
@@ -52,6 +54,8 @@
   - 会为当前 step 驱动内部无 ownership 的 `TargetPosTask`
   - `execution_events()`
     - 聚合内部 task 的最小 command-level 事件流，并带 `step_index`
+  - `execution_events_since()` / `execution_trades_since()`
+    - 提供 scheduler 级 cursor-style 增量读取
   - 支持 step 级 `price_mode`
   - 支持 pause step
   - 非最后一步按 interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步

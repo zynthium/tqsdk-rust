@@ -279,6 +279,8 @@ impl TargetPosTask {
     pub fn is_finished(&self) -> bool;
     pub fn last_error(&self) -> Option<TaskError>;
     pub fn execution_report(&self) -> TargetPosTaskExecutionReport;
+    pub fn execution_events_since(&self, start: usize) -> (usize, Vec<TargetPosTaskExecutionEvent>);
+    pub fn execution_trades_since(&self, start: usize) -> (usize, Vec<TargetPosTaskTradeFill>);
 
     pub fn set_target_volume(&self, volume: i64) -> tqsdk_task::Result<()>;
     pub fn current_target_volume(&self) -> Option<i64>;
@@ -324,6 +326,14 @@ impl TargetPosScheduler {
     pub fn is_finished(&self) -> bool;
     pub fn execution_report(&self) -> TargetPosExecutionReport;
     pub fn execution_events(&self) -> Vec<TargetPosSchedulerExecutionEvent>;
+    pub fn execution_events_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<TargetPosSchedulerExecutionEvent>);
+    pub fn execution_trades_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<TargetPosSchedulerTradeFill>);
     pub fn last_error(&self) -> Option<TaskError>;
     pub async fn cancel(&self) -> tqsdk_task::Result<()>;
     pub async fn wait_finished(&self) -> tqsdk_task::Result<()>;
@@ -334,6 +344,7 @@ impl TargetPosScheduler {
 
 - scheduler 是 `TargetPosTask` 的编排器，不应与单步调仓任务混为一个类型
 - execution report 属于任务自身，不应写回 runtime state tree
+- `execution_events_since()` / `execution_trades_since()` 为高频消费场景保留 cursor-style 增量读取
 - 当前第一版已实现 `steps()` / `build()` / `cancel()` / `wait_finished()` / `execution_report()`
 - `offset_priority` / `split_policy` 已进入真实最小执行路径
 

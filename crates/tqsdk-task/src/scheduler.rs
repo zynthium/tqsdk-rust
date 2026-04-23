@@ -238,6 +238,36 @@ impl TargetPosScheduler {
     }
 
     #[must_use]
+    pub fn execution_events_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<TargetPosSchedulerExecutionEvent>) {
+        let events = self
+            .inner
+            .events
+            .lock()
+            .expect("scheduler events lock poisoned");
+        let end = events.len();
+        let start = start.min(end);
+        (end, events[start..].to_vec())
+    }
+
+    #[must_use]
+    pub fn execution_trades_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<TargetPosSchedulerTradeFill>) {
+        let report = self
+            .inner
+            .report
+            .lock()
+            .expect("scheduler report lock poisoned");
+        let end = report.trades.len();
+        let start = start.min(end);
+        (end, report.trades[start..].to_vec())
+    }
+
+    #[must_use]
     pub fn last_error(&self) -> Option<crate::TaskError> {
         self.inner
             .last_error

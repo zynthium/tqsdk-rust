@@ -277,7 +277,8 @@ impl TargetPosTask {
             .clone()
     }
 
-    pub(crate) fn execution_events_since(
+    #[must_use]
+    pub fn execution_events_since(
         &self,
         start: usize,
     ) -> (usize, Vec<TargetPosTaskExecutionEvent>) {
@@ -289,6 +290,18 @@ impl TargetPosTask {
         let end = report.events.len();
         let start = start.min(end);
         (end, report.events[start..].to_vec())
+    }
+
+    #[must_use]
+    pub fn execution_trades_since(&self, start: usize) -> (usize, Vec<TargetPosTaskTradeFill>) {
+        let report = self
+            .inner
+            .report
+            .lock()
+            .expect("target task execution report lock poisoned");
+        let end = report.trades.len();
+        let start = start.min(end);
+        (end, report.trades[start..].to_vec())
     }
 
     pub fn set_target_volume(&self, volume: i64) -> Result<()> {

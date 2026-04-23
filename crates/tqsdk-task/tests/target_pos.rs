@@ -1320,6 +1320,72 @@ async fn target_pos_execution_report_accumulates_trade_buffer_and_summary() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn target_pos_execution_cursor_reads_only_new_events_and_trades() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(2).unwrap();
+
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    let (event_cursor, initial_events) = task.execution_events_since(0);
+    assert_eq!(event_cursor, 1);
+    assert_eq!(initial_events.len(), 1);
+
+    let (trade_cursor, initial_trades) = task.execution_trades_since(0);
+    assert_eq!(trade_cursor, 0);
+    assert!(initial_trades.is_empty());
+
+    seed_trade_commit(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        "trade-1",
+        2,
+        3678.0,
+    );
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let (next_event_cursor, new_events) = task.execution_events_since(event_cursor);
+    assert_eq!(next_event_cursor, 2);
+    assert_eq!(
+        new_events,
+        vec![TargetPosTaskExecutionEvent::Trade {
+            trade_id: "trade-1".to_string(),
+            order_id: "wait-order-1".to_string(),
+            direction: "BUY".to_string(),
+            offset: "OPEN".to_string(),
+            volume: 2,
+            price: 3678.0,
+            trade_date_time: 1_713_660_000_000_000_000_i64,
+        }]
+    );
+
+    let (next_trade_cursor, new_trades) = task.execution_trades_since(trade_cursor);
+    assert_eq!(next_trade_cursor, 1);
+    assert_eq!(
+        new_trades,
+        vec![TargetPosTaskTradeFill {
+            trade_id: "trade-1".to_string(),
+            order_id: "wait-order-1".to_string(),
+            direction: "BUY".to_string(),
+            offset: "OPEN".to_string(),
+            volume: 2,
+            price: 3678.0,
+            trade_date_time: 1_713_660_000_000_000_000_i64,
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn target_pos_wait_target_reached_returns_error_when_insert_order_submission_fails() {
     let mut host = market_only_host();
     let task = host
