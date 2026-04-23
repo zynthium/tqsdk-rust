@@ -118,6 +118,7 @@
 最小可编译示例见：
 
 - [examples/query_symbol_info.rs](examples/query_symbol_info.rs)
+- [examples/query_command_wait.rs](examples/query_command_wait.rs)
 - [examples/quote_progress.rs](examples/quote_progress.rs)
 - [examples/trade_login_tqkq.rs](examples/trade_login_tqkq.rs)
 
@@ -127,6 +128,12 @@
 - 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
 - 直接通过 `SessionClient` 发起一次性 metadata query
 - 如果调用方自己提交了底层 `RuntimeCommand`，可以用 `wait_command_completed(command_id).await` 只等待该命令完成，而不引入更高层 facade 语义
+
+其中 `query_command_wait.rs` 展示的是最底层的一种写法：
+
+- 调用方直接提交 `RuntimeCommand::Query(QueryCommand::Fetch { .. })`
+- 用 `wait_command_completed(command_id).await` 等到底层命令完成
+- 再通过 `query_result(query_id)` 回到统一状态树读取结果
 
 而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
 

@@ -1,7 +1,10 @@
 use std::time::Duration;
 
+use serde_json::{Value, json};
 use tokio::time::Instant;
-use tqsdk_core::{Account, MarketCommand, Quote, RuntimeCommand, Symbol, TradeCommand};
+use tqsdk_core::{
+    Account, MarketCommand, QueryCommand, QueryId, Quote, RuntimeCommand, Symbol, TradeCommand,
+};
 use tqsdk_session::SessionClientBuilder;
 
 #[tokio::test(flavor = "current_thread")]
@@ -31,6 +34,78 @@ async fn live_query_symbol_info_smoke() {
     assert!(!quote.instrument_id.is_empty());
     assert!(!quote.ins_class.is_empty());
     assert!(quote.price_tick.is_finite());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, stock market access, and validates raw query command waiting"]
+async fn live_query_command_wait_smoke() {
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let symbol = read_env("TQ_QUERY_SYMBOL").unwrap_or_else(|| "SSE.000300".to_string());
+    assert!(
+        is_stock_symbol(symbol.as_str()),
+        "TQ_QUERY_SYMBOL must be a stock symbol when query rides the official stock websocket"
+    );
+
+    let session = SessionClientBuilder::new(auth_user, auth_pass)
+        .stock_market()
+        .enable_query()
+        .build()
+        .expect("live session should build");
+    let query_id = QueryId::new("live-symbol-info");
+    let command_id = session
+        .submit(RuntimeCommand::Query(QueryCommand::Fetch {
+            query_id: query_id.clone(),
+            query: r#"query($instrument_id:[String]){
+  multi_symbol_info(instrument_id: $instrument_id) {
+    ... on basic {
+      instrument_id
+      class
+      price_tick
+    }
+  }
+}"#
+            .to_string(),
+            variables: Some(json!({ "instrument_id": [symbol] })),
+        }))
+        .await
+        .expect("raw query command should submit");
+
+    session
+        .wait_command_completed(command_id)
+        .await
+        .expect("raw query command should complete");
+
+    let payload = session
+        .query_result(query_id.as_str())
+        .expect("query_result should decode")
+        .expect("query command should produce a result payload");
+    let instrument = first_symbol_info(payload).expect("query payload should contain one symbol");
+
+    assert!(
+        !instrument
+            .get("instrument_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert!(
+        !instrument
+            .get("class")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert!(
+        instrument
+            .get("price_tick")
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -140,6 +215,15 @@ fn build_market_session(
 
 fn is_stock_symbol(symbol: &str) -> bool {
     symbol.starts_with("SSE.") || symbol.starts_with("SZSE.") || symbol.starts_with("BSE.")
+}
+
+fn first_symbol_info(payload: Value) -> Option<Value> {
+    let payload = payload.get("result").unwrap_or(&payload);
+    payload
+        .get("multi_symbol_info")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .cloned()
 }
 
 async fn wait_for_quote_update(
