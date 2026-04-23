@@ -48,6 +48,19 @@ pub struct TargetPosExecutionStep {
     pub target_volume: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TargetPosStepOutcomeReport {
+    pub step_index: usize,
+    pub target_volume: i64,
+    pub submitted_order_count: usize,
+    pub cancel_request_count: usize,
+    pub finished_order_count: usize,
+    pub filled_volume: i64,
+    pub filled_turnover: f64,
+    pub trade_count: usize,
+    pub target_reached: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveStepPhase {
     Running,
@@ -57,6 +70,7 @@ enum ActiveStepPhase {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetPosExecutionReport {
     pub applied_steps: Vec<TargetPosExecutionStep>,
+    pub step_outcomes: Vec<TargetPosStepOutcomeReport>,
     pub trades: Vec<TargetPosSchedulerTradeFill>,
     pub submitted_order_count: usize,
     pub cancel_request_count: usize,
@@ -315,16 +329,28 @@ impl TargetPosSchedulerStore {
 }
 
 impl TargetPosExecutionReport {
+    fn step_outcome_mut(&mut self, step_index: usize) -> &mut TargetPosStepOutcomeReport {
+        let step_outcome = self
+            .step_outcomes
+            .get_mut(step_index)
+            .expect("scheduler step outcome should be initialized before events are recorded");
+        debug_assert_eq!(step_outcome.step_index, step_index);
+        step_outcome
+    }
+
     fn record_step_event(&mut self, step_index: usize, event: &TargetPosTaskExecutionEvent) {
         match event {
             TargetPosTaskExecutionEvent::InsertOrder { .. } => {
                 self.submitted_order_count += 1;
+                self.step_outcome_mut(step_index).submitted_order_count += 1;
             }
             TargetPosTaskExecutionEvent::CancelOrder { .. } => {
                 self.cancel_request_count += 1;
+                self.step_outcome_mut(step_index).cancel_request_count += 1;
             }
             TargetPosTaskExecutionEvent::OrderFinished { .. } => {
                 self.finished_order_count += 1;
+                self.step_outcome_mut(step_index).finished_order_count += 1;
             }
             TargetPosTaskExecutionEvent::Trade {
                 trade_id,
@@ -337,6 +363,10 @@ impl TargetPosExecutionReport {
             } => {
                 self.filled_volume += *volume;
                 self.filled_turnover += *price * *volume as f64;
+                let step_outcome = self.step_outcome_mut(step_index);
+                step_outcome.filled_volume += *volume;
+                step_outcome.filled_turnover += *price * *volume as f64;
+                step_outcome.trade_count += 1;
                 self.trades.push(TargetPosSchedulerTradeFill {
                     step_index,
                     trade: TargetPosTaskTradeFill {
@@ -350,7 +380,9 @@ impl TargetPosExecutionReport {
                     },
                 });
             }
-            TargetPosTaskExecutionEvent::TargetReached { .. } => {}
+            TargetPosTaskExecutionEvent::TargetReached { .. } => {
+                self.step_outcome_mut(step_index).target_reached = true;
+            }
         }
     }
 }
@@ -465,14 +497,19 @@ impl TargetPosSchedulerInner {
             .active_task_report_len
             .lock()
             .expect("scheduler active task report len lock poisoned") = 0;
-        self.report
-            .lock()
-            .expect("scheduler report lock poisoned")
-            .applied_steps
-            .push(TargetPosExecutionStep {
-                step_index,
-                target_volume: step.target_volume,
-            });
+        let mut report = self.report.lock().expect("scheduler report lock poisoned");
+        debug_assert_eq!(report.applied_steps.len(), step_index);
+        debug_assert_eq!(report.step_outcomes.len(), step_index);
+        report.applied_steps.push(TargetPosExecutionStep {
+            step_index,
+            target_volume: step.target_volume,
+        });
+        report.step_outcomes.push(TargetPosStepOutcomeReport {
+            step_index,
+            target_volume: step.target_volume,
+            ..TargetPosStepOutcomeReport::default()
+        });
+        drop(report);
 
         let Some(price_mode) = step.price_mode else {
             return;

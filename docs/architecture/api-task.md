@@ -62,7 +62,7 @@
 - `TargetPosTask::last_error()` 会暴露本地命令提交失败
   - 第一版不对本地提交失败做静默重试，而是记录错误并结束任务
 - `TargetPosScheduler::execution_events()` 已按 `step_index` 聚合内部 task 事件
-- `TargetPosScheduler::execution_report()` 已聚合内部 step task 的 trades buffer 与命令计数摘要
+- `TargetPosScheduler::execution_report()` 已聚合内部 step task 的 trades buffer、命令计数摘要与稳定 per-step outcome report
 - `TargetPosScheduler::last_error()` 会向外冒泡内部 step task 的本地提交失败
 - `price_mode / offset_priority / split_policy` 的配置 surface 已冻结为 task 层 public types
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
@@ -92,7 +92,6 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 交易时段感知的 scheduler deadline
-- 更细的 per-step outcome report
 
 ## 为什么它必须独立成 crate
 

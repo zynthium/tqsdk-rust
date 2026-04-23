@@ -64,6 +64,11 @@
   - 最后一步会等待目标持仓真正达到后再 finished
   - 独立 execution report
     - 聚合 step 内部 task 的 trades buffer 与命令计数摘要
+    - 提供稳定的 per-step outcome report：
+      - `step_index` / `target_volume`
+      - 每步的 submitted/cancel/finished 计数
+      - 每步的成交手数/成交额/成交笔数
+      - 每步是否已 target reached
   - `last_error()`
     - 若内部 step task 的命令本地提交失败，错误会向 scheduler 冒泡
   - `cancel()` 同样遵循 `wait_update()` 驱动的撤单后收尾语义
@@ -77,7 +82,6 @@
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 - 基于交易时段的 deadline 计算
-- 更细的 per-step outcome report
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

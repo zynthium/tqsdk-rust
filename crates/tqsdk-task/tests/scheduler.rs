@@ -11,8 +11,9 @@ use tqsdk_session::SessionClient;
 use tqsdk_task::{
     OffsetPriority, PriceMode, TargetPosExecutionReport, TargetPosExecutionStep,
     TargetPosScheduleStep, TargetPosScheduler, TargetPosSchedulerConfig,
-    TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill, TargetPosTaskExecutionEvent,
-    TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind, VolumeSplitPolicy,
+    TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill, TargetPosStepOutcomeReport,
+    TargetPosTaskExecutionEvent, TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind,
+    VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -443,6 +444,12 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
                 step_index: 0,
                 target_volume: 3,
             }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 3,
+                submitted_order_count: 1,
+                ..TargetPosStepOutcomeReport::default()
+            }],
             submitted_order_count: 1,
             ..TargetPosExecutionReport::default()
         }
@@ -501,6 +508,22 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
                 TargetPosExecutionStep {
                     step_index: 1,
                     target_volume: 0,
+                },
+            ],
+            step_outcomes: vec![
+                TargetPosStepOutcomeReport {
+                    step_index: 0,
+                    target_volume: 3,
+                    submitted_order_count: 1,
+                    cancel_request_count: 1,
+                    finished_order_count: 1,
+                    ..TargetPosStepOutcomeReport::default()
+                },
+                TargetPosStepOutcomeReport {
+                    step_index: 1,
+                    target_volume: 0,
+                    target_reached: true,
+                    ..TargetPosStepOutcomeReport::default()
                 },
             ],
             submitted_order_count: 1,
@@ -646,6 +669,12 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
                 step_index: 0,
                 target_volume: 2,
             }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 2,
+                submitted_order_count: 1,
+                ..TargetPosStepOutcomeReport::default()
+            }],
             submitted_order_count: 1,
             ..TargetPosExecutionReport::default()
         }
@@ -732,6 +761,17 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
             applied_steps: vec![TargetPosExecutionStep {
                 step_index: 0,
                 target_volume: 2,
+            }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 2,
+                submitted_order_count: 1,
+                cancel_request_count: 0,
+                finished_order_count: 1,
+                filled_volume: 2,
+                filled_turnover: 7356.0,
+                trade_count: 1,
+                target_reached: true,
             }],
             trades: vec![TargetPosSchedulerTradeFill {
                 step_index: 0,
@@ -1195,6 +1235,11 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
                 step_index: 0,
                 target_volume: 0,
             }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 0,
+                ..TargetPosStepOutcomeReport::default()
+            }],
             ..TargetPosExecutionReport::default()
         }
     );
@@ -1233,6 +1278,19 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
                 TargetPosExecutionStep {
                     step_index: 1,
                     target_volume: 1,
+                },
+            ],
+            step_outcomes: vec![
+                TargetPosStepOutcomeReport {
+                    step_index: 0,
+                    target_volume: 0,
+                    ..TargetPosStepOutcomeReport::default()
+                },
+                TargetPosStepOutcomeReport {
+                    step_index: 1,
+                    target_volume: 1,
+                    submitted_order_count: 1,
+                    ..TargetPosStepOutcomeReport::default()
                 },
             ],
             submitted_order_count: 1,
@@ -1317,6 +1375,19 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
                     target_volume: 1,
                 },
             ],
+            step_outcomes: vec![
+                TargetPosStepOutcomeReport {
+                    step_index: 0,
+                    target_volume: 0,
+                    ..TargetPosStepOutcomeReport::default()
+                },
+                TargetPosStepOutcomeReport {
+                    step_index: 1,
+                    target_volume: 1,
+                    submitted_order_count: 1,
+                    ..TargetPosStepOutcomeReport::default()
+                },
+            ],
             submitted_order_count: 1,
             ..TargetPosExecutionReport::default()
         }
@@ -1350,6 +1421,11 @@ async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
             applied_steps: vec![TargetPosExecutionStep {
                 step_index: 0,
                 target_volume: 0,
+            }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 0,
+                ..TargetPosStepOutcomeReport::default()
             }],
             ..TargetPosExecutionReport::default()
         }

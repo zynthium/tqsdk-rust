@@ -20,6 +20,7 @@ pub use host::TaskHost;
 pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,
+    TargetPosStepOutcomeReport,
 };
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
