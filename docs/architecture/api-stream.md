@@ -156,6 +156,10 @@ impl TqStreamBuilder {
     pub fn from_session_builder(inner: SessionClientBuilder) -> Self;
 
     pub fn market_target(self, stock: bool, backtest: bool) -> Self;
+    pub fn stock_market(self) -> Self;
+    pub fn futures_market(self) -> Self;
+    pub fn stock_backtest_market(self) -> Self;
+    pub fn futures_backtest_market(self) -> Self;
     pub fn trade_target(
         self,
         broker_id: impl Into<String>,
@@ -177,6 +181,7 @@ impl TqStreamBuilder {
 
 - 和 `tqsdk-wait::TqApiBuilder` 保持相似建造路径
 - 继续复用 `SessionClientBuilder`
+- 优先暴露命名清楚的 market-target shortcut，避免 façade 层继续传播裸布尔 market 选择
 - 不在 stream builder 重新定义 direct query 选项
 
 ### root facade

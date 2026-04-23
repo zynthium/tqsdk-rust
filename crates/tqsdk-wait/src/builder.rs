@@ -31,6 +31,30 @@ impl TqApiBuilder {
     }
 
     #[must_use]
+    pub fn stock_market(mut self) -> Self {
+        self.inner = self.inner.stock_market();
+        self
+    }
+
+    #[must_use]
+    pub fn futures_market(mut self) -> Self {
+        self.inner = self.inner.futures_market();
+        self
+    }
+
+    #[must_use]
+    pub fn stock_backtest_market(mut self) -> Self {
+        self.inner = self.inner.stock_backtest_market();
+        self
+    }
+
+    #[must_use]
+    pub fn futures_backtest_market(mut self) -> Self {
+        self.inner = self.inner.futures_backtest_market();
+        self
+    }
+
+    #[must_use]
     pub fn trade_target(
         mut self,
         broker_id: impl Into<String>,
@@ -134,6 +158,28 @@ mod tests {
         assert_eq!(
             builder.inner.endpoints().replay_url.as_deref(),
             Some("replay-driver")
+        );
+    }
+
+    #[test]
+    fn named_market_target_shortcuts_forward_to_inner_session_builder() {
+        let futures_live = TqApiBuilder::new("demo-user", "demo-pass").futures_market();
+        assert_eq!(
+            futures_live.inner.market_target_ref(),
+            &MarketSessionTarget::new(false, false)
+        );
+
+        let stock_backtest = TqApiBuilder::new("demo-user", "demo-pass").stock_backtest_market();
+        assert_eq!(
+            stock_backtest.inner.market_target_ref(),
+            &MarketSessionTarget::new(true, true)
+        );
+
+        let futures_backtest =
+            TqApiBuilder::new("demo-user", "demo-pass").futures_backtest_market();
+        assert_eq!(
+            futures_backtest.inner.market_target_ref(),
+            &MarketSessionTarget::new(false, true)
         );
     }
 }

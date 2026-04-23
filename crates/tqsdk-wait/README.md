@@ -114,9 +114,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `TqApiBuilder` 只补一层和 wait facade 直接相关的便利配置，例如：
 
 - `market_target(...)`
+- `stock_market()`
+- `futures_market()`
+- `stock_backtest_market()`
+- `futures_backtest_market()`
 - `trade_target(...)`
 - `trade_target_with_url(...)`
 - `replay_url(...)`
+
+优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqApiBuilder::from_session_builder(...)` 包装成 wait facade。
 
