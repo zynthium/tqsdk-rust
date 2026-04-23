@@ -1,14 +1,20 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chrono::{Datelike, Days, FixedOffset, NaiveDate, Utc};
 use serde_json::Value;
+use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Symbol};
 
 use crate::error::{DataError, Result};
 
 const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_holiday.json";
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
+const DEFAULT_KLINE_DATA_TIMEOUT: Duration = Duration::from_secs(30);
+
+static NEXT_KLINE_SERIES_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct DataServiceEndpoints {
@@ -36,6 +42,170 @@ struct ContUnderlyingUpdate {
 pub struct HistoricalContQuotesRow {
     pub date: String,
     pub underlyings: BTreeMap<String, String>,
+}
+
+/// Request for a one-shot owned kline history window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KlineDataSeriesRequest {
+    symbol: String,
+    duration: Duration,
+    data_length: usize,
+    left_kline_id: Option<i64>,
+    timeout: Duration,
+}
+
+impl KlineDataSeriesRequest {
+    #[must_use]
+    pub fn new(symbol: impl Into<String>, duration: Duration, data_length: usize) -> Self {
+        Self {
+            symbol: symbol.into(),
+            duration,
+            data_length,
+            left_kline_id: None,
+            timeout: DEFAULT_KLINE_DATA_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_left_kline_id(mut self, left_kline_id: i64) -> Self {
+        self.left_kline_id = Some(left_kline_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    #[must_use]
+    pub fn data_length(&self) -> usize {
+        self.data_length
+    }
+
+    #[must_use]
+    pub fn left_kline_id(&self) -> Option<i64> {
+        self.left_kline_id
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn validate(&self) -> Result<i64> {
+        if self.symbol.is_empty() {
+            return Err(DataError::Validation(
+                "symbol must not be empty".to_string(),
+            ));
+        }
+        if self.data_length == 0 {
+            return Err(DataError::Validation(
+                "data_length must be greater than zero".to_string(),
+            ));
+        }
+        let duration_ns = i64::try_from(self.duration.as_nanos()).map_err(|_| {
+            DataError::Validation("duration is too large to encode as i64 nanoseconds".to_string())
+        })?;
+        if duration_ns <= 0 {
+            return Err(DataError::Validation(
+                "duration must be greater than zero".to_string(),
+            ));
+        }
+        Ok(duration_ns)
+    }
+}
+
+/// Owned result of a one-shot kline history request.
+#[derive(Debug, Clone, Default)]
+pub struct KlineDataSeries {
+    symbol: String,
+    duration_ns: i64,
+    requested_length: usize,
+    left_kline_id: Option<i64>,
+    rows: Vec<Kline>,
+}
+
+impl KlineDataSeries {
+    fn new(
+        symbol: String,
+        duration_ns: i64,
+        requested_length: usize,
+        left_kline_id: Option<i64>,
+        rows: Vec<Kline>,
+    ) -> Self {
+        Self {
+            symbol,
+            duration_ns,
+            requested_length,
+            left_kline_id,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn duration_ns(&self) -> i64 {
+        self.duration_ns
+    }
+
+    #[must_use]
+    pub fn requested_length(&self) -> usize {
+        self.requested_length
+    }
+
+    #[must_use]
+    pub fn left_kline_id(&self) -> Option<i64> {
+        self.left_kline_id
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&Kline> {
+        self.rows.last()
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Kline> {
+        self.rows.get(index)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Kline> + DoubleEndedIterator {
+        self.rows.iter()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Kline] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Kline> {
+        self.rows
+    }
 }
 
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
@@ -172,6 +342,91 @@ impl DataClient {
         Ok(rows)
     }
 
+    pub async fn get_kline_data_series(
+        &self,
+        request: KlineDataSeriesRequest,
+    ) -> Result<KlineDataSeries> {
+        let duration_ns = request.validate()?;
+        let Some(session) = self.session.as_ref() else {
+            return Err(DataError::InvalidState(
+                "get_kline_data_series requires a session-backed data client",
+            ));
+        };
+
+        let chart_id = next_kline_series_chart_id(request.symbol(), duration_ns);
+        let result = self
+            .await_kline_data_series(session, &request, duration_ns, chart_id.as_str())
+            .await;
+
+        let _ = session
+            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
+                chart_id,
+            }))
+            .await;
+
+        result
+    }
+
+    async fn await_kline_data_series(
+        &self,
+        session: &tqsdk_session::SessionClient,
+        request: &KlineDataSeriesRequest,
+        duration_ns: i64,
+        chart_id: &str,
+    ) -> Result<KlineDataSeries> {
+        let command_id = session
+            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                MarketChartCommand {
+                    chart_id: chart_id.to_string(),
+                    symbols: vec![Symbol::new(request.symbol())],
+                    duration_ns,
+                    view_width: request.data_length(),
+                    left_kline_id: request.left_kline_id(),
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                },
+            )))
+            .await?;
+        let reader = session.reader_clone();
+        let deadline = tokio::time::Instant::now() + request.timeout();
+
+        loop {
+            if let Some(series) =
+                try_read_ready_kline_data_series(&reader, request, duration_ns, chart_id)?
+            {
+                return Ok(series);
+            }
+
+            if let Some(status) = session.command_status(command_id)?
+                && matches!(status.as_str(), "rejected" | "failed" | "cancelled")
+            {
+                return Err(DataError::InvalidResponse(format!(
+                    "set chart command reached terminal status {status}"
+                )));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DataError::Timeout(request.timeout()));
+            }
+
+            let mut progress = false;
+            progress |= session.flush_outbound().await?;
+            progress |= session.drive_pending_once().await?;
+            progress |= session.drive_route_once(Some(deadline)).await?;
+
+            if progress {
+                continue;
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(DataError::Timeout(request.timeout()));
+            }
+
+            tokio::time::sleep(remaining.min(Duration::from_millis(1))).await;
+        }
+    }
+
     async fn trading_days(
         &self,
         start_date: NaiveDate,
@@ -294,6 +549,84 @@ impl DataClient {
     }
 }
 
+fn try_read_ready_kline_data_series(
+    reader: &tqsdk_core::RuntimeReader,
+    request: &KlineDataSeriesRequest,
+    duration_ns: i64,
+    chart_id: &str,
+) -> Result<Option<KlineDataSeries>> {
+    let snapshot = reader.read();
+    let Some(chart) = snapshot
+        .decode_path::<Chart>(&["charts", chart_id])
+        .map_err(contract_error_into_data)?
+    else {
+        return Ok(None);
+    };
+    if !chart.ready || chart.more_data {
+        return Ok(None);
+    }
+
+    let duration_key = duration_ns.to_string();
+    let data_path = ["klines", request.symbol(), duration_key.as_str(), "data"];
+    let mut ids = snapshot
+        .get_path(&data_path)
+        .and_then(|value| value.as_object())
+        .map(|data| {
+            data.keys()
+                .filter_map(|key| key.parse::<i64>().ok())
+                .filter(|id| chart.left_id <= *id && *id <= chart.right_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ids.sort_unstable();
+    if ids.len() > request.data_length() {
+        ids.drain(0..ids.len() - request.data_length());
+    }
+
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id_key = id.to_string();
+        if let Some(row) = snapshot
+            .decode_path::<Kline>(&[
+                "klines",
+                request.symbol(),
+                duration_key.as_str(),
+                "data",
+                id_key.as_str(),
+            ])
+            .map_err(contract_error_into_data)?
+        {
+            rows.push(row);
+        }
+    }
+
+    Ok(Some(KlineDataSeries::new(
+        request.symbol().to_string(),
+        duration_ns,
+        request.data_length(),
+        request.left_kline_id(),
+        rows,
+    )))
+}
+
+fn next_kline_series_chart_id(symbol: &str, duration_ns: i64) -> String {
+    let sequence = NEXT_KLINE_SERIES_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "data-kline-{}-{duration_ns}-{sequence}",
+        sanitize_chart_token(symbol)
+    )
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn contract_error_into_data(error: tqsdk_core::ContractError) -> DataError {
+    DataError::Session(tqsdk_session::SessionFacadeError::from(error))
+}
+
 fn current_cst_date() -> NaiveDate {
     let offset = FixedOffset::east_opt(8 * 60 * 60).expect("CST offset must be valid");
     Utc::now().with_timezone(&offset).date_naive()
@@ -345,8 +678,16 @@ fn parse_compact_date_str(value: &str) -> Result<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    use serde_json::json;
+    use tqsdk_core::{
+        AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
+        RuntimeInput,
+    };
+    use tqsdk_session::{SessionClient, SessionFacadeConfig};
 
     use super::*;
 
@@ -413,6 +754,126 @@ mod tests {
     }
 
     #[test]
+    fn await_kline_data_series_returns_ready_rows_within_chart_bounds() {
+        run_on_tokio(async {
+            let (session, handle) = test_session_and_handle();
+            let client = DataClient::from_session(session.clone());
+            let request = KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                .with_left_kline_id(100)
+                .with_timeout(Duration::from_millis(100));
+            let duration_ns = request.validate().unwrap();
+
+            let seed_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                seed_ready_kline_chart(
+                    &handle,
+                    "data-kline-test",
+                    "SHFE.ao2609",
+                    duration_ns,
+                    100,
+                    101,
+                );
+            });
+
+            let series = client
+                .await_kline_data_series(&session, &request, duration_ns, "data-kline-test")
+                .await
+                .unwrap();
+
+            assert_eq!(series.symbol(), "SHFE.ao2609");
+            assert_eq!(series.duration_ns(), duration_ns);
+            assert_eq!(series.requested_length(), 2);
+            assert_eq!(series.left_kline_id(), Some(100));
+            assert_eq!(series.len(), 2);
+            assert_eq!(series.rows()[0].id, 100);
+            assert_eq!(series.rows()[1].id, 101);
+            assert_eq!(series.last().map(|row| row.close), Some(620.0));
+
+            seed_thread.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn get_kline_data_series_requires_session_backed_client() {
+        run_on_tokio(async {
+            let err = DataClient::new()
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    2,
+                ))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                err,
+                DataError::InvalidState(message)
+                    if message
+                        == "get_kline_data_series requires a session-backed data client"
+            ));
+        });
+    }
+
+    #[test]
+    fn get_kline_data_series_times_out_without_ready_chart() {
+        run_on_tokio(async {
+            let (session, _handle) = test_session_and_handle();
+            let client = DataClient::from_session(session);
+
+            let err = client
+                .get_kline_data_series(
+                    KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 2)
+                        .with_timeout(Duration::from_millis(10)),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, DataError::Timeout(timeout) if timeout == Duration::from_millis(10))
+            );
+        });
+    }
+
+    #[test]
+    fn get_kline_data_series_rejects_invalid_requests() {
+        run_on_tokio(async {
+            let client = DataClient::new();
+
+            let err = client
+                .get_kline_data_series(KlineDataSeriesRequest::new("", Duration::from_secs(60), 2))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "symbol must not be empty")
+            );
+
+            let err = client
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::from_secs(60),
+                    0,
+                ))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "data_length must be greater than zero")
+            );
+
+            let err = client
+                .get_kline_data_series(KlineDataSeriesRequest::new(
+                    "SHFE.ao2609",
+                    Duration::ZERO,
+                    2,
+                ))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DataError::Validation(message) if message == "duration must be greater than zero")
+            );
+        });
+    }
+
+    #[test]
     fn query_his_cont_quotes_rejects_invalid_inputs() {
         run_on_tokio(async {
             let client = DataClient::new();
@@ -451,16 +912,117 @@ mod tests {
         });
     }
 
-    fn run_on_tokio<F>(future: F)
+    fn run_on_tokio<F, T>(future: F) -> T
     where
-        F: std::future::Future<Output = ()>,
+        F: Future<Output = T>,
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
             .unwrap();
-        runtime.block_on(future);
+        runtime.block_on(future)
+    }
+
+    fn test_session_and_handle() -> (SessionClient, RuntimeHandle) {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let session =
+            SessionClient::new_for_test_with_handle(handle.clone(), SessionFacadeConfig::default());
+
+        (session, handle)
+    }
+
+    fn seed_ready_kline_chart(
+        handle: &RuntimeHandle,
+        chart_id: &str,
+        symbol: &str,
+        duration_ns: i64,
+        left_id: i64,
+        right_id: i64,
+    ) {
+        handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "charts": {
+                                chart_id: {
+                                    "state": {
+                                        "ins_list": symbol,
+                                        "duration": duration_ns,
+                                    },
+                                    "left_id": left_id,
+                                    "right_id": right_id,
+                                    "more_data": false,
+                                    "ready": true,
+                                }
+                            },
+                            "klines": {
+                                symbol: {
+                                    duration_ns.to_string(): {
+                                        "data": {
+                                            "99": {
+                                                "id": 99,
+                                                "datetime": 1_713_659_940_000_000_000_i64,
+                                                "open": 617.0,
+                                                "high": 618.0,
+                                                "low": 616.0,
+                                                "close": 617.5,
+                                                "volume": 11,
+                                                "open_oi": 99,
+                                                "close_oi": 100
+                                            },
+                                            "100": {
+                                                "id": 100,
+                                                "datetime": 1_713_660_000_000_000_000_i64,
+                                                "open": 618.0,
+                                                "high": 620.0,
+                                                "low": 617.0,
+                                                "close": 619.0,
+                                                "volume": 12,
+                                                "open_oi": 100,
+                                                "close_oi": 101
+                                            },
+                                            "101": {
+                                                "id": 101,
+                                                "datetime": 1_713_660_060_000_000_000_i64,
+                                                "open": 619.0,
+                                                "high": 621.0,
+                                                "low": 618.0,
+                                                "close": 620.0,
+                                                "volume": 15,
+                                                "open_oi": 101,
+                                                "close_oi": 103
+                                            },
+                                            "102": {
+                                                "id": 102,
+                                                "datetime": 1_713_660_120_000_000_000_i64,
+                                                "open": 620.0,
+                                                "high": 622.0,
+                                                "low": 619.0,
+                                                "close": 621.0,
+                                                "volume": 16,
+                                                "open_oi": 103,
+                                                "close_oi": 104
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .expect("seed ready kline chart should produce a commit");
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

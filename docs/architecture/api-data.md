@@ -89,8 +89,12 @@
 - 后续实现的依赖方向约束
 - `DataClient`
 - `DataClient::new()`
+- `DataClient::from_session(...)`
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `HistoricalContQuotesRow`
+- `get_kline_data_series(KlineDataSeriesRequest)`
+- `KlineDataSeries`
+- `KlineDataSeriesRequest`
 
 当前明确先不做：
 
@@ -107,9 +111,8 @@
 
 1. history/query substrate
    - 复用 `tqsdk-session` 的 one-shot query
-   - 必要时复用 `tqsdk-core` 的 replay/history contract
+   - 复用 `tqsdk-core` 的 market history/chart contract
 2. batch fetch surface
-   - `get_kline_data_series`
    - `get_tick_data_series`
    - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
@@ -147,6 +150,19 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 当前仓库里，`tqsdk-data` 已经以“窄 public surface”的方式落地。
 
+其中比较关键的一个点是：
+
+- `get_kline_data_series` 已经落在 `tqsdk-data`
+- 它不是新的 session facade
+- 它也不是 live ref / live stream
+- 它只是对 `SetChart -> ready chart -> owned rows -> CancelChart` 这条底层 contract 的一次性封装
+
+这样做的意义是：
+
+- 不把研究/批量历史接口继续塞进 `tqsdk-session`
+- 不把历史数据读取和 `wait_update()` / stream 模式耦合在一起
+- 后续可以在 `tqsdk-data` 上继续叠加 downloader、tabular adapters、缓存与导出，而不污染 core/session/live facade 的边界
+
 这样做的收益是：
 
 - 先给研究/下载能力一个明确落点
@@ -158,5 +174,6 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 `tqsdk-data` 值得独立存在，但当前阶段最合理的动作是：
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
-2. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
-3. 避免为了兼容 DataFrame 形状而提前做宽 surface
+2. 在此基础上继续保持 `DataClient + get_kline_data_series` 也只是一层 one-shot substrate
+3. 继续按 history/query -> batch fetch -> materialization 的顺序迭代
+4. 避免为了兼容 DataFrame 形状而提前做宽 surface

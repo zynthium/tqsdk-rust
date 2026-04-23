@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
 
 /// Result alias for `tqsdk-data`.
 pub type Result<T> = std::result::Result<T, DataError>;
@@ -10,7 +11,9 @@ pub type Result<T> = std::result::Result<T, DataError>;
 pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
     Validation(String),
+    InvalidState(&'static str),
     InvalidResponse(String),
+    Timeout(Duration),
     Http(reqwest::Error),
 }
 
@@ -31,8 +34,12 @@ impl Display for DataError {
         match self {
             Self::Session(error) => write!(f, "{error}"),
             Self::Validation(message) => write!(f, "invalid data query input: {message}"),
+            Self::InvalidState(message) => write!(f, "invalid data client state: {message}"),
             Self::InvalidResponse(message) => {
                 write!(f, "invalid data service response: {message}")
+            }
+            Self::Timeout(timeout) => {
+                write!(f, "data request timed out after {timeout:?}")
             }
             Self::Http(error) => write!(f, "{error}"),
         }
@@ -44,7 +51,10 @@ impl std::error::Error for DataError {
         match self {
             Self::Session(error) => Some(error),
             Self::Http(error) => Some(error),
-            Self::Validation(_) | Self::InvalidResponse(_) => None,
+            Self::Validation(_)
+            | Self::InvalidState(_)
+            | Self::InvalidResponse(_)
+            | Self::Timeout(_) => None,
         }
     }
 }
