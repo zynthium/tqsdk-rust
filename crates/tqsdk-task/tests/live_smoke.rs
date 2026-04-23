@@ -6,7 +6,8 @@ use tqsdk_core::{
     TradeOffset,
 };
 use tqsdk_task::{
-    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TaskHost,
+    TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosTask,
+    TaskHost,
 };
 use tqsdk_wait::TqApiBuilder;
 
@@ -239,6 +240,107 @@ async fn live_scheduler_pause_step_smoke() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live target-pos smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS, defaults to the official built-in TqKq account, and needs explicit TQ_SMOKE_ALLOW_ORDER=1"]
+async fn live_target_pos_roundtrip_smoke() {
+    if std::env::var_os("TQ_SMOKE_ALLOW_ORDER").is_none() {
+        return;
+    }
+
+    let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+        return;
+    };
+    let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+        return;
+    };
+    let explicit_trade = explicit_trade_override().expect("explicit trade override should parse");
+    let account_number = read_u8_env("TQ_TRADE_ACCOUNT_NO").expect("account number should parse");
+    let symbol = read_env("TQ_SMOKE_TASK_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
+    let target_delta = require_i64_env("TQ_SMOKE_TARGET_DELTA").unwrap_or(1);
+    let timeout_secs = require_u64_env("TQ_SMOKE_TIMEOUT_SECS").unwrap_or(60);
+
+    let builder = TqApiBuilder::new(auth_user, auth_pass).futures_market();
+    let api = if let Some((broker_id, account_id, _password)) = explicit_trade.as_ref() {
+        builder.trade_target(broker_id.clone(), account_id.clone())
+    } else if let Some(number) = account_number {
+        builder.trade_target_tqkq_numbered(number)
+    } else {
+        builder.trade_target_tqkq()
+    }
+    .build()
+    .await
+    .expect("live wait api should build");
+    let mut host = TaskHost::new(api);
+
+    let trade_login = if let Some((broker_id, account_id, password)) = explicit_trade {
+        TradeLoginCommand {
+            account_id: AccountId::new(account_id),
+            broker_id,
+            password,
+            account_type: TradeAccountType::Future,
+            front_broker: None,
+            front_url: None,
+            client_app_id: None,
+            client_system_info: None,
+        }
+    } else if let Some(number) = account_number {
+        host.api()
+            .session()
+            .tqkq_login_command_numbered(number)
+            .await
+            .expect("numbered tqkq login should resolve")
+    } else {
+        host.api()
+            .session()
+            .tqkq_login_command()
+            .await
+            .expect("tqkq login should resolve")
+    };
+    let account_id = trade_login.account_id.as_str().to_string();
+
+    login_trade_account(&host, trade_login)
+        .await
+        .expect("trade login should submit");
+    wait_for_trade_account_ready(&mut host, account_id.as_str(), Duration::from_secs(30))
+        .await
+        .expect("trade account should become ready");
+
+    let baseline = current_net_position(&host, account_id.as_str(), symbol.as_str())
+        .expect("position snapshot should decode");
+    let first_target = baseline + target_delta;
+    let task = host
+        .target_pos(account_id.as_str(), symbol.as_str())
+        .build()
+        .expect("TargetPosTask should build");
+
+    task.set_target_volume(first_target)
+        .expect("first target volume should set");
+    wait_for_task_target_reached(
+        &mut host,
+        &task,
+        first_target,
+        Duration::from_secs(timeout_secs),
+    )
+    .await
+    .expect("target task should reach the first target");
+
+    task.set_target_volume(baseline)
+        .expect("baseline target volume should set");
+    wait_for_task_target_reached(
+        &mut host,
+        &task,
+        baseline,
+        Duration::from_secs(timeout_secs),
+    )
+    .await
+    .expect("target task should revert to the baseline target");
+
+    task.cancel().await.expect("task cancel should succeed");
+    wait_for_task_finished(&mut host, &task, Duration::from_secs(10))
+        .await
+        .expect("task should finish cleanly after cancel");
+}
+
 async fn login_trade_account(
     host: &TaskHost,
     trade_login: TradeLoginCommand,
@@ -303,6 +405,71 @@ async fn wait_for_order_snapshot(
     }
 }
 
+async fn wait_for_task_target_reached(
+    host: &mut TaskHost,
+    task: &TargetPosTask,
+    target_volume: i64,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(error) = task.last_error() {
+            return Err(error.to_string());
+        }
+        if task.applied_target_volume_for_test() == Some(target_volume) {
+            task.wait_target_reached()
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "timed out waiting for target volume {target_volume}"
+            ));
+        }
+
+        host.wait_update(Some(now + Duration::from_secs(5)))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+async fn wait_for_task_finished(
+    host: &mut TaskHost,
+    task: &TargetPosTask,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if task.is_finished() {
+            task.wait_finished()
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err("timed out waiting for task finish".to_string());
+        }
+
+        host.wait_update(Some(now + Duration::from_secs(5)))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+fn current_net_position(host: &TaskHost, account_id: &str, symbol: &str) -> Result<i64, String> {
+    let snapshot = host
+        .api()
+        .get_position(account_id, symbol)
+        .snapshot(host.api())
+        .map_err(|error| error.to_string())?;
+    Ok(snapshot.map_or(0, |position| position.pos))
+}
+
 fn read_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -349,5 +516,11 @@ fn require_f64_env(name: &str) -> Result<f64, String> {
 fn require_i64_env(name: &str) -> Result<i64, String> {
     let raw = require_env(name)?;
     raw.parse::<i64>()
+        .map_err(|error| format!("invalid {name}: {error}"))
+}
+
+fn require_u64_env(name: &str) -> Result<u64, String> {
+    let raw = require_env(name)?;
+    raw.parse::<u64>()
         .map_err(|error| format!("invalid {name}: {error}"))
 }
