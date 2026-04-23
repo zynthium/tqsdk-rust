@@ -68,3 +68,28 @@
 - trades buffer / execution report 细化
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
+
+## 示例
+
+当前提供一个最小 task example：
+
+- [examples/target_pos.rs](examples/target_pos.rs)
+
+运行它需要：
+
+- `TQ_AUTH_USER`
+- `TQ_AUTH_PASS`
+- `SIMNOW_USER_0`
+- `SIMNOW_PASS_0`
+
+它默认只做 trade login 和账户 ready 检查，不会下单。
+
+只有显式设置下面两个环境变量时，才会真正创建 `TargetPosTask` 并进入调仓循环：
+
+- `TQ_TASK_ALLOW_ORDERS=1`
+- `TQ_TARGET_VOLUME=<目标手数>`
+
+可选环境变量：
+
+- `TQ_TASK_SYMBOL`
+- `TQ_TASK_TIMEOUT_SECS`
