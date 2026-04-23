@@ -113,13 +113,22 @@
 
 ## 示例
 
-最小可编译示例见 [examples/query_symbol_info.rs](examples/query_symbol_info.rs)。
+最小可编译示例见：
+
+- [examples/query_symbol_info.rs](examples/query_symbol_info.rs)
+- [examples/trade_login_tqkq.rs](examples/trade_login_tqkq.rs)
 
 这个示例展示的是最推荐的 direct-query 使用路径：
 
 - 调用方自带 Tokio runtime
 - 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
 - 直接通过 `SessionClient` 发起一次性 metadata query
+
+而 `trade_login_tqkq.rs` 展示的是同一层 substrate 的另一条典型路径：
+
+- 用 `SessionClientBuilder::trade_target_tqkq*()` 预声明 trade route
+- 用 `SessionClient::tqkq_login_command*()` 从当前 auth context 派生官方内置模拟账户登录命令
+- 仅靠 `flush_outbound()` / `drive_pending_once()` / `drive_route_once()` 推进到底层 trade state tree，而不引入 `wait_update()` facade
 
 ## 建议的 Direct Query 接口层次
 
