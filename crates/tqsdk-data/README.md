@@ -125,6 +125,8 @@
 - [examples/his_cont_quotes.rs](examples/his_cont_quotes.rs)
 - [examples/kline_data_download.rs](examples/kline_data_download.rs)
 - [examples/kline_export_csv.rs](examples/kline_export_csv.rs)
+- [examples/tick_data_download.rs](examples/tick_data_download.rs)
+- [examples/tick_export_csv.rs](examples/tick_export_csv.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。
