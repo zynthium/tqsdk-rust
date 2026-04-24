@@ -86,14 +86,17 @@
   - 因此也继承内部 task 的按需 quote 自动订阅语义
   - 已支持 step 级 `price_mode`
   - 已支持 pause step
-  - 非最后一步按 wall-clock interval 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
+  - 非最后一步会按“交易时段内累计 elapsed”判断 interval 是否到期
+    - 当前最小实现基于 `quote.trading_time` + weekday 规则
+    - 若拿不到有效 trading session，则保守回退到 wall-clock
+  - 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步要等目标持仓真正达到后才 finished
 
 当前还未落地：
 
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
-- 交易时段感知的 scheduler deadline
+- 基于节假日 calendar 的精确 scheduler deadline gating
 
 ## 为什么它必须独立成 crate
 

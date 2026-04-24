@@ -3,9 +3,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use chrono::{DateTime, Datelike, Days, FixedOffset, NaiveDate, NaiveTime, Utc};
 use tokio::sync::watch;
+use tqsdk_core::{Quote, TradingTime};
 
 use crate::Result;
 use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
@@ -122,7 +124,7 @@ struct TargetPosSchedulerInner {
     steps: Vec<TargetPosScheduleStep>,
     config: TargetPosSchedulerConfig,
     next_step_index: Mutex<usize>,
-    current_step_started_at: Mutex<Option<Instant>>,
+    current_step_clock: Mutex<Option<ActiveStepClock>>,
     current_step_phase: Mutex<ActiveStepPhase>,
     active_task: Mutex<Option<TargetPosTask>>,
     active_task_report_len: Mutex<usize>,
@@ -132,6 +134,12 @@ struct TargetPosSchedulerInner {
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveStepClock {
+    last_accounted_at: DateTime<FixedOffset>,
+    active_elapsed: Duration,
 }
 
 impl TargetPosSchedulerBuilder {
@@ -191,7 +199,7 @@ impl TargetPosSchedulerBuilder {
             steps: self.steps,
             config: self.config,
             next_step_index: Mutex::new(0),
-            current_step_started_at: Mutex::new(None),
+            current_step_clock: Mutex::new(None),
             current_step_phase: Mutex::new(ActiveStepPhase::Running),
             active_task: Mutex::new(None),
             active_task_report_len: Mutex::new(0),
@@ -447,7 +455,8 @@ impl TargetPosSchedulerInner {
                 return;
             }
 
-            if matches!(phase, ActiveStepPhase::Running) && !self.step_deadline_elapsed(step_index)
+            if matches!(phase, ActiveStepPhase::Running)
+                && !self.step_deadline_elapsed(api, step_index)
             {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
@@ -481,9 +490,9 @@ impl TargetPosSchedulerInner {
 
     fn ensure_step_started(&self, step_index: usize) {
         if self
-            .current_step_started_at
+            .current_step_clock
             .lock()
-            .expect("scheduler started-at lock poisoned")
+            .expect("scheduler step clock lock poisoned")
             .is_some()
         {
             return;
@@ -491,9 +500,12 @@ impl TargetPosSchedulerInner {
 
         let step = self.steps[step_index].clone();
         *self
-            .current_step_started_at
+            .current_step_clock
             .lock()
-            .expect("scheduler started-at lock poisoned") = Some(Instant::now());
+            .expect("scheduler step clock lock poisoned") = Some(ActiveStepClock {
+            last_accounted_at: shanghai_now(),
+            active_elapsed: Duration::ZERO,
+        });
         *self
             .current_step_phase
             .lock()
@@ -565,15 +577,21 @@ impl TargetPosSchedulerInner {
             .clone()
     }
 
-    fn step_deadline_elapsed(&self, step_index: usize) -> bool {
-        let started_at = *self
-            .current_step_started_at
+    fn step_deadline_elapsed(&self, api: &tqsdk_wait::TqApi, step_index: usize) -> bool {
+        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
+        let mut step_clock = self
+            .current_step_clock
             .lock()
-            .expect("scheduler started-at lock poisoned");
-        let Some(started_at) = started_at else {
+            .expect("scheduler step clock lock poisoned");
+        let Some(step_clock) = step_clock.as_mut() else {
             return false;
         };
-        Instant::now().duration_since(started_at) >= self.steps[step_index].interval
+
+        let now = shanghai_now();
+        let elapsed = effective_step_elapsed(step_clock.last_accounted_at, now, quote.as_ref());
+        step_clock.last_accounted_at = now;
+        step_clock.active_elapsed = step_clock.active_elapsed.saturating_add(elapsed);
+        step_clock.active_elapsed >= self.steps[step_index].interval
     }
 
     fn current_step_phase(&self) -> ActiveStepPhase {
@@ -600,9 +618,9 @@ impl TargetPosSchedulerInner {
             .lock()
             .expect("scheduler active task report len lock poisoned") = 0;
         *self
-            .current_step_started_at
+            .current_step_clock
             .lock()
-            .expect("scheduler started-at lock poisoned") = None;
+            .expect("scheduler step clock lock poisoned") = None;
         *self
             .current_step_phase
             .lock()
@@ -639,9 +657,9 @@ impl TargetPosSchedulerInner {
             .lock()
             .expect("scheduler active task report len lock poisoned") = 0;
         *self
-            .current_step_started_at
+            .current_step_clock
             .lock()
-            .expect("scheduler started-at lock poisoned") = None;
+            .expect("scheduler step clock lock poisoned") = None;
     }
 
     fn collect_active_task_events(&self, step_index: usize) {
@@ -704,6 +722,141 @@ fn task_failure(task: &TargetPosTask) -> Option<crate::TaskError> {
     task.is_finished().then(|| task.last_error()).flatten()
 }
 
+fn shanghai_now() -> DateTime<FixedOffset> {
+    Utc::now().with_timezone(&china_tz())
+}
+
+fn china_tz() -> FixedOffset {
+    FixedOffset::east_opt(8 * 60 * 60).expect("UTC+8 fixed offset should be valid")
+}
+
+fn effective_step_elapsed(
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+    quote: Option<&Quote>,
+) -> Duration {
+    quote
+        .and_then(|quote| trading_time_elapsed_between(start, end, &quote.trading_time))
+        .unwrap_or_else(|| wall_elapsed(start, end))
+}
+
+fn trading_time_elapsed_between(
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+    trading_time: &TradingTime,
+) -> Option<Duration> {
+    if end <= start {
+        return Some(Duration::ZERO);
+    }
+
+    let min_date = start
+        .date_naive()
+        .checked_sub_days(Days::new(1))
+        .unwrap_or(start.date_naive());
+    let max_date = end.date_naive();
+    let mut date = min_date;
+    let mut total = Duration::ZERO;
+    let mut saw_valid_window = false;
+
+    while date <= max_date {
+        let next_date = date.checked_add_days(Days::new(1))?;
+        let day_open = is_weekday(date);
+        let night_open = is_weekday(date) && is_weekday(next_date);
+
+        if day_open {
+            let (elapsed, saw_valid) =
+                trading_windows_overlap(start, end, date, &trading_time.day, false);
+            total = total.saturating_add(elapsed);
+            saw_valid_window |= saw_valid;
+        }
+        if night_open {
+            let (elapsed, saw_valid) =
+                trading_windows_overlap(start, end, date, &trading_time.night, true);
+            total = total.saturating_add(elapsed);
+            saw_valid_window |= saw_valid;
+        }
+
+        date = next_date;
+    }
+
+    saw_valid_window.then_some(total)
+}
+
+fn trading_windows_overlap(
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+    date: NaiveDate,
+    windows: &[Vec<String>],
+    allow_cross_midnight: bool,
+) -> (Duration, bool) {
+    let mut total = Duration::ZERO;
+    let mut saw_valid_window = false;
+
+    for window in windows {
+        let Some((window_start, window_end, crosses_midnight)) =
+            parse_trading_window(window, allow_cross_midnight)
+        else {
+            continue;
+        };
+        saw_valid_window = true;
+
+        let interval_start = date
+            .and_time(window_start)
+            .and_local_timezone(china_tz())
+            .single();
+        let interval_end_date = if crosses_midnight {
+            date.checked_add_days(Days::new(1))
+        } else {
+            Some(date)
+        };
+        let interval_end = interval_end_date.and_then(|interval_end_date| {
+            interval_end_date
+                .and_time(window_end)
+                .and_local_timezone(china_tz())
+                .single()
+        });
+
+        let (Some(interval_start), Some(interval_end)) = (interval_start, interval_end) else {
+            continue;
+        };
+        if interval_end <= interval_start {
+            continue;
+        }
+
+        let overlap_start = start.max(interval_start);
+        let overlap_end = end.min(interval_end);
+        total = total.saturating_add(wall_elapsed(overlap_start, overlap_end));
+    }
+
+    (total, saw_valid_window)
+}
+
+fn parse_trading_window(
+    window: &[String],
+    allow_cross_midnight: bool,
+) -> Option<(NaiveTime, NaiveTime, bool)> {
+    let start = NaiveTime::parse_from_str(window.first()?, "%H:%M:%S").ok()?;
+    let end = NaiveTime::parse_from_str(window.get(1)?, "%H:%M:%S").ok()?;
+    if start == end {
+        return None;
+    }
+    let crosses_midnight = allow_cross_midnight && end < start;
+    if !crosses_midnight && end <= start {
+        return None;
+    }
+    Some((start, end, crosses_midnight))
+}
+
+fn wall_elapsed(start: DateTime<FixedOffset>, end: DateTime<FixedOffset>) -> Duration {
+    end.signed_duration_since(start)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
+fn is_weekday(date: NaiveDate) -> bool {
+    date.weekday().number_from_monday() <= 5
+}
+
 impl Drop for TargetPosSchedulerInner {
     fn drop(&mut self) {
         if let Some(task) = self
@@ -743,6 +896,7 @@ pub(crate) async fn process_schedulers_wait_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
     use tqsdk_session::SessionClient;
     use tqsdk_wait::TqApi;
@@ -804,5 +958,97 @@ mod tests {
             scheduler.last_error(),
             Some(crate::TaskError::Wait(_))
         ));
+    }
+
+    #[test]
+    fn trading_time_elapsed_counts_only_open_day_windows() {
+        let tz = china_tz();
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 22, 11, 25, 0)
+            .single()
+            .expect("valid datetime");
+        let end = tz
+            .with_ymd_and_hms(2026, 4, 22, 13, 35, 0)
+            .single()
+            .expect("valid datetime");
+        let trading_time = TradingTime {
+            day: vec![
+                vec!["09:00:00".to_string(), "10:15:00".to_string()],
+                vec!["10:30:00".to_string(), "11:30:00".to_string()],
+                vec!["13:30:00".to_string(), "15:00:00".to_string()],
+            ],
+            night: Vec::new(),
+        };
+
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+            .expect("day windows should produce elapsed");
+
+        assert_eq!(elapsed, Duration::from_secs(10 * 60));
+    }
+
+    #[test]
+    fn trading_time_elapsed_skips_weekend_and_closed_hours() {
+        let tz = china_tz();
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 24, 22, 55, 0)
+            .single()
+            .expect("valid datetime");
+        let end = tz
+            .with_ymd_and_hms(2026, 4, 27, 9, 5, 0)
+            .single()
+            .expect("valid datetime");
+        let trading_time = TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "15:00:00".to_string()]],
+            night: vec![vec!["21:00:00".to_string(), "23:00:00".to_string()]],
+        };
+
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+            .expect("day/night windows should produce elapsed");
+
+        assert_eq!(elapsed, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn trading_time_elapsed_supports_cross_midnight_night_window() {
+        let tz = china_tz();
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 21, 22, 55, 0)
+            .single()
+            .expect("valid datetime");
+        let end = tz
+            .with_ymd_and_hms(2026, 4, 22, 0, 35, 0)
+            .single()
+            .expect("valid datetime");
+        let trading_time = TradingTime {
+            day: Vec::new(),
+            night: vec![vec!["21:00:00".to_string(), "01:00:00".to_string()]],
+        };
+
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+            .expect("cross-midnight night window should produce elapsed");
+
+        assert_eq!(elapsed, Duration::from_secs(100 * 60));
+    }
+
+    #[test]
+    fn effective_step_elapsed_falls_back_to_wall_clock_without_valid_schedule() {
+        let tz = china_tz();
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 22, 11, 25, 0)
+            .single()
+            .expect("valid datetime");
+        let end = tz
+            .with_ymd_and_hms(2026, 4, 22, 13, 35, 0)
+            .single()
+            .expect("valid datetime");
+        let quote = Quote {
+            trading_time: TradingTime::default(),
+            ..Quote::default()
+        };
+
+        assert_eq!(
+            effective_step_elapsed(start, end, Some(&quote)),
+            Duration::from_secs(130 * 60)
+        );
     }
 }
