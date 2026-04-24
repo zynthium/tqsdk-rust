@@ -77,6 +77,7 @@
   - 若 live order 与最新期望 batch 不一致，会优先只撤 stale 子集，保留仍匹配新计划的 live order
   - 若已有 live order 与最新计划方向/offset/价格兼容但手数不足，会保留已有订单并只补齐缺口
   - stale live order 进入终态后，再在后续 `wait_update()` 里按新计划补齐或重发
+  - 多笔 live order 中 stale 子集撤单后，仍会保留兼容订单，并在 stale 终态后继续提交缺口 batch
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行 batch：
     - 每次 `wait_update()` 最多提交一个 planner batch
@@ -419,10 +420,8 @@ impl TargetPosScheduler {
 
 ## 下一步建议
 
-文档冻结后，再进入实现：
+当前 `tqsdk-task` 已经进入稳固阶段，下一步不应继续扩宽 surface，而应优先：
 
-1. 先脚手架 `tqsdk-task` crate，但只放最小错误类型、registry、`TaskHost` 空骨架。
-2. 先写 registry/ownership 的失败测试。
-3. 再做最小 `TargetPosTask`，最后补 scheduler。
-
-不要一开始就把 scheduler、report、stream adapter、callback 一起做完。
+1. 增加真实联机 smoke 与 replay/模拟场景回归。
+2. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
+3. 保持 task runtime 独立，不把 scheduler、report、stream adapter、callback 倒灌进 core/session/wait。

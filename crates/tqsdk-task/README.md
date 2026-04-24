@@ -85,9 +85,10 @@
   - 阻止重复 ownership
   - 阻止任务运行期间的手动下单
 
-当前仍未完成：
+当前仍保持的边界：
 
-- 更复杂的多单/多批次主动撤单后重规划
+- 执行策略仍是保守串行 batch，不追求在同一轮内激进并发所有后续 batch
+- 已覆盖多笔 live order 中只撤 stale 子集、保留兼容订单，并在 stale 终态后继续补齐缺口的重规划路径
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

@@ -1872,6 +1872,131 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::TodayYesterdayThenOpen)
+        .build()
+        .unwrap();
+    task.set_target_volume(-1).unwrap();
+
+    seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 1, 0, 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.1, 3677.0, 3677.6);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 3);
+    assert_eq!(
+        transport_payload(&dispatches[0].request)["order_id"],
+        "wait-order-1"
+    );
+    assert_eq!(
+        transport_payload(&dispatches[1].request)["order_id"],
+        "wait-order-2"
+    );
+    assert_eq!(
+        transport_payload(&dispatches[2].request)["order_id"],
+        "wait-order-3"
+    );
+
+    task.set_target_volume(-2).unwrap();
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSETODAY",
+            limit_price: 3676.0,
+            status: "ALIVE",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-2",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSE",
+            limit_price: 3677.0,
+            status: "ALIVE",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-3",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "OPEN",
+            limit_price: 3677.0,
+            status: "ALIVE",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.2, 3677.0, 3677.7);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let cancel = transport_payload(&dispatches[0].request);
+    assert_eq!(cancel["aid"], "cancel_order");
+    assert_eq!(cancel["order_id"], "wait-order-1");
+
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        OrderStatusSeed {
+            direction: "SELL",
+            offset: "CLOSETODAY",
+            limit_price: 3676.0,
+            status: "FINISHED",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+    let close_today = transport_payload(&dispatches[0].request);
+    assert_eq!(close_today["aid"], "insert_order");
+    assert_eq!(close_today["direction"], "SELL");
+    assert_eq!(close_today["offset"], "CLOSETODAY");
+    assert_eq!(close_today["volume"], 1);
+    let open = transport_payload(&dispatches[1].request);
+    assert_eq!(open["aid"], "insert_order");
+    assert_eq!(open["direction"], "SELL");
+    assert_eq!(open["offset"], "OPEN");
+    assert_eq!(open["volume"], 1);
+
+    let report = task.execution_report();
+    assert_eq!(report.cancel_request_count, 1);
+    assert!(report.events.iter().all(|event| {
+        !matches!(
+            event,
+            TargetPosTaskExecutionEvent::CancelOrder { order_id }
+                if order_id == "wait-order-2" || order_id == "wait-order-3"
+        )
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_missing_volume() {
     let mut host = seeded_host();
     let task = host
