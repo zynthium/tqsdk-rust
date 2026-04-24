@@ -13,6 +13,8 @@
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
+//! - `KlineDataDownload::collect_remaining()`
+//! - `TickDataDownload::collect_remaining()`
 //! - `DataClient::from_session(...).query_option_greeks(...)`
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`

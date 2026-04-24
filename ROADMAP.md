@@ -64,6 +64,8 @@
   - `kline_data_download`
   - `tick_data_download`
   - `query_option_greeks`
+  - `KlineDataDownload::collect_remaining`
+  - `TickDataDownload::collect_remaining`
   - `export_kline_data_csv`
   - `export_tick_data_csv`
   - history page 已保留 `more_data` 分页信号，series/download 不再用页行数推断远端结束
@@ -348,7 +350,7 @@
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
 1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在 `query_his_cont_quotes`、`data_page`、`data_series`、`data_download`、`query_option_greeks`、纯 async CSV export 已落地后，继续推进 `tqsdk-data` 的 materialization 层，例如缓存与可选 tabular adapter
+2. 在 `query_his_cont_quotes`、`data_page`、`data_series`、`data_download`、`query_option_greeks`、owned Vec materialization、纯 async CSV export 已落地后，继续推进 `tqsdk-data` 的 materialization 层，例如缓存与可选 tabular adapter
 
 如果目标是先把底座做得更稳，优先选 1。
 如果目标是开始给研究型能力准备独立落点，再选 2。

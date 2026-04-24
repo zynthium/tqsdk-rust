@@ -352,6 +352,14 @@ where
             self.use_focus = false;
         }
     }
+
+    async fn collect_remaining(&mut self) -> Result<Vec<Kline>> {
+        let mut rows = Vec::new();
+        while let Some(page) = self.next_page().await? {
+            rows.extend(page.into_rows());
+        }
+        Ok(rows)
+    }
 }
 
 #[derive(Clone)]
@@ -463,6 +471,14 @@ where
             self.use_focus = false;
         }
     }
+
+    async fn collect_remaining(&mut self) -> Result<Vec<Tick>> {
+        let mut rows = Vec::new();
+        while let Some(page) = self.next_page().await? {
+            rows.extend(page.into_rows());
+        }
+        Ok(rows)
+    }
 }
 
 /// Pure-async pull-based kline download substrate over repeated history pages.
@@ -508,6 +524,14 @@ impl KlineDataDownload {
 
     pub async fn next_page(&mut self) -> Result<Option<KlineDataDownloadPage>> {
         self.inner.next_page().await
+    }
+
+    /// Collects all remaining pages into owned kline rows.
+    ///
+    /// If some pages have already been consumed with [`Self::next_page`], this
+    /// only collects the remaining rows and preserves the download progress.
+    pub async fn collect_remaining(&mut self) -> Result<Vec<Kline>> {
+        self.inner.collect_remaining().await
     }
 }
 
@@ -563,6 +587,14 @@ impl TickDataDownload {
 
     pub async fn next_page(&mut self) -> Result<Option<TickDataDownloadPage>> {
         self.inner.next_page().await
+    }
+
+    /// Collects all remaining pages into owned tick rows.
+    ///
+    /// If some pages have already been consumed with [`Self::next_page`], this
+    /// only collects the remaining rows and preserves the download progress.
+    pub async fn collect_remaining(&mut self) -> Result<Vec<Tick>> {
+        self.inner.collect_remaining().await
     }
 }
 
@@ -971,6 +1003,133 @@ mod tests {
         let second_page = download.next_page().await.unwrap().unwrap();
         assert_eq!(second_page.rows()[0].id, 202);
         assert!(second_page.progress().is_complete());
+    }
+
+    #[tokio::test]
+    async fn kline_data_download_collect_remaining_materializes_remaining_pages() {
+        let source = TestKlineSource {
+            pages: Arc::new(Mutex::new(VecDeque::from([
+                KlineDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    60_000_000_000,
+                    2,
+                    100,
+                    101,
+                    true,
+                    vec![
+                        Kline {
+                            id: 100,
+                            datetime: 10,
+                            ..Kline::default()
+                        },
+                        Kline {
+                            id: 101,
+                            datetime: 20,
+                            ..Kline::default()
+                        },
+                    ],
+                ),
+                KlineDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    60_000_000_000,
+                    2,
+                    102,
+                    103,
+                    false,
+                    vec![
+                        Kline {
+                            id: 102,
+                            datetime: 30,
+                            ..Kline::default()
+                        },
+                        Kline {
+                            id: 103,
+                            datetime: 40,
+                            ..Kline::default()
+                        },
+                    ],
+                ),
+            ]))),
+        };
+
+        let mut download = KlineDataDownloadInner::new(
+            source,
+            KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 0, 50)
+                .with_page_view_width(2),
+        )
+        .unwrap();
+
+        let rows = download.collect_remaining().await.unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![100, 101, 102, 103]
+        );
+        assert!(download.progress.is_complete());
+        assert!(download.finished);
+        assert!(download.next_page().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_data_download_collect_remaining_materializes_after_partial_page_consumption() {
+        let source = TestTickSource {
+            pages: Arc::new(Mutex::new(VecDeque::from([
+                TickDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    2,
+                    200,
+                    201,
+                    true,
+                    vec![
+                        Tick {
+                            id: 200,
+                            datetime: 100,
+                            ..Tick::default()
+                        },
+                        Tick {
+                            id: 201,
+                            datetime: 110,
+                            ..Tick::default()
+                        },
+                    ],
+                ),
+                TickDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    2,
+                    202,
+                    203,
+                    false,
+                    vec![
+                        Tick {
+                            id: 202,
+                            datetime: 120,
+                            ..Tick::default()
+                        },
+                        Tick {
+                            id: 203,
+                            datetime: 130,
+                            ..Tick::default()
+                        },
+                    ],
+                ),
+            ]))),
+        };
+
+        let mut download =
+            TickDataDownloadInner::new(source, TickDataSeriesRequest::new("SHFE.ao2609", 90, 140))
+                .unwrap();
+        let first_page = download.next_page().await.unwrap().unwrap();
+        assert_eq!(first_page.len(), 2);
+
+        let rows = download.collect_remaining().await.unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![202, 203]
+        );
+        assert!(download.progress.is_complete());
+        assert!(download.finished);
+        assert_eq!(download.progress.emitted_rows(), 4);
     }
 
     #[test]

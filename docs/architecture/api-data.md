@@ -100,6 +100,8 @@
 - `get_tick_data_series(TickDataSeriesRequest)`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
+- `KlineDataDownload::collect_remaining()`
+- `TickDataDownload::collect_remaining()`
 - `query_option_greeks(OptionGreeksRequest)`
 - `export_kline_data_csv(KlineDataSeriesRequest, &mut impl AsyncWrite)`
 - `export_tick_data_csv(TickDataSeriesRequest, &mut impl AsyncWrite)`
@@ -147,6 +149,7 @@
    - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
 3. local materialization
+   - 已有最薄的 owned Vec materialization：`collect_remaining`
    - 已有最薄的 `AsyncWrite` CSV export
    - 后续再考虑路径管理型文件导出
    - 文件缓存
@@ -198,6 +201,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `query_option_greeks` 内部复用了 session-backed 的一次性 live quote snapshot，但暂时没有把这层 snapshot helper 冻结成新的 public surface
 - 当依赖的 live quote symbols 缺少行情权限时，`query_option_greeks` 会尽早返回 permission error，而不是等订阅超时
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
+- `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - async history 相关入口会主动获取 auth context 并校验 `tq_dl`，避免把权限问题拖到 chart/websocket timeout
 - `data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 async 读取阶段会再次强校验
