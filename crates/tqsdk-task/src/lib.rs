@@ -4,6 +4,7 @@
 //! This crate hosts task ownership, guarded command entrypoints, and host-driven
 //! execution helpers built on the wait-style facade.
 
+mod calendar;
 mod config;
 mod error;
 mod host;
@@ -12,6 +13,7 @@ mod registry;
 mod scheduler;
 mod target_pos;
 
+pub use calendar::TradingDayCalendar;
 pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,
 };

@@ -3,11 +3,13 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use chrono::NaiveDate;
 use serde_json::Value;
-use tqsdk_core::{Order, TradeDirection, TradeOffset};
+use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
 
 use crate::Result;
 use crate::TaskError;
+use crate::calendar::TradingDayCalendar;
 use crate::registry::{TaskId, TaskRegistry};
 use crate::scheduler::{
     TargetPosSchedulerBuilder, TargetPosSchedulerStore, process_schedulers_wait_update,
@@ -21,6 +23,7 @@ pub struct TaskHost {
     target_tasks: Arc<Mutex<TargetPosStore>>,
     schedulers: Arc<Mutex<TargetPosSchedulerStore>>,
     quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+    trading_calendar: Arc<Mutex<TradingDayCalendar>>,
 }
 
 impl TaskHost {
@@ -32,6 +35,7 @@ impl TaskHost {
             target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
             schedulers: Arc::new(Mutex::new(TargetPosSchedulerStore::default())),
             quote_subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            trading_calendar: Arc::new(Mutex::new(TradingDayCalendar::default())),
         }
     }
 
@@ -48,6 +52,46 @@ impl TaskHost {
     #[must_use]
     pub fn into_api(self) -> tqsdk_wait::TqApi {
         self.api
+    }
+
+    #[must_use]
+    pub fn trading_calendar(&self) -> TradingDayCalendar {
+        self.trading_calendar
+            .lock()
+            .expect("trading calendar lock poisoned")
+            .clone()
+    }
+
+    pub fn set_trading_calendar(&mut self, calendar: TradingDayCalendar) {
+        *self
+            .trading_calendar
+            .lock()
+            .expect("trading calendar lock poisoned") = calendar;
+    }
+
+    pub fn extend_trading_calendar(
+        &mut self,
+        days: impl IntoIterator<Item = TradingCalendarDay>,
+    ) -> Result<()> {
+        self.trading_calendar
+            .lock()
+            .expect("trading calendar lock poisoned")
+            .try_extend_days(days)
+    }
+
+    pub async fn refresh_trading_calendar(
+        &mut self,
+        start_dt: NaiveDate,
+        end_dt: NaiveDate,
+    ) -> Result<usize> {
+        let days = self
+            .api
+            .session()
+            .get_trading_calendar(start_dt, end_dt)
+            .await?;
+        let count = days.len();
+        self.extend_trading_calendar(days)?;
+        Ok(count)
     }
 
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
@@ -83,6 +127,7 @@ impl TaskHost {
             Arc::clone(&self.target_tasks),
             Arc::clone(&self.schedulers),
             Arc::clone(&self.quote_subscriptions),
+            Arc::clone(&self.trading_calendar),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )

@@ -49,6 +49,7 @@
   - `TargetPosTask`
   - `TargetPosScheduler`
   - ownership / guarded order / execution report
+  - scheduler 交易时段 interval 已支持显式交易日历缓存，calendar 缺失时回退 weekday
 
 当前已进入架构与第一批实现的后续层：
 
@@ -182,6 +183,7 @@
 - 执行规划器
 - quote hint / offset priority / volume split policy
 - task execution report
+- scheduler 交易日历缓存与交易时段 deadline gating
 
 ### 设计要求
 
@@ -205,6 +207,7 @@
 
 - `TargetPosTask` 基本语义稳定
 - task ownership 与手动下单冲突策略被明确
+- scheduler deadline 不再只依赖 weekday，能显式使用官方 calendar 或调用方注入的本地 calendar
 - 关键 live/replay 场景下都能工作
 
 ## Phase 4：`tqsdk-data`

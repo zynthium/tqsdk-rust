@@ -87,7 +87,9 @@
   - 已支持 step 级 `price_mode`
   - 已支持 pause step
   - 非最后一步会按“交易时段内累计 elapsed”判断 interval 是否到期
-    - 当前最小实现基于 `quote.trading_time` + weekday 规则
+    - 当前最小实现基于 `quote.trading_time` + `TradingDayCalendar`
+    - `TaskHost::refresh_trading_calendar()` 允许显式预取官方交易日历；`TaskHost::set_trading_calendar()` 允许调用方注入本地 calendar
+    - 缺少某天 calendar 数据时会回退 weekday 规则，避免网络查询失败导致任务卡死
     - 若拿不到有效 trading session，则保守回退到 wall-clock
   - 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步要等目标持仓真正达到后才 finished
@@ -96,7 +98,6 @@
 
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
-- 基于节假日 calendar 的精确 scheduler deadline gating
 
 ## 为什么它必须独立成 crate
 

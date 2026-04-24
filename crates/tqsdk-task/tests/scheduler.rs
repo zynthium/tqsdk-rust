@@ -1,11 +1,12 @@
 use std::time::Duration;
 
+use chrono::NaiveDate;
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, MarketAdapter,
     NormalizedMutation, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
     RuntimeCommand, RuntimeHandle, RuntimeInput, TradeAdapter, TradeCommand, TradeDirection,
-    TradeOffset,
+    TradeOffset, TradingCalendarDay,
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
@@ -13,7 +14,7 @@ use tqsdk_task::{
     TargetPosScheduleStep, TargetPosScheduler, TargetPosSchedulerConfig,
     TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill, TargetPosStepOutcomeReport,
     TargetPosTaskExecutionEvent, TargetPosTaskTradeFill, TaskError, TaskHost, TaskKind,
-    VolumeSplitPolicy,
+    TradingDayCalendar, VolumeSplitPolicy,
 };
 use tqsdk_wait::TqApi;
 
@@ -43,6 +44,33 @@ where
     let handle = RuntimeHandle::with_adapters(adapters);
     let session = SessionClient::new_for_test_with_handle(handle);
     TaskHost::new(TqApi::new(session))
+}
+
+#[test]
+fn task_host_accepts_injected_trading_calendar() {
+    let mut host = market_only_host();
+    let date = NaiveDate::from_ymd_opt(2026, 5, 1).expect("valid date");
+    let calendar = TradingDayCalendar::from_entries([(date, false)]);
+
+    host.set_trading_calendar(calendar);
+
+    assert_eq!(host.trading_calendar().day_status(date), Some(false));
+}
+
+#[test]
+fn task_host_rejects_invalid_trading_calendar_date() {
+    let mut host = market_only_host();
+    let error = host
+        .extend_trading_calendar([TradingCalendarDay {
+            date: "not-a-date".to_string(),
+            trading: true,
+        }])
+        .expect_err("invalid calendar date should fail");
+
+    assert!(matches!(
+        error,
+        TaskError::InvalidCalendarDate { date } if date == "not-a-date"
+    ));
 }
 
 #[derive(Debug, Default)]

@@ -63,7 +63,9 @@
   - 支持 step 级 `price_mode`
   - 支持 pause step
   - 非最后一步会按“交易时段内累计 elapsed”判断 interval 是否到期
-    - 当前实现基于 `quote.trading_time` + weekday 规则
+    - 当前实现基于 `quote.trading_time` + `TradingDayCalendar`
+    - 可通过 `TaskHost::refresh_trading_calendar()` 显式预取官方交易日历，也可通过 `TaskHost::set_trading_calendar()` 注入本地 calendar
+    - calendar 缺失某天时会回退到 weekday 规则，避免查询失败导致 scheduler 卡死
     - 若拿不到有效 trading session，则保守回退到现有 wall-clock 行为
   - 到期后会先发真实撤单，并在挂单进入终态后再切到下一步
   - 最后一步会等待目标持仓真正达到后再 finished
@@ -86,7 +88,6 @@
 
 - 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
-- 基于节假日 calendar 的精确 scheduler deadline gating
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

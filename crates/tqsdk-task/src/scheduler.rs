@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tqsdk_core::{Quote, TradingTime};
 
 use crate::Result;
+use crate::calendar::TradingDayCalendar;
 use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::{TaskId, TaskRegistry};
 use crate::target_pos::{
@@ -98,6 +99,7 @@ pub struct TargetPosSchedulerBuilder {
     target_tasks: Arc<Mutex<TargetPosStore>>,
     store: Arc<Mutex<TargetPosSchedulerStore>>,
     quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+    trading_calendar: Arc<Mutex<TradingDayCalendar>>,
     account_id: String,
     symbol: String,
     steps: Vec<TargetPosScheduleStep>,
@@ -118,6 +120,7 @@ struct TargetPosSchedulerInner {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
     quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+    trading_calendar: Arc<Mutex<TradingDayCalendar>>,
     task_id: TaskId,
     account_id: String,
     symbol: String,
@@ -148,6 +151,7 @@ impl TargetPosSchedulerBuilder {
         target_tasks: Arc<Mutex<TargetPosStore>>,
         store: Arc<Mutex<TargetPosSchedulerStore>>,
         quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+        trading_calendar: Arc<Mutex<TradingDayCalendar>>,
         account_id: String,
         symbol: String,
     ) -> Self {
@@ -156,6 +160,7 @@ impl TargetPosSchedulerBuilder {
             target_tasks,
             store,
             quote_subscriptions,
+            trading_calendar,
             account_id,
             symbol,
             steps: Vec::new(),
@@ -193,6 +198,7 @@ impl TargetPosSchedulerBuilder {
             registry: Arc::clone(&self.registry),
             target_tasks: Arc::clone(&self.target_tasks),
             quote_subscriptions: Arc::clone(&self.quote_subscriptions),
+            trading_calendar: Arc::clone(&self.trading_calendar),
             task_id: task.id,
             account_id: self.account_id,
             symbol: self.symbol,
@@ -588,7 +594,16 @@ impl TargetPosSchedulerInner {
         };
 
         let now = shanghai_now();
-        let elapsed = effective_step_elapsed(step_clock.last_accounted_at, now, quote.as_ref());
+        let trading_calendar = self
+            .trading_calendar
+            .lock()
+            .expect("trading calendar lock poisoned");
+        let elapsed = effective_step_elapsed(
+            step_clock.last_accounted_at,
+            now,
+            quote.as_ref(),
+            Some(&trading_calendar),
+        );
         step_clock.last_accounted_at = now;
         step_clock.active_elapsed = step_clock.active_elapsed.saturating_add(elapsed);
         step_clock.active_elapsed >= self.steps[step_index].interval
@@ -734,9 +749,10 @@ fn effective_step_elapsed(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
     quote: Option<&Quote>,
+    calendar: Option<&TradingDayCalendar>,
 ) -> Duration {
     quote
-        .and_then(|quote| trading_time_elapsed_between(start, end, &quote.trading_time))
+        .and_then(|quote| trading_time_elapsed_between(start, end, &quote.trading_time, calendar))
         .unwrap_or_else(|| wall_elapsed(start, end))
 }
 
@@ -744,6 +760,7 @@ fn trading_time_elapsed_between(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
     trading_time: &TradingTime,
+    calendar: Option<&TradingDayCalendar>,
 ) -> Option<Duration> {
     if end <= start {
         return Some(Duration::ZERO);
@@ -756,12 +773,13 @@ fn trading_time_elapsed_between(
     let max_date = end.date_naive();
     let mut date = min_date;
     let mut total = Duration::ZERO;
-    let mut saw_valid_window = false;
+    let mut saw_valid_window = has_valid_trading_window(trading_time);
 
     while date <= max_date {
         let next_date = date.checked_add_days(Days::new(1))?;
-        let day_open = is_weekday(date);
-        let night_open = is_weekday(date) && is_weekday(next_date);
+        let day_open = is_trading_day(date, calendar);
+        let next_day_open = is_trading_day(next_date, calendar);
+        let night_open = day_open && next_day_open;
 
         if day_open {
             let (elapsed, saw_valid) =
@@ -780,6 +798,17 @@ fn trading_time_elapsed_between(
     }
 
     saw_valid_window.then_some(total)
+}
+
+fn has_valid_trading_window(trading_time: &TradingTime) -> bool {
+    trading_time
+        .day
+        .iter()
+        .any(|window| parse_trading_window(window, false).is_some())
+        || trading_time
+            .night
+            .iter()
+            .any(|window| parse_trading_window(window, true).is_some())
 }
 
 fn trading_windows_overlap(
@@ -857,6 +886,12 @@ fn is_weekday(date: NaiveDate) -> bool {
     date.weekday().number_from_monday() <= 5
 }
 
+fn is_trading_day(date: NaiveDate, calendar: Option<&TradingDayCalendar>) -> bool {
+    calendar
+        .and_then(|calendar| calendar.day_status(date))
+        .unwrap_or_else(|| is_weekday(date))
+}
+
 impl Drop for TargetPosSchedulerInner {
     fn drop(&mut self) {
         if let Some(task) = self
@@ -920,6 +955,7 @@ mod tests {
             Arc::clone(&target_tasks),
             Arc::clone(&schedulers),
             Arc::clone(&quote_subscriptions),
+            Arc::new(Mutex::new(TradingDayCalendar::default())),
             "sim".to_string(),
             "SHFE.rb2601".to_string(),
         )
@@ -980,7 +1016,7 @@ mod tests {
             night: Vec::new(),
         };
 
-        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time, None)
             .expect("day windows should produce elapsed");
 
         assert_eq!(elapsed, Duration::from_secs(10 * 60));
@@ -1002,10 +1038,42 @@ mod tests {
             night: vec![vec!["21:00:00".to_string(), "23:00:00".to_string()]],
         };
 
-        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time, None)
             .expect("day/night windows should produce elapsed");
 
         assert_eq!(elapsed, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn trading_time_elapsed_uses_calendar_closed_days_when_available() {
+        let tz = china_tz();
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 30, 22, 55, 0)
+            .single()
+            .expect("valid datetime");
+        let end = tz
+            .with_ymd_and_hms(2026, 5, 1, 9, 5, 0)
+            .single()
+            .expect("valid datetime");
+        let trading_time = TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "15:00:00".to_string()]],
+            night: vec![vec!["21:00:00".to_string(), "23:00:00".to_string()]],
+        };
+        let calendar = TradingDayCalendar::from_entries([
+            (
+                NaiveDate::from_ymd_opt(2026, 4, 30).expect("valid date"),
+                true,
+            ),
+            (
+                NaiveDate::from_ymd_opt(2026, 5, 1).expect("valid date"),
+                false,
+            ),
+        ]);
+
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time, Some(&calendar))
+            .expect("day/night windows should produce elapsed");
+
+        assert_eq!(elapsed, Duration::ZERO);
     }
 
     #[test]
@@ -1024,7 +1092,7 @@ mod tests {
             night: vec![vec!["21:00:00".to_string(), "01:00:00".to_string()]],
         };
 
-        let elapsed = trading_time_elapsed_between(start, end, &trading_time)
+        let elapsed = trading_time_elapsed_between(start, end, &trading_time, None)
             .expect("cross-midnight night window should produce elapsed");
 
         assert_eq!(elapsed, Duration::from_secs(100 * 60));
@@ -1047,7 +1115,7 @@ mod tests {
         };
 
         assert_eq!(
-            effective_step_elapsed(start, end, Some(&quote)),
+            effective_step_elapsed(start, end, Some(&quote), None),
             Duration::from_secs(130 * 60)
         );
     }

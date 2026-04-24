@@ -16,6 +16,7 @@ pub enum TaskKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskError {
     Wait(tqsdk_wait::WaitFacadeError),
+    Session(tqsdk_session::SessionFacadeError),
     OwnershipConflict {
         account_id: String,
         symbol: String,
@@ -30,6 +31,9 @@ pub enum TaskError {
         account_id: String,
         order_id: String,
     },
+    InvalidCalendarDate {
+        date: String,
+    },
     Unsupported(&'static str),
     InvalidState(&'static str),
 }
@@ -40,10 +44,17 @@ impl From<tqsdk_wait::WaitFacadeError> for TaskError {
     }
 }
 
+impl From<tqsdk_session::SessionFacadeError> for TaskError {
+    fn from(error: tqsdk_session::SessionFacadeError) -> Self {
+        Self::Session(error)
+    }
+}
+
 impl Display for TaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Wait(error) => write!(f, "{error}"),
+            Self::Session(error) => write!(f, "{error}"),
             Self::OwnershipConflict {
                 account_id,
                 symbol,
@@ -67,6 +78,9 @@ impl Display for TaskError {
                 f,
                 "order snapshot not ready for guarded command on account={account_id} order_id={order_id}"
             ),
+            Self::InvalidCalendarDate { date } => {
+                write!(f, "invalid trading calendar date: {date}")
+            }
             Self::Unsupported(message) => write!(f, "unsupported task operation: {message}"),
             Self::InvalidState(message) => write!(f, "invalid task state: {message}"),
         }
@@ -77,9 +91,11 @@ impl std::error::Error for TaskError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Wait(error) => Some(error),
+            Self::Session(error) => Some(error),
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }
+            | Self::InvalidCalendarDate { .. }
             | Self::Unsupported(_)
             | Self::InvalidState(_) => None,
         }
