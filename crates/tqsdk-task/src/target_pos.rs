@@ -1170,10 +1170,16 @@ fn reconcile_live_orders(
 }
 
 fn consume_compatible_desired_order(missing_orders: &mut Vec<DesiredOrder>, order: &Order) -> bool {
-    let Some(index) = missing_orders
+    let exact_index = missing_orders
         .iter()
-        .position(|desired_order| order_can_satisfy_desired(order, desired_order))
-    else {
+        .position(|desired_order| order_exactly_matches_desired(order, desired_order));
+    let fallback_index = exact_index.or_else(|| {
+        missing_orders
+            .iter()
+            .position(|desired_order| order_can_satisfy_desired(order, desired_order))
+    });
+
+    let Some(index) = fallback_index else {
         return false;
     };
 
@@ -1184,6 +1190,10 @@ fn consume_compatible_desired_order(missing_orders: &mut Vec<DesiredOrder>, orde
         missing_orders[index].volume -= live_volume;
     }
     true
+}
+
+fn order_exactly_matches_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
+    order_can_satisfy_desired(order, desired_order) && order.volume_left == desired_order.volume
 }
 
 fn order_can_satisfy_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
@@ -1313,5 +1323,48 @@ mod tests {
 
         assert!(task.is_finished());
         assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
+    }
+
+    #[test]
+    fn reconcile_live_orders_prefers_exact_volume_match() {
+        let live_orders = vec![Order {
+            order_id: "order-1".to_string(),
+            direction: "BUY".to_string(),
+            offset: "OPEN".to_string(),
+            volume_left: 4,
+            limit_price: 10.0,
+            ..Order::default()
+        }];
+        let desired_batch = DesiredBatch {
+            orders: vec![
+                DesiredOrder {
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 6,
+                    limit_price: 10.0,
+                },
+                DesiredOrder {
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 4,
+                    limit_price: 10.0,
+                },
+            ],
+        };
+
+        let reconciliation = reconcile_live_orders(&live_orders, &desired_batch);
+
+        assert!(reconciliation.stale_order_ids.is_empty());
+        assert_eq!(
+            reconciliation.missing_batch,
+            DesiredBatch {
+                orders: vec![DesiredOrder {
+                    direction: TradeDirection::Buy,
+                    offset: TradeOffset::Open,
+                    volume: 6,
+                    limit_price: 10.0,
+                }]
+            }
+        );
     }
 }
