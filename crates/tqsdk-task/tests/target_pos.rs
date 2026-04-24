@@ -1872,6 +1872,58 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_missing_volume() {
+    let mut host = seeded_host();
+    let task = host
+        .target_pos("sim", "SHFE.rb2601")
+        .offset_priority(OffsetPriority::OpenOnly)
+        .build()
+        .unwrap();
+    task.set_target_volume(1).unwrap();
+
+    seed_position_commit(&host, "sim", "SHFE.rb2601", 0);
+    seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    assert_eq!(
+        transport_payload(&dispatches[0].request)["order_id"],
+        "wait-order-1"
+    );
+
+    task.set_target_volume(2).unwrap();
+    seed_order_status_commit_with_seed(
+        &host,
+        "sim",
+        "SHFE.rb2601",
+        "wait-order-1",
+        OrderStatusSeed {
+            direction: "BUY",
+            offset: "OPEN",
+            limit_price: 3678.0,
+            status: "ALIVE",
+            volume_orign: 1,
+            volume_left: 1,
+        },
+    );
+    let updated = host.wait_update(None).await.unwrap();
+    assert!(updated);
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["order_id"], "wait-order-2");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["limit_price"], 3678.0);
+    assert_eq!(task.execution_report().cancel_request_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn default_target_pos_uses_non_shfe_close_then_open() {
     let mut host = seeded_host();
     let task = host.target_pos("sim", "CFFEX.IF2606").build().unwrap();

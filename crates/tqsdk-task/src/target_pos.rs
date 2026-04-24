@@ -125,6 +125,19 @@ struct DesiredBatch {
     orders: Vec<DesiredOrder>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct LiveOrderReconciliation {
+    stale_order_ids: HashSet<String>,
+    missing_batch: DesiredBatch,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LiveOrderHandling {
+    NoLiveOrders,
+    Blocked,
+    SubmitMissing(DesiredBatch),
+}
+
 #[derive(Default)]
 pub(crate) struct TargetPosStore {
     tasks: HashMap<TaskId, Weak<TargetPosTaskInner>>,
@@ -631,8 +644,9 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        let desired_batch = desired_batch_for_target(api, self, target_volume, &current_position);
-        let handled_live_orders = match self
+        let mut desired_batch =
+            desired_batch_for_target(api, self, target_volume, &current_position);
+        desired_batch = match self
             .handle_live_orders(
                 api,
                 current_net_position,
@@ -641,15 +655,14 @@ impl TargetPosTaskInner {
             )
             .await
         {
-            Ok(handled) => handled,
+            Ok(LiveOrderHandling::NoLiveOrders) => desired_batch,
+            Ok(LiveOrderHandling::Blocked) => return,
+            Ok(LiveOrderHandling::SubmitMissing(missing_batch)) => Some(missing_batch),
             Err(error) => {
                 self.finish_with_error(error);
                 return;
             }
         };
-        if handled_live_orders {
-            return;
-        }
 
         if self.awaiting_progress.load(Ordering::SeqCst)
             && self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq
@@ -670,6 +683,25 @@ impl TargetPosTaskInner {
         let Some(desired_batch) = desired_batch else {
             return;
         };
+
+        if let Err(error) = self
+            .submit_desired_batch(api, current_seq, current_net_position, desired_batch)
+            .await
+        {
+            self.finish_with_error(error);
+        }
+    }
+
+    async fn submit_desired_batch(
+        &self,
+        api: &mut tqsdk_wait::TqApi,
+        current_seq: u64,
+        current_net_position: i64,
+        desired_batch: DesiredBatch,
+    ) -> Result<()> {
+        if desired_batch.orders.is_empty() {
+            return Ok(());
+        }
 
         self.submitted_request_seq
             .store(current_seq, Ordering::SeqCst);
@@ -713,14 +745,13 @@ impl TargetPosTaskInner {
                         .expect("target task last error lock poisoned") =
                         Some(TaskError::from(error));
                     self.cancel_requested.store(true, Ordering::SeqCst);
-                    return;
+                    return Ok(());
                 }
-                Err(error) => {
-                    self.finish_with_error(TaskError::from(error));
-                    return;
-                }
+                Err(error) => return Err(TaskError::from(error)),
             }
         }
+
+        Ok(())
     }
 
     fn mark_reached(&self, current_seq: u64, target_volume: i64) {
@@ -891,27 +922,35 @@ impl TargetPosTaskInner {
         current_net_position: i64,
         target_volume: i64,
         desired_batch: Option<&DesiredBatch>,
-    ) -> Result<bool> {
+    ) -> Result<LiveOrderHandling> {
         let live_orders = self.live_orders(api);
         if live_orders.is_empty() {
-            return Ok(false);
+            return Ok(LiveOrderHandling::NoLiveOrders);
         }
 
         if current_net_position == target_volume {
             self.cancel_pending_orders(api).await?;
-            return Ok(true);
+            return Ok(LiveOrderHandling::Blocked);
         }
 
         let Some(desired_batch) = desired_batch else {
-            return Ok(true);
+            return Ok(LiveOrderHandling::Blocked);
         };
 
-        let stale_order_ids = stale_live_order_ids(&live_orders, desired_batch);
-        if !stale_order_ids.is_empty() {
-            self.cancel_pending_orders_by_id(api, &stale_order_ids)
+        let reconciliation = reconcile_live_orders(&live_orders, desired_batch);
+        if !reconciliation.stale_order_ids.is_empty() {
+            self.cancel_pending_orders_by_id(api, &reconciliation.stale_order_ids)
                 .await?;
+            return Ok(LiveOrderHandling::Blocked);
         }
-        Ok(true)
+
+        if reconciliation.missing_batch.orders.is_empty() {
+            Ok(LiveOrderHandling::Blocked)
+        } else {
+            Ok(LiveOrderHandling::SubmitMissing(
+                reconciliation.missing_batch,
+            ))
+        }
     }
 
     async fn cancel_pending_orders(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
@@ -1110,26 +1149,48 @@ fn desired_batch_for_target(
     Some(DesiredBatch { orders })
 }
 
-fn stale_live_order_ids(live_orders: &[Order], desired_batch: &DesiredBatch) -> HashSet<String> {
-    let mut unmatched = desired_batch.orders.clone();
+fn reconcile_live_orders(
+    live_orders: &[Order],
+    desired_batch: &DesiredBatch,
+) -> LiveOrderReconciliation {
+    let mut missing_orders = desired_batch.orders.clone();
     let mut stale_order_ids = HashSet::new();
     for order in live_orders {
-        if let Some(index) = unmatched
-            .iter()
-            .position(|desired_order| order_matches_desired(order, desired_order))
-        {
-            unmatched.remove(index);
-        } else {
+        if !consume_compatible_desired_order(&mut missing_orders, order) {
             stale_order_ids.insert(order.order_id.clone());
         };
     }
-    stale_order_ids
+
+    LiveOrderReconciliation {
+        stale_order_ids,
+        missing_batch: DesiredBatch {
+            orders: missing_orders,
+        },
+    }
 }
 
-fn order_matches_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
+fn consume_compatible_desired_order(missing_orders: &mut Vec<DesiredOrder>, order: &Order) -> bool {
+    let Some(index) = missing_orders
+        .iter()
+        .position(|desired_order| order_can_satisfy_desired(order, desired_order))
+    else {
+        return false;
+    };
+
+    let live_volume = order.volume_left;
+    if live_volume == missing_orders[index].volume {
+        missing_orders.remove(index);
+    } else {
+        missing_orders[index].volume -= live_volume;
+    }
+    true
+}
+
+fn order_can_satisfy_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
     order.direction == desired_order.direction.as_str()
         && order.offset == desired_order.offset.as_str()
-        && order.volume_left == desired_order.volume
+        && order.volume_left > 0
+        && order.volume_left <= desired_order.volume
         && order.limit_price == desired_order.limit_price
 }
 
