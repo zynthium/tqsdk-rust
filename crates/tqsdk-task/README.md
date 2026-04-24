@@ -87,7 +87,6 @@
 
 当前仍未完成：
 
-- 多笔同批次并发提交
 - 更复杂的多单/多批次主动撤单后重规划
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
