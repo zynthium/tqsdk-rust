@@ -180,10 +180,16 @@ tqsdk-wait  tqsdk-stream
 
 - downloader
 - 历史数据批量拉取
+- `get_kline_data_page`
+- `get_tick_data_page`
 - `get_kline_data_series`
 - `get_tick_data_series`
+- `kline_data_download`
+- `tick_data_download`
 - `query_his_cont_quotes`
 - `query_option_greeks`
+- `export_kline_data_csv`
+- `export_tick_data_csv`
 - pandas/polars/DataFrame 兼容层
 - 文件落盘、缓存、导出
 
@@ -327,8 +333,12 @@ tqsdk-wait  tqsdk-stream
 
 - `get_kline_data_series`
 - `get_tick_data_series`
+- `kline_data_download`
+- `tick_data_download`
 - `query_his_cont_quotes`
 - `query_option_greeks`
+- `export_kline_data_csv`
+- `export_tick_data_csv`
 - pandas/DataFrame 相关对象
 - 历史数据下载和导出
 
