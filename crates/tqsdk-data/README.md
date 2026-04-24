@@ -75,11 +75,11 @@
 
 ## 后续仍应承接的能力
 
-- `query_his_cont_quotes`
-- 文件缓存、导出、落盘
+- 文件缓存
+- 路径管理型导出与落盘
 - 可选的 DataFrame / polars 适配层
 
-这里的“文件导出、落盘”目前已经有最薄的一层：
+当前“文件导出、落盘”已经有最薄的一层：
 
 - `export_kline_data_csv`
 - `export_tick_data_csv`

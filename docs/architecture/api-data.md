@@ -126,7 +126,7 @@
 
 - DataFrame / polars public API
 - 历史数据缓存格式
-- CSV / writer public API
+- 路径管理型文件导出 API
 - 后台 downloader task
 - Python 兼容层
 
@@ -147,8 +147,9 @@
    - 扩展 `query_his_cont_quotes`
    - `query_option_greeks`
 3. local materialization
+   - 已有最薄的 `AsyncWrite` CSV export
+   - 后续再考虑路径管理型文件导出
    - 文件缓存
-   - 导出
    - 可选 tabular adapters
 
 ## 依赖方向
