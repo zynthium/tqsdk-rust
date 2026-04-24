@@ -183,6 +183,7 @@ pub struct KlineDataPage {
     view_width: usize,
     chart_left_id: i64,
     chart_right_id: i64,
+    more_data: bool,
     rows: Vec<Kline>,
 }
 
@@ -193,6 +194,7 @@ impl KlineDataPage {
         view_width: usize,
         chart_left_id: i64,
         chart_right_id: i64,
+        more_data: bool,
         rows: Vec<Kline>,
     ) -> Self {
         Self {
@@ -201,6 +203,7 @@ impl KlineDataPage {
             view_width,
             chart_left_id,
             chart_right_id,
+            more_data,
             rows,
         }
     }
@@ -228,6 +231,11 @@ impl KlineDataPage {
     #[must_use]
     pub fn chart_right_id(&self) -> i64 {
         self.chart_right_id
+    }
+
+    #[must_use]
+    pub fn more_data(&self) -> bool {
+        self.more_data
     }
 
     #[must_use]
@@ -388,6 +396,7 @@ pub struct TickDataPage {
     view_width: usize,
     chart_left_id: i64,
     chart_right_id: i64,
+    more_data: bool,
     rows: Vec<Tick>,
 }
 
@@ -397,6 +406,7 @@ impl TickDataPage {
         view_width: usize,
         chart_left_id: i64,
         chart_right_id: i64,
+        more_data: bool,
         rows: Vec<Tick>,
     ) -> Self {
         Self {
@@ -404,6 +414,7 @@ impl TickDataPage {
             view_width,
             chart_left_id,
             chart_right_id,
+            more_data,
             rows,
         }
     }
@@ -426,6 +437,11 @@ impl TickDataPage {
     #[must_use]
     pub fn chart_right_id(&self) -> i64 {
         self.chart_right_id
+    }
+
+    #[must_use]
+    pub fn more_data(&self) -> bool {
+        self.more_data
     }
 
     #[must_use]
@@ -1086,27 +1102,32 @@ impl DataClient {
                     .with_focus_position(0);
             } else if let Some(left_kline_id) = next_left_kline_id {
                 page_request = page_request.with_left_kline_id(left_kline_id);
+            } else {
+                break;
             }
 
             let page = self.get_kline_data_page(page_request).await?;
-            let page_len = page.len();
-            let Some(new_next_left_kline_id) = extend_kline_rows_in_window(
+            let next_left = page.next_left_kline_id();
+            let terminal = !page.more_data()
+                || next_left.is_none()
+                || last_next_left_kline_id == next_left
+                || page
+                    .last()
+                    .is_some_and(|row| row.datetime >= spec.end_datetime_ns);
+
+            extend_kline_rows_in_window(
                 &mut rows,
                 page.into_rows(),
                 spec.start_datetime_ns,
                 spec.end_datetime_ns,
-            ) else {
-                break;
-            };
+            );
 
-            if last_next_left_kline_id == Some(new_next_left_kline_id)
-                || page_len < spec.page_view_width
-            {
+            if terminal {
                 break;
             }
 
-            last_next_left_kline_id = Some(new_next_left_kline_id);
-            next_left_kline_id = Some(new_next_left_kline_id);
+            last_next_left_kline_id = next_left;
+            next_left_kline_id = next_left;
             use_focus = false;
         }
 
@@ -1143,25 +1164,32 @@ impl DataClient {
                     .with_focus_position(0);
             } else if let Some(left_id) = next_left_id {
                 page_request = page_request.with_left_id(left_id);
+            } else {
+                break;
             }
 
             let page = self.get_tick_data_page(page_request).await?;
-            let page_len = page.len();
-            let Some(new_next_left_id) = extend_tick_rows_in_window(
+            let next_left = page.next_left_id();
+            let terminal = !page.more_data()
+                || next_left.is_none()
+                || last_next_left_id == next_left
+                || page
+                    .last()
+                    .is_some_and(|row| row.datetime >= spec.end_datetime_ns);
+
+            extend_tick_rows_in_window(
                 &mut rows,
                 page.into_rows(),
                 spec.start_datetime_ns,
                 spec.end_datetime_ns,
-            ) else {
-                break;
-            };
+            );
 
-            if last_next_left_id == Some(new_next_left_id) || page_len < spec.page_view_width {
+            if terminal {
                 break;
             }
 
-            last_next_left_id = Some(new_next_left_id);
-            next_left_id = Some(new_next_left_id);
+            last_next_left_id = next_left;
+            next_left_id = next_left;
             use_focus = false;
         }
 
@@ -1530,6 +1558,7 @@ fn read_ready_kline_data_page(
         view_width,
         chart.left_id,
         chart.right_id,
+        chart.more_data,
         rows,
     )))
 }
@@ -1582,6 +1611,7 @@ fn read_ready_tick_data_page(
         view_width,
         chart.left_id,
         chart.right_id,
+        chart.more_data,
         rows,
     )))
 }
@@ -1945,6 +1975,7 @@ mod tests {
 
             assert_eq!(page.chart_left_id(), 100);
             assert_eq!(page.chart_right_id(), 101);
+            assert!(page.more_data());
             assert_eq!(page.len(), 2);
 
             seed_thread.join().unwrap();
@@ -1983,6 +2014,7 @@ mod tests {
 
             assert_eq!(page.chart_left_id(), 200);
             assert_eq!(page.chart_right_id(), 201);
+            assert!(page.more_data());
             assert_eq!(page.len(), 2);
 
             seed_thread.join().unwrap();

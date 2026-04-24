@@ -297,9 +297,14 @@ where
             }
 
             let page = self.source.load_page(request).await?;
-            let raw_page_len = page.len();
             let next_left_kline_id = page.next_left_kline_id();
             let last_raw_datetime_ns = page.last().map(|row| row.datetime);
+            let terminal = !page.more_data()
+                || next_left_kline_id.is_none()
+                || self.last_next_left_kline_id == next_left_kline_id
+                || last_raw_datetime_ns.is_some_and(|last_raw_datetime_ns| {
+                    last_raw_datetime_ns >= self.spec.end_datetime_ns
+                });
 
             if let Some(last_raw_datetime_ns) = last_raw_datetime_ns {
                 self.progress.cursor_datetime_ns = Some(
@@ -319,13 +324,6 @@ where
                             .is_none_or(|last_emitted_kline_id| row.id > last_emitted_kline_id)
                 })
                 .collect::<Vec<_>>();
-
-            let terminal = next_left_kline_id.is_none()
-                || raw_page_len < self.spec.page_view_width
-                || self.last_next_left_kline_id == next_left_kline_id
-                || last_raw_datetime_ns.is_some_and(|last_raw_datetime_ns| {
-                    last_raw_datetime_ns >= self.spec.end_datetime_ns
-                });
 
             if let Some(last_row) = rows.last() {
                 self.last_emitted_kline_id = Some(last_row.id);
@@ -410,9 +408,14 @@ where
             }
 
             let page = self.source.load_page(request).await?;
-            let raw_page_len = page.len();
             let next_left_id = page.next_left_id();
             let last_raw_datetime_ns = page.last().map(|row| row.datetime);
+            let terminal = !page.more_data()
+                || next_left_id.is_none()
+                || self.last_next_left_id == next_left_id
+                || last_raw_datetime_ns.is_some_and(|last_raw_datetime_ns| {
+                    last_raw_datetime_ns >= self.spec.end_datetime_ns
+                });
 
             if let Some(last_raw_datetime_ns) = last_raw_datetime_ns {
                 self.progress.cursor_datetime_ns = Some(
@@ -432,13 +435,6 @@ where
                             .is_none_or(|last_emitted_id| row.id > last_emitted_id)
                 })
                 .collect::<Vec<_>>();
-
-            let terminal = next_left_id.is_none()
-                || raw_page_len < self.spec.page_view_width
-                || self.last_next_left_id == next_left_id
-                || last_raw_datetime_ns.is_some_and(|last_raw_datetime_ns| {
-                    last_raw_datetime_ns >= self.spec.end_datetime_ns
-                });
 
             if let Some(last_row) = rows.last() {
                 self.last_emitted_id = Some(last_row.id);
@@ -728,6 +724,7 @@ mod tests {
                     2,
                     90,
                     91,
+                    true,
                     vec![
                         Kline {
                             id: 90,
@@ -747,6 +744,7 @@ mod tests {
                     2,
                     92,
                     93,
+                    true,
                     vec![
                         Kline {
                             id: 92,
@@ -768,6 +766,7 @@ mod tests {
                     2,
                     94,
                     95,
+                    false,
                     vec![
                         Kline {
                             id: 94,
@@ -815,6 +814,7 @@ mod tests {
                 4,
                 200,
                 201,
+                false,
                 vec![
                     Tick {
                         id: 200,
@@ -844,6 +844,133 @@ mod tests {
         assert_eq!(page.progress().completion_percent(), 100.0);
 
         assert!(download.next_page().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn kline_data_download_continues_when_short_page_has_more_data() {
+        let source = TestKlineSource {
+            pages: Arc::new(Mutex::new(VecDeque::from([
+                KlineDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    60_000_000_000,
+                    4,
+                    100,
+                    101,
+                    true,
+                    vec![
+                        Kline {
+                            id: 100,
+                            datetime: 10,
+                            close: 1.0,
+                            ..Kline::default()
+                        },
+                        Kline {
+                            id: 101,
+                            datetime: 20,
+                            close: 2.0,
+                            ..Kline::default()
+                        },
+                    ],
+                ),
+                KlineDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    60_000_000_000,
+                    4,
+                    102,
+                    103,
+                    false,
+                    vec![
+                        Kline {
+                            id: 102,
+                            datetime: 30,
+                            close: 3.0,
+                            ..Kline::default()
+                        },
+                        Kline {
+                            id: 103,
+                            datetime: 40,
+                            close: 4.0,
+                            ..Kline::default()
+                        },
+                    ],
+                ),
+            ]))),
+        };
+
+        let mut download = KlineDataDownloadInner::new(
+            source,
+            KlineDataSeriesRequest::new("SHFE.ao2609", Duration::from_secs(60), 0, 50)
+                .with_page_view_width(4),
+        )
+        .unwrap();
+
+        let first_page = download.next_page().await.unwrap().unwrap();
+        assert!(!first_page.progress().is_complete());
+
+        let second_page = download.next_page().await.unwrap().unwrap();
+        assert_eq!(second_page.rows()[0].id, 102);
+        assert!(second_page.progress().is_complete());
+    }
+
+    #[tokio::test]
+    async fn tick_data_download_continues_when_short_page_has_more_data() {
+        let source = TestTickSource {
+            pages: Arc::new(Mutex::new(VecDeque::from([
+                TickDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    4,
+                    200,
+                    201,
+                    true,
+                    vec![
+                        Tick {
+                            id: 200,
+                            datetime: 100,
+                            last_price: 1.0,
+                            ..Tick::default()
+                        },
+                        Tick {
+                            id: 201,
+                            datetime: 110,
+                            last_price: 2.0,
+                            ..Tick::default()
+                        },
+                    ],
+                ),
+                TickDataPage::new(
+                    "SHFE.ao2609".to_string(),
+                    4,
+                    202,
+                    203,
+                    false,
+                    vec![
+                        Tick {
+                            id: 202,
+                            datetime: 120,
+                            last_price: 3.0,
+                            ..Tick::default()
+                        },
+                        Tick {
+                            id: 203,
+                            datetime: 130,
+                            last_price: 4.0,
+                            ..Tick::default()
+                        },
+                    ],
+                ),
+            ]))),
+        };
+
+        let mut download =
+            TickDataDownloadInner::new(source, TickDataSeriesRequest::new("SHFE.ao2609", 90, 140))
+                .unwrap();
+
+        let first_page = download.next_page().await.unwrap().unwrap();
+        assert!(!first_page.progress().is_complete());
+
+        let second_page = download.next_page().await.unwrap().unwrap();
+        assert_eq!(second_page.rows()[0].id, 202);
+        assert!(second_page.progress().is_complete());
     }
 
     #[test]

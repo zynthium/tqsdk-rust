@@ -193,6 +193,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 - `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
+- `data_page` 会保留 chart 的 `more_data`，上层分页不能用“当前页行数小于 view_width”来推断远端结束
+- `data_series` / `data_download` 的终止条件统一为：`more_data=false`、无 next id、next id 重复，或已推进到请求窗口右边界
 - `query_option_greeks` 内部复用了 session-backed 的一次性 live quote snapshot，但暂时没有把这层 snapshot helper 冻结成新的 public surface
 - 当依赖的 live quote symbols 缺少行情权限时，`query_option_greeks` 会尽早返回 permission error，而不是等订阅超时
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
