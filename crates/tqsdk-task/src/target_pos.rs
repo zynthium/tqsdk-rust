@@ -352,11 +352,15 @@ impl TargetPosTask {
             ));
         }
 
-        *self
+        let mut target_volume = self
             .inner
             .target_volume
             .lock()
-            .expect("target volume lock poisoned") = Some(volume);
+            .expect("target volume lock poisoned");
+        if *target_volume == Some(volume) {
+            return Ok(());
+        }
+        *target_volume = Some(volume);
         *self
             .inner
             .last_error
@@ -923,14 +927,29 @@ impl TargetPosTaskInner {
         target_volume: i64,
         desired_batch: Option<&DesiredBatch>,
     ) -> Result<LiveOrderHandling> {
-        let live_orders = self.live_orders(api);
-        if live_orders.is_empty() {
+        if !self.has_live_orders(api) {
             return Ok(LiveOrderHandling::NoLiveOrders);
         }
 
         if current_net_position == target_volume {
             self.cancel_pending_orders(api).await?;
             return Ok(LiveOrderHandling::Blocked);
+        }
+
+        let unmaterialized_order_ids = self.unmaterialized_order_ids(api);
+        if !unmaterialized_order_ids.is_empty() {
+            if self.awaiting_same_submission(current_net_position) {
+                return Ok(LiveOrderHandling::Blocked);
+            }
+
+            self.cancel_pending_orders_by_id(api, &unmaterialized_order_ids)
+                .await?;
+            return Ok(LiveOrderHandling::Blocked);
+        }
+
+        let live_orders = self.live_orders(api);
+        if live_orders.is_empty() {
+            return Ok(LiveOrderHandling::NoLiveOrders);
         }
 
         let Some(desired_batch) = desired_batch else {
@@ -1057,6 +1076,26 @@ impl TargetPosTaskInner {
             .filter_map(|order_ref| order_ref.snapshot(api).ok().flatten())
             .filter(|order| !order_is_terminal(order))
             .collect()
+    }
+
+    fn unmaterialized_order_ids(&self, api: &tqsdk_wait::TqApi) -> HashSet<String> {
+        self.prune_terminal_orders(api);
+        self.tracked_orders
+            .lock()
+            .expect("target task tracked orders lock poisoned")
+            .iter()
+            .filter(|order_ref| order_ref.snapshot(api).ok().flatten().is_none())
+            .map(|order_ref| order_ref.order_id().to_string())
+            .collect()
+    }
+
+    fn awaiting_same_submission(&self, current_net_position: i64) -> bool {
+        self.awaiting_progress.load(Ordering::SeqCst)
+            && *self
+                .submitted_net_position
+                .lock()
+                .expect("target task submitted net position lock poisoned")
+                == Some(current_net_position)
     }
 
     fn finish(&self) {

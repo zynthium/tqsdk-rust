@@ -48,6 +48,8 @@
     - 若当前 live order 与最新期望 batch 不一致，会优先只撤 stale 子集；仍匹配新计划的 live order 会被保留
     - 若已有 live order 与最新计划方向/offset/价格兼容但手数不足，会保留已有订单并只补齐缺口
     - stale live order 进入终态后，会在后续 `wait_update()` 中按最新价格/最新计划补齐或重发
+    - 已提交但尚未出现在本地状态树的 tracked order 会被视为 pending，不会被当作空挂单提前达成目标或重复发单
+    - 重复设置相同目标不会重置等待中的提交
     - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层测试
     - 当前执行策略仍是保守串行 batch：
       - 每次 `wait_update()` 最多提交一个 planner batch
@@ -89,6 +91,7 @@
 
 - 执行策略仍是保守串行 batch，不追求在同一轮内激进并发所有后续 batch
 - 已覆盖多笔 live order 中只撤 stale 子集、保留兼容订单，并在 stale 终态后继续补齐缺口的重规划路径
+- 已覆盖未物化 tracked order 在 retarget / 重复同目标调用下的保守处理，避免提前 target reached 或重复发单
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 

@@ -78,6 +78,9 @@
   - 若已有 live order 与最新计划方向/offset/价格兼容但手数不足，会保留已有订单并只补齐缺口
   - stale live order 进入终态后，再在后续 `wait_update()` 里按新计划补齐或重发
   - 多笔 live order 中 stale 子集撤单后，仍会保留兼容订单，并在 stale 终态后继续提交缺口 batch
+  - 已提交但尚未出现在本地状态树的 tracked order 会被视为 pending：
+    - 重复设置相同目标时继续等待原提交，不重复发单
+    - retarget 到当前持仓或不兼容目标时，会先提交撤单，不会提前 target reached
   - SHFE/INE 与非 SHFE 的 `CloseToday` / `Close` 差异已落到执行层集成测试
   - 当前实现仍是保守串行 batch：
     - 每次 `wait_update()` 最多提交一个 planner batch
@@ -425,3 +428,8 @@ impl TargetPosScheduler {
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
 2. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 3. 保持 task runtime 独立，不把 scheduler、report、stream adapter、callback 倒灌进 core/session/wait。
+
+本轮已补充未物化 tracked order 的回归：
+
+- order ref 已经由本地提交返回、但远端 order diff 尚未进入状态树时，retarget 不会把该订单当作不存在。
+- 重复设置相同目标不会清空等待状态，也不会在 order diff 到达前重复提交同方向订单。
