@@ -8,6 +8,31 @@ use tqsdk_core::{
 
 mod support;
 
+#[test]
+fn trade_event_streams_read_trade_partition_instead_of_full_snapshot() {
+    let source = include_str!("../src/event.rs");
+    let collect_fn_signature =
+        "type CollectFn<T, C> = for<'a> fn(\n    &CommitResult,\n    &TradeStateReadGuard<'a>,";
+    assert!(
+        source.contains(collect_fn_signature),
+        "trade event collectors should receive TradeStateReadGuard"
+    );
+
+    let collected_stream_impl = source
+        .split("impl<T, C> Stream for CollectedEventStream")
+        .nth(1)
+        .and_then(|rest| rest.split("impl Stream for TradeSessionEventStream").next())
+        .expect("CollectedEventStream implementation should remain in event.rs");
+    assert!(
+        collected_stream_impl.contains("read_trade_state()"),
+        "CollectedEventStream should read the trade partition directly"
+    );
+    assert!(
+        !collected_stream_impl.contains("reader.read()"),
+        "CollectedEventStream should not materialize a full snapshot"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn position_event_stream_emits_matching_account_positions_only() {
     let stream = support::core_seed::seeded_stream();

@@ -14,7 +14,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
     Account, CommitResult, Notification, ObjectKey, Order, Position, PreInsertOrder,
     RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
-    SecurityTrade, SettlementInfo, SnapshotReadGuard, Trade,
+    SecurityTrade, SettlementInfo, SnapshotReadGuard, Trade, TradeStateReadGuard,
 };
 
 use crate::driver::DriverEvent;
@@ -22,7 +22,7 @@ use crate::{DomainCommitStream, Result, StreamFacadeError, ValueUpdate};
 
 type CollectFn<T, C> = for<'a> fn(
     &CommitResult,
-    &SnapshotReadGuard<'a>,
+    &TradeStateReadGuard<'a>,
     &C,
     &mut VecDeque<ValueUpdate<T>>,
 ) -> Result<()>;
@@ -76,9 +76,9 @@ where
 
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(commit))) => {
-                    let snapshot = this.reader.read();
+                    let trade = this.reader.read_trade_state();
                     if let Err(error) =
-                        (this.collect)(&commit, &snapshot, &this.context, &mut this.pending)
+                        (this.collect)(&commit, &trade, &this.context, &mut this.pending)
                     {
                         return Poll::Ready(Some(Err(error)));
                     }
@@ -206,8 +206,10 @@ impl Stream for TradeSessionEventStream {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(DriverEvent::Commit(commit)))) => {
                     let snapshot = this.reader.read();
+                    let trade = this.reader.read_trade_state();
                     if let Err(error) = collect_trade_session_commit_events(
                         &commit,
+                        &trade,
                         &snapshot,
                         &this.spec,
                         &mut this.pending,
@@ -333,14 +335,14 @@ define_account_event_stream!(
 
 fn push_decoded_update<T>(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     pending: &mut VecDeque<ValueUpdate<T>>,
     path: &[&str],
 ) -> Result<()>
 where
     T: DeserializeOwned,
 {
-    if let Some(value) = snapshot.decode_path::<T>(path)? {
+    if let Some(value) = trade.decode_path::<T>(path)? {
         pending.push_back(ValueUpdate {
             commit: commit.clone(),
             value,
@@ -372,16 +374,20 @@ fn push_trade_session_event(
     });
 }
 
-fn path_object_has_field(snapshot: &SnapshotReadGuard<'_>, path: &[&str], field: &str) -> bool {
-    snapshot
-        .get_path(path)
-        .and_then(|value| value.as_object())
-        .is_some_and(|object| object.contains_key(field))
+fn path_object_has_field(
+    trade: &TradeStateReadGuard<'_>,
+    path: &[&str],
+    field: &str,
+) -> Result<bool> {
+    Ok(trade
+        .decode_path::<Value>(path)?
+        .and_then(|value| value.as_object().map(|object| object.contains_key(field)))
+        .unwrap_or(false))
 }
 
 fn decode_trade_object_events<F>(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     mut push: F,
 ) -> Result<()>
@@ -391,13 +397,13 @@ where
     for object in &commit.changes.object_hits {
         match object {
             ObjectKey::Account { account_id } if account_id.as_str() == spec.account_id => {
-                let path = ["trade", account_id.as_str(), "accounts", "CNY"];
-                if path_object_has_field(snapshot, &path, "asset") {
-                    if let Some(value) = snapshot.decode_path::<SecurityAccount>(&path)? {
+                let path = [account_id.as_str(), "accounts", "CNY"];
+                if path_object_has_field(trade, &path, "asset")? {
+                    if let Some(value) = trade.decode_path::<SecurityAccount>(&path)? {
                         push(TradeObjectEvent::SecurityAccount(value));
                     }
                 } else {
-                    if let Some(value) = snapshot.decode_path::<Account>(&path)? {
+                    if let Some(value) = trade.decode_path::<Account>(&path)? {
                         push(TradeObjectEvent::Account(value));
                     }
                 }
@@ -405,13 +411,13 @@ where
             ObjectKey::Position { account_id, symbol }
                 if account_id.as_str() == spec.account_id =>
             {
-                let path = ["trade", account_id.as_str(), "positions", symbol.as_str()];
-                if path_object_has_field(snapshot, &path, "create_date") {
-                    if let Some(value) = snapshot.decode_path::<SecurityPosition>(&path)? {
+                let path = [account_id.as_str(), "positions", symbol.as_str()];
+                if path_object_has_field(trade, &path, "create_date")? {
+                    if let Some(value) = trade.decode_path::<SecurityPosition>(&path)? {
                         push(TradeObjectEvent::SecurityPosition(value));
                     }
                 } else {
-                    if let Some(value) = snapshot.decode_path::<Position>(&path)? {
+                    if let Some(value) = trade.decode_path::<Position>(&path)? {
                         push(TradeObjectEvent::Position(value));
                     }
                 }
@@ -420,8 +426,7 @@ where
                 account_id,
                 order_id,
             } if account_id.as_str() == spec.account_id => {
-                if let Some(value) = snapshot.decode_path::<PreInsertOrder>(&[
-                    "trade",
+                if let Some(value) = trade.decode_path::<PreInsertOrder>(&[
                     account_id.as_str(),
                     "pre_insert_orders",
                     order_id.as_str(),
@@ -433,13 +438,13 @@ where
                 account_id,
                 order_id,
             } if account_id.as_str() == spec.account_id => {
-                let path = ["trade", account_id.as_str(), "orders", order_id.as_str()];
-                if path_object_has_field(snapshot, &path, "frozen_fee") {
-                    if let Some(value) = snapshot.decode_path::<SecurityOrder>(&path)? {
+                let path = [account_id.as_str(), "orders", order_id.as_str()];
+                if path_object_has_field(trade, &path, "frozen_fee")? {
+                    if let Some(value) = trade.decode_path::<SecurityOrder>(&path)? {
                         push(TradeObjectEvent::SecurityOrder(value));
                     }
                 } else {
-                    if let Some(value) = snapshot.decode_path::<Order>(&path)? {
+                    if let Some(value) = trade.decode_path::<Order>(&path)? {
                         push(TradeObjectEvent::Order(value));
                     }
                 }
@@ -448,13 +453,13 @@ where
                 account_id,
                 trade_id,
             } if account_id.as_str() == spec.account_id => {
-                let path = ["trade", account_id.as_str(), "trades", trade_id.as_str()];
-                if path_object_has_field(snapshot, &path, "fee") {
-                    if let Some(value) = snapshot.decode_path::<SecurityTrade>(&path)? {
+                let path = [account_id.as_str(), "trades", trade_id.as_str()];
+                if path_object_has_field(trade, &path, "fee")? {
+                    if let Some(value) = trade.decode_path::<SecurityTrade>(&path)? {
                         push(TradeObjectEvent::SecurityTrade(value));
                     }
                 } else {
-                    if let Some(value) = snapshot.decode_path::<Trade>(&path)? {
+                    if let Some(value) = trade.decode_path::<Trade>(&path)? {
                         push(TradeObjectEvent::Trade(value));
                     }
                 }
@@ -463,8 +468,7 @@ where
                 account_id,
                 exchange_id,
             } if account_id.as_str() == spec.account_id => {
-                if let Some(value) = snapshot.decode_path::<RiskManagementRule>(&[
-                    "trade",
+                if let Some(value) = trade.decode_path::<RiskManagementRule>(&[
                     account_id.as_str(),
                     "risk_management_rule",
                     exchange_id.as_str(),
@@ -475,8 +479,7 @@ where
             ObjectKey::RiskManagementData { account_id, symbol }
                 if account_id.as_str() == spec.account_id =>
             {
-                if let Some(value) = snapshot.decode_path::<RiskManagementData>(&[
-                    "trade",
+                if let Some(value) = trade.decode_path::<RiskManagementData>(&[
                     account_id.as_str(),
                     "risk_management_data",
                     symbol.as_str(),
@@ -488,8 +491,7 @@ where
                 account_id,
                 trading_day,
             } if account_id.as_str() == spec.account_id => {
-                if let Some(value) = snapshot.decode_path::<SettlementInfo>(&[
-                    "trade",
+                if let Some(value) = trade.decode_path::<SettlementInfo>(&[
                     account_id.as_str(),
                     "his_settlements",
                     trading_day.as_str(),
@@ -506,22 +508,23 @@ where
 
 fn collect_trade_object_events(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
 ) -> Result<()> {
-    decode_trade_object_events(commit, snapshot, spec, |event| {
+    decode_trade_object_events(commit, trade, spec, |event| {
         push_trade_object_event(commit, pending, event);
     })
 }
 
 fn collect_trade_session_commit_events(
     commit: &CommitResult,
+    trade: &TradeStateReadGuard<'_>,
     snapshot: &SnapshotReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<TradeSessionEventUpdate>,
 ) -> Result<()> {
-    decode_trade_object_events(commit, snapshot, spec, |event| {
+    decode_trade_object_events(commit, trade, spec, |event| {
         push_trade_session_event(
             commit.into(),
             pending,
@@ -565,7 +568,7 @@ fn collect_trade_session_commit_events(
 
 fn collect_position_events<T>(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
 ) -> Result<()>
@@ -578,9 +581,9 @@ where
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &["trade", account_id.as_str(), "positions", symbol.as_str()],
+                &[account_id.as_str(), "positions", symbol.as_str()],
             )?;
         }
     }
@@ -590,7 +593,7 @@ where
 
 fn collect_pre_insert_order_events(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<PreInsertOrder>>,
 ) -> Result<()> {
@@ -603,14 +606,9 @@ fn collect_pre_insert_order_events(
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &[
-                    "trade",
-                    account_id.as_str(),
-                    "pre_insert_orders",
-                    order_id.as_str(),
-                ],
+                &[account_id.as_str(), "pre_insert_orders", order_id.as_str()],
             )?;
         }
     }
@@ -620,7 +618,7 @@ fn collect_pre_insert_order_events(
 
 fn collect_order_events<T>(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
 ) -> Result<()>
@@ -636,9 +634,9 @@ where
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &["trade", account_id.as_str(), "orders", order_id.as_str()],
+                &[account_id.as_str(), "orders", order_id.as_str()],
             )?;
         }
     }
@@ -648,7 +646,7 @@ where
 
 fn collect_trade_events<T>(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
 ) -> Result<()>
@@ -664,9 +662,9 @@ where
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &["trade", account_id.as_str(), "trades", trade_id.as_str()],
+                &[account_id.as_str(), "trades", trade_id.as_str()],
             )?;
         }
     }
@@ -676,7 +674,7 @@ where
 
 fn collect_risk_management_rule_events(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<RiskManagementRule>>,
 ) -> Result<()> {
@@ -689,10 +687,9 @@ fn collect_risk_management_rule_events(
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
                 &[
-                    "trade",
                     account_id.as_str(),
                     "risk_management_rule",
                     exchange_id.as_str(),
@@ -706,7 +703,7 @@ fn collect_risk_management_rule_events(
 
 fn collect_risk_management_data_events(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<RiskManagementData>>,
 ) -> Result<()> {
@@ -716,14 +713,9 @@ fn collect_risk_management_data_events(
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &[
-                    "trade",
-                    account_id.as_str(),
-                    "risk_management_data",
-                    symbol.as_str(),
-                ],
+                &[account_id.as_str(), "risk_management_data", symbol.as_str()],
             )?;
         }
     }
@@ -733,7 +725,7 @@ fn collect_risk_management_data_events(
 
 fn collect_settlement_info_events(
     commit: &CommitResult,
-    snapshot: &SnapshotReadGuard<'_>,
+    trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<SettlementInfo>>,
 ) -> Result<()> {
@@ -746,14 +738,9 @@ fn collect_settlement_info_events(
         {
             push_decoded_update(
                 commit,
-                snapshot,
+                trade,
                 pending,
-                &[
-                    "trade",
-                    account_id.as_str(),
-                    "his_settlements",
-                    trading_day.as_str(),
-                ],
+                &[account_id.as_str(), "his_settlements", trading_day.as_str()],
             )?;
         }
     }
