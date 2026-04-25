@@ -116,8 +116,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 1. `cargo build -p tqsdk-core`
 2. `cargo build -p tqsdk-session --no-default-features`
-3. `cargo build -p tqsdk-session --features live`
-4. `cargo build -p tqsdk-session --features services`
+3. `cargo build -p tqsdk-session --no-default-features --features live`
+4. `cargo build -p tqsdk-session --no-default-features --features services`
 5. `cargo build -p tqsdk-wait --no-default-features`
 6. `cargo build -p tqsdk-stream --no-default-features`
 7. `cargo build -p tqsdk-task --no-default-features`
