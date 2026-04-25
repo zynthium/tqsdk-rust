@@ -5,9 +5,10 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
 use url::Url;
 
+use tqsdk_core::session_runtime::RouteRequestExecutor;
 use tqsdk_core::{
     ContractError, HttpMethod, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
-    ProtocolDomain, Result, RouteRequestExecutor, RuntimeInput, SessionRoute, SessionRouteEndpoint,
+    ProtocolDomain, Result, RuntimeInput, SessionRoute, SessionRouteEndpoint,
 };
 
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";

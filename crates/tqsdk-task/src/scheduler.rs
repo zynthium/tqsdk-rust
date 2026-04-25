@@ -873,7 +873,8 @@ pub(crate) async fn process_schedulers_wait_update(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
+    use tqsdk_core::adapter::MarketAdapter;
+    use tqsdk_core::{AdapterRegistry, RuntimeHandle};
     use tqsdk_session::SessionClient;
     use tqsdk_wait::TqApi;
 

@@ -1,5 +1,6 @@
 use tokio::time::{Instant, timeout};
-use tqsdk_core::{CommandId, CommitScope, SessionRouteEndpoint, SessionRuntimeDeps};
+use tqsdk_core::session_runtime::SessionRuntimeDeps;
+use tqsdk_core::{CommandId, CommitScope, SessionRouteEndpoint};
 
 use super::{
     SessionClient, SessionIoState, SessionProgress, prime_all_websocket_routes,

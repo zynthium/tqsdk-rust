@@ -1212,7 +1212,8 @@ impl Drop for TargetPosTaskInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tqsdk_core::{AdapterRegistry, MarketAdapter, RuntimeHandle};
+    use tqsdk_core::adapter::MarketAdapter;
+    use tqsdk_core::{AdapterRegistry, RuntimeHandle};
     use tqsdk_session::SessionClient;
     use tqsdk_wait::TqApi;
 

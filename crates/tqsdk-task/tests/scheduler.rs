@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde_json::json;
+use tqsdk_core::adapter::{MarketAdapter, TradeAdapter};
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, MarketAdapter,
-    NormalizedMutation, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
-    RuntimeCommand, RuntimeHandle, RuntimeInput, TradeAdapter, TradeCommand, TradeDirection,
-    TradeOffset, TradingCalendarDay,
+    AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, NormalizedMutation,
+    OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, RuntimeCommand, RuntimeHandle,
+    RuntimeInput, TradeCommand, TradeDirection, TradeOffset, TradingCalendarDay,
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{

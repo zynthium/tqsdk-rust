@@ -19,10 +19,7 @@ pub mod state;
 pub mod transport;
 pub mod types;
 
-pub use adapter::{
-    AdapterRegistry, MarketAdapter, ProtocolAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter,
-    SystemAdapter, TradeAdapter,
-};
+pub use adapter::{AdapterRegistry, ProtocolAdapter};
 pub use auth::{AuthContext, AuthProvider, DynAuthProvider};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
@@ -45,21 +42,15 @@ pub use runtime::{
     CommitLog, CommitReadGuard, CursorLagged, OutboundEnvelope, Runtime, RuntimeHandle,
     RuntimeReader, SnapshotReadGuard,
 };
-pub use session_runtime::{
-    PendingRouteStepOutcome, RoutePumpOutcome, RouteRequestExecutor, SessionRun, SessionRuntime,
-    SessionRuntimeDeps, SessionStepOutcome,
-};
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath,
     StateReadView, StateSnapshot, UpdateCursor,
 };
 pub use transport::{
-    AuthDerivedTradeTarget, BootstrapResult, ConnectedSessionRoute, ConnectedTopology,
-    DefaultRouteConnector, DispatchReceipt, DynRouteConnectFuture, DynTransport, EndpointConfig,
-    HeartbeatPolicy, MarketSessionTarget, RawFrame, ReconnectPolicy, SessionBootstrap,
-    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionTarget, SessionTopology, SessionTopologyResolver, TradeSessionTarget, Transport,
-    WebSocketConnectOptions, WebSocketRouteConnector, WebSocketTransport,
+    AuthDerivedTradeTarget, BootstrapResult, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
+    RawFrame, ReconnectPolicy, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionTarget, SessionTopology, SessionTopologyResolver,
+    TradeSessionTarget, Transport, WebSocketConnectOptions,
 };
 pub use types::{
     Account, CategoryInfo, Chart, ChartInfo, EdbIndexData, FrequentCancellation,

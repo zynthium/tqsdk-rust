@@ -3,9 +3,10 @@ use std::future::Future;
 mod support;
 
 use support::websocket::{ClientFrame, TestWebSocketServer};
+use tqsdk_core::transport::{SessionBootstrap, WebSocketRouteConnector};
 use tqsdk_core::{
-    AccountId, ProtocolDomain, SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget,
-    SessionTopology, WebSocketConnectOptions, WebSocketRouteConnector,
+    AccountId, ProtocolDomain, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
+    WebSocketConnectOptions,
 };
 
 #[test]

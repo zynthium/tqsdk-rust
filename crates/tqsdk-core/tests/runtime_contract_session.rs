@@ -5,10 +5,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
+use tqsdk_core::transport::SessionBootstrap;
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, EndpointConfig,
     HeartbeatPolicy, OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy,
-    Result as CoreResult, SessionBootstrap, SessionConfig, SessionPhase, Transport,
+    Result as CoreResult, SessionConfig, SessionPhase, Transport,
 };
 
 struct TestAuthProvider;

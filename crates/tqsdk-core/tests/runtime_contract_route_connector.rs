@@ -5,9 +5,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 mod support;
 
 use support::websocket::{ClientFrame, TestWebSocketServer};
+use tqsdk_core::transport::{DefaultRouteConnector, SessionBootstrap};
 use tqsdk_core::{
-    DefaultRouteConnector, OutboundFrame, ProtocolDomain, SessionBootstrap, SessionRoute,
-    SessionRouteEndpoint, SessionTarget, SessionTopology, WebSocketConnectOptions,
+    OutboundFrame, ProtocolDomain, SessionRoute, SessionRouteEndpoint, SessionTarget,
+    SessionTopology, WebSocketConnectOptions,
 };
 
 #[test]

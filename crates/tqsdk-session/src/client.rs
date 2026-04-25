@@ -12,13 +12,14 @@ use serde_json::Value;
 #[cfg(any(test, feature = "live"))]
 use serde_json::json;
 use tokio::sync::Mutex;
+use tqsdk_core::session_runtime::{RouteRequestExecutor, SessionRun, SessionRuntime};
 #[cfg(feature = "live")]
-use tqsdk_core::DefaultRouteConnector;
+use tqsdk_core::transport::DefaultRouteConnector;
+use tqsdk_core::transport::SessionBootstrap;
 use tqsdk_core::{
     AdapterRegistry, AuthContext, CommandId, DynAuthProvider, OutboundDispatch, OutboundFrame,
-    Quote, RouteRequestExecutor, RuntimeHandle, RuntimeReader, SessionBootstrap, SessionConfig,
-    SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime,
-    SessionTopologyResolver, TradeSessionTarget,
+    Quote, RuntimeHandle, RuntimeReader, SessionConfig, SessionRouteConnector,
+    SessionRouteEndpoint, SessionTopologyResolver, TradeSessionTarget,
 };
 #[cfg(any(test, feature = "live"))]
 use tqsdk_core::{AuthEvent, InternalEvent, ReplayEvent, SessionRoute, SessionTarget};
