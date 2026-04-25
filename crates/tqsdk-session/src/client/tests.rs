@@ -869,6 +869,7 @@ async fn query_value_helper_requires_enabled_query_route() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "live")]
 async fn query_value_helper_rejects_non_stock_websocket_query_without_http_override() {
     let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
         .futures_market()
@@ -900,6 +901,7 @@ async fn replay_value_helpers_require_explicit_replay_route() {
 }
 
 #[test]
+#[cfg(feature = "live")]
 fn built_client_retains_builder_auth_and_endpoints() {
     let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
         .query_url("https://query.example.com/graphql")
@@ -925,6 +927,7 @@ fn built_client_retains_builder_auth_and_endpoints() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "live")]
 async fn built_client_enable_query_enables_query_domain_without_query_url() {
     let client = crate::builder::SessionClientBuilder::new("demo-user", "demo-pass")
         .enable_query()
