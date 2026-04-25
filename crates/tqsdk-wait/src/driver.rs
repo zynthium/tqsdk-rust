@@ -6,17 +6,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::{Result, WaitFacadeError};
 
 pub(crate) struct WaitDriver {
-    #[allow(dead_code)]
     pub(crate) session: tqsdk_session::SessionClient,
-    #[allow(dead_code)]
     pub(crate) reader: tqsdk_core::RuntimeReader,
-    #[allow(dead_code)]
     pub(crate) cursor: tqsdk_core::UpdateCursor,
     pub(crate) runtime: tqsdk_core::SessionRuntime,
     pub(crate) deferred_commits: VecDeque<tqsdk_core::CommitResult>,
     pub(crate) last_commit: Option<tqsdk_core::CommitResult>,
     pub(crate) waiting: AtomicBool,
-    #[allow(dead_code)]
     pub(crate) next_order_seq: AtomicU64,
 }
 

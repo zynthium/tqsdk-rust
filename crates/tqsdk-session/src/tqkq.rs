@@ -1,6 +1,4 @@
-use tqsdk_core::{
-    AccountId, ContractError, Result, TradeAccountType, TradeLoginCommand, TradeSessionTarget,
-};
+use tqsdk_core::{AccountId, ContractError, Result, TradeAccountType, TradeLoginCommand};
 
 const TQKQ_BROKER_ID: &str = "快期模拟";
 const TQKQ_STOCK_BROKER_ID: &str = "快期股票模拟";
@@ -13,18 +11,17 @@ const TQKQ_STOCK_BROKER_ID: &str = "快期股票模拟";
 /// command. Runtime ownership and trade-session orchestration stay outside the
 /// core crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TqKqAccountConfig {
+pub(crate) struct TqKqAccountConfig {
     broker_id: String,
     account_id: AccountId,
     password: String,
     account_type: TradeAccountType,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl TqKqAccountConfig {
     /// Builds the primary futures built-in simulated account profile.
     #[must_use]
-    pub fn future(auth_id: impl AsRef<str>) -> Self {
+    pub(crate) fn future(auth_id: impl AsRef<str>) -> Self {
         Self::new_future(auth_id.as_ref(), None)
     }
 
@@ -32,13 +29,13 @@ impl TqKqAccountConfig {
     ///
     /// The official Python implementation accepts assistant accounts in the
     /// range `1..=99`.
-    pub fn future_numbered(auth_id: impl AsRef<str>, number: u8) -> Result<Self> {
+    pub(crate) fn future_numbered(auth_id: impl AsRef<str>, number: u8) -> Result<Self> {
         Self::new_numbered_future(auth_id.as_ref(), number)
     }
 
     /// Builds the primary stock built-in simulated account profile.
     #[must_use]
-    pub fn stock(auth_id: impl AsRef<str>) -> Self {
+    pub(crate) fn stock(auth_id: impl AsRef<str>) -> Self {
         Self::new_stock(auth_id.as_ref(), None)
     }
 
@@ -46,37 +43,17 @@ impl TqKqAccountConfig {
     ///
     /// The official Python implementation accepts assistant accounts in the
     /// range `1..=99`.
-    pub fn stock_numbered(auth_id: impl AsRef<str>, number: u8) -> Result<Self> {
+    pub(crate) fn stock_numbered(auth_id: impl AsRef<str>, number: u8) -> Result<Self> {
         Self::new_numbered_stock(auth_id.as_ref(), number)
     }
 
     #[must_use]
-    pub fn broker_id(&self) -> &str {
-        &self.broker_id
-    }
-
-    #[must_use]
-    pub fn account_id(&self) -> &AccountId {
+    pub(crate) fn account_id(&self) -> &AccountId {
         &self.account_id
     }
 
     #[must_use]
-    pub fn password(&self) -> &str {
-        &self.password
-    }
-
-    #[must_use]
-    pub fn account_type(&self) -> TradeAccountType {
-        self.account_type
-    }
-
-    #[must_use]
-    pub fn trade_target(&self) -> TradeSessionTarget {
-        TradeSessionTarget::new(self.broker_id.clone(), self.account_id.clone())
-    }
-
-    #[must_use]
-    pub fn login_command(&self) -> TradeLoginCommand {
+    pub(crate) fn login_command(&self) -> TradeLoginCommand {
         TradeLoginCommand {
             account_id: self.account_id.clone(),
             broker_id: self.broker_id.clone(),
@@ -153,14 +130,10 @@ mod tests {
     fn future_main_matches_official_python_profile() {
         let config = TqKqAccountConfig::future("auth-1");
 
-        assert_eq!(config.broker_id(), "快期模拟");
-        assert_eq!(config.account_id().as_str(), "auth-1");
-        assert_eq!(config.password(), "auth-1");
-        assert_eq!(config.account_type(), TradeAccountType::Future);
-
-        let trade_target = config.trade_target();
-        assert_eq!(trade_target.broker_id, "快期模拟");
-        assert_eq!(trade_target.account_id.as_str(), "auth-1");
+        assert_eq!(config.broker_id, "快期模拟");
+        assert_eq!(config.account_id.as_str(), "auth-1");
+        assert_eq!(config.password, "auth-1");
+        assert_eq!(config.account_type, TradeAccountType::Future);
 
         let login = config.login_command();
         assert_eq!(login.broker_id, "快期模拟");
@@ -173,30 +146,30 @@ mod tests {
     fn future_numbered_matches_official_python_profile() {
         let config = TqKqAccountConfig::future_numbered("auth-1", 7).unwrap();
 
-        assert_eq!(config.broker_id(), "快期模拟");
-        assert_eq!(config.account_id().as_str(), "auth-1007");
-        assert_eq!(config.password(), "shinnytech007");
-        assert_eq!(config.account_type(), TradeAccountType::Future);
+        assert_eq!(config.broker_id, "快期模拟");
+        assert_eq!(config.account_id.as_str(), "auth-1007");
+        assert_eq!(config.password, "shinnytech007");
+        assert_eq!(config.account_type, TradeAccountType::Future);
     }
 
     #[test]
     fn stock_main_matches_official_python_profile() {
         let config = TqKqAccountConfig::stock("auth-1");
 
-        assert_eq!(config.broker_id(), "快期股票模拟");
-        assert_eq!(config.account_id().as_str(), "auth-1-sim-securities");
-        assert_eq!(config.password(), "auth-1");
-        assert_eq!(config.account_type(), TradeAccountType::Spot);
+        assert_eq!(config.broker_id, "快期股票模拟");
+        assert_eq!(config.account_id.as_str(), "auth-1-sim-securities");
+        assert_eq!(config.password, "auth-1");
+        assert_eq!(config.account_type, TradeAccountType::Spot);
     }
 
     #[test]
     fn stock_numbered_matches_official_python_profile() {
         let config = TqKqAccountConfig::stock_numbered("auth-1", 7).unwrap();
 
-        assert_eq!(config.broker_id(), "快期股票模拟");
-        assert_eq!(config.account_id().as_str(), "auth-1007-sim-securities");
-        assert_eq!(config.password(), "shinnytech007");
-        assert_eq!(config.account_type(), TradeAccountType::Spot);
+        assert_eq!(config.broker_id, "快期股票模拟");
+        assert_eq!(config.account_id.as_str(), "auth-1007-sim-securities");
+        assert_eq!(config.password, "shinnytech007");
+        assert_eq!(config.account_type, TradeAccountType::Spot);
     }
 
     #[test]

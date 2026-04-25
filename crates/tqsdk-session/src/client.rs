@@ -51,11 +51,13 @@ type SharedTopologyResolver = Arc<dyn SessionTopologyResolver>;
 type SharedRouteConnector = Arc<dyn SessionRouteConnector>;
 type SharedRouteExecutor = Arc<dyn RouteRequestExecutor>;
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct SessionClientContext {
+    #[cfg(any(test, feature = "live"))]
     auth_user: String,
+    #[cfg(any(test, feature = "live"))]
     auth_pass: String,
+    #[cfg(any(test, feature = "live"))]
     pub(crate) endpoints: tqsdk_core::EndpointConfig,
     #[cfg(feature = "services")]
     service_endpoints: SessionServiceEndpoints,
@@ -67,9 +69,15 @@ impl SessionClientContext {
         auth_pass: String,
         endpoints: tqsdk_core::EndpointConfig,
     ) -> Self {
+        #[cfg(not(any(test, feature = "live")))]
+        let _ = (auth_user, auth_pass, endpoints);
+
         Self {
+            #[cfg(any(test, feature = "live"))]
             auth_user,
+            #[cfg(any(test, feature = "live"))]
             auth_pass,
+            #[cfg(any(test, feature = "live"))]
             endpoints,
             #[cfg(feature = "services")]
             service_endpoints: SessionServiceEndpoints::default(),
@@ -215,7 +223,7 @@ pub struct SessionClient {
     runtime: SessionRuntime,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "services"))]
     context: SessionClientContext,
     io: Option<Arc<Mutex<SessionIoState>>>,
 }
@@ -261,6 +269,7 @@ impl SessionClient {
             runtime,
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
+            #[cfg(any(test, feature = "services"))]
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
                 SessionIoComponents {
@@ -290,6 +299,9 @@ impl SessionClient {
     }
 
     fn new_without_io(handle: RuntimeHandle, context: SessionClientContext) -> Self {
+        #[cfg(not(any(test, feature = "services")))]
+        let _ = context;
+
         let reader = handle.reader();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
         Self {
@@ -298,6 +310,7 @@ impl SessionClient {
             runtime,
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
+            #[cfg(any(test, feature = "services"))]
             context,
             io: None,
         }
@@ -354,17 +367,17 @@ impl SessionClient {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn auth_user(&self) -> &str {
         &self.context.auth_user
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn auth_pass(&self) -> &str {
         &self.context.auth_pass
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn endpoints(&self) -> &tqsdk_core::EndpointConfig {
         &self.context.endpoints
     }

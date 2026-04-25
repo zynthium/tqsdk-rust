@@ -193,13 +193,13 @@ impl SessionClientBuilder {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
-        let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
         let config = session_config(
-            context.endpoints.clone(),
+            endpoints.clone(),
             query_enabled,
             market_target,
             &trade_targets,
         );
+        let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
         SessionClient::new_live(handle, context, config, trade_targets)
     }
 }

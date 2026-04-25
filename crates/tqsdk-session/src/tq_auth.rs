@@ -37,13 +37,13 @@ fn add_route_domain(topology: &mut SessionTopology, label: &str, domain: Protoco
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PasswordCredentials {
-    pub username: String,
-    pub password: String,
+pub(crate) struct PasswordCredentials {
+    username: String,
+    password: String,
 }
 
 impl PasswordCredentials {
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub(crate) fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
             password: password.into(),
@@ -52,27 +52,15 @@ impl PasswordCredentials {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TqAuthProvider {
+pub(crate) struct TqAuthProvider {
     credentials: PasswordCredentials,
     auth_url: String,
     name_service_url: String,
     broker_base_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrokerInfo {
-    pub category: Vec<String>,
-    pub url: String,
-    pub broker_type: Option<String>,
-    pub smtype: Option<String>,
-    pub smconfig: Option<String>,
-    pub condition_type: Option<String>,
-    pub condition_config: Option<String>,
-}
-
-#[allow(dead_code)]
 impl TqAuthProvider {
-    pub fn new(credentials: PasswordCredentials) -> Self {
+    pub(crate) fn new(credentials: PasswordCredentials) -> Self {
         Self {
             credentials,
             auth_url: DEFAULT_AUTH_URL.to_string(),
@@ -81,18 +69,8 @@ impl TqAuthProvider {
         }
     }
 
-    pub fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
+    pub(crate) fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
         self.auth_url = auth_url.into();
-        self
-    }
-
-    pub fn with_name_service_url(mut self, name_service_url: impl Into<String>) -> Self {
-        self.name_service_url = name_service_url.into();
-        self
-    }
-
-    pub fn with_broker_base_url(mut self, broker_base_url: impl Into<String>) -> Self {
-        self.broker_base_url = broker_base_url.into();
         self
     }
 
@@ -267,7 +245,7 @@ impl TqAuthProvider {
         auth: &AuthContext,
         broker_id: &str,
         account_id: &str,
-    ) -> Result<BrokerInfo> {
+    ) -> Result<String> {
         self.run_http(async {
             let client = self.build_http_client(Some(self.auth_headers(auth)?))?;
             let broker_url = format!(
@@ -312,35 +290,9 @@ impl TqAuthProvider {
                 .and_then(Value::as_str)
                 .ok_or_else(|| ContractError::auth("trade broker response missing url"))?;
 
-            Ok(BrokerInfo {
-                category,
-                url: url.to_string(),
-                broker_type: optional_string(broker, "broker_type"),
-                smtype: optional_string(broker, "smtype"),
-                smconfig: optional_string(broker, "smconfig"),
-                condition_type: optional_string(broker, "condition_type"),
-                condition_config: optional_string(broker, "condition_config"),
-            })
+            Ok(url.to_string())
         })
         .await
-    }
-
-    pub async fn fetch_market_url<'a>(
-        &'a self,
-        auth: &'a AuthContext,
-        stock: bool,
-        backtest: bool,
-    ) -> Result<String> {
-        self.request_market_url(auth, stock, backtest).await
-    }
-
-    pub async fn fetch_trade_broker<'a>(
-        &'a self,
-        auth: &'a AuthContext,
-        broker_id: &'a str,
-        account_id: &'a str,
-    ) -> Result<BrokerInfo> {
-        self.request_trade_broker(auth, broker_id, account_id).await
     }
 }
 
@@ -349,13 +301,6 @@ fn require_tokio_runtime() -> Result<()> {
         ContractError::validation("tq auth provider requires an active Tokio runtime")
     })?;
     Ok(())
-}
-
-fn optional_string(payload: &Value, field: &str) -> Option<String> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
 }
 
 impl AuthProvider for TqAuthProvider {
@@ -465,7 +410,6 @@ impl SessionTopologyResolver for TqAuthProvider {
                             resolved_account_id.as_str(),
                         )
                         .await?
-                        .url
                     };
 
                     topology = topology.with_route(SessionRoute {
