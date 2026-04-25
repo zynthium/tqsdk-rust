@@ -25,13 +25,11 @@ pub mod types;
 #[doc(hidden)]
 pub mod internal {
     pub use crate::session_runtime::{
-        PendingRouteStepOutcome, RoutePumpOutcome, RouteRequestExecutor, SessionRun,
-        SessionRuntime, SessionRuntimeDeps, SessionStepOutcome,
+        RouteRequestExecutor, SessionRun, SessionRuntime, SessionRuntimeDeps,
     };
     pub use crate::transport::{
-        ConnectedSessionRoute, ConnectedTopology, DefaultRouteConnector, DispatchReceipt,
-        DynRouteConnectFuture, DynTransport, SessionBootstrap, WebSocketRouteConnector,
-        WebSocketTransport,
+        DefaultRouteConnector, DynRouteConnectFuture, DynTransport, SessionBootstrap,
+        WebSocketRouteConnector, WebSocketTransport,
     };
 }
 
