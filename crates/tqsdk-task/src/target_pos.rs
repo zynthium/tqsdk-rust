@@ -4,22 +4,23 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::sync::watch;
-use tqsdk_core::{ObjectKey, Order, Position, Quote, Trade, TradeDirection, TradeOffset};
+use tqsdk_core::{ObjectKey, Order, Position, Trade, TradeDirection, TradeOffset};
 use tqsdk_wait::OrderRef;
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
-use crate::plan::{compute_plan, net_position};
+use crate::plan::net_position;
 use crate::registry::TaskId;
 use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosStore, SharedTaskRegistry, TaskStateCell,
 };
 use crate::{Result, TaskError};
 
+mod executor;
+mod planner;
 mod state;
 
-use state::{DesiredBatch, DesiredOrder, LiveOrderHandling, LiveOrderReconciliation};
+use state::{DesiredBatch, LiveOrderHandling};
 pub(crate) use state::TargetPosStore;
 use state::TargetPosTaskState;
 
@@ -562,8 +563,16 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        let mut desired_batch =
-            desired_batch_for_target(api, self, target_volume, &current_position);
+        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
+        let mut desired_batch = quote.as_ref().and_then(|quote| {
+            planner::desired_batch_for_target(
+                &self.symbol,
+                &self.config,
+                target_volume,
+                &current_position,
+                quote,
+            )
+        });
         desired_batch = match self
             .handle_live_orders(
                 api,
@@ -626,16 +635,13 @@ impl TargetPosTaskInner {
 
         let mut inserted_any = false;
         for desired_order in desired_batch.orders {
-            match api
-                .insert_order(
-                    &self.account_id,
-                    &self.symbol,
-                    desired_order.direction,
-                    Some(desired_order.offset),
-                    desired_order.volume,
-                    Some(json!(desired_order.limit_price)),
-                )
-                .await
+            match executor::insert_desired_order(
+                api,
+                &self.account_id,
+                &self.symbol,
+                &desired_order,
+            )
+            .await
             {
                 Ok(order_ref) => {
                     inserted_any = true;
@@ -652,12 +658,12 @@ impl TargetPosTaskInner {
                 }
                 Err(error) if inserted_any => {
                     self.with_state_mut(|state| {
-                        state.last_error = Some(TaskError::from(error));
+                        state.last_error = Some(error);
                     });
                     self.cancel_requested.store(true, Ordering::SeqCst);
                     return Ok(());
                 }
-                Err(error) => return Err(TaskError::from(error)),
+                Err(error) => return Err(error),
             }
         }
 
@@ -764,7 +770,7 @@ impl TargetPosTaskInner {
             .ok()
             .flatten()
             .as_ref()
-            .is_some_and(quote_supports_pricing)
+            .is_some_and(planner::quote_supports_pricing)
         {
             return Ok(());
         }
@@ -819,7 +825,7 @@ impl TargetPosTaskInner {
             return Ok(LiveOrderHandling::Blocked);
         };
 
-        let reconciliation = reconcile_live_orders(&live_orders, desired_batch);
+        let reconciliation = planner::reconcile_live_orders(&live_orders, desired_batch);
         if !reconciliation.stale_order_ids.is_empty() {
             self.cancel_pending_orders_by_id(api, &reconciliation.stale_order_ids)
                 .await?;
@@ -877,11 +883,11 @@ impl TargetPosTaskInner {
             if !should_cancel {
                 continue;
             }
-            if let Err(error) = api.cancel_order(order_ref.account_id(), &order_id).await {
+            if let Err(error) = executor::cancel_order(api, order_ref.account_id(), &order_id).await {
                 self.with_state_mut(|state| {
                     state.cancel_requested_order_ids.remove(&order_id);
                 });
-                return Err(TaskError::from(error));
+                return Err(error);
             }
             self.record_cancel_order(&order_id);
         }
@@ -997,149 +1003,6 @@ fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: 
         .unwrap_or_default()
 }
 
-fn desired_batch_for_target(
-    api: &tqsdk_wait::TqApi,
-    task: &TargetPosTaskInner,
-    target_volume: i64,
-    current_position: &Position,
-) -> Option<DesiredBatch> {
-    let quote = api.quote_ref(&task.symbol).snapshot(api).ok().flatten()?;
-    let exchange_id = quote_exchange_id(&quote, &task.symbol);
-    let batch = compute_plan(
-        &exchange_id,
-        current_position,
-        target_volume,
-        task.config.offset_priority,
-    )
-    .into_iter()
-    .next()?;
-
-    let mut orders = Vec::with_capacity(batch.orders.len());
-    for order in batch.orders {
-        orders.push(DesiredOrder {
-            direction: order.direction,
-            offset: order.offset,
-            volume: split_order_volume(order.volume, task.config.split_policy),
-            limit_price: resolve_limit_price(&quote, order.direction, task.config.price_mode)?,
-        });
-    }
-
-    Some(DesiredBatch { orders })
-}
-
-fn reconcile_live_orders(
-    live_orders: &[Order],
-    desired_batch: &DesiredBatch,
-) -> LiveOrderReconciliation {
-    let mut missing_orders = desired_batch.orders.clone();
-    let mut stale_order_ids = HashSet::new();
-    for order in live_orders {
-        if !consume_compatible_desired_order(&mut missing_orders, order) {
-            stale_order_ids.insert(order.order_id.clone());
-        };
-    }
-
-    LiveOrderReconciliation {
-        stale_order_ids,
-        missing_batch: DesiredBatch {
-            orders: missing_orders,
-        },
-    }
-}
-
-fn consume_compatible_desired_order(missing_orders: &mut Vec<DesiredOrder>, order: &Order) -> bool {
-    let exact_index = missing_orders
-        .iter()
-        .position(|desired_order| order_exactly_matches_desired(order, desired_order));
-    let fallback_index = exact_index.or_else(|| {
-        missing_orders
-            .iter()
-            .position(|desired_order| order_can_satisfy_desired(order, desired_order))
-    });
-
-    let Some(index) = fallback_index else {
-        return false;
-    };
-
-    let live_volume = order.volume_left;
-    if live_volume == missing_orders[index].volume {
-        missing_orders.remove(index);
-    } else {
-        missing_orders[index].volume -= live_volume;
-    }
-    true
-}
-
-fn order_exactly_matches_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
-    order_can_satisfy_desired(order, desired_order) && order.volume_left == desired_order.volume
-}
-
-fn order_can_satisfy_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
-    order.direction == desired_order.direction.as_str()
-        && order.offset == desired_order.offset.as_str()
-        && order.volume_left > 0
-        && order.volume_left <= desired_order.volume
-        && order.limit_price == desired_order.limit_price
-}
-
-fn quote_exchange_id(quote: &Quote, symbol: &str) -> String {
-    if !quote.exchange_id.is_empty() {
-        return quote.exchange_id.clone();
-    }
-
-    symbol
-        .split_once('.')
-        .map(|(exchange_id, _)| exchange_id.to_string())
-        .unwrap_or_default()
-}
-
-fn quote_supports_pricing(quote: &Quote) -> bool {
-    quote.ask_price1.is_finite() || quote.bid_price1.is_finite() || quote.last_price.is_finite()
-}
-
-fn resolve_limit_price(quote: &Quote, direction: TradeDirection, mode: PriceMode) -> Option<f64> {
-    let active_price = match direction {
-        TradeDirection::Buy => first_finite(quote.ask_price1, quote.bid_price1, quote.last_price),
-        TradeDirection::Sell => first_finite(quote.bid_price1, quote.ask_price1, quote.last_price),
-    };
-    let passive_price = match direction {
-        TradeDirection::Buy => first_finite(quote.bid_price1, quote.ask_price1, quote.last_price),
-        TradeDirection::Sell => first_finite(quote.ask_price1, quote.bid_price1, quote.last_price),
-    };
-
-    let price = match mode {
-        PriceMode::Active => active_price?,
-        PriceMode::Passive => passive_price?,
-    };
-
-    Some(price)
-}
-
-fn first_finite(primary: f64, secondary: f64, fallback: f64) -> Option<f64> {
-    if primary.is_finite() {
-        Some(primary)
-    } else if secondary.is_finite() {
-        Some(secondary)
-    } else {
-        fallback.is_finite().then_some(fallback)
-    }
-}
-
-fn split_order_volume(volume: i64, split_policy: Option<VolumeSplitPolicy>) -> i64 {
-    match split_policy {
-        None => volume,
-        Some(policy) if volume < policy.max_volume => volume,
-        Some(policy) => {
-            let tail = volume - policy.max_volume;
-            if tail > 0 && tail < policy.min_volume {
-                volume - policy.min_volume
-            } else {
-                policy.max_volume
-            }
-        }
-    }
-}
-
 fn order_is_terminal(order: &Order) -> bool {
     order.status == "FINISHED"
 }
@@ -1197,48 +1060,5 @@ mod tests {
 
         assert!(task.is_finished());
         assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
-    }
-
-    #[test]
-    fn reconcile_live_orders_prefers_exact_volume_match() {
-        let live_orders = vec![Order {
-            order_id: "order-1".to_string(),
-            direction: "BUY".to_string(),
-            offset: "OPEN".to_string(),
-            volume_left: 4,
-            limit_price: 10.0,
-            ..Order::default()
-        }];
-        let desired_batch = DesiredBatch {
-            orders: vec![
-                DesiredOrder {
-                    direction: TradeDirection::Buy,
-                    offset: TradeOffset::Open,
-                    volume: 6,
-                    limit_price: 10.0,
-                },
-                DesiredOrder {
-                    direction: TradeDirection::Buy,
-                    offset: TradeOffset::Open,
-                    volume: 4,
-                    limit_price: 10.0,
-                },
-            ],
-        };
-
-        let reconciliation = reconcile_live_orders(&live_orders, &desired_batch);
-
-        assert!(reconciliation.stale_order_ids.is_empty());
-        assert_eq!(
-            reconciliation.missing_batch,
-            DesiredBatch {
-                orders: vec![DesiredOrder {
-                    direction: TradeDirection::Buy,
-                    offset: TradeOffset::Open,
-                    volume: 6,
-                    limit_price: 10.0,
-                }]
-            }
-        );
     }
 }
