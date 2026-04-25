@@ -111,6 +111,20 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 2. `cargo test -p tqsdk-core -q --test runtime_contract_reader_surface --test runtime_contract_surface`
 3. `cargo test -p tqsdk-core -q`
 
+## Feature / no-default build matrix
+以下命令用于固定 feature flags 与最小依赖构建基线，防止默认 feature 构建通过但 `--no-default-features` 或单独 feature 组合退化。
+
+1. `cargo build -p tqsdk-core`
+2. `cargo build -p tqsdk-session --no-default-features`
+3. `cargo build -p tqsdk-session --features live`
+4. `cargo build -p tqsdk-session --features services`
+5. `cargo build -p tqsdk-wait --no-default-features`
+6. `cargo build -p tqsdk-stream --no-default-features`
+7. `cargo build -p tqsdk-task --no-default-features`
+8. `cargo build -p tqsdk-data --no-default-features`
+9. `cargo test -p tqsdk-core`
+10. `cargo test -p tqsdk-session --no-default-features`
+
 可选的联机 smoke 入口：
 
 1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
