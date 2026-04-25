@@ -9,6 +9,7 @@
 pub mod adapter;
 pub mod auth;
 pub mod commands;
+mod diff_protocol;
 pub mod error;
 pub mod events;
 pub mod ids;

@@ -102,6 +102,27 @@ fn adapter_registry_routes_commands_and_fans_out_inputs() {
 }
 
 #[test]
+fn market_adapter_encoding_uses_diff_protocol_message_model() {
+    let source = include_str!("../src/adapter.rs");
+    let market_impl = source
+        .split("impl ProtocolAdapter for MarketAdapter {")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Default, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("MarketAdapter ProtocolAdapter impl should be present");
+
+    for aid in ["subscribe_quote", "subscribe_trading_status", "set_chart"] {
+        let literal = format!("\"{aid}\"");
+        assert!(
+            !market_impl.contains(&literal),
+            "MarketAdapter should delegate DIFF market aid construction to the protocol model"
+        );
+    }
+}
+
+#[test]
 fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();

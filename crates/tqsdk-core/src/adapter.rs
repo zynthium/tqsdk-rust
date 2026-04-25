@@ -4,6 +4,7 @@ use crate::{
         QueryCommand, QueryRequest, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand,
         TradeCommand, TradeInsertOrderCommand, TradePreInsertOrderCommand,
     },
+    diff_protocol::{DiffProtocolMessage, DiffSetChartRequest},
     error::{ContractError, Result},
     events::{
         AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
@@ -194,22 +195,20 @@ impl ProtocolAdapter for MarketAdapter {
         match cmd {
             RuntimeCommand::Market(MarketCommand::SubscribeQuotes { symbols }) => {
                 extend_symbols(&mut self.quote_subscriptions, symbols);
-                Ok(request_with_peek(json!({
-                    "aid": "subscribe_quote",
-                    "ins_list": join_symbols(&self.quote_subscriptions),
-                })))
+                request_with_peek(DiffProtocolMessage::subscribe_quote(join_symbols(
+                    &self.quote_subscriptions,
+                )))
             }
             RuntimeCommand::Market(MarketCommand::UnsubscribeQuotes { symbols }) => {
                 remove_symbols(&mut self.quote_subscriptions, symbols);
-                Ok(request_with_peek(json!({
-                    "aid": "subscribe_quote",
-                    "ins_list": join_symbols(&self.quote_subscriptions),
-                })))
+                request_with_peek(DiffProtocolMessage::subscribe_quote(join_symbols(
+                    &self.quote_subscriptions,
+                )))
             }
             RuntimeCommand::Market(MarketCommand::SetChart(chart)) => {
                 validate_chart_request(chart)?;
                 self.charts.insert(chart.chart_id.clone(), chart.clone());
-                Ok(request_with_peek(build_chart_request(chart, false)?))
+                request_with_peek(build_chart_message(chart, false))
             }
             RuntimeCommand::Market(MarketCommand::CancelChart { chart_id }) => {
                 let Some(chart) = self.charts.remove(chart_id) else {
@@ -217,21 +216,19 @@ impl ProtocolAdapter for MarketAdapter {
                         "unknown chart_id for cancel_chart: {chart_id}"
                     )));
                 };
-                Ok(request_with_peek(build_chart_request(&chart, true)?))
+                request_with_peek(build_chart_message(&chart, true))
             }
             RuntimeCommand::Market(MarketCommand::SubscribeTradingStatus { symbols }) => {
                 extend_symbols(&mut self.trading_status_subscriptions, symbols);
-                Ok(request_with_peek(json!({
-                    "aid": "subscribe_trading_status",
-                    "ins_list": join_symbols(&self.trading_status_subscriptions),
-                })))
+                request_with_peek(DiffProtocolMessage::subscribe_trading_status(join_symbols(
+                    &self.trading_status_subscriptions,
+                )))
             }
             RuntimeCommand::Market(MarketCommand::UnsubscribeTradingStatus { symbols }) => {
                 remove_symbols(&mut self.trading_status_subscriptions, symbols);
-                Ok(request_with_peek(json!({
-                    "aid": "subscribe_trading_status",
-                    "ins_list": join_symbols(&self.trading_status_subscriptions),
-                })))
+                request_with_peek(DiffProtocolMessage::subscribe_trading_status(join_symbols(
+                    &self.trading_status_subscriptions,
+                )))
             }
             _ => Err(ContractError::UnsupportedCommand("market")),
         }
@@ -488,11 +485,15 @@ fn json_request(value: Value) -> OutboundRequest {
     OutboundRequest::Transport(OutboundFrame::Text(value.to_string()))
 }
 
-fn request_with_peek(value: Value) -> Vec<OutboundRequest> {
-    vec![
-        json_request(value),
-        json_request(json!({"aid": "peek_message"})),
-    ]
+fn diff_request(message: DiffProtocolMessage) -> Result<OutboundRequest> {
+    Ok(json_request(message.into_value()?))
+}
+
+fn request_with_peek(message: DiffProtocolMessage) -> Result<Vec<OutboundRequest>> {
+    Ok(vec![
+        diff_request(message)?,
+        diff_request(DiffProtocolMessage::peek_message())?,
+    ])
 }
 
 fn extend_symbols(target: &mut BTreeSet<String>, symbols: &[crate::ids::Symbol]) {
@@ -526,39 +527,35 @@ fn validate_chart_request(chart: &MarketChartCommand) -> Result<()> {
     Ok(())
 }
 
-fn build_chart_request(chart: &MarketChartCommand, cancel: bool) -> Result<Value> {
-    let mut request = Map::from_iter([
-        ("aid".to_string(), json!("set_chart")),
-        ("chart_id".to_string(), json!(chart.chart_id)),
-        (
-            "ins_list".to_string(),
-            json!(if cancel {
-                String::new()
-            } else {
-                chart
-                    .symbols
-                    .iter()
-                    .map(|symbol| symbol.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            }),
-        ),
-        ("duration".to_string(), json!(chart.duration_ns)),
-        ("view_width".to_string(), json!(chart.view_width)),
-    ]);
+fn build_chart_message(chart: &MarketChartCommand, cancel: bool) -> DiffProtocolMessage {
+    let ins_list = if cancel {
+        String::new()
+    } else {
+        chart
+            .symbols
+            .iter()
+            .map(|symbol| symbol.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
 
+    let mut request = DiffSetChartRequest::new(
+        chart.chart_id.clone(),
+        ins_list,
+        chart.duration_ns,
+        chart.view_width,
+    );
     if !cancel {
         if let Some(left_kline_id) = chart.left_kline_id {
-            request.insert("left_kline_id".to_string(), json!(left_kline_id));
+            request = request.with_left_kline_id(left_kline_id);
         } else if let (Some(focus_datetime_ns), Some(focus_position)) =
             (chart.focus_datetime_ns, chart.focus_position)
         {
-            request.insert("focus_datetime".to_string(), json!(focus_datetime_ns));
-            request.insert("focus_position".to_string(), json!(focus_position));
+            request = request.with_focus(focus_datetime_ns, focus_position);
         }
     }
 
-    Ok(Value::Object(request))
+    DiffProtocolMessage::set_chart(request)
 }
 
 fn insert_optional(map: &mut Map<String, Value>, key: &str, value: Option<String>) {
