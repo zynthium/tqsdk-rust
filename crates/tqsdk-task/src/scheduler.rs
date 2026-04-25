@@ -1,25 +1,38 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Days, FixedOffset, NaiveDate, NaiveTime, Utc};
 use tokio::sync::watch;
-use tqsdk_core::{Quote, TradingTime};
 
 use crate::Result;
-use crate::calendar::TradingDayCalendar;
 use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
 use crate::registry::TaskId;
 use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
     SharedTaskRegistry, SharedTradingCalendar, TaskStateCell,
 };
-use crate::target_pos::{
-    TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskTradeFill,
-};
+use crate::target_pos::{TargetPosTaskExecutionEvent, TargetPosTaskTradeFill};
+
+mod planner;
+mod runner;
+mod state;
+
+#[cfg(test)]
+use chrono::NaiveDate;
+#[cfg(test)]
+use planner::{china_tz, effective_step_elapsed, trading_time_elapsed_between};
+pub(crate) use runner::process_schedulers_wait_update;
+pub(crate) use state::TargetPosSchedulerStore;
+#[cfg(test)]
+use tqsdk_core::{Quote, TradingTime};
+
+#[cfg(test)]
+use crate::calendar::TradingDayCalendar;
+#[cfg(test)]
+use crate::target_pos::TargetPosBuilder;
+use state::TargetPosSchedulerState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetPosScheduleStep {
@@ -67,12 +80,6 @@ pub struct TargetPosStepOutcomeReport {
     pub target_reached: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActiveStepPhase {
-    Running,
-    Cancelling,
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetPosExecutionReport {
     pub applied_steps: Vec<TargetPosExecutionStep>,
@@ -114,11 +121,6 @@ pub struct TargetPosScheduler {
     inner: Arc<TargetPosSchedulerInner>,
 }
 
-#[derive(Default)]
-pub(crate) struct TargetPosSchedulerStore {
-    schedulers: HashMap<TaskId, Weak<TargetPosSchedulerInner>>,
-}
-
 struct TargetPosSchedulerInner {
     registry: SharedTaskRegistry,
     target_tasks: SharedTargetPosStore,
@@ -133,38 +135,6 @@ struct TargetPosSchedulerInner {
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ActiveStepClock {
-    last_accounted_at: DateTime<FixedOffset>,
-    active_elapsed: Duration,
-}
-
-struct TargetPosSchedulerState {
-    next_step_index: usize,
-    current_step_clock: Option<ActiveStepClock>,
-    current_step_phase: ActiveStepPhase,
-    active_task: Option<TargetPosTask>,
-    active_task_report_len: usize,
-    report: TargetPosExecutionReport,
-    events: Vec<TargetPosSchedulerExecutionEvent>,
-    last_error: Option<crate::TaskError>,
-}
-
-impl Default for TargetPosSchedulerState {
-    fn default() -> Self {
-        Self {
-            next_step_index: 0,
-            current_step_clock: None,
-            current_step_phase: ActiveStepPhase::Running,
-            active_task: None,
-            active_task_report_len: 0,
-            report: TargetPosExecutionReport::default(),
-            events: Vec::new(),
-            last_error: None,
-        }
-    }
 }
 
 impl TargetPosSchedulerBuilder {
@@ -328,518 +298,6 @@ impl TargetPosScheduler {
     }
 }
 
-impl TargetPosSchedulerStore {
-    fn register(&mut self, scheduler: Arc<TargetPosSchedulerInner>) {
-        self.schedulers
-            .insert(scheduler.task_id, Arc::downgrade(&scheduler));
-    }
-
-    fn live_schedulers(&mut self) -> Vec<Arc<TargetPosSchedulerInner>> {
-        self.schedulers.retain(|_, weak| weak.strong_count() > 0);
-        self.schedulers.values().filter_map(Weak::upgrade).collect()
-    }
-}
-
-impl TargetPosExecutionReport {
-    fn step_outcome_mut(&mut self, step_index: usize) -> &mut TargetPosStepOutcomeReport {
-        let step_outcome = self
-            .step_outcomes
-            .get_mut(step_index)
-            .expect("scheduler step outcome should be initialized before events are recorded");
-        debug_assert_eq!(step_outcome.step_index, step_index);
-        step_outcome
-    }
-
-    fn record_step_event(&mut self, step_index: usize, event: &TargetPosTaskExecutionEvent) {
-        match event {
-            TargetPosTaskExecutionEvent::InsertOrder { .. } => {
-                self.submitted_order_count += 1;
-                self.step_outcome_mut(step_index).submitted_order_count += 1;
-            }
-            TargetPosTaskExecutionEvent::CancelOrder { .. } => {
-                self.cancel_request_count += 1;
-                self.step_outcome_mut(step_index).cancel_request_count += 1;
-            }
-            TargetPosTaskExecutionEvent::OrderFinished { .. } => {
-                self.finished_order_count += 1;
-                self.step_outcome_mut(step_index).finished_order_count += 1;
-            }
-            TargetPosTaskExecutionEvent::Trade {
-                trade_id,
-                order_id,
-                direction,
-                offset,
-                volume,
-                price,
-                trade_date_time,
-            } => {
-                self.filled_volume += *volume;
-                self.filled_turnover += *price * *volume as f64;
-                let step_outcome = self.step_outcome_mut(step_index);
-                step_outcome.filled_volume += *volume;
-                step_outcome.filled_turnover += *price * *volume as f64;
-                step_outcome.trade_count += 1;
-                self.trades.push(TargetPosSchedulerTradeFill {
-                    step_index,
-                    trade: TargetPosTaskTradeFill {
-                        trade_id: trade_id.clone(),
-                        order_id: order_id.clone(),
-                        direction: direction.clone(),
-                        offset: offset.clone(),
-                        volume: *volume,
-                        price: *price,
-                        trade_date_time: *trade_date_time,
-                    },
-                });
-            }
-            TargetPosTaskExecutionEvent::TargetReached { .. } => {
-                self.step_outcome_mut(step_index).target_reached = true;
-            }
-        }
-    }
-}
-
-impl TargetPosSchedulerInner {
-    fn with_state<R>(&self, f: impl FnOnce(&TargetPosSchedulerState) -> R) -> R {
-        self.state.with(f)
-    }
-
-    fn with_state_mut<R>(&self, f: impl FnOnce(&mut TargetPosSchedulerState) -> R) -> R {
-        self.state.with_mut(f)
-    }
-
-    async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
-        if self.is_finished() {
-            return;
-        }
-
-        if self.cancel_requested.load(Ordering::SeqCst) {
-            if let Some(task) = self.active_task() {
-                if let Err(error) = task.cancel_pending_orders(api).await {
-                    self.finish_with_error(error);
-                    return;
-                }
-                if let Some(step_index) = self.current_step_index() {
-                    self.collect_active_task_events(step_index);
-                }
-                if task.has_live_orders(api) {
-                    return;
-                }
-                task.cancel_internal();
-            }
-            self.finish();
-            return;
-        }
-
-        loop {
-            let Some(step_index) = self.current_step_index() else {
-                self.finish();
-                return;
-            };
-            self.ensure_step_started(step_index);
-            if self.is_finished() {
-                return;
-            }
-
-            let step = self.steps[step_index].clone();
-            let phase = self.current_step_phase();
-            let is_last_step = step_index + 1 == self.steps.len();
-
-            if is_last_step {
-                if let Some(task) = self.active_task() {
-                    task.process_wait_update(api).await;
-                    self.collect_active_task_events(step_index);
-                    if let Some(error) = task_failure(&task) {
-                        self.finish_with_error(error);
-                        return;
-                    }
-                    if task.applied_target_volume() == Some(step.target_volume) {
-                        self.finish();
-                    }
-                } else if step.price_mode.is_none() {
-                    self.finish();
-                }
-                return;
-            }
-
-            if matches!(phase, ActiveStepPhase::Running)
-                && !self.step_deadline_elapsed(api, step_index)
-            {
-                if let Some(task) = self.active_task() {
-                    task.process_wait_update(api).await;
-                    self.collect_active_task_events(step_index);
-                    if let Some(error) = task_failure(&task) {
-                        self.finish_with_error(error);
-                    }
-                }
-                return;
-            }
-
-            self.mark_current_step_cancelling();
-
-            if let Some(task) = self.active_task() {
-                if let Err(error) = task.cancel_pending_orders(api).await {
-                    self.finish_with_error(error);
-                    return;
-                }
-                self.collect_active_task_events(step_index);
-                if task.has_live_orders(api) {
-                    return;
-                }
-                task.cancel_internal();
-            }
-
-            if !self.advance_step() {
-                return;
-            }
-        }
-    }
-
-    fn ensure_step_started(&self, step_index: usize) {
-        let step = self.steps[step_index].clone();
-        let started = self.with_state_mut(|state| {
-            if state.current_step_clock.is_some() {
-                return false;
-            }
-
-            state.current_step_clock = Some(ActiveStepClock {
-                last_accounted_at: shanghai_now(),
-                active_elapsed: Duration::ZERO,
-            });
-            state.current_step_phase = ActiveStepPhase::Running;
-            state.active_task_report_len = 0;
-            debug_assert_eq!(state.report.applied_steps.len(), step_index);
-            debug_assert_eq!(state.report.step_outcomes.len(), step_index);
-            state.report.applied_steps.push(TargetPosExecutionStep {
-                step_index,
-                target_volume: step.target_volume,
-            });
-            state.report.step_outcomes.push(TargetPosStepOutcomeReport {
-                step_index,
-                target_volume: step.target_volume,
-                ..TargetPosStepOutcomeReport::default()
-            });
-            true
-        });
-        if !started {
-            return;
-        }
-
-        let Some(price_mode) = step.price_mode else {
-            return;
-        };
-
-        match self.build_step_task(step.target_volume, price_mode) {
-            Ok(task) => {
-                self.with_state_mut(|state| {
-                    state.active_task = Some(task);
-                });
-            }
-            Err(error) => self.finish_with_error(error),
-        }
-    }
-
-    fn build_step_task(&self, target_volume: i64, price_mode: PriceMode) -> Result<TargetPosTask> {
-        let mut builder = TargetPosBuilder::new(
-            self.registry.clone(),
-            self.target_tasks.clone(),
-            self.quote_subscriptions.clone(),
-            self.account_id.clone(),
-            self.symbol.clone(),
-        )
-        .price_mode(price_mode)
-        .offset_priority(self.config.offset_priority);
-        if let Some(policy) = self.config.split_policy {
-            builder = builder.split_policy(policy);
-        }
-
-        let task = builder.build_internal()?;
-        task.set_target_volume(target_volume)?;
-        Ok(task)
-    }
-
-    fn current_step_index(&self) -> Option<usize> {
-        let next_step_index = self.with_state(|state| state.next_step_index);
-        (next_step_index < self.steps.len()).then_some(next_step_index)
-    }
-
-    fn active_task(&self) -> Option<TargetPosTask> {
-        self.with_state(|state| state.active_task.clone())
-    }
-
-    fn step_deadline_elapsed(&self, api: &tqsdk_wait::TqApi, step_index: usize) -> bool {
-        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
-        let now = shanghai_now();
-        let trading_calendar = self.trading_calendar.snapshot();
-        self.with_state_mut(|state| {
-            let Some(step_clock) = state.current_step_clock.as_mut() else {
-                return false;
-            };
-
-            let elapsed = effective_step_elapsed(
-                step_clock.last_accounted_at,
-                now,
-                quote.as_ref(),
-                Some(&trading_calendar),
-            );
-            step_clock.last_accounted_at = now;
-            step_clock.active_elapsed = step_clock.active_elapsed.saturating_add(elapsed);
-            step_clock.active_elapsed >= self.steps[step_index].interval
-        })
-    }
-
-    fn current_step_phase(&self) -> ActiveStepPhase {
-        self.with_state(|state| state.current_step_phase)
-    }
-
-    fn mark_current_step_cancelling(&self) {
-        self.with_state_mut(|state| {
-            state.current_step_phase = ActiveStepPhase::Cancelling;
-        });
-    }
-
-    fn advance_step(&self) -> bool {
-        let should_finish = self.with_state_mut(|state| {
-            state.active_task = None;
-            state.active_task_report_len = 0;
-            state.current_step_clock = None;
-            state.current_step_phase = ActiveStepPhase::Running;
-            state.next_step_index += 1;
-            state.next_step_index >= self.steps.len()
-        });
-        if should_finish {
-            self.finish();
-            return false;
-        }
-        true
-    }
-
-    fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::SeqCst)
-    }
-
-    fn cancel_active_task(&self) {
-        let task = self.with_state_mut(|state| {
-            let task = state.active_task.take();
-            state.active_task_report_len = 0;
-            state.current_step_clock = None;
-            task
-        });
-        if let Some(task) = task {
-            task.cancel_internal();
-        }
-    }
-
-    fn collect_active_task_events(&self, step_index: usize) {
-        let Some((task, report_len)) = self.with_state(|state| {
-            state
-                .active_task
-                .clone()
-                .map(|task| (task, state.active_task_report_len))
-        }) else {
-            return;
-        };
-        let (next_report_len, new_events) = task.execution_events_since(report_len);
-        if new_events.is_empty() {
-            return;
-        }
-
-        self.with_state_mut(|state| {
-            for event in new_events {
-                state.report.record_step_event(step_index, &event);
-                state
-                    .events
-                    .push(TargetPosSchedulerExecutionEvent { step_index, event });
-            }
-            state.active_task_report_len = next_report_len;
-        });
-    }
-
-    fn finish(&self) {
-        self.cancel_active_task();
-        if self.finished.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        self.finished_tx.send_replace(true);
-        self.registry
-            .with_mut(|registry| registry.unregister_task(self.task_id));
-    }
-
-    fn finish_with_error(&self, error: crate::TaskError) {
-        self.with_state_mut(|state| {
-            state.last_error = Some(error);
-        });
-        self.finish();
-    }
-
-    fn failure_result(&self) -> Result<()> {
-        if let Some(error) = self.with_state(|state| state.last_error.clone()) {
-            return Err(error);
-        }
-        Ok(())
-    }
-}
-
-fn task_failure(task: &TargetPosTask) -> Option<crate::TaskError> {
-    task.is_finished().then(|| task.last_error()).flatten()
-}
-
-fn shanghai_now() -> DateTime<FixedOffset> {
-    Utc::now().with_timezone(&china_tz())
-}
-
-fn china_tz() -> FixedOffset {
-    FixedOffset::east_opt(8 * 60 * 60).expect("UTC+8 fixed offset should be valid")
-}
-
-fn effective_step_elapsed(
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
-    quote: Option<&Quote>,
-    calendar: Option<&TradingDayCalendar>,
-) -> Duration {
-    quote
-        .and_then(|quote| trading_time_elapsed_between(start, end, &quote.trading_time, calendar))
-        .unwrap_or_else(|| wall_elapsed(start, end))
-}
-
-fn trading_time_elapsed_between(
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
-    trading_time: &TradingTime,
-    calendar: Option<&TradingDayCalendar>,
-) -> Option<Duration> {
-    if end <= start {
-        return Some(Duration::ZERO);
-    }
-
-    let min_date = start
-        .date_naive()
-        .checked_sub_days(Days::new(1))
-        .unwrap_or(start.date_naive());
-    let max_date = end.date_naive();
-    let mut date = min_date;
-    let mut total = Duration::ZERO;
-    let mut saw_valid_window = has_valid_trading_window(trading_time);
-
-    while date <= max_date {
-        let next_date = date.checked_add_days(Days::new(1))?;
-        let day_open = is_trading_day(date, calendar);
-        let next_day_open = is_trading_day(next_date, calendar);
-        let night_open = day_open && next_day_open;
-
-        if day_open {
-            let (elapsed, saw_valid) =
-                trading_windows_overlap(start, end, date, &trading_time.day, false);
-            total = total.saturating_add(elapsed);
-            saw_valid_window |= saw_valid;
-        }
-        if night_open {
-            let (elapsed, saw_valid) =
-                trading_windows_overlap(start, end, date, &trading_time.night, true);
-            total = total.saturating_add(elapsed);
-            saw_valid_window |= saw_valid;
-        }
-
-        date = next_date;
-    }
-
-    saw_valid_window.then_some(total)
-}
-
-fn has_valid_trading_window(trading_time: &TradingTime) -> bool {
-    trading_time
-        .day
-        .iter()
-        .any(|window| parse_trading_window(window, false).is_some())
-        || trading_time
-            .night
-            .iter()
-            .any(|window| parse_trading_window(window, true).is_some())
-}
-
-fn trading_windows_overlap(
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
-    date: NaiveDate,
-    windows: &[Vec<String>],
-    allow_cross_midnight: bool,
-) -> (Duration, bool) {
-    let mut total = Duration::ZERO;
-    let mut saw_valid_window = false;
-
-    for window in windows {
-        let Some((window_start, window_end, crosses_midnight)) =
-            parse_trading_window(window, allow_cross_midnight)
-        else {
-            continue;
-        };
-        saw_valid_window = true;
-
-        let interval_start = date
-            .and_time(window_start)
-            .and_local_timezone(china_tz())
-            .single();
-        let interval_end_date = if crosses_midnight {
-            date.checked_add_days(Days::new(1))
-        } else {
-            Some(date)
-        };
-        let interval_end = interval_end_date.and_then(|interval_end_date| {
-            interval_end_date
-                .and_time(window_end)
-                .and_local_timezone(china_tz())
-                .single()
-        });
-
-        let (Some(interval_start), Some(interval_end)) = (interval_start, interval_end) else {
-            continue;
-        };
-        if interval_end <= interval_start {
-            continue;
-        }
-
-        let overlap_start = start.max(interval_start);
-        let overlap_end = end.min(interval_end);
-        total = total.saturating_add(wall_elapsed(overlap_start, overlap_end));
-    }
-
-    (total, saw_valid_window)
-}
-
-fn parse_trading_window(
-    window: &[String],
-    allow_cross_midnight: bool,
-) -> Option<(NaiveTime, NaiveTime, bool)> {
-    let start = NaiveTime::parse_from_str(window.first()?, "%H:%M:%S").ok()?;
-    let end = NaiveTime::parse_from_str(window.get(1)?, "%H:%M:%S").ok()?;
-    if start == end {
-        return None;
-    }
-    let crosses_midnight = allow_cross_midnight && end < start;
-    if !crosses_midnight && end <= start {
-        return None;
-    }
-    Some((start, end, crosses_midnight))
-}
-
-fn wall_elapsed(start: DateTime<FixedOffset>, end: DateTime<FixedOffset>) -> Duration {
-    end.signed_duration_since(start)
-        .to_std()
-        .unwrap_or(Duration::ZERO)
-}
-
-fn is_weekday(date: NaiveDate) -> bool {
-    date.weekday().number_from_monday() <= 5
-}
-
-fn is_trading_day(date: NaiveDate, calendar: Option<&TradingDayCalendar>) -> bool {
-    calendar
-        .and_then(|calendar| calendar.day_status(date))
-        .unwrap_or_else(|| is_weekday(date))
-}
-
 impl Drop for TargetPosSchedulerInner {
     fn drop(&mut self) {
         let active_task = self.state.get_mut().active_task.take();
@@ -854,16 +312,6 @@ impl Drop for TargetPosSchedulerInner {
         self.finished_tx.send_replace(true);
         self.registry
             .with_mut(|registry| registry.unregister_task(self.task_id));
-    }
-}
-
-pub(crate) async fn process_schedulers_wait_update(
-    store: &SharedTargetPosSchedulerStore,
-    api: &mut tqsdk_wait::TqApi,
-) {
-    let schedulers = store.with_mut(TargetPosSchedulerStore::live_schedulers);
-    for scheduler in schedulers {
-        scheduler.process_wait_update(api).await;
     }
 }
 
