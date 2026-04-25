@@ -204,6 +204,100 @@ impl SessionClientBuilder {
     }
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tqsdk_impl_session_builder_forwarders {
+    () => {
+        #[must_use]
+        pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
+            Self::from_session_builder($crate::SessionClientBuilder::new(auth_user, auth_pass))
+        }
+
+        #[must_use]
+        pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
+            self.inner = self.inner.market_target(stock, backtest);
+            self
+        }
+
+        #[must_use]
+        pub fn stock_market(mut self) -> Self {
+            self.inner = self.inner.stock_market();
+            self
+        }
+
+        #[must_use]
+        pub fn futures_market(mut self) -> Self {
+            self.inner = self.inner.futures_market();
+            self
+        }
+
+        #[must_use]
+        pub fn stock_backtest_market(mut self) -> Self {
+            self.inner = self.inner.stock_backtest_market();
+            self
+        }
+
+        #[must_use]
+        pub fn futures_backtest_market(mut self) -> Self {
+            self.inner = self.inner.futures_backtest_market();
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target(
+            mut self,
+            broker_id: impl Into<String>,
+            account_id: impl Into<String>,
+        ) -> Self {
+            self.inner = self.inner.trade_target(broker_id, account_id);
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target_tqkq(mut self) -> Self {
+            self.inner = self.inner.trade_target_tqkq();
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target_tqkq_numbered(mut self, number: u8) -> Self {
+            self.inner = self.inner.trade_target_tqkq_numbered(number);
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target_tqkq_stock(mut self) -> Self {
+            self.inner = self.inner.trade_target_tqkq_stock();
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target_tqkq_stock_numbered(mut self, number: u8) -> Self {
+            self.inner = self.inner.trade_target_tqkq_stock_numbered(number);
+            self
+        }
+
+        #[must_use]
+        pub fn trade_target_with_url(
+            mut self,
+            broker_id: impl Into<String>,
+            account_id: impl Into<String>,
+            trade_url: impl Into<String>,
+        ) -> Self {
+            self.inner = self
+                .inner
+                .trade_target_with_url(broker_id, account_id, trade_url);
+            self
+        }
+
+        #[must_use]
+        pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
+            self.inner = self.inner.replay_url(replay_url);
+            self
+        }
+    };
+}
+
 fn session_config(
     endpoints: EndpointConfig,
     query_enabled: bool,
