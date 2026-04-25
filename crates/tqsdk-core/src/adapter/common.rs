@@ -7,8 +7,8 @@ use crate::{
         TradeLoginCommand, TradePreInsertOrderCommand,
     },
     diff_protocol::{
-        DiffLoginRequest, DiffOrderRequest, DiffPreInsertOrderRequest, DiffProtocolMessage,
-        DiffSetChartRequest,
+        DiffInboundAid, DiffLoginRequest, DiffOrderRequest, DiffPreInsertOrderRequest,
+        DiffProtocolMessage, DiffSetChartRequest,
     },
     error::{ContractError, Result},
     events::{
@@ -249,7 +249,7 @@ pub(super) fn is_trade_io_event(event: &IoEvent) -> bool {
 pub(super) fn decode_trade_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
     match &event.payload {
         InputPayload::Json(value) => {
-            if value.get("aid").and_then(Value::as_str) == Some("qry_settlement_info") {
+            if DiffInboundAid::from_value(value) == DiffInboundAid::QrySettlementInfo {
                 return decode_trade_settlement_query_reply(value);
             }
             decode_json_envelope(value, MutationSource::TradeReply, vec![])
@@ -314,7 +314,7 @@ fn split_symbol(symbol: &str) -> Result<(&str, &str)> {
 }
 
 fn value_contains_market_payload(value: &Value) -> bool {
-    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
         && let Some(data) = value.get("data").and_then(Value::as_array)
     {
         return data.iter().any(value_contains_market_payload);
@@ -328,11 +328,11 @@ fn value_contains_market_payload(value: &Value) -> bool {
 }
 
 fn value_contains_trade_payload(value: &Value) -> bool {
-    if value.get("aid").and_then(Value::as_str) == Some("qry_settlement_info") {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::QrySettlementInfo {
         return true;
     }
 
-    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
         && let Some(data) = value.get("data").and_then(Value::as_array)
     {
         return data.iter().any(value_contains_trade_payload);
@@ -348,13 +348,14 @@ fn value_contains_query_payload(value: &Value) -> bool {
         return true;
     }
 
-    value
-        .get("aid")
-        .and_then(Value::as_str)
-        .filter(|aid| *aid == "rtn_data")
-        .and_then(|_| value.get("data"))
-        .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(value_contains_query_payload))
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        return value
+            .get("data")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(value_contains_query_payload));
+    }
+
+    false
 }
 
 fn decode_json_envelope(
@@ -362,7 +363,7 @@ fn decode_json_envelope(
     source: MutationSource,
     prefix: Vec<String>,
 ) -> Result<Vec<NormalizedMutation>> {
-    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
         && let Some(data) = value.get("data").and_then(Value::as_array)
     {
         let mut mutations = Vec::new();
@@ -376,7 +377,7 @@ fn decode_json_envelope(
 }
 
 fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
-    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
         && let Some(data) = value.get("data").and_then(Value::as_array)
     {
         let mut mutations = Vec::new();
