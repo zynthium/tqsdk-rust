@@ -15,6 +15,7 @@ mod domain_event;
 pub mod error;
 pub mod events;
 pub mod ids;
+pub mod order_lifecycle;
 pub mod runtime;
 pub mod session_runtime;
 pub mod state;
@@ -45,6 +46,7 @@ pub use ids::{
     AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain,
     QueryId, ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
 };
+pub use order_lifecycle::OrderLifecycle;
 pub use runtime::{
     CommitLog, CommitReadGuard, CursorLagged, OutboundEnvelope, Runtime, RuntimeHandle,
     RuntimeReader, SnapshotReadGuard,

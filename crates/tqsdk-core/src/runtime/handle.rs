@@ -3,14 +3,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     adapter::AdapterRegistry,
     commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
     error::{ContractError, Result},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
-    ids::{AccountId, CommandId, ProtocolDomain, Revision},
+    ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision},
+    order_lifecycle::OrderLifecycle,
     state::{
         CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, StateStore, UpdateCursor,
     },
@@ -380,6 +381,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
+        let mutations = normalize_order_lifecycle_mutations(&self.state, mutations)?;
         validate_mutation_domains(&mutations)?;
         let commit = CommitEngine::apply(
             &self.state,
@@ -562,6 +564,118 @@ fn validate_command_status_transition(
             next.as_str()
         )))
     }
+}
+
+fn normalize_order_lifecycle_mutations(
+    state: &StateStore,
+    mutations: Vec<NormalizedMutation>,
+) -> Result<Vec<NormalizedMutation>> {
+    if !mutations.iter().any(is_trade_order_mutation) {
+        return Ok(mutations);
+    }
+
+    let snapshot = state.snapshot();
+    let read = snapshot.read();
+    let mut normalized = Vec::with_capacity(mutations.len());
+
+    for mut mutation in mutations {
+        let Some((account_id, order_id)) = trade_order_key(&mutation) else {
+            normalized.push(mutation);
+            continue;
+        };
+
+        let segments = mutation
+            .path
+            .segments()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let current_order = read
+            .get_path(&segments)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        let mut next_order = current_order.clone();
+        apply_order_fields_to_value(&mut next_order, &mutation.fields);
+
+        let current_lifecycle = OrderLifecycle::infer_from_order_value(&current_order);
+        let next_lifecycle = infer_order_lifecycle_after_mutation(&next_order);
+        if let Some(next_lifecycle) = next_lifecycle {
+            if let Some(current_lifecycle) = current_lifecycle
+                && !current_lifecycle.can_transition_to(next_lifecycle)
+            {
+                return Err(ContractError::validation(format!(
+                    "invalid order lifecycle transition for order {}/{}: {} -> {}",
+                    account_id.as_str(),
+                    order_id.as_str(),
+                    current_lifecycle.as_str(),
+                    next_lifecycle.as_str()
+                )));
+            }
+
+            upsert_order_lifecycle_field(&mut mutation.fields, next_lifecycle);
+        }
+
+        normalized.push(mutation);
+    }
+
+    Ok(normalized)
+}
+
+fn is_trade_order_mutation(mutation: &NormalizedMutation) -> bool {
+    trade_order_key(mutation).is_some()
+}
+
+fn trade_order_key(mutation: &NormalizedMutation) -> Option<(&AccountId, &OrderId)> {
+    if mutation.source != MutationSource::TradeReply {
+        return None;
+    }
+
+    match mutation.object.as_ref()? {
+        ObjectKey::Order {
+            account_id,
+            order_id,
+        } => Some((account_id, order_id)),
+        _ => None,
+    }
+}
+
+fn apply_order_fields_to_value(order: &mut Value, fields: &[FieldMutation]) {
+    if !order.is_object() {
+        *order = Value::Object(Map::new());
+    }
+
+    let Some(map) = order.as_object_mut() else {
+        return;
+    };
+
+    for field in fields {
+        if field.value.is_null() {
+            map.remove(&field.field);
+        } else {
+            map.insert(field.field.clone(), field.value.clone());
+        }
+    }
+}
+
+fn infer_order_lifecycle_after_mutation(order: &Value) -> Option<OrderLifecycle> {
+    let mut inferred_order = order.clone();
+    if let Some(map) = inferred_order.as_object_mut() {
+        map.remove("lifecycle");
+    }
+    OrderLifecycle::infer_from_order_value(&inferred_order)
+}
+
+fn upsert_order_lifecycle_field(fields: &mut Vec<FieldMutation>, lifecycle: OrderLifecycle) {
+    let value = json!(lifecycle.as_str());
+    if let Some(field) = fields.iter_mut().find(|field| field.field == "lifecycle") {
+        field.value = value;
+    } else {
+        fields.push(FieldMutation {
+            field: "lifecycle".to_string(),
+            value,
+        });
+    }
+    sort_field_mutations(fields);
 }
 
 fn validate_mutation_domains(mutations: &[NormalizedMutation]) -> Result<()> {

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::order_lifecycle::OrderLifecycle;
+
 use super::helpers::{default_currency, default_nan, deserialize_f64_or_nan};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,6 +139,7 @@ pub struct SecurityOrder {
     pub frozen_fee: f64,
     pub insert_date_time: i64,
     pub status: String,
+    pub lifecycle: OrderLifecycle,
     pub last_msg: String,
     #[serde(default, rename = "_epoch", skip_serializing_if = "Option::is_none")]
     pub epoch: Option<i64>,

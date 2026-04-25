@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::order_lifecycle::OrderLifecycle;
+
 use super::helpers::{default_currency, default_nan, deserialize_f64_or_nan};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -158,6 +160,7 @@ pub struct Order {
     pub insert_date_time: i64,
     pub last_msg: String,
     pub status: String,
+    pub lifecycle: OrderLifecycle,
     pub is_dead: Option<bool>,
     pub is_online: Option<bool>,
     pub is_error: Option<bool>,
