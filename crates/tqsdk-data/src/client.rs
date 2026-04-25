@@ -846,6 +846,7 @@ struct TickDataSeriesSpec {
 #[derive(Clone)]
 pub struct DataClient {
     session: Option<tqsdk_session::SessionClient>,
+    #[cfg(feature = "services")]
     http: reqwest::Client,
     endpoints: DataServiceEndpoints,
 }
@@ -861,6 +862,7 @@ impl DataClient {
     pub fn new() -> Self {
         Self {
             session: None,
+            #[cfg(feature = "services")]
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints::default(),
         }
@@ -885,6 +887,7 @@ impl DataClient {
     ) -> Self {
         Self {
             session: None,
+            #[cfg(feature = "services")]
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints {
                 holiday_url: holiday_url.into(),
@@ -1433,9 +1436,17 @@ impl DataClient {
         Ok(updates)
     }
 
+    #[cfg(feature = "services")]
     async fn fetch_json(&self, url: &str) -> Result<Value> {
         let response = self.http.get(url).send().await?.error_for_status()?;
         Ok(response.json::<Value>().await?)
+    }
+
+    #[cfg(not(feature = "services"))]
+    async fn fetch_json(&self, _url: &str) -> Result<Value> {
+        Err(DataError::InvalidState(
+            "tqsdk-data services feature is disabled",
+        ))
     }
 }
 
@@ -1782,7 +1793,9 @@ fn parse_compact_date_str(value: &str) -> Result<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    #[cfg(feature = "services")]
     use std::io::{Read, Write};
+    #[cfg(feature = "services")]
     use std::net::TcpListener;
 
     use serde_json::json;
@@ -1794,6 +1807,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "services")]
     #[test]
     fn query_his_cont_quotes_returns_last_n_trading_days_with_fill_forward() {
         run_on_tokio(async {
@@ -2867,12 +2881,14 @@ mod tests {
             .expect("seed auth features should produce a commit");
     }
 
+    #[cfg(feature = "services")]
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         let mut buffer = [0_u8; 4096];
         let size = stream.read(&mut buffer).unwrap();
         String::from_utf8_lossy(&buffer[..size]).into_owned()
     }
 
+    #[cfg(feature = "services")]
     fn write_http_ok(stream: &mut std::net::TcpStream, body: &str) {
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
