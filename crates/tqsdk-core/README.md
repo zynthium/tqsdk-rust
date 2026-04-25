@@ -71,6 +71,13 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
 
+> [!NOTE]
+> `tqsdk_core::internal` 是 `#[doc(hidden)]` 的 sibling-crate 桥接层，用于
+> `tqsdk-session` 吸收 runtime assembly 细节期间复用底层构件。它不是稳定的
+> 用户可见契约。外部用户应优先使用 crate root 导出的 `RuntimeHandle`、
+> `RuntimeReader`、`UpdateCursor`、protocol commands、schema types，以及
+> transport / session contracts。
+
 ## 契约模型
 
 ```text

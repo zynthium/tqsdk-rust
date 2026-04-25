@@ -70,6 +70,7 @@ tqsdk-task
 - 不要恢复 `ContractFuture` public alias；trait async 边界使用 AFIT/RPITIT，boxing 只允许在显式 dyn erased boundary。
 - 不要从 `tqsdk-core` 重新导出 `TqAuthProvider`、`PasswordCredentials`、`BrokerInfo`、`TqKqAccountConfig`、`ReqwestHttpExecutor`。
 - 不要让 core 重新依赖 `reqwest` 或 `base64`。
+- 不要在 `tqsdk_core::internal` 下新增面向用户的 API；它只是 session 吸收 runtime assembly 细节期间供 sibling crates 使用的临时桥接层，不能演变成第二套 public surface。
 
 ### `tqsdk-session`
 
