@@ -15,6 +15,26 @@ use tqsdk_task::{
 };
 use tqsdk_wait::TqApi;
 
+#[test]
+fn target_pos_task_inner_uses_single_runtime_state_mutex() {
+    let source = include_str!("../src/target_pos.rs");
+    let inner = source
+        .split("struct TargetPosTaskInner {")
+        .nth(1)
+        .and_then(|tail| tail.split("impl TargetPosBuilder").next())
+        .expect("TargetPosTaskInner source block should be present");
+
+    let direct_mutex_fields = inner
+        .lines()
+        .filter(|line| line.trim_start().contains(": Mutex<"))
+        .count();
+
+    assert_eq!(
+        direct_mutex_fields, 1,
+        "TargetPosTaskInner should keep mutable task runtime state behind one Mutex"
+    );
+}
+
 fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
