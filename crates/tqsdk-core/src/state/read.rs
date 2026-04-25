@@ -86,7 +86,7 @@ impl<'a> StateReadView<'a> {
     }
 }
 
-fn get_at_path<I, S>(data: &Value, path: I) -> Option<&Value>
+pub(crate) fn get_at_path<I, S>(data: &Value, path: I) -> Option<&Value>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -99,7 +99,7 @@ where
     Some(cursor)
 }
 
-fn decode_value_at_path<T, S>(value: &Value, path: &[S]) -> Result<T>
+pub(crate) fn decode_value_at_path<T, S>(value: &Value, path: &[S]) -> Result<T>
 where
     T: DeserializeOwned,
     S: AsRef<str>,

@@ -6,7 +6,10 @@ use serde_json::Value;
 use crate::{
     Result,
     ids::Revision,
-    state::{CommitResult, StateReadView, StateSnapshot, UpdateCursor},
+    state::{
+        CommitResult, MarketStateReadGuard, StateReadView, StateSnapshot, TradeStateReadGuard,
+        UpdateCursor,
+    },
 };
 
 use super::SharedState;
@@ -182,6 +185,16 @@ impl RuntimeReader {
             snapshot: self.state.snapshot(),
             _marker: PhantomData,
         }
+    }
+
+    /// Borrows only market state partitions needed by typed market readers.
+    pub fn read_market_state(&self) -> MarketStateReadGuard<'_> {
+        self.state.read_market_state()
+    }
+
+    /// Borrows only the trade state partition needed by typed trade readers.
+    pub fn read_trade_state(&self) -> TradeStateReadGuard<'_> {
+        self.state.read_trade_state()
     }
 
     /// Returns the next retained commit for the provided cursor, if available.

@@ -107,6 +107,97 @@ fn state_snapshot_exposes_typed_market_and_trade_root_views() {
     );
 }
 
+#[test]
+fn runtime_reader_exposes_partition_scoped_domain_state_reads() {
+    let symbol = Symbol::new("SHFE.au2602");
+    let account_id = AccountId::new("simnow");
+    let order_id = OrderId::new("order-1");
+
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(DomainStateAdapter {
+        decoded: vec![
+            quote_mutation(symbol.clone(), 619.5),
+            trading_status_mutation(symbol.clone(), "CONTINOUS"),
+            account_mutation(account_id.clone(), 2000.0),
+            position_mutation(account_id.clone(), symbol.clone(), 3),
+            order_mutation(
+                account_id.clone(),
+                order_id.clone(),
+                symbol.clone(),
+                "ALIVE",
+            ),
+        ],
+    });
+
+    let handle = RuntimeHandle::with_adapters(registry);
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "domain-state".to_string(),
+                domains: vec![ProtocolDomain::Market, ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({})),
+            }),
+            Vec::new(),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("domain state mutations should publish a commit");
+
+    let reader = handle.reader();
+    let market = reader.read_market_state();
+    let trade = reader.read_trade_state();
+
+    assert_eq!(market.revision(), handle.latest_snapshot().revision());
+    assert_eq!(trade.revision(), handle.latest_snapshot().revision());
+    assert_eq!(market.quote(&symbol).unwrap().unwrap().last_price, 619.5);
+    assert_eq!(
+        market
+            .trading_status(&symbol)
+            .unwrap()
+            .unwrap()
+            .trade_status,
+        "CONTINOUS"
+    );
+    assert_eq!(trade.account(&account_id).unwrap().unwrap().balance, 2000.0);
+    assert_eq!(
+        trade
+            .position(&account_id, &symbol)
+            .unwrap()
+            .unwrap()
+            .pos_long,
+        3
+    );
+    assert_eq!(
+        trade.order(&account_id, &order_id).unwrap().unwrap().status,
+        "ALIVE"
+    );
+}
+
+#[test]
+fn runtime_reader_domain_state_reads_do_not_materialize_full_snapshot() {
+    let source = include_str!("../src/runtime/reader.rs");
+
+    let market_block = source
+        .split("pub fn read_market_state")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn read_trade_state").next())
+        .expect("RuntimeReader::read_market_state should exist");
+    assert!(
+        !market_block.contains("snapshot()"),
+        "market domain reads should borrow state partitions directly"
+    );
+
+    let trade_block = source
+        .split("pub fn read_trade_state")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn next(").next())
+        .expect("RuntimeReader::read_trade_state should exist");
+    assert!(
+        !trade_block.contains("snapshot()"),
+        "trade domain reads should borrow state partitions directly"
+    );
+}
+
 fn quote_mutation(symbol: Symbol, last_price: f64) -> NormalizedMutation {
     NormalizedMutation {
         path: StatePath::new(["quotes", symbol.as_str()]),
