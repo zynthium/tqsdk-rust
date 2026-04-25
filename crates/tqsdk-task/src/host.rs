@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "services")]
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
@@ -79,6 +80,7 @@ impl TaskHost {
             .try_extend_days(days)
     }
 
+    #[cfg(feature = "services")]
     pub async fn refresh_trading_calendar(
         &mut self,
         start_dt: NaiveDate,

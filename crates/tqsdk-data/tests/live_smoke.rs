@@ -1,3 +1,5 @@
+#![cfg(feature = "live")]
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;

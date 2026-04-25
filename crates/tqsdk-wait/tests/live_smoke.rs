@@ -1,3 +1,5 @@
+#![cfg(feature = "live")]
+
 use std::time::Duration;
 
 use tqsdk_session::SessionClientBuilder;

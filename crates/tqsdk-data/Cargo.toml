@@ -7,14 +7,47 @@ description = "Research and offline data tooling for tqsdk-rust"
 documentation = "https://docs.rs/tqsdk-data"
 readme = "README.md"
 
+[features]
+default = ["live", "services"]
+live = ["tqsdk-session/live"]
+services = ["tqsdk-session/services"]
+
 [dependencies]
 chrono.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
-tqsdk-session = { path = "../tqsdk-session" }
+tqsdk-session = { path = "../tqsdk-session", default-features = false }
 tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
+
+[[example]]
+name = "kline_data_download"
+required-features = ["live"]
+
+[[example]]
+name = "kline_data_page"
+required-features = ["live"]
+
+[[example]]
+name = "kline_data_series"
+required-features = ["live"]
+
+[[example]]
+name = "kline_export_csv"
+required-features = ["live"]
+
+[[example]]
+name = "option_greeks"
+required-features = ["live"]
+
+[[example]]
+name = "tick_data_download"
+required-features = ["live"]
+
+[[example]]
+name = "tick_export_csv"
+required-features = ["live"]

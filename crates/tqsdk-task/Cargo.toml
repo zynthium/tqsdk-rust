@@ -7,10 +7,23 @@ description = "Task and execution tooling built on tqsdk-wait"
 documentation = "https://docs.rs/tqsdk-task"
 readme = "README.md"
 
+[features]
+default = ["live", "services"]
+live = ["tqsdk-session/live", "tqsdk-wait/live"]
+services = ["tqsdk-session/services", "tqsdk-wait/services"]
+
 [dependencies]
 chrono.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
-tqsdk-session = { path = "../tqsdk-session" }
-tqsdk-wait = { path = "../tqsdk-wait" }
+tqsdk-session = { path = "../tqsdk-session", default-features = false }
+tqsdk-wait = { path = "../tqsdk-wait", default-features = false }
+
+[[example]]
+name = "target_pos"
+required-features = ["live"]
+
+[[example]]
+name = "target_pos_scheduler"
+required-features = ["live"]
