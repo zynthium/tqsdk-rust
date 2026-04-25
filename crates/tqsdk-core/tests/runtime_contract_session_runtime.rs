@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -5,16 +7,19 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractError, ContractFuture,
-    EndpointConfig, ProtocolDomain, RawFrame, Runtime, RuntimeHandle, SessionBootstrap,
-    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, Transport,
+    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractError, DynTransport,
+    EndpointConfig, ProtocolDomain, RawFrame, Result as CoreResult, Runtime, RuntimeHandle,
+    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
+    SessionRouteEndpoint, SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver,
+    StatePath, Transport,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 struct TestAuthProvider;
 
 impl AuthProvider for TestAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async {
             Ok(AuthContext::new("test-token")
                 .with_auth_id(AuthId::new("auth-1"))
@@ -26,7 +31,7 @@ impl AuthProvider for TestAuthProvider {
 struct FailingAuthProvider;
 
 impl AuthProvider for FailingAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async { Err(ContractError::auth("token expired")) })
     }
 }
@@ -39,7 +44,7 @@ impl SessionTopologyResolver for TestTopologyResolver {
         auth: &'a AuthContext,
         _config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> BoxFuture<'a, SessionTopology> {
         Box::pin(async move {
             assert_eq!(auth.auth_id().map(AuthId::as_str), Some("auth-1"));
             assert_eq!(
@@ -63,20 +68,23 @@ impl SessionTopologyResolver for TestTopologyResolver {
 struct TestTransport;
 
 impl Transport for TestTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
-        Box::pin(async { Ok(RawFrame::Pong) })
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
+        async { Ok(RawFrame::Pong) }
     }
 
-    fn send(&mut self, _frame: tqsdk_core::OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn send(
+        &mut self,
+        _frame: tqsdk_core::OutboundFrame,
+    ) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -89,12 +97,12 @@ impl SessionRouteConnector for TestRouteConnector {
     fn connect_route<'a>(
         &'a self,
         route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let connected_labels = Arc::clone(&self.connected_labels);
         let label = route.label.clone();
         Box::pin(async move {
             connected_labels.lock().unwrap().push(label);
-            Ok(Box::new(TestTransport) as Box<dyn Transport>)
+            Ok(Box::new(TestTransport) as Box<dyn DynTransport>)
         })
     }
 }
@@ -105,7 +113,7 @@ impl SessionRouteConnector for FailingRouteConnector {
     fn connect_route<'a>(
         &'a self,
         _route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         Box::pin(async { Err(ContractError::auth("route connect refused")) })
     }
 }

@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures::SinkExt;
@@ -7,7 +9,7 @@ use yawc::frame::{Frame, OpCode};
 use yawc::{HttpRequestBuilder, Options, TcpWebSocket, WebSocket};
 
 use crate::adapter::AdapterRegistry;
-use crate::auth::{AuthContext, AuthProvider, ContractFuture};
+use crate::auth::{AuthContext, DynAuthProvider};
 use crate::commands::{OutboundDispatch, OutboundFrame, OutboundRequest};
 use crate::events::{InputPayload, InternalEvent, IoEvent, RuntimeInput};
 use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
@@ -52,10 +54,45 @@ impl WebSocketConnectOptions {
 
 /// Minimal async transport abstraction used by connected session routes.
 pub trait Transport: Send {
-    fn connect(&mut self) -> ContractFuture<'_, ()>;
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame>;
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()>;
-    fn close(&mut self) -> ContractFuture<'_, ()>;
+    fn connect(&mut self) -> impl Future<Output = Result<()>> + Send + '_;
+    fn recv(&mut self) -> impl Future<Output = Result<RawFrame>> + Send + '_;
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = Result<()>> + Send + '_;
+    fn close(&mut self) -> impl Future<Output = Result<()>> + Send + '_;
+}
+
+#[doc(hidden)]
+pub trait DynTransport: Send {
+    fn connect_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn recv_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<RawFrame>> + Send + '_>>;
+    fn send_boxed(
+        &mut self,
+        frame: OutboundFrame,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn close_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+}
+
+impl<T> DynTransport for T
+where
+    T: Transport,
+{
+    fn connect_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(self.connect())
+    }
+
+    fn recv_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<RawFrame>> + Send + '_>> {
+        Box::pin(self.recv())
+    }
+
+    fn send_boxed(
+        &mut self,
+        frame: OutboundFrame,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(self.send(frame))
+    }
+
+    fn close_boxed(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(self.close())
+    }
 }
 
 /// Thin websocket transport built on `yawc`.
@@ -185,20 +222,20 @@ impl WebSocketTransport {
 }
 
 impl Transport for WebSocketTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.connect_async().await })
+    async fn connect(&mut self) -> Result<()> {
+        self.connect_async().await
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
-        Box::pin(async move { self.recv_async().await })
+    async fn recv(&mut self) -> Result<RawFrame> {
+        self.recv_async().await
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.send_async(frame).await })
+    async fn send(&mut self, frame: OutboundFrame) -> Result<()> {
+        self.send_async(frame).await
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async move { self.close_async().await })
+    async fn close(&mut self) -> Result<()> {
+        self.close_async().await
     }
 }
 
@@ -594,12 +631,12 @@ pub trait SessionTopologyResolver: Send + Sync {
         auth: &'a AuthContext,
         config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology>;
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTopology>> + Send + 'a>>;
 }
 
 pub struct ConnectedSessionRoute {
     pub route: SessionRoute,
-    pub transport: Box<dyn Transport>,
+    pub transport: Box<dyn DynTransport>,
     pending_requests: VecDeque<OutboundDispatch>,
     pending_inputs: VecDeque<RuntimeInput>,
 }
@@ -617,7 +654,9 @@ impl ConnectedSessionRoute {
         self.pending_inputs.drain(..).collect()
     }
 
-    pub fn recv_input<'a>(&'a mut self) -> ContractFuture<'a, Option<RuntimeInput>> {
+    pub fn recv_input<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeInput>>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(input) = self.pending_inputs.pop_front() {
                 return Ok(Some(input));
@@ -627,7 +666,7 @@ impl ConnectedSessionRoute {
                 return Ok(None);
             }
 
-            let frame = self.transport.recv().await?;
+            let frame = self.transport.recv_boxed().await?;
             map_raw_frame_to_input(&self.route, frame)
         })
     }
@@ -646,10 +685,10 @@ pub struct DispatchReceipt {
 }
 
 impl ConnectedTopology {
-    pub fn close_all<'a>(&'a mut self) -> ContractFuture<'a, ()> {
+    pub fn close_all<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             for route in &mut self.routes {
-                route.transport.close().await?;
+                route.transport.close_boxed().await?;
             }
             Ok(())
         })
@@ -658,7 +697,7 @@ impl ConnectedTopology {
     pub fn dispatch<'a>(
         &'a mut self,
         dispatch: OutboundDispatch,
-    ) -> ContractFuture<'a, DispatchReceipt> {
+    ) -> Pin<Box<dyn Future<Output = Result<DispatchReceipt>> + Send + 'a>> {
         Box::pin(async move { self.dispatch_ref(&dispatch).await })
     }
 
@@ -669,7 +708,7 @@ impl ConnectedTopology {
     pub fn dispatch_ref<'a>(
         &'a mut self,
         dispatch: &'a OutboundDispatch,
-    ) -> ContractFuture<'a, DispatchReceipt> {
+    ) -> Pin<Box<dyn Future<Output = Result<DispatchReceipt>> + Send + 'a>> {
         Box::pin(async move {
             let route = self
                 .routes
@@ -689,13 +728,13 @@ impl ConnectedTopology {
 
             match &dispatch.request {
                 OutboundRequest::Transport(frame) => {
-                    route.transport.send(frame.clone()).await?;
+                    route.transport.send_boxed(frame.clone()).await?;
                 }
                 OutboundRequest::Query(query) => match &route.route.endpoint {
                     SessionRouteEndpoint::WebSocket { .. } => {
                         route
                             .transport
-                            .send(OutboundFrame::Text(query.body().to_string()))
+                            .send_boxed(OutboundFrame::Text(query.body().to_string()))
                             .await?;
                     }
                     SessionRouteEndpoint::Http { .. } => {
@@ -746,7 +785,7 @@ impl ConnectedTopology {
     pub fn recv_route_input<'a>(
         &'a mut self,
         label: &'a str,
-    ) -> ContractFuture<'a, Option<RuntimeInput>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeInput>>> + Send + 'a>> {
         Box::pin(async move {
             let Some(route) = self.route_mut(label) else {
                 return Err(ContractError::validation(format!(
@@ -761,14 +800,14 @@ impl ConnectedTopology {
         &'a mut self,
         label: &'a str,
         frame: OutboundFrame,
-    ) -> ContractFuture<'a, ()> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let Some(route) = self.route_mut(label) else {
                 return Err(ContractError::validation(format!(
                     "unknown connected route for frame send: {label}"
                 )));
             };
-            route.transport.send(frame).await
+            route.transport.send_boxed(frame).await
         })
     }
 
@@ -793,11 +832,12 @@ impl ConnectedTopology {
     }
 }
 
+#[doc(hidden)]
+pub type DynRouteConnectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn DynTransport>>> + Send + 'a>>;
+
 pub trait SessionRouteConnector: Send + Sync {
-    fn connect_route<'a>(
-        &'a self,
-        route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>>;
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> DynRouteConnectFuture<'a>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -812,30 +852,30 @@ impl PassiveRouteTransport {
 }
 
 impl Transport for PassiveRouteTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    async fn connect(&mut self) -> Result<()> {
+        Ok(())
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = Result<RawFrame>> + Send + '_ {
         let kind = self.kind;
-        Box::pin(async move {
+        async move {
             Err(ContractError::validation(format!(
                 "{kind} route transport does not support frame recv"
             )))
-        })
+        }
     }
 
-    fn send(&mut self, _frame: OutboundFrame) -> ContractFuture<'_, ()> {
+    fn send(&mut self, _frame: OutboundFrame) -> impl Future<Output = Result<()>> + Send + '_ {
         let kind = self.kind;
-        Box::pin(async move {
+        async move {
             Err(ContractError::validation(format!(
                 "{kind} route transport does not support frame send"
             )))
-        })
+        }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -843,17 +883,14 @@ impl Transport for PassiveRouteTransport {
 pub struct WebSocketRouteConnector;
 
 impl SessionRouteConnector for WebSocketRouteConnector {
-    fn connect_route<'a>(
-        &'a self,
-        route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
         Box::pin(async move {
             match &route.endpoint {
                 SessionRouteEndpoint::WebSocket { url, connect } => {
                     let mut transport =
                         WebSocketTransport::new(url.clone()).with_connect_options(connect.clone());
                     transport.connect().await?;
-                    Ok(Box::new(transport) as Box<dyn Transport>)
+                    Ok(Box::new(transport) as Box<dyn DynTransport>)
                 }
                 other => Err(ContractError::validation(format!(
                     "unsupported route endpoint for websocket connector: {other:?}"
@@ -869,21 +906,18 @@ pub struct DefaultRouteConnector {
 }
 
 impl SessionRouteConnector for DefaultRouteConnector {
-    fn connect_route<'a>(
-        &'a self,
-        route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
         Box::pin(async move {
             match &route.endpoint {
                 SessionRouteEndpoint::WebSocket { .. } => self.websocket.connect_route(route).await,
                 SessionRouteEndpoint::Http { .. } => {
-                    Ok(Box::new(PassiveRouteTransport::new("http")) as Box<dyn Transport>)
+                    Ok(Box::new(PassiveRouteTransport::new("http")) as Box<dyn DynTransport>)
                 }
                 SessionRouteEndpoint::Replay { .. } => {
-                    Ok(Box::new(PassiveRouteTransport::new("replay")) as Box<dyn Transport>)
+                    Ok(Box::new(PassiveRouteTransport::new("replay")) as Box<dyn DynTransport>)
                 }
                 SessionRouteEndpoint::Internal { .. } => {
-                    Ok(Box::new(PassiveRouteTransport::new("internal")) as Box<dyn Transport>)
+                    Ok(Box::new(PassiveRouteTransport::new("internal")) as Box<dyn DynTransport>)
                 }
             }
         })
@@ -986,12 +1020,12 @@ impl SessionBootstrap {
 
     pub fn establish<'a>(
         &self,
-        auth: &'a dyn AuthProvider,
+        auth: &'a dyn DynAuthProvider,
         config: &'a SessionConfig,
         adapters: &'a AdapterRegistry,
-    ) -> ContractFuture<'a, BootstrapResult> {
+    ) -> Pin<Box<dyn Future<Output = Result<BootstrapResult>> + Send + 'a>> {
         Box::pin(async move {
-            let auth = auth.authenticate().await?;
+            let auth = auth.authenticate_boxed().await?;
             let enabled_domains = if config.enabled_domains.is_empty() {
                 adapters.domains().to_vec()
             } else {
@@ -1004,13 +1038,13 @@ impl SessionBootstrap {
 
     pub fn establish_with_resolver<'a>(
         &self,
-        auth: &'a dyn AuthProvider,
+        auth: &'a dyn DynAuthProvider,
         resolver: &'a dyn SessionTopologyResolver,
         config: &'a SessionConfig,
         adapters: &'a AdapterRegistry,
-    ) -> ContractFuture<'a, BootstrapResult> {
+    ) -> Pin<Box<dyn Future<Output = Result<BootstrapResult>> + Send + 'a>> {
         Box::pin(async move {
-            let auth = auth.authenticate().await?;
+            let auth = auth.authenticate_boxed().await?;
             let enabled_domains = if config.enabled_domains.is_empty() {
                 adapters.domains().to_vec()
             } else {
@@ -1028,7 +1062,7 @@ impl SessionBootstrap {
         &self,
         topology: &'a SessionTopology,
         connector: &'a dyn SessionRouteConnector,
-    ) -> ContractFuture<'a, ConnectedTopology> {
+    ) -> Pin<Box<dyn Future<Output = Result<ConnectedTopology>> + Send + 'a>> {
         Box::pin(async move {
             let mut connected = ConnectedTopology::default();
 

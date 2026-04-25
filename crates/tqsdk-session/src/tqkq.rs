@@ -1,4 +1,4 @@
-use crate::{
+use tqsdk_core::{
     AccountId, ContractError, Result, TradeAccountType, TradeLoginCommand, TradeSessionTarget,
 };
 
@@ -20,6 +20,7 @@ pub struct TqKqAccountConfig {
     account_type: TradeAccountType,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl TqKqAccountConfig {
     /// Builds the primary futures built-in simulated account profile.
     #[must_use]
@@ -146,7 +147,7 @@ fn validate_number(number: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::TqKqAccountConfig;
-    use crate::TradeAccountType;
+    use tqsdk_core::TradeAccountType;
 
     #[test]
     fn future_main_matches_official_python_profile() {

@@ -8,7 +8,9 @@ documentation = "https://docs.rs/tqsdk-session"
 readme = "README.md"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
+futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

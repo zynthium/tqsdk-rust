@@ -4,8 +4,8 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     commands::{
-        MarketCommand, QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand,
-        TradeCommand,
+        CommandStatus, MarketCommand, QueryCommand, ReplayCommand, RuntimeCommand, SchemaCommand,
+        SystemCommand, TradeCommand,
     },
     ids::{CommandId, ProtocolDomain, Symbol},
 };
@@ -14,6 +14,7 @@ use crate::{
 pub(crate) struct CommandLedger {
     next_command_id: u64,
     command_domains: BTreeMap<CommandId, ProtocolDomain>,
+    command_statuses: BTreeMap<CommandId, CommandStatus>,
     command_detail_seeds: BTreeMap<CommandId, Map<String, Value>>,
     retained_terminal_commands: VecDeque<CommandId>,
     retained_terminal_set: BTreeSet<CommandId>,
@@ -31,6 +32,7 @@ impl CommandLedger {
         Self {
             next_command_id: 1,
             command_domains: BTreeMap::new(),
+            command_statuses: BTreeMap::new(),
             command_detail_seeds: BTreeMap::new(),
             retained_terminal_commands: VecDeque::new(),
             retained_terminal_set: BTreeSet::new(),
@@ -49,6 +51,8 @@ impl CommandLedger {
         let command_id = CommandId::new(self.next_command_id);
         self.next_command_id += 1;
         self.command_domains.insert(command_id, domain);
+        self.command_statuses
+            .insert(command_id, CommandStatus::Queued);
         if !detail_seed.is_empty() {
             self.command_detail_seeds.insert(command_id, detail_seed);
         }
@@ -63,8 +67,19 @@ impl CommandLedger {
         self.command_detail_seeds.get(&command_id)
     }
 
+    pub(crate) fn status(&self, command_id: CommandId) -> Option<CommandStatus> {
+        self.command_statuses.get(&command_id).copied()
+    }
+
+    pub(crate) fn update_status(&mut self, command_id: CommandId, status: CommandStatus) {
+        if self.command_domains.contains_key(&command_id) {
+            self.command_statuses.insert(command_id, status);
+        }
+    }
+
     pub(crate) fn release(&mut self, command_id: CommandId) {
         self.command_domains.remove(&command_id);
+        self.command_statuses.remove(&command_id);
         self.command_detail_seeds.remove(&command_id);
     }
 

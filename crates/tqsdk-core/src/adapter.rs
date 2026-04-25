@@ -238,7 +238,7 @@ impl ProtocolAdapter for MarketAdapter {
     }
 
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
-        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Market))
+        matches!(input, RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Market) && is_market_io_event(event))
     }
 
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
@@ -350,7 +350,7 @@ impl ProtocolAdapter for TradeAdapter {
     }
 
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
-        matches!(input, RuntimeInput::Io(IoEvent { domains, .. }) if domains.contains(&ProtocolDomain::Trade))
+        matches!(input, RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Trade) && is_trade_io_event(event))
     }
 
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>> {
@@ -712,6 +712,50 @@ fn is_query_io_event(event: &IoEvent) -> bool {
         InputPayload::Json(value) => value_contains_query_payload(value),
         InputPayload::Text(_) | InputPayload::Binary(_) => false,
     }
+}
+
+fn is_market_io_event(event: &IoEvent) -> bool {
+    match &event.payload {
+        InputPayload::Json(value) => value_contains_market_payload(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => false,
+    }
+}
+
+fn is_trade_io_event(event: &IoEvent) -> bool {
+    match &event.payload {
+        InputPayload::Json(value) => value_contains_trade_payload(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => false,
+    }
+}
+
+fn value_contains_market_payload(value: &Value) -> bool {
+    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+        && let Some(data) = value.get("data").and_then(Value::as_array)
+    {
+        return data.iter().any(value_contains_market_payload);
+    }
+
+    value.as_object().is_some_and(|object| {
+        ["quotes", "trading_status", "charts", "klines", "ticks"]
+            .iter()
+            .any(|root| object.contains_key(*root))
+    })
+}
+
+fn value_contains_trade_payload(value: &Value) -> bool {
+    if value.get("aid").and_then(Value::as_str) == Some("qry_settlement_info") {
+        return true;
+    }
+
+    if value.get("aid").and_then(Value::as_str) == Some("rtn_data")
+        && let Some(data) = value.get("data").and_then(Value::as_array)
+    {
+        return data.iter().any(value_contains_trade_payload);
+    }
+
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("trade"))
 }
 
 fn value_contains_query_payload(value: &Value) -> bool {

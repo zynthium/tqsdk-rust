@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -8,12 +10,14 @@ mod support;
 use serde_json::json;
 use support::websocket::{ClientFrame, TestWebSocketServer};
 use tqsdk_core::{
-    AccountId, AdapterRegistry, DefaultRouteConnector, HttpMethod, MarketCommand, OutboundDispatch,
-    OutboundFrame, ProtocolDomain, RawFrame, ReplayCommand, Runtime, RuntimeCommand, RuntimeHandle,
-    SchemaCommand, SchemaId, SessionBootstrap, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionTarget, SessionTopology, Symbol, SystemCommand, TradeCommand,
-    Transport, WebSocketConnectOptions,
+    AccountId, AdapterRegistry, DefaultRouteConnector, DynTransport, HttpMethod, MarketCommand,
+    OutboundDispatch, OutboundFrame, ProtocolDomain, RawFrame, ReplayCommand, Result as CoreResult,
+    Runtime, RuntimeCommand, RuntimeHandle, SchemaCommand, SchemaId, SessionBootstrap,
+    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
+    Symbol, SystemCommand, TradeCommand, Transport, WebSocketConnectOptions,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 #[test]
 fn runtime_handle_drain_dispatches_resolves_command_domains() {
@@ -313,11 +317,11 @@ impl SessionRouteConnector for RecordingRouteConnector {
     fn connect_route<'a>(
         &'a self,
         route: &'a SessionRoute,
-    ) -> tqsdk_core::ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let label = route.label.clone();
         let sent_frames = Arc::clone(&self.sent_frames);
         Box::pin(async move {
-            Ok(Box::new(RecordingTransport { label, sent_frames }) as Box<dyn Transport>)
+            Ok(Box::new(RecordingTransport { label, sent_frames }) as Box<dyn DynTransport>)
         })
     }
 }
@@ -328,29 +332,29 @@ struct RecordingTransport {
 }
 
 impl Transport for RecordingTransport {
-    fn connect(&mut self) -> tqsdk_core::ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> tqsdk_core::ContractFuture<'_, RawFrame> {
-        Box::pin(async { Ok(RawFrame::Pong) })
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
+        async { Ok(RawFrame::Pong) }
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> tqsdk_core::ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
         let label = self.label.clone();
         let sent_frames = Arc::clone(&self.sent_frames);
-        Box::pin(async move {
+        async move {
             let text = match frame {
                 OutboundFrame::Text(text) => text,
                 other => panic!("expected trade text frame, got {other:?}"),
             };
             sent_frames.lock().unwrap().push((label, text));
             Ok(())
-        })
+        }
     }
 
-    fn close(&mut self) -> tqsdk_core::ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 

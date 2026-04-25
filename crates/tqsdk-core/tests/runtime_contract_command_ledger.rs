@@ -4,10 +4,11 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_core::{
-    AccountId, AdapterRegistry, ChangeHit, CommandStatus, CommitScope, ObjectKey, OrderId,
-    OutboundEnvelope, OutboundFrame, OutboundRequest, Runtime, RuntimeCommand, RuntimeHandle,
-    StatePath, Symbol, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset,
-    TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    AccountId, AdapterRegistry, ChangeHit, CommandStatus, CommitScope, ContractError,
+    FieldMutation, InputPayload, IoEvent, MutationSource, NormalizedMutation, ObjectKey, OrderId,
+    OutboundEnvelope, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, Runtime,
+    RuntimeCommand, RuntimeHandle, RuntimeInput, StatePath, Symbol, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 
 #[test]
@@ -121,10 +122,249 @@ fn rejected_trade_commands_enter_runtime_command_snapshot_and_commit_log() {
     assert_eq!(repeated, None);
 }
 
+#[test]
+fn command_statuses_accept_forward_lifecycle_path() {
+    let handle = runtime_with_default_adapters();
+    let command_id = submit_trade_command(&handle, "order-forward");
+
+    for status in [
+        CommandStatus::Sent,
+        CommandStatus::Acked,
+        CommandStatus::Completed,
+    ] {
+        handle
+            .record_command_status(command_id, status, None, CommitScope::RealtimeUpdate)
+            .unwrap()
+            .expect("forward status update should publish a commit");
+    }
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
+}
+
+#[test]
+fn command_statuses_reject_terminal_rollback() {
+    let handle = runtime_with_default_adapters();
+    let command_id = submit_trade_command(&handle, "order-terminal-rollback");
+
+    handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Sent,
+            Some(json!({"detail": "sent"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("sent status should publish a commit");
+
+    handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Completed,
+            Some(json!({"detail": "terminal"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("terminal status should publish a commit");
+
+    let err = handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Sent,
+            Some(json!({"detail": "rollback"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .expect_err("terminal status rollback should be rejected");
+
+    assert!(
+        matches!(err, ContractError::Validation(_)),
+        "unexpected error: {err}"
+    );
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("completed"))
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "detail"]),
+        Some(&json!({
+            "aid": "insert_order",
+            "account_id": "simnow",
+            "order_id": "order-terminal-rollback",
+            "symbol": "SHFE.au2602",
+            "detail": "terminal",
+        }))
+    );
+}
+
+#[test]
+fn command_statuses_reject_in_progress_regression() {
+    let handle = runtime_with_default_adapters();
+    let command_id = submit_trade_command(&handle, "order-in-progress-regression");
+
+    for status in [CommandStatus::Sent, CommandStatus::PartiallyApplied] {
+        handle
+            .record_command_status(command_id, status, None, CommitScope::RealtimeUpdate)
+            .unwrap()
+            .expect("forward status update should publish a commit");
+    }
+
+    let err = handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Acked,
+            None,
+            CommitScope::RealtimeUpdate,
+        )
+        .expect_err("partially applied command should not regress to acked");
+
+    assert!(
+        matches!(err, ContractError::Validation(_)),
+        "unexpected error: {err}"
+    );
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "status"]),
+        Some(&json!("partially_applied"))
+    );
+}
+
+#[test]
+fn duplicate_terminal_status_is_idempotent_even_with_new_detail() {
+    let handle = runtime_with_default_adapters();
+    let command_id = submit_trade_command(&handle, "order-idempotent-terminal");
+
+    handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Rejected,
+            Some(json!({"reason": "first"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("terminal status should publish a commit");
+
+    let repeated = handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Rejected,
+            Some(json!({"reason": "second"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+    assert_eq!(repeated, None);
+
+    let command_segment = command_id.get().to_string();
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["runtime", "commands", command_segment.as_str(), "detail"]),
+        Some(&json!({
+            "aid": "insert_order",
+            "account_id": "simnow",
+            "order_id": "order-idempotent-terminal",
+            "symbol": "SHFE.au2602",
+            "reason": "first",
+        }))
+    );
+}
+
+#[test]
+fn mutation_source_domain_guard_rejects_market_write_to_trade_root() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(MaliciousMarketAdapter);
+    let handle = RuntimeHandle::with_adapters(registry);
+
+    let err = handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "malicious-market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({})),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .expect_err("market mutation must not be allowed to write trade root");
+
+    assert!(
+        matches!(err, ContractError::Validation(_)),
+        "unexpected error: {err}"
+    );
+    assert_eq!(handle.latest_snapshot().get(["trade", "simnow"]), None);
+}
+
 fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
     RuntimeHandle::with_adapters(registry)
+}
+
+fn submit_trade_command(handle: &RuntimeHandle, order_id: &str) -> tqsdk_core::CommandId {
+    block_on(
+        handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new(order_id),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 2,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))),
+    )
+    .unwrap()
+}
+
+struct MaliciousMarketAdapter;
+
+impl ProtocolAdapter for MaliciousMarketAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        ProtocolDomain::Market
+    }
+
+    fn accepts_command(&self, _cmd: &RuntimeCommand) -> bool {
+        false
+    }
+
+    fn encode(&mut self, _cmd: &RuntimeCommand) -> tqsdk_core::Result<Vec<OutboundRequest>> {
+        Ok(vec![])
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(
+            input,
+            RuntimeInput::Io(IoEvent { route, domains, .. })
+                if route == "malicious-market" && domains.contains(&ProtocolDomain::Market)
+        )
+    }
+
+    fn decode(&mut self, _input: &RuntimeInput) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
+        Ok(vec![NormalizedMutation {
+            path: StatePath::new(["trade", "simnow"]),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "balance".to_string(),
+                value: json!(1),
+            }],
+            source: MutationSource::MarketDiff,
+        }])
+    }
 }
 
 fn block_on<F>(future: F) -> F::Output

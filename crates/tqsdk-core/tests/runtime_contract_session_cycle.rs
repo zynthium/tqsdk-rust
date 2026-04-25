@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -6,15 +8,17 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_core::{
-    AccountId, AdapterRegistry, BootstrapResult, CommitScope, ContractError, ContractFuture,
-    DefaultRouteConnector, IoEvent, MarketCommand, OrderId, OutboundFrame, ProtocolDomain,
-    RawFrame, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
-    SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun,
-    SessionRuntime, SessionTarget, SessionTopology, Symbol, TradeAccountType, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset,
+    AccountId, AdapterRegistry, BootstrapResult, CommitScope, ContractError, DefaultRouteConnector,
+    DynTransport, IoEvent, MarketCommand, OrderId, OutboundFrame, ProtocolDomain, RawFrame,
+    Result as CoreResult, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand,
+    SchemaId, SessionBootstrap, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRun, SessionRuntime, SessionTarget, SessionTopology, Symbol, TradeAccountType,
+    TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset,
     TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
     Transport,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 #[derive(Clone)]
 struct QueuedTransport {
@@ -32,27 +36,27 @@ impl QueuedTransport {
 }
 
 impl Transport for QueuedTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
         let frame = self
             .recv_frames
             .lock()
             .unwrap()
             .pop_front()
             .unwrap_or(RawFrame::Pong);
-        Box::pin(async move { Ok(frame) })
+        async move { Ok(frame) }
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
         self.sent_frames.lock().unwrap().push(frame);
-        Box::pin(async { Ok(()) })
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -65,10 +69,10 @@ impl SessionRouteConnector for TestRouteConnector {
     fn connect_route<'a>(
         &'a self,
         _route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let transport =
             QueuedTransport::new(self.recv_frames.clone(), Arc::clone(&self.sent_frames));
-        Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+        Box::pin(async move { Ok(Box::new(transport) as Box<dyn DynTransport>) })
     }
 }
 
@@ -76,20 +80,20 @@ impl SessionRouteConnector for TestRouteConnector {
 struct FailingSendTransport;
 
 impl Transport for FailingSendTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
-        Box::pin(async { Ok(RawFrame::Pong) })
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
+        async { Ok(RawFrame::Pong) }
     }
 
-    fn send(&mut self, _frame: OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async { Err(ContractError::auth("websocket send failed: broken pipe")) })
+    fn send(&mut self, _frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Err(ContractError::auth("websocket send failed: broken pipe")) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -99,8 +103,8 @@ impl SessionRouteConnector for FailingSendConnector {
     fn connect_route<'a>(
         &'a self,
         _route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
-        Box::pin(async { Ok(Box::new(FailingSendTransport) as Box<dyn Transport>) })
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
+        Box::pin(async { Ok(Box::new(FailingSendTransport) as Box<dyn DynTransport>) })
     }
 }
 

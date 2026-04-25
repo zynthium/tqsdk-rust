@@ -185,19 +185,22 @@ impl RuntimeHandle {
         let mut inner = mutex_lock(&self.inner);
         let domain_from_ledger = inner.command_ledger.domain(command_id);
         let detail_seed_from_ledger = inner.command_ledger.detail_seed(command_id);
+        let status_from_ledger = inner.command_ledger.status(command_id);
 
-        let (domain, seed_from_snapshot) = if let Some(domain) = domain_from_ledger {
-            (Some(domain), None)
-        } else if inner.command_ledger.is_evicted_terminal(command_id) {
-            return Ok(None);
-        } else {
-            let snapshot_guard = rwlock_read(&self.state);
-            let snapshot = snapshot_guard.read();
-            let domain = command_domain_from_snapshot(snapshot, command_id);
-            let seed = command_detail_seed_from_snapshot(snapshot, command_id);
-            drop(snapshot_guard);
-            (domain, seed)
-        };
+        let (domain, seed_from_snapshot, status_from_snapshot) =
+            if let Some(domain) = domain_from_ledger {
+                (Some(domain), None, None)
+            } else if inner.command_ledger.is_evicted_terminal(command_id) {
+                return Ok(None);
+            } else {
+                let snapshot_guard = rwlock_read(&self.state);
+                let snapshot = snapshot_guard.read();
+                let domain = command_domain_from_snapshot(snapshot, command_id);
+                let seed = command_detail_seed_from_snapshot(snapshot, command_id);
+                let current_status = command_status_from_snapshot(snapshot, command_id);
+                drop(snapshot_guard);
+                (domain, seed, current_status)
+            };
 
         let Some(domain) = domain else {
             return Err(ContractError::validation(format!(
@@ -205,6 +208,12 @@ impl RuntimeHandle {
                 command_id.get()
             )));
         };
+        let current_status = status_from_ledger.or(status_from_snapshot);
+        validate_command_status_transition(command_id, current_status, status)?;
+        if current_status == Some(status) && status.is_terminal() {
+            return Ok(None);
+        }
+
         let detail = merged_detail_from_seed(
             detail_seed_from_ledger.or(seed_from_snapshot.as_ref()),
             detail,
@@ -258,6 +267,8 @@ impl RuntimeHandle {
             inner
                 .command_ledger
                 .commit_terminal(command_id, evicted_terminal_command_id);
+        } else if commit.is_some() {
+            inner.command_ledger.update_status(command_id, status);
         }
 
         Ok(commit)
@@ -368,6 +379,7 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
+        validate_mutation_domains(&mutations)?;
         let mut snapshot = rwlock_write(&self.state);
         let commit = CommitEngine::apply(&mut snapshot, mutations, domains, caused_by, scope);
         if let Some(commit_ref) = commit.as_ref() {
@@ -473,6 +485,129 @@ fn command_detail_seed_from_snapshot(
         .get(["runtime", "commands", command_segment.as_str(), "detail"])
         .and_then(Value::as_object)
         .cloned()
+}
+
+fn command_status_from_snapshot(
+    snapshot: crate::state::StateReadView<'_>,
+    command_id: CommandId,
+) -> Option<CommandStatus> {
+    let command_segment = command_id.get().to_string();
+    snapshot
+        .get(["runtime", "commands", command_segment.as_str(), "status"])
+        .and_then(Value::as_str)
+        .and_then(|status| status.parse().ok())
+}
+
+fn validate_command_status_transition(
+    command_id: CommandId,
+    current: Option<CommandStatus>,
+    next: CommandStatus,
+) -> Result<()> {
+    let Some(current) = current else {
+        return Err(ContractError::validation(format!(
+            "unknown command status for command status update: {}",
+            command_id.get()
+        )));
+    };
+
+    let valid = match current {
+        CommandStatus::Queued => matches!(
+            next,
+            CommandStatus::Sent
+                | CommandStatus::Rejected
+                | CommandStatus::Failed
+                | CommandStatus::Cancelled
+        ),
+        CommandStatus::Sent => matches!(
+            next,
+            CommandStatus::Acked
+                | CommandStatus::PartiallyApplied
+                | CommandStatus::Completed
+                | CommandStatus::Rejected
+                | CommandStatus::Failed
+                | CommandStatus::Cancelled
+        ),
+        CommandStatus::Acked => matches!(
+            next,
+            CommandStatus::PartiallyApplied
+                | CommandStatus::Completed
+                | CommandStatus::Rejected
+                | CommandStatus::Failed
+                | CommandStatus::Cancelled
+        ),
+        CommandStatus::PartiallyApplied => matches!(
+            next,
+            CommandStatus::Completed
+                | CommandStatus::Rejected
+                | CommandStatus::Failed
+                | CommandStatus::Cancelled
+        ),
+        CommandStatus::Completed
+        | CommandStatus::Rejected
+        | CommandStatus::Failed
+        | CommandStatus::Cancelled => current == next,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ContractError::validation(format!(
+            "invalid command status transition for command {}: {} -> {}",
+            command_id.get(),
+            current.as_str(),
+            next.as_str()
+        )))
+    }
+}
+
+fn validate_mutation_domains(mutations: &[NormalizedMutation]) -> Result<()> {
+    for mutation in mutations {
+        let root = mutation
+            .path
+            .segments()
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| {
+                ContractError::validation(format!(
+                    "{} mutation cannot write an empty state path",
+                    mutation_source_label(mutation.source)
+                ))
+            })?;
+        if !mutation_source_allows_root(mutation.source, root) {
+            return Err(ContractError::validation(format!(
+                "{} mutation cannot write state root `{root}`",
+                mutation_source_label(mutation.source)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mutation_source_allows_root(source: MutationSource, root: &str) -> bool {
+    match source {
+        MutationSource::MarketDiff => {
+            matches!(
+                root,
+                "quotes" | "trading_status" | "charts" | "klines" | "ticks"
+            )
+        }
+        MutationSource::TradeReply => root == "trade",
+        MutationSource::QueryResult => root == "query",
+        MutationSource::SchemaBootstrap => root == "schema",
+        MutationSource::ReplayStep => root == "replay",
+        MutationSource::SessionControl => matches!(root, "system" | "runtime"),
+    }
+}
+
+fn mutation_source_label(source: MutationSource) -> &'static str {
+    match source {
+        MutationSource::MarketDiff => "market",
+        MutationSource::TradeReply => "trade",
+        MutationSource::QueryResult => "query",
+        MutationSource::SchemaBootstrap => "schema",
+        MutationSource::ReplayStep => "replay",
+        MutationSource::SessionControl => "session control",
+    }
 }
 
 fn command_cleanup_mutation(command_id: CommandId) -> NormalizedMutation {

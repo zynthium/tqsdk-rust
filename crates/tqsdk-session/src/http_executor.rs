@@ -1,15 +1,14 @@
-use std::time::Duration;
+use std::{future::Future, pin::Pin, time::Duration};
 
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::commands::{HttpMethod, OutboundDispatch, OutboundRequest};
-use crate::events::{InputPayload, IoEvent, RuntimeInput};
-use crate::session_runtime::RouteRequestExecutor;
-use crate::transport::{SessionRoute, SessionRouteEndpoint};
-use crate::{ContractError, ContractFuture, ProtocolDomain, Result};
+use tqsdk_core::{
+    ContractError, HttpMethod, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
+    ProtocolDomain, Result, RouteRequestExecutor, RuntimeInput, SessionRoute, SessionRouteEndpoint,
+};
 
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 
@@ -110,7 +109,7 @@ impl RouteRequestExecutor for ReqwestHttpExecutor {
         &'a self,
         route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> ContractFuture<'a, Vec<RuntimeInput>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RuntimeInput>>> + Send + 'a>> {
         Box::pin(async move {
             require_tokio_runtime()?;
             self.execute_async(route, requests).await

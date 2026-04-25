@@ -1281,6 +1281,44 @@ fn trade_adapter_decodes_settlement_query_reply_into_trade_snapshot() {
 }
 
 #[test]
+fn trade_adapter_ignores_non_trade_payload_on_mixed_domain_frame() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let trade = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_core::IoEvent {
+            route: "market".to_string(),
+            domains: vec![ProtocolDomain::Market, ProtocolDomain::Trade],
+            payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "quotes": {
+                        "SHFE.au2602": {
+                            "last_price": 620.5
+                        }
+                    }
+                }]
+            })),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        trade,
+        vec![NormalizedMutation {
+            path: StatePath::new(["quotes", "SHFE.au2602"]),
+            object: Some(ObjectKey::Quote {
+                symbol: Symbol::new("SHFE.au2602"),
+            }),
+            fields: vec![FieldMutation {
+                field: "last_price".to_string(),
+                value: json!(620.5),
+            }],
+            source: MutationSource::MarketDiff,
+        }]
+    );
+}
+
+#[test]
 fn trade_adapter_decodes_trade_session_branch_into_session_object() {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();

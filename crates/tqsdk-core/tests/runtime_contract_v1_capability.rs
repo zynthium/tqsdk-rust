@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -7,9 +9,9 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use serde_json::json;
 use tqsdk_core::{
     AccountId, AdapterRegistry, AuthContext, AuthEvent, AuthId, AuthProvider, CommitScope,
-    ContractFuture, EndpointConfig, InputPayload, IoEvent, MarketCommand, OrderId,
-    OutboundDispatch, OutboundFrame, ProtocolDomain, QueryCommand, QueryId, RawFrame,
-    ReplayCommand, ReplayEvent, ReplaySessionId, RouteRequestExecutor, Runtime, RuntimeCommand,
+    DynTransport, EndpointConfig, InputPayload, IoEvent, MarketCommand, OrderId, OutboundDispatch,
+    OutboundFrame, ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplayCommand, ReplayEvent,
+    ReplaySessionId, Result as CoreResult, RouteRequestExecutor, Runtime, RuntimeCommand,
     RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
     SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
     SessionTopology, SessionTopologyResolver, SystemCommand, TradeAccountType, TradeCommand,
@@ -18,10 +20,12 @@ use tqsdk_core::{
     Transport,
 };
 
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
+
 struct CapabilityAuthProvider;
 
 impl AuthProvider for CapabilityAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async {
             Ok(AuthContext::new("test-token")
                 .with_auth_id(AuthId::new("auth-v1"))
@@ -46,7 +50,7 @@ impl SessionTopologyResolver for StaticTopologyResolver {
         _auth: &'a AuthContext,
         _config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> BoxFuture<'a, SessionTopology> {
         let topology = self.topology.clone();
         let expected_domains = self.expected_domains.clone();
         Box::pin(async move {
@@ -77,25 +81,25 @@ impl QueuedTransport {
 }
 
 impl Transport for QueuedTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
         let frame = self.recv_frames.pop_front().unwrap_or(RawFrame::Pong);
-        Box::pin(async move { Ok(frame) })
+        async move { Ok(frame) }
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
         self.sent_frames
             .lock()
             .unwrap()
             .push((self.label.clone(), frame));
-        Box::pin(async { Ok(()) })
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -103,28 +107,28 @@ impl Transport for QueuedTransport {
 struct PassiveTransport;
 
 impl Transport for PassiveTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
-        Box::pin(async {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
+        async {
             Err(tqsdk_core::ContractError::validation(
                 "passive transport cannot recv",
             ))
-        })
+        }
     }
 
-    fn send(&mut self, _frame: OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async {
+    fn send(&mut self, _frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async {
             Err(tqsdk_core::ContractError::validation(
                 "passive transport cannot send",
             ))
-        })
+        }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -152,7 +156,7 @@ impl SessionRouteConnector for CapabilityConnector {
     fn connect_route<'a>(
         &'a self,
         route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let route_label = route.label.clone();
         let recv_frames = Arc::clone(&self.recv_frames);
         let sent_frames = Arc::clone(&self.sent_frames);
@@ -166,13 +170,13 @@ impl SessionRouteConnector for CapabilityConnector {
                         .unwrap_or_default();
                     Ok(
                         Box::new(QueuedTransport::new(route_label, frames, sent_frames))
-                            as Box<dyn Transport>,
+                            as Box<dyn DynTransport>,
                     )
                 }
                 SessionRouteEndpoint::Http { .. }
                 | SessionRouteEndpoint::Replay { .. }
                 | SessionRouteEndpoint::Internal { .. } => {
-                    Ok(Box::new(PassiveTransport) as Box<dyn Transport>)
+                    Ok(Box::new(PassiveTransport) as Box<dyn DynTransport>)
                 }
             }
         })
@@ -203,7 +207,7 @@ impl RouteRequestExecutor for RecordingExecutor {
         &'a self,
         route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> ContractFuture<'a, Vec<RuntimeInput>> {
+    ) -> BoxFuture<'a, Vec<RuntimeInput>> {
         let inputs = self
             .responses
             .get(&route.label)

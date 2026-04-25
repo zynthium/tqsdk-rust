@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::{future::Future, pin::Pin, time::Duration};
 
 use serde_json::{Map, Value, json};
 
 use crate::{
     Result,
     adapter::AdapterRegistry,
-    auth::{AuthProvider, ContractFuture},
+    auth::DynAuthProvider,
     commands::{CommandStatus, OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
@@ -52,13 +52,13 @@ pub trait RouteRequestExecutor: Send + Sync {
         &'a self,
         route: &'a crate::transport::SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> ContractFuture<'a, Vec<RuntimeInput>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RuntimeInput>>> + Send + 'a>>;
 }
 
 /// Borrowed dependency bundle required to drive reconnect and timer flows.
 #[derive(Clone, Copy)]
 pub struct SessionRuntimeDeps<'a> {
-    pub auth: &'a dyn AuthProvider,
+    pub auth: &'a dyn DynAuthProvider,
     pub resolver: &'a dyn SessionTopologyResolver,
     pub connector: &'a dyn SessionRouteConnector,
     pub config: &'a SessionConfig,
@@ -68,7 +68,7 @@ pub struct SessionRuntimeDeps<'a> {
 impl<'a> SessionRuntimeDeps<'a> {
     /// Creates a dependency bundle for session orchestration helpers.
     pub fn new(
-        auth: &'a dyn AuthProvider,
+        auth: &'a dyn DynAuthProvider,
         resolver: &'a dyn SessionTopologyResolver,
         connector: &'a dyn SessionRouteConnector,
         config: &'a SessionConfig,
@@ -111,12 +111,12 @@ impl SessionRuntime {
     /// initial session bootstrap commits.
     pub fn establish<'a>(
         &'a self,
-        auth: &'a dyn AuthProvider,
+        auth: &'a dyn DynAuthProvider,
         resolver: &'a dyn SessionTopologyResolver,
         connector: &'a dyn SessionRouteConnector,
         config: &'a SessionConfig,
         adapters: &'a AdapterRegistry,
-    ) -> ContractFuture<'a, SessionRun> {
+    ) -> Pin<Box<dyn Future<Output = Result<SessionRun>> + Send + 'a>> {
         Box::pin(async move {
             self.handle
                 .record_session_phase(SessionPhase::Authenticating, None, vec![])?;
@@ -166,12 +166,12 @@ impl SessionRuntime {
 
     pub fn recover<'a>(
         &'a self,
-        auth: &'a dyn AuthProvider,
+        auth: &'a dyn DynAuthProvider,
         resolver: &'a dyn SessionTopologyResolver,
         connector: &'a dyn SessionRouteConnector,
         config: &'a SessionConfig,
         adapters: &'a AdapterRegistry,
-    ) -> ContractFuture<'a, SessionRun> {
+    ) -> Pin<Box<dyn Future<Output = Result<SessionRun>> + Send + 'a>> {
         Box::pin(async move {
             let recovery = match self
                 .recover_internal(
@@ -193,10 +193,11 @@ impl SessionRuntime {
     pub fn flush_outbound<'a>(
         &'a self,
         run: &'a mut SessionRun,
-    ) -> ContractFuture<'a, Vec<DispatchReceipt>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DispatchReceipt>>> + Send + 'a>> {
         Box::pin(async move {
             let dispatches = self.handle.drain_dispatches()?;
             let mut receipts = Vec::with_capacity(dispatches.len());
+            let mut sent_command_ids = Vec::new();
             for dispatch in dispatches {
                 let receipt = match run.connected.dispatch_ref(&dispatch).await {
                     Ok(receipt) => receipt,
@@ -221,17 +222,20 @@ impl SessionRuntime {
                         return Err(err);
                     }
                 };
-                self.handle.record_command_status(
-                    receipt.command_id,
-                    CommandStatus::Sent,
-                    self.command_detail(
+                if !sent_command_ids.contains(&receipt.command_id) {
+                    self.handle.record_command_status(
                         receipt.command_id,
-                        Some(receipt.route_label.as_str()),
-                        Some(&dispatch),
-                        Map::new(),
-                    ),
-                    CommitScope::RealtimeUpdate,
-                )?;
+                        CommandStatus::Sent,
+                        self.command_detail(
+                            receipt.command_id,
+                            Some(receipt.route_label.as_str()),
+                            Some(&dispatch),
+                            Map::new(),
+                        ),
+                        CommitScope::RealtimeUpdate,
+                    )?;
+                    sent_command_ids.push(receipt.command_id);
+                }
                 receipts.push(receipt);
             }
             Ok(receipts)
@@ -244,7 +248,7 @@ impl SessionRuntime {
         route_label: &'a str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> ContractFuture<'a, Option<CommitResult>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CommitResult>>> + Send + 'a>> {
         Box::pin(async move {
             let Some(input) = run.connected.recv_route_input(route_label).await? else {
                 return Ok(None);
@@ -268,7 +272,7 @@ impl SessionRuntime {
         route_label: &'a str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> ContractFuture<'a, RoutePumpOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<RoutePumpOutcome>> + Send + 'a>> {
         Box::pin(async move {
             if !run.connected.has_route(route_label) {
                 return Err(crate::ContractError::validation(format!(
@@ -311,7 +315,7 @@ impl SessionRuntime {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
         deps: SessionRuntimeDeps<'a>,
-    ) -> ContractFuture<'a, SessionStepOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<SessionStepOutcome>> + Send + 'a>> {
         Box::pin(async move {
             let mut outcome = SessionStepOutcome {
                 dispatches: self.flush_outbound(run).await?,
@@ -353,7 +357,7 @@ impl SessionRuntime {
         timer: TimerEvent,
         caused_by: Vec<CommandId>,
         deps: SessionRuntimeDeps<'a>,
-    ) -> ContractFuture<'a, SessionStepOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<SessionStepOutcome>> + Send + 'a>> {
         Box::pin(async move {
             let mut outcome = SessionStepOutcome::default();
 
@@ -444,7 +448,7 @@ impl SessionRuntime {
         executor: &'a dyn RouteRequestExecutor,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> ContractFuture<'a, PendingRouteStepOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<PendingRouteStepOutcome>> + Send + 'a>> {
         Box::pin(async move {
             let (route, requests) = run.connected.take_route_requests(route_label)?;
             if requests.is_empty() {
@@ -544,7 +548,7 @@ impl SessionRuntime {
         bootstrap: &'a BootstrapResult,
         connector: &'a dyn SessionRouteConnector,
         phase: Option<SessionPhase>,
-    ) -> ContractFuture<'a, ConnectedTopology> {
+    ) -> Pin<Box<dyn Future<Output = Result<ConnectedTopology>> + Send + 'a>> {
         Box::pin(async move {
             if bootstrap.topology.routes.is_empty() {
                 return Ok(ConnectedTopology::default());
@@ -570,7 +574,7 @@ impl SessionRuntime {
         reason: &'static str,
         caused_by: Vec<CommandId>,
         deps: SessionRuntimeDeps<'a>,
-    ) -> ContractFuture<'a, RecoveryOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<RecoveryOutcome>> + Send + 'a>> {
         Box::pin(async move {
             let mut commits = Vec::new();
             let max_attempts = deps.config.reconnect.max_attempts.unwrap_or(1).max(1);
@@ -664,7 +668,7 @@ impl SessionRuntime {
         &'a self,
         deps: SessionRuntimeDeps<'a>,
         record_reconnecting: bool,
-    ) -> ContractFuture<'a, RecoveryOutcome> {
+    ) -> Pin<Box<dyn Future<Output = Result<RecoveryOutcome>> + Send + 'a>> {
         Box::pin(async move {
             let mut commits = Vec::new();
 

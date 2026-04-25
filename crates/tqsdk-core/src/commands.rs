@@ -294,6 +294,24 @@ impl CommandStatus {
     }
 }
 
+impl std::str::FromStr for CommandStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "sent" => Ok(Self::Sent),
+            "acked" => Ok(Self::Acked),
+            "partially_applied" => Ok(Self::PartiallyApplied),
+            "completed" => Ok(Self::Completed),
+            "rejected" => Ok(Self::Rejected),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundFrame {
     Text(String),

@@ -69,9 +69,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
 | `SessionRuntime` | auth / bootstrap / connect / recover / flush / pump 的统一编排器 |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
-| `TqAuthProvider` | 官方 Tianqin auth + topology resolver 实现 |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
-| `ReqwestHttpExecutor` | schema 与显式 HTTP query override 这类 pending HTTP route 的执行器 |
 
 ## 契约模型
 
@@ -132,77 +130,9 @@ async fn submit_quotes(handle: &impl Runtime) -> tqsdk_core::Result<()> {
 
 ### 3. 驱动一个 live session
 
-真实联机时，调用方需要显式组装自己的 runtime loop：
-
-```rust
-use tqsdk_core::{
-    AdapterRegistry, DefaultRouteConnector, EndpointConfig, MarketSessionTarget,
-    PasswordCredentials, ProtocolDomain, ReqwestHttpExecutor, Runtime, RuntimeCommand,
-    RuntimeHandle, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig, SessionRuntime,
-    TqAuthProvider,
-};
-
-fn default_adapters() -> AdapterRegistry {
-    let mut registry = AdapterRegistry::new();
-    registry.register_default_adapters();
-    registry
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let username = std::env::var("TQ_AUTH_USER")?;
-    let password = std::env::var("TQ_AUTH_PASS")?;
-
-    let handle = RuntimeHandle::with_adapters(default_adapters());
-    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
-    let provider = TqAuthProvider::new(PasswordCredentials::new(username, password));
-    let connector = DefaultRouteConnector::default();
-    let bootstrap_adapters = default_adapters();
-    let config = SessionConfig::new(EndpointConfig::from_env())
-        .with_market_target(MarketSessionTarget::futures_live())
-        .enable_domain(ProtocolDomain::Market)
-        .enable_domain(ProtocolDomain::Schema);
-
-    let mut run = runtime
-        .establish(
-            &provider,
-            &provider,
-            &connector,
-            &config,
-            &bootstrap_adapters,
-        )
-        .await?;
-
-    let _market_receipts = runtime.flush_outbound(&mut run).await?;
-
-    let schema_executor = ReqwestHttpExecutor::new()?;
-    let schema_command = handle
-        .submit(RuntimeCommand::Schema(SchemaCommand::Refresh {
-            schema_id: SchemaId::new("symbols-latest"),
-            path: "/shinny_chinese_holiday.json".to_string(),
-        }))
-        .await?;
-
-    let _schema_receipts = runtime.flush_outbound(&mut run).await?;
-    let _outcome = runtime
-        .drive_pending_route_once(
-            &mut run,
-            "schema",
-            &schema_executor,
-            vec![schema_command],
-            tqsdk_core::CommitScope::RealtimeUpdate,
-        )
-        .await?;
-
-    Ok(())
-}
-```
-
-完整可运行的端到端示例可参考：
-
-- [examples/live_probe.rs](examples/live_probe.rs)
-- [examples/live_market_history.rs](examples/live_market_history.rs)
-- [tests/runtime_contract_live_smoke.rs](tests/runtime_contract_live_smoke.rs)
+`tqsdk-core` 只保留底层 runtime、adapter、transport 与 session orchestration contracts。
+官方 Tianqin auth、HTTP executor、内置快期模拟账号派生，以及面向用户的 live session
+组装入口在 `tqsdk-session` 中维护。
 
 ## 环境变量
 

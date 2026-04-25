@@ -18,8 +18,11 @@ mod builder;
 mod client;
 mod direct_query;
 mod error;
+mod http_executor;
 mod metadata;
 mod services;
+mod tq_auth;
+mod tqkq;
 
 pub use builder::SessionClientBuilder;
 pub use client::{SessionClient, SessionProgress};

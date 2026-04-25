@@ -8,9 +8,7 @@ documentation = "https://docs.rs/tqsdk-core"
 readme = "README.md"
 
 [dependencies]
-base64.workspace = true
 futures.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

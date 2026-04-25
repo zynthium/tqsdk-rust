@@ -47,20 +47,29 @@ fn default_route_connector_supports_non_websocket_route_endpoints() {
     assert_eq!(connected.routes[1].route.label, "replay");
     assert_eq!(connected.routes[2].route.label, "internal");
 
-    let query_send = block_on(connected.routes[0].transport.send(OutboundFrame::Ping)).unwrap_err();
+    let query_send = block_on(
+        connected.routes[0]
+            .transport
+            .send_boxed(OutboundFrame::Ping),
+    )
+    .unwrap_err();
     assert_eq!(
         query_send.to_string(),
         "validation error: http route transport does not support frame send"
     );
 
-    let replay_recv = block_on(connected.routes[1].transport.recv()).unwrap_err();
+    let replay_recv = block_on(connected.routes[1].transport.recv_boxed()).unwrap_err();
     assert_eq!(
         replay_recv.to_string(),
         "validation error: replay route transport does not support frame recv"
     );
 
-    let internal_send =
-        block_on(connected.routes[2].transport.send(OutboundFrame::Ping)).unwrap_err();
+    let internal_send = block_on(
+        connected.routes[2]
+            .transport
+            .send_boxed(OutboundFrame::Ping),
+    )
+    .unwrap_err();
     assert_eq!(
         internal_send.to_string(),
         "validation error: internal route transport does not support frame send"

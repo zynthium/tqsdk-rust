@@ -11,13 +11,10 @@ pub mod auth;
 pub mod commands;
 pub mod error;
 pub mod events;
-pub mod http_executor;
 pub mod ids;
 pub mod runtime;
 pub mod session_runtime;
 pub mod state;
-pub mod tq_auth;
-pub mod tqkq;
 pub mod transport;
 pub mod types;
 
@@ -25,7 +22,7 @@ pub use adapter::{
     AdapterRegistry, MarketAdapter, ProtocolAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter,
     SystemAdapter, TradeAdapter,
 };
-pub use auth::{AuthContext, AuthProvider, ContractFuture};
+pub use auth::{AuthContext, AuthProvider, DynAuthProvider};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
     MarketChartCommand, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
@@ -39,7 +36,6 @@ pub use events::{
     AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
     NormalizedMutation, ReplayEvent, RuntimeInput, TimerEvent,
 };
-pub use http_executor::ReqwestHttpExecutor;
 pub use ids::{
     AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain,
     QueryId, ReplaySessionId, Revision, SchemaId, Symbol, TradeId,
@@ -56,15 +52,13 @@ pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath,
     StateReadView, StateSnapshot, UpdateCursor,
 };
-pub use tq_auth::{BrokerInfo, PasswordCredentials, TqAuthProvider};
-pub use tqkq::TqKqAccountConfig;
 pub use transport::{
     AuthDerivedTradeTarget, BootstrapResult, ConnectedSessionRoute, ConnectedTopology,
-    DefaultRouteConnector, DispatchReceipt, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
-    RawFrame, ReconnectPolicy, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
-    SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    SessionTopologyResolver, TradeSessionTarget, Transport, WebSocketConnectOptions,
-    WebSocketRouteConnector, WebSocketTransport,
+    DefaultRouteConnector, DispatchReceipt, DynRouteConnectFuture, DynTransport, EndpointConfig,
+    HeartbeatPolicy, MarketSessionTarget, RawFrame, ReconnectPolicy, SessionBootstrap,
+    SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionTarget, SessionTopology, SessionTopologyResolver, TradeSessionTarget, Transport,
+    WebSocketConnectOptions, WebSocketRouteConnector, WebSocketTransport,
 };
 pub use types::{
     Account, CategoryInfo, Chart, ChartInfo, EdbIndexData, FrequentCancellation,

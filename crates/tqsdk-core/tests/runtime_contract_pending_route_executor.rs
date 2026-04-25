@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -6,18 +8,21 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommitScope, ContractFuture,
+    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommitScope, DynTransport,
     EndpointConfig, IoEvent, OutboundDispatch, ProtocolDomain, QueryCommand, QueryId,
-    ReplayCommand, ReplayEvent, ReplaySessionId, RouteRequestExecutor, Runtime, RuntimeCommand,
-    RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
-    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
-    SessionTopology, SessionTopologyResolver, SystemCommand, Transport,
+    ReplayCommand, ReplayEvent, ReplaySessionId, Result as CoreResult, RouteRequestExecutor,
+    Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, SchemaId,
+    SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
+    SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, SystemCommand,
+    Transport,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 struct TestAuthProvider;
 
 impl AuthProvider for TestAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async { Ok(AuthContext::new("test-token")) })
     }
 }
@@ -33,7 +38,7 @@ impl SessionTopologyResolver for StaticTopologyResolver {
         _auth: &'a AuthContext,
         _config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> BoxFuture<'a, SessionTopology> {
         let topology = self.topology.clone();
         let expected_domains = self.expected_domains.clone();
         Box::pin(async move {
@@ -50,28 +55,31 @@ struct PassiveConnector;
 struct PassiveTransport;
 
 impl Transport for PassiveTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, tqsdk_core::RawFrame> {
-        Box::pin(async {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<tqsdk_core::RawFrame>> + Send + '_ {
+        async {
             Err(tqsdk_core::ContractError::validation(
                 "passive transport cannot recv",
             ))
-        })
+        }
     }
 
-    fn send(&mut self, _frame: tqsdk_core::OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async {
+    fn send(
+        &mut self,
+        _frame: tqsdk_core::OutboundFrame,
+    ) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async {
             Err(tqsdk_core::ContractError::validation(
                 "passive transport cannot send",
             ))
-        })
+        }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -79,8 +87,8 @@ impl SessionRouteConnector for PassiveConnector {
     fn connect_route<'a>(
         &'a self,
         _route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
-        Box::pin(async { Ok(Box::new(PassiveTransport) as Box<dyn Transport>) })
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
+        Box::pin(async { Ok(Box::new(PassiveTransport) as Box<dyn DynTransport>) })
     }
 }
 
@@ -114,7 +122,7 @@ impl RouteRequestExecutor for RecordingExecutor {
         &'a self,
         route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> ContractFuture<'a, Vec<RuntimeInput>> {
+    ) -> BoxFuture<'a, Vec<RuntimeInput>> {
         let responses = self
             .responses
             .get(&route.label)

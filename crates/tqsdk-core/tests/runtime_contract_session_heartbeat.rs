@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -7,12 +9,14 @@ use std::time::Duration;
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractFuture, EndpointConfig,
-    OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy, Runtime, RuntimeHandle,
-    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRuntime, SessionRuntimeDeps, SessionTarget, SessionTopology,
-    SessionTopologyResolver, StatePath, TimerEvent, Transport,
+    AdapterRegistry, AuthContext, AuthProvider, CommitScope, DynTransport, EndpointConfig,
+    OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy, Result as CoreResult, Runtime,
+    RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
+    SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionRuntimeDeps, SessionTarget,
+    SessionTopology, SessionTopologyResolver, StatePath, TimerEvent, Transport,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 #[derive(Clone)]
 enum RecvBehavior {
@@ -26,26 +30,26 @@ struct HeartbeatTransport {
 }
 
 impl Transport for HeartbeatTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
         let behavior = self.behavior.clone();
-        Box::pin(async move {
+        async move {
             match behavior {
                 RecvBehavior::Frame(frame) => Ok(frame),
             }
-        })
+        }
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
         self.sent_frames.lock().unwrap().push(frame);
-        Box::pin(async { Ok(()) })
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -77,7 +81,7 @@ impl SessionRouteConnector for HeartbeatConnector {
     fn connect_route<'a>(
         &'a self,
         route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let behaviors = Arc::clone(&self.behaviors);
         let sent_frames = Arc::clone(&self.sent_frames);
         let connected_labels = Arc::clone(&self.connected_labels);
@@ -92,7 +96,7 @@ impl SessionRouteConnector for HeartbeatConnector {
             Ok(Box::new(HeartbeatTransport {
                 behavior,
                 sent_frames,
-            }) as Box<dyn Transport>)
+            }) as Box<dyn DynTransport>)
         })
     }
 }
@@ -100,7 +104,7 @@ impl SessionRouteConnector for HeartbeatConnector {
 struct TestAuthProvider;
 
 impl AuthProvider for TestAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async { Ok(AuthContext::new("test-token")) })
     }
 }
@@ -113,7 +117,7 @@ impl SessionTopologyResolver for MarketTopologyResolver {
         _auth: &'a AuthContext,
         _config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> BoxFuture<'a, SessionTopology> {
         Box::pin(async move {
             assert_eq!(enabled_domains, &[ProtocolDomain::Market]);
             Ok(market_topology())

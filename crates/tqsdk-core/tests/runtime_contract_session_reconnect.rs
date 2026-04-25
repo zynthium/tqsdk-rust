@@ -1,3 +1,5 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -7,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, ContractFuture,
-    EndpointConfig, ProtocolDomain, RawFrame, ReconnectPolicy, Revision, Runtime, RuntimeHandle,
-    SessionBootstrap, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget,
-    SessionTopology, SessionTopologyResolver, StatePath, Transport,
+    AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, DynTransport,
+    EndpointConfig, ProtocolDomain, RawFrame, ReconnectPolicy, Result as CoreResult, Revision,
+    Runtime, RuntimeHandle, SessionBootstrap, SessionConfig, SessionPhase, SessionRoute,
+    SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps,
+    SessionTarget, SessionTopology, SessionTopologyResolver, StatePath, Transport,
 };
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
 
 #[derive(Clone)]
 enum RecvBehavior {
@@ -26,26 +30,29 @@ struct ControlledTransport {
 }
 
 impl Transport for ControlledTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
         let behavior = self.behavior.clone();
-        Box::pin(async move {
+        async move {
             match behavior {
                 RecvBehavior::Frame(frame) => Ok(frame),
                 RecvBehavior::Error(err) => Err(err),
             }
-        })
+        }
     }
 
-    fn send(&mut self, _frame: tqsdk_core::OutboundFrame) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn send(
+        &mut self,
+        _frame: tqsdk_core::OutboundFrame,
+    ) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
@@ -86,7 +93,7 @@ impl SessionRouteConnector for ControlledConnector {
     fn connect_route<'a>(
         &'a self,
         route: &'a SessionRoute,
-    ) -> ContractFuture<'a, Box<dyn Transport>> {
+    ) -> BoxFuture<'a, Box<dyn DynTransport>> {
         let outcomes = Arc::clone(&self.outcomes);
         let connected_labels = Arc::clone(&self.connected_labels);
         let label = route.label.clone();
@@ -103,7 +110,7 @@ impl SessionRouteConnector for ControlledConnector {
 
             match outcome {
                 ConnectOutcome::Connected(behavior) => {
-                    Ok(Box::new(ControlledTransport { behavior }) as Box<dyn Transport>)
+                    Ok(Box::new(ControlledTransport { behavior }) as Box<dyn DynTransport>)
                 }
                 ConnectOutcome::Error(err) => Err(err),
             }
@@ -631,7 +638,7 @@ fn session_config() -> SessionConfig {
 struct TestAuthProvider;
 
 impl AuthProvider for TestAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async { Ok(AuthContext::new("test-token")) })
     }
 }
@@ -644,7 +651,7 @@ impl SessionTopologyResolver for MarketTopologyResolver {
         _auth: &'a AuthContext,
         _config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> BoxFuture<'a, SessionTopology> {
         Box::pin(async move {
             assert_eq!(enabled_domains, &[ProtocolDomain::Market]);
             Ok(market_topology())

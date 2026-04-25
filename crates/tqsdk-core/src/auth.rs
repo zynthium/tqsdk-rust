@@ -4,8 +4,6 @@ use std::pin::Pin;
 use crate::Result;
 use crate::ids::AuthId;
 
-pub type ContractFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
     pub access_token: String,
@@ -46,5 +44,19 @@ impl AuthContext {
 }
 
 pub trait AuthProvider: Send + Sync {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext>;
+    fn authenticate(&self) -> impl Future<Output = Result<AuthContext>> + Send + '_;
+}
+
+#[doc(hidden)]
+pub trait DynAuthProvider: Send + Sync {
+    fn authenticate_boxed(&self) -> Pin<Box<dyn Future<Output = Result<AuthContext>> + Send + '_>>;
+}
+
+impl<T> DynAuthProvider for T
+where
+    T: AuthProvider,
+{
+    fn authenticate_boxed(&self) -> Pin<Box<dyn Future<Output = Result<AuthContext>> + Send + '_>> {
+        Box::pin(self.authenticate())
+    }
 }

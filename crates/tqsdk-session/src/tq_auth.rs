@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use base64::Engine;
@@ -7,14 +8,12 @@ use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
 
-use crate::auth::{AuthContext, AuthProvider, ContractFuture};
-use crate::ids::ProtocolDomain;
 use crate::tqkq::TqKqAccountConfig;
-use crate::transport::{
-    SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    SessionTopologyResolver, WebSocketConnectOptions,
+use tqsdk_core::{
+    AuthContext, AuthDerivedTradeTarget, AuthId, AuthProvider, ContractError, ProtocolDomain,
+    ReplaySessionId, Result, SessionConfig, SessionRoute, SessionRouteEndpoint, SessionTarget,
+    SessionTopology, SessionTopologyResolver, WebSocketConnectOptions,
 };
-use crate::{AuthId, ContractError, ReplaySessionId, Result};
 
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
@@ -71,6 +70,7 @@ pub struct BrokerInfo {
     pub condition_config: Option<String>,
 }
 
+#[allow(dead_code)]
 impl TqAuthProvider {
     pub fn new(credentials: PasswordCredentials) -> Self {
         Self {
@@ -325,22 +325,22 @@ impl TqAuthProvider {
         .await
     }
 
-    pub fn fetch_market_url<'a>(
+    pub async fn fetch_market_url<'a>(
         &'a self,
         auth: &'a AuthContext,
         stock: bool,
         backtest: bool,
-    ) -> ContractFuture<'a, String> {
-        Box::pin(async move { self.request_market_url(auth, stock, backtest).await })
+    ) -> Result<String> {
+        self.request_market_url(auth, stock, backtest).await
     }
 
-    pub fn fetch_trade_broker<'a>(
+    pub async fn fetch_trade_broker<'a>(
         &'a self,
         auth: &'a AuthContext,
         broker_id: &'a str,
         account_id: &'a str,
-    ) -> ContractFuture<'a, BrokerInfo> {
-        Box::pin(async move { self.request_trade_broker(auth, broker_id, account_id).await })
+    ) -> Result<BrokerInfo> {
+        self.request_trade_broker(auth, broker_id, account_id).await
     }
 }
 
@@ -359,11 +359,9 @@ fn optional_string(payload: &Value, field: &str) -> Option<String> {
 }
 
 impl AuthProvider for TqAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
-        Box::pin(async move {
-            let access_token = self.request_access_token().await?;
-            self.build_auth_context(access_token)
-        })
+    async fn authenticate(&self) -> Result<AuthContext> {
+        let access_token = self.request_access_token().await?;
+        self.build_auth_context(access_token)
     }
 }
 
@@ -373,7 +371,7 @@ impl SessionTopologyResolver for TqAuthProvider {
         auth: &'a AuthContext,
         config: &'a SessionConfig,
         enabled_domains: &'a [ProtocolDomain],
-    ) -> ContractFuture<'a, SessionTopology> {
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTopology>> + Send + 'a>> {
         Box::pin(async move {
             let mut topology = SessionTopology::default();
             let connect = WebSocketConnectOptions::default()
@@ -434,7 +432,7 @@ impl SessionTopologyResolver for TqAuthProvider {
                             })?
                             .as_str();
                         match auth_derived {
-                            crate::AuthDerivedTradeTarget::TqKqFuture { number } => {
+                            AuthDerivedTradeTarget::TqKqFuture { number } => {
                                 if let Some(number) = number {
                                     TqKqAccountConfig::future_numbered(auth_id, number)?
                                         .account_id()
@@ -443,7 +441,7 @@ impl SessionTopologyResolver for TqAuthProvider {
                                     TqKqAccountConfig::future(auth_id).account_id().clone()
                                 }
                             }
-                            crate::AuthDerivedTradeTarget::TqKqStock { number } => {
+                            AuthDerivedTradeTarget::TqKqStock { number } => {
                                 if let Some(number) = number {
                                     TqKqAccountConfig::stock_numbered(auth_id, number)?
                                         .account_id()

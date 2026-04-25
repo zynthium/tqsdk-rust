@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -8,14 +10,13 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthEvent, AuthProvider, CommandId, CommitScope,
-    DefaultRouteConnector, EdbIndexData, InternalEvent, OutboundDispatch, OutboundFrame,
-    QueryCommand, QueryId, Quote, ReplayCommand, ReplayEvent, ReqwestHttpExecutor,
-    RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeReader, SchemaCommand,
-    SchemaId, SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionRun, SessionRuntime, SessionRuntimeDeps, SessionTarget,
-    SessionTopologyResolver, SymbolRanking, SymbolSettlement, SystemCommand, TqAuthProvider,
-    TqKqAccountConfig, TradeLoginCommand, TradeSessionTarget, TradingCalendarDay,
+    AdapterRegistry, AuthContext, AuthEvent, CommandId, CommitScope, DefaultRouteConnector,
+    DynAuthProvider, EdbIndexData, InternalEvent, OutboundDispatch, OutboundFrame, QueryCommand,
+    QueryId, Quote, ReplayCommand, ReplayEvent, RouteRequestExecutor, Runtime, RuntimeCommand,
+    RuntimeHandle, RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
+    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime,
+    SessionRuntimeDeps, SessionTarget, SessionTopologyResolver, SymbolRanking, SymbolSettlement,
+    SystemCommand, TradeLoginCommand, TradeSessionTarget, TradingCalendarDay,
 };
 
 use crate::direct_query::{
@@ -23,7 +24,10 @@ use crate::direct_query::{
     OptionLevelQuotes, OptionQueryFilter, SessionMetadataQuery, SessionRawQuery,
     SessionServiceQuery, SymbolRankingType,
 };
+use crate::http_executor::ReqwestHttpExecutor;
 use crate::services::SessionServiceEndpoints;
+use crate::tq_auth::{PasswordCredentials, TqAuthProvider};
+use crate::tqkq::TqKqAccountConfig;
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 const PEEK_MESSAGE: &str = r#"{"aid":"peek_message"}"#;
@@ -31,7 +35,7 @@ const WEBSOCKET_COMMAND_POLL_BUDGET: Duration = Duration::from_millis(250);
 const WEBSOCKET_COMMAND_MAX_WAIT: Duration = Duration::from_secs(60);
 const LIMITED_INDEX_SYMBOLS: &[&str] = &["SSE.000016", "SSE.000300", "SSE.000905", "SSE.000852"];
 
-type SharedAuthProvider = Arc<dyn AuthProvider>;
+type SharedAuthProvider = Arc<dyn DynAuthProvider>;
 type SharedTopologyResolver = Arc<dyn SessionTopologyResolver>;
 type SharedRouteConnector = Arc<dyn SessionRouteConnector>;
 type SharedRouteExecutor = Arc<dyn RouteRequestExecutor>;
@@ -235,7 +239,7 @@ impl SessionClient {
         let reader = handle.reader();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
         let provider = Arc::new(
-            TqAuthProvider::new(tqsdk_core::PasswordCredentials::new(
+            TqAuthProvider::new(PasswordCredentials::new(
                 context.auth_user.clone(),
                 context.auth_pass.clone(),
             ))
@@ -1012,7 +1016,7 @@ impl SessionClient {
             io.auth_provider.clone()
         };
 
-        let auth = auth_provider.authenticate().await?;
+        let auth = auth_provider.authenticate_boxed().await?;
         io.lock().await.cached_auth = Some(auth.clone());
         Ok(auth)
     }
@@ -1192,7 +1196,8 @@ impl RouteRequestExecutor for SessionInternalExecutor {
         &'a self,
         _route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> tqsdk_core::ContractFuture<'a, Vec<tqsdk_core::RuntimeInput>> {
+    ) -> Pin<Box<dyn Future<Output = tqsdk_core::Result<Vec<tqsdk_core::RuntimeInput>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let mut inputs = Vec::with_capacity(requests.len());
             for request in requests {
@@ -1200,7 +1205,7 @@ impl RouteRequestExecutor for SessionInternalExecutor {
                     tqsdk_core::OutboundRequest::Internal(internal)
                         if internal.label == "refresh-auth" =>
                     {
-                        let auth = self.auth_provider.authenticate().await?;
+                        let auth = self.auth_provider.authenticate_boxed().await?;
                         inputs.push(tqsdk_core::RuntimeInput::Auth(AuthEvent {
                             label: "refreshed",
                             payload: Some(json!({
@@ -1236,7 +1241,8 @@ impl RouteRequestExecutor for SessionReplayExecutor {
         &'a self,
         route: &'a SessionRoute,
         requests: Vec<OutboundDispatch>,
-    ) -> tqsdk_core::ContractFuture<'a, Vec<tqsdk_core::RuntimeInput>> {
+    ) -> Pin<Box<dyn Future<Output = tqsdk_core::Result<Vec<tqsdk_core::RuntimeInput>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let session_id = match &route.target {
                 SessionTarget::Replay(session_id) => Some(session_id.clone()),
@@ -1378,21 +1384,24 @@ fn check_md_grants_for_features(features: &[String], symbols: &[&str]) -> crate:
 }
 
 #[cfg(test)]
+#[allow(clippy::manual_async_fn)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
     use serde_json::{Value, json};
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{Duration, Instant};
     use tqsdk_core::{
-        AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractFuture,
-        EndpointConfig, InputPayload, IoEvent, MarketCommand, OutboundDispatch, OutboundFrame,
-        OutboundRequest, ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId,
-        RouteRequestExecutor, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
-        SessionBootstrap, SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint,
-        SessionRuntime, SessionTarget, SessionTopology, SessionTopologyResolver, TradeAccountType,
-        Transport,
+        AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, DynRouteConnectFuture,
+        DynTransport, EndpointConfig, InputPayload, IoEvent, MarketCommand, OutboundDispatch,
+        OutboundFrame, OutboundRequest, ProtocolDomain, QueryCommand, QueryId, RawFrame,
+        ReplaySessionId, Result as CoreResult, RouteRequestExecutor, Runtime, RuntimeCommand,
+        RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
+        SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
+        SessionTopology, SessionTopologyResolver, TradeAccountType, Transport,
     };
 
     use super::{
@@ -1423,7 +1432,7 @@ mod tests {
     }
 
     impl AuthProvider for TestAuthProvider {
-        fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+        fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
             let mut auth = AuthContext::new("test-token");
             if let Some(auth_id) = &self.auth_id {
                 auth = auth.with_auth_id(AuthId::new(auth_id.clone()));
@@ -1431,7 +1440,7 @@ mod tests {
             for feature in &self.features {
                 auth = auth.with_feature(feature.clone());
             }
-            Box::pin(async move { Ok(auth) })
+            async move { Ok(auth) }
         }
     }
 
@@ -1446,7 +1455,7 @@ mod tests {
             _auth: &'a AuthContext,
             _config: &'a SessionConfig,
             _enabled_domains: &'a [ProtocolDomain],
-        ) -> ContractFuture<'a, SessionTopology> {
+        ) -> Pin<Box<dyn Future<Output = CoreResult<SessionTopology>> + Send + 'a>> {
             let topology = self.topology.clone();
             Box::pin(async move { Ok(topology) })
         }
@@ -1467,32 +1476,35 @@ mod tests {
     }
 
     impl Transport for QueueTransport {
-        fn connect(&mut self) -> ContractFuture<'_, ()> {
-            Box::pin(async { Ok(()) })
+        fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+            async { Ok(()) }
         }
 
-        fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+        fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
             let recv_queue = Arc::clone(&self.recv_queue);
-            Box::pin(async move {
+            async move {
                 let frame = recv_queue
                     .lock()
                     .unwrap()
                     .pop_front()
                     .unwrap_or(RawFrame::Pong);
                 Ok(frame)
-            })
+            }
         }
 
-        fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+        fn send(
+            &mut self,
+            frame: OutboundFrame,
+        ) -> impl Future<Output = CoreResult<()>> + Send + '_ {
             let sent = Arc::clone(&self.sent);
-            Box::pin(async move {
+            async move {
                 sent.lock().unwrap().push(frame);
                 Ok(())
-            })
+            }
         }
 
-        fn close(&mut self) -> ContractFuture<'_, ()> {
-            Box::pin(async { Ok(()) })
+        fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+            async { Ok(()) }
         }
     }
 
@@ -1502,12 +1514,9 @@ mod tests {
     }
 
     impl SessionRouteConnector for QueueConnector {
-        fn connect_route<'a>(
-            &'a self,
-            _route: &'a SessionRoute,
-        ) -> ContractFuture<'a, Box<dyn Transport>> {
+        fn connect_route<'a>(&'a self, _route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
             let transport = self.transport.clone();
-            Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+            Box::pin(async move { Ok(Box::new(transport) as Box<dyn DynTransport>) })
         }
     }
 
@@ -1529,16 +1538,16 @@ mod tests {
     }
 
     impl Transport for QueryResultTransport {
-        fn connect(&mut self) -> ContractFuture<'_, ()> {
-            Box::pin(async { Ok(()) })
+        fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+            async { Ok(()) }
         }
 
-        fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+        fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
             let sent = Arc::clone(&self.sent);
             let emitted_ping = Arc::clone(&self.emitted_ping);
             let emitted_result = Arc::clone(&self.emitted_result);
             let emit_ping_first = self.emit_ping_first;
-            Box::pin(async move {
+            async move {
                 if emit_ping_first && !*emitted_ping.lock().unwrap() {
                     *emitted_ping.lock().unwrap() = true;
                     return Ok(RawFrame::Ping);
@@ -1568,19 +1577,22 @@ mod tests {
                 }
 
                 Ok(RawFrame::Pong)
-            })
+            }
         }
 
-        fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+        fn send(
+            &mut self,
+            frame: OutboundFrame,
+        ) -> impl Future<Output = CoreResult<()>> + Send + '_ {
             let sent = Arc::clone(&self.sent);
-            Box::pin(async move {
+            async move {
                 sent.lock().unwrap().push(frame);
                 Ok(())
-            })
+            }
         }
 
-        fn close(&mut self) -> ContractFuture<'_, ()> {
-            Box::pin(async { Ok(()) })
+        fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+            async { Ok(()) }
         }
     }
 
@@ -1590,12 +1602,9 @@ mod tests {
     }
 
     impl SessionRouteConnector for QueryResultConnector {
-        fn connect_route<'a>(
-            &'a self,
-            _route: &'a SessionRoute,
-        ) -> ContractFuture<'a, Box<dyn Transport>> {
+        fn connect_route<'a>(&'a self, _route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
             let transport = self.transport.clone();
-            Box::pin(async move { Ok(Box::new(transport) as Box<dyn Transport>) })
+            Box::pin(async move { Ok(Box::new(transport) as Box<dyn DynTransport>) })
         }
     }
 
@@ -1628,7 +1637,7 @@ mod tests {
             &'a self,
             route: &'a SessionRoute,
             requests: Vec<OutboundDispatch>,
-        ) -> ContractFuture<'a, Vec<RuntimeInput>> {
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<RuntimeInput>>> + Send + 'a>> {
             let fixed_inputs = self.responses.lock().unwrap().get(&route.label).cloned();
             let query_value = self.query_values.lock().unwrap().get(&route.label).cloned();
             let inputs = fixed_inputs

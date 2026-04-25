@@ -3,8 +3,6 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use sha1::{Digest, Sha1};
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -208,7 +206,32 @@ fn websocket_accept_key(client_key: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(client_key.as_bytes());
     hasher.update(WS_ACCEPT_GUID.as_bytes());
-    STANDARD.encode(hasher.finalize())
+    base64_standard(&hasher.finalize())
+}
+
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+
+        encoded.push(ALPHABET[(b0 >> 2) as usize] as char);
+        encoded.push(ALPHABET[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(ALPHABET[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(ALPHABET[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }
 
 fn write_handshake_response(stream: &mut TcpStream, accept_key: &str) -> io::Result<()> {

@@ -1,18 +1,20 @@
+#![allow(clippy::manual_async_fn)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, ContractFuture,
-    EndpointConfig, HeartbeatPolicy, OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy,
-    SessionBootstrap, SessionConfig, SessionPhase, Transport,
+    AdapterRegistry, AuthContext, AuthId, AuthProvider, BootstrapResult, EndpointConfig,
+    HeartbeatPolicy, OutboundFrame, ProtocolDomain, RawFrame, ReconnectPolicy,
+    Result as CoreResult, SessionBootstrap, SessionConfig, SessionPhase, Transport,
 };
 
 struct TestAuthProvider;
 
 impl AuthProvider for TestAuthProvider {
-    fn authenticate(&self) -> ContractFuture<'_, AuthContext> {
+    fn authenticate(&self) -> impl Future<Output = CoreResult<AuthContext>> + Send + '_ {
         Box::pin(async {
             Ok(AuthContext::new("access-token")
                 .with_auth_id(AuthId::new("auth-1"))
@@ -27,24 +29,24 @@ struct TestTransport {
 }
 
 impl Transport for TestTransport {
-    fn connect(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn connect(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 
-    fn recv(&mut self) -> ContractFuture<'_, RawFrame> {
+    fn recv(&mut self) -> impl Future<Output = CoreResult<RawFrame>> + Send + '_ {
         let frame = self.frames.pop().unwrap_or(RawFrame::Pong);
-        Box::pin(async move { Ok(frame) })
+        async move { Ok(frame) }
     }
 
-    fn send(&mut self, frame: OutboundFrame) -> ContractFuture<'_, ()> {
+    fn send(&mut self, frame: OutboundFrame) -> impl Future<Output = CoreResult<()>> + Send + '_ {
         if matches!(frame, OutboundFrame::Ping) {
             self.frames.push(RawFrame::Pong);
         }
-        Box::pin(async { Ok(()) })
+        async { Ok(()) }
     }
 
-    fn close(&mut self) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn close(&mut self) -> impl Future<Output = CoreResult<()>> + Send + '_ {
+        async { Ok(()) }
     }
 }
 
