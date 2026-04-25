@@ -184,6 +184,7 @@ V1 是：
 
 | 主题 | 当前落点 |
 | :--- | :--- |
+| AI 工作流与架构守则 | [ai-workflow.md](ai-workflow.md) |
 | 总架构、阶段边界、路线图 | [README.md](README.md)、[roadmap.md](roadmap.md) |
 | 当前 workspace crate 边界审计 | [crate-boundaries.md](crate-boundaries.md) |
 | 未来 crate 蓝图与能力映射 | [crate-blueprint.md](crate-blueprint.md) |
@@ -221,22 +222,23 @@ V1 是：
    - task/tooling
 
 ## 阅读顺序
-1. [diff-core](diff-core.md)
-2. [runtime-core 总览](runtime-core/overview.md)
-3. [Session/Auth](runtime-core/session-auth.md)
-4. [协议交互](runtime-core/protocol-flow.md)
-5. [模块清单](runtime-core/modules.md)
-6. [数据契约](runtime-core/data-contracts.md)
-7. [类型约束](runtime-core/type-system.md)
-8. [Python / Rust facade 范式对比](facade-paradigms.md)
-9. [当前 crate 边界审计](crate-boundaries.md)
-10. [未来 crate 蓝图与能力映射](crate-blueprint.md)
-11. [验收与测试矩阵](validation.md)
-12. [wait facade](api-wait.md)
-13. [stream facade](api-stream.md)
-14. [task facade](api-task.md)
-15. [data facade](api-data.md)
-16. [演进路线](roadmap.md)
+1. [AI 工作流与架构守则](ai-workflow.md)
+2. [diff-core](diff-core.md)
+3. [runtime-core 总览](runtime-core/overview.md)
+4. [Session/Auth](runtime-core/session-auth.md)
+5. [协议交互](runtime-core/protocol-flow.md)
+6. [模块清单](runtime-core/modules.md)
+7. [数据契约](runtime-core/data-contracts.md)
+8. [类型约束](runtime-core/type-system.md)
+9. [Python / Rust facade 范式对比](facade-paradigms.md)
+10. [当前 crate 边界审计](crate-boundaries.md)
+11. [未来 crate 蓝图与能力映射](crate-blueprint.md)
+12. [验收与测试矩阵](validation.md)
+13. [wait facade](api-wait.md)
+14. [stream facade](api-stream.md)
+15. [task facade](api-task.md)
+16. [data facade](api-data.md)
+17. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text

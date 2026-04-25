@@ -1,3 +1,32 @@
+## Project Architecture Guardrails
+
+The canonical AI workflow and architecture guardrails for this repository live in
+[`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md). Read it
+before code changes in a new Claude Code session, especially before touching
+crate boundaries, public APIs, runtime state/commit semantics, session/query
+ownership, or wait/stream/task/data facade ownership.
+
+Hard constraints:
+
+- `tqsdk-core` remains the protocol-complete runtime substrate. Do not move
+  high-level facades, direct-query convenience APIs, task/data/downloader logic,
+  or Tianqin-specific public auth/http helpers back into core.
+- `tqsdk-session` owns shared session and one-shot request/response/direct-query
+  helpers. `tqsdk-wait` and `tqsdk-stream` own only diff-backed continuous
+  consumption shapes.
+- All visible state changes must flow through the runtime commit model:
+  `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`.
+  Do not add side caches, private facade revisions, or bypass notifications.
+- Domain writes must keep the `MutationSource` root guard. Hot reads should use
+  partition read surfaces such as `read_market_state()` and `read_trade_state()`
+  when available.
+- Command/order status updates must go through the runtime state machine; do not
+  reintroduce string-based terminal checks or adapter-local rollback behavior.
+- If an implementation changes the architecture, update the architecture docs in
+  the same change. At minimum check `docs/architecture/ai-workflow.md`,
+  `docs/architecture/README.md`, the affected architecture topic docs, affected
+  crate READMEs, and this file.
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 

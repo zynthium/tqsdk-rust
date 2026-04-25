@@ -48,6 +48,7 @@ docs/
 - data crate 说明见 [crates/tqsdk-data/README.md](crates/tqsdk-data/README.md)
 - 仓库级路线图见 [ROADMAP.md](ROADMAP.md)
 - 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
+- AI 工作流与架构守则见 [docs/architecture/ai-workflow.md](docs/architecture/ai-workflow.md)
 - 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
 
 ## 常用命令
@@ -98,6 +99,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明：
 
 - [`docs/architecture/README.md`](docs/architecture/README.md)
+- [`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md)
 - [`docs/architecture/runtime-core/overview.md`](docs/architecture/runtime-core/overview.md)
 - [`docs/architecture/validation.md`](docs/architecture/validation.md)
 
