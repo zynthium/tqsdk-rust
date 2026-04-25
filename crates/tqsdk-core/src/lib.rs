@@ -7,6 +7,7 @@
 //! user APIs or runtime ownership.
 
 pub mod adapter;
+mod aggregation;
 pub mod auth;
 pub mod commands;
 mod diff_protocol;
@@ -21,6 +22,10 @@ pub mod transport;
 pub mod types;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
+pub use aggregation::{
+    AggregatedCommit, AggregatedCursor, AggregatedRuntimeReader, AggregatedSnapshotReadGuard,
+    StateSourceId,
+};
 pub use auth::{AuthContext, AuthProvider, DynAuthProvider};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
