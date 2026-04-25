@@ -129,8 +129,10 @@ fn resolve_request_url(base_url: &str, path: Option<&str>) -> Result<String> {
     let Some(path) = path else {
         return Ok(base_url.to_string());
     };
-    if matches!(path.split_once("://"), Some((_scheme, _rest))) {
-        return Ok(path.to_string());
+    if Url::parse(path).is_ok() || path.starts_with("//") {
+        return Err(ContractError::validation(
+            "absolute http request paths are not allowed; configure the route endpoint instead",
+        ));
     }
 
     let base = Url::parse(base_url)
@@ -184,5 +186,31 @@ fn wrap_query_response(query_id: &str, value: Value) -> Value {
             "query_id": query_id,
             "data": other,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tqsdk_core::ContractError;
+
+    use super::resolve_request_url;
+
+    #[test]
+    fn resolve_request_url_rejects_absolute_request_paths() {
+        let err = resolve_request_url(
+            "https://schema.example/base/latest.json",
+            Some("https://metadata.evil/internal.json"),
+        )
+        .expect_err("absolute request path should be rejected");
+
+        assert!(matches!(err, ContractError::Validation(message) if message.contains("absolute")));
+    }
+
+    #[test]
+    fn resolve_request_url_joins_relative_request_paths_to_route_base() {
+        let url = resolve_request_url("https://schema.example/base/", Some("instrument.json"))
+            .expect("relative path should resolve against the route base");
+
+        assert_eq!(url, "https://schema.example/base/instrument.json");
     }
 }
