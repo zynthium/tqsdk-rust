@@ -19,8 +19,8 @@ impl TradingStatusRef {
     pub fn load(&self, api: &TqApi) -> crate::error::Result<TradingStatus> {
         api.driver
             .reader
-            .read()
-            .decode_path::<TradingStatus>(&["trading_status", self.symbol.as_str()])?
+            .read_market_state()
+            .trading_status(&self.symbol)?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "trading status not ready",
             ))

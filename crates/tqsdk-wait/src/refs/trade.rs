@@ -12,7 +12,7 @@ fn decode_optional<T: DeserializeOwned>(
 ) -> crate::error::Result<Option<T>> {
     api.driver
         .reader
-        .read()
+        .read_trade_state()
         .decode_path::<T>(path)
         .map_err(Into::into)
 }
@@ -39,7 +39,7 @@ impl AccountRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Account>> {
-        decode_optional(api, &["trade", self.account_id.as_str(), "accounts", "CNY"])
+        decode_optional(api, &[self.account_id.as_str(), "accounts", "CNY"])
     }
 
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
@@ -85,12 +85,7 @@ impl PositionRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Position>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "positions",
-                self.symbol.as_str(),
-            ],
+            &[self.account_id.as_str(), "positions", self.symbol.as_str()],
         )
     }
 
@@ -144,7 +139,6 @@ impl PreInsertOrderRef {
         decode_optional(
             api,
             &[
-                "trade",
                 self.account_id.as_str(),
                 "pre_insert_orders",
                 self.order_id.as_str(),
@@ -208,12 +202,7 @@ impl OrderRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Order>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "orders",
-                self.order_id.as_str(),
-            ],
+            &[self.account_id.as_str(), "orders", self.order_id.as_str()],
         )
     }
 
@@ -269,12 +258,7 @@ impl TradeRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Trade>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "trades",
-                self.trade_id.as_str(),
-            ],
+            &[self.account_id.as_str(), "trades", self.trade_id.as_str()],
         )
     }
 
@@ -328,7 +312,6 @@ impl RiskManagementRuleRef {
         decode_optional(
             api,
             &[
-                "trade",
                 self.account_id.as_str(),
                 "risk_management_rule",
                 self.exchange_id.as_str(),
@@ -386,7 +369,6 @@ impl RiskManagementDataRef {
         decode_optional(
             api,
             &[
-                "trade",
                 self.account_id.as_str(),
                 "risk_management_data",
                 self.symbol.as_str(),
@@ -444,7 +426,6 @@ impl SettlementInfoRef {
         decode_optional(
             api,
             &[
-                "trade",
                 self.account_id.as_str(),
                 "his_settlements",
                 self.trading_day.as_str(),

@@ -22,9 +22,10 @@ impl QuoteRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Quote>> {
-        let guard = api.driver.reader.read();
-        guard
-            .decode_path::<Quote>(&["quotes", self.symbol.as_str()])
+        api.driver
+            .reader
+            .read_market_state()
+            .quote(&self.symbol)
             .map_err(Into::into)
     }
 

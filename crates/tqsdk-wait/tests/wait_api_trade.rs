@@ -3,6 +3,21 @@ mod support;
 use serde_json::json;
 use tqsdk_core::{OutboundFrame, OutboundRequest, ProtocolDomain, TradeDirection, TradeOffset};
 
+fn compact_source(source: &str) -> String {
+    source.split_whitespace().collect::<String>()
+}
+
+#[test]
+fn trade_refs_read_trade_partition_instead_of_full_snapshot() {
+    let trade_refs = include_str!("../src/refs/trade.rs");
+    let security_refs = include_str!("../src/refs/security.rs");
+
+    assert!(trade_refs.contains("read_trade_state()"));
+    assert!(security_refs.contains("read_trade_state()"));
+    assert!(!compact_source(trade_refs).contains("reader.read()"));
+    assert!(!compact_source(security_refs).contains("reader.read()"));
+}
+
 fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
     match request {
         OutboundRequest::Transport(OutboundFrame::Text(text)) => {

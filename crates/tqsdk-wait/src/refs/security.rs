@@ -12,7 +12,7 @@ fn decode_optional<T: DeserializeOwned>(
 ) -> crate::error::Result<Option<T>> {
     api.driver
         .reader
-        .read()
+        .read_trade_state()
         .decode_path::<T>(path)
         .map_err(Into::into)
 }
@@ -39,7 +39,7 @@ impl SecurityAccountRef {
     }
 
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SecurityAccount>> {
-        decode_optional(api, &["trade", self.account_id.as_str(), "accounts", "CNY"])
+        decode_optional(api, &[self.account_id.as_str(), "accounts", "CNY"])
     }
 
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
@@ -85,12 +85,7 @@ impl SecurityPositionRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SecurityPosition>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "positions",
-                self.symbol.as_str(),
-            ],
+            &[self.account_id.as_str(), "positions", self.symbol.as_str()],
         )
     }
 
@@ -143,12 +138,7 @@ impl SecurityOrderRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SecurityOrder>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "orders",
-                self.order_id.as_str(),
-            ],
+            &[self.account_id.as_str(), "orders", self.order_id.as_str()],
         )
     }
 
@@ -201,12 +191,7 @@ impl SecurityTradeRef {
     pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SecurityTrade>> {
         decode_optional(
             api,
-            &[
-                "trade",
-                self.account_id.as_str(),
-                "trades",
-                self.trade_id.as_str(),
-            ],
+            &[self.account_id.as_str(), "trades", self.trade_id.as_str()],
         )
     }
 

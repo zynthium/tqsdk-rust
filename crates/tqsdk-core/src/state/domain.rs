@@ -186,6 +186,27 @@ impl<'a> TradeStateView<'a> {
             ),
         }
     }
+
+    /// Decodes a value from a `trade`-partition relative path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        match self.source {
+            TradeStateSource::Snapshot(read) => {
+                let mut full_path = Vec::with_capacity(path.len() + 1);
+                full_path.push("trade");
+                full_path.extend_from_slice(path);
+                read.decode_path(&full_path)
+            }
+            TradeStateSource::Partition { trade, .. } => {
+                let mut display_path = Vec::with_capacity(path.len() + 1);
+                display_path.push("trade");
+                display_path.extend_from_slice(path);
+                decode_partition_path(trade, path, &display_path)
+            }
+        }
+    }
 }
 
 pub struct TradeStateReadGuard<'a> {
@@ -216,6 +237,14 @@ impl<'a> TradeStateReadGuard<'a> {
 
     pub fn order(&self, account_id: &AccountId, order_id: &OrderId) -> Result<Option<Order>> {
         self.view().order(account_id, order_id)
+    }
+
+    /// Decodes a value from a `trade`-partition relative path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        self.view().decode_path(path)
     }
 }
 

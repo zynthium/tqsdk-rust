@@ -1,5 +1,20 @@
 mod support;
 
+fn compact_source(source: &str) -> String {
+    source.split_whitespace().collect::<String>()
+}
+
+#[test]
+fn market_refs_read_market_partitions_instead_of_full_snapshot() {
+    let quote_ref = include_str!("../src/refs/quote.rs");
+    let trading_status_ref = include_str!("../src/refs/trading_status.rs");
+
+    assert!(quote_ref.contains("read_market_state()"));
+    assert!(trading_status_ref.contains("read_market_state()"));
+    assert!(!compact_source(quote_ref).contains("reader.read()"));
+    assert!(!compact_source(trading_status_ref).contains("reader.read()"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn get_quote_returns_ref_without_waiting_for_first_tick() {
     let mut api = support::seeded_api();
