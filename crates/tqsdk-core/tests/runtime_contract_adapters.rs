@@ -104,15 +104,29 @@ fn adapter_registry_routes_commands_and_fans_out_inputs() {
 }
 
 #[test]
-fn market_adapter_encoding_uses_diff_protocol_message_model() {
+fn adapter_root_does_not_own_domain_adapter_implementations() {
     let source = include_str!("../src/adapter.rs");
+
+    for impl_header in [
+        "impl ProtocolAdapter for MarketAdapter",
+        "impl ProtocolAdapter for TradeAdapter",
+        "impl ProtocolAdapter for QueryAdapter",
+        "impl ProtocolAdapter for SchemaAdapter",
+        "impl ProtocolAdapter for ReplayAdapter",
+    ] {
+        assert!(
+            !source.contains(impl_header),
+            "default domain adapter implementations should live in focused adapter submodules"
+        );
+    }
+}
+
+#[test]
+fn market_adapter_encoding_uses_diff_protocol_message_model() {
+    let source = include_str!("../src/adapter/market.rs");
     let market_impl = source
         .split("impl ProtocolAdapter for MarketAdapter {")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("#[derive(Debug, Clone, Default, PartialEq, Eq)]")
-                .next()
-        })
         .expect("MarketAdapter ProtocolAdapter impl should be present");
 
     for aid in ["subscribe_quote", "subscribe_trading_status", "set_chart"] {
@@ -126,14 +140,10 @@ fn market_adapter_encoding_uses_diff_protocol_message_model() {
 
 #[test]
 fn trade_adapter_encoding_uses_diff_protocol_message_model() {
-    let source = include_str!("../src/adapter.rs");
+    let source = include_str!("../src/adapter/trade.rs");
     let trade_impl = source
         .split("impl ProtocolAdapter for TradeAdapter {")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("#[derive(Debug, Clone, Default, PartialEq, Eq)]")
-                .next()
-        })
         .expect("TradeAdapter ProtocolAdapter impl should be present");
 
     for aid in [
