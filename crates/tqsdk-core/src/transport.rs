@@ -654,21 +654,17 @@ impl ConnectedSessionRoute {
         self.pending_inputs.drain(..).collect()
     }
 
-    pub fn recv_input<'a>(
-        &'a mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeInput>>> + Send + 'a>> {
-        Box::pin(async move {
-            if let Some(input) = self.pending_inputs.pop_front() {
-                return Ok(Some(input));
-            }
+    pub async fn recv_input(&mut self) -> Result<Option<RuntimeInput>> {
+        if let Some(input) = self.pending_inputs.pop_front() {
+            return Ok(Some(input));
+        }
 
-            if !matches!(self.route.endpoint, SessionRouteEndpoint::WebSocket { .. }) {
-                return Ok(None);
-            }
+        if !matches!(self.route.endpoint, SessionRouteEndpoint::WebSocket { .. }) {
+            return Ok(None);
+        }
 
-            let frame = self.transport.recv_boxed().await?;
-            map_raw_frame_to_input(&self.route, frame)
-        })
+        let frame = self.transport.recv_boxed().await?;
+        map_raw_frame_to_input(&self.route, frame)
     }
 }
 
@@ -685,80 +681,70 @@ pub struct DispatchReceipt {
 }
 
 impl ConnectedTopology {
-    pub fn close_all<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            for route in &mut self.routes {
-                route.transport.close_boxed().await?;
-            }
-            Ok(())
-        })
+    pub async fn close_all(&mut self) -> Result<()> {
+        for route in &mut self.routes {
+            route.transport.close_boxed().await?;
+        }
+        Ok(())
     }
 
-    pub fn dispatch<'a>(
-        &'a mut self,
-        dispatch: OutboundDispatch,
-    ) -> Pin<Box<dyn Future<Output = Result<DispatchReceipt>> + Send + 'a>> {
-        Box::pin(async move { self.dispatch_ref(&dispatch).await })
+    pub async fn dispatch(&mut self, dispatch: OutboundDispatch) -> Result<DispatchReceipt> {
+        self.dispatch_ref(&dispatch).await
     }
 
     /// Dispatches a request without moving ownership out of the caller.
     ///
     /// This is the preferred hot-path surface when the caller still needs the
     /// dispatch metadata for command-status projection after the route send.
-    pub fn dispatch_ref<'a>(
-        &'a mut self,
-        dispatch: &'a OutboundDispatch,
-    ) -> Pin<Box<dyn Future<Output = Result<DispatchReceipt>> + Send + 'a>> {
-        Box::pin(async move {
-            let route = self
-                .routes
-                .iter_mut()
-                .filter_map(|route| {
-                    route_dispatch_match_score(&route.route, dispatch).map(|score| (score, route))
-                })
-                .max_by_key(|(score, _route)| *score)
-                .map(|(_score, route)| route)
-                .ok_or_else(|| {
-                    ContractError::validation(format!(
-                        "no connected route for {} {:?} request",
-                        dispatch.domain.as_str(),
-                        dispatch.request
-                    ))
-                })?;
+    pub async fn dispatch_ref(&mut self, dispatch: &OutboundDispatch) -> Result<DispatchReceipt> {
+        let route = self
+            .routes
+            .iter_mut()
+            .filter_map(|route| {
+                route_dispatch_match_score(&route.route, dispatch).map(|score| (score, route))
+            })
+            .max_by_key(|(score, _route)| *score)
+            .map(|(_score, route)| route)
+            .ok_or_else(|| {
+                ContractError::validation(format!(
+                    "no connected route for {} {:?} request",
+                    dispatch.domain.as_str(),
+                    dispatch.request
+                ))
+            })?;
 
-            match &dispatch.request {
-                OutboundRequest::Transport(frame) => {
-                    route.transport.send_boxed(frame.clone()).await?;
+        match &dispatch.request {
+            OutboundRequest::Transport(frame) => {
+                route.transport.send_boxed(frame.clone()).await?;
+            }
+            OutboundRequest::Query(query) => match &route.route.endpoint {
+                SessionRouteEndpoint::WebSocket { .. } => {
+                    route
+                        .transport
+                        .send_boxed(OutboundFrame::Text(query.body().to_string()))
+                        .await?;
                 }
-                OutboundRequest::Query(query) => match &route.route.endpoint {
-                    SessionRouteEndpoint::WebSocket { .. } => {
-                        route
-                            .transport
-                            .send_boxed(OutboundFrame::Text(query.body().to_string()))
-                            .await?;
-                    }
-                    SessionRouteEndpoint::Http { .. } => {
-                        route.pending_requests.push_back(dispatch.clone());
-                    }
-                    SessionRouteEndpoint::Replay { .. } | SessionRouteEndpoint::Internal { .. } => {
-                        return Err(ContractError::validation(format!(
-                            "query request cannot be dispatched to {:?}",
-                            route.route.endpoint
-                        )));
-                    }
-                },
-                OutboundRequest::Http(_)
-                | OutboundRequest::Replay(_)
-                | OutboundRequest::Internal(_) => {
+                SessionRouteEndpoint::Http { .. } => {
                     route.pending_requests.push_back(dispatch.clone());
                 }
+                SessionRouteEndpoint::Replay { .. } | SessionRouteEndpoint::Internal { .. } => {
+                    return Err(ContractError::validation(format!(
+                        "query request cannot be dispatched to {:?}",
+                        route.route.endpoint
+                    )));
+                }
+            },
+            OutboundRequest::Http(_)
+            | OutboundRequest::Replay(_)
+            | OutboundRequest::Internal(_) => {
+                route.pending_requests.push_back(dispatch.clone());
             }
+        }
 
-            Ok(DispatchReceipt {
-                command_id: dispatch.command_id,
-                domain: dispatch.domain,
-                route_label: route.route.label.clone(),
-            })
+        Ok(DispatchReceipt {
+            command_id: dispatch.command_id,
+            domain: dispatch.domain,
+            route_label: route.route.label.clone(),
         })
     }
 
@@ -782,33 +768,22 @@ impl ConnectedTopology {
         self.routes.iter().any(|route| route.route.label == label)
     }
 
-    pub fn recv_route_input<'a>(
-        &'a mut self,
-        label: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeInput>>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(route) = self.route_mut(label) else {
-                return Err(ContractError::validation(format!(
-                    "unknown connected route for input recv: {label}"
-                )));
-            };
-            route.recv_input().await
-        })
+    pub async fn recv_route_input(&mut self, label: &str) -> Result<Option<RuntimeInput>> {
+        let Some(route) = self.route_mut(label) else {
+            return Err(ContractError::validation(format!(
+                "unknown connected route for input recv: {label}"
+            )));
+        };
+        route.recv_input().await
     }
 
-    pub fn send_route_frame<'a>(
-        &'a mut self,
-        label: &'a str,
-        frame: OutboundFrame,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(route) = self.route_mut(label) else {
-                return Err(ContractError::validation(format!(
-                    "unknown connected route for frame send: {label}"
-                )));
-            };
-            route.transport.send_boxed(frame).await
-        })
+    pub async fn send_route_frame(&mut self, label: &str, frame: OutboundFrame) -> Result<()> {
+        let Some(route) = self.route_mut(label) else {
+            return Err(ContractError::validation(format!(
+                "unknown connected route for frame send: {label}"
+            )));
+        };
+        route.transport.send_boxed(frame).await
     }
 
     pub fn take_route_requests(
@@ -1018,71 +993,65 @@ impl SessionBootstrap {
         Self
     }
 
-    pub fn establish<'a>(
+    pub async fn establish(
         &self,
-        auth: &'a dyn DynAuthProvider,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
-    ) -> Pin<Box<dyn Future<Output = Result<BootstrapResult>> + Send + 'a>> {
-        Box::pin(async move {
-            let auth = auth.authenticate_boxed().await?;
-            let enabled_domains = if config.enabled_domains.is_empty() {
-                adapters.domains().to_vec()
-            } else {
-                config.enabled_domains.clone()
-            };
+        auth: &dyn DynAuthProvider,
+        config: &SessionConfig,
+        adapters: &AdapterRegistry,
+    ) -> Result<BootstrapResult> {
+        let auth = auth.authenticate_boxed().await?;
+        let enabled_domains = if config.enabled_domains.is_empty() {
+            adapters.domains().to_vec()
+        } else {
+            config.enabled_domains.clone()
+        };
 
-            Ok(BootstrapResult::new(auth, enabled_domains))
-        })
+        Ok(BootstrapResult::new(auth, enabled_domains))
     }
 
-    pub fn establish_with_resolver<'a>(
+    pub async fn establish_with_resolver(
         &self,
-        auth: &'a dyn DynAuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
-    ) -> Pin<Box<dyn Future<Output = Result<BootstrapResult>> + Send + 'a>> {
-        Box::pin(async move {
-            let auth = auth.authenticate_boxed().await?;
-            let enabled_domains = if config.enabled_domains.is_empty() {
-                adapters.domains().to_vec()
-            } else {
-                config.enabled_domains.clone()
-            };
-            let topology = resolver
-                .resolve_topology(&auth, config, &enabled_domains)
-                .await?;
+        auth: &dyn DynAuthProvider,
+        resolver: &dyn SessionTopologyResolver,
+        config: &SessionConfig,
+        adapters: &AdapterRegistry,
+    ) -> Result<BootstrapResult> {
+        let auth = auth.authenticate_boxed().await?;
+        let enabled_domains = if config.enabled_domains.is_empty() {
+            adapters.domains().to_vec()
+        } else {
+            config.enabled_domains.clone()
+        };
+        let topology = resolver
+            .resolve_topology(&auth, config, &enabled_domains)
+            .await?;
 
-            Ok(BootstrapResult::new(auth, enabled_domains).with_topology(topology))
-        })
+        Ok(BootstrapResult::new(auth, enabled_domains).with_topology(topology))
     }
 
-    pub fn connect_topology<'a>(
+    pub async fn connect_topology(
         &self,
-        topology: &'a SessionTopology,
-        connector: &'a dyn SessionRouteConnector,
-    ) -> Pin<Box<dyn Future<Output = Result<ConnectedTopology>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut connected = ConnectedTopology::default();
+        topology: &SessionTopology,
+        connector: &dyn SessionRouteConnector,
+    ) -> Result<ConnectedTopology> {
+        let mut connected = ConnectedTopology::default();
 
-            for route in &topology.routes {
-                match connector.connect_route(route).await {
-                    Ok(transport) => connected.routes.push(ConnectedSessionRoute {
-                        route: route.clone(),
-                        transport,
-                        pending_requests: VecDeque::new(),
-                        pending_inputs: VecDeque::new(),
-                    }),
-                    Err(err) => {
-                        let _ = connected.close_all().await;
-                        return Err(err);
-                    }
+        for route in &topology.routes {
+            match connector.connect_route(route).await {
+                Ok(transport) => connected.routes.push(ConnectedSessionRoute {
+                    route: route.clone(),
+                    transport,
+                    pending_requests: VecDeque::new(),
+                    pending_inputs: VecDeque::new(),
+                }),
+                Err(err) => {
+                    let _ = connected.close_all().await;
+                    return Err(err);
                 }
             }
+        }
 
-            Ok(connected)
-        })
+        Ok(connected)
     }
 }
 

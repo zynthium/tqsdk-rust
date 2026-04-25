@@ -11,6 +11,42 @@ use tqsdk_core::{
 };
 
 #[test]
+fn transport_orchestration_methods_do_not_box_futures() {
+    let source = include_str!("../src/transport.rs");
+    let blocks = [
+        (
+            "ConnectedSessionRoute",
+            source
+                .split("impl ConnectedSessionRoute {")
+                .nth(1)
+                .and_then(|tail| tail.split("#[derive(Default)]").next()),
+        ),
+        (
+            "ConnectedTopology",
+            source
+                .split("impl ConnectedTopology {")
+                .nth(1)
+                .and_then(|tail| tail.split("#[doc(hidden)]").next()),
+        ),
+        (
+            "SessionBootstrap",
+            source
+                .split("impl SessionBootstrap {")
+                .nth(1)
+                .and_then(|tail| tail.split("#[cfg(test)]").next()),
+        ),
+    ];
+
+    for (name, block) in blocks {
+        let block = block.unwrap_or_else(|| panic!("{name} impl block should be present"));
+        assert!(
+            !block.contains("Box::pin"),
+            "{name} orchestration methods should use native async futures"
+        );
+    }
+}
+
+#[test]
 fn default_route_connector_supports_non_websocket_route_endpoints() {
     let topology = SessionTopology::default()
         .with_route(SessionRoute {
