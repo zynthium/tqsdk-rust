@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Days, FixedOffset, NaiveDate, NaiveTime, Utc};
@@ -15,7 +15,7 @@ use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeS
 use crate::registry::TaskId;
 use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
-    SharedTaskRegistry, SharedTradingCalendar,
+    SharedTaskRegistry, SharedTradingCalendar, TaskStateCell,
 };
 use crate::target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskTradeFill,
@@ -129,7 +129,7 @@ struct TargetPosSchedulerInner {
     symbol: String,
     steps: Vec<TargetPosScheduleStep>,
     config: TargetPosSchedulerConfig,
-    state: Mutex<TargetPosSchedulerState>,
+    state: TaskStateCell<TargetPosSchedulerState>,
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
@@ -224,7 +224,7 @@ impl TargetPosSchedulerBuilder {
             symbol: self.symbol,
             steps: self.steps,
             config: self.config,
-            state: Mutex::new(TargetPosSchedulerState::default()),
+            state: TaskStateCell::default(),
             finished_tx,
             cancel_requested: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -265,12 +265,12 @@ impl TargetPosScheduler {
 
     #[must_use]
     pub fn execution_report(&self) -> TargetPosExecutionReport {
-        self.inner.state().report.clone()
+        self.inner.with_state(|state| state.report.clone())
     }
 
     #[must_use]
     pub fn execution_events(&self) -> Vec<TargetPosSchedulerExecutionEvent> {
-        self.inner.state().events.clone()
+        self.inner.with_state(|state| state.events.clone())
     }
 
     #[must_use]
@@ -278,10 +278,11 @@ impl TargetPosScheduler {
         &self,
         start: usize,
     ) -> (usize, Vec<TargetPosSchedulerExecutionEvent>) {
-        let state = self.inner.state();
-        let end = state.events.len();
-        let start = start.min(end);
-        (end, state.events[start..].to_vec())
+        self.inner.with_state(|state| {
+            let end = state.events.len();
+            let start = start.min(end);
+            (end, state.events[start..].to_vec())
+        })
     }
 
     #[must_use]
@@ -289,15 +290,16 @@ impl TargetPosScheduler {
         &self,
         start: usize,
     ) -> (usize, Vec<TargetPosSchedulerTradeFill>) {
-        let state = self.inner.state();
-        let end = state.report.trades.len();
-        let start = start.min(end);
-        (end, state.report.trades[start..].to_vec())
+        self.inner.with_state(|state| {
+            let end = state.report.trades.len();
+            let start = start.min(end);
+            (end, state.report.trades[start..].to_vec())
+        })
     }
 
     #[must_use]
     pub fn last_error(&self) -> Option<crate::TaskError> {
-        self.inner.state().last_error.clone()
+        self.inner.with_state(|state| state.last_error.clone())
     }
 
     pub async fn cancel(&self) -> Result<()> {
@@ -398,8 +400,12 @@ impl TargetPosExecutionReport {
 }
 
 impl TargetPosSchedulerInner {
-    fn state(&self) -> std::sync::MutexGuard<'_, TargetPosSchedulerState> {
-        self.state.lock().expect("scheduler state lock poisoned")
+    fn with_state<R>(&self, f: impl FnOnce(&TargetPosSchedulerState) -> R) -> R {
+        self.state.with(f)
+    }
+
+    fn with_state_mut<R>(&self, f: impl FnOnce(&mut TargetPosSchedulerState) -> R) -> R {
+        self.state.with_mut(f)
     }
 
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
@@ -491,10 +497,9 @@ impl TargetPosSchedulerInner {
 
     fn ensure_step_started(&self, step_index: usize) {
         let step = self.steps[step_index].clone();
-        {
-            let mut state = self.state();
+        let started = self.with_state_mut(|state| {
             if state.current_step_clock.is_some() {
-                return;
+                return false;
             }
 
             state.current_step_clock = Some(ActiveStepClock {
@@ -514,6 +519,10 @@ impl TargetPosSchedulerInner {
                 target_volume: step.target_volume,
                 ..TargetPosStepOutcomeReport::default()
             });
+            true
+        });
+        if !started {
+            return;
         }
 
         let Some(price_mode) = step.price_mode else {
@@ -522,7 +531,9 @@ impl TargetPosSchedulerInner {
 
         match self.build_step_task(step.target_volume, price_mode) {
             Ok(task) => {
-                self.state().active_task = Some(task);
+                self.with_state_mut(|state| {
+                    state.active_task = Some(task);
+                });
             }
             Err(error) => self.finish_with_error(error),
         }
@@ -548,52 +559,54 @@ impl TargetPosSchedulerInner {
     }
 
     fn current_step_index(&self) -> Option<usize> {
-        let next_step_index = self.state().next_step_index;
+        let next_step_index = self.with_state(|state| state.next_step_index);
         (next_step_index < self.steps.len()).then_some(next_step_index)
     }
 
     fn active_task(&self) -> Option<TargetPosTask> {
-        self.state().active_task.clone()
+        self.with_state(|state| state.active_task.clone())
     }
 
     fn step_deadline_elapsed(&self, api: &tqsdk_wait::TqApi, step_index: usize) -> bool {
         let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
         let now = shanghai_now();
-        let mut state = self.state();
-        let Some(step_clock) = state.current_step_clock.as_mut() else {
-            return false;
-        };
-
         let trading_calendar = self.trading_calendar.snapshot();
-        let elapsed = effective_step_elapsed(
-            step_clock.last_accounted_at,
-            now,
-            quote.as_ref(),
-            Some(&trading_calendar),
-        );
-        step_clock.last_accounted_at = now;
-        step_clock.active_elapsed = step_clock.active_elapsed.saturating_add(elapsed);
-        step_clock.active_elapsed >= self.steps[step_index].interval
+        self.with_state_mut(|state| {
+            let Some(step_clock) = state.current_step_clock.as_mut() else {
+                return false;
+            };
+
+            let elapsed = effective_step_elapsed(
+                step_clock.last_accounted_at,
+                now,
+                quote.as_ref(),
+                Some(&trading_calendar),
+            );
+            step_clock.last_accounted_at = now;
+            step_clock.active_elapsed = step_clock.active_elapsed.saturating_add(elapsed);
+            step_clock.active_elapsed >= self.steps[step_index].interval
+        })
     }
 
     fn current_step_phase(&self) -> ActiveStepPhase {
-        self.state().current_step_phase
+        self.with_state(|state| state.current_step_phase)
     }
 
     fn mark_current_step_cancelling(&self) {
-        self.state().current_step_phase = ActiveStepPhase::Cancelling;
+        self.with_state_mut(|state| {
+            state.current_step_phase = ActiveStepPhase::Cancelling;
+        });
     }
 
     fn advance_step(&self) -> bool {
-        let should_finish = {
-            let mut state = self.state();
+        let should_finish = self.with_state_mut(|state| {
             state.active_task = None;
             state.active_task_report_len = 0;
             state.current_step_clock = None;
             state.current_step_phase = ActiveStepPhase::Running;
             state.next_step_index += 1;
             state.next_step_index >= self.steps.len()
-        };
+        });
         if should_finish {
             self.finish();
             return false;
@@ -606,21 +619,19 @@ impl TargetPosSchedulerInner {
     }
 
     fn cancel_active_task(&self) {
-        let task = {
-            let mut state = self.state();
+        let task = self.with_state_mut(|state| {
             let task = state.active_task.take();
             state.active_task_report_len = 0;
             state.current_step_clock = None;
             task
-        };
+        });
         if let Some(task) = task {
             task.cancel_internal();
         }
     }
 
     fn collect_active_task_events(&self, step_index: usize) {
-        let Some((task, report_len)) = ({
-            let state = self.state();
+        let Some((task, report_len)) = self.with_state(|state| {
             state
                 .active_task
                 .clone()
@@ -633,14 +644,15 @@ impl TargetPosSchedulerInner {
             return;
         }
 
-        let mut state = self.state();
-        for event in new_events {
-            state.report.record_step_event(step_index, &event);
-            state
-                .events
-                .push(TargetPosSchedulerExecutionEvent { step_index, event });
-        }
-        state.active_task_report_len = next_report_len;
+        self.with_state_mut(|state| {
+            for event in new_events {
+                state.report.record_step_event(step_index, &event);
+                state
+                    .events
+                    .push(TargetPosSchedulerExecutionEvent { step_index, event });
+            }
+            state.active_task_report_len = next_report_len;
+        });
     }
 
     fn finish(&self) {
@@ -655,12 +667,14 @@ impl TargetPosSchedulerInner {
     }
 
     fn finish_with_error(&self, error: crate::TaskError) {
-        self.state().last_error = Some(error);
+        self.with_state_mut(|state| {
+            state.last_error = Some(error);
+        });
         self.finish();
     }
 
     fn failure_result(&self) -> Result<()> {
-        if let Some(error) = self.state().last_error.clone() {
+        if let Some(error) = self.with_state(|state| state.last_error.clone()) {
             return Err(error);
         }
         Ok(())
@@ -828,12 +842,7 @@ fn is_trading_day(date: NaiveDate, calendar: Option<&TradingDayCalendar>) -> boo
 
 impl Drop for TargetPosSchedulerInner {
     fn drop(&mut self) {
-        let active_task = self
-            .state
-            .get_mut()
-            .expect("scheduler state lock poisoned")
-            .active_task
-            .take();
+        let active_task = self.state.get_mut().active_task.take();
         if let Some(task) = active_task {
             task.cancel_internal();
         }
@@ -909,7 +918,9 @@ mod tests {
         .expect("internal target task should build");
         let mut api = market_only_api();
         task.track_order_for_test(api.get_order("sim", "unit-order-1"));
-        scheduler.inner.state().active_task = Some(task);
+        scheduler.inner.with_state_mut(|state| {
+            state.active_task = Some(task);
+        });
         scheduler
             .inner
             .cancel_requested

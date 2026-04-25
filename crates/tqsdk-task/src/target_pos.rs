@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use serde_json::json;
 use tokio::sync::watch;
@@ -12,7 +12,9 @@ use tqsdk_wait::OrderRef;
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::plan::{compute_plan, net_position};
 use crate::registry::TaskId;
-use crate::shared::{SharedQuoteSubscriptions, SharedTargetPosStore, SharedTaskRegistry};
+use crate::shared::{
+    SharedQuoteSubscriptions, SharedTargetPosStore, SharedTaskRegistry, TaskStateCell,
+};
 use crate::{Result, TaskError};
 
 /// Builder for a target position task.
@@ -153,7 +155,7 @@ struct TargetPosTaskInner {
     account_id: String,
     symbol: String,
     config: TargetPosConfig,
-    state: Mutex<TargetPosTaskState>,
+    state: TaskStateCell<TargetPosTaskState>,
     next_request_seq: AtomicU64,
     submitted_request_seq: AtomicU64,
     awaiting_progress: AtomicBool,
@@ -239,7 +241,7 @@ impl TargetPosBuilder {
             account_id: self.account_id,
             symbol: self.symbol,
             config: self.config,
-            state: Mutex::new(TargetPosTaskState::default()),
+            state: TaskStateCell::default(),
             next_request_seq: AtomicU64::new(0),
             submitted_request_seq: AtomicU64::new(0),
             awaiting_progress: AtomicBool::new(false),
@@ -280,17 +282,17 @@ impl TargetPosTask {
 
     #[must_use]
     pub fn current_target_volume(&self) -> Option<i64> {
-        self.inner.state().target_volume
+        self.inner.with_state(|state| state.target_volume)
     }
 
     #[must_use]
     pub fn last_error(&self) -> Option<TaskError> {
-        self.inner.state().last_error.clone()
+        self.inner.with_state(|state| state.last_error.clone())
     }
 
     #[must_use]
     pub fn execution_report(&self) -> TargetPosTaskExecutionReport {
-        self.inner.state().report.clone()
+        self.inner.with_state(|state| state.report.clone())
     }
 
     #[must_use]
@@ -298,18 +300,20 @@ impl TargetPosTask {
         &self,
         start: usize,
     ) -> (usize, Vec<TargetPosTaskExecutionEvent>) {
-        let state = self.inner.state();
-        let end = state.report.events.len();
-        let start = start.min(end);
-        (end, state.report.events[start..].to_vec())
+        self.inner.with_state(|state| {
+            let end = state.report.events.len();
+            let start = start.min(end);
+            (end, state.report.events[start..].to_vec())
+        })
     }
 
     #[must_use]
     pub fn execution_trades_since(&self, start: usize) -> (usize, Vec<TargetPosTaskTradeFill>) {
-        let state = self.inner.state();
-        let end = state.report.trades.len();
-        let start = start.min(end);
-        (end, state.report.trades[start..].to_vec())
+        self.inner.with_state(|state| {
+            let end = state.report.trades.len();
+            let start = start.min(end);
+            (end, state.report.trades[start..].to_vec())
+        })
     }
 
     pub fn set_target_volume(&self, volume: i64) -> Result<()> {
@@ -324,14 +328,17 @@ impl TargetPosTask {
             ));
         }
 
-        {
-            let mut state = self.inner.state();
+        let changed = self.inner.with_state_mut(|state| {
             if state.target_volume == Some(volume) {
-                return Ok(());
+                return false;
             }
             state.target_volume = Some(volume);
             state.last_error = None;
             state.submitted_net_position = None;
+            true
+        });
+        if !changed {
+            return Ok(());
         }
         self.inner.awaiting_progress.store(false, Ordering::SeqCst);
         self.inner.next_request_seq.fetch_add(1, Ordering::SeqCst);
@@ -405,7 +412,7 @@ impl TargetPosTask {
 
     #[must_use]
     pub(crate) fn applied_target_volume(&self) -> Option<i64> {
-        self.inner.state().applied_target_volume
+        self.inner.with_state(|state| state.applied_target_volume)
     }
 
     pub(crate) fn cancel_internal(&self) {
@@ -569,8 +576,12 @@ impl TargetPosTaskExecutionReport {
 }
 
 impl TargetPosTaskInner {
-    fn state(&self) -> std::sync::MutexGuard<'_, TargetPosTaskState> {
-        self.state.lock().expect("target task state lock poisoned")
+    fn with_state<R>(&self, f: impl FnOnce(&TargetPosTaskState) -> R) -> R {
+        self.state.with(f)
+    }
+
+    fn with_state_mut<R>(&self, f: impl FnOnce(&mut TargetPosTaskState) -> R) -> R {
+        self.state.with_mut(f)
     }
 
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
@@ -593,7 +604,7 @@ impl TargetPosTaskInner {
             return;
         }
 
-        let Some(target_volume) = self.state().target_volume else {
+        let Some(target_volume) = self.with_state(|state| state.target_volume) else {
             return;
         };
 
@@ -626,7 +637,7 @@ impl TargetPosTaskInner {
 
         if self.awaiting_progress.load(Ordering::SeqCst)
             && self.submitted_request_seq.load(Ordering::SeqCst) >= current_seq
-            && self.state().submitted_net_position == Some(current_net_position)
+            && self.with_state(|state| state.submitted_net_position) == Some(current_net_position)
         {
             return;
         }
@@ -662,7 +673,9 @@ impl TargetPosTaskInner {
         self.submitted_request_seq
             .store(current_seq, Ordering::SeqCst);
         self.awaiting_progress.store(true, Ordering::SeqCst);
-        self.state().submitted_net_position = Some(current_net_position);
+        self.with_state_mut(|state| {
+            state.submitted_net_position = Some(current_net_position);
+        });
 
         let mut inserted_any = false;
         for desired_order in desired_batch.orders {
@@ -691,7 +704,9 @@ impl TargetPosTaskInner {
                     );
                 }
                 Err(error) if inserted_any => {
-                    self.state().last_error = Some(TaskError::from(error));
+                    self.with_state_mut(|state| {
+                        state.last_error = Some(TaskError::from(error));
+                    });
                     self.cancel_requested.store(true, Ordering::SeqCst);
                     return Ok(());
                 }
@@ -703,23 +718,23 @@ impl TargetPosTaskInner {
     }
 
     fn mark_reached(&self, current_seq: u64, target_volume: i64) {
-        {
-            let mut state = self.state();
+        self.with_state_mut(|state| {
             state.applied_target_volume = Some(target_volume);
             state
                 .report
                 .record_target_reached(current_seq, target_volume);
-        }
+        });
         self.awaiting_progress.store(false, Ordering::SeqCst);
         self.reached_tx.send_replace(current_seq);
     }
 
     fn track_order(&self, order_ref: OrderRef) {
-        let mut state = self.state();
-        state
-            .known_order_ids
-            .insert(order_ref.order_id().to_string());
-        state.tracked_orders.push(order_ref);
+        self.with_state_mut(|state| {
+            state
+                .known_order_ids
+                .insert(order_ref.order_id().to_string());
+            state.tracked_orders.push(order_ref);
+        });
     }
 
     fn record_insert_order(
@@ -731,18 +746,22 @@ impl TargetPosTaskInner {
         volume: i64,
         limit_price: f64,
     ) {
-        self.state().report.record_insert_order(
-            request_seq,
-            order_id,
-            direction,
-            offset,
-            volume,
-            limit_price,
-        );
+        self.with_state_mut(|state| {
+            state.report.record_insert_order(
+                request_seq,
+                order_id,
+                direction,
+                offset,
+                volume,
+                limit_price,
+            );
+        });
     }
 
     fn record_cancel_order(&self, order_id: &str) {
-        self.state().report.record_cancel_order(order_id);
+        self.with_state_mut(|state| {
+            state.report.record_cancel_order(order_id);
+        });
     }
 
     fn record_commit_trades(&self, api: &tqsdk_wait::TqApi) {
@@ -765,7 +784,7 @@ impl TargetPosTaskInner {
             return;
         }
 
-        let known_order_ids = self.state().known_order_ids.clone();
+        let known_order_ids = self.with_state(|state| state.known_order_ids.clone());
         if known_order_ids.is_empty() {
             return;
         }
@@ -783,10 +802,11 @@ impl TargetPosTaskInner {
                 continue;
             }
 
-            let mut state = self.state();
-            if state.seen_trade_ids.insert(trade.trade_id.clone()) {
-                state.report.record_trade(&trade);
-            }
+            self.with_state_mut(|state| {
+                if state.seen_trade_ids.insert(trade.trade_id.clone()) {
+                    state.report.record_trade(&trade);
+                }
+            });
         }
     }
 
@@ -813,7 +833,7 @@ impl TargetPosTaskInner {
 
     fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
         self.prune_terminal_orders(api);
-        !self.state().tracked_orders.is_empty()
+        self.with_state(|state| !state.tracked_orders.is_empty())
     }
 
     async fn handle_live_orders(
@@ -888,7 +908,7 @@ impl TargetPosTaskInner {
     ) -> Result<()> {
         self.prune_terminal_orders(api);
 
-        let tracked_orders = self.state().tracked_orders.clone();
+        let tracked_orders = self.with_state(|state| state.tracked_orders.clone());
 
         for order_ref in tracked_orders {
             let order_id = order_ref.order_id().to_string();
@@ -898,19 +918,22 @@ impl TargetPosTaskInner {
                 continue;
             }
             let should_cancel = {
-                let mut state = self.state();
-                if state.cancel_requested_order_ids.contains(&order_id) {
-                    false
-                } else {
-                    state.cancel_requested_order_ids.insert(order_id.clone());
-                    true
-                }
+                self.with_state_mut(|state| {
+                    if state.cancel_requested_order_ids.contains(&order_id) {
+                        false
+                    } else {
+                        state.cancel_requested_order_ids.insert(order_id.clone());
+                        true
+                    }
+                })
             };
             if !should_cancel {
                 continue;
             }
             if let Err(error) = api.cancel_order(order_ref.account_id(), &order_id).await {
-                self.state().cancel_requested_order_ids.remove(&order_id);
+                self.with_state_mut(|state| {
+                    state.cancel_requested_order_ids.remove(&order_id);
+                });
                 return Err(TaskError::from(error));
             }
             self.record_cancel_order(&order_id);
@@ -919,9 +942,8 @@ impl TargetPosTaskInner {
     }
 
     fn prune_terminal_orders(&self, api: &tqsdk_wait::TqApi) {
-        let mut state = self.state();
-        let finished_orders = state
-            .tracked_orders
+        let tracked_orders = self.with_state(|state| state.tracked_orders.clone());
+        let finished_orders = tracked_orders
             .iter()
             .filter_map(|order_ref| {
                 order_ref
@@ -931,32 +953,38 @@ impl TargetPosTaskInner {
                     .filter(order_is_terminal)
             })
             .collect::<Vec<_>>();
-        for order in &finished_orders {
-            state.report.record_order_finished(order);
-        }
-        let finished_order_ids = finished_orders
-            .into_iter()
-            .map(|order| order.order_id)
-            .collect::<HashSet<_>>();
-        state
-            .tracked_orders
-            .retain(|order_ref| !finished_order_ids.contains(order_ref.order_id()));
-        if state.tracked_orders.is_empty() {
-            self.awaiting_progress.store(false, Ordering::SeqCst);
+        if finished_orders.is_empty() {
+            if self.with_state(|state| state.tracked_orders.is_empty()) {
+                self.awaiting_progress.store(false, Ordering::SeqCst);
+            }
+            return;
         }
 
-        if !finished_order_ids.is_empty() {
+        let finished_order_ids = finished_orders
+            .iter()
+            .map(|order| order.order_id.clone())
+            .collect::<HashSet<_>>();
+        let no_tracked_orders_left = self.with_state_mut(|state| {
+            for order in &finished_orders {
+                state.report.record_order_finished(order);
+            }
+            state
+                .tracked_orders
+                .retain(|order_ref| !finished_order_ids.contains(order_ref.order_id()));
             state
                 .cancel_requested_order_ids
                 .retain(|order_id| !finished_order_ids.contains(order_id));
+            state.tracked_orders.is_empty()
+        });
+        if no_tracked_orders_left {
+            self.awaiting_progress.store(false, Ordering::SeqCst);
         }
     }
 
     fn live_orders(&self, api: &tqsdk_wait::TqApi) -> Vec<Order> {
         self.prune_terminal_orders(api);
-        self.state()
-            .tracked_orders
-            .iter()
+        self.with_state(|state| state.tracked_orders.clone())
+            .into_iter()
             .filter_map(|order_ref| order_ref.snapshot(api).ok().flatten())
             .filter(|order| !order_is_terminal(order))
             .collect()
@@ -964,9 +992,8 @@ impl TargetPosTaskInner {
 
     fn unmaterialized_order_ids(&self, api: &tqsdk_wait::TqApi) -> HashSet<String> {
         self.prune_terminal_orders(api);
-        self.state()
-            .tracked_orders
-            .iter()
+        self.with_state(|state| state.tracked_orders.clone())
+            .into_iter()
             .filter(|order_ref| order_ref.snapshot(api).ok().flatten().is_none())
             .map(|order_ref| order_ref.order_id().to_string())
             .collect()
@@ -974,7 +1001,7 @@ impl TargetPosTaskInner {
 
     fn awaiting_same_submission(&self, current_net_position: i64) -> bool {
         self.awaiting_progress.load(Ordering::SeqCst)
-            && self.state().submitted_net_position == Some(current_net_position)
+            && self.with_state(|state| state.submitted_net_position) == Some(current_net_position)
     }
 
     fn finish(&self) {
@@ -991,14 +1018,16 @@ impl TargetPosTaskInner {
     }
 
     fn failure_result(&self) -> Result<()> {
-        if let Some(error) = self.state().last_error.clone() {
+        if let Some(error) = self.with_state(|state| state.last_error.clone()) {
             return Err(error);
         }
         Ok(())
     }
 
     fn finish_with_error(&self, error: TaskError) {
-        self.state().last_error = Some(error);
+        self.with_state_mut(|state| {
+            state.last_error = Some(error);
+        });
         self.finish();
     }
 }

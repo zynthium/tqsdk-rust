@@ -15,6 +15,34 @@ pub(crate) type SharedTaskRegistry = SharedTaskState<TaskRegistry>;
 pub(crate) type SharedTargetPosStore = SharedTaskState<TargetPosStore>;
 pub(crate) type SharedTargetPosSchedulerStore = SharedTaskState<TargetPosSchedulerStore>;
 
+pub(crate) struct TaskStateCell<T> {
+    inner: Mutex<T>,
+}
+
+impl<T: Default> Default for TaskStateCell<T> {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(T::default()),
+        }
+    }
+}
+
+impl<T> TaskStateCell<T> {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        let state = self.inner.lock().expect("task state lock poisoned");
+        f(&state)
+    }
+
+    pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut state = self.inner.lock().expect("task state lock poisoned");
+        f(&mut state)
+    }
+
+    pub(crate) fn get_mut(&mut self) -> &mut T {
+        self.inner.get_mut().expect("task state lock poisoned")
+    }
+}
+
 pub(crate) struct SharedTaskState<T> {
     inner: Arc<Mutex<T>>,
 }

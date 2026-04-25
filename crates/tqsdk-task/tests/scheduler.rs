@@ -19,7 +19,7 @@ use tqsdk_task::{
 use tqsdk_wait::TqApi;
 
 #[test]
-fn target_pos_scheduler_inner_uses_single_runtime_state_mutex() {
+fn target_pos_scheduler_inner_uses_dedicated_runtime_state_wrapper() {
     let source = include_str!("../src/scheduler.rs");
     let inner = source
         .split("struct TargetPosSchedulerInner {")
@@ -33,8 +33,12 @@ fn target_pos_scheduler_inner_uses_single_runtime_state_mutex() {
         .count();
 
     assert_eq!(
-        direct_mutex_fields, 1,
-        "TargetPosSchedulerInner should keep mutable scheduler runtime state behind one Mutex"
+        direct_mutex_fields, 0,
+        "TargetPosSchedulerInner should keep mutable scheduler runtime state behind a dedicated state wrapper"
+    );
+    assert!(
+        !source.contains("fn state(&self) -> std::sync::MutexGuard"),
+        "TargetPosSchedulerInner should not expose raw MutexGuard access"
     );
     assert!(
         !inner.contains("Arc<Mutex"),

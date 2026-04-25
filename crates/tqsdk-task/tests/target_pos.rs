@@ -16,7 +16,7 @@ use tqsdk_task::{
 use tqsdk_wait::TqApi;
 
 #[test]
-fn target_pos_task_inner_uses_single_runtime_state_mutex() {
+fn target_pos_task_inner_uses_dedicated_runtime_state_wrapper() {
     let source = include_str!("../src/target_pos.rs");
     let inner = source
         .split("struct TargetPosTaskInner {")
@@ -30,8 +30,12 @@ fn target_pos_task_inner_uses_single_runtime_state_mutex() {
         .count();
 
     assert_eq!(
-        direct_mutex_fields, 1,
-        "TargetPosTaskInner should keep mutable task runtime state behind one Mutex"
+        direct_mutex_fields, 0,
+        "TargetPosTaskInner should keep mutable task runtime state behind a dedicated state wrapper"
+    );
+    assert!(
+        !source.contains("fn state(&self) -> std::sync::MutexGuard"),
+        "TargetPosTaskInner should not expose raw MutexGuard access"
     );
     assert!(
         !inner.contains("Arc<Mutex"),
