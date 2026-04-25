@@ -11,14 +11,14 @@ use tqsdk_wait::OrderRef;
 
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::plan::{compute_plan, net_position};
-use crate::registry::{TaskId, TaskRegistry};
-use crate::shared::SharedQuoteSubscriptions;
+use crate::registry::TaskId;
+use crate::shared::{SharedQuoteSubscriptions, SharedTargetPosStore, SharedTaskRegistry};
 use crate::{Result, TaskError};
 
 /// Builder for a target position task.
 pub struct TargetPosBuilder {
-    registry: Arc<Mutex<TaskRegistry>>,
-    store: Arc<Mutex<TargetPosStore>>,
+    registry: SharedTaskRegistry,
+    store: SharedTargetPosStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     account_id: String,
     symbol: String,
@@ -145,8 +145,8 @@ pub(crate) struct TargetPosStore {
 }
 
 struct TargetPosTaskInner {
-    registry: Arc<Mutex<TaskRegistry>>,
-    store: Arc<Mutex<TargetPosStore>>,
+    registry: SharedTaskRegistry,
+    store: SharedTargetPosStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     managed_by_host: bool,
     task_id: TaskId,
@@ -178,8 +178,8 @@ struct TargetPosTaskState {
 
 impl TargetPosBuilder {
     pub(crate) fn new(
-        registry: Arc<Mutex<TaskRegistry>>,
-        store: Arc<Mutex<TargetPosStore>>,
+        registry: SharedTaskRegistry,
+        store: SharedTargetPosStore,
         quote_subscriptions: SharedQuoteSubscriptions,
         account_id: String,
         symbol: String,
@@ -212,18 +212,14 @@ impl TargetPosBuilder {
     pub fn build(self) -> Result<TargetPosTask> {
         let task = self
             .registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .register_target_task(&self.account_id, &self.symbol)?;
+            .with_mut(|registry| registry.register_target_task(&self.account_id, &self.symbol))?;
         self.build_with_task_id(task.id, true)
     }
 
     pub(crate) fn build_internal(self) -> Result<TargetPosTask> {
         let task_id = self
             .registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .allocate_task_id();
+            .with_mut(|registry| registry.allocate_task_id());
         self.build_with_task_id(task_id, false)
     }
 
@@ -235,8 +231,8 @@ impl TargetPosBuilder {
         let (finished_tx, _) = watch::channel(false);
 
         let inner = Arc::new(TargetPosTaskInner {
-            registry: Arc::clone(&self.registry),
-            store: Arc::clone(&self.store),
+            registry: self.registry.clone(),
+            store: self.store.clone(),
             quote_subscriptions: self.quote_subscriptions.clone(),
             managed_by_host,
             task_id,
@@ -254,9 +250,7 @@ impl TargetPosBuilder {
         });
         if managed_by_host {
             self.store
-                .lock()
-                .expect("target task store lock poisoned")
-                .register(Arc::clone(&inner));
+                .with_mut(|store| store.register(Arc::clone(&inner)));
         }
 
         Ok(TargetPosTask { inner })
@@ -990,14 +984,9 @@ impl TargetPosTaskInner {
 
         self.finished_tx.send_replace(true);
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .unregister_task(self.task_id);
+            .with_mut(|registry| registry.unregister_task(self.task_id));
         if self.managed_by_host {
-            self.store
-                .lock()
-                .expect("target task store lock poisoned")
-                .unregister(self.task_id);
+            self.store.with_mut(|store| store.unregister(self.task_id));
         }
     }
 
@@ -1015,13 +1004,10 @@ impl TargetPosTaskInner {
 }
 
 pub(crate) async fn process_target_tasks_wait_update(
-    store: &Arc<Mutex<TargetPosStore>>,
+    store: &SharedTargetPosStore,
     api: &mut tqsdk_wait::TqApi,
 ) {
-    let tasks = store
-        .lock()
-        .expect("target task store lock poisoned")
-        .live_tasks();
+    let tasks = store.with_mut(TargetPosStore::live_tasks);
     for task in tasks {
         task.process_wait_update(api).await;
     }
@@ -1190,14 +1176,9 @@ impl Drop for TargetPosTaskInner {
 
         self.finished_tx.send_replace(true);
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .unregister_task(self.task_id);
+            .with_mut(|registry| registry.unregister_task(self.task_id));
         if self.managed_by_host {
-            self.store
-                .lock()
-                .expect("target task store lock poisoned")
-                .unregister(self.task_id);
+            self.store.with_mut(|store| store.unregister(self.task_id));
         }
     }
 }
@@ -1220,12 +1201,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancel_requested_task_records_error_when_cancel_submission_fails() {
-        let registry = Arc::new(Mutex::new(TaskRegistry::default()));
-        let store = Arc::new(Mutex::new(TargetPosStore::default()));
+        let registry = SharedTaskRegistry::default();
+        let store = SharedTargetPosStore::default();
         let quote_subscriptions = SharedQuoteSubscriptions::default();
         let task = TargetPosBuilder::new(
-            Arc::clone(&registry),
-            Arc::clone(&store),
+            registry,
+            store,
             quote_subscriptions,
             "sim".to_string(),
             "SHFE.rb2601".to_string(),

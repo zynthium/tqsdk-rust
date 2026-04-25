@@ -12,11 +12,13 @@ use tqsdk_core::{Quote, TradingTime};
 use crate::Result;
 use crate::calendar::TradingDayCalendar;
 use crate::config::{OffsetPriority, PriceMode, TargetPosSchedulerConfig, VolumeSplitPolicy};
-use crate::registry::{TaskId, TaskRegistry};
-use crate::shared::{SharedQuoteSubscriptions, SharedTradingCalendar};
+use crate::registry::TaskId;
+use crate::shared::{
+    SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
+    SharedTaskRegistry, SharedTradingCalendar,
+};
 use crate::target_pos::{
-    TargetPosBuilder, TargetPosStore, TargetPosTask, TargetPosTaskExecutionEvent,
-    TargetPosTaskTradeFill,
+    TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskTradeFill,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,9 +98,9 @@ pub struct TargetPosSchedulerTradeFill {
 }
 
 pub struct TargetPosSchedulerBuilder {
-    registry: Arc<Mutex<TaskRegistry>>,
-    target_tasks: Arc<Mutex<TargetPosStore>>,
-    store: Arc<Mutex<TargetPosSchedulerStore>>,
+    registry: SharedTaskRegistry,
+    target_tasks: SharedTargetPosStore,
+    store: SharedTargetPosSchedulerStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     trading_calendar: SharedTradingCalendar,
     account_id: String,
@@ -118,8 +120,8 @@ pub(crate) struct TargetPosSchedulerStore {
 }
 
 struct TargetPosSchedulerInner {
-    registry: Arc<Mutex<TaskRegistry>>,
-    target_tasks: Arc<Mutex<TargetPosStore>>,
+    registry: SharedTaskRegistry,
+    target_tasks: SharedTargetPosStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     trading_calendar: SharedTradingCalendar,
     task_id: TaskId,
@@ -167,9 +169,9 @@ impl Default for TargetPosSchedulerState {
 
 impl TargetPosSchedulerBuilder {
     pub(crate) fn new(
-        registry: Arc<Mutex<TaskRegistry>>,
-        target_tasks: Arc<Mutex<TargetPosStore>>,
-        store: Arc<Mutex<TargetPosSchedulerStore>>,
+        registry: SharedTaskRegistry,
+        target_tasks: SharedTargetPosStore,
+        store: SharedTargetPosSchedulerStore,
         quote_subscriptions: SharedQuoteSubscriptions,
         trading_calendar: SharedTradingCalendar,
         account_id: String,
@@ -209,14 +211,12 @@ impl TargetPosSchedulerBuilder {
         }
         let task = self
             .registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .register_scheduler(&self.account_id, &self.symbol)?;
+            .with_mut(|registry| registry.register_scheduler(&self.account_id, &self.symbol))?;
         let (finished_tx, _) = watch::channel(false);
 
         let inner = Arc::new(TargetPosSchedulerInner {
-            registry: Arc::clone(&self.registry),
-            target_tasks: Arc::clone(&self.target_tasks),
+            registry: self.registry.clone(),
+            target_tasks: self.target_tasks.clone(),
             quote_subscriptions: self.quote_subscriptions.clone(),
             trading_calendar: self.trading_calendar.clone(),
             task_id: task.id,
@@ -236,9 +236,7 @@ impl TargetPosSchedulerBuilder {
         }
 
         self.store
-            .lock()
-            .expect("scheduler store lock poisoned")
-            .register(Arc::clone(&inner));
+            .with_mut(|store| store.register(Arc::clone(&inner)));
 
         Ok(TargetPosScheduler { inner })
     }
@@ -532,8 +530,8 @@ impl TargetPosSchedulerInner {
 
     fn build_step_task(&self, target_volume: i64, price_mode: PriceMode) -> Result<TargetPosTask> {
         let mut builder = TargetPosBuilder::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.target_tasks),
+            self.registry.clone(),
+            self.target_tasks.clone(),
             self.quote_subscriptions.clone(),
             self.account_id.clone(),
             self.symbol.clone(),
@@ -653,9 +651,7 @@ impl TargetPosSchedulerInner {
 
         self.finished_tx.send_replace(true);
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .unregister_task(self.task_id);
+            .with_mut(|registry| registry.unregister_task(self.task_id));
     }
 
     fn finish_with_error(&self, error: crate::TaskError) {
@@ -848,20 +844,15 @@ impl Drop for TargetPosSchedulerInner {
 
         self.finished_tx.send_replace(true);
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .unregister_task(self.task_id);
+            .with_mut(|registry| registry.unregister_task(self.task_id));
     }
 }
 
 pub(crate) async fn process_schedulers_wait_update(
-    store: &Arc<Mutex<TargetPosSchedulerStore>>,
+    store: &SharedTargetPosSchedulerStore,
     api: &mut tqsdk_wait::TqApi,
 ) {
-    let schedulers = store
-        .lock()
-        .expect("scheduler store lock poisoned")
-        .live_schedulers();
+    let schedulers = store.with_mut(TargetPosSchedulerStore::live_schedulers);
     for scheduler in schedulers {
         scheduler.process_wait_update(api).await;
     }
@@ -886,15 +877,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancelling_scheduler_records_error_when_internal_cancel_submission_fails() {
-        let registry = Arc::new(Mutex::new(TaskRegistry::default()));
-        let target_tasks = Arc::new(Mutex::new(TargetPosStore::default()));
-        let schedulers = Arc::new(Mutex::new(TargetPosSchedulerStore::default()));
+        let registry = SharedTaskRegistry::default();
+        let target_tasks = SharedTargetPosStore::default();
+        let schedulers = SharedTargetPosSchedulerStore::default();
         let quote_subscriptions = SharedQuoteSubscriptions::default();
         let trading_calendar = SharedTradingCalendar::default();
         let scheduler = TargetPosSchedulerBuilder::new(
-            Arc::clone(&registry),
-            Arc::clone(&target_tasks),
-            Arc::clone(&schedulers),
+            registry.clone(),
+            target_tasks.clone(),
+            schedulers,
             quote_subscriptions.clone(),
             trading_calendar,
             "sim".to_string(),
@@ -908,8 +899,8 @@ mod tests {
         .build()
         .expect("scheduler should build");
         let task = TargetPosBuilder::new(
-            Arc::clone(&registry),
-            Arc::clone(&target_tasks),
+            registry,
+            target_tasks,
             quote_subscriptions,
             "sim".to_string(),
             "SHFE.rb2601".to_string(),

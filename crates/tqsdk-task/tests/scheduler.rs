@@ -37,9 +37,31 @@ fn target_pos_scheduler_inner_uses_single_runtime_state_mutex() {
         "TargetPosSchedulerInner should keep mutable scheduler runtime state behind one Mutex"
     );
     assert!(
-        !inner.contains("quote_subscriptions: Arc<Mutex")
-            && !inner.contains("trading_calendar: Arc<Mutex"),
-        "TargetPosSchedulerInner should access shared quote/calendar state through wrappers"
+        !inner.contains("Arc<Mutex"),
+        "TargetPosSchedulerInner should access shared state through wrappers"
+    );
+}
+
+#[test]
+fn task_shared_mutex_usage_is_encapsulated() {
+    let shared = include_str!("../src/shared.rs");
+    let direct_sources = [
+        include_str!("../src/host.rs"),
+        include_str!("../src/target_pos.rs"),
+        include_str!("../src/scheduler.rs"),
+    ];
+
+    assert!(
+        direct_sources
+            .iter()
+            .all(|source| !source.contains("Arc<Mutex")),
+        "task orchestration modules should use shared state wrappers instead of raw Arc<Mutex>"
+    );
+
+    let arc_mutex_count = shared.matches("Arc<Mutex").count();
+    assert!(
+        arc_mutex_count <= 5,
+        "report.md phase 2.3 expects task Arc<Mutex<_>> usage <= 5, found {arc_mutex_count}"
     );
 }
 

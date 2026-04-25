@@ -7,6 +7,45 @@ use tqsdk_core::TradingCalendarDay;
 
 use crate::Result;
 use crate::calendar::TradingDayCalendar;
+use crate::registry::TaskRegistry;
+use crate::scheduler::TargetPosSchedulerStore;
+use crate::target_pos::TargetPosStore;
+
+pub(crate) type SharedTaskRegistry = SharedTaskState<TaskRegistry>;
+pub(crate) type SharedTargetPosStore = SharedTaskState<TargetPosStore>;
+pub(crate) type SharedTargetPosSchedulerStore = SharedTaskState<TargetPosSchedulerStore>;
+
+pub(crate) struct SharedTaskState<T> {
+    inner: Arc<Mutex<T>>,
+}
+
+impl<T> Clone for SharedTaskState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T: Default> Default for SharedTaskState<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(T::default())),
+        }
+    }
+}
+
+impl<T> SharedTaskState<T> {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        let state = self.inner.lock().expect("shared task state lock poisoned");
+        f(&state)
+    }
+
+    pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut state = self.inner.lock().expect("shared task state lock poisoned");
+        f(&mut state)
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct SharedQuoteSubscriptions {

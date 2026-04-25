@@ -34,8 +34,8 @@ fn target_pos_task_inner_uses_single_runtime_state_mutex() {
         "TargetPosTaskInner should keep mutable task runtime state behind one Mutex"
     );
     assert!(
-        !inner.contains("quote_subscriptions: Arc<Mutex"),
-        "TargetPosTaskInner should access quote subscription state through a shared wrapper"
+        !inner.contains("Arc<Mutex"),
+        "TargetPosTaskInner should access shared state through wrappers"
     );
 }
 

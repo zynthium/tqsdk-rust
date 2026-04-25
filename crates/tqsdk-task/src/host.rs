@@ -1,7 +1,5 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::sync::{Arc, Mutex};
-
 #[cfg(feature = "services")]
 use chrono::NaiveDate;
 use serde_json::Value;
@@ -10,19 +8,20 @@ use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
 use crate::Result;
 use crate::TaskError;
 use crate::calendar::TradingDayCalendar;
-use crate::registry::{TaskId, TaskRegistry};
-use crate::scheduler::{
-    TargetPosSchedulerBuilder, TargetPosSchedulerStore, process_schedulers_wait_update,
+use crate::registry::TaskId;
+use crate::scheduler::{TargetPosSchedulerBuilder, process_schedulers_wait_update};
+use crate::shared::{
+    SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
+    SharedTaskRegistry, SharedTradingCalendar,
 };
-use crate::shared::{SharedQuoteSubscriptions, SharedTradingCalendar};
-use crate::target_pos::{TargetPosBuilder, TargetPosStore, process_target_tasks_wait_update};
+use crate::target_pos::{TargetPosBuilder, process_target_tasks_wait_update};
 
 /// Single-owner task host built on a wait-style API.
 pub struct TaskHost {
     api: tqsdk_wait::TqApi,
-    registry: Arc<Mutex<TaskRegistry>>,
-    target_tasks: Arc<Mutex<TargetPosStore>>,
-    schedulers: Arc<Mutex<TargetPosSchedulerStore>>,
+    registry: SharedTaskRegistry,
+    target_tasks: SharedTargetPosStore,
+    schedulers: SharedTargetPosSchedulerStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     trading_calendar: SharedTradingCalendar,
 }
@@ -32,9 +31,9 @@ impl TaskHost {
     pub fn new(api: tqsdk_wait::TqApi) -> Self {
         Self {
             api,
-            registry: Arc::new(Mutex::new(TaskRegistry::default())),
-            target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
-            schedulers: Arc::new(Mutex::new(TargetPosSchedulerStore::default())),
+            registry: SharedTaskRegistry::default(),
+            target_tasks: SharedTargetPosStore::default(),
+            schedulers: SharedTargetPosSchedulerStore::default(),
             quote_subscriptions: SharedQuoteSubscriptions::default(),
             trading_calendar: SharedTradingCalendar::default(),
         }
@@ -101,8 +100,8 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> TargetPosBuilder {
         TargetPosBuilder::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.target_tasks),
+            self.registry.clone(),
+            self.target_tasks.clone(),
             self.quote_subscriptions.clone(),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
@@ -116,9 +115,9 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> TargetPosSchedulerBuilder {
         TargetPosSchedulerBuilder::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.target_tasks),
-            Arc::clone(&self.schedulers),
+            self.registry.clone(),
+            self.target_tasks.clone(),
+            self.schedulers.clone(),
             self.quote_subscriptions.clone(),
             self.trading_calendar.clone(),
             account_id.as_ref().to_owned(),
@@ -138,12 +137,8 @@ impl TaskHost {
         let account_id = account_id.as_ref().to_owned();
         let symbol = symbol.as_ref().to_owned();
 
-        {
-            self.registry
-                .lock()
-                .expect("task registry lock poisoned")
-                .check_manual_order_allowed(&account_id, &symbol)?;
-        }
+        self.registry
+            .with(|registry| registry.check_manual_order_allowed(&account_id, &symbol))?;
 
         self.api
             .insert_order(&account_id, &symbol, direction, offset, volume, limit_price)
@@ -171,12 +166,8 @@ impl TaskHost {
             order_id: order_id.clone(),
         })?;
 
-        {
-            self.registry
-                .lock()
-                .expect("task registry lock poisoned")
-                .check_manual_order_allowed(&account_id, &symbol)?;
-        }
+        self.registry
+            .with(|registry| registry.check_manual_order_allowed(&account_id, &symbol))?;
 
         self.api
             .cancel_order(&account_id, &order_id)
@@ -191,9 +182,7 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> Result<u64> {
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .register_target_task(account_id, symbol)
+            .with_mut(|registry| registry.register_target_task(account_id, symbol))
             .map(|task| task.id.0)
     }
 
@@ -204,9 +193,7 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> Result<u64> {
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .register_scheduler(account_id, symbol)
+            .with_mut(|registry| registry.register_scheduler(account_id, symbol))
             .map(|task| task.id.0)
     }
 
@@ -217,17 +204,13 @@ impl TaskHost {
         symbol: impl AsRef<str>,
     ) -> Result<()> {
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .check_manual_order_allowed(account_id, symbol)
+            .with(|registry| registry.check_manual_order_allowed(account_id, symbol))
     }
 
     #[doc(hidden)]
     pub fn unregister_task_for_test(&mut self, task_id: u64) -> bool {
         self.registry
-            .lock()
-            .expect("task registry lock poisoned")
-            .unregister_task(TaskId(task_id))
+            .with_mut(|registry| registry.unregister_task(TaskId(task_id)))
     }
 }
 
