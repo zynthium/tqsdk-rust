@@ -119,6 +119,21 @@ impl SessionRouteConnector for FailingRouteConnector {
 }
 
 #[test]
+fn session_runtime_orchestrator_methods_do_not_box_futures() {
+    let source = include_str!("../src/session_runtime.rs");
+    let orchestrator_impl = source
+        .split("impl SessionRuntime {")
+        .nth(1)
+        .and_then(|tail| tail.split("fn timer_route_label").next())
+        .expect("SessionRuntime orchestrator impl block should be present");
+
+    assert!(
+        !orchestrator_impl.contains("Box::pin"),
+        "SessionRuntime orchestration methods should use native async futures"
+    );
+}
+
+#[test]
 fn session_runtime_establishes_topology_and_records_initial_ready_flow() {
     let handle = runtime_with_default_adapters();
     let log = handle.commit_log();

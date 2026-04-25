@@ -109,323 +109,286 @@ impl SessionRuntime {
 
     /// Authenticates, resolves topology, connects routes, and records the
     /// initial session bootstrap commits.
-    pub fn establish<'a>(
-        &'a self,
-        auth: &'a dyn DynAuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
-    ) -> Pin<Box<dyn Future<Output = Result<SessionRun>> + Send + 'a>> {
-        Box::pin(async move {
-            self.handle
-                .record_session_phase(SessionPhase::Authenticating, None, vec![])?;
+    pub async fn establish(
+        &self,
+        auth: &dyn DynAuthProvider,
+        resolver: &dyn SessionTopologyResolver,
+        connector: &dyn SessionRouteConnector,
+        config: &SessionConfig,
+        adapters: &AdapterRegistry,
+    ) -> Result<SessionRun> {
+        self.handle
+            .record_session_phase(SessionPhase::Authenticating, None, vec![])?;
 
-            let bootstrap = match self
-                .bootstrap
-                .establish_with_resolver(auth, resolver, config, adapters)
-                .await
-            {
-                Ok(bootstrap) => bootstrap,
-                Err(err) => {
-                    self.record_session_failure(
-                        "session-establish-error",
-                        "bootstrap",
-                        &err,
-                        vec![],
-                    )?;
-                    return Err(err);
-                }
-            };
-            let connected = match self
-                .connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting))
-                .await
-            {
-                Ok(connected) => connected,
-                Err(err) => {
-                    self.record_session_failure(
-                        "session-establish-error",
-                        "connect",
-                        &err,
-                        vec![],
-                    )?;
-                    return Err(err);
-                }
-            };
+        let bootstrap = match self
+            .bootstrap
+            .establish_with_resolver(auth, resolver, config, adapters)
+            .await
+        {
+            Ok(bootstrap) => bootstrap,
+            Err(err) => {
+                self.record_session_failure("session-establish-error", "bootstrap", &err, vec![])?;
+                return Err(err);
+            }
+        };
+        let connected = match self
+            .connect_if_needed(&bootstrap, connector, Some(SessionPhase::Connecting))
+            .await
+        {
+            Ok(connected) => connected,
+            Err(err) => {
+                self.record_session_failure("session-establish-error", "connect", &err, vec![])?;
+                return Err(err);
+            }
+        };
 
-            self.handle
-                .record_session_phase(SessionPhase::Bootstrapping, None, vec![])?;
-            self.handle.record_session_bootstrap(&bootstrap, vec![])?;
+        self.handle
+            .record_session_phase(SessionPhase::Bootstrapping, None, vec![])?;
+        self.handle.record_session_bootstrap(&bootstrap, vec![])?;
 
-            Ok(SessionRun {
-                bootstrap,
-                connected,
-            })
+        Ok(SessionRun {
+            bootstrap,
+            connected,
         })
     }
 
-    pub fn recover<'a>(
-        &'a self,
-        auth: &'a dyn DynAuthProvider,
-        resolver: &'a dyn SessionTopologyResolver,
-        connector: &'a dyn SessionRouteConnector,
-        config: &'a SessionConfig,
-        adapters: &'a AdapterRegistry,
-    ) -> Pin<Box<dyn Future<Output = Result<SessionRun>> + Send + 'a>> {
-        Box::pin(async move {
-            let recovery = match self
-                .recover_internal(
-                    SessionRuntimeDeps::new(auth, resolver, connector, config, adapters),
-                    true,
-                )
-                .await
-            {
-                Ok(recovery) => recovery,
-                Err(err) => {
-                    self.record_session_failure("session-recovery-error", "recover", &err, vec![])?;
-                    return Err(err);
-                }
-            };
-            Ok(recovery.run)
-        })
+    pub async fn recover(
+        &self,
+        auth: &dyn DynAuthProvider,
+        resolver: &dyn SessionTopologyResolver,
+        connector: &dyn SessionRouteConnector,
+        config: &SessionConfig,
+        adapters: &AdapterRegistry,
+    ) -> Result<SessionRun> {
+        let recovery = match self
+            .recover_internal(
+                SessionRuntimeDeps::new(auth, resolver, connector, config, adapters),
+                true,
+            )
+            .await
+        {
+            Ok(recovery) => recovery,
+            Err(err) => {
+                self.record_session_failure("session-recovery-error", "recover", &err, vec![])?;
+                return Err(err);
+            }
+        };
+        Ok(recovery.run)
     }
 
-    pub fn flush_outbound<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<DispatchReceipt>>> + Send + 'a>> {
-        Box::pin(async move {
-            let dispatches = self.handle.drain_dispatches()?;
-            let mut receipts = Vec::with_capacity(dispatches.len());
-            let mut sent_command_ids = Vec::new();
-            for dispatch in dispatches {
-                let receipt = match run.connected.dispatch_ref(&dispatch).await {
-                    Ok(receipt) => receipt,
-                    Err(err) => {
-                        let route_label = run
-                            .connected
-                            .route_label_for_dispatch(&dispatch)
-                            .map(str::to_string);
-                        let mut detail = Map::new();
-                        detail.insert("message".to_string(), json!(err.to_string()));
-                        self.handle.record_command_status(
-                            dispatch.command_id,
-                            CommandStatus::Failed,
-                            self.command_detail(
-                                dispatch.command_id,
-                                route_label.as_deref(),
-                                Some(&dispatch),
-                                detail,
-                            ),
-                            CommitScope::RealtimeUpdate,
-                        )?;
-                        return Err(err);
-                    }
-                };
-                if !sent_command_ids.contains(&receipt.command_id) {
+    pub async fn flush_outbound(&self, run: &mut SessionRun) -> Result<Vec<DispatchReceipt>> {
+        let dispatches = self.handle.drain_dispatches()?;
+        let mut receipts = Vec::with_capacity(dispatches.len());
+        let mut sent_command_ids = Vec::new();
+        for dispatch in dispatches {
+            let receipt = match run.connected.dispatch_ref(&dispatch).await {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    let route_label = run
+                        .connected
+                        .route_label_for_dispatch(&dispatch)
+                        .map(str::to_string);
+                    let mut detail = Map::new();
+                    detail.insert("message".to_string(), json!(err.to_string()));
                     self.handle.record_command_status(
-                        receipt.command_id,
-                        CommandStatus::Sent,
+                        dispatch.command_id,
+                        CommandStatus::Failed,
                         self.command_detail(
-                            receipt.command_id,
-                            Some(receipt.route_label.as_str()),
+                            dispatch.command_id,
+                            route_label.as_deref(),
                             Some(&dispatch),
-                            Map::new(),
+                            detail,
                         ),
                         CommitScope::RealtimeUpdate,
                     )?;
-                    sent_command_ids.push(receipt.command_id);
+                    return Err(err);
                 }
-                receipts.push(receipt);
-            }
-            Ok(receipts)
-        })
-    }
-
-    pub fn recv_route_and_ingest<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-        route_label: &'a str,
-        caused_by: Vec<CommandId>,
-        scope: CommitScope,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CommitResult>>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(input) = run.connected.recv_route_input(route_label).await? else {
-                return Ok(None);
             };
-            let commit = self.handle.ingest(input, caused_by.clone(), scope)?;
-            if let Some(commit_result) = commit.as_ref() {
-                self.record_transport_commit_statuses(
-                    route_label,
-                    commit_result,
-                    &caused_by,
-                    scope,
+            if !sent_command_ids.contains(&receipt.command_id) {
+                self.handle.record_command_status(
+                    receipt.command_id,
+                    CommandStatus::Sent,
+                    self.command_detail(
+                        receipt.command_id,
+                        Some(receipt.route_label.as_str()),
+                        Some(&dispatch),
+                        Map::new(),
+                    ),
+                    CommitScope::RealtimeUpdate,
                 )?;
+                sent_command_ids.push(receipt.command_id);
             }
-            Ok(commit)
-        })
+            receipts.push(receipt);
+        }
+        Ok(receipts)
     }
 
-    pub fn pump_route_once<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-        route_label: &'a str,
+    pub async fn recv_route_and_ingest(
+        &self,
+        run: &mut SessionRun,
+        route_label: &str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Pin<Box<dyn Future<Output = Result<RoutePumpOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            if !run.connected.has_route(route_label) {
-                return Err(crate::ContractError::validation(format!(
-                    "unknown connected route for route pump: {route_label}"
-                )));
-            }
-
-            match run.connected.recv_route_input(route_label).await {
-                Ok(Some(RuntimeInput::Internal(event))) if event.label == "transport-close" => {
-                    self.handle_disconnect(route_label, event, caused_by)
-                }
-                Ok(Some(RuntimeInput::Internal(event)))
-                    if matches!(event.label, "transport-pong" | "transport-ping") =>
-                {
-                    self.handle_transport_signal(event, caused_by)
-                }
-                Ok(Some(input)) => {
-                    let mut outcome = RoutePumpOutcome::default();
-                    if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
-                        self.record_transport_commit_statuses(
-                            route_label,
-                            &commit,
-                            &caused_by,
-                            scope,
-                        )?;
-                        outcome.commits.push(commit);
-                    }
-                    Ok(outcome)
-                }
-                Ok(None) => Ok(RoutePumpOutcome::default()),
-                Err(err) => self.handle_transport_error(route_label, err, caused_by),
-            }
-        })
+    ) -> Result<Option<CommitResult>> {
+        let Some(input) = run.connected.recv_route_input(route_label).await? else {
+            return Ok(None);
+        };
+        let commit = self.handle.ingest(input, caused_by.clone(), scope)?;
+        if let Some(commit_result) = commit.as_ref() {
+            self.record_transport_commit_statuses(route_label, commit_result, &caused_by, scope)?;
+        }
+        Ok(commit)
     }
 
-    pub fn drive_route_once<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-        route_label: &'a str,
+    pub async fn pump_route_once(
+        &self,
+        run: &mut SessionRun,
+        route_label: &str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-        deps: SessionRuntimeDeps<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<SessionStepOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut outcome = SessionStepOutcome {
-                dispatches: self.flush_outbound(run).await?,
-                commits: Vec::new(),
-                recovered: false,
-            };
+    ) -> Result<RoutePumpOutcome> {
+        if !run.connected.has_route(route_label) {
+            return Err(crate::ContractError::validation(format!(
+                "unknown connected route for route pump: {route_label}"
+            )));
+        }
 
-            let route_outcome = self
-                .pump_route_once(run, route_label, caused_by.clone(), scope)
+        match run.connected.recv_route_input(route_label).await {
+            Ok(Some(RuntimeInput::Internal(event))) if event.label == "transport-close" => {
+                self.handle_disconnect(route_label, event, caused_by)
+            }
+            Ok(Some(RuntimeInput::Internal(event)))
+                if matches!(event.label, "transport-pong" | "transport-ping") =>
+            {
+                self.handle_transport_signal(event, caused_by)
+            }
+            Ok(Some(input)) => {
+                let mut outcome = RoutePumpOutcome::default();
+                if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
+                    self.record_transport_commit_statuses(route_label, &commit, &caused_by, scope)?;
+                    outcome.commits.push(commit);
+                }
+                Ok(outcome)
+            }
+            Ok(None) => Ok(RoutePumpOutcome::default()),
+            Err(err) => self.handle_transport_error(route_label, err, caused_by),
+        }
+    }
+
+    pub async fn drive_route_once(
+        &self,
+        run: &mut SessionRun,
+        route_label: &str,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+        deps: SessionRuntimeDeps<'_>,
+    ) -> Result<SessionStepOutcome> {
+        let mut outcome = SessionStepOutcome {
+            dispatches: self.flush_outbound(run).await?,
+            commits: Vec::new(),
+            recovered: false,
+        };
+
+        let route_outcome = self
+            .pump_route_once(run, route_label, caused_by.clone(), scope)
+            .await?;
+        outcome.commits.extend(route_outcome.commits);
+
+        if route_outcome.reconnect_required {
+            let recovery = self
+                .recover_with_policy(
+                    route_label,
+                    route_outcome.reconnect_reason.unwrap_or("transport-close"),
+                    caused_by,
+                    deps,
+                )
                 .await?;
-            outcome.commits.extend(route_outcome.commits);
+            outcome.recovered = true;
+            outcome.commits.extend(recovery.commits);
+            *run = recovery.run;
+            return Ok(outcome);
+        }
 
-            if route_outcome.reconnect_required {
+        if let Some(commit) = self.ingest_queued_inputs(run, caused_by, scope)? {
+            outcome.commits.push(commit);
+        }
+
+        Ok(outcome)
+    }
+
+    pub async fn drive_timer_once(
+        &self,
+        run: &mut SessionRun,
+        timer: TimerEvent,
+        caused_by: Vec<CommandId>,
+        deps: SessionRuntimeDeps<'_>,
+    ) -> Result<SessionStepOutcome> {
+        let mut outcome = SessionStepOutcome::default();
+
+        match timer.label {
+            "heartbeat-due" | "heartbeat-timeout" => {
+                let route_label = timer_route_label(&timer)?;
+                if !run.connected.has_route(route_label) {
+                    return Err(crate::ContractError::validation(format!(
+                        "unknown connected route for timer event: {route_label}"
+                    )));
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(commit) = self.handle.ingest(
+            RuntimeInput::Timer(timer.clone()),
+            caused_by.clone(),
+            CommitScope::SessionTransition,
+        )? {
+            outcome.commits.push(commit);
+        }
+
+        match timer.label {
+            "heartbeat-due" => {
+                let route_label = timer_route_label(&timer)?;
+                run.connected
+                    .send_route_frame(route_label, OutboundFrame::Ping)
+                    .await?;
+                if let Some(commit) = self.handle.ingest(
+                    RuntimeInput::Internal(InternalEvent {
+                        label: "transport-ping",
+                        payload: Some(json!({
+                            "route": route_label,
+                            "reason": "heartbeat-due",
+                        })),
+                    }),
+                    caused_by,
+                    CommitScope::SessionTransition,
+                )? {
+                    outcome.commits.push(commit);
+                }
+            }
+            "heartbeat-timeout" => {
+                let route_label = timer_route_label(&timer)?;
+                if let Some(commit) = self.handle.record_session_phase(
+                    SessionPhase::Reconnecting,
+                    Some(json!({
+                        "route": route_label,
+                        "reason": "heartbeat-timeout",
+                    })),
+                    caused_by.clone(),
+                )? {
+                    outcome.commits.push(commit);
+                }
+
                 let recovery = self
-                    .recover_with_policy(
-                        route_label,
-                        route_outcome.reconnect_reason.unwrap_or("transport-close"),
-                        caused_by,
-                        deps,
-                    )
+                    .recover_with_policy(route_label, "heartbeat-timeout", caused_by, deps)
                     .await?;
                 outcome.recovered = true;
                 outcome.commits.extend(recovery.commits);
                 *run = recovery.run;
-                return Ok(outcome);
             }
+            _ => {}
+        }
 
-            if let Some(commit) = self.ingest_queued_inputs(run, caused_by, scope)? {
-                outcome.commits.push(commit);
-            }
-
-            Ok(outcome)
-        })
-    }
-
-    pub fn drive_timer_once<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-        timer: TimerEvent,
-        caused_by: Vec<CommandId>,
-        deps: SessionRuntimeDeps<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<SessionStepOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut outcome = SessionStepOutcome::default();
-
-            match timer.label {
-                "heartbeat-due" | "heartbeat-timeout" => {
-                    let route_label = timer_route_label(&timer)?;
-                    if !run.connected.has_route(route_label) {
-                        return Err(crate::ContractError::validation(format!(
-                            "unknown connected route for timer event: {route_label}"
-                        )));
-                    }
-                }
-                _ => {}
-            }
-
-            if let Some(commit) = self.handle.ingest(
-                RuntimeInput::Timer(timer.clone()),
-                caused_by.clone(),
-                CommitScope::SessionTransition,
-            )? {
-                outcome.commits.push(commit);
-            }
-
-            match timer.label {
-                "heartbeat-due" => {
-                    let route_label = timer_route_label(&timer)?;
-                    run.connected
-                        .send_route_frame(route_label, OutboundFrame::Ping)
-                        .await?;
-                    if let Some(commit) = self.handle.ingest(
-                        RuntimeInput::Internal(InternalEvent {
-                            label: "transport-ping",
-                            payload: Some(json!({
-                                "route": route_label,
-                                "reason": "heartbeat-due",
-                            })),
-                        }),
-                        caused_by,
-                        CommitScope::SessionTransition,
-                    )? {
-                        outcome.commits.push(commit);
-                    }
-                }
-                "heartbeat-timeout" => {
-                    let route_label = timer_route_label(&timer)?;
-                    if let Some(commit) = self.handle.record_session_phase(
-                        SessionPhase::Reconnecting,
-                        Some(json!({
-                            "route": route_label,
-                            "reason": "heartbeat-timeout",
-                        })),
-                        caused_by.clone(),
-                    )? {
-                        outcome.commits.push(commit);
-                    }
-
-                    let recovery = self
-                        .recover_with_policy(route_label, "heartbeat-timeout", caused_by, deps)
-                        .await?;
-                    outcome.recovered = true;
-                    outcome.commits.extend(recovery.commits);
-                    *run = recovery.run;
-                }
-                _ => {}
-            }
-
-            Ok(outcome)
-        })
+        Ok(outcome)
     }
 
     pub fn ingest_queued_inputs(
@@ -441,52 +404,50 @@ impl SessionRuntime {
         self.handle.ingest_batch(inputs, caused_by, scope)
     }
 
-    pub fn drive_pending_route_once<'a>(
-        &'a self,
-        run: &'a mut SessionRun,
-        route_label: &'a str,
-        executor: &'a dyn RouteRequestExecutor,
+    pub async fn drive_pending_route_once(
+        &self,
+        run: &mut SessionRun,
+        route_label: &str,
+        executor: &dyn RouteRequestExecutor,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Pin<Box<dyn Future<Output = Result<PendingRouteStepOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            let (route, requests) = run.connected.take_route_requests(route_label)?;
-            if requests.is_empty() {
-                return Ok(PendingRouteStepOutcome::default());
-            }
-            let request_command_ids = request_command_ids(&requests);
+    ) -> Result<PendingRouteStepOutcome> {
+        let (route, requests) = run.connected.take_route_requests(route_label)?;
+        if requests.is_empty() {
+            return Ok(PendingRouteStepOutcome::default());
+        }
+        let request_command_ids = request_command_ids(&requests);
 
-            let mut outcome = PendingRouteStepOutcome {
-                requests: requests.clone(),
-                commits: Vec::new(),
-            };
-            let inputs = match executor.execute(&route, requests).await {
-                Ok(inputs) => inputs,
-                Err(err) => {
-                    self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
-                    return Err(err);
-                }
-            };
-            let inputs = self.annotate_pending_route_inputs(&outcome.requests, inputs)?;
-            match self.handle.ingest_batch(inputs, caused_by.clone(), scope) {
-                Ok(Some(commit)) => {
-                    outcome.commits.push(commit);
-                    self.record_command_statuses(
-                        &request_command_ids,
-                        CommandStatus::Completed,
-                        Some(json!({ "route": route.label })),
-                        scope,
-                    )?;
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
-                    return Err(err);
-                }
+        let mut outcome = PendingRouteStepOutcome {
+            requests: requests.clone(),
+            commits: Vec::new(),
+        };
+        let inputs = match executor.execute(&route, requests).await {
+            Ok(inputs) => inputs,
+            Err(err) => {
+                self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
+                return Err(err);
             }
+        };
+        let inputs = self.annotate_pending_route_inputs(&outcome.requests, inputs)?;
+        match self.handle.ingest_batch(inputs, caused_by.clone(), scope) {
+            Ok(Some(commit)) => {
+                outcome.commits.push(commit);
+                self.record_command_statuses(
+                    &request_command_ids,
+                    CommandStatus::Completed,
+                    Some(json!({ "route": route.label })),
+                    scope,
+                )?;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.record_command_failure(&request_command_ids, route.label.as_str(), &err)?;
+                return Err(err);
+            }
+        }
 
-            Ok(outcome)
-        })
+        Ok(outcome)
     }
 
     fn annotate_pending_route_inputs(
@@ -543,168 +504,162 @@ impl SessionRuntime {
         ))
     }
 
-    fn connect_if_needed<'a>(
-        &'a self,
-        bootstrap: &'a BootstrapResult,
-        connector: &'a dyn SessionRouteConnector,
+    async fn connect_if_needed(
+        &self,
+        bootstrap: &BootstrapResult,
+        connector: &dyn SessionRouteConnector,
         phase: Option<SessionPhase>,
-    ) -> Pin<Box<dyn Future<Output = Result<ConnectedTopology>> + Send + 'a>> {
-        Box::pin(async move {
-            if bootstrap.topology.routes.is_empty() {
-                return Ok(ConnectedTopology::default());
-            }
+    ) -> Result<ConnectedTopology> {
+        if bootstrap.topology.routes.is_empty() {
+            return Ok(ConnectedTopology::default());
+        }
 
-            if let Some(phase) = phase {
-                self.handle.record_session_phase(
-                    phase,
-                    Some(json!({ "route_count": bootstrap.topology.routes.len() })),
-                    vec![],
-                )?;
-            }
+        if let Some(phase) = phase {
+            self.handle.record_session_phase(
+                phase,
+                Some(json!({ "route_count": bootstrap.topology.routes.len() })),
+                vec![],
+            )?;
+        }
 
-            self.bootstrap
-                .connect_topology(&bootstrap.topology, connector)
-                .await
-        })
+        self.bootstrap
+            .connect_topology(&bootstrap.topology, connector)
+            .await
     }
 
-    fn recover_with_policy<'a>(
-        &'a self,
-        route_label: &'a str,
+    async fn recover_with_policy(
+        &self,
+        route_label: &str,
         reason: &'static str,
         caused_by: Vec<CommandId>,
-        deps: SessionRuntimeDeps<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<RecoveryOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut commits = Vec::new();
-            let max_attempts = deps.config.reconnect.max_attempts.unwrap_or(1).max(1);
-            let mut last_error = None;
+        deps: SessionRuntimeDeps<'_>,
+    ) -> Result<RecoveryOutcome> {
+        let mut commits = Vec::new();
+        let max_attempts = deps.config.reconnect.max_attempts.unwrap_or(1).max(1);
+        let mut last_error = None;
 
-            for attempt in 1..=max_attempts {
-                let scheduled_backoff_ms = reconnect_backoff_ms(deps.config, attempt);
-                if let Some(commit) = self.handle.record_session_reconnect(
-                    attempt,
-                    scheduled_backoff_ms,
-                    deps.config.reconnect.max_attempts,
-                    false,
-                    Some(json!({
-                        "route": route_label,
-                        "reason": reason,
-                    })),
-                    caused_by.clone(),
-                )? {
-                    commits.push(commit);
-                }
-                sleep_reconnect_backoff(scheduled_backoff_ms).await?;
-
-                match self.recover_internal(deps, false).await {
-                    Ok(recovery) => {
-                        commits.extend(recovery.commits);
-                        return Ok(RecoveryOutcome {
-                            run: recovery.run,
-                            commits,
-                        });
-                    }
-                    Err(err) => {
-                        if let Some(commit) = self.handle.ingest(
-                            RuntimeInput::Internal(InternalEvent {
-                                label: "session-recovery-error",
-                                payload: Some(json!({
-                                    "route": route_label,
-                                    "reason": reason,
-                                    "attempt": attempt,
-                                    "message": err.to_string(),
-                                })),
-                            }),
-                            caused_by.clone(),
-                            CommitScope::SessionTransition,
-                        )? {
-                            commits.push(commit);
-                        }
-                        last_error = Some((attempt, scheduled_backoff_ms, err));
-                    }
-                }
-            }
-
-            let Some((attempt, scheduled_backoff_ms, err)) = last_error else {
-                return Err(crate::ContractError::validation(
-                    "reconnect policy exhausted without any recovery attempts",
-                ));
-            };
-
+        for attempt in 1..=max_attempts {
+            let scheduled_backoff_ms = reconnect_backoff_ms(deps.config, attempt);
             if let Some(commit) = self.handle.record_session_reconnect(
                 attempt,
                 scheduled_backoff_ms,
                 deps.config.reconnect.max_attempts,
-                true,
+                false,
                 Some(json!({
                     "route": route_label,
                     "reason": reason,
-                    "message": err.to_string(),
                 })),
                 caused_by.clone(),
             )? {
                 commits.push(commit);
             }
+            sleep_reconnect_backoff(scheduled_backoff_ms).await?;
 
-            if let Some(commit) = self.handle.record_session_phase(
-                SessionPhase::Closed,
-                Some(json!({
-                    "route": route_label,
-                    "reason": "reconnect-exhausted",
-                    "attempt": attempt,
-                    "message": err.to_string(),
-                })),
-                caused_by,
-            )? {
-                commits.push(commit);
+            match self.recover_internal(deps, false).await {
+                Ok(recovery) => {
+                    commits.extend(recovery.commits);
+                    return Ok(RecoveryOutcome {
+                        run: recovery.run,
+                        commits,
+                    });
+                }
+                Err(err) => {
+                    if let Some(commit) = self.handle.ingest(
+                        RuntimeInput::Internal(InternalEvent {
+                            label: "session-recovery-error",
+                            payload: Some(json!({
+                                "route": route_label,
+                                "reason": reason,
+                                "attempt": attempt,
+                                "message": err.to_string(),
+                            })),
+                        }),
+                        caused_by.clone(),
+                        CommitScope::SessionTransition,
+                    )? {
+                        commits.push(commit);
+                    }
+                    last_error = Some((attempt, scheduled_backoff_ms, err));
+                }
             }
+        }
 
-            Err(err)
-        })
+        let Some((attempt, scheduled_backoff_ms, err)) = last_error else {
+            return Err(crate::ContractError::validation(
+                "reconnect policy exhausted without any recovery attempts",
+            ));
+        };
+
+        if let Some(commit) = self.handle.record_session_reconnect(
+            attempt,
+            scheduled_backoff_ms,
+            deps.config.reconnect.max_attempts,
+            true,
+            Some(json!({
+                "route": route_label,
+                "reason": reason,
+                "message": err.to_string(),
+            })),
+            caused_by.clone(),
+        )? {
+            commits.push(commit);
+        }
+
+        if let Some(commit) = self.handle.record_session_phase(
+            SessionPhase::Closed,
+            Some(json!({
+                "route": route_label,
+                "reason": "reconnect-exhausted",
+                "attempt": attempt,
+                "message": err.to_string(),
+            })),
+            caused_by,
+        )? {
+            commits.push(commit);
+        }
+
+        Err(err)
     }
 
-    fn recover_internal<'a>(
-        &'a self,
-        deps: SessionRuntimeDeps<'a>,
+    async fn recover_internal(
+        &self,
+        deps: SessionRuntimeDeps<'_>,
         record_reconnecting: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<RecoveryOutcome>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut commits = Vec::new();
+    ) -> Result<RecoveryOutcome> {
+        let mut commits = Vec::new();
 
-            if record_reconnecting
-                && let Some(commit) =
-                    self.handle
-                        .record_session_phase(SessionPhase::Reconnecting, None, vec![])?
-            {
-                commits.push(commit);
-            }
-
-            let bootstrap = self
-                .bootstrap
-                .establish_with_resolver(deps.auth, deps.resolver, deps.config, deps.adapters)
-                .await?;
-            let connected = self
-                .connect_if_needed(&bootstrap, deps.connector, None)
-                .await?;
-
-            if let Some(commit) =
+        if record_reconnecting
+            && let Some(commit) =
                 self.handle
-                    .record_session_phase(SessionPhase::Resyncing, None, vec![])?
-            {
-                commits.push(commit);
-            }
-            if let Some(commit) = self.handle.record_session_resync(&bootstrap, vec![])? {
-                commits.push(commit);
-            }
+                    .record_session_phase(SessionPhase::Reconnecting, None, vec![])?
+        {
+            commits.push(commit);
+        }
 
-            Ok(RecoveryOutcome {
-                run: SessionRun {
-                    bootstrap,
-                    connected,
-                },
-                commits,
-            })
+        let bootstrap = self
+            .bootstrap
+            .establish_with_resolver(deps.auth, deps.resolver, deps.config, deps.adapters)
+            .await?;
+        let connected = self
+            .connect_if_needed(&bootstrap, deps.connector, None)
+            .await?;
+
+        if let Some(commit) =
+            self.handle
+                .record_session_phase(SessionPhase::Resyncing, None, vec![])?
+        {
+            commits.push(commit);
+        }
+        if let Some(commit) = self.handle.record_session_resync(&bootstrap, vec![])? {
+            commits.push(commit);
+        }
+
+        Ok(RecoveryOutcome {
+            run: SessionRun {
+                bootstrap,
+                connected,
+            },
+            commits,
         })
     }
 
