@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::watch;
@@ -16,6 +16,12 @@ use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosStore, SharedTaskRegistry, TaskStateCell,
 };
 use crate::{Result, TaskError};
+
+mod state;
+
+use state::{DesiredBatch, DesiredOrder, LiveOrderHandling, LiveOrderReconciliation};
+pub(crate) use state::TargetPosStore;
+use state::TargetPosTaskState;
 
 /// Builder for a target position task.
 pub struct TargetPosBuilder {
@@ -115,37 +121,6 @@ pub struct TargetPosTaskExecutionReport {
     pub last_reached_target: Option<TargetPosTaskReachedTarget>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct DesiredOrder {
-    direction: TradeDirection,
-    offset: TradeOffset,
-    volume: i64,
-    limit_price: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct DesiredBatch {
-    orders: Vec<DesiredOrder>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct LiveOrderReconciliation {
-    stale_order_ids: HashSet<String>,
-    missing_batch: DesiredBatch,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum LiveOrderHandling {
-    NoLiveOrders,
-    Blocked,
-    SubmitMissing(DesiredBatch),
-}
-
-#[derive(Default)]
-pub(crate) struct TargetPosStore {
-    tasks: HashMap<TaskId, Weak<TargetPosTaskInner>>,
-}
-
 struct TargetPosTaskInner {
     registry: SharedTaskRegistry,
     store: SharedTargetPosStore,
@@ -163,19 +138,6 @@ struct TargetPosTaskInner {
     finished_tx: watch::Sender<bool>,
     cancel_requested: AtomicBool,
     finished: AtomicBool,
-}
-
-#[derive(Default)]
-struct TargetPosTaskState {
-    target_volume: Option<i64>,
-    applied_target_volume: Option<i64>,
-    last_error: Option<TaskError>,
-    submitted_net_position: Option<i64>,
-    tracked_orders: Vec<OrderRef>,
-    known_order_ids: HashSet<String>,
-    cancel_requested_order_ids: HashSet<String>,
-    seen_trade_ids: HashSet<String>,
-    report: TargetPosTaskExecutionReport,
 }
 
 impl TargetPosBuilder {
@@ -437,21 +399,6 @@ impl TargetPosTask {
     #[doc(hidden)]
     pub(crate) fn track_order_for_test(&self, order_ref: OrderRef) {
         self.inner.track_order(order_ref);
-    }
-}
-
-impl TargetPosStore {
-    fn register(&mut self, task: Arc<TargetPosTaskInner>) {
-        self.tasks.insert(task.task_id, Arc::downgrade(&task));
-    }
-
-    fn unregister(&mut self, task_id: TaskId) {
-        self.tasks.remove(&task_id);
-    }
-
-    fn live_tasks(&mut self) -> Vec<Arc<TargetPosTaskInner>> {
-        self.tasks.retain(|_, weak| weak.strong_count() > 0);
-        self.tasks.values().filter_map(Weak::upgrade).collect()
     }
 }
 
