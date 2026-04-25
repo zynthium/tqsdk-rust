@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{Result, WaitFacadeError};
-use tqsdk_core::session_runtime::SessionRuntime;
+use tqsdk_core::internal::SessionRuntime;
 
 pub(crate) struct WaitDriver {
     pub(crate) session: tqsdk_session::SessionClient,

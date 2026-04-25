@@ -1,5 +1,5 @@
 use tokio::time::{Instant, timeout};
-use tqsdk_core::session_runtime::SessionRuntimeDeps;
+use tqsdk_core::internal::SessionRuntimeDeps;
 use tqsdk_core::{CommandId, CommitScope, SessionRouteEndpoint};
 
 use super::{

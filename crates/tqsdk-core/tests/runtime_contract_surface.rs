@@ -261,3 +261,21 @@ fn public_surface_exports_are_usable_together() {
 
     assert_eq!(cursor.next_revision().get(), 1);
 }
+
+#[test]
+fn low_level_session_wiring_is_hidden_behind_internal_bridge() {
+    let lib = include_str!("../src/lib.rs");
+
+    assert!(
+        !lib.contains("pub mod transport;"),
+        "transport implementation module should not be part of the stable public surface"
+    );
+    assert!(
+        !lib.contains("pub mod session_runtime;"),
+        "session runtime implementation module should not be part of the stable public surface"
+    );
+    assert!(
+        lib.contains("#[doc(hidden)]\npub mod internal"),
+        "cross-crate implementation bridge should be explicit and doc-hidden"
+    );
+}

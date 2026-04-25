@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
-use tqsdk_core::session_runtime::SessionRuntime;
-use tqsdk_core::transport::{DynTransport, SessionBootstrap};
+use tqsdk_core::internal::SessionRuntime;
+use tqsdk_core::internal::{DynTransport, SessionBootstrap};
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, ContractError, EndpointConfig,
     ProtocolDomain, RawFrame, Result as CoreResult, Runtime, RuntimeHandle, SessionConfig,

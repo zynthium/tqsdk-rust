@@ -8,8 +8,8 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use serde_json::json;
-use tqsdk_core::session_runtime::{SessionRuntime, SessionRuntimeDeps};
-use tqsdk_core::transport::{DynTransport, SessionBootstrap};
+use tqsdk_core::internal::{DynTransport, SessionBootstrap};
+use tqsdk_core::internal::{SessionRuntime, SessionRuntimeDeps};
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, EndpointConfig, OutboundFrame,
     ProtocolDomain, RawFrame, ReconnectPolicy, Result as CoreResult, Runtime, RuntimeHandle,

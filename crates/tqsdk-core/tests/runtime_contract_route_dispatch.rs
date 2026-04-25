@@ -9,7 +9,7 @@ mod support;
 
 use serde_json::json;
 use support::websocket::{ClientFrame, TestWebSocketServer};
-use tqsdk_core::transport::{DefaultRouteConnector, DynTransport, SessionBootstrap};
+use tqsdk_core::internal::{DefaultRouteConnector, DynTransport, SessionBootstrap};
 use tqsdk_core::{
     AccountId, AdapterRegistry, HttpMethod, MarketCommand, OutboundDispatch, OutboundFrame,
     ProtocolDomain, RawFrame, ReplayCommand, Result as CoreResult, Runtime, RuntimeCommand,

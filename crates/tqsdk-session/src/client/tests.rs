@@ -8,8 +8,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{Duration, Instant};
 #[cfg(feature = "tq-auth")]
 use tqsdk_core::TradeAccountType;
-use tqsdk_core::session_runtime::{RouteRequestExecutor, SessionRuntime};
-use tqsdk_core::transport::{DynRouteConnectFuture, DynTransport, SessionBootstrap};
+use tqsdk_core::internal::{DynRouteConnectFuture, DynTransport, SessionBootstrap};
+use tqsdk_core::internal::{RouteRequestExecutor, SessionRuntime};
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, EndpointConfig, InputPayload,
     IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolDomain,

@@ -17,10 +17,23 @@ pub mod events;
 pub mod ids;
 pub mod order_lifecycle;
 pub mod runtime;
-pub mod session_runtime;
+mod session_runtime;
 pub mod state;
-pub mod transport;
+mod transport;
 pub mod types;
+
+#[doc(hidden)]
+pub mod internal {
+    pub use crate::session_runtime::{
+        PendingRouteStepOutcome, RoutePumpOutcome, RouteRequestExecutor, SessionRun,
+        SessionRuntime, SessionRuntimeDeps, SessionStepOutcome,
+    };
+    pub use crate::transport::{
+        ConnectedSessionRoute, ConnectedTopology, DefaultRouteConnector, DispatchReceipt,
+        DynRouteConnectFuture, DynTransport, SessionBootstrap, WebSocketRouteConnector,
+        WebSocketTransport,
+    };
+}
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
 pub use aggregation::{
