@@ -101,6 +101,20 @@ fn runtime_commit_can_be_projected_into_typed_domain_events() {
     assert_eq!(order.2.instrument_id, "au2602");
 }
 
+#[test]
+fn domain_event_projection_uses_typed_domain_state_views() {
+    let source = include_str!("../src/domain_event.rs");
+
+    assert!(
+        source.contains("snapshot.market_state()"),
+        "market event projection should use the typed market state view"
+    );
+    assert!(
+        source.contains("snapshot.trade_state()"),
+        "trade event projection should use the typed trade state view"
+    );
+}
+
 fn quote_mutation(symbol: Symbol, last_price: f64) -> NormalizedMutation {
     NormalizedMutation {
         path: StatePath::new(["quotes", symbol.as_str()]),

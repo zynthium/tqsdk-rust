@@ -5,6 +5,8 @@ use serde_json::Value;
 
 use crate::{ContractError, Result, ids::Revision};
 
+use super::{MarketStateView, TradeStateView};
+
 /// Borrowed, revision-bound view into the runtime state tree.
 #[derive(Clone, Copy)]
 pub struct StateReadView<'a> {
@@ -20,6 +22,16 @@ impl<'a> StateReadView<'a> {
     /// Returns the snapshot revision this view is bound to.
     pub fn revision(&self) -> Revision {
         self.revision
+    }
+
+    /// Returns a typed market-domain view over this revision-bound snapshot.
+    pub fn market_state(&self) -> MarketStateView<'a> {
+        MarketStateView::new(*self)
+    }
+
+    /// Returns a typed trade-domain view over this revision-bound snapshot.
+    pub fn trade_state(&self) -> TradeStateView<'a> {
+        TradeStateView::new(*self)
     }
 
     /// Looks up a value at the provided path.

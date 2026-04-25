@@ -145,21 +145,20 @@ fn decode_market_event(
     path: &StatePath,
     snapshot: StateReadView<'_>,
 ) -> Result<Option<MarketEvent>> {
+    let market = snapshot.market_state();
     match object {
-        ObjectKey::Quote { symbol } => decode_at_path::<Quote>(snapshot, path).map(|value| {
+        ObjectKey::Quote { symbol } => market.quote(symbol).map(|value| {
             value.map(|quote| MarketEvent::QuoteUpdate {
                 symbol: symbol.clone(),
                 quote,
             })
         }),
-        ObjectKey::TradingStatus { symbol } => {
-            decode_at_path::<TradingStatus>(snapshot, path).map(|value| {
-                value.map(|status| MarketEvent::TradingStatusUpdate {
-                    symbol: symbol.clone(),
-                    status,
-                })
+        ObjectKey::TradingStatus { symbol } => market.trading_status(symbol).map(|value| {
+            value.map(|status| MarketEvent::TradingStatusUpdate {
+                symbol: symbol.clone(),
+                status,
             })
-        }
+        }),
         ObjectKey::Chart { chart_id } => decode_at_path::<Chart>(snapshot, path).map(|value| {
             value.map(|chart| MarketEvent::ChartUpdate {
                 chart_id: chart_id.clone(),
@@ -193,6 +192,7 @@ fn decode_trade_event(
     path: &StatePath,
     snapshot: StateReadView<'_>,
 ) -> Result<Option<TradeEvent>> {
+    let trade_state = snapshot.trade_state();
     match object {
         ObjectKey::Account { account_id } => {
             if path_object_has_field(snapshot, path, "asset") {
@@ -203,7 +203,7 @@ fn decode_trade_event(
                     })
                 })
             } else {
-                decode_at_path::<Account>(snapshot, path).map(|value| {
+                trade_state.account(account_id).map(|value| {
                     value.map(|account| TradeEvent::AccountUpdate {
                         account_id: account_id.clone(),
                         account,
@@ -221,7 +221,7 @@ fn decode_trade_event(
                     })
                 })
             } else {
-                decode_at_path::<Position>(snapshot, path).map(|value| {
+                trade_state.position(account_id, symbol).map(|value| {
                     value.map(|position| TradeEvent::PositionUpdate {
                         account_id: account_id.clone(),
                         symbol: symbol.clone(),
@@ -253,7 +253,7 @@ fn decode_trade_event(
                     })
                 })
             } else {
-                decode_at_path::<Order>(snapshot, path).map(|value| {
+                trade_state.order(account_id, order_id).map(|value| {
                     value.map(|order| TradeEvent::OrderUpdate {
                         account_id: account_id.clone(),
                         order_id: order_id.clone(),

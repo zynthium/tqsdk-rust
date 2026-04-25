@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::{Result, events::NormalizedMutation, ids::Revision};
 
-use super::{PathSegment, StateReadView};
+use super::{MarketStateView, PathSegment, StateReadView, TradeStateView};
 
 /// Owned snapshot clone of the runtime state tree.
 ///
@@ -88,6 +88,16 @@ impl StateSnapshot {
     /// Returns a borrowed read view over this owned snapshot.
     pub fn read(&self) -> StateReadView<'_> {
         StateReadView::new(self.revision, &self.data)
+    }
+
+    /// Returns a typed market-domain view over this owned snapshot.
+    pub fn market_state(&self) -> MarketStateView<'_> {
+        self.read().market_state()
+    }
+
+    /// Returns a typed trade-domain view over this owned snapshot.
+    pub fn trade_state(&self) -> TradeStateView<'_> {
+        self.read().trade_state()
     }
 
     fn from_data(revision: Revision, data: Value) -> Self {

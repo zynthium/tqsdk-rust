@@ -65,8 +65,8 @@ pub use runtime::{
     RuntimeReader, SnapshotReadGuard,
 };
 pub use state::{
-    ChangeHit, ChangeSet, CommitResult, CommitScope, ObjectKey, PathSegment, SeriesKey, StatePath,
-    StateReadView, StateSnapshot, UpdateCursor,
+    ChangeHit, ChangeSet, CommitResult, CommitScope, MarketStateView, ObjectKey, PathSegment,
+    SeriesKey, StatePath, StateReadView, StateSnapshot, TradeStateView, UpdateCursor,
 };
 pub use transport::{
     AuthDerivedTradeTarget, BootstrapResult, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
