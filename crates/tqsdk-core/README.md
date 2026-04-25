@@ -64,7 +64,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | --- | --- |
 | `RuntimeHandle` | 写侧入口，负责命令提交、输入摄取、命令状态与 session 状态投影 |
 | `RuntimeReader` | 标准读侧入口 |
-| `SnapshotReadGuard` / `StateReadView` | revision-bound 的 zero-copy 快照读取 |
+| `SnapshotReadGuard` / `StateReadView` | revision-bound 的快照读取 |
 | `CommitReadGuard` | exact revision 的 commit + state 读面 |
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
 | `SessionRuntime` | auth / bootstrap / connect / recover / flush / pump 的统一编排器 |

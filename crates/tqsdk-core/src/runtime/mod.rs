@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, LockResult, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, LockResult, Mutex, MutexGuard},
 };
 
 use crate::{adapter::AdapterRegistry, state::StateStore};
@@ -22,7 +22,7 @@ pub(crate) struct RuntimeCore {
     command_ledger: CommandLedger,
 }
 
-pub(crate) type SharedState = Arc<RwLock<StateStore>>;
+pub(crate) type SharedState = Arc<StateStore>;
 
 impl RuntimeCore {
     pub(crate) fn new(adapters: AdapterRegistry, max_retained_terminal_commands: usize) -> Self {
@@ -46,12 +46,4 @@ fn recover_poisoned_lock<G>(result: LockResult<G>) -> G {
 
 pub(crate) fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     recover_poisoned_lock(mutex.lock())
-}
-
-pub(crate) fn rwlock_read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    recover_poisoned_lock(lock.read())
-}
-
-pub(crate) fn rwlock_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    recover_poisoned_lock(lock.write())
 }

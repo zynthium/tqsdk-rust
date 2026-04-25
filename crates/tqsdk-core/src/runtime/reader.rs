@@ -1,5 +1,4 @@
-use std::fmt;
-use std::sync::RwLockReadGuard;
+use std::{fmt, marker::PhantomData};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -7,20 +6,21 @@ use serde_json::Value;
 use crate::{
     Result,
     ids::Revision,
-    state::{CommitResult, StateReadView, StateStore, UpdateCursor},
+    state::{CommitResult, StateReadView, StateSnapshot, UpdateCursor},
 };
 
-use super::{SharedState, rwlock_read};
+use super::SharedState;
 
-/// Locked, revision-bound read guard over the runtime state tree.
+/// Revision-bound read guard over a materialized runtime state snapshot.
 pub struct SnapshotReadGuard<'a> {
-    guard: RwLockReadGuard<'a, StateStore>,
+    snapshot: StateSnapshot,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl SnapshotReadGuard<'_> {
-    /// Returns a borrowed view over the currently locked snapshot.
+    /// Returns a borrowed view over the materialized snapshot.
     pub fn view(&self) -> StateReadView<'_> {
-        self.guard.read()
+        self.snapshot.read()
     }
 
     /// Returns the snapshot revision visible through this guard.
@@ -62,10 +62,11 @@ impl SnapshotReadGuard<'_> {
     }
 }
 
-/// Zero-copy, revision-consistent read of a just-consumed commit.
+/// Revision-consistent read of a just-consumed commit.
 pub struct CommitReadGuard<'a> {
     commit: CommitResult,
-    guard: RwLockReadGuard<'a, StateStore>,
+    snapshot: StateSnapshot,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl CommitReadGuard<'_> {
@@ -76,7 +77,7 @@ impl CommitReadGuard<'_> {
 
     /// Returns a borrowed view over the state revision paired with this commit.
     pub fn view(&self) -> StateReadView<'_> {
-        self.guard.read()
+        self.snapshot.read()
     }
 
     /// Returns the commit revision represented by this guard.
@@ -122,7 +123,7 @@ impl fmt::Debug for CommitReadGuard<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommitReadGuard")
             .field("commit", &self.commit)
-            .field("revision", &self.guard.revision())
+            .field("revision", &self.snapshot.revision())
             .finish()
     }
 }
@@ -151,8 +152,8 @@ impl CursorLagged {
     }
 }
 
-/// Canonical read-side surface for zero-copy state reads and cursor-driven
-/// commit consumption.
+/// Canonical read-side surface for state reads and cursor-driven commit
+/// consumption.
 #[derive(Clone)]
 pub struct RuntimeReader {
     pub(crate) state: SharedState,
@@ -178,7 +179,8 @@ impl RuntimeReader {
     /// Acquires a revision-bound snapshot read guard.
     pub fn read(&self) -> SnapshotReadGuard<'_> {
         SnapshotReadGuard {
-            guard: rwlock_read(&self.state),
+            snapshot: self.state.snapshot(),
+            _marker: PhantomData,
         }
     }
 
@@ -187,15 +189,14 @@ impl RuntimeReader {
         self.commit_log.next(cursor)
     }
 
-    /// Returns a zero-copy guard pairing the next commit with the matching
-    /// state revision, or reports cursor lag when the caller fell behind
-    /// retention.
+    /// Returns a guard pairing the next commit with the matching state
+    /// revision, or reports cursor lag when the caller fell behind retention.
     pub fn next_view(
         &self,
         cursor: &mut UpdateCursor,
     ) -> std::result::Result<Option<CommitReadGuard<'_>>, CursorLagged> {
-        let guard = rwlock_read(&self.state);
-        let current_revision = guard.revision();
+        let snapshot = self.state.snapshot();
+        let current_revision = snapshot.revision();
         let expected_revision = cursor.next_revision();
 
         if current_revision.get() < expected_revision.get() {
@@ -219,6 +220,10 @@ impl RuntimeReader {
         };
         cursor.set_next_revision(Revision::new(commit.revision.get() + 1));
 
-        Ok(Some(CommitReadGuard { commit, guard }))
+        Ok(Some(CommitReadGuard {
+            commit,
+            snapshot,
+            _marker: PhantomData,
+        }))
     }
 }

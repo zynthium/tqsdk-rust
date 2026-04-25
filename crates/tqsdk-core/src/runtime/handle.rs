@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
 };
 
 use serde_json::{Value, json};
@@ -11,7 +11,9 @@ use crate::{
     error::{ContractError, Result},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
     ids::{AccountId, CommandId, ProtocolDomain, Revision},
-    state::{CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, UpdateCursor},
+    state::{
+        CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, StateStore, UpdateCursor,
+    },
     transport::{BootstrapResult, SessionPhase},
 };
 
@@ -21,7 +23,7 @@ use super::{
     commit_engine::{
         CommitEngine, session_lifecycle_mutation, session_snapshot_mutations, sort_field_mutations,
     },
-    mutex_lock, rwlock_read, rwlock_write,
+    mutex_lock,
 };
 
 /// Low-level runtime contract.
@@ -84,7 +86,7 @@ impl RuntimeHandle {
                 adapters,
                 max_retained_terminal_commands,
             ))),
-            state: Arc::new(RwLock::new(StateSnapshot::new(Revision::new(0)))),
+            state: Arc::new(StateStore::new(Revision::new(0))),
             commit_log: CommitLog::with_retention(max_commit_log_entries),
         }
     }
@@ -193,12 +195,11 @@ impl RuntimeHandle {
             } else if inner.command_ledger.is_evicted_terminal(command_id) {
                 return Ok(None);
             } else {
-                let snapshot_guard = rwlock_read(&self.state);
+                let snapshot_guard = self.state.snapshot();
                 let snapshot = snapshot_guard.read();
                 let domain = command_domain_from_snapshot(snapshot, command_id);
                 let seed = command_detail_seed_from_snapshot(snapshot, command_id);
                 let current_status = command_status_from_snapshot(snapshot, command_id);
-                drop(snapshot_guard);
                 (domain, seed, current_status)
             };
 
@@ -380,11 +381,14 @@ impl RuntimeHandle {
         scope: CommitScope,
     ) -> Result<Option<CommitResult>> {
         validate_mutation_domains(&mutations)?;
-        let mut snapshot = rwlock_write(&self.state);
-        let commit = CommitEngine::apply(&mut snapshot, mutations, domains, caused_by, scope);
-        if let Some(commit_ref) = commit.as_ref() {
-            self.commit_log.publish(commit_ref.clone());
-        }
+        let commit = CommitEngine::apply(
+            &self.state,
+            mutations,
+            domains,
+            caused_by,
+            scope,
+            |commit| self.commit_log.publish(commit.clone()),
+        );
         Ok(commit)
     }
 }
@@ -420,7 +424,7 @@ impl Runtime for RuntimeHandle {
     }
 
     fn latest_snapshot(&self) -> StateSnapshot {
-        rwlock_read(&self.state).clone()
+        self.state.snapshot()
     }
 
     fn cursor(&self) -> UpdateCursor {
@@ -751,8 +755,7 @@ mod tests {
         let poisoned = handle.clone();
 
         let panic = catch_unwind(AssertUnwindSafe(move || {
-            let _guard = poisoned.state.write().unwrap();
-            panic!("poison runtime state lock");
+            poisoned.state.poison_partition_for_test("runtime");
         }));
         assert!(panic.is_err());
 
