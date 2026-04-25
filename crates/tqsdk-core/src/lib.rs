@@ -10,6 +10,7 @@ pub mod adapter;
 pub mod auth;
 pub mod commands;
 mod diff_protocol;
+mod domain_event;
 pub mod error;
 pub mod events;
 pub mod ids;
@@ -29,6 +30,7 @@ pub use commands::{
     TradeLoginCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition,
     TradeVolumeCondition,
 };
+pub use domain_event::{DomainEvent, MarketEvent, TradeEvent, collect_domain_events};
 pub use error::{ContractError, Result};
 pub use events::{
     AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
