@@ -11,6 +11,7 @@ mod host;
 mod plan;
 mod registry;
 mod scheduler;
+mod shared;
 mod target_pos;
 
 pub use calendar::TradingDayCalendar;

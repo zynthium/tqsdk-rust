@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "services")]
@@ -15,6 +14,7 @@ use crate::registry::{TaskId, TaskRegistry};
 use crate::scheduler::{
     TargetPosSchedulerBuilder, TargetPosSchedulerStore, process_schedulers_wait_update,
 };
+use crate::shared::{SharedQuoteSubscriptions, SharedTradingCalendar};
 use crate::target_pos::{TargetPosBuilder, TargetPosStore, process_target_tasks_wait_update};
 
 /// Single-owner task host built on a wait-style API.
@@ -23,8 +23,8 @@ pub struct TaskHost {
     registry: Arc<Mutex<TaskRegistry>>,
     target_tasks: Arc<Mutex<TargetPosStore>>,
     schedulers: Arc<Mutex<TargetPosSchedulerStore>>,
-    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
-    trading_calendar: Arc<Mutex<TradingDayCalendar>>,
+    quote_subscriptions: SharedQuoteSubscriptions,
+    trading_calendar: SharedTradingCalendar,
 }
 
 impl TaskHost {
@@ -35,8 +35,8 @@ impl TaskHost {
             registry: Arc::new(Mutex::new(TaskRegistry::default())),
             target_tasks: Arc::new(Mutex::new(TargetPosStore::default())),
             schedulers: Arc::new(Mutex::new(TargetPosSchedulerStore::default())),
-            quote_subscriptions: Arc::new(Mutex::new(HashSet::new())),
-            trading_calendar: Arc::new(Mutex::new(TradingDayCalendar::default())),
+            quote_subscriptions: SharedQuoteSubscriptions::default(),
+            trading_calendar: SharedTradingCalendar::default(),
         }
     }
 
@@ -57,27 +57,18 @@ impl TaskHost {
 
     #[must_use]
     pub fn trading_calendar(&self) -> TradingDayCalendar {
-        self.trading_calendar
-            .lock()
-            .expect("trading calendar lock poisoned")
-            .clone()
+        self.trading_calendar.snapshot()
     }
 
     pub fn set_trading_calendar(&mut self, calendar: TradingDayCalendar) {
-        *self
-            .trading_calendar
-            .lock()
-            .expect("trading calendar lock poisoned") = calendar;
+        self.trading_calendar.replace(calendar);
     }
 
     pub fn extend_trading_calendar(
         &mut self,
         days: impl IntoIterator<Item = TradingCalendarDay>,
     ) -> Result<()> {
-        self.trading_calendar
-            .lock()
-            .expect("trading calendar lock poisoned")
-            .try_extend_days(days)
+        self.trading_calendar.extend(days)
     }
 
     #[cfg(feature = "services")]
@@ -112,7 +103,7 @@ impl TaskHost {
         TargetPosBuilder::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
-            Arc::clone(&self.quote_subscriptions),
+            self.quote_subscriptions.clone(),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )
@@ -128,8 +119,8 @@ impl TaskHost {
             Arc::clone(&self.registry),
             Arc::clone(&self.target_tasks),
             Arc::clone(&self.schedulers),
-            Arc::clone(&self.quote_subscriptions),
-            Arc::clone(&self.trading_calendar),
+            self.quote_subscriptions.clone(),
+            self.trading_calendar.clone(),
             account_id.as_ref().to_owned(),
             symbol.as_ref().to_owned(),
         )

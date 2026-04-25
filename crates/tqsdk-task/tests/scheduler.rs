@@ -36,6 +36,11 @@ fn target_pos_scheduler_inner_uses_single_runtime_state_mutex() {
         direct_mutex_fields, 1,
         "TargetPosSchedulerInner should keep mutable scheduler runtime state behind one Mutex"
     );
+    assert!(
+        !inner.contains("quote_subscriptions: Arc<Mutex")
+            && !inner.contains("trading_calendar: Arc<Mutex"),
+        "TargetPosSchedulerInner should access shared quote/calendar state through wrappers"
+    );
 }
 
 fn seeded_host() -> TaskHost {

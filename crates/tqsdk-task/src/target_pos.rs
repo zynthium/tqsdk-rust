@@ -12,13 +12,14 @@ use tqsdk_wait::OrderRef;
 use crate::config::{OffsetPriority, PriceMode, TargetPosConfig, VolumeSplitPolicy};
 use crate::plan::{compute_plan, net_position};
 use crate::registry::{TaskId, TaskRegistry};
+use crate::shared::SharedQuoteSubscriptions;
 use crate::{Result, TaskError};
 
 /// Builder for a target position task.
 pub struct TargetPosBuilder {
     registry: Arc<Mutex<TaskRegistry>>,
     store: Arc<Mutex<TargetPosStore>>,
-    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+    quote_subscriptions: SharedQuoteSubscriptions,
     account_id: String,
     symbol: String,
     config: TargetPosConfig,
@@ -146,7 +147,7 @@ pub(crate) struct TargetPosStore {
 struct TargetPosTaskInner {
     registry: Arc<Mutex<TaskRegistry>>,
     store: Arc<Mutex<TargetPosStore>>,
-    quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+    quote_subscriptions: SharedQuoteSubscriptions,
     managed_by_host: bool,
     task_id: TaskId,
     account_id: String,
@@ -179,7 +180,7 @@ impl TargetPosBuilder {
     pub(crate) fn new(
         registry: Arc<Mutex<TaskRegistry>>,
         store: Arc<Mutex<TargetPosStore>>,
-        quote_subscriptions: Arc<Mutex<HashSet<String>>>,
+        quote_subscriptions: SharedQuoteSubscriptions,
         account_id: String,
         symbol: String,
     ) -> Self {
@@ -236,7 +237,7 @@ impl TargetPosBuilder {
         let inner = Arc::new(TargetPosTaskInner {
             registry: Arc::clone(&self.registry),
             store: Arc::clone(&self.store),
-            quote_subscriptions: Arc::clone(&self.quote_subscriptions),
+            quote_subscriptions: self.quote_subscriptions.clone(),
             managed_by_host,
             task_id,
             account_id: self.account_id,
@@ -807,20 +808,12 @@ impl TargetPosTaskInner {
             return Ok(());
         }
 
-        let already_subscribed = self
-            .quote_subscriptions
-            .lock()
-            .expect("target task quote subscriptions lock poisoned")
-            .contains(&self.symbol);
-        if already_subscribed {
+        if self.quote_subscriptions.contains(&self.symbol) {
             return Ok(());
         }
 
         api.get_quote(&self.symbol).await.map_err(TaskError::from)?;
-        self.quote_subscriptions
-            .lock()
-            .expect("target task quote subscriptions lock poisoned")
-            .insert(self.symbol.clone());
+        self.quote_subscriptions.insert(self.symbol.clone());
         Ok(())
     }
 
@@ -1229,11 +1222,11 @@ mod tests {
     async fn cancel_requested_task_records_error_when_cancel_submission_fails() {
         let registry = Arc::new(Mutex::new(TaskRegistry::default()));
         let store = Arc::new(Mutex::new(TargetPosStore::default()));
-        let quote_subscriptions = Arc::new(Mutex::new(HashSet::new()));
+        let quote_subscriptions = SharedQuoteSubscriptions::default();
         let task = TargetPosBuilder::new(
             Arc::clone(&registry),
             Arc::clone(&store),
-            Arc::clone(&quote_subscriptions),
+            quote_subscriptions,
             "sim".to_string(),
             "SHFE.rb2601".to_string(),
         )
