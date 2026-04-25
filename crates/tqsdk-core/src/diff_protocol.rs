@@ -1,9 +1,9 @@
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::{ContractError, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "aid")]
 pub(crate) enum DiffProtocolMessage {
     #[serde(rename = "subscribe_quote")]
@@ -25,6 +25,83 @@ pub(crate) enum DiffProtocolMessage {
     },
     #[serde(rename = "peek_message")]
     PeekMessage,
+    #[serde(rename = "req_login")]
+    ReqLogin {
+        bid: String,
+        user_name: String,
+        password: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_app_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_system_info: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        broker_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        front: Option<String>,
+    },
+    #[serde(rename = "confirm_settlement")]
+    ConfirmSettlement,
+    #[serde(rename = "qry_account_info")]
+    QueryAccountInfo { user_id: String },
+    #[serde(rename = "qry_account_register")]
+    QueryAccountRegister { user_id: String },
+    #[serde(rename = "qry_settlement_info")]
+    QuerySettlementInfo {
+        user_name: String,
+        trading_day: String,
+    },
+    #[serde(rename = "insert_order")]
+    InsertOrder {
+        user_id: String,
+        order_id: String,
+        exchange_id: String,
+        instrument_id: String,
+        direction: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        offset: Option<String>,
+        volume: i64,
+        price_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit_price: Option<Value>,
+        time_condition: String,
+        volume_condition: String,
+    },
+    #[serde(rename = "pre_insert_order")]
+    PreInsertOrder {
+        user_id: String,
+        order_id: String,
+        exchange_id: String,
+        instrument_id: String,
+        direction: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        offset: Option<String>,
+        volume: i64,
+        price_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit_price: Option<Value>,
+        time_condition: String,
+        volume_condition: String,
+        hedge_flag: String,
+        contingent_condition: String,
+    },
+    #[serde(rename = "cancel_order")]
+    CancelOrder { user_id: String, order_id: String },
+    #[serde(rename = "req_transfer")]
+    ReqTransfer {
+        user_id: String,
+        bank_id: String,
+        bank_password: String,
+        future_account: String,
+        future_password: String,
+        currency: String,
+        amount: Value,
+    },
+    #[serde(rename = "set_risk_management_rule")]
+    SetRiskManagementRule {
+        user_id: String,
+        #[serde(skip)]
+        rule: Map<String, Value>,
+    },
 }
 
 impl DiffProtocolMessage {
@@ -56,7 +133,114 @@ impl DiffProtocolMessage {
         Self::PeekMessage
     }
 
+    pub(crate) fn req_login(request: DiffLoginRequest) -> Self {
+        Self::ReqLogin {
+            bid: request.bid,
+            user_name: request.user_name,
+            password: request.password,
+            client_app_id: request.client_app_id,
+            client_system_info: request.client_system_info,
+            broker_id: request.broker_id,
+            front: request.front,
+        }
+    }
+
+    pub(crate) fn confirm_settlement() -> Self {
+        Self::ConfirmSettlement
+    }
+
+    pub(crate) fn query_account_info(user_id: impl Into<String>) -> Self {
+        Self::QueryAccountInfo {
+            user_id: user_id.into(),
+        }
+    }
+
+    pub(crate) fn query_account_register(user_id: impl Into<String>) -> Self {
+        Self::QueryAccountRegister {
+            user_id: user_id.into(),
+        }
+    }
+
+    pub(crate) fn query_settlement_info(
+        user_name: impl Into<String>,
+        trading_day: impl Into<String>,
+    ) -> Self {
+        Self::QuerySettlementInfo {
+            user_name: user_name.into(),
+            trading_day: trading_day.into(),
+        }
+    }
+
+    pub(crate) fn insert_order(request: DiffOrderRequest) -> Self {
+        Self::InsertOrder {
+            user_id: request.user_id,
+            order_id: request.order_id,
+            exchange_id: request.exchange_id,
+            instrument_id: request.instrument_id,
+            direction: request.direction,
+            offset: request.offset,
+            volume: request.volume,
+            price_type: request.price_type,
+            limit_price: request.limit_price,
+            time_condition: request.time_condition,
+            volume_condition: request.volume_condition,
+        }
+    }
+
+    pub(crate) fn pre_insert_order(request: DiffPreInsertOrderRequest) -> Self {
+        Self::PreInsertOrder {
+            user_id: request.order.user_id,
+            order_id: request.order.order_id,
+            exchange_id: request.order.exchange_id,
+            instrument_id: request.order.instrument_id,
+            direction: request.order.direction,
+            offset: request.order.offset,
+            volume: request.order.volume,
+            price_type: request.order.price_type,
+            limit_price: request.order.limit_price,
+            time_condition: request.order.time_condition,
+            volume_condition: request.order.volume_condition,
+            hedge_flag: request.hedge_flag,
+            contingent_condition: request.contingent_condition,
+        }
+    }
+
+    pub(crate) fn cancel_order(user_id: impl Into<String>, order_id: impl Into<String>) -> Self {
+        Self::CancelOrder {
+            user_id: user_id.into(),
+            order_id: order_id.into(),
+        }
+    }
+
+    pub(crate) fn req_transfer(request: DiffTransferRequest) -> Self {
+        Self::ReqTransfer {
+            user_id: request.user_id,
+            bank_id: request.bank_id,
+            bank_password: request.bank_password,
+            future_account: request.future_account,
+            future_password: request.future_password,
+            currency: request.currency,
+            amount: request.amount,
+        }
+    }
+
+    pub(crate) fn set_risk_management_rule(
+        user_id: impl Into<String>,
+        rule: Map<String, Value>,
+    ) -> Self {
+        Self::SetRiskManagementRule {
+            user_id: user_id.into(),
+            rule,
+        }
+    }
+
     pub(crate) fn into_value(self) -> Result<Value> {
+        if let Self::SetRiskManagementRule { user_id, mut rule } = self {
+            rule.insert("aid".to_string(), json!("set_risk_management_rule"));
+            rule.insert("user_id".to_string(), json!(user_id));
+            return Ok(Value::Object(rule));
+        }
+
         serde_json::to_value(self).map_err(|error| {
             ContractError::Adapter(format!("failed to encode DIFF protocol message: {error}"))
         })
@@ -104,11 +288,76 @@ impl DiffSetChartRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiffLoginRequest {
+    pub(crate) bid: String,
+    pub(crate) user_name: String,
+    pub(crate) password: String,
+    pub(crate) client_app_id: Option<String>,
+    pub(crate) client_system_info: Option<String>,
+    pub(crate) broker_id: Option<String>,
+    pub(crate) front: Option<String>,
+}
+
+impl DiffLoginRequest {
+    pub(crate) fn new(
+        bid: impl Into<String>,
+        user_name: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        Self {
+            bid: bid.into(),
+            user_name: user_name.into(),
+            password: password.into(),
+            client_app_id: None,
+            client_system_info: None,
+            broker_id: None,
+            front: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DiffOrderRequest {
+    pub(crate) user_id: String,
+    pub(crate) order_id: String,
+    pub(crate) exchange_id: String,
+    pub(crate) instrument_id: String,
+    pub(crate) direction: String,
+    pub(crate) offset: Option<String>,
+    pub(crate) volume: i64,
+    pub(crate) price_type: String,
+    pub(crate) limit_price: Option<Value>,
+    pub(crate) time_condition: String,
+    pub(crate) volume_condition: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DiffPreInsertOrderRequest {
+    pub(crate) order: DiffOrderRequest,
+    pub(crate) hedge_flag: String,
+    pub(crate) contingent_condition: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DiffTransferRequest {
+    pub(crate) user_id: String,
+    pub(crate) bank_id: String,
+    pub(crate) bank_password: String,
+    pub(crate) future_account: String,
+    pub(crate) future_password: String,
+    pub(crate) currency: String,
+    pub(crate) amount: Value,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{DiffProtocolMessage, DiffSetChartRequest};
+    use super::{
+        DiffLoginRequest, DiffOrderRequest, DiffProtocolMessage, DiffSetChartRequest,
+        DiffTransferRequest,
+    };
 
     #[test]
     fn market_messages_encode_official_diff_aids() {
@@ -148,6 +397,114 @@ mod tests {
                 "duration": 60_000_000_000_i64,
                 "view_width": 128,
                 "left_kline_id": 42,
+            })
+        );
+    }
+
+    #[test]
+    fn trade_messages_encode_official_diff_aids() {
+        let mut login = DiffLoginRequest::new("9999", "simnow", "secret");
+        login.front = Some("tcp://127.0.0.1:12345".to_string());
+        assert_eq!(
+            DiffProtocolMessage::req_login(login).into_value().unwrap(),
+            json!({
+                "aid": "req_login",
+                "bid": "9999",
+                "user_name": "simnow",
+                "password": "secret",
+                "front": "tcp://127.0.0.1:12345",
+            })
+        );
+
+        assert_eq!(
+            DiffProtocolMessage::cancel_order("simnow", "order-1")
+                .into_value()
+                .unwrap(),
+            json!({
+                "aid": "cancel_order",
+                "user_id": "simnow",
+                "order_id": "order-1",
+            })
+        );
+        assert_eq!(
+            DiffProtocolMessage::req_transfer(DiffTransferRequest {
+                user_id: "simnow".to_string(),
+                bank_id: "b001".to_string(),
+                bank_password: "bank-pass".to_string(),
+                future_account: "future-acc".to_string(),
+                future_password: "future-pass".to_string(),
+                currency: "CNY".to_string(),
+                amount: json!(1500.0),
+            })
+            .into_value()
+            .unwrap(),
+            json!({
+                "aid": "req_transfer",
+                "user_id": "simnow",
+                "bank_id": "b001",
+                "bank_password": "bank-pass",
+                "future_account": "future-acc",
+                "future_password": "future-pass",
+                "currency": "CNY",
+                "amount": 1500.0,
+            })
+        );
+    }
+
+    #[test]
+    fn trade_order_message_skips_absent_optional_fields() {
+        let message = DiffProtocolMessage::insert_order(DiffOrderRequest {
+            user_id: "simnow".to_string(),
+            order_id: "order-1".to_string(),
+            exchange_id: "SHFE".to_string(),
+            instrument_id: "au2602".to_string(),
+            direction: "BUY".to_string(),
+            offset: None,
+            volume: 2,
+            price_type: "ANY".to_string(),
+            limit_price: None,
+            time_condition: "IOC".to_string(),
+            volume_condition: "ANY".to_string(),
+        });
+
+        assert_eq!(
+            message.into_value().unwrap(),
+            json!({
+                "aid": "insert_order",
+                "user_id": "simnow",
+                "order_id": "order-1",
+                "exchange_id": "SHFE",
+                "instrument_id": "au2602",
+                "direction": "BUY",
+                "volume": 2,
+                "price_type": "ANY",
+                "time_condition": "IOC",
+                "volume_condition": "ANY",
+            })
+        );
+    }
+
+    #[test]
+    fn risk_rule_message_preserves_reserved_protocol_fields() {
+        let rule = json!({
+            "aid": "malicious",
+            "user_id": "wrong",
+            "exchange_id": "SSE",
+            "enable": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert_eq!(
+            DiffProtocolMessage::set_risk_management_rule("simnow", rule)
+                .into_value()
+                .unwrap(),
+            json!({
+                "aid": "set_risk_management_rule",
+                "user_id": "simnow",
+                "exchange_id": "SSE",
+                "enable": true,
             })
         );
     }

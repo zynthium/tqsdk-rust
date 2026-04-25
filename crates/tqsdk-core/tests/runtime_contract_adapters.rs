@@ -123,6 +123,38 @@ fn market_adapter_encoding_uses_diff_protocol_message_model() {
 }
 
 #[test]
+fn trade_adapter_encoding_uses_diff_protocol_message_model() {
+    let source = include_str!("../src/adapter.rs");
+    let trade_impl = source
+        .split("impl ProtocolAdapter for TradeAdapter {")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Default, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("TradeAdapter ProtocolAdapter impl should be present");
+
+    for aid in [
+        "req_login",
+        "confirm_settlement",
+        "qry_account_info",
+        "qry_account_register",
+        "qry_settlement_info",
+        "insert_order",
+        "pre_insert_order",
+        "cancel_order",
+        "req_transfer",
+        "set_risk_management_rule",
+    ] {
+        let literal = format!("\"{aid}\"");
+        assert!(
+            !trade_impl.contains(&literal),
+            "TradeAdapter should delegate DIFF trade aid construction to the protocol model"
+        );
+    }
+}
+
+#[test]
 fn default_protocol_adapters_cover_domain_registration_and_encode_shapes() {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();

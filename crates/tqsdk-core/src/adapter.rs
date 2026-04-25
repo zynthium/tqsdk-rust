@@ -4,7 +4,10 @@ use crate::{
         QueryCommand, QueryRequest, ReplayCommand, RuntimeCommand, SchemaCommand, SystemCommand,
         TradeCommand, TradeInsertOrderCommand, TradePreInsertOrderCommand,
     },
-    diff_protocol::{DiffProtocolMessage, DiffSetChartRequest},
+    diff_protocol::{
+        DiffLoginRequest, DiffOrderRequest, DiffPreInsertOrderRequest, DiffProtocolMessage,
+        DiffSetChartRequest, DiffTransferRequest,
+    },
     error::{ContractError, Result},
     events::{
         AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
@@ -261,57 +264,34 @@ impl ProtocolAdapter for TradeAdapter {
     }
 
     fn encode(&mut self, cmd: &RuntimeCommand) -> Result<Vec<OutboundRequest>> {
-        let request = match cmd {
-            RuntimeCommand::Trade(TradeCommand::Login(login)) => {
-                let mut request = Map::from_iter([
-                    ("aid".to_string(), json!("req_login")),
-                    ("bid".to_string(), json!(login.broker_id)),
-                    ("user_name".to_string(), json!(login.account_id.as_str())),
-                    ("password".to_string(), json!(login.password)),
-                ]);
-                insert_optional(&mut request, "client_app_id", login.client_app_id.clone());
-                insert_optional(
-                    &mut request,
-                    "client_system_info",
-                    login.client_system_info.clone(),
-                );
-                insert_optional(&mut request, "broker_id", login.front_broker.clone());
-                insert_optional(&mut request, "front", login.front_url.clone());
-                Value::Object(request)
-            }
+        let message = match cmd {
+            RuntimeCommand::Trade(TradeCommand::Login(login)) => build_login_message(login),
             RuntimeCommand::Trade(TradeCommand::ConfirmSettlement { .. }) => {
-                json!({"aid": "confirm_settlement"})
+                DiffProtocolMessage::confirm_settlement()
             }
-            RuntimeCommand::Trade(TradeCommand::QueryAccountInfo { account_id }) => json!({
-                "aid": "qry_account_info",
-                "user_id": account_id.as_str(),
-            }),
-            RuntimeCommand::Trade(TradeCommand::QueryAccountRegister { account_id }) => json!({
-                "aid": "qry_account_register",
-                "user_id": account_id.as_str(),
-            }),
+            RuntimeCommand::Trade(TradeCommand::QueryAccountInfo { account_id }) => {
+                DiffProtocolMessage::query_account_info(account_id.as_str())
+            }
+            RuntimeCommand::Trade(TradeCommand::QueryAccountRegister { account_id }) => {
+                DiffProtocolMessage::query_account_register(account_id.as_str())
+            }
             RuntimeCommand::Trade(TradeCommand::QuerySettlementInfo {
                 account_id,
                 trading_day,
-            }) => json!({
-                "aid": "qry_settlement_info",
-                "user_name": account_id.as_str(),
-                "trading_day": trading_day.to_string(),
-            }),
+            }) => DiffProtocolMessage::query_settlement_info(
+                account_id.as_str(),
+                trading_day.to_string(),
+            ),
             RuntimeCommand::Trade(TradeCommand::PreInsertOrder(order)) => {
-                build_pre_insert_order_request(order)?
+                build_pre_insert_order_message(order)?
             }
             RuntimeCommand::Trade(TradeCommand::InsertOrder(order)) => {
-                build_insert_order_request(order)?
+                build_insert_order_message(order)?
             }
             RuntimeCommand::Trade(TradeCommand::CancelOrder {
                 account_id,
                 order_id,
-            }) => json!({
-                "aid": "cancel_order",
-                "user_id": account_id.as_str(),
-                "order_id": order_id.as_str(),
-            }),
+            }) => DiffProtocolMessage::cancel_order(account_id.as_str(), order_id.as_str()),
             RuntimeCommand::Trade(TradeCommand::Transfer {
                 account_id,
                 bank_id,
@@ -320,30 +300,27 @@ impl ProtocolAdapter for TradeAdapter {
                 future_password,
                 currency,
                 amount,
-            }) => json!({
-                "aid": "req_transfer",
-                "user_id": account_id.as_str(),
-                "bank_id": bank_id,
-                "bank_password": bank_password,
-                "future_account": future_account,
-                "future_password": future_password,
-                "currency": currency,
-                "amount": amount,
+            }) => DiffProtocolMessage::req_transfer(DiffTransferRequest {
+                user_id: account_id.as_str().to_string(),
+                bank_id: bank_id.clone(),
+                bank_password: bank_password.clone(),
+                future_account: future_account.clone(),
+                future_password: future_password.clone(),
+                currency: currency.clone(),
+                amount: amount.clone(),
             }),
             RuntimeCommand::Trade(TradeCommand::SetRiskManagementRule { account_id, rule }) => {
-                let mut request = rule.as_object().cloned().ok_or_else(|| {
+                let request = rule.as_object().cloned().ok_or_else(|| {
                     ContractError::validation(
                         "set_risk_management_rule expects an object-shaped rule payload",
                     )
                 })?;
-                request.insert("aid".to_string(), json!("set_risk_management_rule"));
-                request.insert("user_id".to_string(), json!(account_id.as_str()));
-                Value::Object(request)
+                DiffProtocolMessage::set_risk_management_rule(account_id.as_str(), request)
             }
             _ => return Err(ContractError::UnsupportedCommand("trade")),
         };
 
-        Ok(vec![json_request(request)])
+        Ok(vec![diff_request(message)?])
     }
 
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
@@ -558,73 +535,61 @@ fn build_chart_message(chart: &MarketChartCommand, cancel: bool) -> DiffProtocol
     DiffProtocolMessage::set_chart(request)
 }
 
-fn insert_optional(map: &mut Map<String, Value>, key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        map.insert(key.to_string(), json!(value));
-    }
+fn build_login_message(login: &crate::commands::TradeLoginCommand) -> DiffProtocolMessage {
+    let mut request = DiffLoginRequest::new(
+        login.broker_id.clone(),
+        login.account_id.as_str(),
+        login.password.clone(),
+    );
+    request.client_app_id.clone_from(&login.client_app_id);
+    request
+        .client_system_info
+        .clone_from(&login.client_system_info);
+    request.broker_id.clone_from(&login.front_broker);
+    request.front.clone_from(&login.front_url);
+    DiffProtocolMessage::req_login(request)
 }
 
-fn build_insert_order_request(order: &TradeInsertOrderCommand) -> Result<Value> {
+fn build_insert_order_message(order: &TradeInsertOrderCommand) -> Result<DiffProtocolMessage> {
     let (exchange_id, instrument_id) = split_symbol(order.symbol.as_str())?;
-    let mut request = Map::from_iter([
-        ("aid".to_string(), json!("insert_order")),
-        ("user_id".to_string(), json!(order.account_id.as_str())),
-        ("order_id".to_string(), json!(order.order_id.as_str())),
-        ("exchange_id".to_string(), json!(exchange_id)),
-        ("instrument_id".to_string(), json!(instrument_id)),
-        ("direction".to_string(), json!(order.direction.as_str())),
-        ("volume".to_string(), json!(order.volume)),
-        ("price_type".to_string(), json!(order.price_type.as_str())),
-        (
-            "time_condition".to_string(),
-            json!(order.time_condition.as_str()),
-        ),
-        (
-            "volume_condition".to_string(),
-            json!(order.volume_condition.as_str()),
-        ),
-    ]);
-    if let Some(offset) = order.offset {
-        request.insert("offset".to_string(), json!(offset.as_str()));
-    }
-    if let Some(limit_price) = order.limit_price.clone() {
-        request.insert("limit_price".to_string(), limit_price);
-    }
-    Ok(Value::Object(request))
+    Ok(DiffProtocolMessage::insert_order(DiffOrderRequest {
+        user_id: order.account_id.as_str().to_string(),
+        order_id: order.order_id.as_str().to_string(),
+        exchange_id: exchange_id.to_string(),
+        instrument_id: instrument_id.to_string(),
+        direction: order.direction.as_str().to_string(),
+        offset: order.offset.map(|offset| offset.as_str().to_string()),
+        volume: order.volume,
+        price_type: order.price_type.as_str().to_string(),
+        limit_price: order.limit_price.clone(),
+        time_condition: order.time_condition.as_str().to_string(),
+        volume_condition: order.volume_condition.as_str().to_string(),
+    }))
 }
 
-fn build_pre_insert_order_request(order: &TradePreInsertOrderCommand) -> Result<Value> {
+fn build_pre_insert_order_message(
+    order: &TradePreInsertOrderCommand,
+) -> Result<DiffProtocolMessage> {
     let (exchange_id, instrument_id) = split_symbol(order.symbol.as_str())?;
-    let mut request = Map::from_iter([
-        ("aid".to_string(), json!("pre_insert_order")),
-        ("user_id".to_string(), json!(order.account_id.as_str())),
-        ("order_id".to_string(), json!(order.order_id.as_str())),
-        ("exchange_id".to_string(), json!(exchange_id)),
-        ("instrument_id".to_string(), json!(instrument_id)),
-        ("direction".to_string(), json!(order.direction.as_str())),
-        ("volume".to_string(), json!(order.volume)),
-        ("price_type".to_string(), json!(order.price_type.as_str())),
-        (
-            "time_condition".to_string(),
-            json!(order.time_condition.as_str()),
-        ),
-        (
-            "volume_condition".to_string(),
-            json!(order.volume_condition.as_str()),
-        ),
-        ("hedge_flag".to_string(), json!(order.hedge_flag)),
-        (
-            "contingent_condition".to_string(),
-            json!(order.contingent_condition),
-        ),
-    ]);
-    if let Some(offset) = order.offset {
-        request.insert("offset".to_string(), json!(offset.as_str()));
-    }
-    if let Some(limit_price) = order.limit_price.clone() {
-        request.insert("limit_price".to_string(), limit_price);
-    }
-    Ok(Value::Object(request))
+    Ok(DiffProtocolMessage::pre_insert_order(
+        DiffPreInsertOrderRequest {
+            order: DiffOrderRequest {
+                user_id: order.account_id.as_str().to_string(),
+                order_id: order.order_id.as_str().to_string(),
+                exchange_id: exchange_id.to_string(),
+                instrument_id: instrument_id.to_string(),
+                direction: order.direction.as_str().to_string(),
+                offset: order.offset.map(|offset| offset.as_str().to_string()),
+                volume: order.volume,
+                price_type: order.price_type.as_str().to_string(),
+                limit_price: order.limit_price.clone(),
+                time_condition: order.time_condition.as_str().to_string(),
+                volume_condition: order.volume_condition.as_str().to_string(),
+            },
+            hedge_flag: order.hedge_flag.clone(),
+            contingent_condition: order.contingent_condition.clone(),
+        },
+    ))
 }
 
 fn split_symbol(symbol: &str) -> Result<(&str, &str)> {
