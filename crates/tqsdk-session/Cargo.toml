@@ -7,13 +7,24 @@ description = "Shared async session and direct-query layer for tqsdk-core"
 documentation = "https://docs.rs/tqsdk-session"
 readme = "README.md"
 
+[features]
+default = ["live", "services"]
+http-client = ["dep:reqwest"]
+live = ["http-client", "tq-auth"]
+services = ["http-client"]
+tq-auth = ["dep:base64", "http-client"]
+
 [dependencies]
-base64.workspace = true
+base64 = { workspace = true, optional = true }
 chrono.workspace = true
 futures.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
 url.workspace = true
+
+[[example]]
+name = "trade_login_tqkq"
+required-features = ["live"]

@@ -1,32 +1,47 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+#[cfg(any(test, feature = "live"))]
 use std::future::Future;
+#[cfg(any(test, feature = "live"))]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(test, feature = "live"))]
+use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
+#[cfg(feature = "live")]
+use tqsdk_core::DefaultRouteConnector;
+#[cfg(feature = "tq-auth")]
+use tqsdk_core::TradeLoginCommand;
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthEvent, CommandId, CommitScope, DefaultRouteConnector,
-    DynAuthProvider, EdbIndexData, InternalEvent, OutboundDispatch, OutboundFrame, QueryCommand,
-    QueryId, Quote, ReplayCommand, ReplayEvent, RouteRequestExecutor, Runtime, RuntimeCommand,
-    RuntimeHandle, RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap, SessionConfig,
-    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime,
-    SessionRuntimeDeps, SessionTarget, SessionTopologyResolver, SymbolRanking, SymbolSettlement,
-    SystemCommand, TradeLoginCommand, TradeSessionTarget, TradingCalendarDay,
+    AdapterRegistry, AuthContext, CommandId, CommitScope, DynAuthProvider, OutboundDispatch,
+    OutboundFrame, QueryCommand, QueryId, Quote, ReplayCommand, RouteRequestExecutor, Runtime,
+    RuntimeCommand, RuntimeHandle, RuntimeReader, SchemaCommand, SchemaId, SessionBootstrap,
+    SessionConfig, SessionRouteConnector, SessionRouteEndpoint, SessionRun, SessionRuntime,
+    SessionRuntimeDeps, SessionTopologyResolver, SystemCommand, TradeSessionTarget,
 };
+#[cfg(any(test, feature = "live"))]
+use tqsdk_core::{AuthEvent, InternalEvent, ReplayEvent, SessionRoute, SessionTarget};
+#[cfg(feature = "services")]
+use tqsdk_core::{EdbIndexData, SymbolRanking, SymbolSettlement, TradingCalendarDay};
 
 use crate::direct_query::{
-    AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
-    OptionLevelQuotes, OptionQueryFilter, SessionMetadataQuery, SessionRawQuery,
-    SessionServiceQuery, SymbolRankingType,
+    AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionLevelQuotes,
+    OptionQueryFilter, SessionMetadataQuery, SessionRawQuery,
 };
+#[cfg(feature = "services")]
+use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionServiceQuery, SymbolRankingType};
+#[cfg(feature = "http-client")]
 use crate::http_executor::ReqwestHttpExecutor;
+#[cfg(feature = "services")]
 use crate::services::SessionServiceEndpoints;
+#[cfg(feature = "tq-auth")]
 use crate::tq_auth::{PasswordCredentials, TqAuthProvider};
+#[cfg(feature = "tq-auth")]
 use crate::tqkq::TqKqAccountConfig;
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
@@ -46,6 +61,7 @@ pub(crate) struct SessionClientContext {
     auth_user: String,
     auth_pass: String,
     pub(crate) endpoints: tqsdk_core::EndpointConfig,
+    #[cfg(feature = "services")]
     service_endpoints: SessionServiceEndpoints,
 }
 
@@ -59,11 +75,12 @@ impl SessionClientContext {
             auth_user,
             auth_pass,
             endpoints,
+            #[cfg(feature = "services")]
             service_endpoints: SessionServiceEndpoints::default(),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "services"))]
     pub(crate) fn new_with_services(
         auth_user: impl Into<String>,
         auth_pass: impl Into<String>,
@@ -74,6 +91,7 @@ impl SessionClientContext {
             auth_user: auth_user.into(),
             auth_pass: auth_pass.into(),
             endpoints,
+            #[cfg(feature = "services")]
             service_endpoints,
         }
     }
@@ -94,6 +112,7 @@ struct SessionIoState {
     next_websocket_route: usize,
 }
 
+#[cfg(any(test, feature = "live"))]
 struct SessionIoComponents {
     auth_provider: SharedAuthProvider,
     topology_resolver: SharedTopologyResolver,
@@ -104,6 +123,7 @@ struct SessionIoComponents {
 }
 
 impl SessionIoState {
+    #[cfg(any(test, feature = "live"))]
     fn new(
         components: SessionIoComponents,
         adapters: AdapterRegistry,
@@ -197,6 +217,7 @@ pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,
     runtime: SessionRuntime,
+    #[cfg(feature = "services")]
     service_http: reqwest::Client,
     #[cfg_attr(not(test), allow(dead_code))]
     context: SessionClientContext,
@@ -230,6 +251,7 @@ impl SessionClient {
         ))
     }
 
+    #[cfg(feature = "live")]
     pub(crate) fn new_live(
         handle: RuntimeHandle,
         context: SessionClientContext,
@@ -267,6 +289,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
@@ -284,6 +307,18 @@ impl SessionClient {
         })
     }
 
+    #[cfg(not(feature = "live"))]
+    pub(crate) fn new_live(
+        _handle: RuntimeHandle,
+        _context: SessionClientContext,
+        _config: SessionConfig,
+        _trade_targets: Vec<TradeSessionTarget>,
+    ) -> crate::error::Result<Self> {
+        Err(crate::error::SessionFacadeError::InvalidState(
+            "live session support requires the `live` feature",
+        ))
+    }
+
     fn new_without_io(handle: RuntimeHandle, context: SessionClientContext) -> Self {
         let reader = handle.reader();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
@@ -291,6 +326,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
             context,
             io: None,
@@ -627,10 +663,12 @@ impl SessionClient {
             .map_err(Into::into)
     }
 
+    #[cfg(feature = "tq-auth")]
     pub async fn tqkq_login_command(&self) -> crate::error::Result<TradeLoginCommand> {
         self.tqkq_login_command_with_number(None).await
     }
 
+    #[cfg(feature = "tq-auth")]
     pub async fn tqkq_login_command_numbered(
         &self,
         number: u8,
@@ -638,10 +676,12 @@ impl SessionClient {
         self.tqkq_login_command_with_number(Some(number)).await
     }
 
+    #[cfg(feature = "tq-auth")]
     pub async fn tqkq_stock_login_command(&self) -> crate::error::Result<TradeLoginCommand> {
         self.tqkq_stock_login_command_with_number(None).await
     }
 
+    #[cfg(feature = "tq-auth")]
     pub async fn tqkq_stock_login_command_numbered(
         &self,
         number: u8,
@@ -723,6 +763,7 @@ impl SessionClient {
         }
     }
 
+    #[cfg(feature = "tq-auth")]
     async fn tqkq_login_command_with_number(
         &self,
         number: Option<u8>,
@@ -736,6 +777,7 @@ impl SessionClient {
         Ok(config.login_command())
     }
 
+    #[cfg(feature = "tq-auth")]
     async fn tqkq_stock_login_command_with_number(
         &self,
         number: Option<u8>,
@@ -749,6 +791,7 @@ impl SessionClient {
         Ok(config.login_command())
     }
 
+    #[cfg(feature = "tq-auth")]
     async fn established_auth_id(&self) -> crate::error::Result<String> {
         self.ensure_established().await?;
         let auth = self
@@ -990,10 +1033,12 @@ impl SessionClient {
             ))
     }
 
+    #[cfg(feature = "services")]
     pub(crate) fn service_http(&self) -> &reqwest::Client {
         &self.service_http
     }
 
+    #[cfg(feature = "services")]
     pub(crate) fn service_endpoints(&self) -> &SessionServiceEndpoints {
         &self.context.service_endpoints
     }
@@ -1138,6 +1183,7 @@ impl SessionMetadataQuery for SessionClient {
     }
 }
 
+#[cfg(feature = "services")]
 impl SessionServiceQuery for SessionClient {
     async fn get_trading_calendar(
         &self,
@@ -1181,16 +1227,19 @@ impl SessionServiceQuery for SessionClient {
 }
 
 #[derive(Clone)]
+#[cfg(any(test, feature = "live"))]
 struct SessionInternalExecutor {
     auth_provider: SharedAuthProvider,
 }
 
+#[cfg(any(test, feature = "live"))]
 impl SessionInternalExecutor {
     fn new(auth_provider: SharedAuthProvider) -> Self {
         Self { auth_provider }
     }
 }
 
+#[cfg(any(test, feature = "live"))]
 impl RouteRequestExecutor for SessionInternalExecutor {
     fn execute<'a>(
         &'a self,
@@ -1234,8 +1283,10 @@ impl RouteRequestExecutor for SessionInternalExecutor {
 }
 
 #[derive(Clone, Default)]
+#[cfg(any(test, feature = "live"))]
 struct SessionReplayExecutor;
 
+#[cfg(any(test, feature = "live"))]
 impl RouteRequestExecutor for SessionReplayExecutor {
     fn execute<'a>(
         &'a self,
@@ -1394,6 +1445,8 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{Duration, Instant};
+    #[cfg(feature = "tq-auth")]
+    use tqsdk_core::TradeAccountType;
     use tqsdk_core::{
         AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, DynRouteConnectFuture,
         DynTransport, EndpointConfig, InputPayload, IoEvent, MarketCommand, OutboundDispatch,
@@ -1401,7 +1454,7 @@ mod tests {
         ReplaySessionId, Result as CoreResult, RouteRequestExecutor, Runtime, RuntimeCommand,
         RuntimeHandle, RuntimeInput, SessionBootstrap, SessionConfig, SessionRoute,
         SessionRouteConnector, SessionRouteEndpoint, SessionRuntime, SessionTarget,
-        SessionTopology, SessionTopologyResolver, TradeAccountType, Transport,
+        SessionTopology, SessionTopologyResolver, Transport,
     };
 
     use super::{
@@ -1423,6 +1476,7 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "tq-auth")]
         fn with_auth_id(auth_id: impl Into<String>) -> Self {
             Self {
                 auth_id: Some(auth_id.into()),
@@ -2354,6 +2408,7 @@ mod tests {
         assert!(!client.has_feature("sec").await.unwrap());
     }
 
+    #[cfg(feature = "tq-auth")]
     #[tokio::test(flavor = "current_thread")]
     async fn tqkq_login_helpers_derive_login_from_established_auth_context() {
         let client = test_live_client_with_auth(
@@ -2532,6 +2587,7 @@ mod tests {
             handle: handle.clone(),
             reader: handle.reader(),
             runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
+            #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
             context: SessionClientContext::new(
                 "demo-user".to_string(),

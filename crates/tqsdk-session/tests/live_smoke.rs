@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::time::Instant;
-use tqsdk_core::{
-    Account, MarketCommand, QueryCommand, QueryId, Quote, RuntimeCommand, Symbol, TradeCommand,
-};
+#[cfg(feature = "tq-auth")]
+use tqsdk_core::{Account, TradeCommand};
+use tqsdk_core::{MarketCommand, QueryCommand, QueryId, Quote, RuntimeCommand, Symbol};
 use tqsdk_session::SessionClientBuilder;
 
 #[tokio::test(flavor = "current_thread")]
@@ -136,6 +136,7 @@ async fn live_quote_progress_smoke() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "tq-auth")]
 #[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and uses the official built-in TqKq account"]
 async fn live_tqkq_trade_login_smoke() {
     let Some(auth_user) = read_env("TQ_AUTH_USER") else {
@@ -189,6 +190,7 @@ fn read_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(feature = "tq-auth")]
 fn read_u8_env(name: &str) -> Result<Option<u8>, String> {
     let Some(raw) = read_env(name) else {
         return Ok(None);
@@ -263,6 +265,7 @@ async fn wait_for_quote_update(
     }
 }
 
+#[cfg(feature = "tq-auth")]
 async fn wait_for_trade_account_ready(
     session: &tqsdk_session::SessionClient,
     account_id: &str,

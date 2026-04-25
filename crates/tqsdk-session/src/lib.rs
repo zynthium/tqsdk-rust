@@ -18,10 +18,14 @@ mod builder;
 mod client;
 mod direct_query;
 mod error;
+#[cfg(feature = "http-client")]
 mod http_executor;
 mod metadata;
+#[cfg(feature = "services")]
 mod services;
+#[cfg(feature = "tq-auth")]
 mod tq_auth;
+#[cfg(feature = "tq-auth")]
 mod tqkq;
 
 pub use builder::SessionClientBuilder;

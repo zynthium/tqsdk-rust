@@ -14,6 +14,7 @@ pub enum SymbolRankingType {
 }
 
 impl SymbolRankingType {
+    #[cfg(feature = "services")]
     pub(crate) fn rank_field(self) -> &'static str {
         match self {
             Self::Volume => "volume_ranking",
