@@ -5,7 +5,7 @@
 - **核对日期**：2026-04-26
 - **审查对象**：当前 workspace 代码与架构文档，而不是旧报告中的历史状态
 - **主要依据**：`README.md`、`docs/architecture/ai-workflow.md`、`docs/architecture/README.md`、`docs/architecture/crate-boundaries.md`、各 crate `Cargo.toml`、`tqsdk-core` public surface、目标代码定向搜索结果
-- **未做事项**：本次只更新审查报告，未运行 `cargo test` / `cargo clippy`，也未做全仓逐文件审计
+- **验证状态**：已完成各 crate 回归测试与 `docs/architecture/validation.md` 的 feature/no-default 构建矩阵；未运行 `cargo clippy`，也未做全仓逐文件审计
 
 `report.md` 应被视为审查输入与路线图建议，不是架构权威来源。若本报告与 `docs/architecture` 或当前代码冲突，应以架构文档和代码为准。
 
@@ -38,10 +38,10 @@ tqsdk-task
 - `RuntimeReader::read_market_state()` / `read_trade_state()` 热路径读面
 - `OrderLifecycle` 与 command/order 状态机
 - AFIT/RPITIT 风格 async trait 边界，`ContractFuture` public alias 已移除
-- `DiffProtocolMessage` 协议模型层基础
+- DIFF 入站/出站协议模型层基础
 - `DomainEvent` / `MarketEvent` / `TradeEvent` 领域事件基础
 - `AggregatedRuntimeReader` / `StateSourceId` 多源聚合基础
-- session/wait/stream/task/data feature flags 与可选 HTTP/auth 依赖
+- session/wait/stream/task/data feature flags 与可选 HTTP/auth 依赖，feature/no-default 验证矩阵已固化并通过
 
 ### 当前是否需要局部破坏性重构
 
@@ -54,17 +54,15 @@ tqsdk-task
 - 不应再说“无显式订单状态机”；当前已有 command 状态转换校验与 `OrderLifecycle`。
 - 不应再把 `TqAuthProvider` / `ReqwestHttpExecutor` 这类实现细节列为 core root public API；它们已从 core root surface 收走。
 
-当前更合理的策略是：**保持架构边界，做局部代码健康和协议模型收敛。**
+当前更合理的策略是：**保持架构边界，继续做局部代码健康和协议模型收敛。**
 
-### 当前最优先处理的 5 个优化点
+### 当前最优先处理的优化点
 
 | 序号 | 问题 | 级别 | 涉及 crate | 说明 |
 | --- | --- | --- | --- | --- |
-| 1 | `tqsdk-task` 的 `target_pos.rs` / `scheduler.rs` 文件和状态机复杂度过高 | P1 | task | 不是旧报告里的 `Arc<Mutex<_>>` 泛滥，而是执行状态、规划、调度、报告职责混杂 |
-| 2 | DIFF 协议模型已出现，但入站解析仍有较多 `aid` 字符串判断 | P1 | core | `diff_protocol.rs` 已承接出站模型，`adapter/common.rs` 仍偏大 |
-| 3 | core root public surface 已收窄，但 `tqsdk_core::internal` 仍是跨 crate 逃生舱 | P1 | core/session | 需要明确 unstable/internal 语义，避免外部用户依赖 |
-| 4 | feature flags 已有基础，但 `no-default-features` 验证矩阵需要固化 | P2 | session/wait/stream/task/data | 旧报告“无 feature flags”已过时；现在问题是验证和文档化 |
-| 5 | typed partition 读面已覆盖 market/trade，query/schema/replay 仍主要依赖兼容树 | P2 | core | 不是缺陷，但后续可按热点继续扩展 typed view |
+| 1 | typed partition 读面已覆盖 market/trade，query/schema/replay 仍主要依赖兼容树 | P2 | core | 不是缺陷，但后续可按热点继续扩展 typed view |
+| 2 | `session/client.rs` 可继续按职责拆分，但不紧急 | P2 | session | 当前规模可控，仅在继续增长或出现修改冲突时拆分 |
+| 3 | wait/stream builder 重复属于可接受薄封装 | P2 | wait/stream | 当前重复较薄，不建议为去重引入复杂泛型体系 |
 
 ### 是否存在 P0 实盘风险
 
@@ -119,7 +117,7 @@ tqsdk-task
 
 当前剩余问题不是“没有 feature flags”，而是：
 
-- 需要把 `cargo build --no-default-features` / 组合 feature 构建纳入验证矩阵。
+- feature/no-default 构建矩阵已写入 `docs/architecture/validation.md`，并已完成最终验证。
 - README 与架构文档应明确哪些能力需要 `live`、`services`、`tq-auth`。
 - examples 的 `required-features` 已存在，但需要和 CI/验证矩阵保持同步。
 
@@ -215,59 +213,37 @@ RuntimeCommand / RuntimeInput
 
 ## 5. 当前问题清单
 
-### P1-1：`tqsdk-task` 文件和状态机复杂度偏高
+### 已完成：`tqsdk-task` 内部拆分
 
-- **级别**：P1
-- **涉及位置**：`crates/tqsdk-task/src/target_pos.rs`、`crates/tqsdk-task/src/scheduler.rs`
-- **当前代码事实**：`target_pos.rs` 约 1297 行，`scheduler.rs` 约 1061 行。旧报告所说的 `Arc<Mutex<_>>` 大量散落已不符合当前代码，当前锁主要被封装在 `shared.rs`。真正的问题是执行规划、状态推进、调度、guarded order、report 聚合等职责集中在少数大文件中。
-- **为什么是问题**：task 层是业务执行语义最高、最容易引入边界条件的地方。文件过大和状态机逻辑集中会增加后续修复订单边界、调仓策略、报告语义时的回归风险。
-- **建议**：不要把 task 能力下沉到 core/session。应在 `tqsdk-task` 内部拆分：
-  - `target_pos/state.rs`：本地任务状态
-  - `target_pos/planner.rs`：目标仓位与订单计划
-  - `target_pos/executor.rs`：下单/撤单执行
-  - `target_pos/report.rs`：事件与聚合报告
-  - `scheduler/state.rs` / `scheduler/planner.rs`：调度器内部状态与计划
-- **是否破坏 API**：不应破坏 public API
-- **是否建议立即整改**：是，作为第一优先级的代码健康工作
+- **涉及位置**：`crates/tqsdk-task/src/target_pos/`、`crates/tqsdk-task/src/scheduler/`
+- **当前结论**：task 内部职责已拆分，执行状态、规划、调度、报告等职责不再集中在单一大文件中。
+- **边界判断**：task 能力仍保留在 `tqsdk-task`，未下沉到 core/session/wait/stream，符合架构边界。
+- **验证状态**：`cargo test -p tqsdk-task` 已通过。
 
-### P1-2：DIFF 协议模型层仍需继续收敛
+### 已完成：DIFF 协议模型层继续收敛
 
-- **级别**：P1
-- **涉及位置**：`crates/tqsdk-core/src/diff_protocol.rs`、`crates/tqsdk-core/src/adapter/common.rs`
-- **当前代码事实**：出站协议已通过 `DiffProtocolMessage` 承接，`MarketAdapter` 等路径已经不再直接手写 `subscribe_quote` JSON。但 `adapter/common.rs` 仍有较多基于 `aid` 字段的字符串判断和 JSON envelope 解析逻辑，文件规模约 708 行。
-- **为什么是问题**：协议字段名和消息类型分散在 adapter common 中，会降低未来 DIFF 报文演进、测试覆盖和错误定位的清晰度。
-- **建议**：
-  - 将入站 `aid` 解析也收敛到 `diff_protocol.rs` 的 typed enum / parser。
-  - adapter common 保留“将 typed protocol event 映射为 `NormalizedMutation` / `RuntimeInput`”的职责。
-  - 保留 `NormalizedMutation` 作为 runtime 低级契约，不要为了协议模型层破坏 commit-first 内核。
-- **是否破坏 API**：不应破坏 public API
-- **是否建议立即整改**：是，适合作为第二优先级
+- **涉及位置**：`crates/tqsdk-core/src/diff_protocol/`、`crates/tqsdk-core/src/adapter/`
+- **当前结论**：DIFF 出站与入站协议模型均已进一步集中，adapter 更偏向 typed protocol event 到 `NormalizedMutation` / runtime input 的映射。
+- **边界判断**：保留 `NormalizedMutation`、`MutationSource` 与 commit-first runtime contract，未破坏统一提交模型。
+- **验证状态**：`cargo test -p tqsdk-core` 已通过。
 
-### P1-3：`tqsdk_core::internal` 仍是 public escape hatch
+### 已完成：`tqsdk_core::internal` bridge 继续收窄
 
-- **级别**：P1
 - **涉及位置**：`crates/tqsdk-core/src/lib.rs`
-- **当前代码事实**：core root public surface 已收窄，但仍通过 `#[doc(hidden)] pub mod internal` 暴露 `SessionRuntime`、`SessionRuntimeDeps`、`WebSocketTransport`、`DefaultRouteConnector` 等上层 crate 需要的内部组装类型。
-- **为什么是问题**：`#[doc(hidden)]` 可以降低文档可见性，但不能阻止外部用户依赖这些符号。一旦外部依赖形成，后续继续收窄 core 内部实现会有 semver 成本。
-- **建议**：
-  - 在 architecture 文档或 crate README 明确 `tqsdk_core::internal` 不承诺稳定。
-  - 后续若 session 已完全承接组装职责，可继续把部分类型移动到 `tqsdk-session` 或更窄的 crate-private module。
-  - 不要为了“干净”一次性删除 internal bridge；先确认上层 crate 不再需要。
-- **是否破坏 API**：可能破坏依赖 internal 的外部用户
-- **是否建议立即整改**：建议先文档化，再分批收窄
+- **当前结论**：core root public surface 继续保持克制，internal bridge exports 已进一步修剪，仍只作为 sibling crates 的低层组装桥。
+- **边界判断**：不应把 internal bridge 当作用户稳定 API，也不应重新扩大 core root re-export。
+- **验证状态**：`cargo build -p tqsdk-core` 与 `cargo test -p tqsdk-core` 已通过。
 
-### P2-1：feature flags 已有基础，但验证矩阵需要固化
+### 已完成：feature flags 验证矩阵已固化并通过
 
 - **级别**：P2
 - **涉及位置**：各 crate `Cargo.toml`、`docs/architecture/validation.md`、crate README
-- **当前代码事实**：session/wait/stream/task/data 已有 `live` / `services` 等 feature，`reqwest` / `base64` 也已 optional 化。但本次未确认 `--no-default-features` 的完整构建矩阵。
-- **为什么是问题**：feature flags 只定义不验证，后续容易出现默认构建通过、最小构建失败的情况。
-- **建议**：
-  - 在 `docs/architecture/validation.md` 的 `Feature / no-default build matrix` 固化 feature/no-default 验证基线。
+- **当前代码事实**：session/wait/stream/task/data 已有 `live` / `services` 等 feature，`reqwest` / `base64` 也已 optional 化。`docs/architecture/validation.md` 已列出 feature/no-default 验证矩阵，本轮最终验证已通过。
+- **后续建议**：
   - 保持本报告与架构验证文档使用同一组命令，避免 CI、README 或审查路线图出现互相冲突的矩阵。
   - 对 live examples 保留 `required-features`，并在 README 中说明。
 - **是否破坏 API**：否
-- **是否建议立即整改**：是，但优先级低于 task/协议模型收敛
+- **是否建议立即整改**：否，后续重点是持续纳入 CI/发布前验证
 
 ### P2-2：typed partition 覆盖面可继续扩大
 
@@ -361,7 +337,7 @@ RuntimeCommand / RuntimeInput
 | direct query / schema / metadata | `tqsdk-session` | 正确 |
 | live object / wait_update | `tqsdk-wait` | 正确 |
 | stream fan-out / typed stream | `tqsdk-stream` | 正确 |
-| target position / scheduler / reports | `tqsdk-task` | 正确，但内部需拆分 |
+| target position / scheduler / reports | `tqsdk-task` | 正确，内部职责已拆分 |
 | history/offline/research | `tqsdk-data` | 正确 |
 
 ---
@@ -413,28 +389,28 @@ tqsdk-data
 
 ## 8. 推荐整改路线图
 
-### 阶段 1：报告和验证基线同步
+### 阶段 1：报告和验证基线同步（已完成）
 
 | 步骤 | 内容 | 破坏 API | 验收标准 |
 | --- | --- | --- | --- |
 | 1.1 | 将旧 P0/P1 从路线图中移除或标记已解决 | 否 | 文档不再误导后续 AI/session |
-| 1.2 | 在 `validation.md` 增加 feature/no-default 构建矩阵 | 否 | 验证命令覆盖最小构建和默认构建 |
-| 1.3 | 在 core/session README 明确 `tqsdk_core::internal` 不稳定 | 否 | 外部用户不会误认 internal 为稳定 API |
+| 1.2 | 在 `validation.md` 增加 feature/no-default 构建矩阵 | 否 | 验证命令覆盖最小构建和默认构建，本轮已通过 |
+| 1.3 | 继续修剪并约束 `tqsdk_core::internal` bridge | 否 | core root surface 保持克制，internal 不扩展为用户稳定 API |
 
-### 阶段 2：`tqsdk-task` 内部拆分
+### 阶段 2：`tqsdk-task` 内部拆分（已完成）
 
 | 步骤 | 内容 | 破坏 API | 验收标准 |
 | --- | --- | --- | --- |
 | 2.1 | 拆 `target_pos.rs` 为 state/planner/executor/report | 否 | public API 不变，文件职责清晰 |
 | 2.2 | 拆 `scheduler.rs` 为 state/planner/runner | 否 | 调度状态和执行推进分离 |
-| 2.3 | 补充 task 内部状态机边界测试 | 否 | 订单/调仓边界行为更容易验证 |
+| 2.3 | 保持 task 内部状态机边界测试 | 否 | `cargo test -p tqsdk-task` 已通过 |
 
-### 阶段 3：协议模型继续收敛
+### 阶段 3：协议模型继续收敛（已推进）
 
 | 步骤 | 内容 | 破坏 API | 验收标准 |
 | --- | --- | --- | --- |
-| 3.1 | 将入站 `aid` 解析集中到 `diff_protocol.rs` | 否 | adapter/common 不再分散协议字符串判断 |
-| 3.2 | 将 adapter/common 按 query/trade/replay/schema/system decode 拆分 | 否 | 单文件规模下降，测试更聚焦 |
+| 3.1 | 将入站 `aid` 解析集中到 `diff_protocol.rs` | 否 | 入站/出站协议模型更集中 |
+| 3.2 | 将 adapter common 职责收敛为 typed protocol event 到 runtime input/mutation 的映射 | 否 | adapter 更聚焦，测试更聚焦 |
 | 3.3 | 保持 `NormalizedMutation` 和 `MutationSource` 作为 runtime contract | 否 | 不破坏 commit-first 内核 |
 
 ### 阶段 4：渐进式 public surface 收窄
@@ -467,9 +443,9 @@ tqsdk-data
 1. 保持 `tqsdk-core` 的 protocol-complete runtime substrate 边界。
 2. 保持 `tqsdk-session` 对 one-shot request/response/direct-query 的归属。
 3. 保持 wait/stream 只做 diff-backed continuous consumption。
-4. 把执行工具复杂度收敛在 `tqsdk-task` 内部。
-5. 继续将 DIFF 协议细节集中到协议模型层。
-6. 用验证矩阵固化 feature/no-default 构建能力。
+4. 保持执行工具复杂度收敛在 `tqsdk-task` 内部。
+5. 保持 DIFF 入站/出站协议细节集中到协议模型层。
+6. 用已通过的验证矩阵持续固化 feature/no-default 构建能力。
 7. 渐进式收窄 `tqsdk_core::internal`，不要一次性破坏上层 crate。
 
-**推荐第一步**：先拆 `tqsdk-task` 的 `target_pos.rs` / `scheduler.rs`，并同步补充 task 层内部状态机测试。这个方向收益最高、风险最低，而且不会反向扰动已经稳定下来的 core/session/wait/stream/data 边界。
+**当前建议**：不要再按旧报告启动破坏性 core 重构。后续应把已通过的验证矩阵纳入常规回归，并按需求渐进扩展 typed partition 覆盖面。
