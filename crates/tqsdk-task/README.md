@@ -12,6 +12,7 @@
 - typed task-level order builder
 - pre-trade risk gate
 - execution group foundation
+- account group / multi-account order foundation
 
 当前已落地的最小能力：
 
@@ -30,6 +31,11 @@
   - 所有腿在提交前统一经过 ownership guard、risk gate 和本地参数校验
   - 每条腿复用 wait 层 `OrderTicket` 和 session-scoped client intent ledger
   - 暴露 group outcome / exposure report；当前只报告裸露风险，不自动 hedge
+- `AccountGroup`
+  - 通过 typed account group 和 `Ratio` 表达多账户比例拆单
+  - 多账户订单在提交前统一经过 ownership guard、risk gate 和本地参数校验
+  - 每个账户订单复用 wait 层 `OrderTicket` 和 session-scoped client intent ledger
+  - 暴露 per-account outcome report；当前只报告需要人工处理的账户差异，不自动补单或跨账户 hedge
 - `TargetPosTask`
   - 注册 `account_id + symbol` ownership
   - `set_target_volume()` 与 `wait_target_reached()`
@@ -108,8 +114,51 @@
 - 已覆盖未物化 tracked order 在 retarget / 重复同目标调用下的保守处理，避免提前 target reached 或重复发单
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
+- `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
+
+## 多账户订单 foundation
+
+```rust
+use std::time::Duration;
+
+use tqsdk_task::{AccountFailurePolicy, MultiAccountOrderOutcome, Ratio, TaskHost};
+
+# async fn run(mut host: TaskHost) -> tqsdk_task::Result<()> {
+let accounts = host
+    .account_group()
+    .add("sim-a", Ratio::new(7, 10)?)
+    .add("sim-b", Ratio::new(3, 10)?)
+    .min_volume_per_account(1)
+    .build()?;
+
+let ticket = host
+    .multi_account_order(accounts)
+    .client_group_id("alloc-au-001")
+    .max_unhedged(Duration::from_secs(2))
+    .on_account_failed(AccountFailurePolicy::ReportExposure)
+    .buy_open("SHFE.au2602", 10)
+    .limit(480.0)
+    .send_once()
+    .await?;
+
+match ticket.outcome(host.api())? {
+    Some(MultiAccountOrderOutcome::AllFilled { accounts }) => {
+        println!("all accounts filled: {accounts:?}");
+    }
+    Some(MultiAccountOrderOutcome::NeedsAttention {
+        filled_accounts,
+        unfilled_accounts,
+        ..
+    }) => {
+        println!("filled={filled_accounts:?}, unfilled={unfilled_accounts:?}");
+    }
+    _ => {}
+}
+# Ok(())
+# }
+```
 
 ## 示例
 
@@ -118,6 +167,7 @@
 - [examples/target_pos.rs](examples/target_pos.rs)
 - [examples/target_pos_scheduler.rs](examples/target_pos_scheduler.rs)
 - [examples/api_contract_s12_spread_arbitrage.rs](examples/api_contract_s12_spread_arbitrage.rs)
+- [examples/api_contract_s13_multi_account_ordering.rs](examples/api_contract_s13_multi_account_ordering.rs)
 - [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
 
 另有一个场景契约 sketch 记录完整策略 runtime 缺口：

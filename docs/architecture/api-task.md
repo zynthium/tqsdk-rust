@@ -43,6 +43,7 @@
   - task-level typed order builder
   - 最小 pre-trade risk gate
   - execution group foundation
+  - account group / multi-account order foundation
   - 事件流 + 稳定聚合摘要的 execution report
 
 原因很直接：
@@ -59,6 +60,7 @@
 - typed `TaskHost::orders(...)` order builder
 - `RiskEngine` / `RiskRejection` 最小前置风控
 - `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
+- `AccountGroup` / `MultiAccountOrderTicket` 多账户执行 foundation
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -108,7 +110,8 @@
 当前还未落地：
 
 - 更复杂的多单/多批次主动撤单后重规划
-- 自动 hedge / flatten、timed cancel / replace、group resume / audit
+- 自动 hedge / flatten、timed cancel / replace、group/account resume / audit
+- 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 
 ## 为什么它必须独立成 crate
@@ -241,6 +244,13 @@ impl TaskHost {
         &mut self,
         account_id: impl AsRef<str>,
     ) -> ExecutionGroupBuilder<'_>;
+
+    pub fn account_group(&self) -> AccountGroupBuilder;
+
+    pub fn multi_account_order(
+        &mut self,
+        accounts: AccountGroup,
+    ) -> MultiAccountOrderBuilder<'_>;
 
     pub fn target_pos(
         &mut self,
@@ -428,6 +438,72 @@ impl ExecutionGroupTicket {
   不伪装自动 hedge。
 - `ExecutionGroupOutcome::NeedsHedge` 是显式风险信号，调用方可以人工或后续 policy 层处理。
 
+### account group foundation
+
+```rust
+pub struct Ratio {
+    /* private */
+}
+
+impl Ratio {
+    pub fn new(numerator: u32, denominator: u32) -> tqsdk_task::Result<Self>;
+}
+
+pub struct AccountGroup {
+    /* private */
+}
+
+impl AccountGroup {
+    pub fn builder() -> AccountGroupBuilder;
+    pub fn allocate(&self, total_volume: i64) -> tqsdk_task::Result<AccountAllocationPlan>;
+}
+
+pub enum AccountFailurePolicy {
+    ReportExposure,
+    FlattenFilledAccounts,
+}
+
+pub struct MultiAccountOrderBuilder<'a> {
+    /* private */
+}
+
+impl<'a> MultiAccountOrderBuilder<'a> {
+    pub fn client_group_id(self, group_id: impl Into<String>) -> Self;
+    pub fn max_unhedged(self, duration: std::time::Duration) -> Self;
+    pub fn on_account_failed(self, policy: AccountFailurePolicy) -> Self;
+    pub fn buy_open(self, symbol: impl AsRef<str>, total_volume: i64) -> MultiAccountOrderDraft<'a>;
+    pub fn sell_open(self, symbol: impl AsRef<str>, total_volume: i64) -> MultiAccountOrderDraft<'a>;
+}
+
+pub struct MultiAccountOrderTicket {
+    /* private */
+}
+
+impl MultiAccountOrderTicket {
+    pub fn group_id(&self) -> &str;
+    pub fn orders(&self) -> &[MultiAccountOrderLegTicket];
+    pub fn status(&self, api: &tqsdk_wait::TqApi) -> tqsdk_task::Result<MultiAccountOrderStatus>;
+    pub fn outcome(
+        &self,
+        api: &tqsdk_wait::TqApi,
+    ) -> tqsdk_task::Result<Option<MultiAccountOrderOutcome>>;
+    pub async fn wait_finished(
+        &self,
+        host: &mut TaskHost,
+        deadline: Option<tokio::time::Instant>,
+    ) -> tqsdk_task::Result<MultiAccountOrderOutcome>;
+}
+```
+
+设计意图：
+
+- account group 属于 `tqsdk-task`，因为它表达的是组合执行意图、比例拆单和账户级结果汇总。
+- 每个账户 allocation 仍通过 wait 层 `OrderTicket` 和 session-scoped client intent ledger 提交。
+- multi-account submit 会先对所有账户订单做 ownership/risk/local validation，避免“部分账户已发、另一账户本地拒绝”的资金安全风险。
+- 当前 `AccountFailurePolicy::ReportExposure` 是唯一已支持策略；`FlattenFilledAccounts` 明确返回 unsupported，
+  不伪装自动补单或跨账户 hedge。
+- `MultiAccountOrderOutcome::NeedsAttention` 是显式人工介入信号，调用方可以据此人工处理或接入后续 policy 层。
+
 ### target position task
 
 ```rust
@@ -587,8 +663,10 @@ impl TargetPosScheduler {
    typed `RiskRejection`。
 7. `ExecutionGroup` 能用 typed group id 提交两腿订单、先做 all-leg preflight，并给出
    typed group outcome/exposure report。
-8. scheduler 能按步骤推进并给出独立 execution report。
-9. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
+8. `AccountGroup` 能用 typed group id 提交比例拆分后的多账户订单、先做全账户 preflight，
+   并给出 typed per-account outcome report。
+9. scheduler 能按步骤推进并给出独立 execution report。
+10. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
 
 ## 下一步建议
 

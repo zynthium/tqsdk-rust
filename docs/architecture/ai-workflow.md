@@ -144,6 +144,7 @@ tqsdk-task
 - task-level typed order builder
 - pre-trade risk gate
 - execution group foundation
+- account group / multi-account order foundation
 - execution report
 - planner/executor 的本地任务状态机
 

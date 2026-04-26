@@ -29,23 +29,25 @@
 //! - 应通过 task 局部扩展还是新增 portfolio execution API？
 //!
 //! API gap:
-//! builder 能声明多个 trade target，但 task/wait API 没有面向终端用户的
-//! multi-account execution group、比例拆单和 per-account outcome。
+//! foundation 已支持 typed account group、比例拆单、per-account order ticket 和
+//! per-account outcome。仍未支持自动补单/对冲、跨账户 TargetPos 编排、
+//! 跨进程 resume 和审计日志落库。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let accounts = host.accounts()
-//!     .add("sim-a", Ratio::new(7, 10))
-//!     .add("sim-b", Ratio::new(3, 10))
-//!     .build()
-//!     .await?;
+//! let accounts = host.account_group()
+//!     .add("sim-a", Ratio::new(7, 10)?)
+//!     .add("sim-b", Ratio::new(3, 10)?)
+//!     .min_volume_per_account(1)
+//!     .build()?;
 //! let outcome = host
 //!     .multi_account_order(accounts)
+//!     .client_group_id("alloc-au-001")
 //!     .buy_open("SHFE.au2602", 10)
 //!     .limit(480.0)
-//!     .send()
+//!     .send_once()
 //!     .await?
-//!     .wait_finished(&mut host)
+//!     .wait_finished(&mut host, None)
 //!     .await?;
 //! ```
 
