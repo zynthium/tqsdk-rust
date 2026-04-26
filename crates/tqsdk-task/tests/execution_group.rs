@@ -256,3 +256,88 @@ async fn execution_group_risk_rejection_prevents_partial_dispatch() {
             .is_empty()
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_send_once_reuses_existing_leg_intents_on_retry() {
+    let mut host = seeded_host();
+
+    let first = host
+        .execution_group("sim")
+        .client_group_id("spread-retry-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert!(first.legs().iter().all(|leg| leg.ticket().was_submitted()));
+    assert_eq!(
+        host.api().handle_for_test().drain_dispatches().unwrap().len(),
+        2
+    );
+
+    let retry = host
+        .execution_group("sim")
+        .client_group_id("spread-retry-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert_eq!(retry.group_id(), "spread-retry-001");
+    assert!(retry.legs().iter().all(|leg| !leg.ticket().was_submitted()));
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_retry_with_different_leg_spec_is_rejected_by_intent_ledger() {
+    let mut host = seeded_host();
+
+    host.execution_group("sim")
+        .client_group_id("spread-mismatch-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert_eq!(
+        host.api().handle_for_test().drain_dispatches().unwrap().len(),
+        2
+    );
+
+    let err = host
+        .execution_group("sim")
+        .client_group_id("spread-mismatch-001")
+        .leg("SHFE.au2602")
+        .buy_open(2)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, TaskError::Wait(_)),
+        "mismatched retry should be rejected by the wait/session intent ledger, got {err:?}"
+    );
+}
