@@ -18,7 +18,7 @@ mod builder;
 mod client;
 mod direct_query;
 mod error;
-#[cfg(feature = "http-client")]
+#[cfg(feature = "live")]
 mod http_executor;
 mod metadata;
 #[cfg(feature = "services")]

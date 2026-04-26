@@ -19,10 +19,12 @@ use tqsdk_core::{
     SessionTopologyResolver, Transport,
 };
 
+#[cfg(feature = "live")]
+use super::SessionClientContext;
 use super::{
-    SessionClient, SessionClientContext, SessionInternalExecutor, SessionIoComponents,
-    SessionIoState, SessionProgress, SessionReplayExecutor, SharedAuthProvider,
-    SharedRouteConnector, SharedRouteExecutor, SharedTopologyResolver,
+    SessionClient, SessionInternalExecutor, SessionIoComponents, SessionIoState, SessionProgress,
+    SessionReplayExecutor, SharedAuthProvider, SharedRouteConnector, SharedRouteExecutor,
+    SharedTopologyResolver,
 };
 #[derive(Clone, Default)]
 struct TestAuthProvider {
@@ -1150,6 +1152,7 @@ fn test_live_client_with_components(
         runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
         #[cfg(feature = "services")]
         service_http: reqwest::Client::new(),
+        #[cfg(feature = "live")]
         context: SessionClientContext::new(
             "demo-user".to_string(),
             "demo-pass".to_string(),

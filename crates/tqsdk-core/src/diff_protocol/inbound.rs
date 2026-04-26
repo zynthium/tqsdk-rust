@@ -46,4 +46,11 @@ mod tests {
 
         assert_eq!(DiffInboundAid::from_value(&value), DiffInboundAid::Unknown);
     }
+
+    #[test]
+    fn non_string_aid_is_unknown() {
+        let value = json!({ "aid": 42 });
+
+        assert_eq!(DiffInboundAid::from_value(&value), DiffInboundAid::Unknown);
+    }
 }

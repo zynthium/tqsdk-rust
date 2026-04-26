@@ -32,7 +32,7 @@ use crate::direct_query::{
 };
 #[cfg(feature = "services")]
 use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionServiceQuery, SymbolRankingType};
-#[cfg(feature = "http-client")]
+#[cfg(feature = "live")]
 use crate::http_executor::ReqwestHttpExecutor;
 #[cfg(feature = "services")]
 use crate::services::SessionServiceEndpoints;
@@ -54,11 +54,11 @@ type SharedRouteExecutor = Arc<dyn RouteRequestExecutor>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionClientContext {
-    #[cfg(any(test, feature = "live"))]
+    #[cfg(feature = "live")]
     auth_user: String,
-    #[cfg(any(test, feature = "live"))]
+    #[cfg(feature = "live")]
     auth_pass: String,
-    #[cfg(any(test, feature = "live"))]
+    #[cfg(feature = "live")]
     pub(crate) endpoints: tqsdk_core::EndpointConfig,
     #[cfg(feature = "services")]
     service_endpoints: SessionServiceEndpoints,
@@ -70,15 +70,15 @@ impl SessionClientContext {
         auth_pass: String,
         endpoints: tqsdk_core::EndpointConfig,
     ) -> Self {
-        #[cfg(not(any(test, feature = "live")))]
+        #[cfg(not(feature = "live"))]
         let _ = (auth_user, auth_pass, endpoints);
 
         Self {
-            #[cfg(any(test, feature = "live"))]
+            #[cfg(feature = "live")]
             auth_user,
-            #[cfg(any(test, feature = "live"))]
+            #[cfg(feature = "live")]
             auth_pass,
-            #[cfg(any(test, feature = "live"))]
+            #[cfg(feature = "live")]
             endpoints,
             #[cfg(feature = "services")]
             service_endpoints: SessionServiceEndpoints::default(),
@@ -92,9 +92,17 @@ impl SessionClientContext {
         endpoints: tqsdk_core::EndpointConfig,
         service_endpoints: SessionServiceEndpoints,
     ) -> Self {
+        let auth_user = auth_user.into();
+        let auth_pass = auth_pass.into();
+        #[cfg(not(feature = "live"))]
+        let _ = (&auth_user, &auth_pass, &endpoints);
+
         Self {
-            auth_user: auth_user.into(),
-            auth_pass: auth_pass.into(),
+            #[cfg(feature = "live")]
+            auth_user,
+            #[cfg(feature = "live")]
+            auth_pass,
+            #[cfg(feature = "live")]
             endpoints,
             #[cfg(feature = "services")]
             service_endpoints,
@@ -224,7 +232,7 @@ pub struct SessionClient {
     runtime: SessionRuntime,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
-    #[cfg(any(test, feature = "services"))]
+    #[cfg(any(feature = "services", all(test, feature = "live")))]
     context: SessionClientContext,
     io: Option<Arc<Mutex<SessionIoState>>>,
 }
@@ -270,7 +278,7 @@ impl SessionClient {
             runtime,
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
-            #[cfg(any(test, feature = "services"))]
+            #[cfg(any(feature = "services", all(test, feature = "live")))]
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
                 SessionIoComponents {
@@ -300,7 +308,7 @@ impl SessionClient {
     }
 
     fn new_without_io(handle: RuntimeHandle, context: SessionClientContext) -> Self {
-        #[cfg(not(any(test, feature = "services")))]
+        #[cfg(not(any(feature = "services", all(test, feature = "live"))))]
         let _ = context;
 
         let reader = handle.reader();
@@ -311,7 +319,7 @@ impl SessionClient {
             runtime,
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
-            #[cfg(any(test, feature = "services"))]
+            #[cfg(any(feature = "services", all(test, feature = "live")))]
             context,
             io: None,
         }
@@ -368,17 +376,17 @@ impl SessionClient {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "live"))]
     pub(crate) fn auth_user(&self) -> &str {
         &self.context.auth_user
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "live"))]
     pub(crate) fn auth_pass(&self) -> &str {
         &self.context.auth_pass
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "live"))]
     pub(crate) fn endpoints(&self) -> &tqsdk_core::EndpointConfig {
         &self.context.endpoints
     }
