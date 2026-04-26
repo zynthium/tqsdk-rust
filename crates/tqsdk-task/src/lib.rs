@@ -4,6 +4,7 @@
 //! This crate hosts task ownership, guarded command entrypoints, and host-driven
 //! execution helpers built on the wait-style facade.
 
+mod account_group;
 mod calendar;
 mod config;
 mod error;
@@ -17,6 +18,10 @@ mod scheduler;
 mod shared;
 mod target_pos;
 
+pub use account_group::{
+    AccountAllocation, AccountAllocationPlan, AccountGroup, AccountGroupBuilder,
+    AllocatedAccountOrder, Ratio,
+};
 pub use calendar::TradingDayCalendar;
 pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,
