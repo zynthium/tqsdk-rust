@@ -1,0 +1,49 @@
+//! Scenario: 跨合约套利
+//!
+//! User goal:
+//! - 两腿同时或有序下单
+//! - 处理成交不同步
+//! - 撤单 / 补单 / 对冲剩余敞口
+//!
+//! API contract:
+//! - 两腿 order intent 有同一个 typed execution group
+//! - 部分成交、单腿失败、撤补和对冲由 execution layer 显式表达
+//! - 用户能读取 group-level 风险和最终 outcome
+//! - 不手动创建 channel
+//! - 不手动使用 `Arc<Mutex<_>>`
+//!
+//! Forbidden:
+//! - 两腿分别用普通 order ref 手动拼事务语义
+//! - 本地 bool/Vec 追踪腿状态作为资金安全依据
+//! - 字符串判断订单状态
+//! - `RuntimeCommand::Trade`
+//!
+//! Regression signal:
+//! - 单腿成交后另一腿失败只能靠业务代码临时补救
+//! - 无法表达最大净敞口或超时撤补规则
+//! - group outcome 无法审计
+//!
+//! Review questions:
+//! - 当前 API 是否能安全表达跨合约套利？
+//! - 是否存在 P0 级单腿裸露风险？
+//! - 应通过局部 task 扩展还是新增 execution group abstraction？
+//!
+//! API gap:
+//! 当前 task 层有单合约 `TargetPosTask` 和 scheduler，但没有 two-leg /
+//! execution group / hedge policy 的 public API。
+//!
+//! 理想用户代码草案：
+//! ```ignore
+//! let group = host
+//!     .spread_order(account.id())
+//!     .leg("SHFE.au2602").buy_open(1)
+//!     .leg("SHFE.ag2602").sell_open(15)
+//!     .max_unhedged(Duration::from_secs(2))
+//!     .on_leg_failed(HedgePolicy::FlattenFilledLegs)
+//!     .send()
+//!     .await?;
+//! let outcome = group.wait_finished(&mut host).await?;
+//! println!("{:?}", outcome);
+//! ```
+
+fn main() {}
