@@ -8,8 +8,10 @@ mod calendar;
 mod config;
 mod error;
 mod host;
+mod order;
 mod plan;
 mod registry;
+mod risk;
 mod scheduler;
 mod shared;
 mod target_pos;
@@ -20,6 +22,8 @@ pub use config::{
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use host::TaskHost;
+pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
+pub use risk::{RiskDecision, RiskEngine, RiskRejection};
 pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,

@@ -4,11 +4,14 @@
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
+use tqsdk_wait::{ClientOrderId, OrderTicket};
 
 use crate::Result;
 use crate::TaskError;
 use crate::calendar::TradingDayCalendar;
+use crate::order::{TaskOrderBuilder, TaskOrderIntent};
 use crate::registry::TaskId;
+use crate::risk::{RiskDecision, RiskEngine};
 use crate::scheduler::{TargetPosSchedulerBuilder, process_schedulers_wait_update};
 use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
@@ -24,6 +27,7 @@ pub struct TaskHost {
     schedulers: SharedTargetPosSchedulerStore,
     quote_subscriptions: SharedQuoteSubscriptions,
     trading_calendar: SharedTradingCalendar,
+    risk: Option<RiskEngine>,
 }
 
 impl TaskHost {
@@ -36,6 +40,7 @@ impl TaskHost {
             schedulers: SharedTargetPosSchedulerStore::default(),
             quote_subscriptions: SharedQuoteSubscriptions::default(),
             trading_calendar: SharedTradingCalendar::default(),
+            risk: None,
         }
     }
 
@@ -52,6 +57,21 @@ impl TaskHost {
     #[must_use]
     pub fn into_api(self) -> tqsdk_wait::TqApi {
         self.api
+    }
+
+    #[must_use]
+    pub fn with_risk(mut self, risk: RiskEngine) -> Self {
+        self.risk = Some(risk);
+        self
+    }
+
+    pub fn set_risk(&mut self, risk: RiskEngine) {
+        self.risk = Some(risk);
+    }
+
+    #[must_use]
+    pub fn risk(&self) -> Option<&RiskEngine> {
+        self.risk.as_ref()
     }
 
     #[must_use]
@@ -91,6 +111,11 @@ impl TaskHost {
         process_target_tasks_wait_update(&self.target_tasks, &mut self.api).await;
         process_schedulers_wait_update(&self.schedulers, &mut self.api).await;
         Ok(updated)
+    }
+
+    #[must_use]
+    pub fn orders(&mut self, account_id: impl AsRef<str>) -> TaskOrderBuilder<'_> {
+        TaskOrderBuilder::new(self, account_id.as_ref().to_owned())
     }
 
     #[must_use]
@@ -140,8 +165,51 @@ impl TaskHost {
         self.registry
             .with(|registry| registry.check_manual_order_allowed(&account_id, &symbol))?;
 
+        let intent = TaskOrderIntent {
+            account_id: account_id.clone(),
+            symbol: symbol.clone(),
+            direction,
+            offset,
+            volume,
+            limit_price: limit_price.as_ref().and_then(Value::as_f64),
+        };
+        self.check_risk(&intent)?;
+
         self.api
             .insert_order(&account_id, &symbol, direction, offset, volume, limit_price)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn submit_task_order_once(
+        &mut self,
+        intent: TaskOrderIntent,
+        client_order_id: ClientOrderId,
+    ) -> Result<OrderTicket> {
+        if intent.volume <= 0 {
+            return Err(TaskError::InvalidState("order volume must be positive"));
+        }
+        let offset = intent.offset.ok_or(TaskError::Unsupported(
+            "task orders require explicit offset",
+        ))?;
+        let limit_price = intent
+            .limit_price
+            .ok_or(TaskError::InvalidState("limit price is required"))?;
+        if !limit_price.is_finite() {
+            return Err(TaskError::InvalidState("limit price must be finite"));
+        }
+
+        self.registry.with(|registry| {
+            registry.check_manual_order_allowed(&intent.account_id, &intent.symbol)
+        })?;
+        self.check_risk(&intent)?;
+
+        self.api
+            .limit_order(intent.account_id, intent.symbol)
+            .client_intent(client_order_id)
+            .side(intent.direction, offset, intent.volume)
+            .at(limit_price)
+            .send_once()
             .await
             .map_err(Into::into)
     }
@@ -173,6 +241,16 @@ impl TaskHost {
             .cancel_order(&account_id, &order_id)
             .await
             .map_err(Into::into)
+    }
+
+    fn check_risk(&self, intent: &TaskOrderIntent) -> Result<()> {
+        let Some(risk) = &self.risk else {
+            return Ok(());
+        };
+        match risk.check(&self.api, intent)? {
+            RiskDecision::Accepted => Ok(()),
+            RiskDecision::Rejected(rejection) => Err(TaskError::RiskRejected(rejection)),
+        }
     }
 
     #[doc(hidden)]

@@ -2,6 +2,8 @@
 
 use std::fmt::{Display, Formatter};
 
+use crate::risk::RiskRejection;
+
 /// Result alias for `tqsdk-task`.
 pub type Result<T> = std::result::Result<T, TaskError>;
 
@@ -13,10 +15,11 @@ pub enum TaskKind {
 }
 
 /// Errors returned by task-level ownership and execution helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TaskError {
     Wait(tqsdk_wait::WaitFacadeError),
     Session(tqsdk_session::SessionFacadeError),
+    RiskRejected(RiskRejection),
     OwnershipConflict {
         account_id: String,
         symbol: String,
@@ -55,6 +58,7 @@ impl Display for TaskError {
         match self {
             Self::Wait(error) => write!(f, "{error}"),
             Self::Session(error) => write!(f, "{error}"),
+            Self::RiskRejected(rejection) => write!(f, "risk rejected order: {rejection:?}"),
             Self::OwnershipConflict {
                 account_id,
                 symbol,
@@ -92,6 +96,7 @@ impl std::error::Error for TaskError {
         match self {
             Self::Wait(error) => Some(error),
             Self::Session(error) => Some(error),
+            Self::RiskRejected(_) => None,
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }
