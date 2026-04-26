@@ -187,6 +187,7 @@ async fn send_once_does_not_resubmit_same_local_intent() {
         .await
         .unwrap();
     assert!(first.was_submitted());
+    let first_command_id = first.command_id();
     assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
 
     let second = api
@@ -199,7 +200,40 @@ async fn send_once_does_not_resubmit_same_local_intent() {
         .unwrap();
 
     assert!(!second.was_submitted());
-    assert!(second.command_id().is_none());
+    assert_eq!(second.command_id(), first_command_id);
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_once_does_not_resubmit_same_session_intent_after_wait_rewrap() {
+    let mut api = support::seeded_api();
+
+    let first = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    let first_command_id = first.command_id();
+    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+
+    let session = api.into_session();
+    let mut api = tqsdk_wait::TqApi::new(session);
+
+    let second = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert!(!second.was_submitted());
+    assert_eq!(second.command_id(), first_command_id);
     assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
 }
 
@@ -228,7 +262,7 @@ async fn send_once_rejects_same_intent_with_different_fields() {
     assert_eq!(
         error,
         tqsdk_wait::WaitFacadeError::InvalidState(
-            "client intent id was already submitted with different order fields"
+            "client order intent already registered with different order fields"
         )
     );
     assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());

@@ -1150,6 +1150,7 @@ fn test_live_client_with_components(
         handle: handle.clone(),
         reader: handle.reader(),
         runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
+        order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "services")]
         service_http: reqwest::Client::new(),
         #[cfg(feature = "live")]

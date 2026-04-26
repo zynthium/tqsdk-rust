@@ -57,6 +57,13 @@
 - `replay_reset_value(...).await`
 - `StartupRecoverySpec`
 - `startup_recovery_status(...)`
+- `OrderIntentRecord`
+- `OrderIntentSpec`
+- `OrderIntentRegistration`
+- `remember_order_intent(...)`
+- `update_order_intent_command(...)`
+- `forget_order_intent(...)`
+- `order_intent(...)`
 - `get_trading_calendar(...).await`
 - `query_symbol_settlement(...).await`
 - `query_symbol_ranking(...).await`
@@ -154,6 +161,12 @@
 `StartupRecoverySpec` + `SessionClient::startup_recovery_status(...)` 读取
 revision-bound readiness。这个接口只检查状态，不提交订阅或登录命令；订阅、
 登录和等待形状仍由 `tqsdk-wait` / `tqsdk-stream` 负责。
+
+如果上层 facade 需要对同一用户下单 intent 做进程内/session 内去重，可以用
+`OrderIntentRecord` + `SessionClient::remember_order_intent(...)` 记录稳定
+client order id 与 runtime order id 的对应关系。这个 ledger 会随
+`SessionClient::clone()` 和 `TqApi::into_session()` 共享，但不是跨进程持久化存储，
+也不替代 runtime command ledger 或交易回报对账。
 
 ## 建议的 Direct Query 接口层次
 

@@ -30,10 +30,12 @@
 //!
 //! API gap:
 //! wait facade 已有 `ClientOrderId`、`LimitOrderIntent` 和 `OrderTicket`，
-//! 可以表达稳定 intent id 与单 `TqApi` owner 内的 `send_once()` 防重复提交。
+//! 可以表达稳定 intent id 与同一 `SessionClient` 内的 `send_once()` 防重复提交。
+//! `tqsdk-session` 已有 session-scoped `OrderIntentRecord` ledger，可在同一
+//! session 被重新包装成新的 facade 后继续识别已提交 intent。
 //!
 //! 仍缺完整重连一致性契约：
-//! - intent 未持久化到 `tqsdk-session` 可恢复 ledger；
+//! - intent ledger 还不是跨进程持久化存储；
 //! - `OrderTicket` 还不能跨断线恢复后做 command/order/trade typed 对账；
 //! - 还不能区分 unknown/rejected/filled/cancelled 的 reconnect-safe terminal state。
 //!

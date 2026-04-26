@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -64,7 +64,6 @@ impl TqApi {
                 last_commit: None,
                 waiting: AtomicBool::new(false),
                 next_order_seq: AtomicU64::new(1),
-                submitted_order_intents: HashMap::new(),
             },
         }
     }

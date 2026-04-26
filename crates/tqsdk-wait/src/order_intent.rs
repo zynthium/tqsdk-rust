@@ -1,18 +1,18 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::hash_map::Entry;
-
 use serde_json::{Number, Value};
 use tqsdk_core::{CommandId, Order, OrderId, TradeDirection, TradeOffset};
-
-use crate::{
-    OrderRef, TqApi, WaitFacadeError, api::WaitInsertOrderRequest, driver::SubmittedOrderIntent,
+use tqsdk_session::{
+    OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, SessionFacadeError,
 };
+
+use crate::{OrderRef, TqApi, WaitFacadeError, api::WaitInsertOrderRequest};
 
 /// User-supplied idempotency key for an order intent.
 ///
-/// The wait facade maps this id to the runtime `order_id`, so reconnect/retry
-/// code can look up the same order instead of blindly submitting a new one.
+/// The wait facade maps this id to the runtime `order_id` and stores the intent
+/// in the shared session ledger, so retry code can look up the same order
+/// instead of blindly submitting a new one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClientOrderId(String);
 
@@ -155,31 +155,31 @@ impl<'a> LimitOrderIntent<'a> {
             return Ok(OrderTicket::new(client_order_id, order, None, false));
         }
 
-        let submitted_intent = SubmittedOrderIntent {
+        let intent_record = OrderIntentRecord::new(OrderIntentSpec {
+            account_id: self.account_id.clone(),
+            client_order_id: client_order_id.as_str().to_owned(),
+            order_id: client_order_id.as_str().to_owned(),
             symbol: self.symbol.clone(),
             direction,
             offset,
             volume,
             limit_price: price,
-        };
-        let intent_key = (self.account_id.clone(), order_id.clone());
+        });
         match self
             .api
-            .driver
-            .submitted_order_intents
-            .entry(intent_key.clone())
+            .session()
+            .remember_order_intent(intent_record)
+            .map_err(map_session_intent_error)?
         {
-            Entry::Occupied(entry) => {
-                if entry.get() != &submitted_intent {
-                    return Err(WaitFacadeError::InvalidState(
-                        "client intent id was already submitted with different order fields",
-                    ));
-                }
-                return Ok(OrderTicket::new(client_order_id, order, None, false));
+            OrderIntentRegistration::Existing(existing) => {
+                return Ok(OrderTicket::new(
+                    client_order_id,
+                    order,
+                    existing.command_id(),
+                    false,
+                ));
             }
-            Entry::Vacant(entry) => {
-                entry.insert(submitted_intent);
-            }
+            OrderIntentRegistration::Registered(_) => {}
         }
 
         let command = self
@@ -196,17 +196,37 @@ impl<'a> LimitOrderIntent<'a> {
             .await;
 
         match command {
-            Ok(command_id) => Ok(OrderTicket::new(
-                client_order_id,
-                order,
-                Some(command_id),
-                true,
-            )),
+            Ok(command_id) => {
+                self.api
+                    .session()
+                    .update_order_intent_command(
+                        &self.account_id,
+                        client_order_id.as_str(),
+                        command_id,
+                    )
+                    .map_err(map_session_intent_error)?;
+                Ok(OrderTicket::new(
+                    client_order_id,
+                    order,
+                    Some(command_id),
+                    true,
+                ))
+            }
             Err(error) => {
-                self.api.driver.submitted_order_intents.remove(&intent_key);
+                self.api
+                    .session()
+                    .forget_order_intent(&self.account_id, client_order_id.as_str())
+                    .map_err(map_session_intent_error)?;
                 Err(error)
             }
         }
+    }
+}
+
+fn map_session_intent_error(error: SessionFacadeError) -> WaitFacadeError {
+    match error {
+        SessionFacadeError::InvalidState(message) => WaitFacadeError::InvalidState(message),
+        other => WaitFacadeError::Session(other),
     }
 }
 

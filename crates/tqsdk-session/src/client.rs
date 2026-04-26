@@ -1,11 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashMap;
 #[cfg(any(test, feature = "live"))]
 use std::future::Future;
 #[cfg(any(test, feature = "live"))]
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -34,6 +35,7 @@ use crate::direct_query::{
 use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionServiceQuery, SymbolRankingType};
 #[cfg(feature = "live")]
 use crate::http_executor::ReqwestHttpExecutor;
+use crate::order_intent::{OrderIntentRecord, OrderIntentRegistration};
 #[cfg(feature = "services")]
 use crate::services::SessionServiceEndpoints;
 #[cfg(feature = "tq-auth")]
@@ -230,6 +232,7 @@ pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,
     runtime: SessionRuntime,
+    order_intents: Arc<StdMutex<HashMap<(String, String), OrderIntentRecord>>>,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
     #[cfg(any(feature = "services", all(test, feature = "live")))]
@@ -276,6 +279,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
             #[cfg(any(feature = "services", all(test, feature = "live")))]
@@ -317,6 +321,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
             #[cfg(any(feature = "services", all(test, feature = "live")))]
@@ -352,6 +357,69 @@ impl SessionClient {
 
     pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
         Ok(self.handle.drain_dispatches()?)
+    }
+
+    pub fn remember_order_intent(
+        &self,
+        record: OrderIntentRecord,
+    ) -> crate::error::Result<OrderIntentRegistration> {
+        let mut order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        let key = record.key();
+
+        if let Some(existing) = order_intents.get(&key) {
+            if !existing.request_matches(&record) {
+                return Err(crate::error::SessionFacadeError::InvalidState(
+                    "client order intent already registered with different order fields",
+                ));
+            }
+            return Ok(OrderIntentRegistration::Existing(existing.clone()));
+        }
+
+        order_intents.insert(key, record.clone());
+        Ok(OrderIntentRegistration::Registered(record))
+    }
+
+    pub fn update_order_intent_command(
+        &self,
+        account_id: &str,
+        client_order_id: &str,
+        command_id: CommandId,
+    ) -> crate::error::Result<()> {
+        let mut order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        if let Some(record) =
+            order_intents.get_mut(&(account_id.to_owned(), client_order_id.to_owned()))
+        {
+            record.set_command_id(command_id);
+        }
+        Ok(())
+    }
+
+    pub fn forget_order_intent(
+        &self,
+        account_id: &str,
+        client_order_id: &str,
+    ) -> crate::error::Result<Option<OrderIntentRecord>> {
+        let mut order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        Ok(order_intents.remove(&(account_id.to_owned(), client_order_id.to_owned())))
+    }
+
+    pub fn order_intent(
+        &self,
+        account_id: &str,
+        client_order_id: &str,
+    ) -> crate::error::Result<Option<OrderIntentRecord>> {
+        let order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        Ok(order_intents
+            .get(&(account_id.to_owned(), client_order_id.to_owned()))
+            .cloned())
     }
 
     #[cfg(feature = "services")]

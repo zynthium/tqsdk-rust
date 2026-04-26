@@ -97,6 +97,8 @@
 - metadata query
 - calendar / settlement / ranking / EDB
 - auth refresh
+- session-scoped order intent ledger（只记录 client order id 与 runtime order id
+  的进程内/session 内对应关系，不做订单状态 overlay）
 - replay step / reset 的 one-shot helper
 
 这些能力都具有同一个特征：
@@ -122,6 +124,8 @@
 - `query_symbol_ranking`
 - `query_edb_data`
 - `refresh_auth*`
+- `remember_order_intent`
+- `order_intent`
 - `replay_step*`
 - `replay_reset*`
 

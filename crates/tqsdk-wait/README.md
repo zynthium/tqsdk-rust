@@ -90,7 +90,7 @@
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
-- `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并在同一个 `TqApi` owner 内防止相同 intent 重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
+- `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
 - `tqsdk-stream` 也只承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
@@ -152,7 +152,8 @@ let ticket = api
 
 `OrderTicket` 内部仍只是指向 runtime state tree 的 `OrderRef`，不会创建本地订单
 overlay。`was_submitted()` 可以区分本次调用是否真的提交了新命令，便于 retry 代码
-避免把同一个 intent 发送两次。
+避免把同一个 intent 发送两次。intent ledger 由底层 `SessionClient` 持有，所以同一
+session 被重新包装成新的 `TqApi` 后仍能识别已提交 intent；它不是跨进程持久化存储。
 
 订单撤单和状态等待优先走 `OrderRef` helper：`cancel_remaining()` 会保留订单归属
 上下文，`wait_partially_filled()` / `wait_terminal()` 直接返回 typed `Order`，

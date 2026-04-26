@@ -21,6 +21,7 @@ mod error;
 #[cfg(feature = "live")]
 mod http_executor;
 mod metadata;
+mod order_intent;
 mod recovery;
 #[cfg(feature = "services")]
 mod services;
@@ -37,4 +38,5 @@ pub use direct_query::{
     SessionRawQuery, SessionServiceQuery, SymbolRankingType,
 };
 pub use error::{Result, SessionFacadeError};
+pub use order_intent::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec};
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};

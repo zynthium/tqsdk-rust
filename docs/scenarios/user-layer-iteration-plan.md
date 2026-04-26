@@ -143,12 +143,14 @@ crate 分层合并成一份迭代计划。
 
 - `tqsdk-wait` 增加 `ClientOrderId`、`LimitOrderIntent` 和 `OrderTicket`。
 - `TqApi::limit_order(...).client_intent(...).send_once()` 会把稳定 intent id
-  映射为 runtime `order_id`，并在同一个 `TqApi` owner 内避免相同 intent
-  重复提交。
+  映射为 runtime `order_id`，并在同一个 `SessionClient` 内避免相同 intent
+  重复提交；同一 session 被重新包装成新的 facade 后仍保留该 intent 记录。
+- `tqsdk-session` 增加 session-scoped `OrderIntentRecord` ledger，作为 wait/stream/task
+  可复用的轻量执行一致性 substrate。
 
 仍未完成、不可伪装为已支持：
 
-- intent 尚未持久化到 `tqsdk-session` 的可恢复 ledger。
+- intent ledger 尚未跨进程持久化。
 - `OrderTicket` 尚不能在断线后完成 command/order/trade 级别的 typed 对账。
 - 还没有 `wait_reconnect_safe_terminal()` 这类能区分 unknown/rejected/filled/cancelled
   的完整终态等待契约。
