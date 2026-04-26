@@ -1,7 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use serde_json::{Number, Value};
-use tqsdk_core::{CommandId, Order, OrderId, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    CommandId, CommandStatus, Order, OrderId, OrderLifecycle, TradeDirection, TradeOffset,
+};
 use tqsdk_session::{
     OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, SessionFacadeError,
 };
@@ -239,6 +241,67 @@ pub struct OrderTicket {
     submitted: bool,
 }
 
+/// Typed status for an [`OrderTicket`].
+///
+/// This intentionally combines the session command ledger and the runtime order
+/// object without creating a separate order state tree.
+#[derive(Debug, Clone)]
+pub enum OrderTicketState {
+    Unknown {
+        command_id: Option<CommandId>,
+    },
+    CommandPending {
+        command_id: CommandId,
+        status: CommandStatus,
+    },
+    Live {
+        command_id: Option<CommandId>,
+        order: Order,
+    },
+    Filled {
+        command_id: Option<CommandId>,
+        order: Order,
+    },
+    Cancelled {
+        command_id: Option<CommandId>,
+        order: Option<Order>,
+    },
+    Rejected {
+        command_id: Option<CommandId>,
+        order: Option<Order>,
+    },
+    Failed {
+        command_id: Option<CommandId>,
+        order: Option<Order>,
+    },
+}
+
+impl OrderTicketState {
+    #[must_use]
+    pub fn command_id(&self) -> Option<CommandId> {
+        match self {
+            Self::Unknown { command_id }
+            | Self::Live { command_id, .. }
+            | Self::Filled { command_id, .. }
+            | Self::Cancelled { command_id, .. }
+            | Self::Rejected { command_id, .. }
+            | Self::Failed { command_id, .. } => *command_id,
+            Self::CommandPending { command_id, .. } => Some(*command_id),
+        }
+    }
+
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Filled { .. }
+                | Self::Cancelled { .. }
+                | Self::Rejected { .. }
+                | Self::Failed { .. }
+        )
+    }
+}
+
 impl OrderTicket {
     #[must_use]
     fn new(
@@ -280,6 +343,16 @@ impl OrderTicket {
         self.submitted
     }
 
+    pub fn status(&self, api: &TqApi) -> crate::error::Result<OrderTicketState> {
+        let order = self.order.snapshot(api)?;
+        let command_status = self.command_status(api)?;
+
+        match order {
+            Some(order) => Ok(state_from_order(self.command_id, order)),
+            None => Ok(state_from_command(self.command_id, command_status)),
+        }
+    }
+
     pub async fn wait_terminal(&self, api: &mut TqApi) -> crate::error::Result<Order> {
         self.order.wait_terminal(api).await
     }
@@ -290,5 +363,109 @@ impl OrderTicket {
         deadline: tokio::time::Instant,
     ) -> crate::error::Result<Order> {
         self.order.wait_terminal_until(api, deadline).await
+    }
+
+    pub async fn wait_reconnect_safe_terminal(
+        &self,
+        api: &mut TqApi,
+    ) -> crate::error::Result<OrderTicketState> {
+        self.wait_reconnect_safe_terminal_with_deadline(api, None)
+            .await
+    }
+
+    pub async fn wait_reconnect_safe_terminal_until(
+        &self,
+        api: &mut TqApi,
+        deadline: tokio::time::Instant,
+    ) -> crate::error::Result<OrderTicketState> {
+        self.wait_reconnect_safe_terminal_with_deadline(api, Some(deadline))
+            .await
+    }
+
+    async fn wait_reconnect_safe_terminal_with_deadline(
+        &self,
+        api: &mut TqApi,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<OrderTicketState> {
+        loop {
+            let state = self.status(api)?;
+            if state.is_terminal() {
+                return Ok(state);
+            }
+
+            if !api.wait_update(deadline).await? {
+                return Ok(OrderTicketState::Unknown {
+                    command_id: state.command_id(),
+                });
+            }
+        }
+    }
+
+    fn command_status(&self, api: &TqApi) -> crate::error::Result<Option<CommandStatus>> {
+        let Some(command_id) = self.command_id else {
+            return Ok(None);
+        };
+        let Some(status) = api
+            .session()
+            .command_status(command_id)
+            .map_err(WaitFacadeError::Session)?
+        else {
+            return Ok(None);
+        };
+
+        status
+            .parse()
+            .map(Some)
+            .map_err(|()| WaitFacadeError::InvalidState("unknown command status"))
+    }
+}
+
+fn state_from_order(command_id: Option<CommandId>, order: Order) -> OrderTicketState {
+    match order.lifecycle {
+        OrderLifecycle::Filled => OrderTicketState::Filled { command_id, order },
+        OrderLifecycle::Cancelled => OrderTicketState::Cancelled {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Rejected => OrderTicketState::Rejected {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Failed => OrderTicketState::Failed {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Unknown
+        | OrderLifecycle::Submitting
+        | OrderLifecycle::Sent
+        | OrderLifecycle::Accepted
+        | OrderLifecycle::PartiallyFilled
+        | OrderLifecycle::Cancelling => OrderTicketState::Live { command_id, order },
+    }
+}
+
+fn state_from_command(
+    command_id: Option<CommandId>,
+    command_status: Option<CommandStatus>,
+) -> OrderTicketState {
+    match (command_id, command_status) {
+        (Some(command_id), Some(CommandStatus::Rejected)) => OrderTicketState::Rejected {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Cancelled)) => OrderTicketState::Cancelled {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Failed)) => OrderTicketState::Failed {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Completed)) => OrderTicketState::Unknown {
+            command_id: Some(command_id),
+        },
+        (Some(command_id), Some(status)) => OrderTicketState::CommandPending { command_id, status },
+        (None, Some(_)) => OrderTicketState::Unknown { command_id: None },
+        (command_id, None) => OrderTicketState::Unknown { command_id },
     }
 }

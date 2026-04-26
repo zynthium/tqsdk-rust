@@ -2,9 +2,10 @@ mod support;
 
 use serde_json::json;
 use tqsdk_core::{
-    OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain, TradeAccountType,
-    TradeDirection, TradeOffset,
+    CommandStatus, CommitScope, OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain,
+    TradeAccountType, TradeDirection, TradeOffset,
 };
+use tqsdk_wait::OrderTicketState;
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
@@ -300,6 +301,120 @@ async fn send_once_returns_existing_order_without_resubmit() {
         "strategy-a-open-001"
     );
     assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn order_ticket_status_reports_command_pending_without_order() {
+    let mut api = support::seeded_api();
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+    let command_id = ticket.command_id().unwrap();
+    if let Some(commit) = api
+        .handle_for_test()
+        .record_command_status(
+            command_id,
+            CommandStatus::Sent,
+            None,
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+    {
+        api.push_deferred_commit_for_test(commit);
+    }
+
+    match ticket.status(&api).unwrap() {
+        OrderTicketState::CommandPending {
+            command_id: actual_command_id,
+            status,
+        } => {
+            assert_eq!(actual_command_id, command_id);
+            assert_eq!(status, CommandStatus::Sent);
+        }
+        other => panic!("expected command-pending ticket state, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_reconnect_safe_terminal_returns_rejected_command_without_order() {
+    let mut api = support::seeded_api();
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+    let command_id = ticket.command_id().unwrap();
+
+    if let Some(commit) = api
+        .handle_for_test()
+        .record_command_status(
+            command_id,
+            CommandStatus::Rejected,
+            None,
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+    {
+        api.push_deferred_commit_for_test(commit);
+    }
+
+    match ticket
+        .wait_reconnect_safe_terminal_until(
+            &mut api,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+    {
+        OrderTicketState::Rejected {
+            command_id: Some(actual_command_id),
+            order: None,
+        } => assert_eq!(actual_command_id, command_id),
+        other => panic!("expected rejected command terminal state, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_reconnect_safe_terminal_returns_typed_order_terminal() {
+    let mut api = support::seeded_api();
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    support::seed_order_update(
+        &mut api,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "strategy-a-open-001",
+            volume_orign: 1,
+            volume_left: 0,
+            status: "FINISHED",
+            is_dead: true,
+        },
+    );
+
+    match ticket.wait_reconnect_safe_terminal(&mut api).await.unwrap() {
+        OrderTicketState::Filled { command_id, order } => {
+            assert_eq!(command_id, ticket.command_id());
+            assert_eq!(order.order_id, "strategy-a-open-001");
+            assert_eq!(order.lifecycle, OrderLifecycle::Filled);
+        }
+        other => panic!("expected filled order terminal state, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

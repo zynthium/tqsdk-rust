@@ -48,6 +48,7 @@
 - `ClientOrderId`
 - `LimitOrderIntent`
 - `OrderTicket`
+- `OrderTicketState`
 - `wait_update(deadline).await`
 - `is_changing(...)`
 - `is_changing_fields(...)`
@@ -154,6 +155,10 @@ let ticket = api
 overlay。`was_submitted()` 可以区分本次调用是否真的提交了新命令，便于 retry 代码
 避免把同一个 intent 发送两次。intent ledger 由底层 `SessionClient` 持有，所以同一
 session 被重新包装成新的 `TqApi` 后仍能识别已提交 intent；它不是跨进程持久化存储。
+`OrderTicket::status()` / `wait_reconnect_safe_terminal*()` 会把 command ledger
+和 order lifecycle 合并成 typed `OrderTicketState`，业务代码不需要解析
+command status 字符串或 `order.status` 字符串。契约示例见
+[examples/api_contract_s10_reconnect_order_consistency.rs](examples/api_contract_s10_reconnect_order_consistency.rs)。
 
 订单撤单和状态等待优先走 `OrderRef` helper：`cancel_remaining()` 会保留订单归属
 上下文，`wait_partially_filled()` / `wait_terminal()` 直接返回 typed `Order`，

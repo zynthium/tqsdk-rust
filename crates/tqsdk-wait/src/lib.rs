@@ -29,7 +29,7 @@ pub use api::TqApi;
 pub use builder::TqApiBuilder;
 pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
-pub use order_intent::{ClientOrderId, LimitOrderIntent, OrderTicket};
+pub use order_intent::{ClientOrderId, LimitOrderIntent, OrderTicket, OrderTicketState};
 pub use recovery::WaitStartupRecovery;
 pub use refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,

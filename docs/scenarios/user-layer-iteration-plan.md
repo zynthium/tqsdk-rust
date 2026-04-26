@@ -135,11 +135,11 @@ crate 分层合并成一份迭代计划。
 
 优先提升的场景：
 
-- `api_contract_s10_reconnect_order_consistency`
+- `api_contract_s10_reconnect_order_consistency`（已提升为正式 wait example）
 - `api_contract_s06_limit_order`
 - `api_contract_s07_cancel_partial_fill`
 
-已落地的第一步：
+已落地：
 
 - `tqsdk-wait` 增加 `ClientOrderId`、`LimitOrderIntent` 和 `OrderTicket`。
 - `TqApi::limit_order(...).client_intent(...).send_once()` 会把稳定 intent id
@@ -147,13 +147,13 @@ crate 分层合并成一份迭代计划。
   重复提交；同一 session 被重新包装成新的 facade 后仍保留该 intent 记录。
 - `tqsdk-session` 增加 session-scoped `OrderIntentRecord` ledger，作为 wait/stream/task
   可复用的轻量执行一致性 substrate。
+- `OrderTicket::status()` / `wait_reconnect_safe_terminal*()` 返回 typed
+  `OrderTicketState`，业务代码不需要解析 command status 或 `order.status` 字符串。
 
 仍未完成、不可伪装为已支持：
 
 - intent ledger 尚未跨进程持久化。
-- `OrderTicket` 尚不能在断线后完成 command/order/trade 级别的 typed 对账。
-- 还没有 `wait_reconnect_safe_terminal()` 这类能区分 unknown/rejected/filled/cancelled
-  的完整终态等待契约。
+- `OrderTicketState` 已覆盖 command/order 级别的 typed 对账；trade fill 明细聚合仍需后续执行层补齐。
 
 ### P1：执行层抽象
 
