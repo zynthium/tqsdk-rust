@@ -9,7 +9,7 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundFrame},
     events::{InternalEvent, RuntimeInput, TimerEvent},
     ids::CommandId,
-    runtime::RuntimeHandle,
+    runtime::{Runtime, RuntimeHandle},
     state::{CommitResult, CommitScope, StatePath},
     transport::{
         BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
@@ -652,6 +652,10 @@ impl SessionRuntime {
         }
         if let Some(commit) = self.handle.record_session_resync(&bootstrap, vec![])? {
             commits.push(commit);
+        }
+
+        for command in self.handle.recovery_commands() {
+            self.handle.submit(command).await?;
         }
 
         Ok(RecoveryOutcome {

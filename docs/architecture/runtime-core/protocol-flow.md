@@ -61,7 +61,13 @@
 5. 进入 `Resyncing`
 6. 接收恢复期输入并归一化为 mutation
 7. 达到内部一致后形成 `ResyncRecovery` commit
-8. 回到 `Running`
+8. 从 adapter 保留的协议意图生成 recovery commands，例如行情订阅与 chart
+   请求，并重新进入 runtime outbound 队列
+9. 回到 `Running`
+
+adapter 可以暴露 recovery commands，但仍然没有提交权：这些命令必须回到
+`RuntimeHandle::submit()` / outbound / dispatch 链路，继续使用统一 command ledger
+和 route dispatch 规则。
 
 ## 与后续 adapter 的关系
 - future `wait_update` adapter 只消费 `RuntimeReader` / `UpdateCursor`

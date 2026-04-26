@@ -12,10 +12,10 @@ use tqsdk_core::internal::{DynTransport, SessionBootstrap};
 use tqsdk_core::internal::{SessionRun, SessionRuntime, SessionRuntimeDeps};
 use tqsdk_core::{
     AdapterRegistry, AuthContext, AuthProvider, CommitScope, ContractError, EndpointConfig,
-    ProtocolDomain, RawFrame, ReconnectPolicy, Result as CoreResult, Revision, Runtime,
-    RuntimeHandle, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,
-    SessionRouteEndpoint, SessionTarget, SessionTopology, SessionTopologyResolver, StatePath,
-    Transport,
+    MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolDomain, RawFrame,
+    ReconnectPolicy, Result as CoreResult, Revision, Runtime, RuntimeHandle, SessionConfig,
+    SessionPhase, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionTarget,
+    SessionTopology, SessionTopologyResolver, StatePath, Symbol, Transport,
 };
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>;
@@ -292,6 +292,61 @@ fn session_runtime_drive_route_once_recovers_after_transport_close_without_dupli
 }
 
 #[test]
+fn session_runtime_recovery_requeues_market_subscription_intent() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = ControlledConnector::new(vec![
+        RecvBehavior::Frame(RawFrame::Close),
+        RecvBehavior::Frame(RawFrame::Pong),
+    ]);
+    let adapters = adapter_registry();
+    let config = session_config();
+
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    block_on(handle.submit(tqsdk_core::RuntimeCommand::Market(
+        MarketCommand::SubscribeQuotes {
+            symbols: vec![Symbol::new("SHFE.au2602"), Symbol::new("SHFE.ag2606")],
+        },
+    )))
+    .unwrap();
+    assert_eq!(block_on(runtime.flush_outbound(&mut run)).unwrap().len(), 2);
+
+    let outcome = block_on(runtime.drive_route_once(
+        &mut run,
+        "market",
+        vec![],
+        CommitScope::RealtimeUpdate,
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
+    ))
+    .unwrap();
+
+    assert!(outcome.recovered);
+    let dispatches = handle.drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 2);
+    let payload = dispatches
+        .iter()
+        .map(dispatch_payload)
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("recovery should requeue subscribe_quote");
+    assert_eq!(payload["aid"], "subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606,SHFE.au2602");
+}
+
+#[test]
 fn session_runtime_drive_route_once_recovers_after_transport_error() {
     let handle = runtime_with_default_adapters();
     let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
@@ -349,6 +404,18 @@ fn session_runtime_drive_route_once_recovers_after_transport_error() {
             .get(["system", "session", "lifecycle", "phase"]),
         Some(&json!("running"))
     );
+}
+
+fn dispatch_payload(dispatch: &OutboundDispatch) -> serde_json::Value {
+    match &dispatch.request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport text should contain json")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => {
+            serde_json::from_slice(bytes).expect("transport bytes should contain json")
+        }
+        other => panic!("expected transport request, got {other:?}"),
+    }
 }
 
 #[test]

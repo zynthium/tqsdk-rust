@@ -354,6 +354,8 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - `quotes()` 返回用户级 `QuoteSubscription` handle，用来表达动态 add/remove/current
   symbols，并作为 typed quote stream 消费；它仍然只复用底层 market adapter 的订阅集合、
   `RuntimeCommand::Market` 和同一条 commit fan-out。
+  session reconnect/resync 后，runtime 会从底层 market adapter 当前订阅意图生成
+  recovery commands 并重新排队发送，用户不需要在业务代码中维护第二份 symbol 集合。
 - `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；
   它内部仍然只提交 quote/chart 命令并消费同一条 commit fan-out，不维护第二棵状态树。
   quote 事件读 `read_market_state()` 分区；tick/kline ready window 沿用 chart/window

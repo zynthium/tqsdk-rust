@@ -26,6 +26,10 @@ pub trait ProtocolAdapter: Send + Sync {
     fn encode(&mut self, cmd: &RuntimeCommand) -> Result<Vec<OutboundRequest>>;
     fn accepts_input(&self, input: &RuntimeInput) -> bool;
     fn decode(&mut self, input: &RuntimeInput) -> Result<Vec<NormalizedMutation>>;
+
+    fn recovery_commands(&self) -> Vec<RuntimeCommand> {
+        Vec::new()
+    }
 }
 
 pub struct AdapterRegistry {
@@ -91,6 +95,13 @@ impl AdapterRegistry {
             decoded.extend(adapter.decode(input)?);
         }
         Ok(decoded)
+    }
+
+    pub(crate) fn recovery_commands(&self) -> Vec<RuntimeCommand> {
+        self.adapters
+            .iter()
+            .flat_map(|adapter| adapter.recovery_commands())
+            .collect()
     }
 
     pub fn domains(&self) -> &[ProtocolDomain] {

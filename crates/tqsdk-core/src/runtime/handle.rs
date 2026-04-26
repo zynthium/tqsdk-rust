@@ -96,6 +96,11 @@ impl RuntimeHandle {
         self.commit_log.clone()
     }
 
+    pub(crate) fn recovery_commands(&self) -> Vec<RuntimeCommand> {
+        let inner = mutex_lock(&self.inner);
+        inner.adapters.recovery_commands()
+    }
+
     pub fn reader(&self) -> RuntimeReader {
         RuntimeReader {
             state: Arc::clone(&self.state),

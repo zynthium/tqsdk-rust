@@ -175,7 +175,9 @@ quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 多合约动态 quote 订阅优先使用 `quotes(...).await` 返回的
 `QuoteSubscription`。它持有当前 symbol 集合，提供 `add(...)` /
 `remove(...)` / `symbols()` / `close()`，并作为 typed quote stream 使用。
-底层仍复用 market adapter 的全量订阅集合和同一条 commit fan-out。
+底层仍复用 market adapter 的全量订阅集合和同一条 commit fan-out；session
+reconnect/resync 后，runtime 会根据 adapter 保留的订阅意图重新排队发送恢复命令，
+用户不需要手写重连后的重订阅逻辑。
 
 如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：

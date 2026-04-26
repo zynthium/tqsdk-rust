@@ -171,6 +171,8 @@ live 示例另外会用到：
 - 所有协议域共享同一棵 runtime state tree。
 - 只有一套 revision 推进语义和一套 commit 模型。
 - adapter 可以编解码，但没有自行发布 commit 的权限。
+- adapter 可以提供重连后的 recovery commands，用于恢复行情订阅或 chart 请求；
+  这些命令必须重新进入 `RuntimeHandle::submit()` / outbound dispatch 链路。
 - 未来 `wait_update`、stream、callback facade 都应该只消费这个 substrate，而不是重定义内核。
 - `StateSnapshot`、`CommitLog` 这类兼容/底层原语仍然保留，但它们不定义主要读模型。
 

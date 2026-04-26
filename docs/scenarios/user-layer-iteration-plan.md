@@ -108,8 +108,16 @@ crate 分层合并成一份迭代计划。
 优先提升的场景：
 
 - `api_contract_s09_startup_state_recovery`（已提升为正式 wait example）
-- `api_contract_s02_dynamic_subscriptions`
+- `api_contract_s02_dynamic_subscriptions`（已具备 reconnect 订阅恢复契约）
 - `api_contract_s20_production_daemon` 的健康状态子集
+
+已落地：
+
+- 启动 ready barrier 已通过 `TqApi::startup_recovery` 与 `TqStream::recover_state`
+  表达。
+- Market adapter 会保留当前 quote / trading-status / chart 订阅意图；session
+  reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
+  因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
 
 ### P0：订单 intent 与断线一致性
 

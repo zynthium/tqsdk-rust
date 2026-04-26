@@ -29,8 +29,8 @@
 //! - 取消订阅是否有类型安全的 public API？
 //!
 //! Current API note:
-//! `QuoteSubscription` 已能表达 add/remove/current symbols；重连恢复依赖
-//! runtime/session 保持的底层订阅意图，后续还需要专门的 reconnect contract test。
+//! `QuoteSubscription` 表达 add/remove/current symbols；重连恢复由
+//! runtime/session 根据底层 adapter 保留的订阅意图自动重新排队发送。
 
 use futures::StreamExt;
 use tqsdk_stream::TqStreamBuilder;

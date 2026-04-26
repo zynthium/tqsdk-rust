@@ -5,7 +5,7 @@ use crate::{
     diff_protocol::DiffProtocolMessage,
     error::{ContractError, Result},
     events::{MutationSource, NormalizedMutation, RuntimeInput},
-    ids::ProtocolDomain,
+    ids::{ProtocolDomain, Symbol},
 };
 
 use super::{
@@ -86,5 +86,41 @@ impl ProtocolAdapter for MarketAdapter {
             }
             _ => Ok(vec![]),
         }
+    }
+
+    fn recovery_commands(&self) -> Vec<RuntimeCommand> {
+        let mut commands = Vec::new();
+
+        if !self.quote_subscriptions.is_empty() {
+            commands.push(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+                symbols: self
+                    .quote_subscriptions
+                    .iter()
+                    .map(|symbol| Symbol::new(symbol.clone()))
+                    .collect(),
+            }));
+        }
+
+        if !self.trading_status_subscriptions.is_empty() {
+            commands.push(RuntimeCommand::Market(
+                MarketCommand::SubscribeTradingStatus {
+                    symbols: self
+                        .trading_status_subscriptions
+                        .iter()
+                        .map(|symbol| Symbol::new(symbol.clone()))
+                        .collect(),
+                },
+            ));
+        }
+
+        commands.extend(
+            self.charts
+                .values()
+                .cloned()
+                .map(MarketCommand::SetChart)
+                .map(RuntimeCommand::Market),
+        );
+
+        commands
     }
 }
