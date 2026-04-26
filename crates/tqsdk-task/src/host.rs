@@ -8,6 +8,7 @@ use tqsdk_wait::{ClientOrderId, OrderTicket};
 
 use crate::Result;
 use crate::TaskError;
+use crate::account_group::{AccountGroup, AccountGroupBuilder, MultiAccountOrderBuilder};
 use crate::calendar::TradingDayCalendar;
 use crate::execution_group::ExecutionGroupBuilder;
 use crate::order::{TaskOrderBuilder, TaskOrderIntent};
@@ -122,6 +123,16 @@ impl TaskHost {
     #[must_use]
     pub fn execution_group(&mut self, account_id: impl AsRef<str>) -> ExecutionGroupBuilder<'_> {
         ExecutionGroupBuilder::new(self, account_id.as_ref().to_owned())
+    }
+
+    #[must_use]
+    pub fn account_group(&self) -> AccountGroupBuilder {
+        AccountGroup::builder()
+    }
+
+    #[must_use]
+    pub fn multi_account_order(&mut self, accounts: AccountGroup) -> MultiAccountOrderBuilder<'_> {
+        MultiAccountOrderBuilder::new(self, accounts)
     }
 
     #[must_use]

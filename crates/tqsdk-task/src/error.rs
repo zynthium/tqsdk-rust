@@ -26,6 +26,12 @@ pub enum TaskError {
         total_legs: usize,
         reason: &'static str,
     },
+    MultiAccountPartialSubmit {
+        group_id: String,
+        submitted_accounts: usize,
+        total_accounts: usize,
+        reason: &'static str,
+    },
     OwnershipConflict {
         account_id: String,
         symbol: String,
@@ -74,6 +80,15 @@ impl Display for TaskError {
                 f,
                 "execution group partial submit group_id={group_id} submitted_legs={submitted_legs} total_legs={total_legs}: {reason}"
             ),
+            Self::MultiAccountPartialSubmit {
+                group_id,
+                submitted_accounts,
+                total_accounts,
+                reason,
+            } => write!(
+                f,
+                "multi-account partial submit group_id={group_id} submitted_accounts={submitted_accounts} total_accounts={total_accounts}: {reason}"
+            ),
             Self::OwnershipConflict {
                 account_id,
                 symbol,
@@ -112,7 +127,9 @@ impl std::error::Error for TaskError {
             Self::Wait(error) => Some(error),
             Self::Session(error) => Some(error),
             Self::RiskRejected(_) => None,
-            Self::ExecutionGroupPartialSubmit { .. } => None,
+            Self::ExecutionGroupPartialSubmit { .. } | Self::MultiAccountPartialSubmit { .. } => {
+                None
+            }
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }
