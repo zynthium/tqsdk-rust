@@ -21,6 +21,7 @@ mod error;
 #[cfg(feature = "live")]
 mod http_executor;
 mod metadata;
+mod recovery;
 #[cfg(feature = "services")]
 mod services;
 #[cfg(feature = "tq-auth")]
@@ -36,3 +37,4 @@ pub use direct_query::{
     SessionRawQuery, SessionServiceQuery, SymbolRankingType,
 };
 pub use error::{Result, SessionFacadeError};
+pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};

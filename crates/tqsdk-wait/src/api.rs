@@ -212,6 +212,10 @@ impl TqApi {
         quote.load(self)
     }
 
+    pub fn startup_recovery(&mut self) -> crate::recovery::WaitStartupRecovery<'_> {
+        crate::recovery::WaitStartupRecovery::new(self)
+    }
+
     pub async fn get_trading_status(
         &mut self,
         symbol: &str,

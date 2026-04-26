@@ -55,6 +55,8 @@
 - `replay_step_value(...).await`
 - `replay_reset(...).await`
 - `replay_reset_value(...).await`
+- `StartupRecoverySpec`
+- `startup_recovery_status(...)`
 - `get_trading_calendar(...).await`
 - `query_symbol_settlement(...).await`
 - `query_symbol_ranking(...).await`
@@ -147,6 +149,11 @@
 - 用 `SessionClientBuilder::trade_target_tqkq*()` 预声明 trade route
 - 用 `SessionClient::tqkq_login_command*()` 从当前 auth context 派生官方内置模拟账户登录命令
 - 仅靠 `progress_once()` 推进到底层 trade state tree，而不引入 `wait_update()` facade
+
+如果上层 facade 需要在策略启动前确认行情和交易初始截面已经可用，可以用
+`StartupRecoverySpec` + `SessionClient::startup_recovery_status(...)` 读取
+revision-bound readiness。这个接口只检查状态，不提交订阅或登录命令；订阅、
+登录和等待形状仍由 `tqsdk-wait` / `tqsdk-stream` 负责。
 
 ## 建议的 Direct Query 接口层次
 

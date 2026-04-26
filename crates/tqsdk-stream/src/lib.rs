@@ -31,6 +31,7 @@ mod event;
 mod filter;
 mod market_event;
 mod quote_subscription;
+mod recovery;
 mod typed;
 mod window;
 
@@ -49,5 +50,6 @@ pub use filter::{
 };
 pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::QuoteSubscription;
+pub use recovery::StreamStartupRecovery;
 pub use typed::{PathValueStream, ValueUpdate};
 pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};

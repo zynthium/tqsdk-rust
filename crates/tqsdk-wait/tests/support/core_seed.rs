@@ -204,6 +204,7 @@ pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
                     "data": [{
                         "trade": {
                             account_id: {
+                                "trade_more_data": false,
                                 "accounts": {
                                     "CNY": {
                                         "user_id": account_id,

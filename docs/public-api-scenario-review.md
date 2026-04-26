@@ -28,7 +28,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 6. 普通限价下单 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{login_trade_account, insert_limit_order}`; `OrderRef::wait_terminal` |
 | 7. 撤单与部分成交 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs`; `OrderRef::{wait_partially_filled, cancel_remaining, wait_terminal}`; `Order.lifecycle`; `Order.volume_left` |
 | 8. 账户 / 资金 / 持仓查询 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs`; `TqApi::{login_trade_account, get_account, get_position}` |
-| 9. 启动后状态恢复 | 无法表达 | 高 | 严重 | 少量 | 高 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s09_startup_state_recovery.rs`; `SessionRuntime::recover` is not user-facing |
+| 9. 启动后状态恢复 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s09_startup_state_recovery.rs`; `tqsdk_session::StartupRecoverySpec`; `TqApi::startup_recovery`; `TqStream::recover_state` |
 | 10. 断线重连中的订单一致性 | 无法表达 | 高 | 严重 | 少量 | P0 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s10_reconnect_order_consistency.rs`; runtime command ledger lacks user-facing order intent contract |
 | 11. 简单策略 | 勉强 | 高 | 少量 | 少量 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`; `TaskHost`; `TargetPosTask` |
 | 12. 跨合约套利 | 无法表达 | 高 | 严重 | 严重 | P0 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; no execution group / hedge policy API |

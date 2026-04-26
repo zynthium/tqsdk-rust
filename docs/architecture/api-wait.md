@@ -72,6 +72,10 @@ wait adapter 层未来可以提供：
   的薄便利层存在，用来从用户路径移除 `TradeLoginCommand` 构造；builder
   仍负责 trade route 配置，helper 只提交 runtime trade login command 并等待
   同一 trade state 分区里的账户对象 ready。
+- `startup_recovery()` 这类启动屏障 helper 可以作为 wait facade 的薄便利层
+  存在，用来把 quote 订阅和 trade 初始同步合并成用户级 ready barrier；ready
+  判定复用 `tqsdk-session::StartupRecoverySpec`，不得绕过 runtime state tree，
+  也不得把 provider 私有恢复状态暴露给业务代码。
 - `OrderRef::cancel_remaining()`、`wait_partially_filled()`、
   `wait_terminal()` 这类订单 helper 可以作为 wait facade 的薄便利层存在；
   它们必须只读取 `read_trade_state()` 暴露的 typed order 状态并复用

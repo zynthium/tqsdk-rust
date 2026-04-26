@@ -152,6 +152,11 @@ impl TqStream {
         crate::market_event::MarketEventBuilder::new(self)
     }
 
+    #[must_use]
+    pub fn recover_state(&self) -> crate::recovery::StreamStartupRecovery<'_> {
+        crate::recovery::StreamStartupRecovery::new(self)
+    }
+
     pub async fn kline_stream(
         &self,
         symbol: impl AsRef<str>,

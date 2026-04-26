@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use serde_json::Value;
+use tqsdk_core::{OutboundFrame, OutboundRequest};
 use tqsdk_session::SessionFacadeError;
 use tqsdk_stream::{
     SessionReconnectEvent, StreamFacadeError, TradeSessionEvent, TradeSessionEventUpdate,
@@ -16,6 +18,51 @@ async fn next_trade_session_event(
         .expect("trade session event stream should not stall")
         .expect("trade session event stream should yield an item")
         .expect("trade session event stream should decode an event")
+}
+
+fn transport_payload(request: &OutboundRequest) -> Value {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport frame should contain valid json payload")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
+            .expect("transport frame should contain valid json payload"),
+        other => panic!("expected transport request, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recover_state_waits_for_quote_and_trade_account_ready() {
+    let stream = support::core_seed::seeded_stream();
+
+    let recovery = stream
+        .recover_state()
+        .quotes(["SHFE.au2602"])
+        .trade_account("sim")
+        .deadline(tokio::time::Instant::now() + Duration::from_millis(200))
+        .wait();
+    let seed = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 618.0);
+        support::core_seed::seed_trade_snapshot(&stream, "sim", "SHFE.au2602");
+    };
+
+    let (status, ()) = tokio::join!(recovery, seed);
+    let status = status.expect("startup recovery should become ready");
+
+    assert!(status.is_ready());
+    assert!(status.market_ready);
+    assert!(status.trade_ready);
+    assert!(status.missing_quotes.is_empty());
+    assert!(status.pending_trade_accounts.is_empty());
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("recover_state should submit quote subscription intent");
+    assert_eq!(payload["ins_list"], "SHFE.au2602");
 }
 
 #[tokio::test(flavor = "current_thread")]

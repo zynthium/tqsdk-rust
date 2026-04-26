@@ -58,6 +58,48 @@ async fn quote_snapshot_reports_not_ready_when_deadline_expires() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_recovery_waits_for_quote_and_trade_sync_without_manual_flags() {
+    let mut api = support::seeded_api();
+    support::seed_quote_commit_with_datetime(
+        &mut api,
+        "SHFE.au2602",
+        618.0,
+        "2026-04-26 09:00:00.000000",
+    );
+    support::seed_trade_snapshot(&mut api, "sim", "SHFE.au2602");
+
+    let status = api
+        .startup_recovery()
+        .quotes(["SHFE.au2602"])
+        .trade_account("sim")
+        .await
+        .unwrap();
+
+    assert!(status.is_ready());
+    assert!(status.market_ready);
+    assert!(status.trade_ready);
+    assert!(status.missing_quotes.is_empty());
+    assert!(status.pending_trade_accounts.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_recovery_reports_not_ready_when_deadline_expires() {
+    let mut api = support::seeded_api();
+
+    let error = api
+        .startup_recovery()
+        .quotes(["SHFE.au2602"])
+        .deadline(tokio::time::Instant::now() + std::time::Duration::from_millis(10))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState("startup recovery not ready")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn get_trading_status_returns_ref_without_blocking() {
     let mut api = support::seeded_api();
     let status = api.get_trading_status("SHFE.au2602").await.unwrap();

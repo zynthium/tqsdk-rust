@@ -66,6 +66,7 @@
 - `unsubscribe_quotes(...)`
 - `quotes(...).await`
 - `market_events()`
+- `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
 - `kline_stream(...)`
@@ -180,6 +181,11 @@ quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：
 内部提交 quote/chart 命令，并从同一条 commit fan-out 中投影 typed event；不维护
 第二棵状态树，也不复制 direct-query 能力。
+
+如果 async 系统在启动阶段需要等待行情订阅和交易初始同步完成，可以使用
+`TqStream::recover_state()`。它从同一条 commit fan-out 等待 readiness，并复用
+`tqsdk-session` 的 `StartupRecoverySpec` 判断状态，不要求用户手写 channel 或
+provider 级恢复 flag。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

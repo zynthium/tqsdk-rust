@@ -20,6 +20,7 @@ mod builder;
 mod change;
 mod driver;
 mod error;
+mod recovery;
 mod refs;
 mod views;
 
@@ -27,6 +28,7 @@ pub use api::TqApi;
 pub use builder::TqApiBuilder;
 pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
+pub use recovery::WaitStartupRecovery;
 pub use refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
     QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,

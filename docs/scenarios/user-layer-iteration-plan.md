@@ -107,7 +107,7 @@ crate 分层合并成一份迭代计划。
 
 优先提升的场景：
 
-- `api_contract_s09_startup_state_recovery`
+- `api_contract_s09_startup_state_recovery`（已提升为正式 wait example）
 - `api_contract_s02_dynamic_subscriptions`
 - `api_contract_s20_production_daemon` 的健康状态子集
 

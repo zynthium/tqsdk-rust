@@ -215,6 +215,7 @@ impl TqStream {
         I: IntoIterator<Item = S>,
         S: AsRef<str>;
     pub fn market_events(&self) -> MarketEventBuilder<'_>;
+    pub fn recover_state(&self) -> StreamStartupRecovery<'_>;
     pub async fn kline_stream(
         &self,
         symbol: impl AsRef<str>,
@@ -336,6 +337,10 @@ impl TqStream {
     ) -> tqsdk_stream::Result<SecurityTradeEventStream>;
 }
 ```
+
+`recover_state()` 是 stream facade 的启动恢复屏障。它可以提交 quote 订阅意图，
+再通过同一条 commit fan-out 等待 `tqsdk-session::StartupRecoverySpec` 判定为
+ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/resync 类型。
 
 设计意图：
 
