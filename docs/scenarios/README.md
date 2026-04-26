@@ -10,6 +10,10 @@ API 已经支持或至少可以自然组合表达的终端用户代码。
 `docs/scenarios/api_gaps/`。这些文件只记录理想用户代码草案和审查结论，不参与
 Cargo example 自动发现，也不得伪装成已经支持。
 
+场景评审时应先判断示例主要服务哪类 Rust 使用者，而不是按官方 Python SDK 的
+方法名逐项对齐。使用者分层与迭代顺序见
+[`user-layer-iteration-plan.md`](user-layer-iteration-plan.md)。
+
 当某个 gap 被修复时，应同时完成：
 
 1. 将对应 sketch 提升为正式 `crates/<crate>/examples/api_contract_sXX_*.rs`。

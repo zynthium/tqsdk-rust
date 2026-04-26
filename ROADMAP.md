@@ -20,6 +20,9 @@
 - 共享 session 与 one-shot request/response 能力继续集中在 `tqsdk-session`。
 - diff-backed continuous consumption 能力只进入 `tqsdk-wait` 和 `tqsdk-stream`。
 - `TargetPosTask`、downloader、DataFrame/polars、回测报告、GUI 都不应倒灌到底层。
+- 后续迭代对齐的是不同 Rust 使用者的合理路径，不是照搬官方 Python SDK 的
+  public API 名称。详见
+  [`docs/scenarios/user-layer-iteration-plan.md`](docs/scenarios/user-layer-iteration-plan.md)。
 - 每一阶段都要求：
   - 清晰 crate 边界
   - 可验证的验收标准
@@ -79,18 +82,28 @@
 
 原始的推荐顺序已经完成到 `tqsdk-stream` 与 `tqsdk-task`。
 
-从当前时点继续推进，建议按下面顺序收敛：
+从当前时点继续推进，应先按使用者分层收敛，而不是继续按 Python
+方法清单补 facade。当前优先级是：
 
-1. 继续稳固当前 `core/session/wait/stream/task`
-2. 实现 `tqsdk-data`
-3. 视复杂度决定是否独立 `tqsdk-backtest`
-4. 最后再决定 `tqsdk-callback` 是否独立存在
+1. P0：启动 ready / 重连 resync / 订阅恢复 / 交易同步屏障
+2. P0：订单 intent、client order id、断线恢复后的订单对账
+3. P1：执行层抽象，包括 `TargetPosTask` ownership、execution group、多账户隔离
+4. P1：风控前置与 what-if 试算
+5. P1：策略运行时、fake market / fake broker、live / sim / replay 一致事件模型
+6. P2：生产守护、慢消费者隔离、错误诊断与重试
+7. P2：本地行情缓存、历史数据和 replay 研究闭环
+8. P3：多 provider 行情聚合
 
 原因：
 
-- `tqsdk-stream` 与 `tqsdk-task` 已经落地，但仍属于最容易继续膨胀的两层，优先继续压实边界和回归
-- `tqsdk-data` 面向研究与离线分析，价值明确，但不应倒逼底层设计
-- `tqsdk-backtest` 与 `tqsdk-callback` 的独立价值，要等前面几层稳定后再判断
+- 官方 Python SDK 证明了初始截面、重连恢复、订单对账、任务 ownership、
+  多账户、风控、回放和数据下载都是高价值用户语义。
+- Rust 版本的设计哲学是分层满足不同用户；这些语义必须按用户类型落在
+  `session` / `wait` / `stream` / `task` / `data`，不能重新合并成单体 API。
+- `tqsdk-data` 已有基础实现，后续仍应继续推进，但在交易安全语义 P0
+  补齐前，不应把研究层能力当成唯一下一阶段。
+- `tqsdk-backtest` 与 `tqsdk-callback` 的独立价值，要等策略运行时、stream
+  健康事件和 replay 数据路径稳定后再判断。
 
 ## Phase 1（已完成）：稳固当前基础层
 
@@ -349,8 +362,11 @@
 
 如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
 
-1. 继续稳固 `core/session/wait/stream/task`，优先补文档收口、公开面回归测试和真实联机 smoke 示例
-2. 在 `query_his_cont_quotes`、`data_page`、`data_series`、`data_download`、`query_option_greeks`、owned Vec materialization、纯 async CSV export 已落地后，继续推进 `tqsdk-data` 的 materialization 层，例如缓存与可选 tabular adapter
+1. 设计并落地启动 ready / 重连 resync 的最小 public contract，优先服务
+   `tqsdk-wait` 的单策略用户和 `tqsdk-stream` 的 async 多消费者用户。
+2. 设计订单 intent 与 client order id 的用户级契约，使场景 10
+   “断线重连中的订单一致性”不再依赖用户手写重试和本地状态推断。
 
-如果目标是先把底座做得更稳，优先选 1。
-如果目标是开始给研究型能力准备独立落点，再选 2。
+这两件事完成前，不建议先做更多便利 facade。它们是资金安全和状态一致性的
+前置条件，也是把 `docs/scenarios/api_gaps/` 中 P0 gap 提升为正式 example
+的入口。

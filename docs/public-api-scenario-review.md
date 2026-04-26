@@ -13,6 +13,11 @@ facade：它们继续复用既有 session、runtime commit、reader/cursor 与
 domain partition 读面；未改变 crate 边界或 runtime contract。对应架构文档与
 crate README 已随 public API 调整同步更新。
 
+本报告中的“当前 API 是否自然表达”应按 Rust 分层使用者判断，而不是按官方
+Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证据；Rust
+版本通过 `core/session/wait/stream/task/data` 分层服务不同用户。后续 gap
+修复顺序见 [`scenarios/user-layer-iteration-plan.md`](scenarios/user-layer-iteration-plan.md)。
+
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. 零门槛行情订阅 | 自然 | 低 | 无 | 无 | 低 | 无 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs`; `tqsdk_wait::TqApi::{get_quote, wait_update, is_changing}` |

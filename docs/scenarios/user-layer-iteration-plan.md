@@ -1,0 +1,311 @@
+# 使用者分层驱动的 Public API 迭代计划
+
+## 文档定位
+
+本文档把场景驱动审查、官方 `tqsdk-python` 调研结果和当前 Rust
+crate 分层合并成一份迭代计划。
+
+这里对齐的对象不是 Python SDK 的 public API 名称，而是不同类型终端用户的工作流：
+
+- 策略作者需要低样板、稳定状态截面和清晰的交易一致性。
+- 系统集成方需要 async-native、多消费者、背压和健康状态。
+- 高频或基础设施用户需要薄底座、可控推进和热路径读面。
+- 执行工具用户需要订单 intent、任务 ownership、风控和多账户隔离。
+- 研究用户需要历史数据、批处理、缓存和回放。
+- 测试用户需要 fake market / fake broker / deterministic clock。
+
+官方 Python SDK 是成熟使用者语义的证据来源，不是 Rust API 的复制模板。
+
+## 调研依据
+
+本轮主要参考：
+
+- `~/Projects/GitHub/tqsdk-python/tqsdk/api.py`
+  - `TqApi.__init__` 的初始快照等待语义
+  - `wait_update()` 的单推进点与稳定截面语义
+  - `get_quote` / `get_kline_serial` / `get_tick_serial`
+  - `insert_order` / `cancel_order`
+  - `get_account` / `get_position` / `get_order` / `get_trade`
+- `~/Projects/GitHub/tqsdk-python/tqsdk/connect.py`
+  - 重连后记录请求、重发订阅、暂停向上输出、等待完整快照后恢复
+- `~/Projects/GitHub/tqsdk-python/tqsdk/lib/target_pos_task.py`
+  - 目标持仓任务、拆单、撤单、追价和同账户同合约任务唯一性
+- `~/Projects/GitHub/tqsdk-python/tqsdk/multiaccount.py`
+  - 多账户模式下显式 account 参数与状态隔离
+- `~/Projects/GitHub/tqsdk-python/tqsdk/risk_manager.py`
+  - 下单前统一风控检查入口
+- `~/Projects/GitHub/tqsdk-python/tqsdk/backtest.py`
+  - 实盘、模拟、回测、回放共享策略心智
+- `~/Projects/GitHub/tqsdk-python/tqsdk/tools/downloader.py`
+  - 历史 tick / K线下载、进度和 CSV 落盘
+- `~/Projects/GitHub/tqsdk-python/tqsdk/scenario/tqscenario.py`
+  - 保证金和持仓变动的 what-if 场景试算
+
+结合当前 Rust 侧审查材料：
+
+- [`docs/public-api-scenario-review.md`](../public-api-scenario-review.md)
+- [`docs/scenarios/api_gaps/`](api_gaps/)
+- [`docs/architecture/crate-boundaries.md`](../architecture/crate-boundaries.md)
+- [`docs/architecture/facade-paradigms.md`](../architecture/facade-paradigms.md)
+
+## 使用者分层
+
+| 使用者 | 主要需求 | Rust 推荐入口 | 对应场景 | 迭代判断 |
+| --- | --- | --- | --- | --- |
+| 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情 | `tqsdk-core` + `tqsdk-session` | 5, 23 | 维持薄底座，不上移厚 facade |
+| 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10 | 继承 Python 语义，不复制 Python 单体 |
+| async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk-stream` + `tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
+| 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19 | 建立执行层抽象，不下沉到 core |
+| 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18 | 独立数据层，不污染 session/wait |
+| 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
+| 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 后续独立 facade 或 `tqsdk-stream` 上层 | 14 | 晚于事件语义稳定后推进 |
+
+## 从 Python SDK 对齐的语义，不对齐的形状
+
+应对齐的成熟语义：
+
+- 初始化后先获得可用状态截面，再运行用户策略。
+- 重连时自动恢复订阅和交易同步，恢复完成前不让用户误读半截面。
+- 下单 intent 和订单状态必须可恢复、可对账、可解释。
+- 同账户同合约的执行任务需要 ownership 约束。
+- 多账户模式必须显式账户归属，不能共享模糊状态。
+- 风控应在下单入口统一执行，而不是散落在策略代码里。
+- 实盘、模拟、回放、测试应尽可能共享同一套策略事件模型。
+- 历史数据、缓存、下载和研究批处理应有独立用户入口。
+
+不应照搬的 API 形状：
+
+- 不把所有能力塞回一个 Rust 版单体 `TqApi`。
+- 不要求普通用户直接使用 Python 式 `TqChan` / task 编排心智。
+- 不在 `tqsdk-core` 拥有 event loop 或暴露 provider 私有协议。
+- 不用原地更新 DataFrame 作为 Rust 研究层的唯一表达。
+- 不为了 API 名字兼容牺牲 crate 边界和类型安全。
+
+## 推荐迭代顺序
+
+### P0：启动 / 重连恢复语义
+
+服务的使用者：
+
+- 单策略作者
+- async 系统集成方
+- 执行工具用户
+
+目标：
+
+- 建立启动 ready barrier。
+- 建立重连 resync barrier。
+- 订阅意图在重连后自动恢复。
+- 交易账户登录后能等待订单、成交、持仓、资金同步完成。
+- 恢复期间对外暴露 typed recovery event，而不是 provider protocol 细节。
+
+建议落点：
+
+- `tqsdk-session`：恢复 substrate、订阅意图记录、route/trade sync 状态。
+- `tqsdk-wait`：单策略用户的 `wait_ready()` / `recover_ready()` 风格薄包装。
+- `tqsdk-stream`：多消费者用户的 `recovery_events()` / ready stream。
+
+优先提升的场景：
+
+- `api_contract_s09_startup_state_recovery`
+- `api_contract_s02_dynamic_subscriptions`
+- `api_contract_s20_production_daemon` 的健康状态子集
+
+### P0：订单 intent 与断线一致性
+
+服务的使用者：
+
+- 单策略作者
+- 执行工具用户
+- 生产系统用户
+
+目标：
+
+- 把用户下单意图建模为 typed `OrderIntent`，而不是一次性函数调用副作用。
+- client order id 成为一等类型。
+- command ledger 能从本地意图、发送状态、交易回报和恢复对账解释订单状态。
+- 重连后能区分：未发送、已发送未确认、已确认、被拒、未知待对账、终态。
+
+建议落点：
+
+- `tqsdk-core`：只在现有 command/order 状态机确有缺口时补最小 contract。
+- `tqsdk-session`：保存可恢复命令意图和对账 substrate。
+- `tqsdk-wait` / `tqsdk-stream`：提供不同消费形状下的 `OrderRef` / 订单事件。
+- `tqsdk-task`：执行任务只消费 intent/result，不私造第二套订单状态。
+
+优先提升的场景：
+
+- `api_contract_s10_reconnect_order_consistency`
+- `api_contract_s06_limit_order`
+- `api_contract_s07_cancel_partial_fill`
+
+### P1：执行层抽象
+
+服务的使用者：
+
+- 自动调仓用户
+- 套利和多腿策略用户
+- 多账户交易用户
+
+目标：
+
+- 稳固 `TargetPosTask` ownership，避免手动下单与任务下单互相踩状态。
+- 新增 execution group 表达两腿 / 多腿订单生命周期。
+- 支持最大裸露量、超时撤单、补单、对冲和人工介入结果。
+- 新增 account group 和 allocation policy，明确多账户状态隔离。
+
+建议落点：
+
+- `tqsdk-task`：`ExecutionGroup`、`HedgePolicy`、`AccountGroup`、allocation policy。
+- `tqsdk-wait` / `tqsdk-stream`：只提供所需 live state 和 order event。
+
+优先提升的场景：
+
+- `api_contract_s11_simple_strategy`
+- `api_contract_s12_spread_arbitrage`
+- `api_contract_s13_multi_account_ordering`
+
+### P1：风控前置与 what-if 试算
+
+服务的使用者：
+
+- 实盘策略作者
+- 多账户执行用户
+- 生产部署用户
+
+目标：
+
+- 下单前统一检查资金、持仓、价格、合约、限额和频率。
+- 风控规则能组合、能解释拒单原因。
+- 提供轻量 what-if 试算，用于开仓前估算保证金和持仓变化。
+
+建议落点：
+
+- `tqsdk-task`：`RiskManager` / `PreTradeGuard` / 风控规则组合。
+- `tqsdk-data` 或 task 上层工具：离线或本地 what-if 试算，避免污染 core。
+
+优先提升的场景：
+
+- `api_contract_s19_pre_trade_risk`
+
+### P1：策略运行时与可测试性
+
+服务的使用者：
+
+- 希望同一策略跑 live / sim / replay 的用户
+- 希望单元测试策略的用户
+
+目标：
+
+- 提供统一策略事件模型。
+- fake market / fake broker / deterministic clock 成为 public test support。
+- 用户不需要在测试里手动搭 runtime state、channel 或 provider protocol。
+
+建议落点：
+
+- `tqsdk-task`：策略运行时与执行桥接。
+- 后续可评估独立 `tqsdk-testing`，但不应过早拆 crate。
+- replay/history 数据来源复用 `tqsdk-session` / `tqsdk-data`。
+
+优先提升的场景：
+
+- `api_contract_s15_live_sim_replay_switch`
+- `api_contract_s16_history_replay_strategy`
+- `api_contract_s24_testable_strategy`
+
+### P2：生产守护、慢消费者隔离和错误诊断
+
+服务的使用者：
+
+- async 系统集成方
+- 生产部署用户
+- 写库、日志、监控组件作者
+
+目标：
+
+- 健康状态、恢复状态、错误分类、重试策略成为 typed event。
+- 慢消费者策略明确：drop、lag error、可靠队列、专用 sink。
+- 优雅关闭和 metrics hook 有稳定入口。
+
+建议落点：
+
+- `tqsdk-stream`：health/recovery/error event stream、sink isolation。
+- `tqsdk-session`：底层连接和登录错误分类。
+
+优先提升的场景：
+
+- `api_contract_s20_production_daemon`
+- `api_contract_s21_slow_consumer_isolation`
+- `api_contract_s22_error_diagnosis_retry`
+
+### P2：本地行情缓存与研究闭环
+
+服务的使用者：
+
+- 研究用户
+- 多策略共享行情用户
+- 回放和测试用户
+
+目标：
+
+- live 行情可以写入本地缓存。
+- 其他进程或策略可以读取缓存快照和增量。
+- 历史数据、缓存数据和 replay driver 能接到同一策略事件模型。
+
+建议落点：
+
+- `tqsdk-data`：cache writer / reader / export / import。
+- `tqsdk-stream`：live sink adapter。
+- `tqsdk-task`：策略 replay driver 只消费标准事件。
+
+优先提升的场景：
+
+- `api_contract_s18_local_market_cache`
+- `api_contract_s16_history_replay_strategy`
+- `api_contract_s17_research_kline_batch`
+
+### P3：多 provider 行情聚合
+
+服务的使用者：
+
+- 基础设施用户
+- 低延迟或高可用行情系统
+
+目标：
+
+- 标准化 provider id、source timestamp、接收 timestamp、质量状态。
+- 明确冲突合并策略和 provider 级健康状态。
+- 不影响单 provider 用户的简单路径。
+
+建议落点：
+
+- 优先作为 `tqsdk-stream` 之上的独立聚合 facade 设计。
+- 只有当 aggregation contract 成为多个上层 crate 共同依赖时，再评估是否新增 crate。
+
+优先提升的场景：
+
+- `api_contract_s14_multi_provider_market_aggregation`
+
+## 每个场景后续要补的元信息
+
+后续新增或提升 `api_contract_sXX_*.rs` 时，除原有文件头模板外，建议增加：
+
+- Primary user layer：该示例主要服务哪类用户。
+- Intended crate path：推荐使用哪些 crate 组合。
+- Lower-level escape hatch：高级用户是否可以用更低层 API 完成。
+- Non-goal：明确本层不承诺什么。
+
+这样 review 的重点会从“像不像 Python API”转向“是否满足该类 Rust 用户的合理路径”。
+
+## 验收原则
+
+每次修复 gap 时必须同时回答：
+
+- 这个能力服务哪类使用者？
+- 是否放在了该使用者应使用的 crate 层？
+- 是否把更低层用户不需要的抽象强加给了他们？
+- 是否让高层用户暴露了 provider protocol、runtime command 或手写异步编排？
+- 是否维持单一 runtime commit / revision / command lifecycle？
+- 是否能把对应 gap sketch 提升为正式 example？
+
+如果答案不清楚，应先补文档和 example sketch，再写实现。
