@@ -26,20 +26,46 @@
 //! - 当前 API 是否自然表达部分成交撤单？
 //! - 订单生命周期是否类型安全？
 //! - 是否存在漏撤或误判终态的资金安全风险？
-//!
-//! API gap:
-//! 当前 `Order` 已有 typed `lifecycle` 和 `volume_left`，但 wait facade
-//! 缺少 `order.cancel(&mut api).await?`、`wait_partially_filled()`、
-//! `wait_terminal()` 这类用户级 helper。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let order = api.limit_order(account.id(), "SHFE.au2602").buy_open(3).at(480.0).send().await?;
-//! let partial = order.wait_partially_filled(&mut api).await?;
-//! assert!(partial.volume_left > 0);
-//! order.cancel_remaining(&mut api).await?;
-//! let final_state = order.wait_terminal(&mut api).await?;
-//! assert!(final_state.lifecycle.is_terminal());
-//! ```
 
-fn main() {}
+use tqsdk_core::{TradeDirection, TradeOffset};
+use tqsdk_wait::TqApiBuilder;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let mut api = TqApiBuilder::new(user, pass)
+        .futures_market()
+        .trade_target_tqkq()
+        .build()
+        .await?;
+    let account_id = std::env::var("TQ_ACCOUNT_ID")?;
+
+    let order = api
+        .insert_limit_order(
+            account_id.as_str(),
+            "SHFE.au2602",
+            TradeDirection::Buy,
+            Some(TradeOffset::Open),
+            3,
+            480.0,
+        )
+        .await?;
+
+    let partial = order.wait_partially_filled(&mut api).await?;
+    println!(
+        "partial order={} left={}",
+        partial.order_id, partial.volume_left
+    );
+
+    order.cancel_remaining(&mut api).await?;
+
+    let final_state = order.wait_terminal(&mut api).await?;
+    println!(
+        "final order={} lifecycle={}",
+        final_state.order_id,
+        final_state.lifecycle.as_str()
+    );
+
+    Ok(())
+}

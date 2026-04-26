@@ -68,6 +68,11 @@ wait adapter 层未来可以提供：
   的薄便利层存在，用来从用户路径移除 `serde_json::Value` 价格参数；
   它仍必须只提交到底层 command contract，不做本地伪造订单状态或第二棵
   trade state。
+- `OrderRef::cancel_remaining()`、`wait_partially_filled()`、
+  `wait_terminal()` 这类订单 helper 可以作为 wait facade 的薄便利层存在；
+  它们必须只读取 `read_trade_state()` 暴露的 typed order 状态并复用
+  `TqApi::wait_update()` 推进，不得绕过 runtime order lifecycle 校验，也不得
+  新增本地订单 overlay。
 
 ## 为什么单独保留这份文档
 因为 Python 兼容性的大部分难点都在 wait facade 层，而不在 V1 contract 层。

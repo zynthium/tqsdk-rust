@@ -277,6 +277,64 @@ pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
 }
 
 #[allow(dead_code)]
+pub fn seed_order_update(
+    api: &mut TqApi,
+    account_id: &str,
+    symbol: &str,
+    order_id: &str,
+    volume_orign: i64,
+    volume_left: i64,
+    status: &str,
+    is_dead: bool,
+) {
+    let commit = api
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "orders": {
+                                    order_id: {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": order_id,
+                                        "exchange_order_id": "exchange-order-1",
+                                        "exchange_id": "SHFE",
+                                        "instrument_id": symbol,
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "volume_orign": volume_orign,
+                                        "volume_left": volume_left,
+                                        "limit_price": 618.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "status": status,
+                                        "is_dead": is_dead,
+                                        "trade_price": 618.0
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed order update should produce a commit");
+
+    api.push_deferred_commit_for_test(commit);
+}
+
+#[allow(dead_code)]
 pub fn seed_trade_extended_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
     let commit = api
         .handle_for_test()

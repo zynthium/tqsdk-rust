@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use tqsdk_core::{
-    Account, AccountId, ObjectKey, Order, OrderId, Position, PreInsertOrder, RiskManagementData,
-    RiskManagementRule, SettlementInfo, StatePath, Symbol, Trade, TradeId,
+    Account, AccountId, ObjectKey, Order, OrderId, OrderLifecycle, Position, PreInsertOrder,
+    RiskManagementData, RiskManagementRule, SettlementInfo, StatePath, Symbol, Trade, TradeId,
 };
 
 use crate::{api::TqApi, change::ChangeTrackedRef};
@@ -212,6 +212,98 @@ impl OrderRef {
                 "order not ready",
             ))
     }
+
+    pub async fn cancel(&self, api: &mut TqApi) -> crate::error::Result<()> {
+        api.cancel_order(self.account_id.as_str(), self.order_id.as_str())
+            .await
+    }
+
+    pub async fn cancel_remaining(&self, api: &mut TqApi) -> crate::error::Result<()> {
+        if let Some(order) = self.snapshot(api)?
+            && (order.volume_left <= 0 || order.lifecycle.is_terminal())
+        {
+            return Ok(());
+        }
+
+        self.cancel(api).await
+    }
+
+    pub async fn wait_partially_filled(&self, api: &mut TqApi) -> crate::error::Result<Order> {
+        self.wait_partially_filled_with_deadline(api, None).await
+    }
+
+    pub async fn wait_partially_filled_until(
+        &self,
+        api: &mut TqApi,
+        deadline: tokio::time::Instant,
+    ) -> crate::error::Result<Order> {
+        self.wait_partially_filled_with_deadline(api, Some(deadline))
+            .await
+    }
+
+    pub async fn wait_terminal(&self, api: &mut TqApi) -> crate::error::Result<Order> {
+        self.wait_terminal_with_deadline(api, None).await
+    }
+
+    pub async fn wait_terminal_until(
+        &self,
+        api: &mut TqApi,
+        deadline: tokio::time::Instant,
+    ) -> crate::error::Result<Order> {
+        self.wait_terminal_with_deadline(api, Some(deadline)).await
+    }
+
+    async fn wait_partially_filled_with_deadline(
+        &self,
+        api: &mut TqApi,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<Order> {
+        loop {
+            if let Some(order) = self.snapshot(api)? {
+                if is_partially_filled(&order) {
+                    return Ok(order);
+                }
+                if order.lifecycle.is_terminal() {
+                    return Err(crate::error::WaitFacadeError::InvalidState(
+                        "order reached terminal state before partial fill",
+                    ));
+                }
+            }
+
+            if !api.wait_update(deadline).await? {
+                return Err(crate::error::WaitFacadeError::InvalidState(
+                    "order partial fill not ready",
+                ));
+            }
+        }
+    }
+
+    async fn wait_terminal_with_deadline(
+        &self,
+        api: &mut TqApi,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<Order> {
+        loop {
+            if let Some(order) = self.snapshot(api)?
+                && order.lifecycle.is_terminal()
+            {
+                return Ok(order);
+            }
+
+            if !api.wait_update(deadline).await? {
+                return Err(crate::error::WaitFacadeError::InvalidState(
+                    "order terminal state not ready",
+                ));
+            }
+        }
+    }
+}
+
+fn is_partially_filled(order: &Order) -> bool {
+    order.lifecycle == OrderLifecycle::PartiallyFilled
+        || (order.volume_orign > 0
+            && order.volume_left > 0
+            && order.volume_left < order.volume_orign)
 }
 
 impl ChangeTrackedRef for OrderRef {

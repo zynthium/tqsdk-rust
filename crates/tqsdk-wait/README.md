@@ -69,6 +69,12 @@
 - `insert_order(...).await`
 - `insert_limit_order(...).await`
 - `cancel_order(...).await`
+- `OrderRef::cancel(...).await`
+- `OrderRef::cancel_remaining(...).await`
+- `OrderRef::wait_partially_filled(...).await`
+- `OrderRef::wait_partially_filled_until(...).await`
+- `OrderRef::wait_terminal(...).await`
+- `OrderRef::wait_terminal_until(...).await`
 - `confirm_settlement(...).await`
 - `session()`
 - `into_session()`
@@ -114,6 +120,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户可见的
 `last_commit()` / `is_changing()` 截面解释不被内部等待破坏。契约示例见
 [examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
+
+订单撤单和状态等待优先走 `OrderRef` helper：`cancel_remaining()` 会保留订单归属
+上下文，`wait_partially_filled()` / `wait_terminal()` 直接返回 typed `Order`，
+业务代码不需要解析 `status` 字符串或手写 terminal-state 轮询。契约示例见
+[examples/api_contract_s07_cancel_partial_fill.rs](examples/api_contract_s07_cancel_partial_fill.rs)。
 
 如果要证明 wait facade 可以复用同一个底层 session 做 direct query，而不需要额外建第二个 client，可参考 [examples/quote_wait_with_session_query.rs](examples/quote_wait_with_session_query.rs)。
 

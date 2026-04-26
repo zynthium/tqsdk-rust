@@ -1,7 +1,9 @@
 mod support;
 
 use serde_json::json;
-use tqsdk_core::{OutboundFrame, OutboundRequest, ProtocolDomain, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain, TradeDirection, TradeOffset,
+};
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
@@ -276,4 +278,48 @@ async fn cancel_order_and_confirm_settlement_submit_trade_commands() {
 
     let confirm_payload = transport_payload(&dispatches[1].request);
     assert_eq!(confirm_payload["aid"], "confirm_settlement");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn order_ref_helpers_wait_cancel_remaining_and_terminal_state() {
+    let mut api = support::seeded_api();
+    let order = api.get_order("sim", "order-1");
+
+    support::seed_order_update(
+        &mut api,
+        "sim",
+        "SHFE.ao2602",
+        "order-1",
+        3,
+        1,
+        "ALIVE",
+        false,
+    );
+
+    let partial = order.wait_partially_filled(&mut api).await.unwrap();
+    assert_eq!(partial.lifecycle, OrderLifecycle::PartiallyFilled);
+    assert_eq!(partial.volume_left, 1);
+
+    order.cancel_remaining(&mut api).await.unwrap();
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let cancel_payload = transport_payload(&dispatches[0].request);
+    assert_eq!(cancel_payload["aid"], "cancel_order");
+    assert_eq!(cancel_payload["user_id"], "sim");
+    assert_eq!(cancel_payload["order_id"], "order-1");
+
+    support::seed_order_update(
+        &mut api,
+        "sim",
+        "SHFE.ao2602",
+        "order-1",
+        3,
+        1,
+        "FINISHED",
+        true,
+    );
+
+    let terminal = order.wait_terminal(&mut api).await.unwrap();
+    assert_eq!(terminal.lifecycle, OrderLifecycle::Cancelled);
+    assert!(terminal.lifecycle.is_terminal());
 }
