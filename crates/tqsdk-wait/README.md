@@ -66,6 +66,7 @@
 - `get_security_position(...)`
 - `get_security_order(...)`
 - `get_security_trade(...)`
+- `login_trade_account(...).await`
 - `insert_order(...).await`
 - `insert_limit_order(...).await`
 - `cancel_order(...).await`
@@ -120,6 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户可见的
 `last_commit()` / `is_changing()` 截面解释不被内部等待破坏。契约示例见
 [examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
+
+交易登录优先走 `TqApi::login_trade_account(...)`：builder 负责配置 trade route，
+该 helper 负责提交 typed login request 并等待账户对象 ready，业务代码不需要构造
+`TradeLoginCommand`。
 
 订单撤单和状态等待优先走 `OrderRef` helper：`cancel_remaining()` 会保留订单归属
 上下文，`wait_partially_filled()` / `wait_terminal()` 直接返回 typed `Order`，

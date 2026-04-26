@@ -27,9 +27,51 @@
 //! - 当前 API 是否自然表达账户/持仓 live ref？
 //! - 是否暴露内部路径？
 //! - 是否存在状态一致性风险？
-//!
-//! Current API note:
-//! `TqApi::get_account()` 和 `TqApi::get_position()` 能表达 typed refs；
-//! 主要缺口在交易登录/账户 ready 仍偏底层，导致完整用户代码样板偏高。
 
-fn main() {}
+use std::time::Duration;
+
+use tqsdk_core::TradeAccountType;
+use tqsdk_wait::TqApiBuilder;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let broker_id = std::env::var("TQ_BROKER_ID")?;
+    let account_id = std::env::var("TQ_ACCOUNT_ID")?;
+    let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
+    let symbol = std::env::var("TQ_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".to_string());
+
+    let mut api = TqApiBuilder::new(user, pass)
+        .futures_market()
+        .trade_target(broker_id.clone(), account_id.clone())
+        .build()
+        .await?;
+    let account = api
+        .login_trade_account(
+            broker_id.as_str(),
+            account_id.as_str(),
+            account_password.as_str(),
+            TradeAccountType::Future,
+            Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+        )
+        .await?;
+    let position = api.get_position(account_id.as_str(), symbol.as_str());
+
+    println!("account balance={}", account.load(&api)?.balance);
+
+    loop {
+        if !api.wait_update(None).await? {
+            continue;
+        }
+
+        if api.is_changing(&account)? {
+            println!("available={}", account.load(&api)?.available);
+        }
+
+        if api.is_changing(&position)? {
+            let snapshot = position.load(&api)?;
+            println!("{} pos={}", symbol, snapshot.pos);
+        }
+    }
+}

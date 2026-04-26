@@ -2,7 +2,8 @@ mod support;
 
 use serde_json::json;
 use tqsdk_core::{
-    OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain, TradeDirection, TradeOffset,
+    OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain, TradeAccountType,
+    TradeDirection, TradeOffset,
 };
 
 fn compact_source(source: &str) -> String {
@@ -64,6 +65,33 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
     assert_eq!(payload["price_type"], "LIMIT");
     assert_eq!(payload["time_condition"], "GFD");
     assert_eq!(payload["limit_price"], 618.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn login_trade_account_submits_typed_login_and_waits_for_account_ready() {
+    let mut api = support::seeded_api();
+    support::seed_trade_snapshot(&mut api, "sim", "SHFE.ao2602");
+
+    let account = api
+        .login_trade_account("9999", "sim", "secret", TradeAccountType::Future, None)
+        .await
+        .unwrap();
+
+    assert_eq!(account.load(&api).unwrap().currency, "CNY");
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
+    assert_eq!(
+        dispatches[0].account_id.as_ref().map(|id| id.as_str()),
+        Some("sim")
+    );
+
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "req_login");
+    assert_eq!(payload["bid"], "9999");
+    assert_eq!(payload["user_name"], "sim");
+    assert_eq!(payload["password"], "secret");
 }
 
 #[tokio::test(flavor = "current_thread")]

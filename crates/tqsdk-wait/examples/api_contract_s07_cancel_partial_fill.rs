@@ -27,19 +27,31 @@
 //! - 订单生命周期是否类型安全？
 //! - 是否存在漏撤或误判终态的资金安全风险？
 
-use tqsdk_core::{TradeDirection, TradeOffset};
+use std::time::Duration;
+
+use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = std::env::var("TQ_AUTH_USER")?;
     let pass = std::env::var("TQ_AUTH_PASS")?;
+    let broker_id = std::env::var("TQ_BROKER_ID")?;
+    let account_id = std::env::var("TQ_ACCOUNT_ID")?;
+    let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
     let mut api = TqApiBuilder::new(user, pass)
         .futures_market()
-        .trade_target_tqkq()
+        .trade_target(broker_id.clone(), account_id.clone())
         .build()
         .await?;
-    let account_id = std::env::var("TQ_ACCOUNT_ID")?;
+    api.login_trade_account(
+        broker_id.as_str(),
+        account_id.as_str(),
+        account_password.as_str(),
+        TradeAccountType::Future,
+        Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+    )
+    .await?;
 
     let order = api
         .insert_limit_order(
@@ -52,7 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    let partial = order.wait_partially_filled(&mut api).await?;
+    let partial = order
+        .wait_partially_filled_until(
+            &mut api,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await?;
     println!(
         "partial order={} left={}",
         partial.order_id, partial.volume_left
@@ -60,7 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     order.cancel_remaining(&mut api).await?;
 
-    let final_state = order.wait_terminal(&mut api).await?;
+    let final_state = order
+        .wait_terminal_until(
+            &mut api,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await?;
     println!(
         "final order={} lifecycle={}",
         final_state.order_id,

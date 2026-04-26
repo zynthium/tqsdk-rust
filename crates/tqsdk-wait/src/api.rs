@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use serde_json::{Number, Value};
 use tqsdk_core::{
-    AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
-    TradeVolumeCondition,
+    AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol,
+    TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
+    TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 use tqsdk_session::SessionClient;
 
@@ -299,6 +299,42 @@ impl TqApi {
             .await?;
 
         Ok(serial)
+    }
+
+    pub async fn login_trade_account(
+        &mut self,
+        broker_id: &str,
+        account_id: &str,
+        password: &str,
+        account_type: TradeAccountType,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<AccountRef> {
+        self.driver
+            .session
+            .submit(RuntimeCommand::Trade(TradeCommand::Login(
+                TradeLoginCommand {
+                    account_id: AccountId::new(account_id),
+                    broker_id: broker_id.to_owned(),
+                    password: password.to_owned(),
+                    account_type,
+                    front_broker: None,
+                    front_url: None,
+                    client_app_id: None,
+                    client_system_info: None,
+                },
+            )))
+            .await
+            .map_err(crate::error::WaitFacadeError::Session)?;
+
+        let account = self.get_account(account_id);
+        self.wait_until_ready_until_for_test(
+            |api| account.is_ready(api),
+            deadline,
+            "trade account not ready",
+        )
+        .await?;
+
+        Ok(account)
     }
 
     pub async fn insert_order(

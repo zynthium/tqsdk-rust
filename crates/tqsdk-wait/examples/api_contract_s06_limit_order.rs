@@ -27,34 +27,60 @@
 //! - 当前 API 是否自然表达普通限价单？
 //! - 是否暴露交易协议细节？
 //! - 是否存在资金安全或重复下单风险？
-//!
-//! API gap:
-//! 当前 `TqApi::insert_limit_order` 已经能用 typed `f64` 价格提交限价单，
-//! `OrderRef::wait_terminal()` 也能避免用户手写订单终态轮询；但 trade
-//! login / account ready 仍缺少完全用户级 API，完整场景还不能自然表达。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let mut api = TqApiBuilder::new(user, pass)
-//!     .futures_market()
-//!     .trade_target_tqkq()
-//!     .build()
-//!     .await?;
-//! let account = api.login_default_trade_account().await?;
-//!
-//! let order = api
-//!     .insert_limit_order(
-//!         account.id(),
-//!         "SHFE.au2602",
-//!         TradeDirection::Buy,
-//!         Some(TradeOffset::Open),
-//!         1,
-//!         480.0,
-//!     )
-//!     .await?;
-//!
-//! let finished = order.wait_terminal(&mut api).await?;
-//! println!("{:?}", finished.lifecycle);
-//! ```
 
-fn main() {}
+use std::time::Duration;
+
+use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
+use tqsdk_wait::TqApiBuilder;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let broker_id = std::env::var("TQ_BROKER_ID")?;
+    let account_id = std::env::var("TQ_ACCOUNT_ID")?;
+    let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    let mut api = TqApiBuilder::new(user, pass)
+        .futures_market()
+        .trade_target(broker_id.clone(), account_id.clone())
+        .build()
+        .await?;
+    let account = api
+        .login_trade_account(
+            broker_id.as_str(),
+            account_id.as_str(),
+            account_password.as_str(),
+            TradeAccountType::Future,
+            Some(deadline),
+        )
+        .await?;
+    let balance = account.load(&api)?.balance;
+    println!("account={} balance={}", account_id, balance);
+
+    let order = api
+        .insert_limit_order(
+            account_id.as_str(),
+            "SHFE.au2602",
+            TradeDirection::Buy,
+            Some(TradeOffset::Open),
+            1,
+            480.0,
+        )
+        .await?;
+
+    let finished = order
+        .wait_terminal_until(
+            &mut api,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await?;
+    println!(
+        "order={} lifecycle={}",
+        finished.order_id,
+        finished.lifecycle.as_str()
+    );
+
+    Ok(())
+}
