@@ -70,7 +70,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `tqsdk-session` 现已提供 `progress_once()` 与 `wait_command_completed()` 这两个最小 substrate/control-plane 原语，并用真实联机示例验证了纯 substrate 的行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`，并已用真实示例验证 `stream.session()` 复用同一底层 session 做 direct query 的边界；后续重点转向 notification/transport-error 级 trade session 事件流。
-- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、ownership / guarded order / execution report（原始事件流 + 聚合摘要）。
+- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、execution group foundation、ownership / guarded order / execution report（原始事件流 + 聚合摘要）。
 - `tqsdk-data` 已落地独立 crate 骨架、`DataClient`、`query_his_cont_quotes`、history `data_page` / `data_series` 与 pull-based `data_download` substrate。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
@@ -91,6 +91,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 - `crates/tqsdk-stream/examples/trade_session_events.rs`
 - `crates/tqsdk-task/examples/target_pos.rs`
 - `crates/tqsdk-task/examples/target_pos_scheduler.rs`
+- `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
 - `crates/tqsdk-data/examples/kline_data_page.rs`
 - `crates/tqsdk-data/examples/kline_data_series.rs`

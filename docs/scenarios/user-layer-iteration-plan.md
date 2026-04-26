@@ -181,15 +181,27 @@ crate 分层合并成一份迭代计划。
 - 支持最大裸露量、超时撤单、补单、对冲和人工介入结果。
 - 新增 account group 和 allocation policy，明确多账户状态隔离。
 
+已落地：
+
+- `ExecutionGroup` foundation 支持 typed group id、两腿订单、all-leg preflight、
+  session-scoped retry idempotency 和 group outcome/exposure report。
+
+仍未完成、不可伪装为已支持：
+
+- 自动 hedge / flatten；
+- timed cancel / replace；
+- `AccountGroup` 与 allocation policy；
+- group resume / audit log。
+
 建议落点：
 
-- `tqsdk-task`：`ExecutionGroup`、`HedgePolicy`、`AccountGroup`、allocation policy。
+- `tqsdk-task`：在当前 `ExecutionGroup` 上继续扩展 `HedgePolicy`、`AccountGroup`、allocation policy。
 - `tqsdk-wait` / `tqsdk-stream`：只提供所需 live state 和 order event。
 
 优先提升的场景：
 
 - `api_contract_s11_simple_strategy`
-- `api_contract_s12_spread_arbitrage`
+- `api_contract_s12_spread_arbitrage`（foundation 已提升为正式 task example）
 - `api_contract_s13_multi_account_ordering`
 
 ### P1：风控前置与 what-if 试算

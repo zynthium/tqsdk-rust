@@ -42,6 +42,7 @@
   - 手动下单冲突保护
   - task-level typed order builder
   - 最小 pre-trade risk gate
+  - execution group foundation
   - 事件流 + 稳定聚合摘要的 execution report
 
 原因很直接：
@@ -57,6 +58,7 @@
 - guarded `insert_order` / `cancel_order`
 - typed `TaskHost::orders(...)` order builder
 - `RiskEngine` / `RiskRejection` 最小前置风控
+- `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -106,7 +108,8 @@
 当前还未落地：
 
 - 更复杂的多单/多批次主动撤单后重规划
-- 合约 metadata 规则、组合级 what-if 保证金试算、多腿 / 多账户联合风控
+- 自动 hedge / flatten、timed cancel / replace、group resume / audit
+- 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 
 ## 为什么它必须独立成 crate
 
@@ -234,6 +237,11 @@ impl TaskHost {
 
     pub fn orders(&mut self, account_id: impl AsRef<str>) -> TaskOrderBuilder<'_>;
 
+    pub fn execution_group(
+        &mut self,
+        account_id: impl AsRef<str>,
+    ) -> ExecutionGroupBuilder<'_>;
+
     pub fn target_pos(
         &mut self,
         account_id: impl AsRef<str>,
@@ -272,6 +280,8 @@ impl TaskHost {
 - `orders(...)` 是 task 层 typed 手动下单入口，复用 wait 层 `OrderTicket`，
   不创建第二套订单状态
 - 配置 `RiskEngine` 后，typed order builder 与 legacy guarded insert 都必须经过同一套 risk gate
+- `execution_group(...)` 是 task 层多腿 foundation，复用相同 risk/ownership preflight 和 wait 层
+  `OrderTicket`，只报告 group outcome/exposure，不自动提交 hedge 单
 - guarded cancel 需要先从本地状态解析订单对应 symbol；若订单尚未进入状态树，第一版应保守拒绝
 - 不要求 `tqsdk-wait` 反向感知 task registry
 
@@ -368,6 +378,55 @@ pub enum RiskRejection {
 - 风控拒绝必须是 typed reason，不能要求业务代码解析字符串拒单原因。
 - 这一版只覆盖最小 pre-trade gate；合约 metadata、组合保证金 what-if、
   多腿 / 多账户联合限额属于后续 execution/risk layer 扩展。
+
+### execution group foundation
+
+```rust
+pub enum HedgePolicy {
+    ReportExposure,
+    FlattenFilledLegs,
+}
+
+pub struct ExecutionGroupBuilder<'a> {
+    /* private */
+}
+
+impl<'a> ExecutionGroupBuilder<'a> {
+    pub fn client_group_id(self, group_id: impl Into<String>) -> Self;
+    pub fn max_unhedged(self, duration: std::time::Duration) -> Self;
+    pub fn on_leg_failed(self, policy: HedgePolicy) -> Self;
+    pub fn leg(self, symbol: impl AsRef<str>) -> ExecutionLegBuilder<'a>;
+    pub async fn send_once(self) -> tqsdk_task::Result<ExecutionGroupTicket>;
+}
+
+pub struct ExecutionGroupTicket {
+    /* private */
+}
+
+impl ExecutionGroupTicket {
+    pub fn group_id(&self) -> &str;
+    pub fn legs(&self) -> &[ExecutionLegTicket];
+    pub fn status(&self, api: &tqsdk_wait::TqApi) -> tqsdk_task::Result<ExecutionGroupStatus>;
+    pub fn outcome(
+        &self,
+        api: &tqsdk_wait::TqApi,
+    ) -> tqsdk_task::Result<Option<ExecutionGroupOutcome>>;
+    pub async fn wait_finished(
+        &self,
+        host: &mut TaskHost,
+        deadline: tokio::time::Instant,
+    ) -> tqsdk_task::Result<ExecutionGroupOutcome>;
+}
+```
+
+设计意图：
+
+- execution group 属于 `tqsdk-task`，因为它维护的是业务执行意图、腿状态汇总和裸露风险解释。
+- 每条腿仍通过 wait 层 `OrderTicket` 和 session-scoped client intent ledger 提交，不创建 task 私有订单状态树。
+- group submit 会先对所有腿做 ownership/risk/local validation，避免“第一腿已发、第二腿本地拒绝”的 P0 风险。
+- 当前 `HedgePolicy::ReportExposure` 是唯一已支持策略；`FlattenFilledLegs` 明确返回 unsupported，
+  不伪装自动 hedge。
+- `ExecutionGroupOutcome::NeedsHedge` 是显式风险信号，调用方可以人工或后续 policy 层处理。
 
 ### target position task
 
@@ -526,8 +585,10 @@ impl TargetPosScheduler {
    `OrderTicket`。
 6. 配置 `RiskEngine` 后，typed order builder 与 `insert_order_guarded` 都会在提交前返回
    typed `RiskRejection`。
-7. scheduler 能按步骤推进并给出独立 execution report。
-8. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
+7. `ExecutionGroup` 能用 typed group id 提交两腿订单、先做 all-leg preflight，并给出
+   typed group outcome/exposure report。
+8. scheduler 能按步骤推进并给出独立 execution report。
+9. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
 
 ## 下一步建议
 

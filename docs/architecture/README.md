@@ -109,6 +109,7 @@ V1 是：
   - `TargetPosTask`
   - `TargetPosScheduler`
   - typed order builder / pre-trade risk gate
+  - execution group foundation
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
 - `tqsdk-data`
   - research/offline data crate

@@ -28,21 +28,29 @@
 //! - 是否存在 P0 级单腿裸露风险？
 //! - 应通过局部 task 扩展还是新增 execution group abstraction？
 //!
-//! API gap:
-//! 当前 task 层有单合约 `TargetPosTask` 和 scheduler，但没有 two-leg /
-//! execution group / hedge policy 的 public API。
+//! Remaining API gap:
+//! `tqsdk-task` 已提供最小 `ExecutionGroup` foundation：typed group id、
+//! all-leg preflight、idempotent leg order intents、group outcome 和 exposure report。
+//!
+//! 本文件保留的是更高阶执行缺口：
+//! - 自动 hedge / flatten filled legs；
+//! - timed cancel / replace；
+//! - 最大裸露量驱动的自动撤补；
+//! - 多账户或多腿组合的联合风控；
+//! - 人工介入后的 group resume / audit。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let group = host
-//!     .spread_order(account.id())
-//!     .leg("SHFE.au2602").buy_open(1)
-//!     .leg("SHFE.ag2602").sell_open(15)
+//!     .execution_group(account.id())
+//!     .client_group_id("spread-entry-001")
 //!     .max_unhedged(Duration::from_secs(2))
-//!     .on_leg_failed(HedgePolicy::FlattenFilledLegs)
-//!     .send()
+//!     .on_leg_failed(HedgePolicy::ReportExposure)
+//!     .leg("SHFE.au2602").buy_open(1).limit(480.0)
+//!     .leg("SHFE.ag2602").sell_open(15).limit(6500.0)
+//!     .send_once()
 //!     .await?;
-//! let outcome = group.wait_finished(&mut host).await?;
+//! let outcome = group.wait_finished(&mut host, deadline).await?;
 //! println!("{:?}", outcome);
 //! ```
 

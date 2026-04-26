@@ -31,7 +31,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 9. 启动后状态恢复 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s09_startup_state_recovery.rs`; `tqsdk_session::StartupRecoverySpec`; `TqApi::startup_recovery`; `TqStream::recover_state` |
 | 10. 断线重连中的订单一致性 | 自然 | 中 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s10_reconnect_order_consistency.rs`; `tqsdk_session::OrderIntentRecord`; `TqApi::limit_order`; `OrderTicket`; `OrderTicketState`; session-scoped reconnect is covered, cross-process persistence remains out of scope |
 | 11. 简单策略 | 勉强 | 中 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`; `TaskHost`; `TaskHost::orders`; `RiskEngine`; `TargetPosTask` |
-| 12. 跨合约套利 | 无法表达 | 高 | 严重 | 严重 | P0 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; no execution group / hedge policy API |
+| 12. 跨合约套利 | 勉强 | 中 | 无 | 无 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; `ExecutionGroupBuilder`; `ExecutionGroupOutcome`; automatic hedge remains gap |
 | 13. 多账户下单 | 无法表达 | 高 | 严重 | 严重 | 高 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `SessionClientBuilder::trade_target*`; no account group API |
 | 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
 | 15. 实盘 / 模拟 / 回放切换 | 勉强 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; builders have targets/replay URL, but no common strategy runtime |
@@ -48,6 +48,6 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 ## 主要结论
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
-2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent 和最小前置风控已具备薄 facade；跨进程持久恢复、组合级 what-if 风控和组合执行仍需继续补齐。
+2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控和 execution group foundation 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户组合执行仍需继续补齐。
 3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event 和 health snapshot 已有薄 facade；慢消费者 sink、完整 daemon supervisor/metrics 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
 4. 多 provider 聚合、统一策略 runtime、历史回放驱动策略、本地行情缓存、fake broker/test harness 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。
