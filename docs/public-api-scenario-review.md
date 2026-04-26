@@ -18,6 +18,22 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 版本通过 `core/session/wait/stream/task/data` 分层服务不同用户。后续 gap
 修复顺序见 [`scenarios/user-layer-iteration-plan.md`](scenarios/user-layer-iteration-plan.md)。
 
+## 批次状态
+
+截至 2026-04-27，上一批“execution group foundation”已经完成并验证：
+
+- S12 跨合约套利从“无法表达”推进到“勉强”：用户现在可以通过
+  `TaskHost::execution_group(...)` 表达两腿 typed 下单、全腿 preflight、
+  session-scoped retry idempotency 和 group outcome / exposure report。
+- S12 仍不能标记为“自然”：自动 hedge / flatten、timed cancel / replace、
+  group resume / audit log 仍是 API gap，保留在
+  `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`。
+- S13 多账户下单仍是“无法表达”：当前没有 typed account group、比例拆单、
+  per-account outcome 和多账户隔离执行入口；下一批计划应优先补齐这一层
+  `tqsdk-task` foundation，而不是要求用户循环调用多个单账户 order builder。
+  执行计划见
+  [`superpowers/plans/2026-04-27-task-account-group-allocation.md`](superpowers/plans/2026-04-27-task-account-group-allocation.md)。
+
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. 零门槛行情订阅 | 自然 | 低 | 无 | 无 | 低 | 无 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs`; `tqsdk_wait::TqApi::{get_quote, wait_update, is_changing}` |
