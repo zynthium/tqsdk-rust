@@ -28,20 +28,27 @@
 //! - 是否存在资金安全风险？
 //! - 应通过 task 层局部扩展还是独立 risk facade？
 //!
-//! API gap:
-//! `TaskHost::insert_order_guarded` 现在只做 task ownership guard，不是资金、
-//! 持仓、价格、合约和限额的通用 pre-trade risk engine。
+//! Remaining API gap:
+//! `tqsdk-task` 已提供最小 `RiskEngine`、typed rejection reason 和
+//! `TaskHost::orders(...).limit(...).send_once(...)` 风控下单入口。
+//!
+//! 本文件保留的是更高阶风控缺口：
+//! - 组合级资金/保证金 what-if simulation；
+//! - 多账户 / 多腿订单组的联合限额；
+//! - 合约 metadata 规则驱动的 tick size、涨跌停、品种级限额；
+//! - 策略级风控策略热更新与审计日志落库。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let risk = RiskEngine::new()
 //!     .max_order_volume(3)
-//!     .max_symbol_position("SHFE.au2602", 5)
-//!     .price_band_from_quote(5)
-//!     .require_available_margin()
-//!     .build();
+//!     .min_available(1000.0)
+//!     .max_net_position(5)
+//!     .max_price_deviation(20.0)
+//!     .with_portfolio_margin_simulation(margin_model)
+//!     .with_contract_rules(contract_catalog);
 //! let mut host = TaskHost::new(api).with_risk(risk);
-//! host.orders().buy_open("SHFE.au2602", 1).limit(480.0).send().await?;
+//! host.orders("sim").buy_open("SHFE.au2602", 1).limit(480.0).send_once("entry-1").await?;
 //! ```
 
 fn main() {}

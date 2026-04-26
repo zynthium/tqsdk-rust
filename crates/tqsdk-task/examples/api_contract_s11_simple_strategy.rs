@@ -29,9 +29,12 @@
 //! - 资金安全风险应由 task 层还是 strategy facade 处理？
 //!
 //! Current API note:
-//! `TaskHost + TargetPosTask` 可以覆盖“目标持仓”类简单策略，但普通
-//! signal-driven order ticket、成交后持仓确认、止盈止损平仓仍缺少直接
-//! public contract。
+//! `TaskHost + TargetPosTask` 可以覆盖“目标持仓”类简单策略。
+//! signal-driven order ticket 现在可以通过 `TaskHost::orders(...).buy_open(...).limit(...).send_once(...)`
+//! 表达，并可配置 `RiskEngine` 做前置风控。
+//!
+//! 仍未落地的是完整 `StrategyHost`：统一行情触发、订单 terminal wait、
+//! 成交后持仓确认、止盈止损平仓和策略级 cursor 的单一上下文。
 //!
 //! 理想用户代码草案：
 //! ```ignore
