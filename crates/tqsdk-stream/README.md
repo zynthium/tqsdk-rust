@@ -34,6 +34,9 @@
 - `TickWindow`
 - `KlineWindowStream`
 - `TickWindowStream`
+- `MarketEvent`
+- `MarketEventBuilder`
+- `MarketEventStream`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -60,6 +63,7 @@
 - `path_stream::<T>(...)`
 - `subscribe_quotes(...)`
 - `unsubscribe_quotes(...)`
+- `market_events()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
 - `kline_stream(...)`
@@ -99,7 +103,7 @@
 
 - 第一版只提供 raw commit stream，不预先冻结对象级 stream 形状
 - 第二版增量先补 commit 级 path / scope / domain / object / field 过滤，不直接跳到对象级 stream
-- 当前第三步已经补到 typed path、ready-window、账户级 trade object / trade session 事件流，以及 market/system/trade/security 单对象 stream；更高层 family API 仍未冻结
+- 当前第三步已经补到 typed path、ready-window、统一 market event、账户级 trade object / trade session 事件流，以及 market/system/trade/security 单对象 stream；更高层 family API 仍未冻结
 - `kline/tick` 的远端 chart 生命周期当前采用显式 `close()`，不做隐式 async drop
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
@@ -165,6 +169,11 @@ quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 `unsubscribe_quotes(...)` 表达，普通用户不需要直接提交
 `RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })`。当前这仍然是薄包装，
 尚未冻结 subscription handle 或重连后按 handle 恢复的用户级契约。
+
+如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
+`market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：
+内部提交 quote/chart 命令，并从同一条 commit fan-out 中投影 typed event；不维护
+第二棵状态树，也不复制 direct-query 能力。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

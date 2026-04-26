@@ -210,6 +210,7 @@ impl TqStream {
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>;
+    pub fn market_events(&self) -> MarketEventBuilder<'_>;
     pub async fn kline_stream(
         &self,
         symbol: impl AsRef<str>,
@@ -341,6 +342,10 @@ impl TqStream {
 - `subscribe_quotes()` / `unsubscribe_quotes()` 是 quote 订阅命令的薄包装，
   用来避免普通 stream 用户直接构造 `RuntimeCommand::Market`；它们不是
   subscription handle，也不改变订阅恢复语义。
+- `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；
+  它内部仍然只提交 quote/chart 命令并消费同一条 commit fan-out，不维护第二棵状态树。
+  quote 事件读 `read_market_state()` 分区；tick/kline ready window 沿用 chart/window
+  投影逻辑。
 - `kline_stream()/tick_stream()` 是最薄的 ready-window stream 包装：内部仍然只是提交 `set_chart`，然后基于同一条 commit fan-out 读取共享状态树
 - 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护 event journal
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义

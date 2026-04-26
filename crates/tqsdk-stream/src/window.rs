@@ -143,18 +143,18 @@ impl TickWindow {
 }
 
 #[derive(Debug, Clone)]
-struct KlineWindowSpec {
-    symbol: String,
-    duration_ns: i64,
-    view_width: usize,
-    chart_id: String,
+pub(crate) struct KlineWindowSpec {
+    pub(crate) symbol: String,
+    pub(crate) duration_ns: i64,
+    pub(crate) view_width: usize,
+    pub(crate) chart_id: String,
 }
 
 #[derive(Debug, Clone)]
-struct TickWindowSpec {
-    symbol: String,
-    view_width: usize,
-    chart_id: String,
+pub(crate) struct TickWindowSpec {
+    pub(crate) symbol: String,
+    pub(crate) view_width: usize,
+    pub(crate) chart_id: String,
 }
 
 struct ProjectedValueStream<T, C> {
@@ -342,15 +342,22 @@ fn sanitize_chart_token(raw: &str) -> String {
         .collect()
 }
 
-fn project_kline_window(
+pub(crate) fn project_kline_window(
     snapshot: SnapshotReadGuard<'_>,
     spec: &KlineWindowSpec,
 ) -> Result<Option<KlineWindow>> {
-    if !chart_is_ready(&snapshot, spec.chart_id.as_str()) {
+    project_kline_window_from_snapshot(&snapshot, spec)
+}
+
+pub(crate) fn project_kline_window_from_snapshot(
+    snapshot: &SnapshotReadGuard<'_>,
+    spec: &KlineWindowSpec,
+) -> Result<Option<KlineWindow>> {
+    if !chart_is_ready(snapshot, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_kline_window(&snapshot, spec)?;
+    let window = read_kline_window(snapshot, spec)?;
     if window.is_empty() {
         return Ok(None);
     }
@@ -358,15 +365,22 @@ fn project_kline_window(
     Ok(Some(window))
 }
 
-fn project_tick_window(
+pub(crate) fn project_tick_window(
     snapshot: SnapshotReadGuard<'_>,
     spec: &TickWindowSpec,
 ) -> Result<Option<TickWindow>> {
-    if !chart_is_ready(&snapshot, spec.chart_id.as_str()) {
+    project_tick_window_from_snapshot(&snapshot, spec)
+}
+
+pub(crate) fn project_tick_window_from_snapshot(
+    snapshot: &SnapshotReadGuard<'_>,
+    spec: &TickWindowSpec,
+) -> Result<Option<TickWindow>> {
+    if !chart_is_ready(snapshot, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_tick_window(&snapshot, spec)?;
+    let window = read_tick_window(snapshot, spec)?;
     if window.is_empty() {
         return Ok(None);
     }

@@ -2,14 +2,17 @@
 
 本文档审查 `api_contract_sXX_*.rs` 示例所表达的终端用户场景。示例文件是 public API 契约样本：能自然表达的场景使用当前 public API 写成可编译示例；不能自然表达的场景只保留理想用户代码草案，并显式标记 API gap，不用底层绕路代码伪装通过。
 
-本轮未改变 crate 边界、runtime contract 或实际 public API，因此未更新 `docs/architecture/*`。新增的是审查契约示例与本审查报告。
+本轮新增和微调的 public surface 只位于 `tqsdk-wait` / `tqsdk-stream`
+facade：它们继续复用既有 session、runtime commit、reader/cursor 与
+domain partition 读面；未改变 crate 边界或 runtime contract。对应架构文档与
+crate README 已随 public API 调整同步更新。
 
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. 零门槛行情订阅 | 自然 | 低 | 无 | 无 | 低 | 无 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs`; `tqsdk_wait::TqApi::{get_quote, wait_update, is_changing}` |
 | 2. 多合约动态订阅 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs`; `tqsdk_stream::TqStream::{subscribe_quotes, unsubscribe_quotes, quote_stream}` |
 | 3. 行情快照读取 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::TqApi::quote_snapshot` |
-| 4. Tick / Quote / K线混合订阅 | 勉强 | 中 | 少量 | 少量 | 低 | 中 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::{quote_stream, tick_stream, kline_stream}` |
+| 4. Tick / Quote / K线混合订阅 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::market_events`; `MarketEventStream`; `MarketEvent` |
 | 5. 高频裸行情直通 | 自然 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs`; `SessionClient::progress_once`; `RuntimeReader::read_market_state` |
 | 6. 普通限价下单 | 勉强 | 中 | 少量 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{insert_limit_order, insert_order}`; `TradeLoginCommand` |
 | 7. 撤单与部分成交 | 勉强 | 中 | 少量 | 无 | 中 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs`; `Order.lifecycle`; `Order.volume_left`; `TqApi::cancel_order` |
@@ -35,5 +38,5 @@
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 login/ticket/intent/risk abstraction 不足。手写 trade login command、缺少 reconnect-safe order intent 是最高优先级问题。
-3. `tqsdk-stream` 的底座方向正确，但 quote 订阅、动态订阅、混合 market event、慢消费者 sink、daemon health 还停留在底层组合能力，距离终端用户契约仍有明显 gap。
+3. `tqsdk-stream` 的底座方向正确，quote 订阅和混合 market event 已有薄 facade；动态订阅 handle、慢消费者 sink、daemon health 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
 4. 多 provider 聚合、统一策略 runtime、历史回放驱动策略、本地行情缓存、fake broker/test harness 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。

@@ -27,30 +27,55 @@
 //! - 当前 API 是否自然表达统一 market event loop？
 //! - 是否泄漏底层协议命令？
 //! - 是否有热路径多余 decode 或 full snapshot 风险？
-//!
-//! API gap:
-//! 当前 `subscribe_quotes()` 能避免 quote 订阅泄漏底层 protocol command，
-//! `kline_stream()` / `tick_stream()` 也会提交 chart 命令；但还没有统一
-//! `MarketEventStream`。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let stream = TqStreamBuilder::new(user, pass).futures_market().build().await?;
-//! let mut events = stream
-//!     .market_events()
-//!     .quote("SHFE.au2602")
-//!     .tick("SHFE.au2602", 200)
-//!     .kline("SHFE.au2602", Duration::from_secs(60), 200)
-//!     .build()
-//!     .await?;
-//!
-//! while let Some(event) = events.next().await.transpose()? {
-//!     match event {
-//!         MarketEvent::Quote(update) => println!("{}", update.value.last_price),
-//!         MarketEvent::TickWindow(update) => println!("{}", update.value.len()),
-//!         MarketEvent::KlineWindow(update) => println!("{}", update.value.len()),
-//!     }
-//! }
-//! ```
 
-fn main() {}
+use std::time::Duration;
+
+use futures::StreamExt;
+use tqsdk_stream::{MarketEvent, TqStreamBuilder};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let stream = TqStreamBuilder::new(user, pass)
+        .futures_market()
+        .build()
+        .await?;
+
+    let mut events = stream
+        .market_events()
+        .quote("SHFE.au2602")
+        .tick("SHFE.au2602", 200)
+        .kline("SHFE.au2602", Duration::from_secs(60), 200)
+        .build()
+        .await?;
+
+    while let Some(event) = events.next().await.transpose()? {
+        match event {
+            MarketEvent::Quote(update) => {
+                println!(
+                    "quote {} {}",
+                    update.value.instrument_id, update.value.last_price
+                );
+            }
+            MarketEvent::TickWindow(update) => {
+                println!(
+                    "tick window {} rows={} revision={}",
+                    update.value.symbol(),
+                    update.value.len(),
+                    update.commit.revision.get()
+                );
+            }
+            MarketEvent::KlineWindow(update) => {
+                println!(
+                    "kline window {} rows={} revision={}",
+                    update.value.symbol(),
+                    update.value.len(),
+                    update.commit.revision.get()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}

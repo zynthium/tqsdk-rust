@@ -7,7 +7,7 @@ use tqsdk_core::{
     ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder,
     SecurityPosition, SecurityTrade, SettlementInfo, Trade, TradingStatus,
 };
-use tqsdk_stream::{KlineWindow, TickWindow};
+use tqsdk_stream::{KlineWindow, MarketEvent, TickWindow};
 
 mod support;
 
@@ -356,6 +356,124 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(payload["ins_list"], "");
     assert_eq!(payload["duration"], 0);
     assert_eq!(payload["view_width"], 32);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn market_event_stream_subscribes_mixed_market_data_and_yields_typed_events() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream
+        .market_events()
+        .quote("SHFE.au2602")
+        .tick("SHFE.au2602", 32)
+        .kline("SHFE.au2602", Duration::from_secs(60), 64)
+        .build()
+        .await
+        .unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payloads = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .collect::<Vec<_>>();
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload["aid"] == "subscribe_quote"
+                && payload["ins_list"] == "SHFE.au2602")
+    );
+    assert!(payloads.iter().any(|payload| {
+        payload["aid"] == "set_chart"
+            && payload["chart_id"] == "stream-tick-SHFE_au2602-32"
+            && payload["duration"] == 0
+            && payload["view_width"] == 32
+    }));
+    assert!(payloads.iter().any(|payload| {
+        payload["aid"] == "set_chart"
+            && payload["chart_id"] == "stream-kline-SHFE_au2602-60000000000-64"
+            && payload["duration"] == 60_000_000_000_i64
+            && payload["view_width"] == 64
+    }));
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 625.0);
+    let quote = events
+        .next()
+        .await
+        .expect("market event stream should yield a quote event")
+        .expect("market event stream should decode quote");
+    match quote {
+        MarketEvent::Quote(update) => {
+            assert_eq!(update.value.instrument_id, "SHFE.au2602");
+            assert_eq!(update.value.last_price, 625.0);
+        }
+        other => panic!("expected quote event, got {other:?}"),
+    }
+
+    support::core_seed::seed_ready_tick_chart(&stream, "SHFE.au2602", 32);
+    let tick = events
+        .next()
+        .await
+        .expect("market event stream should yield a tick event")
+        .expect("market event stream should decode tick window");
+    match tick {
+        MarketEvent::TickWindow(update) => {
+            assert_eq!(update.value.symbol(), "SHFE.au2602");
+            assert_eq!(update.value.len(), 2);
+            assert_eq!(update.value.last().unwrap().last_price, 618.5);
+        }
+        other => panic!("expected tick window event, got {other:?}"),
+    }
+
+    support::core_seed::seed_ready_kline_chart(&stream, "SHFE.au2602", 60_000_000_000_i64, 64);
+    let kline = events
+        .next()
+        .await
+        .expect("market event stream should yield a kline event")
+        .expect("market event stream should decode kline window");
+    match kline {
+        MarketEvent::KlineWindow(update) => {
+            assert_eq!(update.value.symbol(), "SHFE.au2602");
+            assert_eq!(update.value.len(), 2);
+            assert_eq!(update.value.last().unwrap().close, 620.0);
+        }
+        other => panic!("expected kline window event, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn market_event_stream_close_unsubscribes_quotes_and_cancels_charts() {
+    let stream = support::core_seed::seeded_stream();
+    let events = stream
+        .market_events()
+        .quote("SHFE.au2602")
+        .tick("SHFE.au2602", 32)
+        .kline("SHFE.au2602", Duration::from_secs(60), 64)
+        .build()
+        .await
+        .unwrap();
+
+    stream.session().drain_dispatches().unwrap();
+    events.close().await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payloads = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .collect::<Vec<_>>();
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload["aid"] == "subscribe_quote" && payload["ins_list"] == "")
+    );
+    assert!(payloads.iter().any(|payload| {
+        payload["aid"] == "set_chart"
+            && payload["chart_id"] == "stream-tick-SHFE_au2602-32"
+            && payload["ins_list"] == ""
+    }));
+    assert!(payloads.iter().any(|payload| {
+        payload["aid"] == "set_chart"
+            && payload["chart_id"] == "stream-kline-SHFE_au2602-60000000000-64"
+            && payload["ins_list"] == ""
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

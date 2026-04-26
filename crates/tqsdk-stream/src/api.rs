@@ -30,7 +30,7 @@ use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_ch
 
 const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
-fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
+pub(crate) fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
     i64::try_from(duration.as_nanos()).map_err(|_| {
         crate::error::StreamFacadeError::InvalidState("kline duration exceeds i64 nanoseconds")
     })
@@ -132,6 +132,11 @@ impl TqStream {
         symbol: impl AsRef<str>,
     ) -> crate::error::Result<PathValueStream<TradingStatus>> {
         self.path_stream(["trading_status", symbol.as_ref()])
+    }
+
+    #[must_use]
+    pub fn market_events(&self) -> crate::market_event::MarketEventBuilder<'_> {
+        crate::market_event::MarketEventBuilder::new(self)
     }
 
     pub async fn kline_stream(
