@@ -10,7 +10,7 @@ crate README 已随 public API 调整同步更新。
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. 零门槛行情订阅 | 自然 | 低 | 无 | 无 | 低 | 无 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs`; `tqsdk_wait::TqApi::{get_quote, wait_update, is_changing}` |
-| 2. 多合约动态订阅 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs`; `tqsdk_stream::TqStream::{subscribe_quotes, unsubscribe_quotes, quote_stream}` |
+| 2. 多合约动态订阅 | 勉强 | 低 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs`; `tqsdk_stream::TqStream::quotes`; `QuoteSubscription::{add, remove, symbols}` |
 | 3. 行情快照读取 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::TqApi::quote_snapshot` |
 | 4. Tick / Quote / K线混合订阅 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::market_events`; `MarketEventStream`; `MarketEvent` |
 | 5. 高频裸行情直通 | 自然 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs`; `SessionClient::progress_once`; `RuntimeReader::read_market_state` |
@@ -38,5 +38,5 @@ crate README 已随 public API 调整同步更新。
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 intent/risk abstraction 不足。普通登录、限价单、部分成交撤单已具备薄 facade；缺少 reconnect-safe order intent 仍是最高优先级问题。
-3. `tqsdk-stream` 的底座方向正确，quote 订阅和混合 market event 已有薄 facade；动态订阅 handle、慢消费者 sink、daemon health 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
+3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle 和混合 market event 已有薄 facade；慢消费者 sink、daemon health 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
 4. 多 provider 聚合、统一策略 runtime、历史回放驱动策略、本地行情缓存、fake broker/test harness 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。

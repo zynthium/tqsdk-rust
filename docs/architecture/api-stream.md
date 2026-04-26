@@ -210,6 +210,10 @@ impl TqStream {
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>;
+    pub async fn quotes<I, S>(&self, symbols: I) -> tqsdk_stream::Result<QuoteSubscription>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
     pub fn market_events(&self) -> MarketEventBuilder<'_>;
     pub async fn kline_stream(
         &self,
@@ -342,6 +346,9 @@ impl TqStream {
 - `subscribe_quotes()` / `unsubscribe_quotes()` 是 quote 订阅命令的薄包装，
   用来避免普通 stream 用户直接构造 `RuntimeCommand::Market`；它们不是
   subscription handle，也不改变订阅恢复语义。
+- `quotes()` 返回用户级 `QuoteSubscription` handle，用来表达动态 add/remove/current
+  symbols，并作为 typed quote stream 消费；它仍然只复用底层 market adapter 的订阅集合、
+  `RuntimeCommand::Market` 和同一条 commit fan-out。
 - `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；
   它内部仍然只提交 quote/chart 命令并消费同一条 commit fan-out，不维护第二棵状态树。
   quote 事件读 `read_market_state()` 分区；tick/kline ready window 沿用 chart/window

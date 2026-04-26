@@ -6,12 +6,12 @@
 //! form. The current minimal surface exposes a shared-session [`TqStream`],
 //! raw commit fan-out via [`CommitStream`], typed path decoding via
 //! [`PathValueStream`], ready-window market streams via
-//! [`KlineWindowStream`] / [`TickWindowStream`], a unified
-//! [`MarketEventStream`] for mixed quote/tick/kline loops, minimal
-//! commit-backed trade event streams via [`OrderEventStream`] /
-//! [`TradeEventStream`] and related account-scoped wrappers, unified
-//! [`TradeObjectEventStream`] / [`TradeSessionEventStream`] layers, and direct
-//! access to the shared [`tqsdk_core::RuntimeReader`].
+//! [`KlineWindowStream`] / [`TickWindowStream`], dynamic
+//! [`QuoteSubscription`] handles, a unified [`MarketEventStream`] for mixed
+//! quote/tick/kline loops, minimal commit-backed trade event streams via
+//! [`OrderEventStream`] / [`TradeEventStream`] and related account-scoped
+//! wrappers, unified [`TradeObjectEventStream`] / [`TradeSessionEventStream`]
+//! layers, and direct access to the shared [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
 //! helpers remain in [`tqsdk_session`]. Use [`TqStream::session`] when a
@@ -30,6 +30,7 @@ mod error;
 mod event;
 mod filter;
 mod market_event;
+mod quote_subscription;
 mod typed;
 mod window;
 
@@ -47,5 +48,6 @@ pub use filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
 pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
+pub use quote_subscription::QuoteSubscription;
 pub use typed::{PathValueStream, ValueUpdate};
 pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};

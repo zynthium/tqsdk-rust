@@ -28,22 +28,34 @@
 //! - 订阅意图是否能跨重连保持？
 //! - 取消订阅是否有类型安全的 public API？
 //!
-//! API gap:
-//! 当前 `tqsdk-stream` 已有 `subscribe_quotes()` / `unsubscribe_quotes()`，
-//! 普通用户不再需要手动提交 quote protocol command；但还没有
-//! subscription handle，也没有 public restore contract。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let stream = TqStreamBuilder::new(user, pass).futures_market().build().await?;
-//! let mut quotes = stream.quotes(["SHFE.au2602"]).await?;
-//!
-//! quotes.add("SHFE.ag2602").await?;
-//! quotes.remove("SHFE.au2602").await?;
-//!
-//! while let Some(update) = quotes.next().await.transpose()? {
-//!     println!("{} {}", update.symbol, update.quote.last_price);
-//! }
-//! ```
+//! Current API note:
+//! `QuoteSubscription` 已能表达 add/remove/current symbols；重连恢复依赖
+//! runtime/session 保持的底层订阅意图，后续还需要专门的 reconnect contract test。
 
-fn main() {}
+use futures::StreamExt;
+use tqsdk_stream::TqStreamBuilder;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let stream = TqStreamBuilder::new(user, pass)
+        .futures_market()
+        .build()
+        .await?;
+    let mut quotes = stream.quotes(["SHFE.au2602"]).await?;
+
+    quotes.add("SHFE.ag2606").await?;
+    quotes.remove("SHFE.au2602").await?;
+
+    while let Some(update) = quotes.next().await.transpose()? {
+        println!(
+            "{} {} revision={}",
+            update.value.instrument_id,
+            update.value.last_price,
+            update.commit.revision.get()
+        );
+    }
+
+    Ok(())
+}

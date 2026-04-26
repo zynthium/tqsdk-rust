@@ -70,6 +70,86 @@ async fn subscribe_and_unsubscribe_quotes_submit_market_requests_without_protoco
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn quote_subscription_adds_removes_and_streams_current_symbols() {
+    let stream = support::core_seed::seeded_stream();
+    let mut quotes = stream.quotes(["SHFE.au2602"]).await.unwrap();
+
+    assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec!["SHFE.au2602"]);
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote subscription should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.au2602");
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 625.0);
+    let update = quotes
+        .next()
+        .await
+        .expect("quote subscription should yield initial symbol updates")
+        .expect("quote subscription should decode quote");
+    assert_eq!(update.value.instrument_id, "SHFE.au2602");
+    assert_eq!(update.value.last_price, 625.0);
+
+    quotes.add("SHFE.ag2606").await.unwrap();
+    assert_eq!(
+        quotes.symbols().collect::<Vec<_>>(),
+        vec!["SHFE.ag2606", "SHFE.au2602"]
+    );
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote subscription add should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606,SHFE.au2602");
+
+    quotes.remove("SHFE.au2602").await.unwrap();
+    assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec!["SHFE.ag2606"]);
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote subscription remove should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606");
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 626.0);
+    let idle = tokio::time::timeout(Duration::from_millis(10), quotes.next()).await;
+    assert!(idle.is_err());
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.ag2606", 5103.0);
+    let update = quotes
+        .next()
+        .await
+        .expect("quote subscription should yield added symbol updates")
+        .expect("quote subscription should decode added quote");
+    assert_eq!(update.value.instrument_id, "SHFE.ag2606");
+    assert_eq!(update.value.last_price, 5103.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_subscription_close_unsubscribes_current_symbols() {
+    let stream = support::core_seed::seeded_stream();
+    let quotes = stream.quotes(["SHFE.au2602", "SHFE.ag2606"]).await.unwrap();
+
+    stream.session().drain_dispatches().unwrap();
+    quotes.close().await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote subscription close should submit unsubscribe");
+    assert_eq!(payload["ins_list"], "");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn path_stream_decodes_typed_value_for_selected_path() {
     let stream = support::core_seed::seeded_stream();
     let mut quotes = stream

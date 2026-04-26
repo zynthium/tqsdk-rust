@@ -25,6 +25,9 @@ use crate::event::{
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
+use crate::quote_subscription::{
+    QuoteSubscription, submit_subscribe, submit_unsubscribe, validate_quote_symbols,
+};
 use crate::typed::PathValueStream;
 use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_chart_id};
 
@@ -93,6 +96,26 @@ impl TqStream {
         self.path_stream(["quotes", symbol.as_ref()])
     }
 
+    pub async fn quotes<I, S>(&self, symbols: I) -> crate::error::Result<QuoteSubscription>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| Symbol::new(symbol.as_ref()))
+            .collect::<Vec<_>>();
+        validate_quote_symbols(&symbols)?;
+        let commits = self.commit_stream()?;
+        submit_subscribe(self.session(), symbols.iter().cloned()).await?;
+        Ok(QuoteSubscription::new(
+            commits,
+            self.session().clone(),
+            self.reader.clone(),
+            symbols,
+        ))
+    }
+
     pub async fn subscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<()>
     where
         I: IntoIterator<Item = S>,
@@ -101,13 +124,8 @@ impl TqStream {
         let symbols = symbols
             .into_iter()
             .map(|symbol| Symbol::new(symbol.as_ref()))
-            .collect();
-        self.session()
-            .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-                symbols,
-            }))
-            .await?;
-        Ok(())
+            .collect::<Vec<_>>();
+        submit_subscribe(self.session(), symbols).await
     }
 
     pub async fn unsubscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<()>
@@ -118,13 +136,8 @@ impl TqStream {
         let symbols = symbols
             .into_iter()
             .map(|symbol| Symbol::new(symbol.as_ref()))
-            .collect();
-        self.session()
-            .submit(RuntimeCommand::Market(MarketCommand::UnsubscribeQuotes {
-                symbols,
-            }))
-            .await?;
-        Ok(())
+            .collect::<Vec<_>>();
+        submit_unsubscribe(self.session(), symbols).await
     }
 
     pub fn trading_status_stream(

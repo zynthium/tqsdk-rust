@@ -34,6 +34,7 @@
 - `TickWindow`
 - `KlineWindowStream`
 - `TickWindowStream`
+- `QuoteSubscription`
 - `MarketEvent`
 - `MarketEventBuilder`
 - `MarketEventStream`
@@ -63,6 +64,7 @@
 - `path_stream::<T>(...)`
 - `subscribe_quotes(...)`
 - `unsubscribe_quotes(...)`
+- `quotes(...).await`
 - `market_events()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
@@ -167,8 +169,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 `unsubscribe_quotes(...)` 表达，普通用户不需要直接提交
-`RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })`。当前这仍然是薄包装，
-尚未冻结 subscription handle 或重连后按 handle 恢复的用户级契约。
+`RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })`。
+
+多合约动态 quote 订阅优先使用 `quotes(...).await` 返回的
+`QuoteSubscription`。它持有当前 symbol 集合，提供 `add(...)` /
+`remove(...)` / `symbols()` / `close()`，并作为 typed quote stream 使用。
+底层仍复用 market adapter 的全量订阅集合和同一条 commit fan-out。
 
 如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：
