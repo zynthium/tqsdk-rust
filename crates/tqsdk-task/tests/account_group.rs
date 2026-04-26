@@ -37,7 +37,8 @@ fn seed_account_position_quote(
     net_position: i64,
     last_price: f64,
 ) {
-    host.api()
+    let _ = host
+        .api()
         .handle_for_test()
         .ingest(
             RuntimeInput::Io(IoEvent {
@@ -58,8 +59,7 @@ fn seed_account_position_quote(
             vec![],
             CommitScope::RealtimeUpdate,
         )
-        .unwrap()
-        .map(|_| ());
+        .unwrap();
 
     let (exchange_id, instrument_id) = symbol
         .split_once('.')
