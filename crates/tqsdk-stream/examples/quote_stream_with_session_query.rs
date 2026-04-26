@@ -1,7 +1,6 @@
 use std::error::Error;
 
 use futures::StreamExt;
-use tqsdk_core::{MarketCommand, RuntimeCommand, Symbol};
 use tqsdk_session::SessionClientBuilder;
 use tqsdk_stream::TqStreamBuilder;
 
@@ -39,13 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         instrument.instrument_id, instrument.ins_class, instrument.price_tick
     );
 
-    stream
-        .session()
-        .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-            symbols: vec![Symbol::new(symbol.clone())],
-        }))
-        .await?;
-
+    stream.subscribe_quotes([symbol.as_str()]).await?;
     let mut quotes = stream.quote_stream(symbol.as_str())?;
 
     loop {

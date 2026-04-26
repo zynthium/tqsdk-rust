@@ -93,6 +93,40 @@ impl TqStream {
         self.path_stream(["quotes", symbol.as_ref()])
     }
 
+    pub async fn subscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| Symbol::new(symbol.as_ref()))
+            .collect();
+        self.session()
+            .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+                symbols,
+            }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unsubscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| Symbol::new(symbol.as_ref()))
+            .collect();
+        self.session()
+            .submit(RuntimeCommand::Market(MarketCommand::UnsubscribeQuotes {
+                symbols,
+            }))
+            .await?;
+        Ok(())
+    }
+
     pub fn trading_status_stream(
         &self,
         symbol: impl AsRef<str>,

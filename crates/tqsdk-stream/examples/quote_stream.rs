@@ -1,7 +1,6 @@
 use std::error::Error;
 
 use futures::StreamExt;
-use tqsdk_core::{MarketCommand, RuntimeCommand, Symbol};
 use tqsdk_stream::TqStreamBuilder;
 
 fn read_env(key: &str) -> Result<String, Box<dyn Error>> {
@@ -16,13 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let stream_once = std::env::var_os("TQ_STREAM_ONCE").is_some();
 
     let stream = TqStreamBuilder::new(user, pass).build().await?;
-    stream
-        .session()
-        .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-            symbols: vec![Symbol::new(symbol.clone())],
-        }))
-        .await?;
-
+    stream.subscribe_quotes([symbol.as_str()]).await?;
     let mut quotes = stream.quote_stream(&symbol)?;
 
     loop {

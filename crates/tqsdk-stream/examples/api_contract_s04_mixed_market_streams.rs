@@ -29,8 +29,8 @@
 //! - 是否有热路径多余 decode 或 full snapshot 风险？
 //!
 //! API gap:
-//! 当前 `kline_stream()` / `tick_stream()` 会提交 chart 命令，但
-//! `quote_stream()` 只是 path stream 包装，不会自动订阅；也没有统一
+//! 当前 `subscribe_quotes()` 能避免 quote 订阅泄漏底层 protocol command，
+//! `kline_stream()` / `tick_stream()` 也会提交 chart 命令；但还没有统一
 //! `MarketEventStream`。
 //!
 //! 理想用户代码草案：

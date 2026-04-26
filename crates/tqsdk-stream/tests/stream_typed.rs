@@ -42,6 +42,34 @@ async fn quote_stream_decodes_matching_quote_and_skips_other_symbols() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn subscribe_and_unsubscribe_quotes_submit_market_requests_without_protocol_types() {
+    let stream = support::core_seed::seeded_stream();
+
+    stream
+        .subscribe_quotes(["SHFE.au2602", "SHFE.ag2606"])
+        .await
+        .unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("subscribe_quotes should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606,SHFE.au2602");
+
+    stream.unsubscribe_quotes(["SHFE.ag2606"]).await.unwrap();
+
+    let dispatches = stream.session().drain_dispatches().unwrap();
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("unsubscribe_quotes should submit updated subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.au2602");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn path_stream_decodes_typed_value_for_selected_path() {
     let stream = support::core_seed::seeded_stream();
     let mut quotes = stream

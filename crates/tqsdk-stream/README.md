@@ -58,6 +58,8 @@
 - `CommitStream::filter_object(s)`
 - `CommitStream::filter_fields(...)`
 - `path_stream::<T>(...)`
+- `subscribe_quotes(...)`
+- `unsubscribe_quotes(...)`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
 - `kline_stream(...)`
@@ -158,6 +160,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqStreamBuilder::from_session_builder(...)` 包装成 stream facade。
 
 如果要证明 stream facade 可以复用同一个底层 session 做一次性 metadata/direct query，而不需要额外建第二个 client，可参考 `examples/quote_stream_with_session_query.rs`。
+
+quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
+`unsubscribe_quotes(...)` 表达，普通用户不需要直接提交
+`RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })`。当前这仍然是薄包装，
+尚未冻结 subscription handle 或重连后按 handle 恢复的用户级契约。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

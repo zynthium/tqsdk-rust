@@ -202,6 +202,14 @@ impl TqStream {
         T: DeserializeOwned,
         I: IntoIterator<Item = S>,
         S: Into<String>;
+    pub async fn subscribe_quotes<I, S>(&self, symbols: I) -> tqsdk_stream::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
+    pub async fn unsubscribe_quotes<I, S>(&self, symbols: I) -> tqsdk_stream::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
     pub async fn kline_stream(
         &self,
         symbol: impl AsRef<str>,
@@ -330,6 +338,9 @@ impl TqStream {
 - `reader()` 保留高性能用户直接读共享状态树的权利
 - `commit_stream()` 是第一版唯一必须稳定的 continuous-consumption 入口
 - `path_stream()` 是最薄的 typed decode 便利层
+- `subscribe_quotes()` / `unsubscribe_quotes()` 是 quote 订阅命令的薄包装，
+  用来避免普通 stream 用户直接构造 `RuntimeCommand::Market`；它们不是
+  subscription handle，也不改变订阅恢复语义。
 - `kline_stream()/tick_stream()` 是最薄的 ready-window stream 包装：内部仍然只是提交 `set_chart`，然后基于同一条 commit fan-out 读取共享状态树
 - 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护 event journal
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义

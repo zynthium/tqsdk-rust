@@ -29,9 +29,9 @@
 //! - 取消订阅是否有类型安全的 public API？
 //!
 //! API gap:
-//! 当前 `tqsdk-stream` 有 `quote_stream()`，但 quote 订阅仍需要用户通过
-//! `stream.session().submit(RuntimeCommand::Market(...))` 手动提交协议命令；
-//! 没有 subscription handle，也没有 public restore contract。
+//! 当前 `tqsdk-stream` 已有 `subscribe_quotes()` / `unsubscribe_quotes()`，
+//! 普通用户不再需要手动提交 quote protocol command；但还没有
+//! subscription handle，也没有 public restore contract。
 //!
 //! 理想用户代码草案：
 //! ```ignore
