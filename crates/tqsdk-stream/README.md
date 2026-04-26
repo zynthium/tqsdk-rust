@@ -38,6 +38,8 @@
 - `MarketEvent`
 - `MarketEventBuilder`
 - `MarketEventStream`
+- `StreamHealthSnapshot`
+- `StreamSessionPhase`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -66,6 +68,7 @@
 - `unsubscribe_quotes(...)`
 - `quotes(...).await`
 - `market_events()`
+- `health()`
 - `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
@@ -188,6 +191,11 @@ reconnect/resync 后，runtime 会根据 adapter 保留的订阅意图重新排�
 `TqStream::recover_state()`。它从同一条 commit fan-out 等待 readiness，并复用
 `tqsdk-session` 的 `StartupRecoverySpec` 判断状态，不要求用户手写 channel 或
 provider 级恢复 flag。
+
+生产守护进程如果只需要 typed health snapshot，可以调用 `TqStream::health()`。
+返回的 `StreamHealthSnapshot` 包含 runtime revision、session phase、最近一次
+reconnect diagnostics 和 stream driver closed 状态；完整 metrics endpoint、ctrl-c
+graceful shutdown 和可靠 sink isolation 仍属于上层 daemon/tooling 能力。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

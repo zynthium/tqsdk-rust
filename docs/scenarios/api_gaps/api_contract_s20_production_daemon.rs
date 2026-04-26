@@ -30,8 +30,9 @@
 //! - 这是 stream facade 扩展还是单独 runtime crate？
 //!
 //! API gap:
-//! `tqsdk-stream` 已有 session event/reconnect 事件的一部分，但没有
-//! daemon health snapshot、metrics hooks、typed graceful shutdown contract。
+//! `tqsdk-stream` 已有 session event/reconnect 事件和 typed
+//! `TqStream::health()` snapshot；仍没有 metrics hooks、HTTP health endpoint、
+//! typed graceful shutdown contract 和完整 supervisor API。
 //!
 //! 理想用户代码草案：
 //! ```ignore

@@ -109,7 +109,7 @@ crate 分层合并成一份迭代计划。
 
 - `api_contract_s09_startup_state_recovery`（已提升为正式 wait example）
 - `api_contract_s02_dynamic_subscriptions`（已具备 reconnect 订阅恢复契约）
-- `api_contract_s20_production_daemon` 的健康状态子集
+- `api_contract_s20_production_daemon` 的健康状态子集（已新增 typed health snapshot）
 
 已落地：
 
@@ -118,6 +118,9 @@ crate 分层合并成一份迭代计划。
 - Market adapter 会保留当前 quote / trading-status / chart 订阅意图；session
   reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
   因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
+- `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
+  reconnect diagnostics、driver closed 和 revision；完整 metrics endpoint、ctrl-c
+  graceful shutdown 与可靠 sink isolation 仍在后续 daemon/tooling 层。
 
 ### P0：订单 intent 与断线一致性
 

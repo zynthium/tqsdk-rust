@@ -195,6 +195,7 @@ impl TqStream {
     pub fn session(&self) -> &SessionClient;
     pub fn into_session(self) -> SessionClient;
     pub fn reader(&self) -> &RuntimeReader;
+    pub fn health(&self) -> tqsdk_stream::Result<StreamHealthSnapshot>;
 
     pub fn commit_stream(&self) -> tqsdk_stream::Result<CommitStream>;
     pub fn path_stream<T, I, S>(&self, path: I) -> tqsdk_stream::Result<PathValueStream<T>>
@@ -364,6 +365,9 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护 event journal
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面
+- `health()` 是生产部署的 typed snapshot 读面，只从 runtime `system/session`
+  状态和 stream driver closed flag 组装 `StreamHealthSnapshot`；它不是 metrics
+  endpoint、supervisor 或 graceful shutdown 框架。
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
@@ -584,6 +588,24 @@ impl futures::Stream for TradeObjectEventStream {
 ### unified trade session event stream
 
 ```rust
+pub enum StreamSessionPhase {
+    Idle,
+    Authenticating,
+    Connecting,
+    Bootstrapping,
+    Running,
+    Reconnecting,
+    Resyncing,
+    Closed,
+}
+
+pub struct StreamHealthSnapshot {
+    pub revision: Revision,
+    pub session_phase: Option<StreamSessionPhase>,
+    pub reconnect: Option<SessionReconnectEvent>,
+    pub driver_closed: bool,
+}
+
 pub struct SessionReconnectEvent {
     pub attempt: u32,
     pub scheduled_backoff_ms: u64,
@@ -614,6 +636,8 @@ impl futures::Stream for TradeSessionEventStream {
 设计意图：
 
 - 统一账户级 trade session 消费入口，同时覆盖 trade object、system notification、session reconnect 与底层 session error
+- health snapshot 是同一 session 状态的当前截面读面，服务生产指标/日志读取；
+  它不启动额外 task，也不拥有独立健康状态树
 - 对 commit-backed 事件保留 `Option<CommitResult>` 中的 `Some(commit)`，不伪造 driver error 的 commit
 - 实现层直接订阅 raw driver 事件，而不是建立在 `CommitStream` 之上，以免把 `DriverEvent::Error` 提前折叠成 facade error
 - `Closed` / `Lagged` 仍保留为 stream error，因为这两个语义属于消费通道自身，而不是业务事件

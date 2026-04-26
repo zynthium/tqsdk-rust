@@ -29,6 +29,7 @@ mod driver;
 mod error;
 mod event;
 mod filter;
+mod health;
 mod market_event;
 mod quote_subscription;
 mod recovery;
@@ -48,6 +49,7 @@ pub use event::{
 pub use filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
+pub use health::{StreamHealthSnapshot, StreamSessionPhase};
 pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::QuoteSubscription;
 pub use recovery::StreamStartupRecovery;

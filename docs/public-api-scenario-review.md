@@ -39,7 +39,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
 | 18. 本地行情缓存读写 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; no live cache writer/reader contract |
 | 19. 风控前置 | 不自然 | 高 | 少量 | 无 | 高 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `TaskHost::insert_order_guarded` only guards task ownership |
-| 20. 生产守护进程 | 不自然 | 高 | 少量 | 严重 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TradeSessionEvent`; no health/metrics/shutdown API |
+| 20. 生产守护进程 | 勉强 | 中 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `StreamHealthSnapshot`; health snapshot covered, metrics/graceful shutdown still gap |
 | 21. 慢消费者隔离 | 勉强 | 中 | 少量 | 少量 | 低 | 中 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `CommitStream`; `StreamFacadeError::Lagged` |
 | 22. 错误诊断与重试 | 勉强 | 中 | 少量 | 少量 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `SessionFacadeError`; `StreamFacadeError`; `TradeSessionEvent` |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_symbol_info`; `Quote` metadata fields |

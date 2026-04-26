@@ -96,6 +96,10 @@ impl StreamDriver {
             task.abort();
         }
     }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
 }
 
 fn emit_closed_once(sender: &broadcast::Sender<DriverEvent>, closed: &AtomicBool) {

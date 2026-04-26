@@ -78,6 +78,10 @@ impl TqStream {
         &self.reader
     }
 
+    pub fn health(&self) -> crate::error::Result<crate::health::StreamHealthSnapshot> {
+        crate::health::read_health(&self.reader, self.driver.is_closed())
+    }
+
     pub fn path_stream<T, I, S>(&self, path: I) -> crate::error::Result<PathValueStream<T>>
     where
         T: serde::de::DeserializeOwned,

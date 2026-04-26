@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use tqsdk_core::SessionPhase;
 use tqsdk_session::SessionFacadeError;
-use tqsdk_stream::StreamFacadeError;
+use tqsdk_stream::{StreamFacadeError, StreamSessionPhase};
 
 mod support;
 
@@ -92,6 +93,43 @@ async fn commit_stream_returns_closed_after_driver_was_explicitly_closed() {
         Err(err) => err,
     };
     assert_eq!(err, StreamFacadeError::Closed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_health_reports_session_reconnect_and_driver_state() {
+    let stream = support::core_seed::seeded_stream();
+
+    let initial = stream.health().unwrap();
+    assert_eq!(initial.session_phase, None);
+    assert!(!initial.driver_closed);
+    assert!(!initial.is_healthy());
+
+    support::core_seed::seed_session_phase_commit(&stream, SessionPhase::Running);
+    let running = stream.health().unwrap();
+    assert_eq!(running.session_phase, Some(StreamSessionPhase::Running));
+    assert!(running.is_healthy());
+
+    support::core_seed::seed_session_reconnect_commit(&stream, "transport-error");
+    let reconnecting = stream.health().unwrap();
+    let reconnect = reconnecting
+        .reconnect
+        .expect("health should expose reconnect diagnostics");
+    assert_eq!(reconnect.attempt, 1);
+    assert_eq!(reconnect.scheduled_backoff_ms, 250);
+    assert_eq!(reconnect.max_attempts, Some(5));
+    assert!(!reconnect.exhausted);
+
+    let mut commits = stream.commit_stream().unwrap();
+    stream.close_driver_for_test();
+    let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
+        .await
+        .expect("commit stream should observe close")
+        .expect("commit stream should yield close item");
+    assert!(matches!(update, Err(StreamFacadeError::Closed)));
+
+    let closed = stream.health().unwrap();
+    assert!(closed.driver_closed);
+    assert!(!closed.is_healthy());
 }
 
 #[test]

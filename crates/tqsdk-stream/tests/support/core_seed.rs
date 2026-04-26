@@ -2,7 +2,7 @@ use serde_json::Value;
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
-    RuntimeInput,
+    RuntimeInput, SessionPhase,
 };
 use tqsdk_session::SessionClient;
 use tqsdk_stream::TqStream;
@@ -477,6 +477,15 @@ pub fn seed_session_reconnect_commit(stream: &TqStream, reason: &str) {
         )
         .unwrap()
         .expect("seed session reconnect commit should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_session_phase_commit(stream: &TqStream, phase: SessionPhase) {
+    stream
+        .handle_for_test()
+        .record_session_phase(phase, None, vec![])
+        .unwrap()
+        .expect("seed session phase commit should produce a commit");
 }
 
 #[allow(dead_code)]
