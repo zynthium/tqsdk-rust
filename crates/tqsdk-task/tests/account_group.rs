@@ -5,7 +5,8 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
-    AccountFailurePolicy, AccountGroup, Ratio, RiskEngine, RiskRejection, TaskError, TaskHost,
+    AccountFailurePolicy, AccountGroup, MultiAccountOrderOutcome, Ratio, RiskEngine, RiskRejection,
+    TaskError, TaskHost,
 };
 use tqsdk_wait::TqApi;
 
@@ -102,6 +103,66 @@ fn seed_account_position_quote(
         )
         .unwrap()
         .expect("seed account/position commit should produce a commit");
+}
+
+struct OrderStatusSeed<'a> {
+    account_id: &'a str,
+    symbol: &'a str,
+    order_id: &'a str,
+    direction: &'a str,
+    offset: &'a str,
+    volume_orign: i64,
+    volume_left: i64,
+    status: &'a str,
+}
+
+fn seed_order_status_commit(host: &TaskHost, seed: OrderStatusSeed<'_>) {
+    let (exchange_id, instrument_id) = seed
+        .symbol
+        .split_once('.')
+        .expect("test symbol should contain an exchange prefix");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            seed.account_id: {
+                                "orders": {
+                                    seed.order_id: {
+                                        "seqno": 1,
+                                        "user_id": seed.account_id,
+                                        "order_id": seed.order_id,
+                                        "exchange_order_id": format!("exchange-{}", seed.order_id),
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "direction": seed.direction,
+                                        "offset": seed.offset,
+                                        "volume_orign": seed.volume_orign,
+                                        "volume_left": seed.volume_left,
+                                        "limit_price": 1.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "last_msg": "",
+                                        "status": seed.status,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed order status commit should produce a commit");
 }
 
 #[test]
@@ -298,4 +359,125 @@ async fn multi_account_order_retry_reuses_existing_account_intents() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multi_account_order_reports_all_accounts_filled() {
+    let mut host = seeded_host();
+    let accounts = AccountGroup::builder()
+        .add("sim-a", Ratio::new(1, 2).unwrap())
+        .add("sim-b", Ratio::new(1, 2).unwrap())
+        .build()
+        .unwrap();
+
+    let ticket = host
+        .multi_account_order(accounts)
+        .client_group_id("alloc-filled-001")
+        .buy_open("SHFE.au2602", 4)
+        .limit(480.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-a",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-filled-001:acct:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 0,
+            status: "FINISHED",
+        },
+    );
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-b",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-filled-001:acct:1",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 0,
+            status: "FINISHED",
+        },
+    );
+
+    let outcome = ticket.outcome(host.api()).unwrap().unwrap();
+    match outcome {
+        MultiAccountOrderOutcome::AllFilled { accounts } => {
+            assert_eq!(accounts.len(), 2);
+            assert!(
+                accounts
+                    .iter()
+                    .all(|account| account.filled_volume == account.requested_volume)
+            );
+        }
+        other => panic!("expected all-filled outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multi_account_order_reports_mixed_account_outcome() {
+    let mut host = seeded_host();
+    let accounts = AccountGroup::builder()
+        .add("sim-a", Ratio::new(1, 2).unwrap())
+        .add("sim-b", Ratio::new(1, 2).unwrap())
+        .build()
+        .unwrap();
+
+    let ticket = host
+        .multi_account_order(accounts)
+        .client_group_id("alloc-mixed-001")
+        .buy_open("SHFE.au2602", 4)
+        .limit(480.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-a",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-mixed-001:acct:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 0,
+            status: "FINISHED",
+        },
+    );
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-b",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-mixed-001:acct:1",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 2,
+            status: "FINISHED",
+        },
+    );
+
+    let outcome = ticket.outcome(host.api()).unwrap().unwrap();
+    match outcome {
+        MultiAccountOrderOutcome::NeedsAttention {
+            filled_accounts,
+            unfilled_accounts,
+            accounts,
+        } => {
+            assert_eq!(filled_accounts, vec!["sim-a".to_string()]);
+            assert_eq!(unfilled_accounts, vec!["sim-b".to_string()]);
+            assert_eq!(accounts.len(), 2);
+        }
+        other => panic!("expected needs-attention outcome, got {other:?}"),
+    }
 }

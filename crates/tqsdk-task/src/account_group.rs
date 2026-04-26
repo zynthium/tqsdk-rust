@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use tqsdk_core::{TradeDirection, TradeOffset};
-use tqsdk_wait::OrderTicket;
+use tqsdk_core::{Order, OrderLifecycle, TradeDirection, TradeOffset};
+use tqsdk_wait::{OrderTicket, OrderTicketState};
 
 use crate::{Result, TaskError, TaskHost, TaskOrderIntent};
 
@@ -91,6 +91,65 @@ pub struct MultiAccountOrderLegTicket {
     client_order_id: String,
     intent: TaskOrderIntent,
     ticket: OrderTicket,
+}
+
+/// State of one account allocation projected from its wait-layer order ticket.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiAccountOrderState {
+    Unknown,
+    CommandPending,
+    Live,
+    Filled,
+    PartiallyFilled {
+        filled_volume: i64,
+        volume_left: i64,
+    },
+    Cancelled,
+    Rejected,
+    Failed,
+}
+
+/// Stable report for one account allocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiAccountOrderReport {
+    pub account_id: String,
+    pub client_order_id: String,
+    pub symbol: String,
+    pub requested_volume: i64,
+    pub filled_volume: i64,
+    pub volume_left: i64,
+    pub state: MultiAccountOrderState,
+}
+
+/// Current multi-account order status.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiAccountOrderStatus {
+    Pending {
+        accounts: Vec<MultiAccountOrderReport>,
+    },
+    Finished(MultiAccountOrderOutcome),
+}
+
+/// Terminal multi-account order outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiAccountOrderOutcome {
+    AllFilled {
+        accounts: Vec<MultiAccountOrderReport>,
+    },
+    Cancelled {
+        accounts: Vec<MultiAccountOrderReport>,
+    },
+    Rejected {
+        accounts: Vec<MultiAccountOrderReport>,
+    },
+    Failed {
+        accounts: Vec<MultiAccountOrderReport>,
+    },
+    NeedsAttention {
+        filled_accounts: Vec<String>,
+        unfilled_accounts: Vec<String>,
+        accounts: Vec<MultiAccountOrderReport>,
+    },
 }
 
 impl Ratio {
@@ -383,6 +442,42 @@ impl MultiAccountOrderTicket {
     pub fn orders(&self) -> &[MultiAccountOrderLegTicket] {
         &self.orders
     }
+
+    pub fn status(&self, api: &tqsdk_wait::TqApi) -> Result<MultiAccountOrderStatus> {
+        let accounts = self.account_reports(api)?;
+        Ok(match outcome_from_reports(&accounts) {
+            Some(outcome) => MultiAccountOrderStatus::Finished(outcome),
+            None => MultiAccountOrderStatus::Pending { accounts },
+        })
+    }
+
+    pub fn outcome(&self, api: &tqsdk_wait::TqApi) -> Result<Option<MultiAccountOrderOutcome>> {
+        let accounts = self.account_reports(api)?;
+        Ok(outcome_from_reports(&accounts))
+    }
+
+    pub async fn wait_finished(
+        &self,
+        host: &mut TaskHost,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<MultiAccountOrderOutcome> {
+        loop {
+            if let Some(outcome) = self.outcome(host.api())? {
+                return Ok(outcome);
+            }
+            if !host.wait_update(deadline).await? {
+                let accounts = self.account_reports(host.api())?;
+                return Ok(needs_attention_from_reports(&accounts));
+            }
+        }
+    }
+
+    fn account_reports(&self, api: &tqsdk_wait::TqApi) -> Result<Vec<MultiAccountOrderReport>> {
+        self.orders
+            .iter()
+            .map(|order| account_report(api, order))
+            .collect()
+    }
 }
 
 impl MultiAccountOrderLegTicket {
@@ -486,4 +581,172 @@ async fn submit_multi_account_order(
         failure_policy,
         orders,
     })
+}
+
+fn account_report(
+    api: &tqsdk_wait::TqApi,
+    order: &MultiAccountOrderLegTicket,
+) -> Result<MultiAccountOrderReport> {
+    let state = order.ticket.status(api)?;
+    let (state, filled_volume, volume_left) = match state {
+        OrderTicketState::Unknown { .. } => {
+            (MultiAccountOrderState::Unknown, 0, order.intent.volume)
+        }
+        OrderTicketState::CommandPending { .. } => (
+            MultiAccountOrderState::CommandPending,
+            0,
+            order.intent.volume,
+        ),
+        OrderTicketState::Live { order, .. } => live_account_order_state(&order),
+        OrderTicketState::Filled { order, .. } => {
+            let volume_left = order.volume_left;
+            let filled = (order.volume_orign - volume_left).max(0);
+            (MultiAccountOrderState::Filled, filled, volume_left)
+        }
+        OrderTicketState::Cancelled {
+            order: ticket_order,
+            ..
+        } => terminal_optional_order_state(
+            ticket_order.as_ref(),
+            MultiAccountOrderState::Cancelled,
+            order.intent.volume,
+        ),
+        OrderTicketState::Rejected {
+            order: ticket_order,
+            ..
+        } => terminal_optional_order_state(
+            ticket_order.as_ref(),
+            MultiAccountOrderState::Rejected,
+            order.intent.volume,
+        ),
+        OrderTicketState::Failed {
+            order: ticket_order,
+            ..
+        } => terminal_optional_order_state(
+            ticket_order.as_ref(),
+            MultiAccountOrderState::Failed,
+            order.intent.volume,
+        ),
+    };
+
+    Ok(MultiAccountOrderReport {
+        account_id: order.account_id.clone(),
+        client_order_id: order.client_order_id.clone(),
+        symbol: order.intent.symbol.clone(),
+        requested_volume: order.intent.volume,
+        filled_volume,
+        volume_left,
+        state,
+    })
+}
+
+fn live_account_order_state(order: &Order) -> (MultiAccountOrderState, i64, i64) {
+    let volume_left = order.volume_left;
+    let filled = (order.volume_orign - volume_left).max(0);
+    if filled > 0 {
+        (
+            MultiAccountOrderState::PartiallyFilled {
+                filled_volume: filled,
+                volume_left,
+            },
+            filled,
+            volume_left,
+        )
+    } else {
+        (MultiAccountOrderState::Live, 0, volume_left)
+    }
+}
+
+fn terminal_optional_order_state(
+    order: Option<&Order>,
+    fallback: MultiAccountOrderState,
+    requested_volume: i64,
+) -> (MultiAccountOrderState, i64, i64) {
+    let Some(order) = order else {
+        return (fallback, 0, requested_volume);
+    };
+    let volume_left = order.volume_left;
+    let filled = (order.volume_orign - volume_left).max(0);
+    let state = match (order.lifecycle, filled > 0, volume_left == 0) {
+        (OrderLifecycle::Filled, _, _) => MultiAccountOrderState::Filled,
+        (_, true, false) => MultiAccountOrderState::PartiallyFilled {
+            filled_volume: filled,
+            volume_left,
+        },
+        _ => fallback,
+    };
+    (state, filled, volume_left)
+}
+
+fn outcome_from_reports(accounts: &[MultiAccountOrderReport]) -> Option<MultiAccountOrderOutcome> {
+    if accounts.iter().any(is_pending_state) {
+        return None;
+    }
+
+    let all_filled = accounts
+        .iter()
+        .all(|account| matches!(account.state, MultiAccountOrderState::Filled));
+    if all_filled {
+        return Some(MultiAccountOrderOutcome::AllFilled {
+            accounts: accounts.to_vec(),
+        });
+    }
+
+    let any_filled = accounts.iter().any(|account| account.filled_volume > 0);
+    if any_filled {
+        return Some(needs_attention_from_reports(accounts));
+    }
+
+    if accounts
+        .iter()
+        .any(|account| matches!(account.state, MultiAccountOrderState::Failed))
+    {
+        return Some(MultiAccountOrderOutcome::Failed {
+            accounts: accounts.to_vec(),
+        });
+    }
+    if accounts
+        .iter()
+        .any(|account| matches!(account.state, MultiAccountOrderState::Rejected))
+    {
+        return Some(MultiAccountOrderOutcome::Rejected {
+            accounts: accounts.to_vec(),
+        });
+    }
+    if accounts
+        .iter()
+        .any(|account| matches!(account.state, MultiAccountOrderState::Cancelled))
+    {
+        return Some(MultiAccountOrderOutcome::Cancelled {
+            accounts: accounts.to_vec(),
+        });
+    }
+    None
+}
+
+fn needs_attention_from_reports(accounts: &[MultiAccountOrderReport]) -> MultiAccountOrderOutcome {
+    let filled_accounts = accounts
+        .iter()
+        .filter(|account| account.filled_volume > 0)
+        .map(|account| account.account_id.clone())
+        .collect();
+    let unfilled_accounts = accounts
+        .iter()
+        .filter(|account| account.filled_volume < account.requested_volume)
+        .map(|account| account.account_id.clone())
+        .collect();
+    MultiAccountOrderOutcome::NeedsAttention {
+        filled_accounts,
+        unfilled_accounts,
+        accounts: accounts.to_vec(),
+    }
+}
+
+fn is_pending_state(account: &MultiAccountOrderReport) -> bool {
+    matches!(
+        account.state,
+        MultiAccountOrderState::Unknown
+            | MultiAccountOrderState::CommandPending
+            | MultiAccountOrderState::Live
+    )
 }

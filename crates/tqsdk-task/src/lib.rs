@@ -21,7 +21,8 @@ mod target_pos;
 pub use account_group::{
     AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
     AccountGroupBuilder, AllocatedAccountOrder, MultiAccountOrderBuilder, MultiAccountOrderDraft,
-    MultiAccountOrderLegTicket, MultiAccountOrderTicket, Ratio,
+    MultiAccountOrderLegTicket, MultiAccountOrderOutcome, MultiAccountOrderReport,
+    MultiAccountOrderState, MultiAccountOrderStatus, MultiAccountOrderTicket, Ratio,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{
