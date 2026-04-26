@@ -239,12 +239,16 @@ async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<Executio
         })
         .collect::<Vec<_>>();
 
+    for leg in &leg_intents {
+        builder.host.preflight_task_order(&leg.intent)?;
+    }
+
     let mut submitted = Vec::with_capacity(leg_intents.len());
     let total_legs = leg_intents.len();
     for leg in leg_intents {
         match builder
             .host
-            .submit_task_order_once(leg.intent.clone(), leg.client_order_id.as_str().into())
+            .submit_prechecked_task_order_once(leg.intent.clone(), leg.client_order_id.as_str())
             .await
         {
             Ok(ticket) => submitted.push(ExecutionLegTicket {

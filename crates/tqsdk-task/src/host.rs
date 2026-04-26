@@ -192,12 +192,20 @@ impl TaskHost {
         intent: TaskOrderIntent,
         client_order_id: ClientOrderId,
     ) -> Result<OrderTicket> {
+        self.preflight_task_order(&intent)?;
+        self.submit_prechecked_task_order_once(intent, client_order_id)
+            .await
+    }
+
+    pub(crate) fn preflight_task_order(&self, intent: &TaskOrderIntent) -> Result<()> {
         if intent.volume <= 0 {
             return Err(TaskError::InvalidState("order volume must be positive"));
         }
-        let offset = intent.offset.ok_or(TaskError::Unsupported(
-            "task orders require explicit offset",
-        ))?;
+        if intent.offset.is_none() {
+            return Err(TaskError::Unsupported(
+                "task orders require explicit offset",
+            ));
+        }
         let limit_price = intent
             .limit_price
             .ok_or(TaskError::InvalidState("limit price is required"))?;
@@ -208,7 +216,21 @@ impl TaskHost {
         self.registry.with(|registry| {
             registry.check_manual_order_allowed(&intent.account_id, &intent.symbol)
         })?;
-        self.check_risk(&intent)?;
+        self.check_risk(intent)?;
+        Ok(())
+    }
+
+    pub(crate) async fn submit_prechecked_task_order_once(
+        &mut self,
+        intent: TaskOrderIntent,
+        client_order_id: impl Into<ClientOrderId>,
+    ) -> Result<OrderTicket> {
+        let offset = intent.offset.ok_or(TaskError::Unsupported(
+            "task orders require explicit offset",
+        ))?;
+        let limit_price = intent
+            .limit_price
+            .ok_or(TaskError::InvalidState("limit price is required"))?;
 
         self.api
             .limit_order(intent.account_id, intent.symbol)
