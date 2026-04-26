@@ -9,6 +9,8 @@
 - task registry
 - symbol ownership
 - 手动下单冲突保护
+- typed task-level order builder
+- pre-trade risk gate
 
 当前已落地的最小能力：
 
@@ -16,6 +18,12 @@
   - 托管单一 `wait_update()` 推进点
   - 每次 `wait_update()` 调用都会推进 task/scheduler，即使底层 `api.wait_update()` 本轮返回 `false`
   - 提供 guarded `insert_order` / `cancel_order`
+  - 提供 `orders(account_id)` typed 下单入口，返回 wait 层 `OrderTicket`
+  - 可配置 `RiskEngine`，让 typed order builder 和 guarded insert 在提交前统一经过 risk gate
+- `RiskEngine`
+  - 当前覆盖单笔最大手数、最低可用资金、最大净持仓和 quote 价格偏离
+  - 拒绝结果通过 typed `RiskRejection` 暴露
+  - 读取现有 account / position / quote refs，不维护第二份资金或持仓状态
 - `TargetPosTask`
   - 注册 `account_id + symbol` ownership
   - `set_target_volume()` 与 `wait_target_reached()`
@@ -92,6 +100,7 @@
 - 执行策略仍是保守串行 batch，不追求在同一轮内激进并发所有后续 batch
 - 已覆盖多笔 live order 中只撤 stale 子集、保留兼容订单，并在 stale 终态后继续补齐缺口的重规划路径
 - 已覆盖未物化 tracked order 在 retarget / 重复同目标调用下的保守处理，避免提前 target reached 或重复发单
+- `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 
@@ -101,6 +110,11 @@
 
 - [examples/target_pos.rs](examples/target_pos.rs)
 - [examples/target_pos_scheduler.rs](examples/target_pos_scheduler.rs)
+- [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
+
+另有一个场景契约 sketch 记录完整策略 runtime 缺口：
+
+- [examples/api_contract_s11_simple_strategy.rs](examples/api_contract_s11_simple_strategy.rs)
 
 运行它需要：
 

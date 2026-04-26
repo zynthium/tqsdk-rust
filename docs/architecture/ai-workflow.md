@@ -141,6 +141,8 @@ tqsdk-task
 - `TargetPosTask`
 - `TargetPosScheduler`
 - ownership / guarded order
+- task-level typed order builder
+- pre-trade risk gate
 - execution report
 - planner/executor 的本地任务状态机
 

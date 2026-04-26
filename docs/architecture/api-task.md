@@ -40,6 +40,8 @@
   - `TargetPosScheduler`
   - task registry / symbol ownership
   - 手动下单冲突保护
+  - task-level typed order builder
+  - 最小 pre-trade risk gate
   - 事件流 + 稳定聚合摘要的 execution report
 
 原因很直接：
@@ -53,6 +55,8 @@
 - `TaskHost`
 - `TargetPosTask`
 - guarded `insert_order` / `cancel_order`
+- typed `TaskHost::orders(...)` order builder
+- `RiskEngine` / `RiskRejection` 最小前置风控
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -102,6 +106,7 @@
 当前还未落地：
 
 - 更复杂的多单/多批次主动撤单后重规划
+- 合约 metadata 规则、组合级 what-if 保证金试算、多腿 / 多账户联合风控
 
 ## 为什么它必须独立成 crate
 
@@ -218,10 +223,16 @@ impl TaskHost {
     pub fn api(&self) -> &tqsdk_wait::TqApi;
     pub fn api_mut(&mut self) -> &mut tqsdk_wait::TqApi;
 
+    pub fn with_risk(self, risk: RiskEngine) -> Self;
+    pub fn set_risk(&mut self, risk: RiskEngine);
+    pub fn risk(&self) -> Option<&RiskEngine>;
+
     pub async fn wait_update(
         &mut self,
         deadline: Option<tokio::time::Instant>,
     ) -> tqsdk_task::Result<bool>;
+
+    pub fn orders(&mut self, account_id: impl AsRef<str>) -> TaskOrderBuilder<'_>;
 
     pub fn target_pos(
         &mut self,
@@ -258,12 +269,105 @@ impl TaskHost {
 - `TaskHost` 拥有单一推进点
 - 用户继续通过 `api()` 读取 live refs
 - 任务相关命令通过 host 本身走，便于做 ownership guard
+- `orders(...)` 是 task 层 typed 手动下单入口，复用 wait 层 `OrderTicket`，
+  不创建第二套订单状态
+- 配置 `RiskEngine` 后，typed order builder 与 legacy guarded insert 都必须经过同一套 risk gate
 - guarded cancel 需要先从本地状态解析订单对应 symbol；若订单尚未进入状态树，第一版应保守拒绝
 - 不要求 `tqsdk-wait` 反向感知 task registry
 
 `api_mut()` 只是 escape hatch，不应成为常规命令入口。
 
 如果用户绕过 guarded API 直接对底层 `TqApi` 或 `SessionClient` 发单，视为主动绕过 ownership 保护，第一版不保证语义。
+
+### task-level order builder
+
+```rust
+pub struct TaskOrderIntent {
+    pub account_id: String,
+    pub symbol: String,
+    pub direction: tqsdk_core::TradeDirection,
+    pub offset: Option<tqsdk_core::TradeOffset>,
+    pub volume: i64,
+    pub limit_price: Option<f64>,
+}
+
+pub struct TaskOrderBuilder<'a> {
+    /* private */
+}
+
+impl<'a> TaskOrderBuilder<'a> {
+    pub fn buy_open(self, symbol: impl AsRef<str>, volume: i64) -> TaskOrderDraft<'a>;
+    pub fn sell_open(self, symbol: impl AsRef<str>, volume: i64) -> TaskOrderDraft<'a>;
+    pub fn buy_close(self, symbol: impl AsRef<str>, volume: i64) -> TaskOrderDraft<'a>;
+    pub fn sell_close(self, symbol: impl AsRef<str>, volume: i64) -> TaskOrderDraft<'a>;
+}
+
+pub struct TaskOrderDraft<'a> {
+    /* private */
+}
+
+impl TaskOrderDraft<'_> {
+    pub fn limit(self, price: f64) -> Self;
+    pub fn intent(&self) -> &TaskOrderIntent;
+    pub async fn send_once(
+        self,
+        client_order_id: impl Into<tqsdk_wait::ClientOrderId>,
+    ) -> tqsdk_task::Result<tqsdk_wait::OrderTicket>;
+}
+```
+
+设计意图：
+
+- task 层下单应表达用户意图，而不是暴露 `serde_json::Value` 价格字段。
+- `send_once()` 继续委托 `tqsdk-wait::LimitOrderIntent`，因此订单去重、
+  command ledger 和 terminal wait 都复用 wait/session substrate。
+- `TaskOrderIntent` 是 risk gate 的稳定输入快照；它不是一棵新的订单状态树。
+
+### pre-trade risk gate
+
+```rust
+pub struct RiskEngine {
+    /* private */
+}
+
+impl RiskEngine {
+    pub fn new() -> Self;
+    pub fn max_order_volume(self, max: i64) -> Self;
+    pub fn min_available(self, min_available: f64) -> Self;
+    pub fn max_net_position(self, max_abs_net: i64) -> Self;
+    pub fn max_price_deviation(self, max_abs_deviation: f64) -> Self;
+
+    pub fn check(
+        &self,
+        api: &tqsdk_wait::TqApi,
+        intent: &TaskOrderIntent,
+    ) -> tqsdk_task::Result<RiskDecision>;
+}
+
+pub enum RiskDecision {
+    Accepted,
+    Rejected(RiskRejection),
+}
+
+pub enum RiskRejection {
+    MaxOrderVolumeExceeded { /* typed fields */ },
+    MissingAccount { /* typed fields */ },
+    AvailableBelowMinimum { /* typed fields */ },
+    MissingPosition { /* typed fields */ },
+    NetPositionLimitExceeded { /* typed fields */ },
+    MissingQuote { /* typed fields */ },
+    PriceDeviationExceeded { /* typed fields */ },
+}
+```
+
+设计意图：
+
+- 风控属于执行工具层，不下沉到 `tqsdk-core` 或 `tqsdk-session`。
+- 规则读取 `TqApi` 的 account / position / quote refs，使用同一 runtime 状态树和
+  partition read 面，不维护私有资金或持仓状态。
+- 风控拒绝必须是 typed reason，不能要求业务代码解析字符串拒单原因。
+- 这一版只覆盖最小 pre-trade gate；合约 metadata、组合保证金 what-if、
+  多腿 / 多账户联合限额属于后续 execution/risk layer 扩展。
 
 ### target position task
 
@@ -418,8 +522,12 @@ impl TargetPosScheduler {
 2. `set_target_volume()` 后，后续 `TaskHost::wait_update()` 能驱动任务推进。
 3. 任务持有 symbol ownership 时，guarded manual order 会被拒绝。
 4. `cancel()` / `wait_finished()` / `wait_target_reached()` 的任务生命周期清晰可验证。
-5. scheduler 能按步骤推进并给出独立 execution report。
-6. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
+5. `TaskHost::orders(...)` 下单不暴露 `serde_json::Value` 价格字段，并返回 wait 层
+   `OrderTicket`。
+6. 配置 `RiskEngine` 后，typed order builder 与 `insert_order_guarded` 都会在提交前返回
+   typed `RiskRejection`。
+7. scheduler 能按步骤推进并给出独立 execution report。
+8. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
 
 ## 下一步建议
 

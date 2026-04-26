@@ -206,14 +206,35 @@ crate 分层合并成一份迭代计划。
 - 风控规则能组合、能解释拒单原因。
 - 提供轻量 what-if 试算，用于开仓前估算保证金和持仓变化。
 
+已落地：
+
+- `tqsdk-task::RiskEngine` 提供最小 typed pre-trade gate：
+  - 单笔最大手数；
+  - 最低可用资金；
+  - 当前持仓截面上的最大净持仓；
+  - 基于当前 quote last price 的价格偏离限制。
+- `TaskHost::with_risk` / `set_risk` 将风控挂到执行 host 上。
+- `TaskHost::orders(account).buy_open(...).limit(...).send_once(...)` 提供 typed
+  task-level order builder，并复用 `tqsdk-wait::OrderTicket` 和 session-scoped
+  client intent 去重。
+- legacy `insert_order_guarded` 在配置 risk 后也会经过同一套 risk gate。
+- 风控拒绝通过 `TaskError::RiskRejected(RiskRejection)` 返回 typed reason。
+
+仍未完成、不可伪装为已支持：
+
+- 合约 metadata 规则驱动的 tick size、涨跌停和交易所品种规则。
+- 组合级保证金 / 持仓 what-if simulation。
+- 多账户 / 多腿执行组上的联合限额、最大裸露量和频率控制。
+- 风控审计日志落库与热更新。
+
 建议落点：
 
-- `tqsdk-task`：`RiskManager` / `PreTradeGuard` / 风控规则组合。
+- `tqsdk-task`：在当前 `RiskEngine` 上继续扩展规则组合、合约规则和执行组风控。
 - `tqsdk-data` 或 task 上层工具：离线或本地 what-if 试算，避免污染 core。
 
 优先提升的场景：
 
-- `api_contract_s19_pre_trade_risk`
+- `api_contract_s19_pre_trade_risk`（最小 foundation 已提升为正式 task example）
 
 ### P1：策略运行时与可测试性
 
