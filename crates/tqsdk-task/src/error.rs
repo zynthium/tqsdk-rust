@@ -20,6 +20,12 @@ pub enum TaskError {
     Wait(tqsdk_wait::WaitFacadeError),
     Session(tqsdk_session::SessionFacadeError),
     RiskRejected(RiskRejection),
+    ExecutionGroupPartialSubmit {
+        group_id: String,
+        submitted_legs: usize,
+        total_legs: usize,
+        reason: &'static str,
+    },
     OwnershipConflict {
         account_id: String,
         symbol: String,
@@ -59,6 +65,15 @@ impl Display for TaskError {
             Self::Wait(error) => write!(f, "{error}"),
             Self::Session(error) => write!(f, "{error}"),
             Self::RiskRejected(rejection) => write!(f, "risk rejected order: {rejection:?}"),
+            Self::ExecutionGroupPartialSubmit {
+                group_id,
+                submitted_legs,
+                total_legs,
+                reason,
+            } => write!(
+                f,
+                "execution group partial submit group_id={group_id} submitted_legs={submitted_legs} total_legs={total_legs}: {reason}"
+            ),
             Self::OwnershipConflict {
                 account_id,
                 symbol,
@@ -97,6 +112,7 @@ impl std::error::Error for TaskError {
             Self::Wait(error) => Some(error),
             Self::Session(error) => Some(error),
             Self::RiskRejected(_) => None,
+            Self::ExecutionGroupPartialSubmit { .. } => None,
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }

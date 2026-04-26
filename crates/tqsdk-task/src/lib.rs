@@ -7,6 +7,7 @@
 mod calendar;
 mod config;
 mod error;
+mod execution_group;
 mod host;
 mod order;
 mod plan;
@@ -21,6 +22,10 @@ pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,
 };
 pub use error::{Result, TaskError, TaskKind};
+pub use execution_group::{
+    ExecutionGroupBuilder, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegTicket,
+    HedgePolicy,
+};
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use risk::{RiskDecision, RiskEngine, RiskRejection};
