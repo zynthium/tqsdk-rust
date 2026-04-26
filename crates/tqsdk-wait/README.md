@@ -49,6 +49,7 @@
 - `is_changing(...)`
 - `is_changing_fields(...)`
 - `get_quote(...).await`
+- `quote_snapshot(...).await`
 - `get_trading_status(...).await`
 - `get_kline_serial(...).await`
 - `get_tick_serial(...).await`
@@ -106,6 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 完整可编译示例见 [examples/quote_wait.rs](examples/quote_wait.rs)。
+
+如果只需要一次 typed 行情快照，而不想手写 `wait_update()` 循环，可以使用
+`TqApi::quote_snapshot(symbol, deadline).await`。该 helper 会复用同一个底层
+session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户可见的
+`last_commit()` / `is_changing()` 截面解释不被内部等待破坏。契约示例见
+[examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
 
 如果要证明 wait facade 可以复用同一个底层 session 做 direct query，而不需要额外建第二个 client，可参考 [examples/quote_wait_with_session_query.rs](examples/quote_wait_with_session_query.rs)。
 

@@ -19,6 +19,16 @@ pub fn seeded_api() -> TqApi {
 
 #[allow(dead_code)]
 pub fn seed_quote_commit(api: &mut TqApi, symbol: &str, last_price: f64) {
+    seed_quote_commit_with_datetime(api, symbol, last_price, "");
+}
+
+#[allow(dead_code)]
+pub fn seed_quote_commit_with_datetime(
+    api: &mut TqApi,
+    symbol: &str,
+    last_price: f64,
+    datetime: &str,
+) {
     let commit = api
         .handle_for_test()
         .ingest(
@@ -31,6 +41,7 @@ pub fn seed_quote_commit(api: &mut TqApi, symbol: &str, last_price: f64) {
                         "quotes": {
                             symbol: {
                                 "instrument_id": symbol,
+                                "datetime": datetime,
                                 "last_price": last_price
                             }
                         }

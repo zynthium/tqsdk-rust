@@ -23,6 +23,41 @@ async fn get_quote_returns_ref_without_waiting_for_first_tick() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn quote_snapshot_returns_ready_quote_without_manual_wait_loop() {
+    let mut api = support::seeded_api();
+    support::seed_quote_commit_with_datetime(
+        &mut api,
+        "SHFE.au2602",
+        618.0,
+        "2024-04-22 09:00:00.000000",
+    );
+
+    let quote = api.quote_snapshot("SHFE.au2602", None).await.unwrap();
+
+    assert_eq!(quote.instrument_id, "SHFE.au2602");
+    assert_eq!(quote.datetime, "2024-04-22 09:00:00.000000");
+    assert_eq!(quote.last_price, 618.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_snapshot_reports_not_ready_when_deadline_expires() {
+    let mut api = support::seeded_api();
+
+    let error = api
+        .quote_snapshot(
+            "SHFE.au2602",
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(10)),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState("quote snapshot not ready")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn get_trading_status_returns_ref_without_blocking() {
     let mut api = support::seeded_api();
     let status = api.get_trading_status("SHFE.au2602").await.unwrap();

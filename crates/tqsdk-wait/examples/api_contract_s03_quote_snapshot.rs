@@ -27,16 +27,32 @@
 //! - 当前 API 是否自然表达一次性 quote snapshot？
 //! - 是否暴露内部提交模型？
 //! - 是否存在订阅泄漏或快照不一致风险？
-//!
-//! API gap:
-//! 当前可以用 `get_quote().await?` 加 `wait_update()` 循环再 `quote.load(&api)?`
-//! 拼出结果，但这不是“只读当前快照”的自然 API。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let mut api = TqApiBuilder::new(user, pass).futures_market().build().await?;
-//! let quote = api.quote_snapshot("SHFE.au2602").await?;
-//! println!("{} {}", quote.datetime, quote.last_price);
-//! ```
 
-fn main() {}
+use std::time::Duration;
+
+use tqsdk_wait::TqApiBuilder;
+
+fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+    std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = read_env("TQ_AUTH_USER")?;
+    let pass = read_env("TQ_AUTH_PASS")?;
+    let symbol = std::env::var("TQ_TEST_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".to_string());
+
+    let mut api = TqApiBuilder::new(user, pass)
+        .futures_market()
+        .build()
+        .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let quote = api.quote_snapshot(&symbol, Some(deadline)).await?;
+
+    println!(
+        "symbol={} datetime={} last_price={}",
+        quote.instrument_id, quote.datetime, quote.last_price
+    );
+
+    Ok(())
+}

@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1. 零门槛行情订阅 | 自然 | 低 | 无 | 无 | 低 | 无 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs`; `tqsdk_wait::TqApi::{get_quote, wait_update, is_changing}` |
 | 2. 多合约动态订阅 | 无法表达 | 中 | 严重 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs`; `tqsdk_stream::TqStream::quote_stream`; `tqsdk_core::MarketCommand::{SubscribeQuotes, UnsubscribeQuotes}` |
-| 3. 行情快照读取 | 勉强 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::QuoteRef::{snapshot, load}` |
+| 3. 行情快照读取 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::TqApi::quote_snapshot` |
 | 4. Tick / Quote / K线混合订阅 | 勉强 | 中 | 少量 | 少量 | 低 | 中 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::{quote_stream, tick_stream, kline_stream}` |
 | 5. 高频裸行情直通 | 自然 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs`; `SessionClient::progress_once`; `RuntimeReader::read_market_state` |
 | 6. 普通限价下单 | 不自然 | 高 | 严重 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::insert_order`; `TradeLoginCommand`; `serde_json::Value` price |

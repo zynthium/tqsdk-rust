@@ -192,6 +192,26 @@ impl TqApi {
         Ok(self.quote_ref(symbol))
     }
 
+    pub async fn quote_snapshot(
+        &mut self,
+        symbol: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<tqsdk_core::Quote> {
+        let quote = self.get_quote(symbol).await?;
+        self.wait_until_ready_until_for_test(
+            |api| {
+                Ok(quote
+                    .snapshot(api)?
+                    .is_some_and(|quote| !quote.datetime.is_empty()))
+            },
+            deadline,
+            "quote snapshot not ready",
+        )
+        .await?;
+
+        quote.load(self)
+    }
+
     pub async fn get_trading_status(
         &mut self,
         symbol: &str,
@@ -369,6 +389,19 @@ impl TqApi {
     where
         F: FnMut(&Self) -> crate::error::Result<bool>,
     {
+        self.wait_until_ready_until_for_test(&mut ready, None, "object not ready")
+            .await
+    }
+
+    async fn wait_until_ready_until_for_test<F>(
+        &mut self,
+        mut ready: F,
+        deadline: Option<tokio::time::Instant>,
+        not_ready_message: &'static str,
+    ) -> crate::error::Result<()>
+    where
+        F: FnMut(&Self) -> crate::error::Result<bool>,
+    {
         if ready(self)? {
             return Ok(());
         }
@@ -377,13 +410,13 @@ impl TqApi {
         let mut replay = Vec::new();
 
         while !ready(self)? {
-            if !self.wait_update(None).await? {
+            if !self.wait_update(deadline).await? {
                 for commit in replay.into_iter().rev() {
                     self.driver.deferred_commits.push_front(commit);
                 }
                 self.driver.last_commit = previous_last_commit;
                 return Err(crate::error::WaitFacadeError::InvalidState(
-                    "object not ready",
+                    not_ready_message,
                 ));
             }
 

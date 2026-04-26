@@ -60,6 +60,10 @@ wait adapter 层未来可以提供：
 - 只有明确需要 detached ownership 时，才应退回 `StateSnapshot` clone 路径
 - `is_changing()` 只解释最近一次成功消费到的 commit
 - 所有 timeout / 初始 ready / 重连行为都必须建立在同一 commit 模型上
+- 一次性 `quote_snapshot(symbol, deadline)` 这类 helper 可以作为 wait facade
+  的薄便利层存在，但必须仍通过同一个 session 提交订阅、通过同一个
+  `RuntimeReader` 等待 ready snapshot，并且不得偷改用户随后看到的
+  `last_commit()` / `is_changing()` 语义。
 
 ## 为什么单独保留这份文档
 因为 Python 兼容性的大部分难点都在 wait facade 层，而不在 V1 contract 层。
