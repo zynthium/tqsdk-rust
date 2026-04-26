@@ -49,5 +49,5 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单和 session-scoped reconnect-safe order intent 已具备薄 facade；跨进程持久恢复、风控和组合执行仍需继续补齐。
-3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle 和混合 market event 已有薄 facade；慢消费者 sink、daemon health 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
+3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event 和 health snapshot 已有薄 facade；慢消费者 sink、完整 daemon supervisor/metrics 仍停留在底层组合能力，距离终端用户契约仍有明显 gap。
 4. 多 provider 聚合、统一策略 runtime、历史回放驱动策略、本地行情缓存、fake broker/test harness 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。
