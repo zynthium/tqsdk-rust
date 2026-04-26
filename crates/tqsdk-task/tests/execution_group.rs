@@ -106,18 +106,20 @@ fn seed_account_position_quote(
         .expect("seed account/position commit should produce a commit");
 }
 
-fn seed_order_status_commit(
-    host: &TaskHost,
-    account_id: &str,
-    symbol: &str,
-    order_id: &str,
-    direction: &str,
-    offset: &str,
+struct OrderStatusSeed<'a> {
+    account_id: &'a str,
+    symbol: &'a str,
+    order_id: &'a str,
+    direction: &'a str,
+    offset: &'a str,
     volume_orign: i64,
     volume_left: i64,
-    status: &str,
-) {
-    let (exchange_id, instrument_id) = symbol
+    status: &'a str,
+}
+
+fn seed_order_status_commit(host: &TaskHost, seed: OrderStatusSeed<'_>) {
+    let (exchange_id, instrument_id) = seed
+        .symbol
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
@@ -130,26 +132,26 @@ fn seed_order_status_commit(
                     "aid": "rtn_data",
                     "data": [{
                         "trade": {
-                            account_id: {
+                            seed.account_id: {
                                 "orders": {
-                                    order_id: {
+                                    seed.order_id: {
                                         "seqno": 1,
-                                        "user_id": account_id,
-                                        "order_id": order_id,
-                                        "exchange_order_id": format!("exchange-{order_id}"),
+                                        "user_id": seed.account_id,
+                                        "order_id": seed.order_id,
+                                        "exchange_order_id": format!("exchange-{}", seed.order_id),
                                         "exchange_id": exchange_id,
                                         "instrument_id": instrument_id,
-                                        "direction": direction,
-                                        "offset": offset,
-                                        "volume_orign": volume_orign,
-                                        "volume_left": volume_left,
+                                        "direction": seed.direction,
+                                        "offset": seed.offset,
+                                        "volume_orign": seed.volume_orign,
+                                        "volume_left": seed.volume_left,
                                         "limit_price": 1.0,
                                         "price_type": "LIMIT",
                                         "volume_condition": "ANY",
                                         "time_condition": "GFD",
                                         "insert_date_time": 1_713_660_000_000_000_000_i64,
                                         "last_msg": "",
-                                        "status": status,
+                                        "status": seed.status,
                                     }
                                 }
                             }
@@ -429,25 +431,29 @@ async fn execution_group_status_reports_all_filled_outcome() {
 
     seed_order_status_commit(
         &host,
-        "sim",
-        "SHFE.au2602",
-        "spread-filled-001:leg:0",
-        "BUY",
-        "OPEN",
-        1,
-        0,
-        "FINISHED",
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.au2602",
+            order_id: "spread-filled-001:leg:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 1,
+            volume_left: 0,
+            status: "FINISHED",
+        },
     );
     seed_order_status_commit(
         &host,
-        "sim",
-        "SHFE.ag2602",
-        "spread-filled-001:leg:1",
-        "SELL",
-        "OPEN",
-        15,
-        0,
-        "FINISHED",
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.ag2602",
+            order_id: "spread-filled-001:leg:1",
+            direction: "SELL",
+            offset: "OPEN",
+            volume_orign: 15,
+            volume_left: 0,
+            status: "FINISHED",
+        },
     );
 
     let outcome = group.outcome(host.api()).unwrap().unwrap();
@@ -482,25 +488,29 @@ async fn execution_group_status_reports_exposure_when_one_leg_fills_and_other_re
 
     seed_order_status_commit(
         &host,
-        "sim",
-        "SHFE.au2602",
-        "spread-exposure-001:leg:0",
-        "BUY",
-        "OPEN",
-        1,
-        0,
-        "FINISHED",
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.au2602",
+            order_id: "spread-exposure-001:leg:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 1,
+            volume_left: 0,
+            status: "FINISHED",
+        },
     );
     seed_order_status_commit(
         &host,
-        "sim",
-        "SHFE.ag2602",
-        "spread-exposure-001:leg:1",
-        "SELL",
-        "OPEN",
-        15,
-        15,
-        "FINISHED",
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.ag2602",
+            order_id: "spread-exposure-001:leg:1",
+            direction: "SELL",
+            offset: "OPEN",
+            volume_orign: 15,
+            volume_left: 15,
+            status: "FINISHED",
+        },
     );
 
     let outcome = group.outcome(host.api()).unwrap().unwrap();
