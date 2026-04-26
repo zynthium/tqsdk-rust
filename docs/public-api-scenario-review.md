@@ -11,7 +11,7 @@
 | 3. 行情快照读取 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::TqApi::quote_snapshot` |
 | 4. Tick / Quote / K线混合订阅 | 勉强 | 中 | 少量 | 少量 | 低 | 中 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::{quote_stream, tick_stream, kline_stream}` |
 | 5. 高频裸行情直通 | 自然 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs`; `SessionClient::progress_once`; `RuntimeReader::read_market_state` |
-| 6. 普通限价下单 | 不自然 | 高 | 严重 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::insert_order`; `TradeLoginCommand`; `serde_json::Value` price |
+| 6. 普通限价下单 | 勉强 | 中 | 少量 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{insert_limit_order, insert_order}`; `TradeLoginCommand` |
 | 7. 撤单与部分成交 | 勉强 | 中 | 少量 | 无 | 中 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs`; `Order.lifecycle`; `Order.volume_left`; `TqApi::cancel_order` |
 | 8. 账户 / 资金 / 持仓查询 | 勉强 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs`; `TqApi::{get_account, get_position}` |
 | 9. 启动后状态恢复 | 无法表达 | 高 | 严重 | 少量 | 高 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s09_startup_state_recovery.rs`; `SessionRuntime::recover` is not user-facing |
@@ -34,6 +34,6 @@
 ## 主要结论
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
-2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 typed order/login/ticket/intent/risk abstraction 不足。`serde_json::Value` 价格、手写 trade login command、缺少 reconnect-safe order intent 是最高优先级问题。
+2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 login/ticket/intent/risk abstraction 不足。手写 trade login command、缺少 reconnect-safe order intent 是最高优先级问题。
 3. `tqsdk-stream` 的底座方向正确，但 quote 订阅、动态订阅、混合 market event、慢消费者 sink、daemon health 还停留在底层组合能力，距离终端用户契约仍有明显 gap。
 4. 多 provider 聚合、统一策略 runtime、历史回放驱动策略、本地行情缓存、fake broker/test harness 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。

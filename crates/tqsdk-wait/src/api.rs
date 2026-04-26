@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Number, Value};
 use tqsdk_core::{
     AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol, TradeCommand,
     TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
@@ -334,6 +334,29 @@ impl TqApi {
             .map_err(crate::error::WaitFacadeError::Session)?;
 
         Ok(self.get_order(account_id, order_id.as_str()))
+    }
+
+    pub async fn insert_limit_order(
+        &mut self,
+        account_id: &str,
+        symbol: &str,
+        direction: TradeDirection,
+        offset: Option<TradeOffset>,
+        volume: i64,
+        limit_price: f64,
+    ) -> crate::error::Result<OrderRef> {
+        let limit_price = Number::from_f64(limit_price).ok_or(
+            crate::error::WaitFacadeError::InvalidState("limit price must be finite"),
+        )?;
+        self.insert_order(
+            account_id,
+            symbol,
+            direction,
+            offset,
+            volume,
+            Some(Value::Number(limit_price)),
+        )
+        .await
     }
 
     pub async fn cancel_order(

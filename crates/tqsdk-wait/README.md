@@ -67,6 +67,7 @@
 - `get_security_order(...)`
 - `get_security_trade(...)`
 - `insert_order(...).await`
+- `insert_limit_order(...).await`
 - `cancel_order(...).await`
 - `confirm_settlement(...).await`
 - `session()`
@@ -76,7 +77,7 @@
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
-- `insert_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
+- `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
 - `tqsdk-stream` 也只承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query

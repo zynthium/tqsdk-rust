@@ -65,6 +65,54 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn insert_limit_order_uses_typed_finite_price() {
+    let mut api = support::seeded_api();
+    let order = api
+        .insert_limit_order(
+            "sim",
+            "SHFE.ao2602",
+            TradeDirection::Buy,
+            Some(TradeOffset::Open),
+            2,
+            619.5,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(order.account_id(), "sim");
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["price_type"], "LIMIT");
+    assert_eq!(payload["time_condition"], "GFD");
+    assert_eq!(payload["volume"], 2);
+    assert_eq!(payload["limit_price"], 619.5);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_limit_order_rejects_non_finite_price() {
+    let mut api = support::seeded_api();
+
+    let error = api
+        .insert_limit_order(
+            "sim",
+            "SHFE.ao2602",
+            TradeDirection::Buy,
+            Some(TradeOffset::Open),
+            1,
+            f64::NAN,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState("limit price must be finite")
+    );
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn account_position_order_and_trade_refs_decode_from_state_tree() {
     let mut api = support::seeded_api();
     support::seed_trade_snapshot(&mut api, "sim", "SHFE.ao2602");

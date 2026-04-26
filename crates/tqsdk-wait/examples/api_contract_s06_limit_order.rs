@@ -29,9 +29,9 @@
 //! - 是否存在资金安全或重复下单风险？
 //!
 //! API gap:
-//! 当前 `TqApi::insert_order` 能提交订单，但 `limit_price` 是
-//! `Option<serde_json::Value>`，trade login 也通常需要经 `session().submit(...)`
-//! 手动发送底层命令。
+//! 当前 `TqApi::insert_limit_order` 已经能用 typed `f64` 价格提交限价单，
+//! 但 trade login 仍通常需要经 `session().submit(...)` 手动发送底层命令；
+//! 订单 ticket / wait finished helper 也还没有冻结成终端用户 contract。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -43,10 +43,14 @@
 //! let account = api.login_default_trade_account().await?;
 //!
 //! let order = api
-//!     .limit_order(account.id(), "SHFE.au2602")
-//!     .buy_open(1)
-//!     .at(480.0)
-//!     .send()
+//!     .insert_limit_order(
+//!         account.id(),
+//!         "SHFE.au2602",
+//!         TradeDirection::Buy,
+//!         Some(TradeOffset::Open),
+//!         1,
+//!         480.0,
+//!     )
 //!     .await?;
 //!
 //! let finished = order.wait_finished(&mut api).await?;
