@@ -54,8 +54,12 @@ docs/
 ## 常用命令
 
 ```bash
+cargo check --workspace --examples
+cargo test --workspace
+cargo clippy --workspace --examples --all-targets -- -D warnings
+cargo check --workspace --no-default-features
+cargo check --workspace --all-features --examples
 cargo test -p tqsdk-core -q
-cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::perf
 cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocapture
 ```
 

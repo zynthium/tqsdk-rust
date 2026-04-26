@@ -42,6 +42,10 @@ struct KlineEventSpec {
 
 /// Typed market data update emitted by [`MarketEventStream`].
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "MarketEvent preserves allocation-free public pattern matching on the market hot path."
+)]
 pub enum MarketEvent {
     Quote(ValueUpdate<Quote>),
     TickWindow(ValueUpdate<TickWindow>),

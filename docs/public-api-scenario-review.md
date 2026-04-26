@@ -1,6 +1,12 @@
 # 场景驱动 Public API 设计审查
 
-本文档审查 `api_contract_sXX_*.rs` 示例所表达的终端用户场景。示例文件是 public API 契约样本：能自然表达的场景使用当前 public API 写成可编译示例；不能自然表达的场景只保留理想用户代码草案，并显式标记 API gap，不用底层绕路代码伪装通过。
+本文档审查 `api_contract_sXX_*.rs` 所表达的终端用户场景。正式
+`crates/*/examples/api_contract_sXX_*.rs` 文件是 public API 契约样本：能自然表达的场景使用当前
+public API 写成可编译示例，并纳入 `cargo check --workspace --examples` 与 CI。
+
+不能自然表达的场景只保留理想用户代码草案，放在
+`docs/scenarios/api_gaps/`，并显式标记 API gap；这些 sketch 不参与 Cargo
+example 自动发现，不用底层绕路代码伪装通过。
 
 本轮新增和微调的 public surface 只位于 `tqsdk-wait` / `tqsdk-stream`
 facade：它们继续复用既有 session、runtime commit、reader/cursor 与
@@ -17,22 +23,22 @@ crate README 已随 public API 调整同步更新。
 | 6. 普通限价下单 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{login_trade_account, insert_limit_order}`; `OrderRef::wait_terminal` |
 | 7. 撤单与部分成交 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs`; `OrderRef::{wait_partially_filled, cancel_remaining, wait_terminal}`; `Order.lifecycle`; `Order.volume_left` |
 | 8. 账户 / 资金 / 持仓查询 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs`; `TqApi::{login_trade_account, get_account, get_position}` |
-| 9. 启动后状态恢复 | 无法表达 | 高 | 严重 | 少量 | 高 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s09_startup_state_recovery.rs`; `SessionRuntime::recover` is not user-facing |
-| 10. 断线重连中的订单一致性 | 无法表达 | 高 | 严重 | 少量 | P0 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s10_reconnect_order_consistency.rs`; runtime command ledger lacks user-facing order intent contract |
+| 9. 启动后状态恢复 | 无法表达 | 高 | 严重 | 少量 | 高 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s09_startup_state_recovery.rs`; `SessionRuntime::recover` is not user-facing |
+| 10. 断线重连中的订单一致性 | 无法表达 | 高 | 严重 | 少量 | P0 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s10_reconnect_order_consistency.rs`; runtime command ledger lacks user-facing order intent contract |
 | 11. 简单策略 | 勉强 | 高 | 少量 | 少量 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`; `TaskHost`; `TargetPosTask` |
-| 12. 跨合约套利 | 无法表达 | 高 | 严重 | 严重 | P0 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; no execution group / hedge policy API |
-| 13. 多账户下单 | 无法表达 | 高 | 严重 | 严重 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `SessionClientBuilder::trade_target*`; no account group API |
-| 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `crates/tqsdk-stream/examples/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
-| 15. 实盘 / 模拟 / 回放切换 | 勉强 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`; builders have targets/replay URL, but no common strategy runtime |
-| 16. 历史行情回放 | 不自然 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s16_history_replay_strategy.rs`; `DataClient` history series; `SessionClient::replay_step*` |
+| 12. 跨合约套利 | 无法表达 | 高 | 严重 | 严重 | P0 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; no execution group / hedge policy API |
+| 13. 多账户下单 | 无法表达 | 高 | 严重 | 严重 | 高 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `SessionClientBuilder::trade_target*`; no account group API |
+| 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
+| 15. 实盘 / 模拟 / 回放切换 | 勉强 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; builders have targets/replay URL, but no common strategy runtime |
+| 16. 历史行情回放 | 不自然 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `DataClient` history series; `SessionClient::replay_step*` |
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
-| 18. 本地行情缓存读写 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; no live cache writer/reader contract |
-| 19. 风控前置 | 不自然 | 高 | 少量 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `TaskHost::insert_order_guarded` only guards task ownership |
-| 20. 生产守护进程 | 不自然 | 高 | 少量 | 严重 | 中 | 中 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon.rs`; `TradeSessionEvent`; no health/metrics/shutdown API |
+| 18. 本地行情缓存读写 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; no live cache writer/reader contract |
+| 19. 风控前置 | 不自然 | 高 | 少量 | 无 | 高 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `TaskHost::insert_order_guarded` only guards task ownership |
+| 20. 生产守护进程 | 不自然 | 高 | 少量 | 严重 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TradeSessionEvent`; no health/metrics/shutdown API |
 | 21. 慢消费者隔离 | 勉强 | 中 | 少量 | 少量 | 低 | 中 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `CommitStream`; `StreamFacadeError::Lagged` |
 | 22. 错误诊断与重试 | 勉强 | 中 | 少量 | 少量 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `SessionFacadeError`; `StreamFacadeError`; `TradeSessionEvent` |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_symbol_info`; `Quote` metadata fields |
-| 24. 最小可测试策略 | 无法表达 | 高 | 严重 | 严重 | 中 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; hidden `*_for_test` helpers; no public fake market/broker |
+| 24. 最小可测试策略 | 无法表达 | 高 | 严重 | 严重 | 中 | 低 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; hidden `*_for_test` helpers; no public fake market/broker |
 
 ## 主要结论
 

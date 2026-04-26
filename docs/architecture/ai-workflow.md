@@ -321,11 +321,35 @@ git diff --check
 Rust 代码改动的默认验证：
 
 ```bash
-cargo fmt --all --check
+cargo check --workspace --examples
 cargo test --workspace
-cargo check --workspace --no-default-features
-cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo clippy --workspace --examples --all-targets -- -D warnings
 ```
+
+如果修改了 feature flags、workspace 依赖或 crate feature 传播，还必须验证：
+
+```bash
+cargo check --workspace --no-default-features
+cargo check --workspace --all-features --examples
+```
+
+如果改动会影响格式化，提交前仍应补充：
+
+```bash
+cargo fmt --all --check
+```
+
+场景驱动 public API example 的处理原则：
+
+1. 已经成为正式 API 契约的 `crates/*/examples/api_contract_sXX_*.rs`
+   必须保持可编译。
+2. 当前 API 尚不支持、或只能用绕路代码伪装表达的场景，只能作为
+   desired API sketch 保存在 `docs/scenarios/api_gaps/`，不得放在正式
+   examples 中伪装成已支持。
+3. 一旦某个 gap 被修复，应将 sketch 提升为正式 example，并纳入
+   `cargo check --workspace --examples` 与 CI。
+4. 如果重构导致 example 变长、变绕、暴露更多内部细节，应优先判定为
+   API 退化，而不是用户使用问题。
 
 架构边界相关改动还应补充静态验收，例如：
 

@@ -277,16 +277,26 @@ pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
 }
 
 #[allow(dead_code)]
-pub fn seed_order_update(
-    api: &mut TqApi,
-    account_id: &str,
-    symbol: &str,
-    order_id: &str,
-    volume_orign: i64,
-    volume_left: i64,
-    status: &str,
-    is_dead: bool,
-) {
+pub struct OrderUpdateSeed<'a> {
+    pub account_id: &'a str,
+    pub symbol: &'a str,
+    pub order_id: &'a str,
+    pub volume_orign: i64,
+    pub volume_left: i64,
+    pub status: &'a str,
+    pub is_dead: bool,
+}
+
+#[allow(dead_code)]
+pub fn seed_order_update(api: &mut TqApi, seed: OrderUpdateSeed<'_>) {
+    let account_id = seed.account_id;
+    let symbol = seed.symbol;
+    let order_id = seed.order_id;
+    let volume_orign = seed.volume_orign;
+    let volume_left = seed.volume_left;
+    let status = seed.status;
+    let is_dead = seed.is_dead;
+
     let commit = api
         .handle_for_test()
         .ingest(

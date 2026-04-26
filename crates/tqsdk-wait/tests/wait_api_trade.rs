@@ -315,13 +315,15 @@ async fn order_ref_helpers_wait_cancel_remaining_and_terminal_state() {
 
     support::seed_order_update(
         &mut api,
-        "sim",
-        "SHFE.ao2602",
-        "order-1",
-        3,
-        1,
-        "ALIVE",
-        false,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "order-1",
+            volume_orign: 3,
+            volume_left: 1,
+            status: "ALIVE",
+            is_dead: false,
+        },
     );
 
     let partial = order.wait_partially_filled(&mut api).await.unwrap();
@@ -338,13 +340,15 @@ async fn order_ref_helpers_wait_cancel_remaining_and_terminal_state() {
 
     support::seed_order_update(
         &mut api,
-        "sim",
-        "SHFE.ao2602",
-        "order-1",
-        3,
-        1,
-        "FINISHED",
-        true,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "order-1",
+            volume_orign: 3,
+            volume_left: 1,
+            status: "FINISHED",
+            is_dead: true,
+        },
     );
 
     let terminal = order.wait_terminal(&mut api).await.unwrap();

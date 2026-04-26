@@ -111,6 +111,37 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 2. `cargo test -p tqsdk-core -q --test runtime_contract_reader_surface --test runtime_contract_surface`
 3. `cargo test -p tqsdk-core -q`
 
+## 场景驱动 public API 契约
+
+`crates/*/examples/api_contract_sXX_*.rs` 是面向终端用户的 public API
+契约样本。它们不是普通 demo：每次 public API、crate 拆分、feature flag、
+facade 或 runtime 消费方式重构后，都必须确认这些 examples 仍能用清晰、
+简洁、类型安全且性能合理的方式表达目标场景。
+
+重构后至少运行：
+
+1. `cargo check --workspace --examples`
+2. `cargo test --workspace`
+3. `cargo clippy --workspace --examples --all-targets -- -D warnings`
+
+如果 feature flags、workspace 依赖或 crate feature 传播被修改，还必须运行：
+
+1. `cargo check --workspace --no-default-features`
+2. `cargo check --workspace --all-features --examples`
+
+examples 的处理原则：
+
+1. 已经成为正式 API 契约的 example 必须保持可编译。
+2. 当前 API 尚不支持、或只能用明显绕路方式表达的场景，可以先作为
+   desired API sketch 保存在 `docs/scenarios/api_gaps/`，但不得伪装成已经支持。
+3. 一旦某个 gap 被修复，应将其提升为正式 `crates/*/examples/api_contract_sXX_*.rs`，
+   并纳入 CI。
+4. 如果重构导致 example 变长、变绕、暴露更多内部细节，应优先判定为 API
+   退化。
+
+当前场景审查报告见 [`../public-api-scenario-review.md`](../public-api-scenario-review.md)；
+API gap sketches 见 [`../scenarios/api_gaps/`](../scenarios/api_gaps/)。
+
 ## Feature / no-default build matrix
 以下命令用于固定 feature flags 与最小依赖构建基线，防止默认 feature 构建通过但 `--no-default-features` 或单独 feature 组合退化。
 
