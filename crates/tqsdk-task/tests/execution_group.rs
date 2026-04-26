@@ -6,7 +6,9 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::SessionClient;
-use tqsdk_task::{HedgePolicy, RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind};
+use tqsdk_task::{
+    ExecutionGroupOutcome, HedgePolicy, RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind,
+};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {
@@ -102,6 +104,64 @@ fn seed_account_position_quote(
         )
         .unwrap()
         .expect("seed account/position commit should produce a commit");
+}
+
+fn seed_order_status_commit(
+    host: &TaskHost,
+    account_id: &str,
+    symbol: &str,
+    order_id: &str,
+    direction: &str,
+    offset: &str,
+    volume_orign: i64,
+    volume_left: i64,
+    status: &str,
+) {
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("test symbol should contain an exchange prefix");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "orders": {
+                                    order_id: {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": order_id,
+                                        "exchange_order_id": format!("exchange-{order_id}"),
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "direction": direction,
+                                        "offset": offset,
+                                        "volume_orign": volume_orign,
+                                        "volume_left": volume_left,
+                                        "limit_price": 1.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "last_msg": "",
+                                        "status": status,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed order status commit should produce a commit");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -275,7 +335,11 @@ async fn execution_group_send_once_reuses_existing_leg_intents_on_retry() {
         .unwrap();
     assert!(first.legs().iter().all(|leg| leg.ticket().was_submitted()));
     assert_eq!(
-        host.api().handle_for_test().drain_dispatches().unwrap().len(),
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
         2
     );
 
@@ -319,7 +383,11 @@ async fn execution_group_retry_with_different_leg_spec_is_rejected_by_intent_led
         .await
         .unwrap();
     assert_eq!(
-        host.api().handle_for_test().drain_dispatches().unwrap().len(),
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
         2
     );
 
@@ -340,4 +408,108 @@ async fn execution_group_retry_with_different_leg_spec_is_rejected_by_intent_led
         matches!(err, TaskError::Wait(_)),
         "mismatched retry should be rejected by the wait/session intent ledger, got {err:?}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_status_reports_all_filled_outcome() {
+    let mut host = seeded_host();
+    let group = host
+        .execution_group("sim")
+        .client_group_id("spread-filled-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.au2602",
+        "spread-filled-001:leg:0",
+        "BUY",
+        "OPEN",
+        1,
+        0,
+        "FINISHED",
+    );
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.ag2602",
+        "spread-filled-001:leg:1",
+        "SELL",
+        "OPEN",
+        15,
+        0,
+        "FINISHED",
+    );
+
+    let outcome = group.outcome(host.api()).unwrap().unwrap();
+    match outcome {
+        ExecutionGroupOutcome::AllFilled { legs } => {
+            assert_eq!(legs.len(), 2);
+            assert!(
+                legs.iter()
+                    .all(|leg| leg.filled_volume == leg.requested_volume)
+            );
+        }
+        other => panic!("expected all filled outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_status_reports_exposure_when_one_leg_fills_and_other_rejects() {
+    let mut host = seeded_host();
+    let group = host
+        .execution_group("sim")
+        .client_group_id("spread-exposure-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.au2602",
+        "spread-exposure-001:leg:0",
+        "BUY",
+        "OPEN",
+        1,
+        0,
+        "FINISHED",
+    );
+    seed_order_status_commit(
+        &host,
+        "sim",
+        "SHFE.ag2602",
+        "spread-exposure-001:leg:1",
+        "SELL",
+        "OPEN",
+        15,
+        15,
+        "FINISHED",
+    );
+
+    let outcome = group.outcome(host.api()).unwrap().unwrap();
+    match outcome {
+        ExecutionGroupOutcome::NeedsHedge { exposure, legs } => {
+            assert_eq!(legs.len(), 2);
+            assert_eq!(exposure.filled_symbols, vec!["SHFE.au2602".to_string()]);
+            assert_eq!(exposure.unfilled_symbols, vec!["SHFE.ag2602".to_string()]);
+        }
+        other => panic!("expected hedge exposure outcome, got {other:?}"),
+    }
 }

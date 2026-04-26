@@ -23,8 +23,9 @@ pub use config::{
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use execution_group::{
-    ExecutionGroupBuilder, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegTicket,
-    HedgePolicy,
+    ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupStatus,
+    ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport, ExecutionLegState,
+    ExecutionLegTicket, HedgePolicy,
 };
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};

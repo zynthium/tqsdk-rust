@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use tqsdk_core::{TradeDirection, TradeOffset};
-use tqsdk_wait::OrderTicket;
+use tqsdk_core::{Order, OrderLifecycle, TradeDirection, TradeOffset};
+use tqsdk_wait::{OrderTicket, OrderTicketState};
 
 use crate::{Result, TaskError, TaskHost, TaskOrderIntent};
 
@@ -76,6 +76,71 @@ pub struct ExecutionGroupTicket {
     hedge_policy: HedgePolicy,
     max_unhedged: Option<Duration>,
     legs: Vec<ExecutionLegTicket>,
+}
+
+/// State of one execution-group leg projected from its wait-layer order ticket.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionLegState {
+    Unknown,
+    CommandPending,
+    Live,
+    Filled,
+    PartiallyFilled {
+        filled_volume: i64,
+        volume_left: i64,
+    },
+    Cancelled,
+    Rejected,
+    Failed,
+}
+
+/// Stable report for one execution-group leg.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionLegReport {
+    pub client_order_id: String,
+    pub account_id: String,
+    pub symbol: String,
+    pub direction: TradeDirection,
+    pub offset: Option<TradeOffset>,
+    pub requested_volume: i64,
+    pub filled_volume: i64,
+    pub volume_left: i64,
+    pub state: ExecutionLegState,
+}
+
+/// Exposure summary when a group reaches a mixed terminal state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionExposure {
+    pub filled_symbols: Vec<String>,
+    pub unfilled_symbols: Vec<String>,
+}
+
+/// Current group status.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionGroupStatus {
+    Pending { legs: Vec<ExecutionLegReport> },
+    Finished(ExecutionGroupOutcome),
+}
+
+/// Terminal group outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionGroupOutcome {
+    AllFilled {
+        legs: Vec<ExecutionLegReport>,
+    },
+    Cancelled {
+        legs: Vec<ExecutionLegReport>,
+    },
+    Rejected {
+        legs: Vec<ExecutionLegReport>,
+    },
+    Failed {
+        legs: Vec<ExecutionLegReport>,
+    },
+    NeedsHedge {
+        exposure: ExecutionExposure,
+        legs: Vec<ExecutionLegReport>,
+    },
 }
 
 impl<'a> ExecutionGroupBuilder<'a> {
@@ -206,6 +271,42 @@ impl ExecutionGroupTicket {
     pub fn legs(&self) -> &[ExecutionLegTicket] {
         &self.legs
     }
+
+    pub fn status(&self, api: &tqsdk_wait::TqApi) -> Result<ExecutionGroupStatus> {
+        let legs = self.leg_reports(api)?;
+        Ok(match outcome_from_reports(&legs) {
+            Some(outcome) => ExecutionGroupStatus::Finished(outcome),
+            None => ExecutionGroupStatus::Pending { legs },
+        })
+    }
+
+    pub fn outcome(&self, api: &tqsdk_wait::TqApi) -> Result<Option<ExecutionGroupOutcome>> {
+        let legs = self.leg_reports(api)?;
+        Ok(outcome_from_reports(&legs))
+    }
+
+    pub async fn wait_finished(
+        &self,
+        host: &mut TaskHost,
+        deadline: tokio::time::Instant,
+    ) -> Result<ExecutionGroupOutcome> {
+        loop {
+            if let Some(outcome) = self.outcome(host.api())? {
+                return Ok(outcome);
+            }
+            if !host.wait_update(Some(deadline)).await? {
+                let legs = self.leg_reports(host.api())?;
+                return Ok(ExecutionGroupOutcome::NeedsHedge {
+                    exposure: exposure_from_reports(&legs),
+                    legs,
+                });
+            }
+        }
+    }
+
+    fn leg_reports(&self, api: &tqsdk_wait::TqApi) -> Result<Vec<ExecutionLegReport>> {
+        self.legs.iter().map(|leg| leg_report(api, leg)).collect()
+    }
 }
 
 async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<ExecutionGroupTicket> {
@@ -275,4 +376,158 @@ async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<Executio
         max_unhedged: builder.max_unhedged,
         legs: submitted,
     })
+}
+
+fn leg_report(api: &tqsdk_wait::TqApi, leg: &ExecutionLegTicket) -> Result<ExecutionLegReport> {
+    let state = leg.ticket.status(api)?;
+    let (state, filled_volume, volume_left) = match state {
+        OrderTicketState::Unknown { .. } => (ExecutionLegState::Unknown, 0, leg.intent.volume),
+        OrderTicketState::CommandPending { .. } => {
+            (ExecutionLegState::CommandPending, 0, leg.intent.volume)
+        }
+        OrderTicketState::Live { order, .. } => live_leg_state(&order),
+        OrderTicketState::Filled { order, .. } => {
+            let volume_left = order.volume_left;
+            let filled = (order.volume_orign - volume_left).max(0);
+            (ExecutionLegState::Filled, filled, volume_left)
+        }
+        OrderTicketState::Cancelled { order, .. } => terminal_optional_order_state(
+            order.as_ref(),
+            ExecutionLegState::Cancelled,
+            leg.intent.volume,
+        ),
+        OrderTicketState::Rejected { order, .. } => terminal_optional_order_state(
+            order.as_ref(),
+            ExecutionLegState::Rejected,
+            leg.intent.volume,
+        ),
+        OrderTicketState::Failed { order, .. } => terminal_optional_order_state(
+            order.as_ref(),
+            ExecutionLegState::Failed,
+            leg.intent.volume,
+        ),
+    };
+
+    Ok(ExecutionLegReport {
+        client_order_id: leg.client_order_id.clone(),
+        account_id: leg.intent.account_id.clone(),
+        symbol: leg.intent.symbol.clone(),
+        direction: leg.intent.direction,
+        offset: leg.intent.offset,
+        requested_volume: leg.intent.volume,
+        filled_volume,
+        volume_left,
+        state,
+    })
+}
+
+fn live_leg_state(order: &Order) -> (ExecutionLegState, i64, i64) {
+    let volume_left = order.volume_left;
+    let filled = (order.volume_orign - volume_left).max(0);
+    if filled > 0 {
+        (
+            ExecutionLegState::PartiallyFilled {
+                filled_volume: filled,
+                volume_left,
+            },
+            filled,
+            volume_left,
+        )
+    } else {
+        (ExecutionLegState::Live, 0, volume_left)
+    }
+}
+
+fn terminal_optional_order_state(
+    order: Option<&Order>,
+    fallback: ExecutionLegState,
+    requested_volume: i64,
+) -> (ExecutionLegState, i64, i64) {
+    let Some(order) = order else {
+        return (fallback, 0, requested_volume);
+    };
+    let volume_left = order.volume_left;
+    let filled = (order.volume_orign - volume_left).max(0);
+    let state = match (order.lifecycle, filled > 0, volume_left == 0) {
+        (OrderLifecycle::Filled, _, _) => ExecutionLegState::Filled,
+        (_, true, false) => ExecutionLegState::PartiallyFilled {
+            filled_volume: filled,
+            volume_left,
+        },
+        _ => fallback,
+    };
+    (state, filled, volume_left)
+}
+
+fn outcome_from_reports(legs: &[ExecutionLegReport]) -> Option<ExecutionGroupOutcome> {
+    if legs.iter().any(is_pending_state) {
+        return None;
+    }
+
+    let any_filled = legs.iter().any(|leg| leg.filled_volume > 0);
+    let all_filled = legs
+        .iter()
+        .all(|leg| matches!(leg.state, ExecutionLegState::Filled));
+    if all_filled {
+        return Some(ExecutionGroupOutcome::AllFilled {
+            legs: legs.to_vec(),
+        });
+    }
+
+    if any_filled {
+        return Some(ExecutionGroupOutcome::NeedsHedge {
+            exposure: exposure_from_reports(legs),
+            legs: legs.to_vec(),
+        });
+    }
+
+    if legs
+        .iter()
+        .any(|leg| matches!(leg.state, ExecutionLegState::Failed))
+    {
+        return Some(ExecutionGroupOutcome::Failed {
+            legs: legs.to_vec(),
+        });
+    }
+    if legs
+        .iter()
+        .any(|leg| matches!(leg.state, ExecutionLegState::Rejected))
+    {
+        return Some(ExecutionGroupOutcome::Rejected {
+            legs: legs.to_vec(),
+        });
+    }
+    if legs
+        .iter()
+        .any(|leg| matches!(leg.state, ExecutionLegState::Cancelled))
+    {
+        return Some(ExecutionGroupOutcome::Cancelled {
+            legs: legs.to_vec(),
+        });
+    }
+    None
+}
+
+fn is_pending_state(leg: &ExecutionLegReport) -> bool {
+    matches!(
+        leg.state,
+        ExecutionLegState::Unknown | ExecutionLegState::CommandPending | ExecutionLegState::Live
+    )
+}
+
+fn exposure_from_reports(legs: &[ExecutionLegReport]) -> ExecutionExposure {
+    let filled_symbols = legs
+        .iter()
+        .filter(|leg| leg.filled_volume > 0)
+        .map(|leg| leg.symbol.clone())
+        .collect();
+    let unfilled_symbols = legs
+        .iter()
+        .filter(|leg| leg.filled_volume < leg.requested_volume)
+        .map(|leg| leg.symbol.clone())
+        .collect();
+    ExecutionExposure {
+        filled_symbols,
+        unfilled_symbols,
+    }
 }
