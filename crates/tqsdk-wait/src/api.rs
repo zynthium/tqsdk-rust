@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -30,6 +30,16 @@ pub struct TqApi {
     pub(crate) driver: WaitDriver,
 }
 
+pub(crate) struct WaitInsertOrderRequest {
+    pub(crate) account_id: String,
+    pub(crate) symbol: String,
+    pub(crate) order_id: OrderId,
+    pub(crate) direction: TradeDirection,
+    pub(crate) offset: Option<TradeOffset>,
+    pub(crate) volume: i64,
+    pub(crate) limit_price: Option<Value>,
+}
+
 impl TqApi {
     #[must_use]
     pub fn new(session: SessionClient) -> Self {
@@ -54,6 +64,7 @@ impl TqApi {
                 last_commit: None,
                 waiting: AtomicBool::new(false),
                 next_order_seq: AtomicU64::new(1),
+                submitted_order_intents: HashMap::new(),
             },
         }
     }
@@ -352,18 +363,45 @@ impl TqApi {
     ) -> crate::error::Result<OrderRef> {
         let order_seq = self.driver.next_order_seq.fetch_add(1, Ordering::Relaxed);
         let order_id = OrderId::new(format!("wait-order-{order_seq}"));
-        let (price_type, limit_price, time_condition) = map_wait_order_price(limit_price);
+        self.submit_insert_order(WaitInsertOrderRequest {
+            account_id: account_id.to_owned(),
+            symbol: symbol.to_owned(),
+            order_id: order_id.clone(),
+            direction,
+            offset,
+            volume,
+            limit_price,
+        })
+        .await?;
 
-        self.driver
+        Ok(self.get_order(account_id, order_id.as_str()))
+    }
+
+    pub fn limit_order(
+        &mut self,
+        account_id: impl Into<String>,
+        symbol: impl Into<String>,
+    ) -> crate::order_intent::LimitOrderIntent<'_> {
+        crate::order_intent::LimitOrderIntent::new(self, account_id, symbol)
+    }
+
+    pub(crate) async fn submit_insert_order(
+        &mut self,
+        request: WaitInsertOrderRequest,
+    ) -> crate::error::Result<tqsdk_core::CommandId> {
+        let (price_type, limit_price, time_condition) = map_wait_order_price(request.limit_price);
+
+        let command_id = self
+            .driver
             .session
             .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
                 TradeInsertOrderCommand {
-                    account_id: AccountId::new(account_id),
-                    order_id: order_id.clone(),
-                    symbol: Symbol::new(symbol),
-                    direction,
-                    offset,
-                    volume,
+                    account_id: AccountId::new(request.account_id),
+                    order_id: request.order_id,
+                    symbol: Symbol::new(request.symbol),
+                    direction: request.direction,
+                    offset: request.offset,
+                    volume: request.volume,
                     price_type,
                     limit_price,
                     time_condition,
@@ -373,7 +411,7 @@ impl TqApi {
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
-        Ok(self.get_order(account_id, order_id.as_str()))
+        Ok(command_id)
     }
 
     pub async fn insert_limit_order(

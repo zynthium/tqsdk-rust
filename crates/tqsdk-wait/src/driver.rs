@@ -1,10 +1,11 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{Result, WaitFacadeError};
 use tqsdk_core::internal::SessionRuntime;
+use tqsdk_core::{TradeDirection, TradeOffset};
 
 pub(crate) struct WaitDriver {
     pub(crate) session: tqsdk_session::SessionClient,
@@ -15,6 +16,16 @@ pub(crate) struct WaitDriver {
     pub(crate) last_commit: Option<tqsdk_core::CommitResult>,
     pub(crate) waiting: AtomicBool,
     pub(crate) next_order_seq: AtomicU64,
+    pub(crate) submitted_order_intents: HashMap<(String, String), SubmittedOrderIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubmittedOrderIntent {
+    pub(crate) symbol: String,
+    pub(crate) direction: TradeDirection,
+    pub(crate) offset: Option<TradeOffset>,
+    pub(crate) volume: i64,
+    pub(crate) limit_price: f64,
 }
 
 impl WaitDriver {

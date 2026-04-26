@@ -20,6 +20,7 @@ mod builder;
 mod change;
 mod driver;
 mod error;
+mod order_intent;
 mod recovery;
 mod refs;
 mod views;
@@ -28,6 +29,7 @@ pub use api::TqApi;
 pub use builder::TqApiBuilder;
 pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
+pub use order_intent::{ClientOrderId, LimitOrderIntent, OrderTicket};
 pub use recovery::WaitStartupRecovery;
 pub use refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,

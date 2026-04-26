@@ -139,6 +139,20 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s06_limit_order`
 - `api_contract_s07_cancel_partial_fill`
 
+已落地的第一步：
+
+- `tqsdk-wait` 增加 `ClientOrderId`、`LimitOrderIntent` 和 `OrderTicket`。
+- `TqApi::limit_order(...).client_intent(...).send_once()` 会把稳定 intent id
+  映射为 runtime `order_id`，并在同一个 `TqApi` owner 内避免相同 intent
+  重复提交。
+
+仍未完成、不可伪装为已支持：
+
+- intent 尚未持久化到 `tqsdk-session` 的可恢复 ledger。
+- `OrderTicket` 尚不能在断线后完成 command/order/trade 级别的 typed 对账。
+- 还没有 `wait_reconnect_safe_terminal()` 这类能区分 unknown/rejected/filled/cancelled
+  的完整终态等待契约。
+
 ### P1：执行层抽象
 
 服务的使用者：

@@ -143,6 +143,164 @@ async fn insert_limit_order_rejects_non_finite_price() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn limit_order_intent_uses_client_intent_as_order_id() {
+    let mut api = support::seeded_api();
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert!(ticket.was_submitted());
+    assert_eq!(ticket.client_order_id(), "strategy-a-open-001");
+    assert_eq!(ticket.order().account_id(), "sim");
+    assert_eq!(ticket.order().order_id(), "strategy-a-open-001");
+    assert!(ticket.command_id().is_some());
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["aid"], "insert_order");
+    assert_eq!(payload["user_id"], "sim");
+    assert_eq!(payload["order_id"], "strategy-a-open-001");
+    assert_eq!(payload["direction"], "BUY");
+    assert_eq!(payload["offset"], "OPEN");
+    assert_eq!(payload["volume"], 1);
+    assert_eq!(payload["price_type"], "LIMIT");
+    assert_eq!(payload["time_condition"], "GFD");
+    assert_eq!(payload["limit_price"], 618.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_once_does_not_resubmit_same_local_intent() {
+    let mut api = support::seeded_api();
+
+    let first = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+
+    let second = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert!(!second.was_submitted());
+    assert!(second.command_id().is_none());
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_once_rejects_same_intent_with_different_fields() {
+    let mut api = support::seeded_api();
+
+    api.limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+
+    let error = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(2)
+        .at(619.0)
+        .send_once()
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState(
+            "client intent id was already submitted with different order fields"
+        )
+    );
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_once_returns_existing_order_without_resubmit() {
+    let mut api = support::seeded_api();
+    support::seed_order_update(
+        &mut api,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "strategy-a-open-001",
+            volume_orign: 1,
+            volume_left: 1,
+            status: "ALIVE",
+            is_dead: false,
+        },
+    );
+
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert!(!ticket.was_submitted());
+    assert!(ticket.command_id().is_none());
+    assert_eq!(
+        ticket.order().snapshot(&api).unwrap().unwrap().order_id,
+        "strategy-a-open-001"
+    );
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_once_validates_required_intent_fields() {
+    let mut api = support::seeded_api();
+
+    let error = api
+        .limit_order("sim", "SHFE.ao2602")
+        .buy_open(1)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState("client intent id is required")
+    );
+
+    let error = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-002")
+        .buy_open(1)
+        .at(f64::NAN)
+        .send_once()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        tqsdk_wait::WaitFacadeError::InvalidState("limit price must be finite")
+    );
+
+    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn account_position_order_and_trade_refs_decode_from_state_tree() {
     let mut api = support::seeded_api();
     support::seed_trade_snapshot(&mut api, "sim", "SHFE.ao2602");

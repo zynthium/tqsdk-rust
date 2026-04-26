@@ -29,9 +29,13 @@
 //! - 需要 API 微调、局部重构还是新增执行一致性层？
 //!
 //! API gap:
-//! runtime command ledger 存在，但 wait/stream/task public API 还没有
-//! client intent id、reconnect-safe order ticket、command/order/trade correlation
-//! 的终端用户契约。
+//! wait facade 已有 `ClientOrderId`、`LimitOrderIntent` 和 `OrderTicket`，
+//! 可以表达稳定 intent id 与单 `TqApi` owner 内的 `send_once()` 防重复提交。
+//!
+//! 仍缺完整重连一致性契约：
+//! - intent 未持久化到 `tqsdk-session` 可恢复 ledger；
+//! - `OrderTicket` 还不能跨断线恢复后做 command/order/trade typed 对账；
+//! - 还不能区分 unknown/rejected/filled/cancelled 的 reconnect-safe terminal state。
 //!
 //! 理想用户代码草案：
 //! ```ignore

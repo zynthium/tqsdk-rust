@@ -68,6 +68,11 @@ wait adapter 层未来可以提供：
   的薄便利层存在，用来从用户路径移除 `serde_json::Value` 价格参数；
   它仍必须只提交到底层 command contract，不做本地伪造订单状态或第二棵
   trade state。
+- `limit_order(...).client_intent(...).send_once()` 这类订单 intent helper
+  可以作为 wait facade 的薄便利层存在，用来把用户稳定 intent id 映射到
+  runtime `order_id`，并在同一个 `TqApi` owner 内防止相同 intent 重复提交；
+  它不得声明已经完成跨进程或断线后的完整对账，完整重连一致性必须继续依赖
+  session/runtime 的 command ledger、交易回报和恢复屏障。
 - `login_trade_account(...)` 这类 typed login helper 可以作为 wait facade
   的薄便利层存在，用来从用户路径移除 `TradeLoginCommand` 构造；builder
   仍负责 trade route 配置，helper 只提交 runtime trade login command 并等待

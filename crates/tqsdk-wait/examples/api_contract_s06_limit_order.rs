@@ -7,6 +7,7 @@
 //!
 //! API contract:
 //! - 下单参数是 typed order request，而不是 `serde_json::Value`
+//! - 用户能提供稳定 client intent id，SDK 返回 order ticket
 //! - 登录、账户 ready、订单状态等待是用户级 API
 //! - 订单状态用 typed lifecycle 表达
 //! - 不手动创建 channel
@@ -21,6 +22,7 @@
 //! Regression signal:
 //! - 用户必须手动提交 login command
 //! - 价格和 offset 需要靠 loosely typed JSON/string 表达
+//! - retry 代码必须自己维护“是否已经提交过”的 bool
 //! - 等待成交只能写状态轮询模板
 //!
 //! Review questions:
@@ -30,7 +32,7 @@
 
 use std::time::Duration;
 
-use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
+use tqsdk_core::TradeAccountType;
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
@@ -40,6 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let broker_id = std::env::var("TQ_BROKER_ID")?;
     let account_id = std::env::var("TQ_ACCOUNT_ID")?;
     let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
+    let client_order_id =
+        std::env::var("TQ_CLIENT_ORDER_ID").unwrap_or_else(|_| "example-limit-order-001".into());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
     let mut api = TqApiBuilder::new(user, pass)
@@ -59,18 +63,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let balance = account.load(&api)?.balance;
     println!("account={} balance={}", account_id, balance);
 
-    let order = api
-        .insert_limit_order(
-            account_id.as_str(),
-            "SHFE.au2602",
-            TradeDirection::Buy,
-            Some(TradeOffset::Open),
-            1,
-            480.0,
-        )
+    let ticket = api
+        .limit_order(account_id.as_str(), "SHFE.au2602")
+        .client_intent(client_order_id)
+        .buy_open(1)
+        .at(480.0)
+        .send_once()
         .await?;
 
-    let finished = order
+    let finished = ticket
         .wait_terminal_until(
             &mut api,
             tokio::time::Instant::now() + Duration::from_secs(30),
