@@ -30,8 +30,8 @@
 //!
 //! API gap:
 //! 当前 `TqApi::insert_limit_order` 已经能用 typed `f64` 价格提交限价单，
-//! 但 trade login 仍通常需要经 `session().submit(...)` 手动发送底层命令；
-//! 订单 ticket / wait finished helper 也还没有冻结成终端用户 contract。
+//! `OrderRef::wait_terminal()` 也能避免用户手写订单终态轮询；但 trade
+//! login / account ready 仍缺少完全用户级 API，完整场景还不能自然表达。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -53,7 +53,7 @@
 //!     )
 //!     .await?;
 //!
-//! let finished = order.wait_finished(&mut api).await?;
+//! let finished = order.wait_terminal(&mut api).await?;
 //! println!("{:?}", finished.lifecycle);
 //! ```
 

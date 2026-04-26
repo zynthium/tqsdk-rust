@@ -14,7 +14,7 @@ crate README 已随 public API 调整同步更新。
 | 3. 行情快照读取 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs`; `tqsdk_wait::TqApi::quote_snapshot` |
 | 4. Tick / Quote / K线混合订阅 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs`; `TqStream::market_events`; `MarketEventStream`; `MarketEvent` |
 | 5. 高频裸行情直通 | 自然 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs`; `SessionClient::progress_once`; `RuntimeReader::read_market_state` |
-| 6. 普通限价下单 | 勉强 | 中 | 少量 | 无 | 高 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{insert_limit_order, insert_order}`; `TradeLoginCommand` |
+| 6. 普通限价下单 | 勉强 | 中 | 少量 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs`; `TqApi::{insert_limit_order, insert_order}`; `OrderRef::wait_terminal`; `TradeLoginCommand` |
 | 7. 撤单与部分成交 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs`; `OrderRef::{wait_partially_filled, cancel_remaining, wait_terminal}`; `Order.lifecycle`; `Order.volume_left` |
 | 8. 账户 / 资金 / 持仓查询 | 勉强 | 中 | 少量 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs`; `TqApi::{get_account, get_position}` |
 | 9. 启动后状态恢复 | 无法表达 | 高 | 严重 | 少量 | 高 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s09_startup_state_recovery.rs`; `SessionRuntime::recover` is not user-facing |
