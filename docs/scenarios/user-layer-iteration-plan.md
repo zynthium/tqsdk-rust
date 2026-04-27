@@ -283,8 +283,10 @@ crate 分层合并成一份迭代计划。
   task/wait 推进点内读取 quote/account/position，并复用 typed order、
   target-pos 和 risk gate。
 - `tqsdk-task::testing` 已提供 public `StrategyTestHarness`、`FakeMarket`
-  和 `FakeBroker`，支持全成、拒单和单步部分成交测试；用户不需要 hidden
-  `*_for_test` API、runtime handle、channel 或 provider protocol。
+  和 `FakeBroker`，支持全成、拒单和单步部分成交测试；`StrategyTestClock`
+  与 `FakeBroker::latency_steps` 已提供 deterministic fake broker time 和
+  step latency；用户不需要 hidden `*_for_test` API、runtime handle、channel
+  或 provider protocol。
 - `tqsdk-task::StrategyReplay` 已连接 `tqsdk-data::MarketCacheReplay`，
   cache quote/kline/tick event 可以按时间顺序推进到同构 `StrategyContext`，
   并复用 typed order builder 与 fake broker。
@@ -305,7 +307,7 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - S15 完整 live / sim / replay environment adapter。
-- fake reconnect、延迟、跨 step 部分成交推进与 deterministic clock。
+- fake reconnect、跨 step 部分成交推进与更完整 broker 行为。
 - 跨进程 intent / test fixture 持久恢复。
 
 ### P2：生产守护、慢消费者隔离和错误诊断

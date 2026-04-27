@@ -39,8 +39,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   quote/account/position，并复用 `TaskHost::orders(...)`、`RiskEngine` 和
   `TargetPosTask` 表达入场与止盈止损平仓。
 - S24 最小可测试策略从“无法表达”推进到“勉强”：`tqsdk-task::testing`
-  提供 public `StrategyTestHarness`、`FakeMarket` 和 `FakeBroker`，测试代码不再
-  需要 hidden `*_for_test` API、runtime handle、channel 或 provider protocol。
+  提供 public `StrategyTestHarness`、`FakeMarket`、`FakeBroker` 和
+  `StrategyTestClock`，测试代码不再需要 hidden `*_for_test` API、runtime
+  handle、channel 或 provider protocol；fake broker 已支持全成、拒单、单步部分成交、
+  deterministic clock 和 step latency。
 - S16 历史行情回放从“不自然”推进到“勉强”：`tqsdk-task::StrategyReplay`
   已能消费 `tqsdk-data::MarketCacheReplay` 的有序 quote/kline/tick cache
   event，并复用 `StrategyContext`、typed order builder 和 fake broker；
@@ -90,11 +92,11 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 21. 慢消费者隔离 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; bounded fan-out / typed lag diagnostic 子集自然；durable sink runtime 仍是 gap |
 | 22. 错误诊断与重试 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; error kind / retry hint 子集自然；retry orchestration 仍是 gap |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
-| 24. 最小可测试策略 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; fake reconnect/deterministic clock remains gap |
+| 24. 最小可测试策略 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `FakeBroker::latency_steps`; fake reconnect / cross-step partial-fill remains gap |
 
 ## 主要结论
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户高级执行策略仍需继续补齐。
 3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、fan-out capacity 和 typed lag/error diagnostics 已有薄 facade；持久化 sink、完整 daemon supervisor/metrics 仍停留在底层组合能力之外。
-4. 多 provider 聚合、完整 live/sim/replay environment、live durable cache sink、fake reconnect/deterministic clock 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、replay source builder、replay speed policy 与 checkpoint store 已落在 `tqsdk-task`。
+4. 多 provider 聚合、完整 live/sim/replay environment、live durable cache sink、fake reconnect 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、replay source builder、replay speed policy、checkpoint store、test clock 与 fake broker latency 已落在 `tqsdk-task`。

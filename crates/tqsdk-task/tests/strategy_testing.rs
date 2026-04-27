@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use tqsdk_task::StrategyHost;
-use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
+use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestClock, StrategyTestHarness};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_test_harness_seeds_market_and_fills_orders() {
@@ -109,4 +111,87 @@ async fn strategy_test_harness_can_partial_fill_orders() {
     assert_eq!(report.trades().len(), 1);
     assert_eq!(report.trades()[0].volume, 2);
     assert_eq!(report.position("sim", "SHFE.rb2601").unwrap().pos_long, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_test_harness_uses_deterministic_clock_for_fake_broker_events() {
+    let start_ns = 1_800_000_000_000_000_000;
+    let harness = StrategyTestHarness::new()
+        .market(
+            FakeMarket::new()
+                .quote("SHFE.rb2601", 3_678.0)
+                .account("sim", 80_000.0)
+                .position("sim", "SHFE.rb2601", 0),
+        )
+        .broker(FakeBroker::new().fill_all())
+        .clock(StrategyTestClock::new(start_ns).step_by(Duration::from_millis(250)))
+        .build()
+        .unwrap();
+
+    let mut strategy = StrategyHost::builder(harness.into_task_host())
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = strategy.next_once().await.unwrap();
+
+    ctx.orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_678.0)
+        .send_once("entry-clocked")
+        .await
+        .unwrap();
+
+    let report = ctx.finish_test_step().await.unwrap();
+    assert_eq!(report.orders()[0].insert_date_time, start_ns);
+    assert_eq!(report.trades()[0].trade_date_time, start_ns + 250_000_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_test_harness_can_delay_fake_broker_outcomes_by_test_steps() {
+    let harness = StrategyTestHarness::new()
+        .market(
+            FakeMarket::new()
+                .quote("SHFE.rb2601", 3_678.0)
+                .account("sim", 80_000.0)
+                .position("sim", "SHFE.rb2601", 0),
+        )
+        .broker(FakeBroker::new().fill_all().latency_steps(1))
+        .build()
+        .unwrap();
+
+    let mut strategy = StrategyHost::builder(harness.into_task_host())
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = strategy.next_once().await.unwrap();
+
+    ctx.orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_678.0)
+        .send_once("entry-delayed")
+        .await
+        .unwrap();
+
+    let first_step = ctx.finish_test_step().await.unwrap();
+    assert!(first_step.orders().is_empty());
+    assert!(first_step.trades().is_empty());
+    assert_eq!(first_step.pending_orders(), 1);
+    assert_eq!(
+        first_step.position("sim", "SHFE.rb2601").unwrap().pos_long,
+        0
+    );
+
+    let second_step = ctx.finish_test_step().await.unwrap();
+    assert_eq!(second_step.orders().len(), 1);
+    assert_eq!(second_step.orders()[0].status, "FINISHED");
+    assert_eq!(second_step.trades().len(), 1);
+    assert_eq!(second_step.pending_orders(), 0);
+    assert_eq!(
+        second_step.position("sim", "SHFE.rb2601").unwrap().pos_long,
+        1
+    );
 }

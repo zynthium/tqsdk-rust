@@ -1,11 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tqsdk_core::{
-    AdapterRegistry, CommandStatus, CommitScope, InputPayload, IoEvent, Order, OutboundFrame,
-    OutboundRequest, Position, ProtocolDomain, RuntimeHandle, RuntimeInput, Trade,
+    AdapterRegistry, CommandId, CommandStatus, CommitScope, InputPayload, IoEvent, Order,
+    OutboundFrame, OutboundRequest, Position, ProtocolDomain, RuntimeHandle, RuntimeInput, Trade,
 };
 use tqsdk_session::SessionClient;
 use tqsdk_wait::TqApi;
@@ -16,6 +17,7 @@ use crate::{Result, TaskError, TaskHost};
 pub struct StrategyTestHarness {
     market: FakeMarket,
     broker: FakeBroker,
+    clock: StrategyTestClock,
 }
 
 /// Compatibility alias for callers that prefer an explicit builder type name.
@@ -33,6 +35,7 @@ pub struct FakeMarket {
 #[derive(Debug, Clone)]
 pub struct FakeBroker {
     policy: FakeBrokerPolicy,
+    latency_steps: usize,
 }
 
 /// Order handling policy used by [`FakeBroker`].
@@ -41,6 +44,13 @@ pub enum FakeBrokerPolicy {
     FillAll,
     RejectAll { reason: String },
     PartialFill { volume: i64 },
+}
+
+/// Deterministic clock used by fake strategy tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrategyTestClock {
+    next_time_ns: i64,
+    step_ns: i64,
 }
 
 /// Built fake test harness.
@@ -54,6 +64,7 @@ pub struct StrategyTestReport {
     orders: Vec<Order>,
     trades: Vec<Trade>,
     positions: HashMap<(String, String), Position>,
+    pending_orders: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +89,14 @@ struct FakePosition {
 pub(crate) struct StrategyTestRuntime {
     broker: FakeBroker,
     positions: HashMap<(String, String), Position>,
+    clock: StrategyTestClock,
+    pending_orders: VecDeque<PendingFakeOrder>,
+}
+
+struct PendingFakeOrder {
+    command_id: CommandId,
+    request: FakeOrderRequest,
+    remaining_steps: usize,
 }
 
 struct FakeOrderRequest {
@@ -98,6 +117,7 @@ impl StrategyTestHarness {
         Self {
             market: FakeMarket::new(),
             broker: FakeBroker::new(),
+            clock: StrategyTestClock::default(),
         }
     }
 
@@ -113,6 +133,12 @@ impl StrategyTestHarness {
         self
     }
 
+    #[must_use]
+    pub fn clock(mut self, clock: StrategyTestClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
     pub fn build(self) -> Result<BuiltStrategyTestHarness> {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
@@ -123,6 +149,8 @@ impl StrategyTestHarness {
         host.strategy_test = Some(StrategyTestRuntime {
             broker: self.broker,
             positions,
+            clock: self.clock,
+            pending_orders: VecDeque::new(),
         });
 
         Ok(BuiltStrategyTestHarness { host })
@@ -179,7 +207,58 @@ impl Default for FakeBroker {
     fn default() -> Self {
         Self {
             policy: FakeBrokerPolicy::FillAll,
+            latency_steps: 0,
         }
+    }
+}
+
+impl Default for StrategyTestClock {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_START_TIME_NS).step_by_ns(Self::DEFAULT_STEP_NS)
+    }
+}
+
+impl StrategyTestClock {
+    pub const DEFAULT_START_TIME_NS: i64 = 1_777_222_800_000_000_000;
+    pub const DEFAULT_STEP_NS: i64 = 100_000_000;
+
+    #[must_use]
+    pub fn new(start_time_ns: i64) -> Self {
+        Self {
+            next_time_ns: start_time_ns,
+            step_ns: Self::DEFAULT_STEP_NS,
+        }
+    }
+
+    #[must_use]
+    pub fn fixed(time_ns: i64) -> Self {
+        Self {
+            next_time_ns: time_ns,
+            step_ns: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn step_by(mut self, step: Duration) -> Self {
+        self.step_ns = duration_to_ns(step);
+        self
+    }
+
+    #[must_use]
+    pub fn step_by_ns(mut self, step_ns: i64) -> Self {
+        self.step_ns = step_ns.max(0);
+        self
+    }
+
+    #[must_use]
+    pub fn now_ns(&self) -> i64 {
+        self.next_time_ns
+    }
+
+    fn next_timestamp_ns(&mut self) -> i64 {
+        let timestamp = self.next_time_ns;
+        self.next_time_ns = self.next_time_ns.saturating_add(self.step_ns);
+        timestamp
     }
 }
 
@@ -208,6 +287,12 @@ impl FakeBroker {
         self.policy = FakeBrokerPolicy::PartialFill { volume };
         self
     }
+
+    #[must_use]
+    pub fn latency_steps(mut self, steps: usize) -> Self {
+        self.latency_steps = steps;
+        self
+    }
 }
 
 impl BuiltStrategyTestHarness {
@@ -228,11 +313,20 @@ impl StrategyTestReport {
         &self.trades
     }
 
-    pub fn position(&self, account_id: impl AsRef<str>, symbol: impl AsRef<str>) -> Result<Position> {
+    pub fn position(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> Result<Position> {
         self.positions
             .get(&(account_id.as_ref().to_owned(), symbol.as_ref().to_owned()))
             .cloned()
             .ok_or(TaskError::InvalidState("strategy test position not ready"))
+    }
+
+    #[must_use]
+    pub fn pending_orders(&self) -> usize {
+        self.pending_orders
     }
 }
 
@@ -249,6 +343,10 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
         ..StrategyTestReport::default()
     };
 
+    for (command_id, outcome) in runtime.advance_pending_orders()? {
+        ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+    }
+
     for dispatch in dispatches {
         let Some(request) = fake_order_request(&dispatch.request)? else {
             continue;
@@ -260,23 +358,14 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
             None,
             CommitScope::RealtimeUpdate,
         )?;
-        let outcome = runtime.apply_order(request)?;
-        let status = outcome.command_status;
-        ingest_fake_trade_update(host, &outcome, dispatch.command_id)?;
-        let _ = host.api().handle_for_test().record_command_status(
-            dispatch.command_id,
-            status,
-            None,
-            CommitScope::RealtimeUpdate,
-        )?;
-
-        report.orders.push(outcome.order);
-        if let Some(trade) = outcome.trade {
-            report.trades.push(trade);
-        }
-        report.positions = runtime.positions.clone();
+        runtime.enqueue_order(dispatch.command_id, request);
     }
 
+    for (command_id, outcome) in runtime.drain_ready_orders()? {
+        ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+    }
+
+    report.pending_orders = runtime.pending_orders.len();
     host.strategy_test = Some(runtime);
     Ok(report)
 }
@@ -294,6 +383,35 @@ struct FakeOrderOutcome {
 }
 
 impl StrategyTestRuntime {
+    fn enqueue_order(&mut self, command_id: CommandId, request: FakeOrderRequest) {
+        self.pending_orders.push_back(PendingFakeOrder {
+            command_id,
+            request,
+            remaining_steps: self.broker.latency_steps,
+        });
+    }
+
+    fn advance_pending_orders(&mut self) -> Result<Vec<(CommandId, FakeOrderOutcome)>> {
+        for pending_order in &mut self.pending_orders {
+            pending_order.remaining_steps = pending_order.remaining_steps.saturating_sub(1);
+        }
+        self.drain_ready_orders()
+    }
+
+    fn drain_ready_orders(&mut self) -> Result<Vec<(CommandId, FakeOrderOutcome)>> {
+        let mut ready = Vec::new();
+        let mut pending = VecDeque::new();
+        while let Some(order) = self.pending_orders.pop_front() {
+            if order.remaining_steps == 0 {
+                ready.push((order.command_id, self.apply_order(order.request)?));
+            } else {
+                pending.push_back(order);
+            }
+        }
+        self.pending_orders = pending;
+        Ok(ready)
+    }
+
     fn apply_order(&mut self, request: FakeOrderRequest) -> Result<FakeOrderOutcome> {
         let (filled_volume, volume_left, status, lifecycle, is_dead, last_msg, command_status) =
             match self.broker.policy.clone() {
@@ -334,6 +452,7 @@ impl StrategyTestRuntime {
             };
 
         let position = self.apply_position(&request, filled_volume)?;
+        let insert_date_time = self.clock.next_timestamp_ns();
         let order_value = json!({
             "seqno": 1,
             "user_id": request.account_id,
@@ -353,7 +472,7 @@ impl StrategyTestRuntime {
             "price_type": "LIMIT",
             "volume_condition": "ANY",
             "time_condition": "GFD",
-            "insert_date_time": 1_777_222_800_000_000_000_i64,
+            "insert_date_time": insert_date_time,
             "last_msg": last_msg,
             "status": status,
             "lifecycle": lifecycle,
@@ -364,6 +483,7 @@ impl StrategyTestRuntime {
             .map_err(|_| TaskError::InvalidState("fake order payload is invalid"))?;
 
         let trade_value = (filled_volume > 0).then(|| {
+            let trade_date_time = self.clock.next_timestamp_ns();
             json!({
                 "seqno": 1,
                 "user_id": request.account_id,
@@ -376,7 +496,7 @@ impl StrategyTestRuntime {
                 "offset": request.offset,
                 "price": request.limit_price,
                 "volume": filled_volume,
-                "trade_date_time": 1_777_222_800_100_000_000_i64,
+                "trade_date_time": trade_date_time,
                 "commission": 0.0
             })
         });
@@ -400,14 +520,19 @@ impl StrategyTestRuntime {
         })
     }
 
-    fn apply_position(&mut self, request: &FakeOrderRequest, filled_volume: i64) -> Result<Position> {
+    fn apply_position(
+        &mut self,
+        request: &FakeOrderRequest,
+        filled_volume: i64,
+    ) -> Result<Position> {
         let key = (request.account_id.clone(), request.symbol.clone());
         let mut position = self
             .positions
             .get(&key)
             .cloned()
             .unwrap_or_else(|| position_from_net(&request.account_id, &request.symbol, 0));
-        let signed_delta = signed_position_delta(&request.direction, &request.offset, filled_volume);
+        let signed_delta =
+            signed_position_delta(&request.direction, &request.offset, filled_volume);
         position.pos += signed_delta;
         position.pos_long = position.pos.max(0);
         position.pos_short = (-position.pos).max(0);
@@ -418,7 +543,34 @@ impl StrategyTestRuntime {
     }
 }
 
-fn seed_market(host: &TaskHost, market: &FakeMarket) -> Result<HashMap<(String, String), Position>> {
+fn ingest_fake_order_outcome(
+    host: &TaskHost,
+    report: &mut StrategyTestReport,
+    runtime: &mut StrategyTestRuntime,
+    command_id: CommandId,
+    outcome: FakeOrderOutcome,
+) -> Result<()> {
+    let status = outcome.command_status;
+    ingest_fake_trade_update(host, &outcome, command_id)?;
+    let _ = host.api().handle_for_test().record_command_status(
+        command_id,
+        status,
+        None,
+        CommitScope::RealtimeUpdate,
+    )?;
+
+    report.orders.push(outcome.order);
+    if let Some(trade) = outcome.trade {
+        report.trades.push(trade);
+    }
+    report.positions = runtime.positions.clone();
+    Ok(())
+}
+
+fn seed_market(
+    host: &TaskHost,
+    market: &FakeMarket,
+) -> Result<HashMap<(String, String), Position>> {
     if !market.quotes.is_empty() {
         host.api().handle_for_test().ingest(
             RuntimeInput::Io(IoEvent {
@@ -520,7 +672,9 @@ fn fake_order_request(request: &OutboundRequest) -> Result<Option<FakeOrderReque
         OutboundRequest::Transport(OutboundFrame::Text(text)) => serde_json::from_str(text)
             .map_err(|_| TaskError::InvalidState("fake broker received invalid text payload"))?,
         OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
-            .map_err(|_| TaskError::InvalidState("fake broker received invalid binary payload"))?,
+            .map_err(|_| {
+            TaskError::InvalidState("fake broker received invalid binary payload")
+        })?,
         _ => return Ok(None),
     };
     if payload.get("aid").and_then(Value::as_str) != Some("insert_order") {
@@ -561,7 +715,10 @@ fn ingest_fake_trade_update(
             .get("trade_id")
             .and_then(Value::as_str)
             .ok_or(TaskError::InvalidState("fake trade id missing"))?;
-        account_node.insert("trades".to_string(), json!({ trade_id: trade_value.clone() }));
+        account_node.insert(
+            "trades".to_string(),
+            json!({ trade_id: trade_value.clone() }),
+        );
     }
 
     host.api().handle_for_test().ingest(
@@ -638,24 +795,34 @@ fn signed_position_delta(direction: &str, offset: &str, volume: i64) -> i64 {
     }
 }
 
+fn duration_to_ns(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
+}
+
 fn required_string(payload: &Value, key: &'static str) -> Result<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or(TaskError::InvalidState("fake broker payload missing string field"))
+        .ok_or(TaskError::InvalidState(
+            "fake broker payload missing string field",
+        ))
 }
 
 fn required_i64(payload: &Value, key: &'static str) -> Result<i64> {
     payload
         .get(key)
         .and_then(Value::as_i64)
-        .ok_or(TaskError::InvalidState("fake broker payload missing integer field"))
+        .ok_or(TaskError::InvalidState(
+            "fake broker payload missing integer field",
+        ))
 }
 
 fn required_f64(payload: &Value, key: &'static str) -> Result<f64> {
     payload
         .get(key)
         .and_then(Value::as_f64)
-        .ok_or(TaskError::InvalidState("fake broker payload missing float field"))
+        .ok_or(TaskError::InvalidState(
+            "fake broker payload missing float field",
+        ))
 }
