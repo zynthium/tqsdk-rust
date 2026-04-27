@@ -289,6 +289,10 @@ crate 分层合并成一份迭代计划。
   `StrategyLifecycle` 已提供 S15 provider-backed TQKQ sim config、live trade
   config、统一 run loop、typed stop reason 和 graceful shutdown report；策略步骤
   仍只依赖 `StrategyEnvironmentContext`。
+- `tqsdk-task::StrategySupervisor` / `StrategyRetryPolicy` /
+  `StrategyShutdownSignal` 已提供 task-layer supervisor foundation，覆盖 typed
+  health/metrics snapshot、显式有限 retry、ctrl-c shutdown hook 和 typed
+  shutdown report；S15 example 已改为通过 supervisor lifecycle 运行。
 - `tqsdk-task::testing` 已提供 public `StrategyTestHarness`、`FakeMarket`
   和 `FakeBroker`，支持全成、拒单和单步/跨 step 部分成交测试；`StrategyTestClock`
   与 `FakeBroker::latency_steps` 已提供 deterministic fake broker time 和
@@ -315,8 +319,8 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- S15 完整 production supervisor、health/retry orchestration、ctrl-c shutdown
-  hook 和多 provider environment。
+- S15 配置文件反序列化、HTTP metrics endpoint、完整 reconnect orchestration 和
+  多 provider environment。
 - 更完整 broker 行为。
 - 跨进程 intent / test fixture 持久恢复。
 
@@ -365,6 +369,20 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s20_production_daemon`
 - `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag 子集已提升为正式 stream example）
 - `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
+
+已落地：
+
+- `tqsdk-stream::TqStream::health()` 已提供 typed health snapshot、health status
+  和 restart hint 子集。
+- `tqsdk-task::StrategySupervisor` 已新增正式 S20 task example，覆盖 strategy
+  deployment 的 typed health/metrics snapshot、显式 retry policy、ctrl-c
+  shutdown signal 和 typed shutdown report。
+
+仍未完成、不可伪装为已支持：
+
+- HTTP health/metrics endpoint。
+- 持久化 sink isolation / per-sink retry-storage policy。
+- 完整 reconnect orchestration 和跨进程 daemon 管理。
 
 ### P2：本地行情缓存与研究闭环
 

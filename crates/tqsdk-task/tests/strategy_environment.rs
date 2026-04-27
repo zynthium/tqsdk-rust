@@ -6,7 +6,8 @@ use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 use tqsdk_task::{
     RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
     StrategyEnvironmentContext, StrategyEnvironmentKind, StrategyEnvironmentProvider,
-    StrategyLifecycle, StrategyRunStopReason,
+    StrategyLifecycle, StrategyRetryPolicy, StrategyRunStopReason, StrategyShutdownSignal,
+    StrategySupervisor, StrategySupervisorHealthStatus, StrategySupervisorStopReason, TaskError,
 };
 
 const SYMBOL: &str = "SHFE.au2602";
@@ -215,4 +216,130 @@ async fn deployment_runs_async_strategy_step_and_reports_shutdown() {
     assert_eq!(run_report.steps(), 1);
     assert_eq!(shutdown_report.kind(), StrategyEnvironmentKind::TaskHost);
     assert!(shutdown_report.graceful());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn supervisor_stops_before_run_when_shutdown_signal_is_requested() {
+    let deployment = fake_deployment_with_lifecycle(StrategyLifecycle::new().max_steps(1)).await;
+    let signal = StrategyShutdownSignal::manual();
+    signal.request_shutdown();
+    let mut supervisor = StrategySupervisor::new(deployment).shutdown_signal(signal);
+
+    let report = supervisor
+        .run(|_| {
+            Box::pin(async move {
+                panic!("strategy step should not run after shutdown was requested");
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.stop_reason(),
+        StrategySupervisorStopReason::ShutdownRequested
+    );
+    assert_eq!(report.metrics().steps(), 0);
+    assert_eq!(
+        supervisor.health().status(),
+        StrategySupervisorHealthStatus::Stopped
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn supervisor_retries_strategy_step_and_records_metrics() {
+    let deployment = replay_deployment_with_events(2, StrategyLifecycle::new().max_steps(1)).await;
+    let mut attempts = 0;
+    let mut supervisor =
+        StrategySupervisor::new(deployment).retry_policy(StrategyRetryPolicy::new().max_retries(1));
+
+    let report = supervisor
+        .run(move |_| {
+            attempts += 1;
+            Box::pin(async move {
+                if attempts == 1 {
+                    return Err(TaskError::InvalidState("transient strategy failure"));
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.stop_reason(),
+        StrategySupervisorStopReason::Deployment(StrategyRunStopReason::MaxSteps)
+    );
+    assert_eq!(report.metrics().steps(), 1);
+    assert_eq!(report.metrics().retries(), 1);
+    assert_eq!(report.metrics().errors(), 1);
+    assert_eq!(
+        supervisor.health().status(),
+        StrategySupervisorHealthStatus::Stopped
+    );
+}
+
+async fn fake_deployment_with_lifecycle(lifecycle: StrategyLifecycle) -> StrategyDeployment {
+    let harness = StrategyTestHarness::new()
+        .market(
+            FakeMarket::new()
+                .quote(SYMBOL, 481.0)
+                .account("sim", 100_000.0)
+                .position("sim", SYMBOL, 0),
+        )
+        .broker(FakeBroker::new().fill_all())
+        .build()
+        .unwrap();
+    let environment = StrategyEnvironment::from_test_harness(harness)
+        .account("sim")
+        .quote(SYMBOL)
+        .build()
+        .await
+        .unwrap();
+
+    StrategyDeployment::from_environment(environment)
+        .account_id("sim")
+        .lifecycle(lifecycle)
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn replay_deployment_with_events(
+    event_count: usize,
+    lifecycle: StrategyLifecycle,
+) -> StrategyDeployment {
+    let events = (0..event_count)
+        .map(|idx| {
+            MarketCacheEvent::quote(
+                "cache",
+                SYMBOL,
+                1_000 + idx as i64,
+                Some(900 + idx as i64),
+                Quote {
+                    last_price: 481.0 + idx as f64,
+                    ..Quote::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    let replay = MarketCacheReplay::new(events);
+    let replay_builder = tqsdk_task::StrategyReplay::builder(replay).market(
+        FakeMarket::new()
+            .account("sim", 100_000.0)
+            .position("sim", SYMBOL, 0),
+    );
+    let environment = StrategyEnvironment::from_replay_builder(replay_builder)
+        .account("sim")
+        .quote(SYMBOL)
+        .build()
+        .await
+        .unwrap();
+
+    StrategyDeployment::from_environment(environment)
+        .account_id("sim")
+        .lifecycle(lifecycle)
+        .build()
+        .await
+        .unwrap()
 }

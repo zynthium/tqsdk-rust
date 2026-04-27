@@ -52,6 +52,10 @@
   - 提供 provider-backed TQKQ sim 和 live trade 的 typed deployment config
   - provider-backed sim 的账号派生与登录由 builder 处理，不向策略泄漏内部协议
   - 统一 fake/replay/live deployment wrapper、run loop、typed stop reason 和 graceful shutdown report
+- `StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
+  - 在 deployment 之上提供 task-layer supervisor foundation
+  - 暴露 typed health/metrics snapshot、显式有限 retry、ctrl-c shutdown hook 和 typed shutdown report
+  - retry 默认不隐藏启用，避免策略步骤有下单副作用时被 SDK 静默重复执行
 - `StrategyReplay`
   - 使用 `tqsdk-data::MarketCacheReplay` 作为离线 market event source
   - 将 cache quote/kline/tick 转成正常 runtime market commit
@@ -144,7 +148,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategyDeployment` 仍是 foundation，production supervisor、health/retry orchestration、ctrl-c shutdown hook 和多 provider environment 仍是后续工作
+- `StrategySupervisor` 仍是 foundation，HTTP metrics endpoint、完整 reconnect orchestration、跨进程 daemon 管理和多 provider environment 仍是后续工作
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

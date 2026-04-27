@@ -2,6 +2,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 #[cfg(feature = "live")]
@@ -9,7 +13,7 @@ use tqsdk_core::TradeAccountType;
 
 use crate::{
     Result, RiskEngine, StrategyEnvironment, StrategyEnvironmentContext, StrategyEnvironmentKind,
-    StrategyEnvironmentSubscriptions,
+    StrategyEnvironmentSubscriptions, TaskError,
 };
 
 #[cfg(feature = "live")]
@@ -86,6 +90,72 @@ pub enum StrategyRunStopReason {
 pub struct StrategyShutdownReport {
     kind: StrategyEnvironmentKind,
     graceful: bool,
+}
+
+/// Retry policy used by [`StrategySupervisor`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StrategyRetryPolicy {
+    max_retries: usize,
+}
+
+/// User-facing shutdown signal for supervised strategy runs.
+#[derive(Debug, Clone)]
+pub struct StrategyShutdownSignal {
+    requested: Arc<AtomicBool>,
+    listen_ctrl_c: bool,
+}
+
+/// Production-oriented wrapper around [`StrategyDeployment`].
+pub struct StrategySupervisor {
+    deployment: StrategyDeployment,
+    retry_policy: StrategyRetryPolicy,
+    shutdown_signal: StrategyShutdownSignal,
+    metrics: StrategySupervisorMetrics,
+    health: StrategySupervisorHealth,
+}
+
+/// Stable metrics snapshot produced by [`StrategySupervisor`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StrategySupervisorMetrics {
+    steps: usize,
+    retries: usize,
+    errors: usize,
+}
+
+/// Health status for a supervised strategy run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategySupervisorHealthStatus {
+    Starting,
+    Running,
+    Recovering,
+    Stopped,
+    Failed,
+}
+
+/// Stable health snapshot for process supervisors and metrics exporters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategySupervisorHealth {
+    status: StrategySupervisorHealthStatus,
+    provider: StrategyEnvironmentProvider,
+    kind: StrategyEnvironmentKind,
+    account_id: Option<String>,
+    metrics: StrategySupervisorMetrics,
+}
+
+/// Summary returned after a supervised strategy run stops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategySupervisorReport {
+    stop_reason: StrategySupervisorStopReason,
+    metrics: StrategySupervisorMetrics,
+    last_error: Option<TaskError>,
+}
+
+/// Why a supervised strategy run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategySupervisorStopReason {
+    Deployment(StrategyRunStopReason),
+    ShutdownRequested,
+    RetryLimitExceeded,
 }
 
 pub type StrategyStepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
@@ -459,6 +529,314 @@ impl StrategyShutdownReport {
     #[must_use]
     pub fn graceful(&self) -> bool {
         self.graceful
+    }
+}
+
+impl StrategyRetryPolicy {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    #[must_use]
+    pub fn without_retries(mut self) -> Self {
+        self.max_retries = 0;
+        self
+    }
+
+    #[must_use]
+    pub fn max_retries_limit(&self) -> usize {
+        self.max_retries
+    }
+
+    fn should_retry(&self, retries: usize) -> bool {
+        retries < self.max_retries
+    }
+}
+
+impl Default for StrategyShutdownSignal {
+    fn default() -> Self {
+        Self::manual()
+    }
+}
+
+impl StrategyShutdownSignal {
+    #[must_use]
+    pub fn manual() -> Self {
+        Self {
+            requested: Arc::new(AtomicBool::new(false)),
+            listen_ctrl_c: false,
+        }
+    }
+
+    #[must_use]
+    pub fn ctrl_c() -> Self {
+        Self {
+            requested: Arc::new(AtomicBool::new(false)),
+            listen_ctrl_c: true,
+        }
+    }
+
+    pub fn request_shutdown(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_shutdown_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn listens_to_ctrl_c(&self) -> bool {
+        self.listen_ctrl_c
+    }
+}
+
+impl StrategySupervisor {
+    #[must_use]
+    pub fn new(deployment: StrategyDeployment) -> Self {
+        let health = StrategySupervisorHealth {
+            status: StrategySupervisorHealthStatus::Starting,
+            provider: deployment.provider(),
+            kind: deployment.kind(),
+            account_id: deployment.account_id().map(str::to_owned),
+            metrics: StrategySupervisorMetrics::default(),
+        };
+        Self {
+            deployment,
+            retry_policy: StrategyRetryPolicy::new(),
+            shutdown_signal: StrategyShutdownSignal::manual(),
+            metrics: StrategySupervisorMetrics::default(),
+            health,
+        }
+    }
+
+    #[must_use]
+    pub fn retry_policy(mut self, retry_policy: StrategyRetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    #[must_use]
+    pub fn shutdown_signal(mut self, shutdown_signal: StrategyShutdownSignal) -> Self {
+        self.shutdown_signal = shutdown_signal;
+        self
+    }
+
+    #[must_use]
+    pub fn health(&self) -> &StrategySupervisorHealth {
+        &self.health
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> StrategySupervisorMetrics {
+        self.metrics
+    }
+
+    #[must_use]
+    pub fn deployment(&self) -> &StrategyDeployment {
+        &self.deployment
+    }
+
+    #[must_use]
+    pub fn deployment_mut(&mut self) -> &mut StrategyDeployment {
+        &mut self.deployment
+    }
+
+    pub async fn shutdown(self) -> Result<StrategyShutdownReport> {
+        self.deployment.shutdown().await
+    }
+
+    pub async fn run<F>(&mut self, mut step: F) -> Result<StrategySupervisorReport>
+    where
+        F: for<'a> FnMut(&'a mut StrategyEnvironmentContext<'a>) -> StrategyStepFuture<'a>,
+    {
+        let mut consecutive_retries = 0;
+        self.set_status(StrategySupervisorHealthStatus::Running);
+
+        loop {
+            if self.shutdown_signal.is_shutdown_requested() {
+                return Ok(self.stop(StrategySupervisorStopReason::ShutdownRequested, None));
+            }
+
+            if self
+                .deployment
+                .lifecycle
+                .max_steps
+                .is_some_and(|max_steps| self.metrics.steps >= max_steps)
+            {
+                return Ok(self.stop(
+                    StrategySupervisorStopReason::Deployment(StrategyRunStopReason::MaxSteps),
+                    None,
+                ));
+            }
+
+            let shutdown_signal = self.shutdown_signal.clone();
+            let next = if shutdown_signal.listens_to_ctrl_c() {
+                tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        shutdown_signal.request_shutdown();
+                        None
+                    }
+                    result = self.deployment.environment.next() => Some(result),
+                }
+            } else {
+                Some(self.deployment.environment.next().await)
+            };
+
+            let Some(next) = next else {
+                return Ok(self.stop(StrategySupervisorStopReason::ShutdownRequested, None));
+            };
+
+            let Some(mut context) = (match next {
+                Ok(context) => context,
+                Err(error) => {
+                    if let Some(report) = self.record_error(error, &mut consecutive_retries) {
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            }) else {
+                return Ok(self.stop(
+                    StrategySupervisorStopReason::Deployment(
+                        StrategyRunStopReason::EnvironmentClosed,
+                    ),
+                    None,
+                ));
+            };
+
+            let step_result = step(&mut context).await;
+            match step_result {
+                Ok(()) => {
+                    self.metrics.steps += 1;
+                    consecutive_retries = 0;
+                    self.set_status(StrategySupervisorHealthStatus::Running);
+                }
+                Err(error) => {
+                    if let Some(report) = self.record_error(error, &mut consecutive_retries) {
+                        return Ok(report);
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_error(
+        &mut self,
+        error: TaskError,
+        consecutive_retries: &mut usize,
+    ) -> Option<StrategySupervisorReport> {
+        self.metrics.errors += 1;
+        if self.retry_policy.should_retry(*consecutive_retries) {
+            *consecutive_retries += 1;
+            self.metrics.retries += 1;
+            self.set_status(StrategySupervisorHealthStatus::Recovering);
+            None
+        } else {
+            self.set_status(StrategySupervisorHealthStatus::Failed);
+            Some(self.report(
+                StrategySupervisorStopReason::RetryLimitExceeded,
+                Some(error),
+            ))
+        }
+    }
+
+    fn stop(
+        &mut self,
+        stop_reason: StrategySupervisorStopReason,
+        last_error: Option<TaskError>,
+    ) -> StrategySupervisorReport {
+        self.set_status(StrategySupervisorHealthStatus::Stopped);
+        self.report(stop_reason, last_error)
+    }
+
+    fn report(
+        &mut self,
+        stop_reason: StrategySupervisorStopReason,
+        last_error: Option<TaskError>,
+    ) -> StrategySupervisorReport {
+        self.sync_health_metrics();
+        StrategySupervisorReport {
+            stop_reason,
+            metrics: self.metrics,
+            last_error,
+        }
+    }
+
+    fn set_status(&mut self, status: StrategySupervisorHealthStatus) {
+        self.health.status = status;
+        self.sync_health_metrics();
+    }
+
+    fn sync_health_metrics(&mut self) {
+        self.health.metrics = self.metrics;
+    }
+}
+
+impl StrategySupervisorMetrics {
+    #[must_use]
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+
+    #[must_use]
+    pub fn retries(&self) -> usize {
+        self.retries
+    }
+
+    #[must_use]
+    pub fn errors(&self) -> usize {
+        self.errors
+    }
+}
+
+impl StrategySupervisorHealth {
+    #[must_use]
+    pub fn status(&self) -> StrategySupervisorHealthStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> StrategyEnvironmentProvider {
+        self.provider
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> StrategyEnvironmentKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> StrategySupervisorMetrics {
+        self.metrics
+    }
+}
+
+impl StrategySupervisorReport {
+    #[must_use]
+    pub fn stop_reason(&self) -> StrategySupervisorStopReason {
+        self.stop_reason
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> StrategySupervisorMetrics {
+        self.metrics
+    }
+
+    #[must_use]
+    pub fn last_error(&self) -> Option<&TaskError> {
+        self.last_error.as_ref()
     }
 }
 

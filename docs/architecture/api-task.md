@@ -77,6 +77,10 @@
   - 提供 provider-backed TQKQ sim 和 live trade 的 typed deployment config
   - provider-backed sim 的账号派生与登录由 task 层 builder 处理，不向策略泄漏 TQKQ 内部协议
   - 统一 fake/replay/live deployment wrapper、run loop、typed stop reason 和 graceful shutdown report
+- `StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
+  - 在 `StrategyDeployment` 之上提供 task-layer supervisor foundation
+  - 暴露 typed stop reason、health/metrics snapshot、显式有限 retry 和 ctrl-c shutdown hook
+  - retry 默认不隐藏启用，避免策略步骤已产生下单副作用后被 SDK 静默重复执行
 - `StrategyReplay`
   - 消费 `tqsdk-data::MarketCacheReplay` 的有序 quote/kline/tick cache event
   - 将 cache event 推进为正常 runtime market commit
@@ -143,7 +147,7 @@
 - 自动 hedge / flatten、timed cancel / replace、group/account resume / audit
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
-- 完整 production supervisor / health-retry orchestration / ctrl-c shutdown hook / 多 provider environment
+- HTTP metrics endpoint、完整 reconnect orchestration、跨进程 daemon 管理 / 多 provider environment
 - 更完整 broker 行为 / 持久化测试 fixture 恢复
 
 ## 为什么它必须独立成 crate
@@ -709,8 +713,8 @@ impl TargetPosScheduler {
 当前 `tqsdk-task` 已经进入稳固阶段，下一步不应继续扩宽 surface，而应优先：
 
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
-2. 在 `StrategyDeployment` 之上继续设计 production supervisor、health/retry
-   orchestration、ctrl-c shutdown hook 和 metrics endpoint。
+2. 在 `StrategySupervisor` 之上继续设计 HTTP metrics endpoint、完整 reconnect
+   orchestration、持久化 sink lifecycle 和跨进程 daemon 管理。
 3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、
    stream adapter、callback 倒灌进 core/session/wait。

@@ -32,8 +32,11 @@
 //! API gap:
 //! `tqsdk-stream` 已有 session event/reconnect 事件、typed
 //! `TqStream::health()` snapshot、`StreamHealthSnapshot::status()` 和
-//! `should_restart()`；仍没有 metrics hooks、HTTP health endpoint、typed
-//! graceful shutdown contract 和完整 supervisor API。
+//! `should_restart()`；`tqsdk-task` 已有 `StrategySupervisor` foundation、
+//! `StrategySupervisorHealth` / `StrategySupervisorMetrics` typed snapshot、
+//! 显式 `StrategyRetryPolicy`、`StrategyShutdownSignal::ctrl_c()` 和 typed
+//! shutdown report。仍没有 HTTP health/metrics endpoint、持久化 sink isolation、
+//! 完整 reconnect orchestration 和跨进程 daemon 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore

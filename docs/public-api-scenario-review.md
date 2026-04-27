@@ -51,20 +51,24 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `resume_from` foundation，并通过 `StrategyReplaySpeed` 提供最快 / real-time /
   scaled replay speed policy；`StrategyReplayCheckpointStore` 已提供 JSON file-backed
   durable checkpoint persistence foundation；`StrategyReplaySourceBuilder` 已提供
-  多序列 event source 合并入口。production supervisor / health-retry orchestration
-  仍是 gap。
+  多序列 event source 合并入口。完整 daemon reconnect orchestration 和 metrics
+  endpoint 仍是 gap。
 - S15 实盘 / 模拟 / 回放切换继续推进：“勉强”但已覆盖 provider-backed sim /
   deployment config / lifecycle 子集。`StrategyDeploymentConfig` 支持 live trade
   与 TQKQ sim provider 配置，`StrategyDeployment` / `StrategyLifecycle` 提供统一
-  run loop、typed stop reason 和 graceful shutdown report；策略步骤仍只依赖
-  `StrategyEnvironmentContext`。完整 supervisor、health/retry orchestration 和
-  多 provider environment 仍是 gap。
+  run loop、typed stop reason 和 graceful shutdown report；`StrategySupervisor` /
+  `StrategyRetryPolicy` / `StrategyShutdownSignal` 提供 task-layer supervisor、
+  typed health/metrics snapshot、有限 retry 和 ctrl-c shutdown hook；策略步骤仍只依赖
+  `StrategyEnvironmentContext`。配置文件反序列化和多 provider environment 仍是 gap。
 - S5 低层裸行情直通继续保持“自然”：低层用户可以用
   `SessionClient::subscribe_quotes(...)` 减少 raw `RuntimeCommand` 样板，同时仍通过
   `RuntimeReader::read_market_state()` 走热路径分区读面。
-- S20 生产守护进程仍为“勉强”：`TqStream::health()` 现在返回
-  `StreamHealthSnapshot::status()` / `should_restart()`，但 metrics endpoint、ctrl-c
-  graceful shutdown 和完整 daemon supervisor 仍是 gap。
+- S20 生产守护进程继续推进但仍为“勉强”：`TqStream::health()` 现在返回
+  `StreamHealthSnapshot::status()` / `should_restart()`；`tqsdk-task` 新增
+  `StrategySupervisor` foundation，提供 typed health/metrics snapshot、显式
+  retry policy、ctrl-c shutdown signal 和 typed shutdown report。HTTP metrics
+  endpoint、持久化 sink isolation、完整 reconnect orchestration 和跨进程 daemon
+  管理仍是 gap。
 - S21 慢消费者隔离的 bounded fan-out / lag 诊断子集已经自然表达：`TqStreamBuilder`
   可配置 root fan-out capacity，`StreamFacadeError::diagnostic()` 暴露 typed
   lag 诊断；持久化 sink runtime / per-sink retry/storage policy 仍保留为 gap。
@@ -90,12 +94,12 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 12. 跨合约套利 | 勉强 | 中 | 无 | 无 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; `ExecutionGroupBuilder`; `ExecutionGroupOutcome`; automatic hedge remains gap |
 | 13. 多账户下单 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `AccountGroup`; `MultiAccountOrderTicket`; advanced failure policy/resume/audit remains gap |
 | 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
-| 15. 实盘 / 模拟 / 回放切换 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`; `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; `StrategyEnvironment`; `StrategyEnvironmentContext`; `StrategyDeploymentConfig`; `StrategyDeployment`; `StrategyLifecycle`; `StrategyEnvironment::from_config`; `StrategyEnvironment::{from_task_host,from_test_harness,from_replay_builder}`; supervisor/health/retry/multi-provider environment still gap |
-| 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_events`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplaySourceBuilder`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; production supervisor/deployment health still gap |
+| 15. 实盘 / 模拟 / 回放切换 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`; `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; `StrategyEnvironment`; `StrategyEnvironmentContext`; `StrategyDeploymentConfig`; `StrategyDeployment`; `StrategyLifecycle`; `StrategySupervisor`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; `StrategyEnvironment::from_config`; `StrategyEnvironment::{from_task_host,from_test_harness,from_replay_builder}`; config file loader / multi-provider environment still gap |
+| 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_events`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplaySourceBuilder`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; complete daemon reconnect orchestration still gap |
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
 | 18. 本地行情缓存读写 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; live durable sink still gap |
 | 19. 风控前置 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration |
-| 20. 生产守护进程 | 勉强 | 中 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `StreamHealthSnapshot::{status, should_restart}`; metrics/graceful shutdown still gap |
+| 20. 生产守护进程 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `StreamHealthSnapshot::{status, should_restart}`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; HTTP metrics endpoint / durable sink isolation / full reconnect orchestration still gap |
 | 21. 慢消费者隔离 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; bounded fan-out / typed lag diagnostic 子集自然；durable sink runtime 仍是 gap |
 | 22. 错误诊断与重试 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; error kind / retry hint 子集自然；retry orchestration 仍是 gap |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
@@ -106,4 +110,4 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户高级执行策略仍需继续补齐。
 3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、fan-out capacity 和 typed lag/error diagnostics 已有薄 facade；持久化 sink、完整 daemon supervisor/metrics 仍停留在底层组合能力之外。
-4. 多 provider 聚合、完整 production supervisor 和 live durable cache sink 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、strategy environment/deployment foundation、provider-backed TQKQ sim config、replay source builder、replay speed policy、checkpoint store、test clock、fake broker latency、fake broker reconnect 与跨 step partial fill 已落在 `tqsdk-task`。
+4. 多 provider 聚合、完整 production daemon 和 live durable cache sink 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、strategy environment/deployment/supervisor foundation、provider-backed TQKQ sim config、replay source builder、replay speed policy、checkpoint store、test clock、fake broker latency、fake broker reconnect 与跨 step partial fill 已落在 `tqsdk-task`。

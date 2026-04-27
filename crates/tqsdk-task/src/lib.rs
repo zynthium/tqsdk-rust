@@ -35,8 +35,11 @@ pub use config::{
 };
 pub use deployment::{
     StrategyDeployment, StrategyDeploymentBuilder, StrategyDeploymentConfig,
-    StrategyEnvironmentProvider, StrategyLifecycle, StrategyMarketMode, StrategyRunReport,
-    StrategyRunStopReason, StrategyShutdownReport, StrategyStepFuture,
+    StrategyEnvironmentProvider, StrategyLifecycle, StrategyMarketMode, StrategyRetryPolicy,
+    StrategyRunReport, StrategyRunStopReason, StrategyShutdownReport, StrategyShutdownSignal,
+    StrategyStepFuture, StrategySupervisor, StrategySupervisorHealth,
+    StrategySupervisorHealthStatus, StrategySupervisorMetrics, StrategySupervisorReport,
+    StrategySupervisorStopReason,
 };
 pub use environment::{
     StrategyEnvironment, StrategyEnvironmentBuilder, StrategyEnvironmentContext,

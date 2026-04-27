@@ -1,17 +1,17 @@
-//! Scenario: 实盘 / 模拟 / 回放切换（deployment config + lifecycle）
+//! Scenario: 实盘 / 模拟 / 回放切换（deployment config + supervisor lifecycle）
 //!
 //! User goal:
 //! - 同一套策略步骤代码在 live trade、provider-backed TQKQ sim、fake sim 和 replay 之间复用
 //! - provider 差异只出现在 deployment config / environment construction
 //! - 策略逻辑只依赖标准 context 读取和 typed execution API
-//! - 运行生命周期由 SDK wrapper 管理，而不是用户手写 Tokio task/channel
+//! - 运行生命周期、ctrl-c shutdown、retry 和 metrics snapshot 由 SDK wrapper 管理
 //!
 //! API contract:
 //! - public API 提供 `StrategyDeploymentConfig` / `StrategyDeployment`
 //! - provider-backed sim 使用 typed config，不暴露 TQKQ 内部账号派生协议
 //! - live/sim/replay 都暴露同一套 quote/position/orders context 方法
 //! - replay 不要求策略改写成底层 replay command loop
-//! - lifecycle 提供 typed stop reason 和 graceful shutdown report
+//! - supervisor 提供 typed stop reason、retry policy、health/metrics snapshot 和 graceful shutdown report
 //!
 //! Forbidden:
 //! - 策略中写 `if live { ... } else if replay { ... }`
@@ -24,12 +24,12 @@
 //! - 策略从 live/sim 迁到 replay 需要改事件循环
 //! - provider-backed sim 需要用户手动派生账号或提交登录协议命令
 //! - replay 无法复用同一 typed order/risk 接口
-//! - lifecycle/shutdown 退化成用户手写后台任务编排
+//! - lifecycle/shutdown/retry 退化成用户手写后台任务编排
 //!
 //! Review questions:
 //! - 当前 API 是否自然表达 provider-backed sim / live / replay 切换？
 //! - 是否保持同一策略 context contract？
-//! - lifecycle 是否避免用户手动管理 Tokio task / channel？
+//! - supervisor lifecycle 是否避免用户手动管理 Tokio task / channel？
 
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 use tqsdk_task::{
     RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
     StrategyEnvironmentContext, StrategyLifecycle, StrategyReplay, StrategyReplaySpeed,
+    StrategyRetryPolicy, StrategyShutdownSignal, StrategySupervisor, StrategySupervisorReport,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -46,22 +47,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::var("TQ_STRATEGY_ENV").unwrap_or_else(|_| "fake".into());
     let configured_account = std::env::var("TQ_STRATEGY_ACCOUNT").unwrap_or_else(|_| "sim".into());
     let symbol = std::env::var("TQ_STRATEGY_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".into());
-    let mut deployment =
+    let deployment =
         build_deployment(mode.as_str(), configured_account.as_str(), symbol.as_str()).await?;
     let account_id = deployment
         .account_id()
         .unwrap_or(configured_account.as_str())
         .to_owned();
+    let mut supervisor = StrategySupervisor::new(deployment)
+        .shutdown_signal(StrategyShutdownSignal::ctrl_c())
+        .retry_policy(StrategyRetryPolicy::new().max_retries(1));
 
     let run_report =
-        run_breakout_once(&mut deployment, account_id.as_str(), symbol.as_str()).await?;
-    let shutdown = deployment.shutdown().await?;
+        run_breakout_once(&mut supervisor, account_id.as_str(), symbol.as_str()).await?;
+    let health = supervisor.health().clone();
+    let shutdown = supervisor.shutdown().await?;
 
     println!(
-        "provider={:?} stop={:?} steps={} shutdown_kind={:?} graceful={}",
+        "provider={:?} stop={:?} steps={} retries={} errors={} health={:?} shutdown_kind={:?} graceful={}",
         mode,
         run_report.stop_reason(),
-        run_report.steps(),
+        run_report.metrics().steps(),
+        run_report.metrics().retries(),
+        run_report.metrics().errors(),
+        health.status(),
         shutdown.kind(),
         shutdown.graceful()
     );
@@ -69,13 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_breakout_once(
-    deployment: &mut StrategyDeployment,
+    supervisor: &mut StrategySupervisor,
     account_id: &str,
     symbol: &str,
-) -> tqsdk_task::Result<tqsdk_task::StrategyRunReport> {
+) -> tqsdk_task::Result<StrategySupervisorReport> {
     let account_id = account_id.to_owned();
     let symbol = symbol.to_owned();
-    deployment
+    supervisor
         .run(move |ctx| {
             let account_id = account_id.clone();
             let symbol = symbol.clone();

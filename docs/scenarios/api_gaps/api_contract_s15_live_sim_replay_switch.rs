@@ -33,23 +33,28 @@
 //! strategy context；`StrategyDeploymentConfig` / `StrategyDeployment` /
 //! `StrategyLifecycle` 已覆盖 provider-backed TQKQ sim config、live trade config、
 //! fake/replay deployment wrapper、typed run stop reason 和 graceful shutdown
-//! report。正式 example 已更新到
+//! report；`StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
+//! 已覆盖 task-layer supervisor、typed health/metrics snapshot、有限 retry 和
+//! ctrl-c shutdown hook foundation。正式 example 已更新到
 //! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`。
 //!
 //! Remaining API gap:
-//! 当前仍是 deployment foundation：配置文件反序列化、production supervisor、
-//! ctrl-c shutdown hook、health/retry orchestration、metrics endpoint 和多 provider
-//! environment 尚未冻结。
+//! 当前仍是 deployment/supervisor foundation：配置文件反序列化、HTTP metrics
+//! endpoint、完整 reconnect orchestration 和多 provider environment 尚未冻结。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let config = StrategyDeploymentConfig::from_file("strategy.toml")?
-//!     .lifecycle(StrategyLifecycle::new().shutdown_on_ctrl_c());
-//! let mut deployment = StrategyEnvironment::from_config(config)
+//!     .lifecycle(StrategyLifecycle::new().without_step_limit());
+//! let deployment = StrategyEnvironment::from_config(config)
 //!     .build()
 //!     .await?;
-//! deployment.run(MyStrategy::default()).await?;
-//! deployment.shutdown().await?;
+//! let mut supervisor = StrategySupervisor::new(deployment)
+//!     .shutdown_signal(StrategyShutdownSignal::ctrl_c())
+//!     .retry_policy(StrategyRetryPolicy::new().max_retries(3))
+//!     .metrics_endpoint("127.0.0.1:9000");
+//! supervisor.run(MyStrategy::default()).await?;
+//! supervisor.shutdown().await?;
 //! ```
 
 fn main() {}
