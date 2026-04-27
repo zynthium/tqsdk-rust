@@ -28,6 +28,7 @@ mod error;
 mod export;
 mod greeks;
 mod live_quote;
+mod market_cache;
 
 pub use client::{
     DataClient, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
@@ -41,3 +42,4 @@ pub use download::{
 pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
+pub use market_cache::{MarketCacheEvent, MarketCachePayload};

@@ -18,6 +18,7 @@ pub enum DataError {
     #[cfg(feature = "services")]
     Http(reqwest::Error),
     Io(std::io::Error),
+    Json(serde_json::Error),
 }
 
 impl From<tqsdk_session::SessionFacadeError> for DataError {
@@ -39,6 +40,12 @@ impl From<std::io::Error> for DataError {
     }
 }
 
+impl From<serde_json::Error> for DataError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
 impl Display for DataError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -55,6 +62,7 @@ impl Display for DataError {
             #[cfg(feature = "services")]
             Self::Http(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
+            Self::Json(error) => write!(f, "{error}"),
         }
     }
 }
@@ -66,6 +74,7 @@ impl std::error::Error for DataError {
             #[cfg(feature = "services")]
             Self::Http(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
             Self::PermissionDenied(_)
             | Self::Validation(_)
             | Self::InvalidState(_)

@@ -15,6 +15,7 @@ services = ["dep:reqwest", "tqsdk-session/services"]
 [dependencies]
 chrono.workspace = true
 reqwest = { workspace = true, optional = true }
+serde.workspace = true
 serde_json.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
 tqsdk-session = { path = "../tqsdk-session", default-features = false }
