@@ -43,10 +43,7 @@ async fn strategy_replay_drives_quote_events_into_strategy_context() {
     let report = ctx.finish_test_step().await.unwrap();
     assert_eq!(report.orders().len(), 1);
     assert_eq!(report.trades().len(), 1);
-    assert_eq!(
-        report.position("sim", "SHFE.au2602").unwrap().pos_long,
-        1
-    );
+    assert_eq!(report.position("sim", "SHFE.au2602").unwrap().pos_long, 1);
 
     drop(ctx);
     assert!(strategy.next().await.unwrap().is_none());
@@ -54,47 +51,7 @@ async fn strategy_replay_drives_quote_events_into_strategy_context() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_drives_kline_events_into_strategy_context() {
-    let older = Kline {
-        id: 1,
-        datetime: 1_000,
-        close: 480.0,
-        ..Kline::default()
-    };
-    let newer = Kline {
-        id: 2,
-        datetime: 2_000,
-        close: 481.0,
-        ..Kline::default()
-    };
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::kline(
-            "cache",
-            "SHFE.au2602",
-            2_100,
-            Some(2_000),
-            60_000_000_000,
-            newer,
-        )
-        .unwrap(),
-        MarketCacheEvent::kline(
-            "cache",
-            "SHFE.au2602",
-            1_100,
-            Some(1_000),
-            60_000_000_000,
-            older,
-        )
-        .unwrap(),
-    ]);
-
-    let mut strategy = StrategyReplay::builder(replay)
-        .market(FakeMarket::new().account("sim", 100_000.0))
-        .broker(FakeBroker::new().fill_all())
-        .account("sim")
-        .kline("SHFE.au2602", Duration::from_secs(60), 16)
-        .build()
-        .await
-        .unwrap();
+    let mut strategy = replay_strategy(two_kline_replay()).await;
 
     let ctx = strategy.next().await.unwrap().unwrap();
     assert_eq!(ctx.event().event_time_ns(), 1_000);
@@ -118,4 +75,90 @@ async fn strategy_replay_drives_kline_events_into_strategy_context() {
             .close,
         481.0
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_exposes_replay_clock_and_checkpoint() {
+    let mut strategy = replay_strategy(two_kline_replay()).await;
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.replay_time_ns(), 1_000);
+    assert_eq!(ctx.checkpoint().next_event_index(), 1);
+    assert_eq!(ctx.checkpoint().replay_time_ns(), Some(1_000));
+    let checkpoint = ctx.checkpoint();
+    drop(ctx);
+
+    assert_eq!(strategy.replay_time_ns(), Some(1_000));
+    assert_eq!(strategy.checkpoint(), checkpoint);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_resume_from_checkpoint_skips_processed_events() {
+    let mut first = replay_strategy(two_kline_replay()).await;
+    let ctx = first.next().await.unwrap().unwrap();
+    let checkpoint = ctx.checkpoint();
+    drop(ctx);
+
+    let mut resumed = StrategyReplay::builder(two_kline_replay())
+        .market(FakeMarket::new().account("sim", 100_000.0))
+        .broker(FakeBroker::new().fill_all())
+        .account("sim")
+        .kline("SHFE.au2602", Duration::from_secs(60), 16)
+        .resume_from(checkpoint)
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.replay_time_ns(), Some(1_000));
+    assert_eq!(resumed.checkpoint(), checkpoint);
+
+    let ctx = resumed.next().await.unwrap().unwrap();
+    assert_eq!(ctx.replay_time_ns(), 2_000);
+    assert_eq!(ctx.checkpoint().next_event_index(), 2);
+}
+
+fn two_kline_replay() -> MarketCacheReplay {
+    let older = Kline {
+        id: 1,
+        datetime: 1_000,
+        close: 480.0,
+        ..Kline::default()
+    };
+    let newer = Kline {
+        id: 2,
+        datetime: 2_000,
+        close: 481.0,
+        ..Kline::default()
+    };
+    MarketCacheReplay::new(vec![
+        MarketCacheEvent::kline(
+            "cache",
+            "SHFE.au2602",
+            2_100,
+            Some(2_000),
+            60_000_000_000,
+            newer,
+        )
+        .unwrap(),
+        MarketCacheEvent::kline(
+            "cache",
+            "SHFE.au2602",
+            1_100,
+            Some(1_000),
+            60_000_000_000,
+            older,
+        )
+        .unwrap(),
+    ])
+}
+
+async fn replay_strategy(replay: MarketCacheReplay) -> StrategyReplay {
+    StrategyReplay::builder(replay)
+        .market(FakeMarket::new().account("sim", 100_000.0))
+        .broker(FakeBroker::new().fill_all())
+        .account("sim")
+        .kline("SHFE.au2602", Duration::from_secs(60), 16)
+        .build()
+        .await
+        .unwrap()
 }

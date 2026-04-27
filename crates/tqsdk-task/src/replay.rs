@@ -21,6 +21,7 @@ pub struct StrategyReplayBuilder {
     quotes: Vec<String>,
     klines: Vec<ReplayKlineSpec>,
     ticks: Vec<ReplayTickSpec>,
+    checkpoint: StrategyReplayCheckpoint,
 }
 
 /// Offline strategy replay host.
@@ -29,6 +30,8 @@ pub struct StrategyReplay {
     strategy: StrategyHost,
     klines: Vec<ReplayKlineSpec>,
     ticks: Vec<ReplayTickSpec>,
+    next_event_index: usize,
+    replay_time_ns: Option<i64>,
 }
 
 /// Metadata for the market event that produced a replay strategy context.
@@ -40,9 +43,17 @@ pub struct StrategyReplayEvent {
     event_time_ns: i64,
 }
 
+/// Resumable position in a [`StrategyReplay`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StrategyReplayCheckpoint {
+    next_event_index: usize,
+    replay_time_ns: Option<i64>,
+}
+
 /// Strategy context plus the replay event that triggered it.
 pub struct StrategyReplayContext<'a> {
     event: StrategyReplayEvent,
+    checkpoint: StrategyReplayCheckpoint,
     context: StrategyContext<'a>,
 }
 
@@ -70,12 +81,33 @@ impl StrategyReplay {
             return Ok(None);
         };
         let replay_event = StrategyReplayEvent::from_cache_event(&event);
+        let event_time_ns = replay_event.event_time_ns();
         ingest_market_cache_event(self.strategy.task_host(), &event, &self.klines, &self.ticks)?;
         let context = self.strategy.next_once().await?;
+        self.next_event_index += 1;
+        self.replay_time_ns = Some(event_time_ns);
+        let checkpoint = StrategyReplayCheckpoint {
+            next_event_index: self.next_event_index,
+            replay_time_ns: self.replay_time_ns,
+        };
         Ok(Some(StrategyReplayContext {
             event: replay_event,
+            checkpoint,
             context,
         }))
+    }
+
+    #[must_use]
+    pub fn replay_time_ns(&self) -> Option<i64> {
+        self.replay_time_ns
+    }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> StrategyReplayCheckpoint {
+        StrategyReplayCheckpoint {
+            next_event_index: self.next_event_index,
+            replay_time_ns: self.replay_time_ns,
+        }
     }
 
     #[must_use]
@@ -105,6 +137,7 @@ impl StrategyReplayBuilder {
             quotes: Vec::new(),
             klines: Vec::new(),
             ticks: Vec::new(),
+            checkpoint: StrategyReplayCheckpoint::default(),
         }
     }
 
@@ -133,12 +166,7 @@ impl StrategyReplayBuilder {
     }
 
     #[must_use]
-    pub fn kline(
-        mut self,
-        symbol: impl AsRef<str>,
-        duration: Duration,
-        view_width: usize,
-    ) -> Self {
+    pub fn kline(mut self, symbol: impl AsRef<str>, duration: Duration, view_width: usize) -> Self {
         let spec = ReplayKlineSpec {
             symbol: symbol.as_ref().to_owned(),
             duration_ns: duration_to_ns(duration),
@@ -159,6 +187,12 @@ impl StrategyReplayBuilder {
         if !self.ticks.iter().any(|existing| existing == &spec) {
             self.ticks.push(spec);
         }
+        self
+    }
+
+    #[must_use]
+    pub fn resume_from(mut self, checkpoint: StrategyReplayCheckpoint) -> Self {
+        self.checkpoint = checkpoint;
         self
     }
 
@@ -188,12 +222,40 @@ impl StrategyReplayBuilder {
         }
         let mut strategy = builder.build().await?;
         drain_initial_commits(&mut strategy).await?;
+        let mut replay = self.replay;
+        for _ in 0..self.checkpoint.next_event_index {
+            if replay.next().is_none() {
+                break;
+            }
+        }
         Ok(StrategyReplay {
-            replay: self.replay,
+            replay,
             strategy,
             klines: self.klines,
             ticks: self.ticks,
+            next_event_index: self.checkpoint.next_event_index,
+            replay_time_ns: self.checkpoint.replay_time_ns,
         })
+    }
+}
+
+impl StrategyReplayCheckpoint {
+    #[must_use]
+    pub const fn new(next_event_index: usize, replay_time_ns: Option<i64>) -> Self {
+        Self {
+            next_event_index,
+            replay_time_ns,
+        }
+    }
+
+    #[must_use]
+    pub fn next_event_index(&self) -> usize {
+        self.next_event_index
+    }
+
+    #[must_use]
+    pub fn replay_time_ns(&self) -> Option<i64> {
+        self.replay_time_ns
     }
 }
 
@@ -232,6 +294,16 @@ impl StrategyReplayContext<'_> {
     #[must_use]
     pub fn event(&self) -> &StrategyReplayEvent {
         &self.event
+    }
+
+    #[must_use]
+    pub fn replay_time_ns(&self) -> i64 {
+        self.event.event_time_ns()
+    }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> StrategyReplayCheckpoint {
+        self.checkpoint
     }
 
     pub fn quote(&self, symbol: impl AsRef<str>) -> Result<Quote> {
@@ -411,12 +483,7 @@ fn quote_update(symbol: &str, quote: &Quote) -> Value {
     })
 }
 
-fn kline_update(
-    symbol: &str,
-    duration_ns: i64,
-    row: &Kline,
-    klines: &[ReplayKlineSpec],
-) -> Value {
+fn kline_update(symbol: &str, duration_ns: i64, row: &Kline, klines: &[ReplayKlineSpec]) -> Value {
     let row_id = row.id.to_string();
     let mut charts = Map::new();
     for spec in klines
