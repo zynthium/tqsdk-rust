@@ -29,17 +29,32 @@
 //! - 需要 API 微调还是 error model 局部重构？
 //!
 //! Current API note:
-//! 当前有 `SessionFacadeError`、`WaitFacadeError`、`StreamFacadeError` 和
-//! trade session event，但诊断/retry hint 还没有形成终端用户级统一 contract。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! match order.send().await {
-//!     Ok(ticket) => ticket.wait_terminal(&mut api).await?,
-//!     Err(error) if error.is_retryable_transport() => retry_policy.retry(error).await?,
-//!     Err(error) if error.is_business_reject() => return Err(error.explain()),
-//!     Err(error) => return Err(error.into()),
-//! }
-//! ```
+//! 本示例验证低层 transport/session/stream 诊断。业务拒单仍应通过
+//! typed order/risk surface 判断，完整 retry policy orchestration 仍是 gap。
 
-fn main() {}
+use tqsdk_core::{ContractError, RetryHint};
+use tqsdk_session::SessionFacadeError;
+use tqsdk_stream::{StreamErrorKind, StreamFacadeError};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let error = StreamFacadeError::Session(SessionFacadeError::from(ContractError::transport(
+        "websocket recv failed",
+    )));
+    let diagnostic = error.diagnostic();
+
+    match diagnostic.retry_hint {
+        RetryHint::RetryAfterReconnect => {
+            if diagnostic.kind == StreamErrorKind::Transport {
+                println!("retry after reconnect: {}", diagnostic.message);
+            }
+        }
+        RetryHint::DoNotRetry => {
+            println!("do not retry: {}", diagnostic.message);
+        }
+        RetryHint::RetryWithBackoff => {
+            println!("retry with backoff: {}", diagnostic.message);
+        }
+    }
+
+    Ok(())
+}

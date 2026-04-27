@@ -38,7 +38,7 @@ mod window;
 
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
-pub use error::{Result, StreamFacadeError};
+pub use error::{Result, StreamErrorDiagnostic, StreamErrorKind, StreamFacadeError};
 pub use event::{
     OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
     RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
@@ -49,7 +49,7 @@ pub use event::{
 pub use filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
-pub use health::{StreamHealthSnapshot, StreamSessionPhase};
+pub use health::{StreamHealthSnapshot, StreamHealthStatus, StreamSessionPhase};
 pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::QuoteSubscription;
 pub use recovery::StreamStartupRecovery;

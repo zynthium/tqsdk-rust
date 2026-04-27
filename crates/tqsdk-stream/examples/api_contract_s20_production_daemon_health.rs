@@ -9,6 +9,7 @@
 //! - health 是 typed public API
 //! - 不解析 runtime state tree 字符串路径
 //! - reconnect exhaustion 可直接读取
+//! - health status / restart hint 可直接读取
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -49,14 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(commit) = commits.next().await.transpose()? {
         let health = stream.health()?;
         println!(
-            "revision={} phase={:?} healthy={} reconnect_exhausted={}",
+            "revision={} phase={:?} status={:?} healthy={} restart={}",
             commit.revision.get(),
             health.session_phase,
+            health.status(),
             health.is_healthy(),
-            health.reconnect_exhausted()
+            health.should_restart()
         );
 
-        if health.reconnect_exhausted() || health.driver_closed {
+        if health.should_restart() {
             break;
         }
     }

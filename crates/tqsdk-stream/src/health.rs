@@ -17,6 +17,15 @@ pub enum StreamSessionPhase {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamHealthStatus {
+    Starting,
+    Healthy,
+    Recovering,
+    Degraded,
+    Closed,
+}
+
 impl StreamSessionPhase {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -68,6 +77,38 @@ impl StreamHealthSnapshot {
         self.reconnect
             .as_ref()
             .is_some_and(|reconnect| reconnect.exhausted)
+    }
+
+    #[must_use]
+    pub fn status(&self) -> StreamHealthStatus {
+        if self.driver_closed {
+            return StreamHealthStatus::Closed;
+        }
+        if self.reconnect_exhausted() {
+            return StreamHealthStatus::Degraded;
+        }
+        match self.session_phase {
+            Some(StreamSessionPhase::Running) => StreamHealthStatus::Healthy,
+            Some(StreamSessionPhase::Reconnecting | StreamSessionPhase::Resyncing) => {
+                StreamHealthStatus::Recovering
+            }
+            Some(
+                StreamSessionPhase::Idle
+                | StreamSessionPhase::Authenticating
+                | StreamSessionPhase::Connecting
+                | StreamSessionPhase::Bootstrapping,
+            )
+            | None => StreamHealthStatus::Starting,
+            Some(StreamSessionPhase::Closed) => StreamHealthStatus::Closed,
+        }
+    }
+
+    #[must_use]
+    pub fn should_restart(&self) -> bool {
+        matches!(
+            self.status(),
+            StreamHealthStatus::Degraded | StreamHealthStatus::Closed
+        )
     }
 }
 
