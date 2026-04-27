@@ -76,6 +76,16 @@
 
 这些仍然属于 `tqsdk-wait` / `tqsdk-stream`。
 
+## Market Cache Foundation
+
+`MarketCacheEvent` / `MarketCacheWriter` / `MarketCacheReader` /
+`MarketCacheReplay` define the offline cache record and replay foundation for
+standard `Quote` / `Kline` / `Tick` payloads.
+
+This is not a live durable sink runtime: it does not spawn tasks, isolate slow
+consumers, manage WAL compaction, or drive `StrategyHost`. Those remain
+scenario gaps above this data-layer foundation.
+
 ## 后续仍应承接的能力
 
 - 文件缓存

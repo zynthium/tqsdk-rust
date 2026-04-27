@@ -34,10 +34,9 @@
 //! task order。
 //!
 //! Remaining API gap:
-//! `tqsdk-data` 能拉取历史序列，`tqsdk-session` 有 replay control-plane
-//! helper，但还没有把历史数据转成 `StrategyHost` 同构 update/context 的
-//! public replay driver。后续 `HistoryReplay` 应复用这一策略 context，而不是
-//! 让用户手写历史 K线到实时事件的转换循环。
+//! `tqsdk-data` 能拉取历史序列，并提供 cache event replay iterator；
+//! `tqsdk-session` 有 replay control-plane helper。但还没有把历史/cache
+//! event 转成 `StrategyHost` 同构 update/context 的 public replay driver。
 //!
 //! 理想用户代码草案：
 //! ```ignore

@@ -29,8 +29,10 @@
 //! - 是否存在热路径性能风险？
 //!
 //! API gap:
-//! 当前 `tqsdk-data` 有历史拉取和 CSV export substrate，但没有 live market
-//! cache writer/reader、跨进程缓存格式或 cache replay contract。
+//! `tqsdk-data` 已提供离线 cache record、JSONL reader/writer 和 ordered
+//! replay iterator。剩余 gap 是 live market stream pipe、可靠 sink runtime、
+//! 跨进程锁/index、cache compaction 和将 cache replay 接入 `StrategyHost`
+//! 同构 context。
 //!
 //! 理想用户代码草案：
 //! ```ignore

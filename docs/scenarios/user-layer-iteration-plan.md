@@ -362,9 +362,27 @@ crate 分层合并成一份迭代计划。
 - `tqsdk-stream`：live sink adapter。
 - `tqsdk-task`：策略 replay driver 只消费标准事件。
 
+已落地：
+
+- `tqsdk-data::MarketCacheEvent` 定义标准 `Quote` / `Kline` / `Tick`
+  cache record。
+- `MarketCacheWriter` / `MarketCacheReader` 提供最薄 JSONL 离线读写
+  foundation。
+- `MarketCacheReplay` 提供按事件时间、接收时间排序的 deterministic
+  offline replay iterator。
+- `api_contract_s18_local_market_cache` 已提升为正式 data example，明确只
+  覆盖 cache record / reader-writer / replay 子集。
+
+仍未完成、不可伪装为已支持：
+
+- live market stream pipe；
+- durable sink runtime、可靠队列、WAL compaction；
+- 跨进程锁、索引和 cache compaction；
+- 将 cache/history event 接入 `StrategyHost` 同构 replay context。
+
 优先提升的场景：
 
-- `api_contract_s18_local_market_cache`
+- `api_contract_s18_local_market_cache`（cache record/replay 子集已提升为正式 data example）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 
