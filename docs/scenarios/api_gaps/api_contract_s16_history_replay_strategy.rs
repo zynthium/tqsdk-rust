@@ -36,12 +36,14 @@
 //! `KlineDataSeries::into_market_cache_replay` 与
 //! `TickDataSeries::into_market_cache_replay` 已提供 history series 到 cache
 //! replay 的直接 adapter。
+//! `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已提供
+//! 内存级 replay checkpoint 和 deterministic replay clock。
 //!
 //! Remaining API gap:
 //! `tqsdk-task::StrategyReplay` 已提供 history/cache replay -> strategy context
-//! foundation。剩余 gap 是 replay speed/clock control、resumable replay
-//! checkpoint、多序列 replay convenience builder，以及面向生产策略部署的统一
-//! live/sim/replay environment abstraction。
+//! foundation。剩余 gap 是真实 sleep/speed policy、durable checkpoint
+//! persistence、多序列 replay convenience builder，以及面向生产策略部署的
+//! 统一 live/sim/replay environment abstraction。
 //!
 //! 理想用户代码草案：
 //! ```ignore

@@ -9,6 +9,7 @@
 //! - history series 到 replay event 的转换是 public API
 //! - history/cache replay 是 public strategy replay driver，不是用户手写 runtime for-loop
 //! - replay event 输出标准 kline/tick/quote 状态读取面
+//! - replay context 暴露 deterministic replay time 和可恢复 checkpoint
 //! - 策略无需区分 live market event 和 replay market event 的状态读取 API
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -27,7 +28,7 @@
 //! Review questions:
 //! - 当前 API 是否自然表达历史回放驱动策略？
 //! - 是否存在状态一致性风险？
-//! - 剩余 replay clock/checkpoint gap 是否被明确排除？
+//! - replay time/checkpoint 是否作为 public contract 保持可读？
 
 use std::time::Duration;
 
@@ -80,11 +81,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(mut ctx) = strategy.next().await? {
         let event = ctx.event();
+        let checkpoint = ctx.checkpoint();
         println!(
-            "replay source={} symbol={} event_time_ns={}",
+            "replay source={} symbol={} event_time_ns={} replay_time_ns={} next_event_index={}",
             event.source(),
             event.symbol(),
-            event.event_time_ns()
+            event.event_time_ns(),
+            ctx.replay_time_ns(),
+            checkpoint.next_event_index()
         );
 
         let last_row = ctx.kline(symbol.as_str(), duration)?.last().cloned();
