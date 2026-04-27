@@ -17,6 +17,7 @@ pub enum TaskKind {
 /// Errors returned by task-level ownership and execution helpers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskError {
+    Core(tqsdk_core::ContractError),
     Wait(tqsdk_wait::WaitFacadeError),
     Session(tqsdk_session::SessionFacadeError),
     RiskRejected(RiskRejection),
@@ -53,6 +54,12 @@ pub enum TaskError {
     InvalidState(&'static str),
 }
 
+impl From<tqsdk_core::ContractError> for TaskError {
+    fn from(error: tqsdk_core::ContractError) -> Self {
+        Self::Core(error)
+    }
+}
+
 impl From<tqsdk_wait::WaitFacadeError> for TaskError {
     fn from(error: tqsdk_wait::WaitFacadeError) -> Self {
         Self::Wait(error)
@@ -68,6 +75,7 @@ impl From<tqsdk_session::SessionFacadeError> for TaskError {
 impl Display for TaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Core(error) => write!(f, "{error}"),
             Self::Wait(error) => write!(f, "{error}"),
             Self::Session(error) => write!(f, "{error}"),
             Self::RiskRejected(rejection) => write!(f, "risk rejected order: {rejection:?}"),
@@ -124,6 +132,7 @@ impl Display for TaskError {
 impl std::error::Error for TaskError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Core(error) => Some(error),
             Self::Wait(error) => Some(error),
             Self::Session(error) => Some(error),
             Self::RiskRejected(_) => None,

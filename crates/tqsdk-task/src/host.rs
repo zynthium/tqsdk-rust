@@ -19,6 +19,8 @@ use crate::shared::{
     SharedQuoteSubscriptions, SharedTargetPosSchedulerStore, SharedTargetPosStore,
     SharedTaskRegistry, SharedTradingCalendar,
 };
+use crate::strategy::StrategyHostBuilder;
+use crate::testing::StrategyTestRuntime;
 use crate::target_pos::{TargetPosBuilder, process_target_tasks_wait_update};
 
 /// Single-owner task host built on a wait-style API.
@@ -30,6 +32,7 @@ pub struct TaskHost {
     quote_subscriptions: SharedQuoteSubscriptions,
     trading_calendar: SharedTradingCalendar,
     risk: Option<RiskEngine>,
+    pub(crate) strategy_test: Option<StrategyTestRuntime>,
 }
 
 impl TaskHost {
@@ -43,6 +46,7 @@ impl TaskHost {
             quote_subscriptions: SharedQuoteSubscriptions::default(),
             trading_calendar: SharedTradingCalendar::default(),
             risk: None,
+            strategy_test: None,
         }
     }
 
@@ -118,6 +122,11 @@ impl TaskHost {
     #[must_use]
     pub fn orders(&mut self, account_id: impl AsRef<str>) -> TaskOrderBuilder<'_> {
         TaskOrderBuilder::new(self, account_id.as_ref().to_owned())
+    }
+
+    #[must_use]
+    pub fn strategy(self) -> StrategyHostBuilder {
+        StrategyHostBuilder::new(self)
     }
 
     #[must_use]

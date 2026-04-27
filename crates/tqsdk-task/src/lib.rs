@@ -16,7 +16,9 @@ mod registry;
 mod risk;
 mod scheduler;
 mod shared;
+mod strategy;
 mod target_pos;
+pub mod testing;
 
 pub use account_group::{
     AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
@@ -42,6 +44,7 @@ pub use scheduler::{
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,
     TargetPosStepOutcomeReport,
 };
+pub use strategy::{StrategyContext, StrategyHost, StrategyHostBuilder, StrategyUpdate};
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
     TargetPosTaskOrderReport, TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
