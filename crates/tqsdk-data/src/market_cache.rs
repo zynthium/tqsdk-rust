@@ -1,5 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use tqsdk_core::{Kline, Quote, Tick};
 
@@ -118,5 +122,67 @@ impl MarketCacheEvent {
     #[must_use]
     pub fn event_time_ns(&self) -> i64 {
         self.exchange_time_ns.unwrap_or(self.received_at_ns)
+    }
+}
+
+pub struct MarketCacheWriter<W: Write> {
+    inner: BufWriter<W>,
+}
+
+impl MarketCacheWriter<File> {
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::new(File::create(path)?))
+    }
+}
+
+impl<W: Write> MarketCacheWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner: BufWriter::new(inner),
+        }
+    }
+
+    pub fn write_event(&mut self, event: &MarketCacheEvent) -> Result<()> {
+        serde_json::to_writer(&mut self.inner, event)?;
+        self.inner.write_all(b"\n")?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.inner.flush()?;
+        Ok(())
+    }
+}
+
+pub struct MarketCacheReader<R: BufRead> {
+    lines: Lines<R>,
+}
+
+impl MarketCacheReader<BufReader<File>> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::new(BufReader::new(File::open(path)?)))
+    }
+}
+
+impl<R: BufRead> MarketCacheReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self {
+            lines: inner.lines(),
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for MarketCacheReader<R> {
+    type Item = Result<MarketCacheEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.lines.next()?;
+        Some(line.map_err(DataError::from).and_then(|line| {
+            if line.trim().is_empty() {
+                Err(DataError::InvalidResponse("empty market cache line".into()))
+            } else {
+                serde_json::from_str(&line).map_err(DataError::from)
+            }
+        }))
     }
 }

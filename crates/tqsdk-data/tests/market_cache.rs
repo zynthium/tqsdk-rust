@@ -1,5 +1,7 @@
+use std::io::Cursor;
+
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_data::{MarketCacheEvent, MarketCachePayload};
+use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheWriter};
 
 #[test]
 fn market_cache_event_constructors_preserve_standard_payloads() {
@@ -63,4 +65,33 @@ fn market_cache_event_rejects_invalid_identity_and_times() {
     assert!(
         MarketCacheEvent::kline("history", "SHFE.au2602", 1, None, 0, Kline::default()).is_err()
     );
+}
+
+#[test]
+fn market_cache_writer_and_reader_roundtrip_jsonl_events() {
+    let quote = Quote {
+        last_price: 481.0,
+        ..Quote::default()
+    };
+    let event = MarketCacheEvent::quote("live", "SHFE.au2602", 1_000, Some(900), quote).unwrap();
+
+    let mut bytes = Vec::new();
+    {
+        let mut writer = MarketCacheWriter::new(&mut bytes);
+        writer.write_event(&event).unwrap();
+        writer.flush().unwrap();
+    }
+
+    let decoded: Vec<_> = MarketCacheReader::new(Cursor::new(bytes))
+        .collect::<tqsdk_data::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].source, event.source);
+    assert_eq!(decoded[0].symbol, event.symbol);
+    assert_eq!(decoded[0].received_at_ns, event.received_at_ns);
+    assert_eq!(decoded[0].exchange_time_ns, event.exchange_time_ns);
+    match &decoded[0].payload {
+        MarketCachePayload::Quote(payload) => assert_eq!(payload.last_price, 481.0),
+        _ => panic!("expected quote payload"),
+    }
 }
