@@ -29,24 +29,26 @@
 //! - 是否需要新增 strategy/runtime facade？
 //!
 //! Current API note:
-//! `tqsdk-task::StrategyHost` 已提供基于 `TaskHost` 的共同 strategy
-//! loop/context 形状；同一套策略步骤可以在真实 `TaskHost` 和 public
-//! `StrategyTestHarness` 之间复用。
+//! `tqsdk-task::StrategyEnvironment` / `StrategyEnvironmentContext` 已提供最小
+//! environment foundation。task-host live/sim、public fake harness 和 replay builder
+//! 可收敛到同一套 quote/position/orders/target-pos/risk context 方法；正式
+//! example 已提升到
+//! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`。
 //!
 //! Remaining API gap:
-//! builder 已有 live/backtest/replay 相关配置入口，但还没有完整的
-//! `StrategyEnvironment` adapter 让 live / sim / replay 在构建配置层完成切换。
-//! history replay 和 provider-backed sim 也尚未实现同一个 environment contract。
+//! 当前 adapter 仍是 foundation：provider-backed sim、部署级 config loader、
+//! 生命周期管理、graceful shutdown、health/retry 组合和多 provider environment
+//! 尚未冻结。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let env = StrategyEnvironment::from_args()
-//!     .live(TqLive::new(user, pass))
-//!     .sim(TqKqSim::new(user, pass))
-//!     .replay(TqReplay::from_file("session.replay"))
+//! let mut env = StrategyEnvironment::from_config(config)
+//!     .live_task_host(live_host)
+//!     .simulated_broker(sim_host)
+//!     .replay_builder(replay_builder)
 //!     .build()
 //!     .await?;
-//! run_strategy(env, MyStrategy::default()).await?;
+//! run_strategy(&mut env, MyStrategy::default()).await?;
 //! ```
 
 fn main() {}

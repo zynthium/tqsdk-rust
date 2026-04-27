@@ -259,7 +259,7 @@
 - `TargetPosScheduler`
 - ownership / guarded order
 - execution report
-- strategy host / strategy context
+- strategy host / strategy context / strategy environment adapter
 - strategy cache replay driver
 - public fake market / fake broker test harness
 - 规划与执行之间的本地任务状态机

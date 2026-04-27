@@ -14,6 +14,7 @@
 - execution group foundation
 - account group / multi-account order foundation
 - strategy host / strategy context
+- strategy environment adapter
 - strategy cache replay driver
 - public fake market / fake broker test harness
 
@@ -43,6 +44,10 @@
   - 包装 `TaskHost`，保持单 owner / 单推进点策略心智
   - `StrategyContext` 在同一稳定推进点内读取 quote / account / position
   - 同一 context 复用 typed order builder、target-pos builder 和 risk gate
+- `StrategyEnvironment`
+  - 提供 live/sim task host 与 replay 的最小统一构建入口
+  - `StrategyEnvironmentContext` 让同一策略步骤函数复用 quote/position/orders/target-pos/risk context 方法
+  - replay metadata 通过可选 `replay_event()` / `replay_time_ns()` 暴露，不要求 live/sim 策略分叉
 - `StrategyReplay`
   - 使用 `tqsdk-data::MarketCacheReplay` 作为离线 market event source
   - 将 cache quote/kline/tick 转成正常 runtime market commit
@@ -52,7 +57,6 @@
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
   - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/cache event series 合并
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
-  - 当前不包含 live/sim/replay environment adapter
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`
@@ -136,7 +140,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter 仍是后续工作
+- `StrategyEnvironment` 仍是 foundation，完整 provider-backed sim、deployment config 和运行生命周期管理仍是后续工作
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
@@ -192,6 +196,7 @@ match ticket.outcome(host.api())? {
 - [examples/api_contract_s11_simple_strategy.rs](examples/api_contract_s11_simple_strategy.rs)
 - [examples/api_contract_s12_spread_arbitrage.rs](examples/api_contract_s12_spread_arbitrage.rs)
 - [examples/api_contract_s13_multi_account_ordering.rs](examples/api_contract_s13_multi_account_ordering.rs)
+- [examples/api_contract_s15_live_sim_replay_switch.rs](examples/api_contract_s15_live_sim_replay_switch.rs)
 - [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
 - [examples/api_contract_s24_testable_strategy.rs](examples/api_contract_s24_testable_strategy.rs)
 

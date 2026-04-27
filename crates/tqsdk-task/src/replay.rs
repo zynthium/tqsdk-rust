@@ -14,7 +14,9 @@ use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReplay};
 
 use crate::strategy::StrategyHostBuilder;
 use crate::testing::{FakeBroker, FakeMarket, StrategyTestReport};
-use crate::{Result, StrategyContext, StrategyHost, TaskError, TaskHost};
+use crate::{
+    Result, StrategyContext, StrategyHost, StrategyUpdate, TargetPosBuilder, TaskError, TaskHost,
+};
 
 /// Offline strategy replay builder backed by ordered market cache events.
 pub struct StrategyReplayBuilder {
@@ -534,6 +536,11 @@ impl StrategyReplayEvent {
 
 impl StrategyReplayContext<'_> {
     #[must_use]
+    pub fn update(&self) -> StrategyUpdate {
+        self.context.update()
+    }
+
+    #[must_use]
     pub fn event(&self) -> &StrategyReplayEvent {
         &self.event
     }
@@ -579,6 +586,20 @@ impl StrategyReplayContext<'_> {
     #[must_use]
     pub fn orders(&mut self, account_id: impl AsRef<str>) -> crate::TaskOrderBuilder<'_> {
         self.context.orders(account_id)
+    }
+
+    #[must_use]
+    pub fn target_pos(
+        &mut self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> TargetPosBuilder {
+        self.context.target_pos(account_id, symbol)
+    }
+
+    #[must_use]
+    pub fn risk(&self) -> Option<&crate::RiskEngine> {
+        self.context.risk()
     }
 
     pub async fn finish_test_step(&mut self) -> Result<StrategyTestReport> {

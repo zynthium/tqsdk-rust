@@ -7,6 +7,7 @@
 mod account_group;
 mod calendar;
 mod config;
+mod environment;
 mod error;
 mod execution_group;
 mod host;
@@ -30,6 +31,10 @@ pub use account_group::{
 pub use calendar::TradingDayCalendar;
 pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,
+};
+pub use environment::{
+    StrategyEnvironment, StrategyEnvironmentBuilder, StrategyEnvironmentContext,
+    StrategyEnvironmentKind,
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use execution_group::{
