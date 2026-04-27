@@ -171,11 +171,12 @@ tqsdk-task
 - research/offline data crate
 - history page/series/download
 - CSV export
+- offline market cache record / JSONL reader-writer / ordered replay foundation
 - Greeks、历史主连等研究派生能力
 
 设计原因：
 
-- 这些能力有批量、离线、tabular、衍生计算语义，不应污染 live session、wait 或 stream 的最小心智。
+- 这些能力有批量、离线、tabular、缓存物化、衍生计算语义，不应污染 live session、wait 或 stream 的最小心智。
 
 禁止回退：
 

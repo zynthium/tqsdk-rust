@@ -124,6 +124,8 @@ V1 是：
   - `DataClient`
   - `query_his_cont_quotes`
   - `HistoricalContQuotesRow`
+  - history page/series/download and CSV export substrate
+  - offline market cache record / JSONL reader-writer / ordered replay foundation
 
 这两层当前仍然遵守同一个约束：
 

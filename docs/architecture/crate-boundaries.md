@@ -374,6 +374,7 @@
 需求：
 
 - 批量历史数据拉取
+- 本地行情 cache record / reader-writer / ordered replay foundation
 - DataFrame / polars
 - 衍生计算
 - 离线分析
