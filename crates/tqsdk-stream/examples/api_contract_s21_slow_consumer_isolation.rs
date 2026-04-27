@@ -7,7 +7,7 @@
 //!
 //! API contract:
 //! - fan-out/backpressure 策略是 public config
-//! - 每个 consumer 的 lag/drop policy 可独立配置
+//! - fan-out buffer capacity 可显式配置
 //! - 慢消费者错误不会影响 session driver
 //! - 不要求用户自建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -29,17 +29,40 @@
 //! - 应通过 stream config 微调还是新增 sink abstraction？
 //!
 //! Current API note:
-//! 当前 `tqsdk-stream` 使用 bounded broadcast，并把 `Lagged` 显式暴露；
-//! 这是正确底座，但还没有面向写库/日志这类 sink 的用户级隔离 API。
-//!
-//! 理想用户代码草案：
-//! ```ignore
-//! let stream = TqStreamBuilder::new(user, pass)
-//!     .consumer("strategy", ConsumerPolicy::lossless())
-//!     .consumer("warehouse", ConsumerPolicy::drop_oldest(10_000))
-//!     .build()
-//!     .await?;
-//! stream.market_events().pipe("warehouse", SqlSink::new(pool)).await?;
-//! ```
+//! 当前 `tqsdk-stream` 暴露 root fan-out capacity 和 typed `Lagged`
+//! diagnostic。持久化 sink runtime、per-sink retry/storage policy 仍是 gap。
 
-fn main() {}
+use futures::StreamExt;
+use tqsdk_stream::{StreamErrorKind, TqStreamBuilder};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+
+    let stream = TqStreamBuilder::new(user, pass)
+        .futures_market()
+        .commit_channel_capacity(16_384)?
+        .build()
+        .await?;
+
+    let mut strategy_commits = stream.commit_stream()?;
+    let mut warehouse_commits = stream.commit_stream()?;
+
+    if let Some(update) = strategy_commits.next().await {
+        let commit = update?;
+        println!("strategy revision={}", commit.revision.get());
+    }
+
+    if let Some(update) = warehouse_commits.next().await {
+        match update {
+            Ok(commit) => println!("warehouse revision={}", commit.revision.get()),
+            Err(error) if error.diagnostic().kind == StreamErrorKind::Lagged => {
+                println!("warehouse lagged: {}", error.diagnostic().message);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}

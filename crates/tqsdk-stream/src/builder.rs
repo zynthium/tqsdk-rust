@@ -9,19 +9,36 @@ use crate::api::TqStream;
 #[derive(Debug, Clone)]
 pub struct TqStreamBuilder {
     inner: tqsdk_session::SessionClientBuilder,
+    commit_channel_capacity: usize,
 }
 
 impl TqStreamBuilder {
     #[must_use]
     pub fn from_session_builder(inner: tqsdk_session::SessionClientBuilder) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            commit_channel_capacity: crate::api::DEFAULT_COMMIT_CHANNEL_CAPACITY,
+        }
     }
 
     tqsdk_session::__tqsdk_impl_session_builder_forwarders!();
 
+    pub fn commit_channel_capacity(mut self, capacity: usize) -> crate::error::Result<Self> {
+        if capacity == 0 {
+            return Err(crate::StreamFacadeError::InvalidState(
+                "commit channel capacity must be greater than zero",
+            ));
+        }
+        self.commit_channel_capacity = capacity;
+        Ok(self)
+    }
+
     pub async fn build(self) -> crate::error::Result<TqStream> {
         let session = self.inner.build()?;
-        Ok(TqStream::new(session))
+        Ok(TqStream::new_with_capacity(
+            session,
+            self.commit_channel_capacity,
+        ))
     }
 }
 
@@ -154,6 +171,27 @@ mod tests {
         assert_eq!(
             futures_backtest.inner.market_target_ref(),
             &MarketSessionTarget::futures_backtest()
+        );
+    }
+
+    #[test]
+    fn commit_channel_capacity_accepts_positive_capacity() {
+        let builder = TqStreamBuilder::new("demo-user", "demo-pass")
+            .commit_channel_capacity(2048)
+            .unwrap();
+
+        assert_eq!(builder.commit_channel_capacity, 2048);
+    }
+
+    #[test]
+    fn commit_channel_capacity_rejects_zero_capacity() {
+        let err = TqStreamBuilder::new("demo-user", "demo-pass")
+            .commit_channel_capacity(0)
+            .unwrap_err();
+
+        assert_eq!(
+            err.diagnostic().kind,
+            crate::StreamErrorKind::InvalidState
         );
     }
 }

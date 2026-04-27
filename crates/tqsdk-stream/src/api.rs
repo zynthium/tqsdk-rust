@@ -31,7 +31,7 @@ use crate::quote_subscription::{
 use crate::typed::PathValueStream;
 use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_chart_id};
 
-const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
 pub(crate) fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
     i64::try_from(duration.as_nanos()).map_err(|_| {
@@ -56,7 +56,7 @@ impl TqStream {
         Self::new_with_capacity(session, DEFAULT_COMMIT_CHANNEL_CAPACITY)
     }
 
-    fn new_with_capacity(session: tqsdk_session::SessionClient, capacity: usize) -> Self {
+    pub(crate) fn new_with_capacity(session: tqsdk_session::SessionClient, capacity: usize) -> Self {
         let reader = session.reader_clone();
         let driver = StreamDriver::new(session.clone(), reader.clone(), capacity);
         Self {
