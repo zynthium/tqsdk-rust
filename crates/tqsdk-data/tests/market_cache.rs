@@ -1,7 +1,9 @@
 use std::io::Cursor;
 
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheWriter};
+use tqsdk_data::{
+    MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheReplay, MarketCacheWriter,
+};
 
 #[test]
 fn market_cache_event_constructors_preserve_standard_payloads() {
@@ -94,4 +96,32 @@ fn market_cache_writer_and_reader_roundtrip_jsonl_events() {
         MarketCachePayload::Quote(payload) => assert_eq!(payload.last_price, 481.0),
         _ => panic!("expected quote payload"),
     }
+}
+
+#[test]
+fn market_cache_replay_orders_events_by_event_time_then_receive_time() {
+    let late_received_early_exchange =
+        MarketCacheEvent::quote("live", "SHFE.au2602", 2_000, Some(1_000), Quote::default())
+            .unwrap();
+    let early_received_late_exchange =
+        MarketCacheEvent::quote("live", "SHFE.au2602", 1_000, Some(3_000), Quote::default())
+            .unwrap();
+    let no_exchange_time =
+        MarketCacheEvent::quote("live", "SHFE.au2602", 1_500, None, Quote::default()).unwrap();
+
+    let replay = MarketCacheReplay::new(vec![
+        early_received_late_exchange,
+        no_exchange_time,
+        late_received_early_exchange,
+    ]);
+    let ordered: Vec<_> = replay.collect();
+    let order_keys: Vec<_> = ordered
+        .iter()
+        .map(|event| (event.event_time_ns(), event.received_at_ns))
+        .collect();
+
+    assert_eq!(
+        order_keys,
+        vec![(1_000, 2_000), (1_500, 1_500), (3_000, 1_000)]
+    );
 }

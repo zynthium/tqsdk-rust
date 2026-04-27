@@ -186,3 +186,41 @@ impl<R: BufRead> Iterator for MarketCacheReader<R> {
         }))
     }
 }
+
+pub struct MarketCacheReplay {
+    events: Vec<MarketCacheEvent>,
+    index: usize,
+}
+
+impl MarketCacheReplay {
+    #[must_use]
+    pub fn new(mut events: Vec<MarketCacheEvent>) -> Self {
+        events.sort_by_key(|event| (event.event_time_ns(), event.received_at_ns));
+        Self { events, index: 0 }
+    }
+
+    pub fn from_reader<R: BufRead>(reader: MarketCacheReader<R>) -> Result<Self> {
+        let events = reader.collect::<Result<Vec<_>>>()?;
+        Ok(Self::new(events))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len().saturating_sub(self.index)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Iterator for MarketCacheReplay {
+    type Item = MarketCacheEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let event = self.events.get(self.index)?.clone();
+        self.index += 1;
+        Some(event)
+    }
+}

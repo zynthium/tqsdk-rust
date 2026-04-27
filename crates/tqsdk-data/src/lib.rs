@@ -43,5 +43,5 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use market_cache::{
-    MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheWriter,
+    MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheReplay, MarketCacheWriter,
 };
