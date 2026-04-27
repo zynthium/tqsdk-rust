@@ -411,5 +411,7 @@ crate 分层合并成一份迭代计划。
 - 是否让高层用户暴露了 provider protocol、runtime command 或手写异步编排？
 - 是否维持单一 runtime commit / revision / command lifecycle？
 - 是否能把对应 gap sketch 提升为正式 example？
+- 新增或提升场景 example 后运行 `scripts/check_api_contract_examples.sh`，
+  确认正式 examples 和 gap sketches 都保留完整场景契约头。
 
 如果答案不清楚，应先补文档和 example sketch，再写实现。
