@@ -184,6 +184,11 @@ pub trait SessionRawQuery {
 pub trait SessionMetadataQuery {
     async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>>;
 
+    async fn query_instrument_specs(
+        &self,
+        symbols: &[&str],
+    ) -> crate::error::Result<Vec<crate::InstrumentSpec>>;
+
     async fn query_quotes(
         &self,
         ins_class: Option<&str>,

@@ -20,6 +20,7 @@ mod direct_query;
 mod error;
 #[cfg(feature = "live")]
 mod http_executor;
+mod instrument;
 mod metadata;
 mod order_intent;
 mod recovery;
@@ -38,6 +39,7 @@ pub use direct_query::{
     SessionRawQuery, SessionServiceQuery, SymbolRankingType,
 };
 pub use error::{Result, SessionErrorDiagnostic, SessionErrorKind, SessionFacadeError};
+pub use instrument::{InstrumentClass, InstrumentSpec};
 pub use order_intent::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec};
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};
 pub use tqsdk_core::RetryHint;

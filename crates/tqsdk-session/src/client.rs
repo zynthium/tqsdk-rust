@@ -495,6 +495,13 @@ impl SessionMetadataQuery for SessionClient {
         SessionClient::query_symbol_info(self, symbols).await
     }
 
+    async fn query_instrument_specs(
+        &self,
+        symbols: &[&str],
+    ) -> crate::error::Result<Vec<crate::InstrumentSpec>> {
+        SessionClient::query_instrument_specs(self, symbols).await
+    }
+
     async fn query_quotes(
         &self,
         ins_class: Option<&str>,

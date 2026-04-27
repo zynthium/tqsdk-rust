@@ -221,6 +221,17 @@ impl SessionClient {
         parse_query_symbol_info_quotes(&payload, &symbol_list, Utc::now().timestamp())
     }
 
+    pub async fn query_instrument_specs(
+        &self,
+        symbols: &[&str],
+    ) -> Result<Vec<crate::InstrumentSpec>> {
+        self.query_symbol_info(symbols)
+            .await?
+            .into_iter()
+            .map(crate::InstrumentSpec::try_from)
+            .collect()
+    }
+
     pub async fn query_quotes(
         &self,
         ins_class: Option<&str>,

@@ -7,7 +7,7 @@
 //!
 //! API contract:
 //! - 使用 `tqsdk-session` 的 one-shot metadata public API
-//! - 返回 typed `Quote`/metadata fields
+//! - 返回 typed `InstrumentSpec`/metadata fields
 //! - 不要求 live subscription 或 `wait_update()`
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -43,21 +43,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = SessionClientBuilder::new(user, pass)
         .enable_query()
         .build()?;
-    let quote = session
-        .query_symbol_info(&[symbol.as_str()])
+    let spec = session
+        .query_instrument_specs(&[symbol.as_str()])
         .await?
         .into_iter()
         .next()
-        .ok_or("query_symbol_info returned no rows")?;
+        .ok_or("query_instrument_specs returned no rows")?;
 
     println!(
-        "symbol={} exchange={} product={} tick={} multiplier={} expire={:?}",
-        quote.instrument_id,
-        quote.exchange_id,
-        quote.product_id,
-        quote.price_tick,
-        quote.volume_multiple,
-        quote.expire_datetime
+        "symbol={} exchange={} product={} class={:?} tick={} multiplier={} expire={:?}",
+        spec.symbol.as_str(),
+        spec.exchange_id,
+        spec.product_id,
+        spec.class,
+        spec.price_tick,
+        spec.volume_multiple,
+        spec.expire_datetime_ns
     );
 
     Ok(())
