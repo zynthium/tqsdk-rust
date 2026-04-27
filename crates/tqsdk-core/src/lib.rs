@@ -48,7 +48,7 @@ pub use commands::{
     TradeVolumeCondition,
 };
 pub use domain_event::{DomainEvent, MarketEvent, TradeEvent, collect_domain_events};
-pub use error::{ContractError, Result};
+pub use error::{ContractError, ContractErrorKind, Result, RetryHint};
 pub use events::{
     AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
     NormalizedMutation, ReplayEvent, RuntimeInput, TimerEvent,

@@ -1,5 +1,23 @@
 use std::fmt::{Display, Formatter};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryHint {
+    DoNotRetry,
+    RetryWithBackoff,
+    RetryAfterReconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractErrorKind {
+    Validation,
+    Auth,
+    Transport,
+    Http,
+    Adapter,
+    UnsupportedCommand,
+    UnsupportedInput,
+}
+
 /// Error categories emitted by the runtime contract.
 ///
 /// The variants are intentionally coarse-grained so higher layers can
@@ -35,6 +53,32 @@ impl ContractError {
     /// Constructs an HTTP execution error.
     pub fn http(message: impl Into<String>) -> Self {
         Self::Http(message.into())
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ContractErrorKind {
+        match self {
+            Self::Validation(_) => ContractErrorKind::Validation,
+            Self::Auth(_) => ContractErrorKind::Auth,
+            Self::Transport(_) => ContractErrorKind::Transport,
+            Self::Http(_) => ContractErrorKind::Http,
+            Self::Adapter(_) => ContractErrorKind::Adapter,
+            Self::UnsupportedCommand(_) => ContractErrorKind::UnsupportedCommand,
+            Self::UnsupportedInput(_) => ContractErrorKind::UnsupportedInput,
+        }
+    }
+
+    #[must_use]
+    pub fn retry_hint(&self) -> RetryHint {
+        match self {
+            Self::Transport(_) => RetryHint::RetryAfterReconnect,
+            Self::Http(_) => RetryHint::RetryWithBackoff,
+            Self::Validation(_)
+            | Self::Auth(_)
+            | Self::Adapter(_)
+            | Self::UnsupportedCommand(_)
+            | Self::UnsupportedInput(_) => RetryHint::DoNotRetry,
+        }
     }
 }
 
