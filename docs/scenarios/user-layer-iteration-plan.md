@@ -276,6 +276,29 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s24_testable_strategy`
 
+下一批执行计划：
+
+- 计划文档：[`../superpowers/plans/2026-04-27-strategy-host-test-harness.md`](../superpowers/plans/2026-04-27-strategy-host-test-harness.md)
+- 批次目标：先在 `tqsdk-task` 建立最小 `StrategyHost` / `StrategyContext`
+  和 public fake market / fake broker test harness。
+- 本批应优先提升：
+  - S11 简单策略：若 formal example 能通过一个稳定 strategy context 表达
+    行情触发、typed 下单、持仓读取、止盈止损，则从“勉强”推进到“自然”。
+  - S24 最小可测试策略：若用户可以用 public fake harness 编写单元测试且不
+    调用 hidden `*_for_test` API，则从“无法表达”推进到“勉强”。
+- 本批只收窄但不关闭：
+  - S15 实盘 / 模拟 / 回放切换：先复用同一 strategy loop 形状，完整环境
+    adapter 留到下一批。
+  - S16 历史行情回放：先确定未来 replay driver 要对齐的 strategy context，
+    不在本批直接冻结历史回放驱动。
+- 边界约束：
+  - 不新增 crate。
+  - 不把 strategy/test harness 下沉到 `tqsdk-core` / `tqsdk-session` /
+    `tqsdk-wait` / `tqsdk-stream`。
+  - 不引入用户可见 Tokio task、channel、`Arc<Mutex<_>>` 或 provider protocol
+    类型。
+  - 不为了测试方便扩大 core public surface。
+
 ### P2：生产守护、慢消费者隔离和错误诊断
 
 服务的使用者：
