@@ -13,6 +13,7 @@ mod host;
 mod order;
 mod plan;
 mod registry;
+mod replay;
 mod risk;
 mod scheduler;
 mod shared;
@@ -38,6 +39,9 @@ pub use execution_group::{
 };
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
+pub use replay::{
+    StrategyReplay, StrategyReplayBuilder, StrategyReplayContext, StrategyReplayEvent,
+};
 pub use risk::{RiskDecision, RiskEngine, RiskRejection};
 pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
