@@ -285,6 +285,10 @@ crate 分层合并成一份迭代计划。
 - `tqsdk-task::StrategyEnvironment` / `StrategyEnvironmentContext` 已提供
   live/sim task host、public fake harness 和 replay builder 的最小统一 context
   adapter；S15 environment foundation 已提升为正式 task example。
+- `tqsdk-task::StrategyDeploymentConfig` / `StrategyDeployment` /
+  `StrategyLifecycle` 已提供 S15 provider-backed TQKQ sim config、live trade
+  config、统一 run loop、typed stop reason 和 graceful shutdown report；策略步骤
+  仍只依赖 `StrategyEnvironmentContext`。
 - `tqsdk-task::testing` 已提供 public `StrategyTestHarness`、`FakeMarket`
   和 `FakeBroker`，支持全成、拒单和单步/跨 step 部分成交测试；`StrategyTestClock`
   与 `FakeBroker::latency_steps` 已提供 deterministic fake broker time 和
@@ -311,7 +315,8 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- S15 完整 provider-backed sim、deployment config 和运行生命周期管理。
+- S15 完整 production supervisor、health/retry orchestration、ctrl-c shutdown
+  hook 和多 provider environment。
 - 更完整 broker 行为。
 - 跨进程 intent / test fixture 持久恢复。
 

@@ -29,26 +29,27 @@
 //! - 是否需要新增 strategy/runtime facade？
 //!
 //! Current API note:
-//! `tqsdk-task::StrategyEnvironment` / `StrategyEnvironmentContext` 已提供最小
-//! environment foundation。task-host live/sim、public fake harness 和 replay builder
-//! 可收敛到同一套 quote/position/orders/target-pos/risk context 方法；正式
-//! example 已提升到
+//! `tqsdk-task::StrategyEnvironment` / `StrategyEnvironmentContext` 已提供统一
+//! strategy context；`StrategyDeploymentConfig` / `StrategyDeployment` /
+//! `StrategyLifecycle` 已覆盖 provider-backed TQKQ sim config、live trade config、
+//! fake/replay deployment wrapper、typed run stop reason 和 graceful shutdown
+//! report。正式 example 已更新到
 //! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`。
 //!
 //! Remaining API gap:
-//! 当前 adapter 仍是 foundation：provider-backed sim、部署级 config loader、
-//! 生命周期管理、graceful shutdown、health/retry 组合和多 provider environment
-//! 尚未冻结。
+//! 当前仍是 deployment foundation：配置文件反序列化、production supervisor、
+//! ctrl-c shutdown hook、health/retry orchestration、metrics endpoint 和多 provider
+//! environment 尚未冻结。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let mut env = StrategyEnvironment::from_config(config)
-//!     .live_task_host(live_host)
-//!     .simulated_broker(sim_host)
-//!     .replay_builder(replay_builder)
+//! let config = StrategyDeploymentConfig::from_file("strategy.toml")?
+//!     .lifecycle(StrategyLifecycle::new().shutdown_on_ctrl_c());
+//! let mut deployment = StrategyEnvironment::from_config(config)
 //!     .build()
 //!     .await?;
-//! run_strategy(&mut env, MyStrategy::default()).await?;
+//! deployment.run(MyStrategy::default()).await?;
+//! deployment.shutdown().await?;
 //! ```
 
 fn main() {}

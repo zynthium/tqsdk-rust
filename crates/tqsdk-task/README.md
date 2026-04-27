@@ -48,6 +48,10 @@
   - 提供 live/sim task host 与 replay 的最小统一构建入口
   - `StrategyEnvironmentContext` 让同一策略步骤函数复用 quote/position/orders/target-pos/risk context 方法
   - replay metadata 通过可选 `replay_event()` / `replay_time_ns()` 暴露，不要求 live/sim 策略分叉
+- `StrategyDeploymentConfig` / `StrategyDeployment` / `StrategyLifecycle`
+  - 提供 provider-backed TQKQ sim 和 live trade 的 typed deployment config
+  - provider-backed sim 的账号派生与登录由 builder 处理，不向策略泄漏内部协议
+  - 统一 fake/replay/live deployment wrapper、run loop、typed stop reason 和 graceful shutdown report
 - `StrategyReplay`
   - 使用 `tqsdk-data::MarketCacheReplay` 作为离线 market event source
   - 将 cache quote/kline/tick 转成正常 runtime market commit
@@ -140,7 +144,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategyEnvironment` 仍是 foundation，完整 provider-backed sim、deployment config 和运行生命周期管理仍是后续工作
+- `StrategyDeployment` 仍是 foundation，production supervisor、health/retry orchestration、ctrl-c shutdown hook 和多 provider environment 仍是后续工作
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

@@ -24,10 +24,7 @@ pub enum StrategyEnvironment {
 /// Builder for a [`StrategyEnvironment`].
 pub struct StrategyEnvironmentBuilder {
     source: StrategyEnvironmentSource,
-    accounts: Vec<String>,
-    quotes: Vec<String>,
-    klines: Vec<EnvironmentKlineSpec>,
-    ticks: Vec<EnvironmentTickSpec>,
+    subscriptions: StrategyEnvironmentSubscriptions,
 }
 
 /// Source kind backing a [`StrategyEnvironment`].
@@ -43,22 +40,33 @@ pub enum StrategyEnvironmentContext<'a> {
     Replay(StrategyReplayContext<'a>),
 }
 
-enum StrategyEnvironmentSource {
-    TaskHost(Box<TaskHost>),
-    Replay(Box<StrategyReplayBuilder>),
+/// Market/trade objects a strategy environment should prepare before running.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrategyEnvironmentSubscriptions {
+    accounts: Vec<String>,
+    quotes: Vec<String>,
+    klines: Vec<StrategyEnvironmentKlineSubscription>,
+    ticks: Vec<StrategyEnvironmentTickSubscription>,
 }
 
+/// Kline serial requested by a strategy environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EnvironmentKlineSpec {
+pub struct StrategyEnvironmentKlineSubscription {
     symbol: String,
     duration: Duration,
     view_width: usize,
 }
 
+/// Tick serial requested by a strategy environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EnvironmentTickSpec {
+pub struct StrategyEnvironmentTickSubscription {
     symbol: String,
     view_width: usize,
+}
+
+enum StrategyEnvironmentSource {
+    TaskHost(Box<TaskHost>),
+    Replay(Box<StrategyReplayBuilder>),
 }
 
 impl StrategyEnvironment {
@@ -109,11 +117,82 @@ impl StrategyEnvironmentBuilder {
     fn new(source: StrategyEnvironmentSource) -> Self {
         Self {
             source,
-            accounts: Vec::new(),
-            quotes: Vec::new(),
-            klines: Vec::new(),
-            ticks: Vec::new(),
+            subscriptions: StrategyEnvironmentSubscriptions::new(),
         }
+    }
+
+    #[must_use]
+    pub fn account(mut self, account_id: impl AsRef<str>) -> Self {
+        self.subscriptions = self.subscriptions.account(account_id);
+        self
+    }
+
+    #[must_use]
+    pub fn quote(mut self, symbol: impl AsRef<str>) -> Self {
+        self.subscriptions = self.subscriptions.quote(symbol);
+        self
+    }
+
+    #[must_use]
+    pub fn kline(mut self, symbol: impl AsRef<str>, duration: Duration, view_width: usize) -> Self {
+        self.subscriptions = self.subscriptions.kline(symbol, duration, view_width);
+        self
+    }
+
+    #[must_use]
+    pub fn tick(mut self, symbol: impl AsRef<str>, view_width: usize) -> Self {
+        self.subscriptions = self.subscriptions.tick(symbol, view_width);
+        self
+    }
+
+    #[must_use]
+    pub fn subscriptions(mut self, subscriptions: StrategyEnvironmentSubscriptions) -> Self {
+        self.subscriptions = subscriptions;
+        self
+    }
+
+    pub async fn build(self) -> Result<StrategyEnvironment> {
+        match self.source {
+            StrategyEnvironmentSource::TaskHost(host) => {
+                let mut builder = StrategyHostBuilder::new(*host);
+                for account in &self.subscriptions.accounts {
+                    builder = builder.account(account);
+                }
+                for quote in &self.subscriptions.quotes {
+                    builder = builder.quote(quote);
+                }
+                for spec in &self.subscriptions.klines {
+                    builder = builder.kline(&spec.symbol, spec.duration, spec.view_width);
+                }
+                for spec in &self.subscriptions.ticks {
+                    builder = builder.tick(&spec.symbol, spec.view_width);
+                }
+                Ok(StrategyEnvironment::TaskHost(builder.build().await?))
+            }
+            StrategyEnvironmentSource::Replay(builder) => {
+                let mut builder = *builder;
+                for account in &self.subscriptions.accounts {
+                    builder = builder.account(account);
+                }
+                for quote in &self.subscriptions.quotes {
+                    builder = builder.quote(quote);
+                }
+                for spec in &self.subscriptions.klines {
+                    builder = builder.kline(&spec.symbol, spec.duration, spec.view_width);
+                }
+                for spec in &self.subscriptions.ticks {
+                    builder = builder.tick(&spec.symbol, spec.view_width);
+                }
+                Ok(StrategyEnvironment::Replay(builder.build().await?))
+            }
+        }
+    }
+}
+
+impl StrategyEnvironmentSubscriptions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
     #[must_use]
@@ -130,7 +209,7 @@ impl StrategyEnvironmentBuilder {
 
     #[must_use]
     pub fn kline(mut self, symbol: impl AsRef<str>, duration: Duration, view_width: usize) -> Self {
-        let spec = EnvironmentKlineSpec {
+        let spec = StrategyEnvironmentKlineSubscription {
             symbol: symbol.as_ref().to_owned(),
             duration,
             view_width,
@@ -143,7 +222,7 @@ impl StrategyEnvironmentBuilder {
 
     #[must_use]
     pub fn tick(mut self, symbol: impl AsRef<str>, view_width: usize) -> Self {
-        let spec = EnvironmentTickSpec {
+        let spec = StrategyEnvironmentTickSubscription {
             symbol: symbol.as_ref().to_owned(),
             view_width,
         };
@@ -153,41 +232,53 @@ impl StrategyEnvironmentBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<StrategyEnvironment> {
-        match self.source {
-            StrategyEnvironmentSource::TaskHost(host) => {
-                let mut builder = StrategyHostBuilder::new(*host);
-                for account in &self.accounts {
-                    builder = builder.account(account);
-                }
-                for quote in &self.quotes {
-                    builder = builder.quote(quote);
-                }
-                for spec in &self.klines {
-                    builder = builder.kline(&spec.symbol, spec.duration, spec.view_width);
-                }
-                for spec in &self.ticks {
-                    builder = builder.tick(&spec.symbol, spec.view_width);
-                }
-                Ok(StrategyEnvironment::TaskHost(builder.build().await?))
-            }
-            StrategyEnvironmentSource::Replay(builder) => {
-                let mut builder = *builder;
-                for account in &self.accounts {
-                    builder = builder.account(account);
-                }
-                for quote in &self.quotes {
-                    builder = builder.quote(quote);
-                }
-                for spec in &self.klines {
-                    builder = builder.kline(&spec.symbol, spec.duration, spec.view_width);
-                }
-                for spec in &self.ticks {
-                    builder = builder.tick(&spec.symbol, spec.view_width);
-                }
-                Ok(StrategyEnvironment::Replay(builder.build().await?))
-            }
-        }
+    #[must_use]
+    pub fn account_ids(&self) -> &[String] {
+        &self.accounts
+    }
+
+    #[must_use]
+    pub fn quote_symbols(&self) -> &[String] {
+        &self.quotes
+    }
+
+    #[must_use]
+    pub fn klines(&self) -> &[StrategyEnvironmentKlineSubscription] {
+        &self.klines
+    }
+
+    #[must_use]
+    pub fn ticks(&self) -> &[StrategyEnvironmentTickSubscription] {
+        &self.ticks
+    }
+}
+
+impl StrategyEnvironmentKlineSubscription {
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    #[must_use]
+    pub fn view_width(&self) -> usize {
+        self.view_width
+    }
+}
+
+impl StrategyEnvironmentTickSubscription {
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn view_width(&self) -> usize {
+        self.view_width
     }
 }
 

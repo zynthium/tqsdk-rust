@@ -1,32 +1,35 @@
-//! Scenario: 实盘 / 模拟 / 回放切换（environment foundation）
+//! Scenario: 实盘 / 模拟 / 回放切换（deployment config + lifecycle）
 //!
 //! User goal:
-//! - 同一套策略步骤代码在 live task host、simulated fake broker 和 replay 之间复用
-//! - provider 差异只出现在 environment 构建配置
+//! - 同一套策略步骤代码在 live trade、provider-backed TQKQ sim、fake sim 和 replay 之间复用
+//! - provider 差异只出现在 deployment config / environment construction
 //! - 策略逻辑只依赖标准 context 读取和 typed execution API
+//! - 运行生命周期由 SDK wrapper 管理，而不是用户手写 Tokio task/channel
 //!
 //! API contract:
-//! - public API 提供 `StrategyEnvironment` / `StrategyEnvironmentContext`
-//! - task-host live/sim 和 replay 都暴露同一套 quote/position/orders context 方法
+//! - public API 提供 `StrategyDeploymentConfig` / `StrategyDeployment`
+//! - provider-backed sim 使用 typed config，不暴露 TQKQ 内部账号派生协议
+//! - live/sim/replay 都暴露同一套 quote/position/orders context 方法
 //! - replay 不要求策略改写成底层 replay command loop
-//! - 不手动创建 channel
-//! - 不手动使用 `Arc<Mutex<_>>`
+//! - lifecycle 提供 typed stop reason 和 graceful shutdown report
 //!
 //! Forbidden:
 //! - 策略中写 `if live { ... } else if replay { ... }`
 //! - `ReplayCommand` 泄漏到策略主逻辑
 //! - provider 内部 session / protocol type
+//! - 手写 Tokio task、channel 或 `Arc<Mutex<_>>`
 //! - 多套状态读取模型
 //!
 //! Regression signal:
 //! - 策略从 live/sim 迁到 replay 需要改事件循环
+//! - provider-backed sim 需要用户手动派生账号或提交登录协议命令
 //! - replay 无法复用同一 typed order/risk 接口
-//! - fake broker 和 replay 不能复用同一策略步骤函数
+//! - lifecycle/shutdown 退化成用户手写后台任务编排
 //!
 //! Review questions:
-//! - 当前 API 是否自然表达最小运行环境切换？
+//! - 当前 API 是否自然表达 provider-backed sim / live / replay 切换？
 //! - 是否保持同一策略 context contract？
-//! - 完整 provider-backed sim / deployment config 是否仍应作为后续 gap？
+//! - lifecycle 是否避免用户手动管理 Tokio task / channel？
 
 use std::time::Duration;
 
@@ -34,42 +37,51 @@ use tqsdk_core::{Quote, TradeAccountType};
 use tqsdk_data::MarketCacheEvent;
 use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 use tqsdk_task::{
-    RiskEngine, StrategyEnvironment, StrategyEnvironmentContext, StrategyReplay,
-    StrategyReplaySpeed, TaskHost,
+    RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
+    StrategyEnvironmentContext, StrategyLifecycle, StrategyReplay, StrategyReplaySpeed,
 };
-use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mode = std::env::var("TQ_STRATEGY_ENV").unwrap_or_else(|_| "sim".into());
-    let account_id = std::env::var("TQ_STRATEGY_ACCOUNT").unwrap_or_else(|_| "sim".into());
+    let mode = std::env::var("TQ_STRATEGY_ENV").unwrap_or_else(|_| "fake".into());
+    let configured_account = std::env::var("TQ_STRATEGY_ACCOUNT").unwrap_or_else(|_| "sim".into());
     let symbol = std::env::var("TQ_STRATEGY_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".into());
-    let mut environment =
-        build_environment(mode.as_str(), account_id.as_str(), symbol.as_str()).await?;
+    let mut deployment =
+        build_deployment(mode.as_str(), configured_account.as_str(), symbol.as_str()).await?;
+    let account_id = deployment
+        .account_id()
+        .unwrap_or(configured_account.as_str())
+        .to_owned();
 
-    run_breakout_once(&mut environment, account_id.as_str(), symbol.as_str()).await?;
+    let run_report =
+        run_breakout_once(&mut deployment, account_id.as_str(), symbol.as_str()).await?;
+    let shutdown = deployment.shutdown().await?;
+
+    println!(
+        "provider={:?} stop={:?} steps={} shutdown_kind={:?} graceful={}",
+        mode,
+        run_report.stop_reason(),
+        run_report.steps(),
+        shutdown.kind(),
+        shutdown.graceful()
+    );
     Ok(())
 }
 
 async fn run_breakout_once(
-    environment: &mut StrategyEnvironment,
+    deployment: &mut StrategyDeployment,
     account_id: &str,
     symbol: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(mut ctx) = environment.next().await? else {
-        return Ok(());
-    };
-    breakout_step(&mut ctx, account_id, symbol).await?;
-
-    if let Some(event) = ctx.replay_event() {
-        println!(
-            "replay source={} symbol={} replay_time_ns={}",
-            event.source(),
-            event.symbol(),
-            ctx.replay_time_ns().unwrap_or_default()
-        );
-    }
-    Ok(())
+) -> tqsdk_task::Result<tqsdk_task::StrategyRunReport> {
+    let account_id = account_id.to_owned();
+    let symbol = symbol.to_owned();
+    deployment
+        .run(move |ctx| {
+            let account_id = account_id.clone();
+            let symbol = symbol.clone();
+            Box::pin(async move { breakout_step(ctx, &account_id, &symbol).await })
+        })
+        .await
 }
 
 async fn breakout_step(
@@ -86,63 +98,81 @@ async fn breakout_step(
             .send_once("env-breakout-entry")
             .await?;
     }
+
+    if let Some(event) = ctx.replay_event() {
+        println!(
+            "replay source={} symbol={} replay_time_ns={}",
+            event.source(),
+            event.symbol(),
+            ctx.replay_time_ns().unwrap_or_default()
+        );
+    }
     Ok(())
 }
 
-async fn build_environment(
+async fn build_deployment(
     mode: &str,
     account_id: &str,
     symbol: &str,
-) -> Result<StrategyEnvironment, Box<dyn std::error::Error>> {
+) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
     match mode {
-        "live" => live_environment(account_id, symbol).await,
-        "replay" => replay_environment(account_id, symbol).await,
-        _ => simulated_environment(account_id, symbol).await,
+        "live" => live_deployment(account_id, symbol).await,
+        "tqkq-sim" => tqkq_sim_deployment(symbol).await,
+        "replay" => replay_deployment(account_id, symbol).await,
+        _ => fake_deployment(account_id, symbol).await,
     }
 }
 
-async fn live_environment(
+async fn live_deployment(
     account_id: &str,
     symbol: &str,
-) -> Result<StrategyEnvironment, Box<dyn std::error::Error>> {
-    let user = std::env::var("TQ_AUTH_USER")?;
-    let pass = std::env::var("TQ_AUTH_PASS")?;
-    let broker_id = std::env::var("TQ_BROKER_ID")?;
-    let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-
-    let mut api = TqApiBuilder::new(user, pass)
-        .futures_market()
-        .trade_target(broker_id.clone(), account_id.to_owned())
-        .build()
-        .await?;
-    api.login_trade_account(
-        broker_id.as_str(),
-        account_id,
-        account_password.as_str(),
+) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
+    let config = StrategyDeploymentConfig::live_trade(
+        read_env("TQ_AUTH_USER")?,
+        read_env("TQ_AUTH_PASS")?,
+        read_env("TQ_BROKER_ID")?,
+        account_id.to_owned(),
+        read_env("TQ_ACCOUNT_PASSWORD")?,
         TradeAccountType::Future,
-        Some(deadline),
     )
-    .await?;
-    api.quote_snapshot(symbol, Some(deadline)).await?;
+    .futures_market()
+    .account(account_id)
+    .quote(symbol)
+    .startup_timeout(Duration::from_secs(30))
+    .lifecycle(StrategyLifecycle::new().max_steps(1))
+    .risk(example_risk());
 
-    let risk = RiskEngine::new()
-        .max_order_volume(1)
-        .min_available(1_000.0)
-        .max_net_position(1)
-        .max_price_deviation(50.0);
-    StrategyEnvironment::from_task_host(TaskHost::new(api).with_risk(risk))
-        .account(account_id)
-        .quote(symbol)
+    StrategyEnvironment::from_config(config)
         .build()
         .await
         .map_err(Into::into)
 }
 
-async fn simulated_environment(
+async fn tqkq_sim_deployment(
+    symbol: &str,
+) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
+    let mut config =
+        StrategyDeploymentConfig::tqkq_sim(read_env("TQ_AUTH_USER")?, read_env("TQ_AUTH_PASS")?)
+            .futures_market()
+            .quote(symbol)
+            .startup_timeout(Duration::from_secs(30))
+            .lifecycle(StrategyLifecycle::new().max_steps(1))
+            .risk(example_risk());
+
+    if let Some(number) = read_optional_u8_env("TQ_TRADE_ACCOUNT_NO")? {
+        config = config.account_number(number);
+    }
+
+    StrategyEnvironment::from_config(config)
+        .build()
+        .await
+        .map_err(Into::into)
+}
+
+async fn fake_deployment(
     account_id: &str,
     symbol: &str,
-) -> Result<StrategyEnvironment, Box<dyn std::error::Error>> {
+) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
     let harness = StrategyTestHarness::new()
         .market(
             FakeMarket::new()
@@ -152,19 +182,24 @@ async fn simulated_environment(
         )
         .broker(FakeBroker::new().fill_all())
         .build()?;
-
-    StrategyEnvironment::from_test_harness(harness)
+    let environment = StrategyEnvironment::from_test_harness(harness)
         .account(account_id)
         .quote(symbol)
+        .build()
+        .await?;
+
+    StrategyDeployment::from_environment(environment)
+        .account_id(account_id)
+        .lifecycle(StrategyLifecycle::new().max_steps(1))
         .build()
         .await
         .map_err(Into::into)
 }
 
-async fn replay_environment(
+async fn replay_deployment(
     account_id: &str,
     symbol: &str,
-) -> Result<StrategyEnvironment, Box<dyn std::error::Error>> {
+) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
     let replay = StrategyReplay::source_builder()
         .event(MarketCacheEvent::quote(
             "inline-cache",
@@ -185,11 +220,39 @@ async fn replay_environment(
         )
         .broker(FakeBroker::new().fill_all())
         .speed(StrategyReplaySpeed::FASTEST);
-
-    StrategyEnvironment::from_replay_builder(replay_builder)
+    let environment = StrategyEnvironment::from_replay_builder(replay_builder)
         .account(account_id)
         .quote(symbol)
         .build()
+        .await?;
+
+    StrategyDeployment::from_environment(environment)
+        .account_id(account_id)
+        .lifecycle(StrategyLifecycle::new().max_steps(1))
+        .build()
         .await
         .map_err(Into::into)
+}
+
+fn example_risk() -> RiskEngine {
+    RiskEngine::new()
+        .max_order_volume(1)
+        .min_available(1_000.0)
+        .max_net_position(1)
+        .max_price_deviation(50.0)
+}
+
+fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+    std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
+}
+
+fn read_optional_u8_env(key: &str) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+    let Some(raw) = std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(raw.parse()?))
 }

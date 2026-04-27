@@ -149,7 +149,7 @@ tqsdk-task
 - pre-trade risk gate
 - execution group foundation
 - account group / multi-account order foundation
-- strategy host / strategy context / strategy environment adapter
+- strategy host / strategy context / strategy environment / deployment adapter
 - strategy cache replay driver
 - public fake market / fake broker test harness
 - execution report

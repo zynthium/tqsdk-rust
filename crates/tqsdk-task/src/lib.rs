@@ -7,6 +7,7 @@
 mod account_group;
 mod calendar;
 mod config;
+mod deployment;
 mod environment;
 mod error;
 mod execution_group;
@@ -32,9 +33,15 @@ pub use calendar::TradingDayCalendar;
 pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,
 };
+pub use deployment::{
+    StrategyDeployment, StrategyDeploymentBuilder, StrategyDeploymentConfig,
+    StrategyEnvironmentProvider, StrategyLifecycle, StrategyMarketMode, StrategyRunReport,
+    StrategyRunStopReason, StrategyShutdownReport, StrategyStepFuture,
+};
 pub use environment::{
     StrategyEnvironment, StrategyEnvironmentBuilder, StrategyEnvironmentContext,
-    StrategyEnvironmentKind,
+    StrategyEnvironmentKind, StrategyEnvironmentKlineSubscription,
+    StrategyEnvironmentSubscriptions, StrategyEnvironmentTickSubscription,
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use execution_group::{
