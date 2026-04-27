@@ -48,8 +48,9 @@
   - 将 cache quote/kline/tick 转成正常 runtime market commit
   - 可接收由 `KlineDataSeries` / `TickDataSeries` adapter 生成的 history replay
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
+  - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
-  - 当前不包含真实 sleep/speed controller、durable checkpoint persistence 或 live/sim/replay environment adapter
+  - 当前不包含 durable checkpoint persistence 或 live/sim/replay environment adapter
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`
@@ -133,7 +134,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter、真实 replay sleep/speed policy、durable checkpoint persistence、多序列 replay builder 仍是后续工作
+- `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter、durable checkpoint persistence、多序列 replay builder 仍是后续工作
 - `StrategyTestHarness` 仍是 foundation，fake reconnect、延迟、跨 step 部分成交推进和 deterministic clock 仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

@@ -10,7 +10,7 @@ use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReplay};
 
 use crate::strategy::StrategyHostBuilder;
 use crate::testing::{FakeBroker, FakeMarket, StrategyTestReport};
-use crate::{Result, StrategyContext, StrategyHost, TaskHost};
+use crate::{Result, StrategyContext, StrategyHost, TaskError, TaskHost};
 
 /// Offline strategy replay builder backed by ordered market cache events.
 pub struct StrategyReplayBuilder {
@@ -22,6 +22,7 @@ pub struct StrategyReplayBuilder {
     klines: Vec<ReplayKlineSpec>,
     ticks: Vec<ReplayTickSpec>,
     checkpoint: StrategyReplayCheckpoint,
+    speed: StrategyReplaySpeed,
 }
 
 /// Offline strategy replay host.
@@ -32,6 +33,7 @@ pub struct StrategyReplay {
     ticks: Vec<ReplayTickSpec>,
     next_event_index: usize,
     replay_time_ns: Option<i64>,
+    speed: StrategyReplaySpeed,
 }
 
 /// Metadata for the market event that produced a replay strategy context.
@@ -48,6 +50,18 @@ pub struct StrategyReplayEvent {
 pub struct StrategyReplayCheckpoint {
     next_event_index: usize,
     replay_time_ns: Option<i64>,
+}
+
+/// Replay pacing policy for [`StrategyReplay`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrategyReplaySpeed {
+    kind: StrategyReplaySpeedKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StrategyReplaySpeedKind {
+    Fastest,
+    Scaled { multiplier: f64 },
 }
 
 /// Strategy context plus the replay event that triggered it.
@@ -82,6 +96,9 @@ impl StrategyReplay {
         };
         let replay_event = StrategyReplayEvent::from_cache_event(&event);
         let event_time_ns = replay_event.event_time_ns();
+        if let Some(delay) = self.speed.delay_between(self.replay_time_ns, event_time_ns) {
+            tokio::time::sleep(delay).await;
+        }
         ingest_market_cache_event(self.strategy.task_host(), &event, &self.klines, &self.ticks)?;
         let context = self.strategy.next_once().await?;
         self.next_event_index += 1;
@@ -108,6 +125,11 @@ impl StrategyReplay {
             next_event_index: self.next_event_index,
             replay_time_ns: self.replay_time_ns,
         }
+    }
+
+    #[must_use]
+    pub fn speed(&self) -> StrategyReplaySpeed {
+        self.speed
     }
 
     #[must_use]
@@ -138,6 +160,7 @@ impl StrategyReplayBuilder {
             klines: Vec::new(),
             ticks: Vec::new(),
             checkpoint: StrategyReplayCheckpoint::default(),
+            speed: StrategyReplaySpeed::FASTEST,
         }
     }
 
@@ -196,6 +219,12 @@ impl StrategyReplayBuilder {
         self
     }
 
+    #[must_use]
+    pub fn speed(mut self, speed: StrategyReplaySpeed) -> Self {
+        self.speed = speed;
+        self
+    }
+
     pub async fn build(self) -> Result<StrategyReplay> {
         let harness = crate::testing::StrategyTestHarness::new()
             .market(self.market)
@@ -235,7 +264,54 @@ impl StrategyReplayBuilder {
             ticks: self.ticks,
             next_event_index: self.checkpoint.next_event_index,
             replay_time_ns: self.checkpoint.replay_time_ns,
+            speed: self.speed,
         })
+    }
+}
+
+impl StrategyReplaySpeed {
+    pub const FASTEST: Self = Self {
+        kind: StrategyReplaySpeedKind::Fastest,
+    };
+
+    pub const REAL_TIME: Self = Self {
+        kind: StrategyReplaySpeedKind::Scaled { multiplier: 1.0 },
+    };
+
+    pub fn scaled(multiplier: f64) -> Result<Self> {
+        if !multiplier.is_finite() || multiplier <= 0.0 {
+            return Err(TaskError::InvalidState(
+                "strategy replay speed multiplier must be finite and positive",
+            ));
+        }
+        Ok(Self {
+            kind: StrategyReplaySpeedKind::Scaled { multiplier },
+        })
+    }
+
+    fn delay_between(self, previous_time_ns: Option<i64>, event_time_ns: i64) -> Option<Duration> {
+        match self.kind {
+            StrategyReplaySpeedKind::Fastest => None,
+            StrategyReplaySpeedKind::Scaled { multiplier } => {
+                let previous_time_ns = previous_time_ns?;
+                let delta_ns = event_time_ns.checked_sub(previous_time_ns)?;
+                if delta_ns <= 0 {
+                    return None;
+                }
+                let delay_secs = (delta_ns as f64 / 1_000_000_000.0) / multiplier;
+                if delay_secs.is_finite() && delay_secs > 0.0 {
+                    Some(Duration::from_secs_f64(delay_secs))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Default for StrategyReplaySpeed {
+    fn default() -> Self {
+        Self::FASTEST
     }
 }
 

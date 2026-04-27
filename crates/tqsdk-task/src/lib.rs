@@ -41,7 +41,7 @@ pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use replay::{
     StrategyReplay, StrategyReplayBuilder, StrategyReplayCheckpoint, StrategyReplayContext,
-    StrategyReplayEvent,
+    StrategyReplayEvent, StrategyReplaySpeed,
 };
 pub use risk::{RiskDecision, RiskEngine, RiskRejection};
 pub use scheduler::{

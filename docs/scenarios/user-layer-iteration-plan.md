@@ -290,6 +290,8 @@ crate 分层合并成一份迭代计划。
   并复用 typed order builder 与 fake broker。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已提供
   deterministic replay clock 与内存级 checkpoint/resume foundation。
+- `StrategyReplaySpeed` / `StrategyReplayBuilder::speed` 已提供最快、
+  real-time 和 scaled replay speed policy。
 - `KlineDataSeries` / `TickDataSeries` 已提供 history series -> cache replay
   adapter，S16 可以从 `DataClient` 历史序列直接进入 `StrategyReplay`。
 - S11 简单策略已提升为正式 task example；S24 最小可测试策略已新增正式
@@ -300,7 +302,7 @@ crate 分层合并成一份迭代计划。
 
 - S15 完整 live / sim / replay environment adapter。
 - 多序列 replay convenience builder。
-- 真实 sleep/speed policy、durable checkpoint persistence。
+- durable checkpoint persistence。
 - fake reconnect、延迟、跨 step 部分成交推进与 deterministic clock。
 - 跨进程 intent / test fixture 持久恢复。
 
@@ -382,6 +384,8 @@ crate 分层合并成一份迭代计划。
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
   S16 replay clock 与内存级 checkpoint/resume foundation。
+- `StrategyReplaySpeed` / `StrategyReplayBuilder::speed` 已覆盖 S16 最小
+  speed policy foundation。
 - `KlineDataSeries` / `TickDataSeries` 已提供 `into_market_cache_events`
   与 `into_market_cache_replay`，覆盖 history series -> cache replay
   adapter foundation。
@@ -394,7 +398,7 @@ crate 分层合并成一份迭代计划。
 - durable sink runtime、可靠队列、WAL compaction；
 - 跨进程锁、索引和 cache compaction；
 - 多序列 replay convenience builder；
-- 真实 sleep/speed policy 和 durable checkpoint persistence。
+- durable checkpoint persistence。
 
 优先提升的场景：
 

@@ -10,6 +10,7 @@
 //! - history/cache replay 是 public strategy replay driver，不是用户手写 runtime for-loop
 //! - replay event 输出标准 kline/tick/quote 状态读取面
 //! - replay context 暴露 deterministic replay time 和可恢复 checkpoint
+//! - replay speed policy 是 public API，默认可选择最快回放
 //! - 策略无需区分 live market event 和 replay market event 的状态读取 API
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -29,14 +30,15 @@
 //! - 当前 API 是否自然表达历史回放驱动策略？
 //! - 是否存在状态一致性风险？
 //! - replay time/checkpoint 是否作为 public contract 保持可读？
+//! - replay speed policy 是否不要求用户手写 sleep / task 编排？
 
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tqsdk_data::{DataClient, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
-use tqsdk_task::StrategyReplay;
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
+use tqsdk_task::{StrategyReplay, StrategyReplaySpeed};
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
@@ -76,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .broker(FakeBroker::new().fill_all())
         .account("sim")
         .kline(symbol.as_str(), duration, 64)
+        .speed(StrategyReplaySpeed::FASTEST)
         .build()
         .await?;
 

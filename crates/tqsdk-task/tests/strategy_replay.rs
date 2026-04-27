@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use tqsdk_core::{Kline, Quote};
 use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
-use tqsdk_task::StrategyReplay;
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
+use tqsdk_task::{StrategyReplay, StrategyReplaySpeed};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_drives_quote_events_into_strategy_context() {
@@ -117,16 +117,60 @@ async fn strategy_replay_resume_from_checkpoint_skips_processed_events() {
     assert_eq!(ctx.checkpoint().next_event_index(), 2);
 }
 
+#[test]
+fn strategy_replay_speed_rejects_invalid_multiplier() {
+    assert!(StrategyReplaySpeed::scaled(0.0).is_err());
+    assert!(StrategyReplaySpeed::scaled(f64::NAN).is_err());
+    assert!(StrategyReplaySpeed::scaled(f64::INFINITY).is_err());
+    assert_eq!(
+        StrategyReplaySpeed::scaled(10.0).unwrap(),
+        StrategyReplaySpeed::scaled(10.0).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_real_time_speed_waits_between_event_times() {
+    let mut strategy =
+        StrategyReplay::builder(two_kline_replay_with_times(1_000_000_000, 1_020_000_000))
+            .market(FakeMarket::new().account("sim", 100_000.0))
+            .broker(FakeBroker::new().fill_all())
+            .account("sim")
+            .kline("SHFE.au2602", Duration::from_secs(60), 16)
+            .speed(StrategyReplaySpeed::REAL_TIME)
+            .build()
+            .await
+            .unwrap();
+
+    assert_eq!(strategy.speed(), StrategyReplaySpeed::REAL_TIME);
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.replay_time_ns(), 1_000_000_000);
+    drop(ctx);
+
+    let started = std::time::Instant::now();
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.replay_time_ns(), 1_020_000_000);
+    assert!(
+        started.elapsed() >= Duration::from_millis(10),
+        "expected real-time replay to wait before ingesting the next event, elapsed={:?}",
+        started.elapsed()
+    );
+}
+
 fn two_kline_replay() -> MarketCacheReplay {
+    two_kline_replay_with_times(1_000, 2_000)
+}
+
+fn two_kline_replay_with_times(older_time_ns: i64, newer_time_ns: i64) -> MarketCacheReplay {
     let older = Kline {
         id: 1,
-        datetime: 1_000,
+        datetime: older_time_ns,
         close: 480.0,
         ..Kline::default()
     };
     let newer = Kline {
         id: 2,
-        datetime: 2_000,
+        datetime: newer_time_ns,
         close: 481.0,
         ..Kline::default()
     };
@@ -134,8 +178,8 @@ fn two_kline_replay() -> MarketCacheReplay {
         MarketCacheEvent::kline(
             "cache",
             "SHFE.au2602",
-            2_100,
-            Some(2_000),
+            newer_time_ns + 100,
+            Some(newer_time_ns),
             60_000_000_000,
             newer,
         )
@@ -143,8 +187,8 @@ fn two_kline_replay() -> MarketCacheReplay {
         MarketCacheEvent::kline(
             "cache",
             "SHFE.au2602",
-            1_100,
-            Some(1_000),
+            older_time_ns + 100,
+            Some(older_time_ns),
             60_000_000_000,
             older,
         )
