@@ -45,6 +45,7 @@ pub enum FakeBrokerPolicy {
     FillAll,
     RejectAll { reason: String },
     PartialFill { volume: i64 },
+    PartialFills { volumes: Vec<i64> },
 }
 
 /// Fake broker connection status observed during a strategy test step.
@@ -111,6 +112,10 @@ struct PendingFakeOrder {
     request: FakeOrderRequest,
     remaining_steps: usize,
     sent: bool,
+    fill_steps: VecDeque<i64>,
+    filled_volume: i64,
+    trade_sequence: usize,
+    last_status: Option<CommandStatus>,
 }
 
 struct FakeOrderRequest {
@@ -306,6 +311,14 @@ impl FakeBroker {
     }
 
     #[must_use]
+    pub fn partial_fills(mut self, volumes: impl IntoIterator<Item = i64>) -> Self {
+        self.policy = FakeBrokerPolicy::PartialFills {
+            volumes: volumes.into_iter().collect(),
+        };
+        self
+    }
+
+    #[must_use]
     pub fn latency_steps(mut self, steps: usize) -> Self {
         self.latency_steps = steps;
         self
@@ -424,7 +437,7 @@ struct FakeOrderOutcome {
     position_value: Value,
     order: Order,
     trade: Option<Trade>,
-    command_status: CommandStatus,
+    command_status: Option<CommandStatus>,
 }
 
 impl StrategyTestRuntime {
@@ -442,12 +455,43 @@ impl StrategyTestRuntime {
     }
 
     fn enqueue_order(&mut self, command_id: CommandId, request: FakeOrderRequest, sent: bool) {
+        let fill_steps = self.fill_steps_for(&request);
         self.pending_orders.push_back(PendingFakeOrder {
             command_id,
             request,
             remaining_steps: self.broker.latency_steps,
             sent,
+            fill_steps,
+            filled_volume: 0,
+            trade_sequence: 0,
+            last_status: None,
         });
+    }
+
+    fn fill_steps_for(&self, request: &FakeOrderRequest) -> VecDeque<i64> {
+        match &self.broker.policy {
+            FakeBrokerPolicy::FillAll => VecDeque::from([request.volume]),
+            FakeBrokerPolicy::RejectAll { .. } => VecDeque::from([0]),
+            FakeBrokerPolicy::PartialFill { volume } => {
+                VecDeque::from([(*volume).clamp(0, request.volume)])
+            }
+            FakeBrokerPolicy::PartialFills { volumes } => {
+                let mut remaining = request.volume;
+                let mut fills = VecDeque::new();
+                for volume in volumes {
+                    if remaining <= 0 {
+                        break;
+                    }
+                    let filled = (*volume).clamp(0, remaining);
+                    fills.push_back(filled);
+                    remaining -= filled;
+                }
+                if fills.is_empty() {
+                    fills.push_back(0);
+                }
+                fills
+            }
+        }
     }
 
     fn mark_unsent_pending_orders_sent(&mut self) -> Vec<CommandId> {
@@ -473,9 +517,18 @@ impl StrategyTestRuntime {
     fn drain_ready_orders(&mut self) -> Result<Vec<(CommandId, FakeOrderOutcome)>> {
         let mut ready = Vec::new();
         let mut pending = VecDeque::new();
-        while let Some(order) = self.pending_orders.pop_front() {
+        while let Some(mut order) = self.pending_orders.pop_front() {
             if order.sent && order.remaining_steps == 0 {
-                ready.push((order.command_id, self.apply_order(order.request)?));
+                let outcome = self.apply_order(&mut order)?;
+                let command_id = order.command_id;
+                let stays_pending = order.sent
+                    && order.request.volume > order.filled_volume
+                    && !order.fill_steps.is_empty();
+                ready.push((command_id, outcome));
+                if stays_pending {
+                    order.remaining_steps = 1;
+                    pending.push_back(order);
+                }
             } else {
                 pending.push_back(order);
             }
@@ -484,29 +537,59 @@ impl StrategyTestRuntime {
         Ok(ready)
     }
 
-    fn apply_order(&mut self, request: FakeOrderRequest) -> Result<FakeOrderOutcome> {
-        let (filled_volume, volume_left, status, lifecycle, is_dead, last_msg, command_status) =
+    fn apply_order(&mut self, pending: &mut PendingFakeOrder) -> Result<FakeOrderOutcome> {
+        let request = &pending.request;
+        let (filled_volume, volume_left, status, lifecycle, is_dead, last_msg, next_status) =
             match self.broker.policy.clone() {
-                FakeBrokerPolicy::FillAll => (
-                    request.volume,
-                    0,
-                    "FINISHED",
-                    "filled",
-                    true,
-                    String::new(),
-                    CommandStatus::Completed,
-                ),
-                FakeBrokerPolicy::RejectAll { reason } => (
-                    0,
-                    request.volume,
-                    "FINISHED",
-                    "rejected",
-                    true,
-                    reason,
-                    CommandStatus::Rejected,
-                ),
+                FakeBrokerPolicy::FillAll | FakeBrokerPolicy::PartialFills { .. } => {
+                    let filled = pending
+                        .fill_steps
+                        .pop_front()
+                        .unwrap_or(request.volume - pending.filled_volume)
+                        .clamp(0, request.volume - pending.filled_volume);
+                    pending.filled_volume += filled;
+                    let volume_left = request.volume - pending.filled_volume;
+                    (
+                        filled,
+                        volume_left,
+                        if volume_left == 0 {
+                            "FINISHED"
+                        } else {
+                            "ALIVE"
+                        },
+                        if volume_left == 0 {
+                            "filled"
+                        } else if filled > 0 {
+                            "partially_filled"
+                        } else {
+                            "accepted"
+                        },
+                        volume_left == 0,
+                        String::new(),
+                        if volume_left == 0 {
+                            CommandStatus::Completed
+                        } else {
+                            CommandStatus::PartiallyApplied
+                        },
+                    )
+                }
+                FakeBrokerPolicy::RejectAll { reason } => {
+                    pending.fill_steps.clear();
+                    pending.filled_volume = request.volume;
+                    (
+                        0,
+                        request.volume,
+                        "FINISHED",
+                        "rejected",
+                        true,
+                        reason,
+                        CommandStatus::Rejected,
+                    )
+                }
                 FakeBrokerPolicy::PartialFill { volume } => {
                     let filled = volume.clamp(0, request.volume);
+                    pending.fill_steps.clear();
+                    pending.filled_volume = request.volume;
                     (
                         filled,
                         request.volume - filled,
@@ -523,7 +606,13 @@ impl StrategyTestRuntime {
                 }
             };
 
-        let position = self.apply_position(&request, filled_volume)?;
+        let command_status = if pending.last_status == Some(next_status) {
+            None
+        } else {
+            pending.last_status = Some(next_status);
+            Some(next_status)
+        };
+        let position = self.apply_position(request, filled_volume)?;
         let insert_date_time = self.clock.next_timestamp_ns();
         let order_value = json!({
             "seqno": 1,
@@ -555,13 +644,15 @@ impl StrategyTestRuntime {
             .map_err(|_| TaskError::InvalidState("fake order payload is invalid"))?;
 
         let trade_value = (filled_volume > 0).then(|| {
+            pending.trade_sequence += 1;
+            let trade_sequence = pending.trade_sequence;
             let trade_date_time = self.clock.next_timestamp_ns();
             json!({
                 "seqno": 1,
                 "user_id": request.account_id,
                 "order_id": request.order_id,
-                "trade_id": format!("fake-trade-{}", request.order_id),
-                "exchange_trade_id": format!("fake-exchange-trade-{}", request.order_id),
+                "trade_id": format!("fake-trade-{}-{}", request.order_id, trade_sequence),
+                "exchange_trade_id": format!("fake-exchange-trade-{}-{}", request.order_id, trade_sequence),
                 "exchange_id": request.exchange_id,
                 "instrument_id": request.instrument_id,
                 "direction": request.direction,
@@ -580,9 +671,9 @@ impl StrategyTestRuntime {
         let position_value = position_to_value(&position);
 
         Ok(FakeOrderOutcome {
-            account_id: request.account_id,
-            symbol: request.symbol,
-            order_id: request.order_id,
+            account_id: request.account_id.clone(),
+            symbol: request.symbol.clone(),
+            order_id: request.order_id.clone(),
             order_value,
             trade_value,
             position_value,
@@ -622,14 +713,15 @@ fn ingest_fake_order_outcome(
     command_id: CommandId,
     outcome: FakeOrderOutcome,
 ) -> Result<()> {
-    let status = outcome.command_status;
     ingest_fake_trade_update(host, &outcome, command_id)?;
-    let _ = host.api().handle_for_test().record_command_status(
-        command_id,
-        status,
-        None,
-        CommitScope::RealtimeUpdate,
-    )?;
+    if let Some(status) = outcome.command_status {
+        let _ = host.api().handle_for_test().record_command_status(
+            command_id,
+            status,
+            None,
+            CommitScope::RealtimeUpdate,
+        )?;
+    }
 
     report.orders.push(outcome.order);
     if let Some(trade) = outcome.trade {

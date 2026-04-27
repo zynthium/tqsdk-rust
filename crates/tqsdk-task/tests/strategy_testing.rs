@@ -116,6 +116,64 @@ async fn strategy_test_harness_can_partial_fill_orders() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn strategy_test_harness_can_advance_partial_fills_across_steps() {
+    let harness = StrategyTestHarness::new()
+        .market(
+            FakeMarket::new()
+                .quote("SHFE.rb2601", 3_678.0)
+                .account("sim", 80_000.0)
+                .position("sim", "SHFE.rb2601", 0),
+        )
+        .broker(FakeBroker::new().partial_fills([2, 2, 1]))
+        .build()
+        .unwrap();
+
+    let mut strategy = StrategyHost::builder(harness.into_task_host())
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = strategy.next_once().await.unwrap();
+
+    ctx.orders("sim")
+        .buy_open("SHFE.rb2601", 5)
+        .limit(3_678.0)
+        .send_once("entry-step-partial")
+        .await
+        .unwrap();
+
+    let first = ctx.finish_test_step().await.unwrap();
+    assert_eq!(first.orders().len(), 1);
+    assert_eq!(first.orders()[0].status, "ALIVE");
+    assert_eq!(first.orders()[0].volume_left, 3);
+    assert_eq!(first.trades().len(), 1);
+    assert_eq!(first.trades()[0].volume, 2);
+    assert_eq!(first.pending_orders(), 1);
+    assert_eq!(first.position("sim", "SHFE.rb2601").unwrap().pos_long, 2);
+
+    let second = ctx.finish_test_step().await.unwrap();
+    assert_eq!(second.orders().len(), 1);
+    assert_eq!(second.orders()[0].status, "ALIVE");
+    assert_eq!(second.orders()[0].volume_left, 1);
+    assert_eq!(second.trades().len(), 1);
+    assert_eq!(second.trades()[0].volume, 2);
+    assert_eq!(second.pending_orders(), 1);
+    assert_eq!(second.position("sim", "SHFE.rb2601").unwrap().pos_long, 4);
+
+    let third = ctx.finish_test_step().await.unwrap();
+    assert_eq!(third.orders().len(), 1);
+    assert_eq!(third.orders()[0].status, "FINISHED");
+    assert_eq!(third.orders()[0].volume_left, 0);
+    assert_eq!(third.trades().len(), 1);
+    assert_eq!(third.trades()[0].volume, 1);
+    assert_eq!(third.pending_orders(), 0);
+    assert_eq!(third.position("sim", "SHFE.rb2601").unwrap().pos_long, 5);
+    assert_ne!(first.trades()[0].trade_id, second.trades()[0].trade_id);
+    assert_ne!(second.trades()[0].trade_id, third.trades()[0].trade_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn strategy_test_harness_uses_deterministic_clock_for_fake_broker_events() {
     let start_ns = 1_800_000_000_000_000_000;
     let harness = StrategyTestHarness::new()

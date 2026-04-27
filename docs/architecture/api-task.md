@@ -81,7 +81,7 @@
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略
-  - 当前覆盖 quote/account/position seed、全成、拒单、单步部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
+  - 当前覆盖 quote/account/position seed、全成、拒单、单步/跨 step 部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -135,7 +135,7 @@
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 - 完整 live / sim / replay environment adapter
-- 跨 step 部分成交推进 / 更完整 broker 行为
+- 更完整 broker 行为 / 持久化测试 fixture 恢复
 
 ## 为什么它必须独立成 crate
 

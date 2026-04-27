@@ -6,9 +6,9 @@
 //! - 断言策略发出的订单和状态变化
 //!
 //! API contract:
-//! - public fake provider/test harness 可构造行情、成交、拒单、部分成交
+//! - public fake provider/test harness 可构造行情、成交、拒单、跨 step 部分成交、测试时钟、延迟成交和 broker 断线恢复
 //! - 策略测试不使用 hidden `*_for_test` API
-//! - fake broker 与真实 broker 复用同一策略 context
+//! - fake broker 与真实 broker 复用同一 `StrategyHost` / `StrategyContext`
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -20,7 +20,8 @@
 //!
 //! Regression signal:
 //! - 单元测试只能用 live smoke 或 ignored test
-//! - fake broker 无法覆盖 partial fill/reject
+//! - fake broker 无法覆盖 reject 或跨 step partial fill
+//! - fake broker 无法控制测试时间、延迟成交或断线恢复
 //! - 策略逻辑和真实运行入口不是同一个 context
 //!
 //! Review questions:
@@ -33,11 +34,11 @@
 //! `FakeMarket`、`FakeBroker` 和 `StrategyTestClock`。用户可以在不连接真实服务、
 //! 不调用 hidden `*_for_test` API 的情况下，用同一套
 //! `StrategyHost` / `StrategyContext` 路径测试 quote 触发下单、全成、拒单、
-//! 部分成交、确定性 fake broker 时间、step latency 和 broker disconnect/reconnect。
+//! 单步/跨 step 部分成交、确定性 fake broker 时间、step latency 和 broker
+//! disconnect/reconnect。
 //!
 //! Remaining API gap:
-//! 当前 test harness 仍是 foundation：跨 step 部分成交推进、持久化恢复和更完整
-//! broker 行为仍未冻结。
+//! 当前 test harness 仍是 foundation：持久化恢复和更完整 broker 行为仍未冻结。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -45,7 +46,7 @@
 //! async fn strategy_buys_when_breakout() -> Result<()> {
 //!     let harness = StrategyTestHarness::new()
 //!         .market(FakeMarket::new().quote("SHFE.au2602", 481.0))
-//!         .broker(FakeBroker::new().fill_all().disconnect_for_steps(1).latency_steps(1))
+//!         .broker(FakeBroker::new().partial_fills([1, 1]).disconnect_for_steps(1).latency_steps(1))
 //!         .clock(StrategyTestClock::new(1_800_000_000_000_000_000))
 //!         .build()?;
 //!
@@ -55,7 +56,7 @@
 //!         .build()
 //!         .await?;
 //!     let mut ctx = strategy.next_once().await?;
-//!     ctx.orders("sim").buy_open("SHFE.au2602", 1).limit(481.0).send_once("entry-1").await?;
+//!     ctx.orders("sim").buy_open("SHFE.au2602", 2).limit(481.0).send_once("entry-1").await?;
 //!     assert_eq!(
 //!         ctx.finish_test_step().await?.broker_connection_status(),
 //!         FakeBrokerConnectionStatus::Disconnected
@@ -64,6 +65,9 @@
 //!     let report = ctx.finish_test_step().await?;
 //!     assert_eq!(report.orders().len(), 1);
 //!     assert_eq!(report.position("sim", "SHFE.au2602")?.pos_long, 1);
+//!     let report = ctx.finish_test_step().await?;
+//!     assert_eq!(report.orders()[0].volume_left, 0);
+//!     assert_eq!(report.position("sim", "SHFE.au2602")?.pos_long, 2);
 //!     Ok(())
 //! }
 //! ```

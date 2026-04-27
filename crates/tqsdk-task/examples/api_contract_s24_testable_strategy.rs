@@ -6,7 +6,7 @@
 //! - 断言策略发出的订单和状态变化
 //!
 //! API contract:
-//! - public fake provider/test harness 可构造行情、成交、拒单、部分成交、测试时钟、延迟成交和 broker 断线恢复
+//! - public fake provider/test harness 可构造行情、成交、拒单、跨 step 部分成交、测试时钟、延迟成交和 broker 断线恢复
 //! - 策略测试不使用 hidden `*_for_test` API
 //! - fake broker 与真实 broker 复用同一 `StrategyHost` / `StrategyContext`
 //! - 不手动创建 channel
@@ -20,7 +20,7 @@
 //!
 //! Regression signal:
 //! - 单元测试只能用 live smoke 或 ignored test
-//! - fake broker 无法覆盖 partial fill/reject
+//! - fake broker 无法覆盖 reject 或跨 step partial fill
 //! - fake broker 无法控制测试时间、延迟成交或断线恢复
 //! - 策略逻辑和真实运行入口不是同一个 context
 //!
@@ -47,7 +47,7 @@ async fn main() -> tqsdk_task::Result<()> {
         )
         .broker(
             FakeBroker::new()
-                .fill_all()
+                .partial_fills([1, 1, 1])
                 .disconnect_for_steps(1)
                 .latency_steps(1),
         )
@@ -68,7 +68,7 @@ async fn main() -> tqsdk_task::Result<()> {
 
     if quote.last_price > 3_600.0 && position.pos_long == 0 {
         ctx.orders("sim")
-            .buy_open("SHFE.rb2601", 1)
+            .buy_open("SHFE.rb2601", 3)
             .limit(quote.last_price)
             .send_once("test-entry-1")
             .await?;
@@ -90,17 +90,35 @@ async fn main() -> tqsdk_task::Result<()> {
     assert_eq!(reconnected.pending_orders(), 1);
     assert!(reconnected.orders().is_empty());
 
-    let report = ctx.finish_test_step().await?;
+    let first_fill = ctx.finish_test_step().await?;
     assert_eq!(
-        report.broker_connection_status(),
+        first_fill.broker_connection_status(),
         FakeBrokerConnectionStatus::Connected
     );
+    assert_eq!(first_fill.orders().len(), 1);
+    assert_eq!(first_fill.orders()[0].status, "ALIVE");
+    assert_eq!(first_fill.orders()[0].volume_left, 2);
+    assert_eq!(first_fill.trades().len(), 1);
+    assert_eq!(first_fill.pending_orders(), 1);
+    assert_eq!(first_fill.position("sim", "SHFE.rb2601")?.pos_long, 1);
+
+    let second_fill = ctx.finish_test_step().await?;
+    assert_eq!(second_fill.orders().len(), 1);
+    assert_eq!(second_fill.orders()[0].status, "ALIVE");
+    assert_eq!(second_fill.orders()[0].volume_left, 1);
+    assert_eq!(second_fill.trades().len(), 1);
+    assert_eq!(second_fill.pending_orders(), 1);
+    assert_eq!(second_fill.position("sim", "SHFE.rb2601")?.pos_long, 2);
+
+    let report = ctx.finish_test_step().await?;
     assert_eq!(report.orders().len(), 1);
+    assert_eq!(report.orders()[0].status, "FINISHED");
+    assert_eq!(report.orders()[0].volume_left, 0);
     assert_eq!(report.trades().len(), 1);
     assert_eq!(
         report.trades()[0].trade_date_time,
-        1_800_000_000_250_000_000
+        1_800_000_001_250_000_000
     );
-    assert_eq!(report.position("sim", "SHFE.rb2601")?.pos_long, 1);
+    assert_eq!(report.position("sim", "SHFE.rb2601")?.pos_long, 3);
     Ok(())
 }
