@@ -31,7 +31,7 @@
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tqsdk_core::{MarketCommand, RuntimeCommand, Symbol};
+use tqsdk_core::Symbol;
 use tqsdk_session::SessionClientBuilder;
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -48,11 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = SessionClientBuilder::new(user, pass)
         .futures_market()
         .build()?;
-    session
-        .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-            symbols: vec![symbol_key.clone()],
-        }))
-        .await?;
+    session.subscribe_quotes([symbol.as_str()]).await?;
 
     let reader = session.reader().clone();
     let mut cursor = reader.cursor();

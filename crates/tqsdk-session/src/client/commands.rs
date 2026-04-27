@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 use tokio::time::Instant;
 use tqsdk_core::{
-    CommandId, QueryCommand, QueryId, ReplayCommand, Runtime, RuntimeCommand, SchemaCommand,
-    SchemaId, SystemCommand,
+    CommandId, MarketCommand, QueryCommand, QueryId, ReplayCommand, Runtime, RuntimeCommand,
+    SchemaCommand, SchemaId, Symbol, SystemCommand,
 };
 
 use super::{
@@ -40,6 +40,46 @@ impl SessionClient {
 
     pub async fn submit(&self, command: RuntimeCommand) -> crate::error::Result<CommandId> {
         Ok(self.handle.submit(command).await?)
+    }
+
+    pub async fn subscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<CommandId>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| Symbol::new(symbol.as_ref()))
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "subscribe_quotes requires at least one symbol",
+            ));
+        }
+        self.submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+            symbols,
+        }))
+        .await
+    }
+
+    pub async fn unsubscribe_quotes<I, S>(&self, symbols: I) -> crate::error::Result<CommandId>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| Symbol::new(symbol.as_ref()))
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "unsubscribe_quotes requires at least one symbol",
+            ));
+        }
+        self.submit(RuntimeCommand::Market(MarketCommand::UnsubscribeQuotes {
+            symbols,
+        }))
+        .await
     }
 
     pub fn query_result(&self, query_id: &str) -> crate::error::Result<Option<Value>> {
