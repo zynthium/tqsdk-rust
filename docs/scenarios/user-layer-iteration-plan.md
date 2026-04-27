@@ -294,6 +294,8 @@ crate 分层合并成一份迭代计划。
   real-time 和 scaled replay speed policy。
 - `StrategyReplayCheckpointStore` / `StrategyReplayBuilder::resume_from_store`
   已提供 JSON file-backed durable checkpoint persistence foundation。
+- `StrategyReplaySourceBuilder` 已提供多序列 event source 合并入口，用户不需要
+  手写 vector 拼接和排序。
 - `KlineDataSeries` / `TickDataSeries` 已提供 history series -> cache replay
   adapter，S16 可以从 `DataClient` 历史序列直接进入 `StrategyReplay`。
 - S11 简单策略已提升为正式 task example；S24 最小可测试策略已新增正式
@@ -303,7 +305,6 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - S15 完整 live / sim / replay environment adapter。
-- 多序列 replay convenience builder。
 - fake reconnect、延迟、跨 step 部分成交推进与 deterministic clock。
 - 跨进程 intent / test fixture 持久恢复。
 
@@ -389,6 +390,8 @@ crate 分层合并成一份迭代计划。
   speed policy foundation。
 - `StrategyReplayCheckpointStore` / `StrategyReplayBuilder::resume_from_store`
   已覆盖 S16 最小 durable checkpoint persistence foundation。
+- `StrategyReplaySourceBuilder` 已覆盖 S16 多序列 replay convenience builder
+  foundation。
 - `KlineDataSeries` / `TickDataSeries` 已提供 `into_market_cache_events`
   与 `into_market_cache_replay`，覆盖 history series -> cache replay
   adapter foundation。
@@ -400,7 +403,6 @@ crate 分层合并成一份迭代计划。
 - live market stream pipe；
 - durable sink runtime、可靠队列、WAL compaction；
 - 跨进程锁、索引和 cache compaction；
-- 多序列 replay convenience builder；
 
 优先提升的场景：
 

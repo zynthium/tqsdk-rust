@@ -42,19 +42,19 @@
 //! real-time 和 scaled replay speed policy。
 //! `StrategyReplayCheckpointStore` / `StrategyReplayBuilder::resume_from_store`
 //! 已提供 JSON file-backed durable checkpoint persistence foundation。
+//! `StrategyReplaySourceBuilder` 已提供多序列 event source 合并入口。
 //!
 //! Remaining API gap:
 //! `tqsdk-task::StrategyReplay` 已提供 history/cache replay -> strategy context
-//! foundation。剩余 gap 是多序列 replay convenience builder，以及面向生产
-//! 策略部署的统一 live/sim/replay environment abstraction。
+//! foundation。剩余 gap 是面向生产策略部署的统一 live/sim/replay
+//! environment abstraction。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let replay = HistoryReplay::new()
-//!     .kline("SHFE.au2602", Duration::from_secs(60), start, end)
-//!     .speed(StrategyReplaySpeed::FASTEST)
-//!     .build()
-//!     .await?;
+//! let replay = StrategyReplay::source_builder()
+//!     .events(kline_series.into_market_cache_events("history")?)
+//!     .events(tick_series.into_market_cache_events("history")?)
+//!     .build();
 //! let checkpoint_store = StrategyReplayCheckpointStore::json_file("replay.checkpoint.json");
 //! run_strategy(replay, MyStrategy::default()).await?;
 //! ```

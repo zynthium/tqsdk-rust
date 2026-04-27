@@ -4,7 +4,9 @@ use std::time::Duration;
 use tqsdk_core::{Kline, Quote};
 use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySpeed};
+use tqsdk_task::{
+    StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySourceBuilder, StrategyReplaySpeed,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_drives_quote_events_into_strategy_context() {
@@ -156,6 +158,66 @@ async fn strategy_replay_checkpoint_store_persists_and_resumes() {
     assert_eq!(store.load().unwrap(), None);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_source_builder_merges_multiple_series_by_event_time() {
+    let symbol = "SHFE.au2602";
+    let quote = Quote {
+        last_price: 480.5,
+        ..Quote::default()
+    };
+    let builder = StrategyReplay::source_builder()
+        .events(vec![kline_event(2_000, 481.0)])
+        .event(MarketCacheEvent::quote("quote-cache", symbol, 1_550, Some(1_500), quote).unwrap())
+        .events(vec![kline_event(1_000, 480.0)]);
+
+    assert_eq!(builder.len(), 3);
+    assert!(!builder.is_empty());
+
+    let mut strategy = StrategyReplay::builder(builder.build())
+        .market(FakeMarket::new().account("sim", 100_000.0))
+        .broker(FakeBroker::new().fill_all())
+        .account("sim")
+        .quote(symbol)
+        .kline(symbol, Duration::from_secs(60), 16)
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().event_time_ns(), 1_000);
+    assert_eq!(
+        ctx.kline(symbol, Duration::from_secs(60))
+            .unwrap()
+            .last()
+            .unwrap()
+            .close,
+        480.0
+    );
+    drop(ctx);
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().event_time_ns(), 1_500);
+    assert_eq!(ctx.quote(symbol).unwrap().last_price, 480.5);
+    drop(ctx);
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().event_time_ns(), 2_000);
+    assert_eq!(
+        ctx.kline(symbol, Duration::from_secs(60))
+            .unwrap()
+            .last()
+            .unwrap()
+            .close,
+        481.0
+    );
+}
+
+#[test]
+fn strategy_replay_source_builder_allows_empty_replay() {
+    let replay = StrategyReplaySourceBuilder::new().build();
+    assert!(replay.is_empty());
+}
+
 #[test]
 fn strategy_replay_checkpoint_store_rejects_invalid_file() {
     let path = temp_checkpoint_path("invalid");
@@ -213,38 +275,28 @@ fn two_kline_replay() -> MarketCacheReplay {
 }
 
 fn two_kline_replay_with_times(older_time_ns: i64, newer_time_ns: i64) -> MarketCacheReplay {
-    let older = Kline {
-        id: 1,
-        datetime: older_time_ns,
-        close: 480.0,
-        ..Kline::default()
-    };
-    let newer = Kline {
-        id: 2,
-        datetime: newer_time_ns,
-        close: 481.0,
-        ..Kline::default()
-    };
     MarketCacheReplay::new(vec![
-        MarketCacheEvent::kline(
-            "cache",
-            "SHFE.au2602",
-            newer_time_ns + 100,
-            Some(newer_time_ns),
-            60_000_000_000,
-            newer,
-        )
-        .unwrap(),
-        MarketCacheEvent::kline(
-            "cache",
-            "SHFE.au2602",
-            older_time_ns + 100,
-            Some(older_time_ns),
-            60_000_000_000,
-            older,
-        )
-        .unwrap(),
+        kline_event(newer_time_ns, 481.0),
+        kline_event(older_time_ns, 480.0),
     ])
+}
+
+fn kline_event(datetime_ns: i64, close: f64) -> MarketCacheEvent {
+    let older = Kline {
+        id: datetime_ns / 1_000,
+        datetime: datetime_ns,
+        close,
+        ..Kline::default()
+    };
+    MarketCacheEvent::kline(
+        "cache",
+        "SHFE.au2602",
+        datetime_ns + 100,
+        Some(datetime_ns),
+        60_000_000_000,
+        older,
+    )
+    .unwrap()
 }
 
 async fn replay_strategy(replay: MarketCacheReplay) -> StrategyReplay {

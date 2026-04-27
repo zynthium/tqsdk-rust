@@ -29,6 +29,12 @@ pub struct StrategyReplayBuilder {
     speed: StrategyReplaySpeed,
 }
 
+/// Builder that combines multiple normalized market event series into one replay.
+#[derive(Debug, Clone, Default)]
+pub struct StrategyReplaySourceBuilder {
+    events: Vec<MarketCacheEvent>,
+}
+
 /// Offline strategy replay host.
 pub struct StrategyReplay {
     replay: MarketCacheReplay,
@@ -100,6 +106,11 @@ impl StrategyReplay {
         StrategyReplayBuilder::new(replay)
     }
 
+    #[must_use]
+    pub fn source_builder() -> StrategyReplaySourceBuilder {
+        StrategyReplaySourceBuilder::new()
+    }
+
     pub async fn next(&mut self) -> Result<Option<StrategyReplayContext<'_>>> {
         let Some(event) = self.replay.next() else {
             return Ok(None);
@@ -155,6 +166,40 @@ impl StrategyReplay {
     #[must_use]
     pub fn into_strategy(self) -> StrategyHost {
         self.strategy
+    }
+}
+
+impl StrategyReplaySourceBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    #[must_use]
+    pub fn event(mut self, event: MarketCacheEvent) -> Self {
+        self.events.push(event);
+        self
+    }
+
+    #[must_use]
+    pub fn events(mut self, events: impl IntoIterator<Item = MarketCacheEvent>) -> Self {
+        self.events.extend(events);
+        self
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    #[must_use]
+    pub fn build(self) -> MarketCacheReplay {
+        MarketCacheReplay::new(self.events)
     }
 }
 

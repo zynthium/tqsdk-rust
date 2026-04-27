@@ -7,6 +7,7 @@
 //!
 //! API contract:
 //! - history series 到 replay event 的转换是 public API
+//! - 多个 history/cache event series 可通过 public replay source builder 合并
 //! - history/cache replay 是 public strategy replay driver，不是用户手写 runtime for-loop
 //! - replay event 输出标准 kline/tick/quote 状态读取面
 //! - replay context 暴露 deterministic replay time 和可恢复 checkpoint
@@ -33,6 +34,7 @@
 //! - replay time/checkpoint 是否作为 public contract 保持可读？
 //! - replay speed policy 是否不要求用户手写 sleep / task 编排？
 //! - checkpoint persistence 是否不泄漏 serde_json 或内部 runtime 状态？
+//! - 多序列 replay 是否不要求用户手动排序和拼接？
 
 use std::time::Duration;
 
@@ -69,7 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             end.timestamp_nanos_opt().ok_or("invalid end timestamp")?,
         ))
         .await?;
-    let replay = series.into_market_cache_replay("history")?;
+    let replay = StrategyReplay::source_builder()
+        .events(series.into_market_cache_events("history")?)
+        .build();
     let checkpoint_store =
         std::env::var("TQ_REPLAY_CHECKPOINT_FILE").map(StrategyReplayCheckpointStore::json_file);
 

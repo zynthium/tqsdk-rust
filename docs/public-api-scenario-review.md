@@ -48,8 +48,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   adapter；`StrategyReplay` 已提供 deterministic replay clock、checkpoint 与
   `resume_from` foundation，并通过 `StrategyReplaySpeed` 提供最快 / real-time /
   scaled replay speed policy；`StrategyReplayCheckpointStore` 已提供 JSON file-backed
-  durable checkpoint persistence foundation。多序列 convenience builder 和完整
-  live/sim/replay environment 仍是 gap。
+  durable checkpoint persistence foundation；`StrategyReplaySourceBuilder` 已提供
+  多序列 event source 合并入口。完整 live/sim/replay environment 仍是 gap。
 - S5 低层裸行情直通继续保持“自然”：低层用户可以用
   `SessionClient::subscribe_quotes(...)` 减少 raw `RuntimeCommand` 样板，同时仍通过
   `RuntimeReader::read_market_state()` 走热路径分区读面。
@@ -82,7 +82,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 13. 多账户下单 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `AccountGroup`; `MultiAccountOrderTicket`; advanced failure policy/resume/audit remains gap |
 | 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
 | 15. 实盘 / 模拟 / 回放切换 | 勉强 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; builders have targets/replay URL, but no common strategy runtime |
-| 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_replay`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; multi-series builder/live-sim-replay environment still gap |
+| 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_events`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplaySourceBuilder`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; live-sim-replay environment still gap |
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
 | 18. 本地行情缓存读写 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; live durable sink still gap |
 | 19. 风控前置 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration |
@@ -97,4 +97,4 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户高级执行策略仍需继续补齐。
 3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、fan-out capacity 和 typed lag/error diagnostics 已有薄 facade；持久化 sink、完整 daemon supervisor/metrics 仍停留在底层组合能力之外。
-4. 多 provider 聚合、完整 live/sim/replay environment、live durable cache sink、fake reconnect/deterministic clock 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、replay speed policy 与 checkpoint store 已落在 `tqsdk-task`。
+4. 多 provider 聚合、完整 live/sim/replay environment、live durable cache sink、fake reconnect/deterministic clock 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、replay source builder、replay speed policy 与 checkpoint store 已落在 `tqsdk-task`。

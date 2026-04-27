@@ -50,6 +50,7 @@
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
+  - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/cache event series 合并
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 当前不包含 live/sim/replay environment adapter
 - `tqsdk-task::testing`
@@ -135,7 +136,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter、多序列 replay builder 仍是后续工作
+- `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter 仍是后续工作
 - `StrategyTestHarness` 仍是 foundation，fake reconnect、延迟、跨 step 部分成交推进和 deterministic clock 仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
