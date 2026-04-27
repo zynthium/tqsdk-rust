@@ -1,6 +1,10 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::ffi::OsString;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{fs, io};
 
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
@@ -50,6 +54,12 @@ pub struct StrategyReplayEvent {
 pub struct StrategyReplayCheckpoint {
     next_event_index: usize,
     replay_time_ns: Option<i64>,
+}
+
+/// JSON file-backed durable store for [`StrategyReplayCheckpoint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyReplayCheckpointStore {
+    path: PathBuf,
 }
 
 /// Replay pacing policy for [`StrategyReplay`].
@@ -219,6 +229,13 @@ impl StrategyReplayBuilder {
         self
     }
 
+    pub fn resume_from_store(mut self, store: &StrategyReplayCheckpointStore) -> Result<Self> {
+        if let Some(checkpoint) = store.load()? {
+            self.checkpoint = checkpoint;
+        }
+        Ok(self)
+    }
+
     #[must_use]
     pub fn speed(mut self, speed: StrategyReplaySpeed) -> Self {
         self.speed = speed;
@@ -266,6 +283,59 @@ impl StrategyReplayBuilder {
             replay_time_ns: self.checkpoint.replay_time_ns,
             speed: self.speed,
         })
+    }
+}
+
+impl StrategyReplayCheckpointStore {
+    #[must_use]
+    pub fn json_file(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn load(&self) -> Result<Option<StrategyReplayCheckpoint>> {
+        match fs::read_to_string(&self.path) {
+            Ok(content) => {
+                let value = serde_json::from_str(&content).map_err(|error| {
+                    invalid_checkpoint(format!("checkpoint JSON is invalid: {error}"))
+                })?;
+                StrategyReplayCheckpoint::from_json_value(&value).map(Some)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(checkpoint_io_error("read", &self.path, error)),
+        }
+    }
+
+    pub fn save(&self, checkpoint: StrategyReplayCheckpoint) -> Result<()> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .map_err(|error| checkpoint_io_error("create parent directory", parent, error))?;
+        }
+
+        let tmp_path = checkpoint_tmp_path(&self.path);
+        fs::write(&tmp_path, checkpoint.to_json_string())
+            .map_err(|error| checkpoint_io_error("write", &tmp_path, error))?;
+        fs::rename(&tmp_path, &self.path)
+            .map_err(|error| checkpoint_io_error("rename", &self.path, error))?;
+        Ok(())
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(checkpoint_io_error("remove", &self.path, error)),
+        }
     }
 }
 
@@ -332,6 +402,57 @@ impl StrategyReplayCheckpoint {
     #[must_use]
     pub fn replay_time_ns(&self) -> Option<i64> {
         self.replay_time_ns
+    }
+
+    fn to_json_string(self) -> String {
+        let mut output = json!({
+            "version": 1,
+            "next_event_index": self.next_event_index,
+            "replay_time_ns": self.replay_time_ns,
+        })
+        .to_string();
+        output.push('\n');
+        output
+    }
+
+    fn from_json_value(value: &Value) -> Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid_checkpoint("checkpoint root must be a JSON object"))?;
+
+        let version = object
+            .get("version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid_checkpoint("checkpoint version must be an unsigned integer"))?;
+        if version != 1 {
+            return Err(invalid_checkpoint(format!(
+                "unsupported checkpoint version {version}"
+            )));
+        }
+
+        let next_event_index = object
+            .get("next_event_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                invalid_checkpoint("checkpoint next_event_index must be an unsigned integer")
+            })?;
+        let next_event_index = usize::try_from(next_event_index).map_err(|_| {
+            invalid_checkpoint("checkpoint next_event_index does not fit this platform")
+        })?;
+
+        let replay_time_ns = match object.get("replay_time_ns") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(
+                value
+                    .as_i64()
+                    .ok_or_else(|| invalid_checkpoint("checkpoint replay_time_ns must be i64"))?,
+            ),
+        };
+
+        Ok(Self {
+            next_event_index,
+            replay_time_ns,
+        })
     }
 }
 
@@ -693,5 +814,28 @@ fn duration_to_ns(duration: Duration) -> i64 {
 fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|existing| existing == value) {
         values.push(value.to_owned());
+    }
+}
+
+fn checkpoint_tmp_path(path: &Path) -> PathBuf {
+    let mut extension = path.extension().map_or_else(OsString::new, OsString::from);
+    if !extension.is_empty() {
+        extension.push(".");
+    }
+    extension.push("tmp");
+    path.with_extension(extension)
+}
+
+fn checkpoint_io_error(operation: &'static str, path: &Path, error: io::Error) -> TaskError {
+    TaskError::CheckpointIo {
+        operation,
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    }
+}
+
+fn invalid_checkpoint(reason: impl Into<String>) -> TaskError {
+    TaskError::InvalidCheckpoint {
+        reason: reason.into(),
     }
 }

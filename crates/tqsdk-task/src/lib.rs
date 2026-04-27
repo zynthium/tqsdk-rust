@@ -40,8 +40,8 @@ pub use execution_group::{
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use replay::{
-    StrategyReplay, StrategyReplayBuilder, StrategyReplayCheckpoint, StrategyReplayContext,
-    StrategyReplayEvent, StrategyReplaySpeed,
+    StrategyReplay, StrategyReplayBuilder, StrategyReplayCheckpoint, StrategyReplayCheckpointStore,
+    StrategyReplayContext, StrategyReplayEvent, StrategyReplaySpeed,
 };
 pub use risk::{RiskDecision, RiskEngine, RiskRejection};
 pub use scheduler::{

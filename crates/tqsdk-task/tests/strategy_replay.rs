@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tqsdk_core::{Kline, Quote};
 use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{StrategyReplay, StrategyReplaySpeed};
+use tqsdk_task::{StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySpeed};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_drives_quote_events_into_strategy_context() {
@@ -117,6 +118,56 @@ async fn strategy_replay_resume_from_checkpoint_skips_processed_events() {
     assert_eq!(ctx.checkpoint().next_event_index(), 2);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_checkpoint_store_persists_and_resumes() {
+    let path = temp_checkpoint_path("persist-resume");
+    let store = StrategyReplayCheckpointStore::json_file(&path);
+    store.clear().unwrap();
+
+    assert_eq!(store.path(), path.as_path());
+    assert_eq!(store.load().unwrap(), None);
+
+    let mut first = replay_strategy(two_kline_replay()).await;
+    let ctx = first.next().await.unwrap().unwrap();
+    store.save(ctx.checkpoint()).unwrap();
+    drop(ctx);
+
+    let checkpoint = store.load().unwrap().unwrap();
+    assert_eq!(checkpoint.next_event_index(), 1);
+    assert_eq!(checkpoint.replay_time_ns(), Some(1_000));
+
+    let mut resumed = StrategyReplay::builder(two_kline_replay())
+        .market(FakeMarket::new().account("sim", 100_000.0))
+        .broker(FakeBroker::new().fill_all())
+        .account("sim")
+        .kline("SHFE.au2602", Duration::from_secs(60), 16)
+        .resume_from_store(&store)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.checkpoint(), checkpoint);
+    let ctx = resumed.next().await.unwrap().unwrap();
+    assert_eq!(ctx.replay_time_ns(), 2_000);
+    drop(ctx);
+
+    store.clear().unwrap();
+    assert_eq!(store.load().unwrap(), None);
+}
+
+#[test]
+fn strategy_replay_checkpoint_store_rejects_invalid_file() {
+    let path = temp_checkpoint_path("invalid");
+    let store = StrategyReplayCheckpointStore::json_file(&path);
+    store.clear().unwrap();
+    std::fs::write(&path, "{\"version\":1,\"next_event_index\":-1}").unwrap();
+
+    assert!(store.load().is_err());
+
+    store.clear().unwrap();
+}
+
 #[test]
 fn strategy_replay_speed_rejects_invalid_multiplier() {
     assert!(StrategyReplaySpeed::scaled(0.0).is_err());
@@ -205,4 +256,11 @@ async fn replay_strategy(replay: MarketCacheReplay) -> StrategyReplay {
         .build()
         .await
         .unwrap()
+}
+
+fn temp_checkpoint_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "tqsdk-rust-strategy-replay-{name}-{}.json",
+        std::process::id()
+    ))
 }

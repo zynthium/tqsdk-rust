@@ -73,6 +73,7 @@
   - 将 cache event 推进为正常 runtime market commit
   - 暴露 deterministic replay time、checkpoint 和 resume-from foundation
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
+  - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
     strategy execution 搬入 data
@@ -133,7 +134,7 @@
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 - 完整 live / sim / replay environment adapter
-- durable checkpoint persistence、多序列 replay builder、fake reconnect / latency / deterministic clock
+- 多序列 replay builder、fake reconnect / latency / deterministic clock
 
 ## 为什么它必须独立成 crate
 
@@ -699,7 +700,7 @@ impl TargetPosScheduler {
 
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
 2. 在 `StrategyHost` / `StrategyReplay` 之上继续设计 live / sim / replay
-   environment adapter、durable checkpoint persistence 和多序列 replay builder。
+   environment adapter 和多序列 replay builder。
 3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、
    stream adapter、callback 倒灌进 core/session/wait。

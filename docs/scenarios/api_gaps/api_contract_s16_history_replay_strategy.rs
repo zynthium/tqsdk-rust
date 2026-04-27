@@ -40,12 +40,13 @@
 //! 内存级 replay checkpoint 和 deterministic replay clock。
 //! `StrategyReplaySpeed` / `StrategyReplayBuilder::speed` 已提供最快、
 //! real-time 和 scaled replay speed policy。
+//! `StrategyReplayCheckpointStore` / `StrategyReplayBuilder::resume_from_store`
+//! 已提供 JSON file-backed durable checkpoint persistence foundation。
 //!
 //! Remaining API gap:
 //! `tqsdk-task::StrategyReplay` 已提供 history/cache replay -> strategy context
-//! foundation。剩余 gap 是 durable checkpoint persistence、多序列 replay
-//! convenience builder，以及面向生产策略部署的统一 live/sim/replay
-//! environment abstraction。
+//! foundation。剩余 gap 是多序列 replay convenience builder，以及面向生产
+//! 策略部署的统一 live/sim/replay environment abstraction。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -54,6 +55,7 @@
 //!     .speed(StrategyReplaySpeed::FASTEST)
 //!     .build()
 //!     .await?;
+//! let checkpoint_store = StrategyReplayCheckpointStore::json_file("replay.checkpoint.json");
 //! run_strategy(replay, MyStrategy::default()).await?;
 //! ```
 

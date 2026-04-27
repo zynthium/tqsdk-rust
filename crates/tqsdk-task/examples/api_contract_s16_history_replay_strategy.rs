@@ -11,6 +11,7 @@
 //! - replay event 输出标准 kline/tick/quote 状态读取面
 //! - replay context 暴露 deterministic replay time 和可恢复 checkpoint
 //! - replay speed policy 是 public API，默认可选择最快回放
+//! - replay checkpoint 可保存到 durable store 并恢复，不要求用户手写 JSON
 //! - 策略无需区分 live market event 和 replay market event 的状态读取 API
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -31,6 +32,7 @@
 //! - 是否存在状态一致性风险？
 //! - replay time/checkpoint 是否作为 public contract 保持可读？
 //! - replay speed policy 是否不要求用户手写 sleep / task 编排？
+//! - checkpoint persistence 是否不泄漏 serde_json 或内部 runtime 状态？
 
 use std::time::Duration;
 
@@ -38,7 +40,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use tqsdk_data::{DataClient, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{StrategyReplay, StrategyReplaySpeed};
+use tqsdk_task::{StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySpeed};
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
@@ -68,8 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
     let replay = series.into_market_cache_replay("history")?;
+    let checkpoint_store =
+        std::env::var("TQ_REPLAY_CHECKPOINT_FILE").map(StrategyReplayCheckpointStore::json_file);
 
-    let mut strategy = StrategyReplay::builder(replay)
+    let mut strategy_builder = StrategyReplay::builder(replay)
         .market(
             FakeMarket::new()
                 .account("sim", 100_000.0)
@@ -78,9 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .broker(FakeBroker::new().fill_all())
         .account("sim")
         .kline(symbol.as_str(), duration, 64)
-        .speed(StrategyReplaySpeed::FASTEST)
-        .build()
-        .await?;
+        .speed(StrategyReplaySpeed::FASTEST);
+    if let Ok(store) = &checkpoint_store {
+        strategy_builder = strategy_builder.resume_from_store(store)?;
+    }
+    let mut strategy = strategy_builder.build().await?;
 
     while let Some(mut ctx) = strategy.next().await? {
         let event = ctx.event();
@@ -115,7 +121,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 report.trades().len(),
                 report.position("sim", symbol.as_str())?.pos_long
             );
+            if let Ok(store) = &checkpoint_store {
+                store.save(ctx.checkpoint())?;
+            }
             break;
+        }
+
+        if let Ok(store) = &checkpoint_store {
+            store.save(ctx.checkpoint())?;
         }
     }
 

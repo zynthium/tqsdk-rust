@@ -47,6 +47,14 @@ pub enum TaskError {
         account_id: String,
         order_id: String,
     },
+    CheckpointIo {
+        operation: &'static str,
+        path: String,
+        reason: String,
+    },
+    InvalidCheckpoint {
+        reason: String,
+    },
     InvalidCalendarDate {
         date: String,
     },
@@ -120,6 +128,17 @@ impl Display for TaskError {
                 f,
                 "order snapshot not ready for guarded command on account={account_id} order_id={order_id}"
             ),
+            Self::CheckpointIo {
+                operation,
+                path,
+                reason,
+            } => write!(
+                f,
+                "strategy replay checkpoint {operation} failed path={path}: {reason}"
+            ),
+            Self::InvalidCheckpoint { reason } => {
+                write!(f, "invalid strategy replay checkpoint: {reason}")
+            }
             Self::InvalidCalendarDate { date } => {
                 write!(f, "invalid trading calendar date: {date}")
             }
@@ -142,6 +161,8 @@ impl std::error::Error for TaskError {
             Self::OwnershipConflict { .. }
             | Self::ManualOrderBlocked { .. }
             | Self::OrderNotReady { .. }
+            | Self::CheckpointIo { .. }
+            | Self::InvalidCheckpoint { .. }
             | Self::InvalidCalendarDate { .. }
             | Self::Unsupported(_)
             | Self::InvalidState(_) => None,
