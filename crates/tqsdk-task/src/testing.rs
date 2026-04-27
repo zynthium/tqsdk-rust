@@ -36,6 +36,7 @@ pub struct FakeMarket {
 pub struct FakeBroker {
     policy: FakeBrokerPolicy,
     latency_steps: usize,
+    disconnect_steps: usize,
 }
 
 /// Order handling policy used by [`FakeBroker`].
@@ -44,6 +45,15 @@ pub enum FakeBrokerPolicy {
     FillAll,
     RejectAll { reason: String },
     PartialFill { volume: i64 },
+}
+
+/// Fake broker connection status observed during a strategy test step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FakeBrokerConnectionStatus {
+    #[default]
+    Connected,
+    Disconnected,
+    Reconnected,
 }
 
 /// Deterministic clock used by fake strategy tests.
@@ -65,6 +75,7 @@ pub struct StrategyTestReport {
     trades: Vec<Trade>,
     positions: HashMap<(String, String), Position>,
     pending_orders: usize,
+    broker_connection_status: FakeBrokerConnectionStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -91,12 +102,15 @@ pub(crate) struct StrategyTestRuntime {
     positions: HashMap<(String, String), Position>,
     clock: StrategyTestClock,
     pending_orders: VecDeque<PendingFakeOrder>,
+    disconnect_remaining_steps: usize,
+    was_disconnected: bool,
 }
 
 struct PendingFakeOrder {
     command_id: CommandId,
     request: FakeOrderRequest,
     remaining_steps: usize,
+    sent: bool,
 }
 
 struct FakeOrderRequest {
@@ -147,10 +161,12 @@ impl StrategyTestHarness {
         let mut host = TaskHost::new(TqApi::new(session));
         let positions = seed_market(&host, &self.market)?;
         host.strategy_test = Some(StrategyTestRuntime {
+            disconnect_remaining_steps: self.broker.disconnect_steps,
             broker: self.broker,
             positions,
             clock: self.clock,
             pending_orders: VecDeque::new(),
+            was_disconnected: false,
         });
 
         Ok(BuiltStrategyTestHarness { host })
@@ -208,6 +224,7 @@ impl Default for FakeBroker {
         Self {
             policy: FakeBrokerPolicy::FillAll,
             latency_steps: 0,
+            disconnect_steps: 0,
         }
     }
 }
@@ -293,6 +310,12 @@ impl FakeBroker {
         self.latency_steps = steps;
         self
     }
+
+    #[must_use]
+    pub fn disconnect_for_steps(mut self, steps: usize) -> Self {
+        self.disconnect_steps = steps;
+        self
+    }
 }
 
 impl BuiltStrategyTestHarness {
@@ -328,6 +351,11 @@ impl StrategyTestReport {
     pub fn pending_orders(&self) -> usize {
         self.pending_orders
     }
+
+    #[must_use]
+    pub fn broker_connection_status(&self) -> FakeBrokerConnectionStatus {
+        self.broker_connection_status
+    }
 }
 
 pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTestReport> {
@@ -342,9 +370,22 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
         positions: runtime.positions.clone(),
         ..StrategyTestReport::default()
     };
+    let broker_connection_status = runtime.next_connection_status();
+    let broker_connected = broker_connection_status != FakeBrokerConnectionStatus::Disconnected;
+    report.broker_connection_status = broker_connection_status;
 
-    for (command_id, outcome) in runtime.advance_pending_orders()? {
-        ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+    if broker_connected {
+        for (command_id, outcome) in runtime.advance_sent_pending_orders()? {
+            ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+        }
+        for command_id in runtime.mark_unsent_pending_orders_sent() {
+            let _ = host.api().handle_for_test().record_command_status(
+                command_id,
+                CommandStatus::Sent,
+                None,
+                CommitScope::RealtimeUpdate,
+            )?;
+        }
     }
 
     for dispatch in dispatches {
@@ -352,17 +393,21 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
             continue;
         };
 
-        let _ = host.api().handle_for_test().record_command_status(
-            dispatch.command_id,
-            CommandStatus::Sent,
-            None,
-            CommitScope::RealtimeUpdate,
-        )?;
-        runtime.enqueue_order(dispatch.command_id, request);
+        if broker_connected {
+            let _ = host.api().handle_for_test().record_command_status(
+                dispatch.command_id,
+                CommandStatus::Sent,
+                None,
+                CommitScope::RealtimeUpdate,
+            )?;
+        }
+        runtime.enqueue_order(dispatch.command_id, request, broker_connected);
     }
 
-    for (command_id, outcome) in runtime.drain_ready_orders()? {
-        ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+    if broker_connected {
+        for (command_id, outcome) in runtime.drain_ready_orders()? {
+            ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
+        }
     }
 
     report.pending_orders = runtime.pending_orders.len();
@@ -383,17 +428,44 @@ struct FakeOrderOutcome {
 }
 
 impl StrategyTestRuntime {
-    fn enqueue_order(&mut self, command_id: CommandId, request: FakeOrderRequest) {
+    fn next_connection_status(&mut self) -> FakeBrokerConnectionStatus {
+        if self.disconnect_remaining_steps > 0 {
+            self.disconnect_remaining_steps -= 1;
+            self.was_disconnected = true;
+            FakeBrokerConnectionStatus::Disconnected
+        } else if self.was_disconnected {
+            self.was_disconnected = false;
+            FakeBrokerConnectionStatus::Reconnected
+        } else {
+            FakeBrokerConnectionStatus::Connected
+        }
+    }
+
+    fn enqueue_order(&mut self, command_id: CommandId, request: FakeOrderRequest, sent: bool) {
         self.pending_orders.push_back(PendingFakeOrder {
             command_id,
             request,
             remaining_steps: self.broker.latency_steps,
+            sent,
         });
     }
 
-    fn advance_pending_orders(&mut self) -> Result<Vec<(CommandId, FakeOrderOutcome)>> {
+    fn mark_unsent_pending_orders_sent(&mut self) -> Vec<CommandId> {
+        let mut command_ids = Vec::new();
         for pending_order in &mut self.pending_orders {
-            pending_order.remaining_steps = pending_order.remaining_steps.saturating_sub(1);
+            if !pending_order.sent {
+                pending_order.sent = true;
+                command_ids.push(pending_order.command_id);
+            }
+        }
+        command_ids
+    }
+
+    fn advance_sent_pending_orders(&mut self) -> Result<Vec<(CommandId, FakeOrderOutcome)>> {
+        for pending_order in &mut self.pending_orders {
+            if pending_order.sent {
+                pending_order.remaining_steps = pending_order.remaining_steps.saturating_sub(1);
+            }
         }
         self.drain_ready_orders()
     }
@@ -402,7 +474,7 @@ impl StrategyTestRuntime {
         let mut ready = Vec::new();
         let mut pending = VecDeque::new();
         while let Some(order) = self.pending_orders.pop_front() {
-            if order.remaining_steps == 0 {
+            if order.sent && order.remaining_steps == 0 {
                 ready.push((order.command_id, self.apply_order(order.request)?));
             } else {
                 pending.push_back(order);

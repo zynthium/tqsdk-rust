@@ -33,11 +33,11 @@
 //! `FakeMarket`、`FakeBroker` 和 `StrategyTestClock`。用户可以在不连接真实服务、
 //! 不调用 hidden `*_for_test` API 的情况下，用同一套
 //! `StrategyHost` / `StrategyContext` 路径测试 quote 触发下单、全成、拒单、
-//! 部分成交、确定性 fake broker 时间和 step latency。
+//! 部分成交、确定性 fake broker 时间、step latency 和 broker disconnect/reconnect。
 //!
 //! Remaining API gap:
-//! 当前 test harness 仍是 foundation：fake reconnect、跨 step 部分成交推进、
-//! 持久化恢复和更完整 broker 行为仍未冻结。
+//! 当前 test harness 仍是 foundation：跨 step 部分成交推进、持久化恢复和更完整
+//! broker 行为仍未冻结。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -45,7 +45,7 @@
 //! async fn strategy_buys_when_breakout() -> Result<()> {
 //!     let harness = StrategyTestHarness::new()
 //!         .market(FakeMarket::new().quote("SHFE.au2602", 481.0))
-//!         .broker(FakeBroker::new().fill_all().latency_steps(1))
+//!         .broker(FakeBroker::new().fill_all().disconnect_for_steps(1).latency_steps(1))
 //!         .clock(StrategyTestClock::new(1_800_000_000_000_000_000))
 //!         .build()?;
 //!
@@ -56,6 +56,10 @@
 //!         .await?;
 //!     let mut ctx = strategy.next_once().await?;
 //!     ctx.orders("sim").buy_open("SHFE.au2602", 1).limit(481.0).send_once("entry-1").await?;
+//!     assert_eq!(
+//!         ctx.finish_test_step().await?.broker_connection_status(),
+//!         FakeBrokerConnectionStatus::Disconnected
+//!     );
 //!     assert_eq!(ctx.finish_test_step().await?.pending_orders(), 1);
 //!     let report = ctx.finish_test_step().await?;
 //!     assert_eq!(report.orders().len(), 1);

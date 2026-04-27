@@ -6,7 +6,7 @@
 //! - 断言策略发出的订单和状态变化
 //!
 //! API contract:
-//! - public fake provider/test harness 可构造行情、成交、拒单、部分成交、测试时钟和延迟成交
+//! - public fake provider/test harness 可构造行情、成交、拒单、部分成交、测试时钟、延迟成交和 broker 断线恢复
 //! - 策略测试不使用 hidden `*_for_test` API
 //! - fake broker 与真实 broker 复用同一 `StrategyHost` / `StrategyContext`
 //! - 不手动创建 channel
@@ -21,7 +21,7 @@
 //! Regression signal:
 //! - 单元测试只能用 live smoke 或 ignored test
 //! - fake broker 无法覆盖 partial fill/reject
-//! - fake broker 无法控制测试时间或延迟成交
+//! - fake broker 无法控制测试时间、延迟成交或断线恢复
 //! - 策略逻辑和真实运行入口不是同一个 context
 //!
 //! Review questions:
@@ -32,7 +32,9 @@
 use std::time::Duration;
 
 use tqsdk_task::StrategyHost;
-use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestClock, StrategyTestHarness};
+use tqsdk_task::testing::{
+    FakeBroker, FakeBrokerConnectionStatus, FakeMarket, StrategyTestClock, StrategyTestHarness,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk_task::Result<()> {
@@ -43,7 +45,12 @@ async fn main() -> tqsdk_task::Result<()> {
                 .account("sim", 80_000.0)
                 .position("sim", "SHFE.rb2601", 0),
         )
-        .broker(FakeBroker::new().fill_all().latency_steps(1))
+        .broker(
+            FakeBroker::new()
+                .fill_all()
+                .disconnect_for_steps(1)
+                .latency_steps(1),
+        )
         .clock(
             StrategyTestClock::new(1_800_000_000_000_000_000).step_by(Duration::from_millis(250)),
         )
@@ -68,10 +75,26 @@ async fn main() -> tqsdk_task::Result<()> {
     }
 
     let first_step = ctx.finish_test_step().await?;
+    assert_eq!(
+        first_step.broker_connection_status(),
+        FakeBrokerConnectionStatus::Disconnected
+    );
     assert_eq!(first_step.pending_orders(), 1);
     assert!(first_step.orders().is_empty());
 
+    let reconnected = ctx.finish_test_step().await?;
+    assert_eq!(
+        reconnected.broker_connection_status(),
+        FakeBrokerConnectionStatus::Reconnected
+    );
+    assert_eq!(reconnected.pending_orders(), 1);
+    assert!(reconnected.orders().is_empty());
+
     let report = ctx.finish_test_step().await?;
+    assert_eq!(
+        report.broker_connection_status(),
+        FakeBrokerConnectionStatus::Connected
+    );
     assert_eq!(report.orders().len(), 1);
     assert_eq!(report.trades().len(), 1);
     assert_eq!(

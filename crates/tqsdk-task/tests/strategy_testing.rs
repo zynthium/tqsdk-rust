@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use tqsdk_task::StrategyHost;
-use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestClock, StrategyTestHarness};
+use tqsdk_task::testing::{
+    FakeBroker, FakeBrokerConnectionStatus, FakeMarket, StrategyTestClock, StrategyTestHarness,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_test_harness_seeds_market_and_fills_orders() {
@@ -192,6 +194,65 @@ async fn strategy_test_harness_can_delay_fake_broker_outcomes_by_test_steps() {
     assert_eq!(second_step.pending_orders(), 0);
     assert_eq!(
         second_step.position("sim", "SHFE.rb2601").unwrap().pos_long,
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_test_harness_defers_orders_until_fake_broker_reconnects() {
+    let harness = StrategyTestHarness::new()
+        .market(
+            FakeMarket::new()
+                .quote("SHFE.rb2601", 3_678.0)
+                .account("sim", 80_000.0)
+                .position("sim", "SHFE.rb2601", 0),
+        )
+        .broker(FakeBroker::new().fill_all().disconnect_for_steps(1))
+        .build()
+        .unwrap();
+
+    let mut strategy = StrategyHost::builder(harness.into_task_host())
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = strategy.next_once().await.unwrap();
+
+    ctx.orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_678.0)
+        .send_once("entry-reconnect")
+        .await
+        .unwrap();
+
+    let disconnected = ctx.finish_test_step().await.unwrap();
+    assert_eq!(
+        disconnected.broker_connection_status(),
+        FakeBrokerConnectionStatus::Disconnected
+    );
+    assert!(disconnected.orders().is_empty());
+    assert!(disconnected.trades().is_empty());
+    assert_eq!(disconnected.pending_orders(), 1);
+    assert_eq!(
+        disconnected
+            .position("sim", "SHFE.rb2601")
+            .unwrap()
+            .pos_long,
+        0
+    );
+
+    let reconnected = ctx.finish_test_step().await.unwrap();
+    assert_eq!(
+        reconnected.broker_connection_status(),
+        FakeBrokerConnectionStatus::Reconnected
+    );
+    assert_eq!(reconnected.orders().len(), 1);
+    assert_eq!(reconnected.orders()[0].status, "FINISHED");
+    assert_eq!(reconnected.trades().len(), 1);
+    assert_eq!(reconnected.pending_orders(), 0);
+    assert_eq!(
+        reconnected.position("sim", "SHFE.rb2601").unwrap().pos_long,
         1
     );
 }

@@ -56,7 +56,7 @@
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`
-  - 当前支持 fake quote/account/position seed、全成、拒单、单步部分成交、deterministic fake broker clock 和 step latency
+  - 当前支持 fake quote/account/position seed、全成、拒单、单步部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
 - `TargetPosTask`
   - 注册 `account_id + symbol` ownership
   - `set_target_volume()` 与 `wait_target_reached()`
@@ -137,7 +137,7 @@
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
 - `StrategyHost` / `StrategyReplay` 仍是 foundation，完整 live / sim / replay environment adapter 仍是后续工作
-- `StrategyTestHarness` 仍是 foundation，fake reconnect、跨 step 部分成交推进和更完整 broker 行为仍是后续工作
+- `StrategyTestHarness` 仍是 foundation，跨 step 部分成交推进和更完整 broker 行为仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 
