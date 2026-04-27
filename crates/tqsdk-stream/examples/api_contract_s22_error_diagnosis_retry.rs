@@ -1,8 +1,8 @@
-//! Scenario: 错误诊断与重试
+//! Scenario: 错误诊断与重试（error diagnostic / retry hint 子集）
 //!
 //! User goal:
 //! - 区分连接错误、登录错误、业务拒单、交易错误
-//! - 对可重试错误执行重试
+//! - 对可重试错误读取 typed retry hint
 //! - 对不可重试错误给出明确诊断
 //!
 //! API contract:

@@ -47,10 +47,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - S20 生产守护进程仍为“勉强”：`TqStream::health()` 现在返回
   `StreamHealthSnapshot::status()` / `should_restart()`，但 metrics endpoint、ctrl-c
   graceful shutdown 和完整 daemon supervisor 仍是 gap。
-- S21 慢消费者隔离从“勉强”推进到“自然”的底层子集：`TqStreamBuilder`
+- S21 慢消费者隔离的 bounded fan-out / lag 诊断子集已经自然表达：`TqStreamBuilder`
   可配置 root fan-out capacity，`StreamFacadeError::diagnostic()` 暴露 typed
   lag 诊断；持久化 sink runtime / per-sink retry/storage policy 仍保留为 gap。
-- S22 错误诊断与重试从“勉强”推进到“自然”的低层子集：core/session/stream
+- S22 错误诊断与重试的 error diagnostic / retry hint 子集已经自然表达：core/session/stream
   均有 typed error kind 和 retry hint；业务拒单仍应通过订单/风控 public API
   判断，完整 retry orchestration 仍是 gap。
 - S23 合约信息查询与标准化继续保持“自然”：`SessionClient::query_instrument_specs`
@@ -78,8 +78,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 18. 本地行情缓存读写 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; no live cache writer/reader contract |
 | 19. 风控前置 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration |
 | 20. 生产守护进程 | 勉强 | 中 | 少量 | 少量 | 中 | 中 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `StreamHealthSnapshot::{status, should_restart}`; metrics/graceful shutdown still gap |
-| 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; `TqStreamBuilder::commit_channel_capacity`; `CommitStream`; `StreamFacadeError::{Lagged, diagnostic}`; durable sink runtime still gap |
-| 22. 错误诊断与重试 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; `ContractError::{kind, retry_hint}`; `SessionFacadeError::diagnostic`; `StreamFacadeError::diagnostic`; retry orchestration still gap |
+| 21. 慢消费者隔离 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; bounded fan-out / typed lag diagnostic 子集自然；durable sink runtime 仍是 gap |
+| 22. 错误诊断与重试 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; error kind / retry hint 子集自然；retry orchestration 仍是 gap |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
 | 24. 最小可测试策略 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; fake reconnect/deterministic clock remains gap |
 

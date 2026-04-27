@@ -1,4 +1,4 @@
-//! Scenario: 慢消费者隔离
+//! Scenario: 慢消费者隔离（bounded fan-out / lag 诊断子集）
 //!
 //! User goal:
 //! - 写库 / 日志不能拖慢核心行情循环
@@ -6,9 +6,10 @@
 //! - 核心策略消费者不受影响
 //!
 //! API contract:
-//! - fan-out/backpressure 策略是 public config
+//! - fan-out/backpressure 的底层 capacity 是 public config
 //! - fan-out buffer capacity 可显式配置
-//! - 慢消费者错误不会影响 session driver
+//! - 慢消费者 lag 通过 typed diagnostic 暴露
+//! - durable sink lifecycle / per-sink retry/storage policy 仍是 gap
 //! - 不要求用户自建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
