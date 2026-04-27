@@ -176,6 +176,7 @@ tqsdk-task
 - history page/series/download
 - CSV export
 - offline market cache record / JSONL reader-writer / ordered replay foundation
+- history series -> market cache replay adapter
 - Greeks、历史主连等研究派生能力
 
 设计原因：

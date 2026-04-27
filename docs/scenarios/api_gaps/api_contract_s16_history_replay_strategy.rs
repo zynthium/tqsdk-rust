@@ -33,12 +33,15 @@
 //! 的有序 quote/kline/tick cache event，并将它们推进到正常 runtime market
 //! commit。回放策略通过同一个 `StrategyContext` 读取 quote/kline/tick、
 //! account/position，并提交 typed task order。
+//! `KlineDataSeries::into_market_cache_replay` 与
+//! `TickDataSeries::into_market_cache_replay` 已提供 history series 到 cache
+//! replay 的直接 adapter。
 //!
 //! Remaining API gap:
-//! `tqsdk-task::StrategyReplay` 已提供 cache replay -> strategy context
-//! foundation。剩余 gap 是 `DataClient` history series 到 replay event 的直接
-//! adapter、replay speed/clock control、resumable replay checkpoint，以及面向生产
-//! 策略部署的统一 live/sim/replay environment abstraction。
+//! `tqsdk-task::StrategyReplay` 已提供 history/cache replay -> strategy context
+//! foundation。剩余 gap 是 replay speed/clock control、resumable replay
+//! checkpoint、多序列 replay convenience builder，以及面向生产策略部署的统一
+//! live/sim/replay environment abstraction。
 //!
 //! 理想用户代码草案：
 //! ```ignore

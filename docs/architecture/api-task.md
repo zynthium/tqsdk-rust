@@ -131,7 +131,7 @@
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 - 完整 live / sim / replay environment adapter
-- `DataClient` history series adapter、replay speed/clock/checkpoint、fake reconnect / latency / deterministic clock
+- replay speed/clock/checkpoint、多序列 replay builder、fake reconnect / latency / deterministic clock
 
 ## 为什么它必须独立成 crate
 
@@ -696,8 +696,8 @@ impl TargetPosScheduler {
 当前 `tqsdk-task` 已经进入稳固阶段，下一步不应继续扩宽 surface，而应优先：
 
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
-2. 在 `StrategyHost` 之上继续设计 live / sim / replay environment adapter 和
-   history replay driver。
+2. 在 `StrategyHost` / `StrategyReplay` 之上继续设计 live / sim / replay
+   environment adapter、replay clock/checkpoint 和多序列 replay builder。
 3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、
    stream adapter、callback 倒灌进 core/session/wait。

@@ -2,12 +2,13 @@
 //!
 //! User goal:
 //! - 历史行情按时间顺序驱动同一套策略逻辑
-//! - quote / kline replay 进入标准 strategy context
+//! - DataClient 拉取的历史 K线直接进入标准 strategy context
 //! - 回放策略可以复用 typed 下单与 fake broker 验证成交
 //!
 //! API contract:
+//! - history series 到 replay event 的转换是 public API
 //! - history/cache replay 是 public strategy replay driver，不是用户手写 runtime for-loop
-//! - replay event 输出标准 quote/kline/tick 状态读取面
+//! - replay event 输出标准 kline/tick/quote 状态读取面
 //! - 策略无需区分 live market event 和 replay market event 的状态读取 API
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -26,56 +27,54 @@
 //! Review questions:
 //! - 当前 API 是否自然表达历史回放驱动策略？
 //! - 是否存在状态一致性风险？
-//! - 剩余 history adapter / replay clock gap 是否被明确排除？
+//! - 剩余 replay clock/checkpoint gap 是否被明确排除？
 
 use std::time::Duration;
 
-use tqsdk_core::{Kline, Quote};
-use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
+use chrono::{Duration as ChronoDuration, Utc};
+use tqsdk_data::{DataClient, KlineDataSeriesRequest};
+use tqsdk_session::SessionClientBuilder;
 use tqsdk_task::StrategyReplay;
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
 
+fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+    std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let symbol = "SHFE.au2602";
+    let user = read_env("TQ_AUTH_USER")?;
+    let pass = read_env("TQ_AUTH_PASS")?;
+    let symbol = std::env::var("TQ_TEST_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".to_string());
     let duration = Duration::from_secs(60);
+    let end = Utc::now();
+    let start = end - ChronoDuration::hours(4);
 
-    let quote = Quote {
-        last_price: 480.5,
-        ..Quote::default()
-    };
-    let kline = Kline {
-        id: 1,
-        datetime: 1_900,
-        open: 480.0,
-        high: 482.0,
-        low: 479.0,
-        close: 481.0,
-        ..Kline::default()
-    };
-
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote("cache", symbol, 1_000, Some(900), quote)?,
-        MarketCacheEvent::kline(
-            "cache",
-            symbol,
-            2_000,
-            Some(1_900),
-            60_000_000_000,
-            kline,
-        )?,
-    ]);
+    let session = SessionClientBuilder::new(user, pass)
+        .futures_market()
+        .build()?;
+    let client = DataClient::from_session(session);
+    let series = client
+        .get_kline_data_series(KlineDataSeriesRequest::new(
+            symbol.clone(),
+            duration,
+            start
+                .timestamp_nanos_opt()
+                .ok_or("invalid start timestamp")?,
+            end.timestamp_nanos_opt().ok_or("invalid end timestamp")?,
+        ))
+        .await?;
+    let replay = series.into_market_cache_replay("history")?;
 
     let mut strategy = StrategyReplay::builder(replay)
         .market(
             FakeMarket::new()
                 .account("sim", 100_000.0)
-                .position("sim", symbol, 0),
+                .position("sim", symbol.as_str(), 0),
         )
         .broker(FakeBroker::new().fill_all())
         .account("sim")
-        .quote(symbol)
-        .kline(symbol, duration, 32)
+        .kline(symbol.as_str(), duration, 64)
         .build()
         .await?;
 
@@ -88,14 +87,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             event.event_time_ns()
         );
 
-        let last_price = ctx.quote(symbol)?.last_price;
-        let last_close = ctx.kline(symbol, duration)?.last().map(|row| row.close);
-        let position = ctx.position("sim", symbol)?;
+        let last_row = ctx.kline(symbol.as_str(), duration)?.last().cloned();
+        let position = ctx.position("sim", symbol.as_str())?;
 
-        if matches!(last_close, Some(close) if close > last_price) && position.pos_long == 0 {
+        if let Some(row) = last_row
+            && row.close.is_finite()
+            && row.close > row.open
+            && position.pos_long == 0
+        {
             ctx.orders("sim")
-                .buy_open(symbol, 1)
-                .limit(last_price)
+                .buy_open(symbol.as_str(), 1)
+                .limit(row.close)
                 .send_once("history-replay-entry-1")
                 .await?;
 
@@ -104,8 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "orders={} trades={} pos_long={}",
                 report.orders().len(),
                 report.trades().len(),
-                report.position("sim", symbol)?.pos_long
+                report.position("sim", symbol.as_str())?.pos_long
             );
+            break;
         }
     }
 

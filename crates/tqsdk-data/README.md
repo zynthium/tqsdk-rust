@@ -82,6 +82,11 @@
 `MarketCacheReplay` define the offline cache record and replay foundation for
 standard `Quote` / `Kline` / `Tick` payloads.
 
+`KlineDataSeries::into_market_cache_events` /
+`KlineDataSeries::into_market_cache_replay` and the matching tick methods
+connect owned history series to that replay foundation without requiring users
+to hand-build cache events.
+
 This is not a live durable sink runtime: it does not spawn tasks, isolate slow
 consumers, manage WAL compaction, or drive `StrategyHost`. Those remain
 scenario gaps above this data-layer foundation.

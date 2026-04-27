@@ -288,14 +288,16 @@ crate 分层合并成一份迭代计划。
 - `tqsdk-task::StrategyReplay` 已连接 `tqsdk-data::MarketCacheReplay`，
   cache quote/kline/tick event 可以按时间顺序推进到同构 `StrategyContext`，
   并复用 typed order builder 与 fake broker。
+- `KlineDataSeries` / `TickDataSeries` 已提供 history series -> cache replay
+  adapter，S16 可以从 `DataClient` 历史序列直接进入 `StrategyReplay`。
 - S11 简单策略已提升为正式 task example；S24 最小可测试策略已新增正式
-  task example；S16 cache replay -> strategy context 子集已提升为正式 task
+  task example；S16 history series -> strategy context 子集已提升为正式 task
   example。
 
 仍未完成、不可伪装为已支持：
 
 - S15 完整 live / sim / replay environment adapter。
-- S16 `DataClient` history series -> replay event adapter。
+- 多序列 replay convenience builder。
 - replay speed/clock control、resumable replay checkpoint。
 - fake reconnect、延迟、跨 step 部分成交推进与 deterministic clock。
 - 跨进程 intent / test fixture 持久恢复。
@@ -376,6 +378,9 @@ crate 分层合并成一份迭代计划。
   offline replay iterator。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
+- `KlineDataSeries` / `TickDataSeries` 已提供 `into_market_cache_events`
+  与 `into_market_cache_replay`，覆盖 history series -> cache replay
+  adapter foundation。
 - `api_contract_s18_local_market_cache` 已提升为正式 data example，明确只
   覆盖 cache record / reader-writer / replay 子集。
 
@@ -384,7 +389,7 @@ crate 分层合并成一份迭代计划。
 - live market stream pipe；
 - durable sink runtime、可靠队列、WAL compaction；
 - 跨进程锁、索引和 cache compaction；
-- `DataClient` history series -> cache replay adapter；
+- 多序列 replay convenience builder；
 - replay speed/clock control 和 checkpoint/resume。
 
 优先提升的场景：

@@ -200,6 +200,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
 - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 也已经落在 `tqsdk-data`
+- `KlineDataSeries` / `TickDataSeries` 到 `MarketCacheReplay` 的 adapter
+  已经落在 `tqsdk-data`
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
 - `data_page` 是对底层 chart/history contract 的显式单页封装
@@ -213,6 +215,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的 cache record、JSONL reader/writer 和 deterministic replay iterator，不拥有 live session、不创建任务、不隔离慢消费者，也不驱动 `StrategyHost`
+- history series replay adapter 只把 owned `KlineDataSeries` / `TickDataSeries`
+  materialize 成 `MarketCacheEvent` / `MarketCacheReplay`，不引入策略执行语义
 - async history 相关入口会主动获取 auth context 并校验 `tq_dl`，避免把权限问题拖到 chart/websocket timeout
 - `data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 async 读取阶段会再次强校验
 - 默认 SHFE 历史示例会显式切到 `futures_market()`，避免把 futures history 请求发到 stock market route
@@ -236,5 +240,5 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
 2. 在此基础上继续保持 `DataClient + data_page + data_series + data_download` 也只是底层 substrate
-3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代
+3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter 已完成，后续重点是 cache index/compaction 与 live sink adapter
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface
