@@ -1,11 +1,14 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::time::Duration;
+
 use tqsdk_core::{Account, Position, Quote};
+use tqsdk_wait::{KlineSerialRef, KlineWindow, TickSerialRef, TickWindow};
 
 use crate::order::TaskOrderBuilder;
 use crate::risk::RiskEngine;
-use crate::testing::StrategyTestReport;
 use crate::target_pos::TargetPosBuilder;
+use crate::testing::StrategyTestReport;
 use crate::{Result, TaskError, TaskHost};
 
 /// Builder for a single-owner strategy host.
@@ -13,6 +16,8 @@ pub struct StrategyHostBuilder {
     host: TaskHost,
     accounts: Vec<String>,
     quotes: Vec<String>,
+    klines: Vec<StrategyKlineSpec>,
+    ticks: Vec<StrategyTickSpec>,
 }
 
 /// Single-owner strategy runtime built on [`TaskHost`].
@@ -20,6 +25,8 @@ pub struct StrategyHost {
     host: TaskHost,
     accounts: Vec<String>,
     quotes: Vec<String>,
+    klines: Vec<StrategyKlineHandle>,
+    ticks: Vec<StrategyTickHandle>,
 }
 
 /// Summary of one strategy update step.
@@ -32,6 +39,31 @@ pub struct StrategyUpdate {
 pub struct StrategyContext<'a> {
     host: &'a mut TaskHost,
     update: StrategyUpdate,
+    klines: &'a [StrategyKlineHandle],
+    ticks: &'a [StrategyTickHandle],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrategyKlineSpec {
+    symbol: String,
+    duration_ns: i64,
+    view_width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrategyTickSpec {
+    symbol: String,
+    view_width: usize,
+}
+
+struct StrategyKlineHandle {
+    spec: StrategyKlineSpec,
+    serial: KlineSerialRef,
+}
+
+struct StrategyTickHandle {
+    spec: StrategyTickSpec,
+    serial: TickSerialRef,
 }
 
 impl StrategyHost {
@@ -48,6 +80,8 @@ impl StrategyHost {
         Ok(Some(StrategyContext {
             host: &mut self.host,
             update: StrategyUpdate { updated },
+            klines: &self.klines,
+            ticks: &self.ticks,
         }))
     }
 
@@ -90,6 +124,8 @@ impl StrategyHostBuilder {
             host,
             accounts: Vec::new(),
             quotes: Vec::new(),
+            klines: Vec::new(),
+            ticks: Vec::new(),
         }
     }
 
@@ -105,14 +141,72 @@ impl StrategyHostBuilder {
         self
     }
 
+    #[must_use]
+    pub fn kline(mut self, symbol: impl AsRef<str>, duration: Duration, view_width: usize) -> Self {
+        let spec = StrategyKlineSpec {
+            symbol: symbol.as_ref().to_owned(),
+            duration_ns: duration_to_ns(duration),
+            view_width,
+        };
+        if !self.klines.iter().any(|existing| existing == &spec) {
+            self.klines.push(spec);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn tick(mut self, symbol: impl AsRef<str>, view_width: usize) -> Self {
+        let spec = StrategyTickSpec {
+            symbol: symbol.as_ref().to_owned(),
+            view_width,
+        };
+        if !self.ticks.iter().any(|existing| existing == &spec) {
+            self.ticks.push(spec);
+        }
+        self
+    }
+
     pub async fn build(mut self) -> Result<StrategyHost> {
         for symbol in &self.quotes {
             self.host.api_mut().get_quote(symbol).await?;
         }
+
+        let mut kline_handles = Vec::new();
+        for spec in &self.klines {
+            let serial = self
+                .host
+                .api_mut()
+                .get_kline_serial(
+                    &spec.symbol,
+                    Duration::from_nanos(spec.duration_ns as u64),
+                    spec.view_width,
+                )
+                .await?;
+            kline_handles.push(StrategyKlineHandle {
+                spec: spec.clone(),
+                serial,
+            });
+        }
+
+        let mut tick_handles = Vec::new();
+        for spec in &self.ticks {
+            let serial = self
+                .host
+                .api_mut()
+                .get_tick_serial(&spec.symbol, spec.view_width)
+                .await?;
+            tick_handles.push(StrategyTickHandle {
+                spec: spec.clone(),
+                serial,
+            });
+        }
+
         Ok(StrategyHost {
             host: self.host,
             accounts: self.accounts,
             quotes: self.quotes,
+            klines: kline_handles,
+            ticks: tick_handles,
         })
     }
 }
@@ -136,6 +230,35 @@ impl StrategyContext<'_> {
             .quote_ref(symbol.as_ref())
             .load(self.host.api())
             .map_err(Into::into)
+    }
+
+    pub fn kline(&self, symbol: impl AsRef<str>, duration: Duration) -> Result<KlineWindow> {
+        let duration_ns = duration_to_ns(duration);
+        let symbol = symbol.as_ref();
+        let Some(handle) = self
+            .klines
+            .iter()
+            .find(|handle| handle.spec.symbol == symbol && handle.spec.duration_ns == duration_ns)
+        else {
+            return Err(TaskError::InvalidState(
+                "strategy kline serial is not configured",
+            ));
+        };
+        handle.serial.load(self.host.api()).map_err(Into::into)
+    }
+
+    pub fn tick(&self, symbol: impl AsRef<str>) -> Result<TickWindow> {
+        let symbol = symbol.as_ref();
+        let Some(handle) = self
+            .ticks
+            .iter()
+            .find(|handle| handle.spec.symbol == symbol)
+        else {
+            return Err(TaskError::InvalidState(
+                "strategy tick serial is not configured",
+            ));
+        };
+        handle.serial.load(self.host.api()).map_err(Into::into)
     }
 
     pub fn account(&self, account_id: impl AsRef<str>) -> Result<Account> {
@@ -196,4 +319,8 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|existing| existing == value) {
         values.push(value.to_owned());
     }
+}
+
+fn duration_to_ns(duration: Duration) -> i64 {
+    (duration.as_secs() as i64) * 1_000_000_000 + i64::from(duration.subsec_nanos())
 }

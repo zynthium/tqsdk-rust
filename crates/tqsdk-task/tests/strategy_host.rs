@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
@@ -93,6 +95,75 @@ fn seed_account_position_quote(
         .expect("seed account/position commit should produce a commit");
 }
 
+fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            "wait-kline-SHFE.rb2601-60000000000-16": {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 60_000_000_000_i64
+                                },
+                                "left_id": 1,
+                                "right_id": 1,
+                                "more_data": false,
+                                "ready": true
+                            },
+                            "wait-tick-SHFE.rb2601-16": {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 0
+                                },
+                                "left_id": 1,
+                                "right_id": 1,
+                                "more_data": false,
+                                "ready": true
+                            }
+                        },
+                        "klines": {
+                            symbol: {
+                                "60000000000": {
+                                    "data": {
+                                        "1": {
+                                            "id": 1,
+                                            "datetime": 1_000_i64,
+                                            "open": 3670.0,
+                                            "high": 3680.0,
+                                            "low": 3660.0,
+                                            "close": 3678.0
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "data": {
+                                    "1": {
+                                        "id": 1,
+                                        "datetime": 1_100_i64,
+                                        "last_price": 3679.0
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed serial market commit should produce a commit");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_context_reads_quote_account_and_position() {
     let host = seeded_host();
@@ -173,4 +244,29 @@ async fn strategy_context_target_pos_delegates_to_task_host_ownership() {
             active_task_kind: TaskKind::TargetPos,
         }
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_context_reads_kline_and_tick_windows() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, "sim", "SHFE.rb2601", 80_000.0, 0, 3_678.0);
+    seed_ready_kline_and_tick(&host, "SHFE.rb2601");
+
+    let mut strategy = StrategyHost::builder(host)
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .kline("SHFE.rb2601", Duration::from_secs(60), 16)
+        .tick("SHFE.rb2601", 16)
+        .build()
+        .await
+        .unwrap();
+    let ctx = strategy.next_once().await.unwrap();
+
+    let klines = ctx.kline("SHFE.rb2601", Duration::from_secs(60)).unwrap();
+    let ticks = ctx.tick("SHFE.rb2601").unwrap();
+
+    assert_eq!(klines.len(), 1);
+    assert_eq!(klines.last().unwrap().close, 3_678.0);
+    assert_eq!(ticks.len(), 1);
+    assert_eq!(ticks.last().unwrap().last_price, 3_679.0);
 }
