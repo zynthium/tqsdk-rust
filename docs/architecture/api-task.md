@@ -45,6 +45,7 @@
   - execution group foundation
   - account group / multi-account order foundation
   - strategy host / strategy context
+  - strategy cache replay driver
   - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
 
@@ -67,6 +68,12 @@
   - 复用 `TaskHost::wait_update()` 作为单推进点
   - 在同一稳定 context 内读取 quote/account/position
   - 通过同一个 context 进入 typed order builder、target-pos 和 risk gate
+- `StrategyReplay`
+  - 消费 `tqsdk-data::MarketCacheReplay` 的有序 quote/kline/tick cache event
+  - 将 cache event 推进为正常 runtime market commit
+  - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
+  - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
+    strategy execution 搬入 data
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略
@@ -124,7 +131,7 @@
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
 - 完整 live / sim / replay environment adapter
-- history replay driver、cache replay、fake reconnect / latency / deterministic clock
+- `DataClient` history series adapter、replay speed/clock/checkpoint、fake reconnect / latency / deterministic clock
 
 ## 为什么它必须独立成 crate
 

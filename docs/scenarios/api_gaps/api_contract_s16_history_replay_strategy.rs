@@ -29,14 +29,16 @@
 //! - 应由 `tqsdk-data` 还是新的 replay/strategy facade 承接？
 //!
 //! Current API note:
-//! `tqsdk-task::StrategyHost` 已提供策略侧应对齐的 context 形状：
-//! 策略步骤通过同一个 context 读取 quote/position/account 并提交 typed
-//! task order。
+//! `tqsdk-task::StrategyReplay` 已能消费 `tqsdk-data::MarketCacheReplay`
+//! 的有序 quote/kline/tick cache event，并将它们推进到正常 runtime market
+//! commit。回放策略通过同一个 `StrategyContext` 读取 quote/kline/tick、
+//! account/position，并提交 typed task order。
 //!
 //! Remaining API gap:
-//! `tqsdk-data` 能拉取历史序列，并提供 cache event replay iterator；
-//! `tqsdk-session` 有 replay control-plane helper。但还没有把历史/cache
-//! event 转成 `StrategyHost` 同构 update/context 的 public replay driver。
+//! `tqsdk-task::StrategyReplay` 已提供 cache replay -> strategy context
+//! foundation。剩余 gap 是 `DataClient` history series 到 replay event 的直接
+//! adapter、replay speed/clock control、resumable replay checkpoint，以及面向生产
+//! 策略部署的统一 live/sim/replay environment abstraction。
 //!
 //! 理想用户代码草案：
 //! ```ignore

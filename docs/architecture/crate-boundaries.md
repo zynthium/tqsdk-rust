@@ -259,9 +259,15 @@
 - `TargetPosScheduler`
 - ownership / guarded order
 - execution report
+- strategy host / strategy context
+- strategy cache replay driver
+- public fake market / fake broker test harness
 - 规划与执行之间的本地任务状态机
 
 它是执行工具层，不是消费 facade，也不是协议 substrate。
+它可以消费 `tqsdk-data` cache/history event 构建 strategy replay driver；这是
+上层集成路径，不代表 cache storage 进入 task，也不代表 strategy execution
+进入 data。
 
 ### 不应吸收的能力
 

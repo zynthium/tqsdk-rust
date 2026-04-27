@@ -117,6 +117,7 @@ V1 是：
   - execution group foundation
   - account group foundation
   - strategy host / strategy context
+  - strategy cache replay foundation
   - public fake market / fake broker test harness
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
 - `tqsdk-data`
@@ -132,6 +133,9 @@ V1 是：
 - 不反向修改 `tqsdk-core` 的 runtime contract
 - 不在 facade 层复制第二棵状态树
 - direct query 不重新塞回 `tqsdk-wait`
+- `tqsdk-task` 可以消费 `tqsdk-data` cache/history event 构建 strategy replay
+  driver；这是上层集成路径，不代表 cache storage 进入 task，也不代表 strategy
+  execution 进入 data
 
 ## API 归属总表
 

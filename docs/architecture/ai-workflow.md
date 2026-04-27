@@ -150,6 +150,7 @@ tqsdk-task
 - execution group foundation
 - account group / multi-account order foundation
 - strategy host / strategy context
+- strategy cache replay driver
 - public fake market / fake broker test harness
 - execution report
 - planner/executor 的本地任务状态机
@@ -158,6 +159,9 @@ tqsdk-task
 
 - 任务层维护业务执行状态，既不是协议 substrate，也不是通用消费 facade。
 - 它可以依赖 `tqsdk-wait` 的稳定截面语义，但不得反向要求 core 改写提交模型。
+- 它可以在 strategy replay driver 中消费 `tqsdk-data` 的 cache/history event。
+  这是上层集成路径；不得把 cache storage 下沉进 task，也不得把 strategy
+  execution 下沉进 data。
 
 演进方向：
 
