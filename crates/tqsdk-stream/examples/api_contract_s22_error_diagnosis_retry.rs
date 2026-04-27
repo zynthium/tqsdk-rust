@@ -8,7 +8,7 @@
 //! API contract:
 //! - public error enum 有稳定分类和 retry hint
 //! - trade reject 与 transport failure 不混在一个字符串里
-//! - retry policy 可配置并能审计
+//! - retry hint 可读取；完整 retry policy orchestration 保留为 gap
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!

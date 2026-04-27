@@ -39,7 +39,10 @@
 - `MarketEventBuilder`
 - `MarketEventStream`
 - `StreamHealthSnapshot`
+- `StreamHealthStatus`
 - `StreamSessionPhase`
+- `StreamErrorDiagnostic`
+- `StreamErrorKind`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -69,6 +72,10 @@
 - `quotes(...).await`
 - `market_events()`
 - `health()`
+- `StreamHealthSnapshot::status()`
+- `StreamHealthSnapshot::should_restart()`
+- `StreamFacadeError::diagnostic()`
+- `StreamFacadeError::is_retryable()`
 - `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
@@ -164,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `trade_target_tqkq_stock_numbered(<1..99>)`
 - `trade_target_with_url(...)`
 - `replay_url(...)`
+- `commit_channel_capacity(...)`
 
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
 
@@ -194,8 +202,19 @@ provider 级恢复 flag。
 
 生产守护进程如果只需要 typed health snapshot，可以调用 `TqStream::health()`。
 返回的 `StreamHealthSnapshot` 包含 runtime revision、session phase、最近一次
-reconnect diagnostics 和 stream driver closed 状态；完整 metrics endpoint、ctrl-c
-graceful shutdown 和可靠 sink isolation 仍属于上层 daemon/tooling 能力。
+reconnect diagnostics 和 stream driver closed 状态，并提供
+`status()` / `should_restart()` 作为生产指标和日志的最小判定；完整 metrics
+endpoint、ctrl-c graceful shutdown 和可靠 sink isolation 仍属于上层
+daemon/tooling 能力。
+
+慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`
+表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过
+`StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
+信息。这个配置不是 durable queue，也不是 per-sink retry/storage policy。
+
+错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
+`tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。它只负责错误分类和 retry
+hint，不负责执行业务级 retry orchestration。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

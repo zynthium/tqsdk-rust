@@ -85,9 +85,12 @@ V1 是：
   - shared session shell
   - lazy establish + route / pending-route 驱动原语
   - `progress_once()` 这个最小 substrate 推进原语
+  - `subscribe_quotes()` / `unsubscribe_quotes()` 这类低层命令 helper
   - `wait_command_completed()` 这个最小 control-plane 等待原语
   - direct query / schema refresh 薄层入口
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
+  - `InstrumentSpec` / `InstrumentClass` 这类一次性 metadata 标准化对象
+  - session-level error diagnostic / retry hint wrapper
   - session-scoped order intent ledger，供上层 facade 在同一 session 内对稳定
     client order id 做去重和命令关联
   - 保持“纯 async substrate，调用方自带 Tokio runtime”的约束
@@ -101,8 +104,10 @@ V1 是：
   - 允许通过 `session()` 落回同一个底层 `SessionClient`，但不复制 direct query API
 - `tqsdk-stream`
   - shared-session multi-consumer commit stream facade
+  - root fan-out capacity 配置与 typed lag diagnostics
   - commit/path/scope/domain/object/field filters
   - typed path stream / ready kline-tick window / trade session events
+  - health status / restart hint
   - `stream.session()` 仍然是一次性 direct query 的逃生舱，但不改变 direct query 的 crate 归属
 - `tqsdk-task`
   - `TaskHost`
@@ -137,10 +142,12 @@ V1 是：
 | :--- | :--- | :--- |
 | GraphQL / HTTP query | `tqsdk-session` | 一次 `await` 请求/响应，不依赖 `wait_update()` 或 stream |
 | schema refresh / fetch | `tqsdk-session` | 一次性拉取/刷新，不是持续变化对象 |
-| 合约元数据查询 | `tqsdk-session` | 属于 direct query / metadata，不需要模式化消费 |
+| 合约元数据查询 / `InstrumentSpec` 标准化 | `tqsdk-session` | 属于 direct query / metadata，不需要模式化消费 |
 | 交易日历 | `tqsdk-session` | 一次性结果，不应绑定某种 diff 消费形状 |
 | `SymbolSettlement` / `SymbolRanking` / 其他 metadata query | `tqsdk-session` | 都是 query 结果，不是 live object |
 | session 内订单 intent ledger | `tqsdk-session` | 是 shared session substrate，帮助 wait/stream/task 复用同一 client order id 去重语义，但不拥有 live order object |
+| 低层行情命令 helper | `tqsdk-session` | 是一次性 runtime command submission，不拥有 live quote object 或消费循环 |
+| stream fan-out capacity / lag diagnostics / health status | `tqsdk-stream` | 属于 continuous consumption 的 consumer/channel 状态，不应下沉到 core/session |
 | `get_quote` / `get_trading_status` | `tqsdk-wait` / `tqsdk-stream` | 返回持续变化对象，依赖 commit 持续推进 |
 | `get_kline_serial` / `get_tick_serial` | `tqsdk-wait` / `tqsdk-stream` | 返回持续更新窗口，依赖后续 diff |
 | `get_account` / `get_position` / `get_order` / `get_trade` | `tqsdk-wait` / `tqsdk-stream` | 读取的是同一棵状态树中的 live 对象 |

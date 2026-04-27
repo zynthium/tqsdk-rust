@@ -18,6 +18,8 @@
 - `SessionClient`
 - lazy establish 的 live session owner
 - `progress_once(deadline).await`
+- `subscribe_quotes(...).await`
+- `unsubscribe_quotes(...).await`
 - `flush_outbound()`
 - `drive_pending_once()`
 - `drive_route_once()`
@@ -34,6 +36,7 @@
 - `refresh_schema(...).await`
 - `refresh_schema_value(...).await`
 - `query_symbol_info(...).await`
+- `query_instrument_specs(...).await`
 - `query_quotes(...).await`
 - `query_cont_quotes(...).await`
 - `query_options(...).await`
@@ -45,10 +48,14 @@
 - `AllLevelOptionQuery`
 - `FinanceOptionLevelQuery`
 - `OptionLevelQuotes`
+- `InstrumentSpec`
+- `InstrumentClass`
 - `SessionRawQuery`
 - `SessionMetadataQuery`
 - `SessionServiceQuery`
 - `SessionDirectQuery`
+- `SessionFacadeError::diagnostic()`
+- `SessionFacadeError::is_retryable()`
 - `refresh_auth(...).await`
 - `refresh_auth_value(...).await`
 - `replay_step(...).await`
@@ -146,10 +153,10 @@
 
 而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
 
-- 直接通过 `RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })` 提交订阅
+- 通过 `SessionClient::subscribe_quotes(...)` 提交最薄行情订阅命令
 - 用 `SessionClient::progress_once()` 推进 live session
 - 用 `RuntimeReader::cursor()` / `RuntimeReader::next()` 自己消费 commit 边界
-- 用 `SnapshotReadGuard::decode_path::<Quote>()` 读取最新快照
+- 用 `RuntimeReader::read_market_state()` 走热路径 market partition 读取最新 quote
 
 而 `trade_login_tqkq.rs` 展示的是同一层 substrate 的另一条典型路径：
 
@@ -186,6 +193,8 @@ client order id 与 runtime order id 的对应关系。这个 ledger 会随
 这些接口仍然属于 `tqsdk-session`，因为它们只是一次性 request/response：
 
 - `query_symbol_info(...)` 已实现
+- `query_instrument_specs(...)` 已实现，用 `InstrumentSpec` 表达合约规格，
+  避免用户把 live `Quote` 当作 metadata 对象
 - `query_quotes(...)` 已实现
 - `query_cont_quotes(...)` 已实现
 - `query_options(...)` 已实现

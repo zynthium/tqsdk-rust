@@ -79,8 +79,11 @@ tqsdk-task
 - shared session owner
 - lazy establish、route/pending-route driving、reconnect/resync control
 - one-shot request/response helpers
+- low-level market command helpers that remain one-shot command submission
+- typed instrument metadata normalization
 - GraphQL / HTTP query、schema refresh、metadata、calendar、settlement、ranking、EDB
 - auth refresh、replay step/reset 这类 one-shot control-plane helper
+- session-level error diagnostics / retry hints
 - 天勤特定 auth/http/TqKq 实现的内部落点
 
 设计原因：
@@ -119,6 +122,7 @@ tqsdk-task
 职责：
 
 - shared-session multi-consumer commit fan-out
+- fan-out capacity configuration、lag diagnostics、health status
 - commit/path/scope/domain/object/field filters
 - typed path stream、ready kline/tick window stream
 - trade object/session event stream

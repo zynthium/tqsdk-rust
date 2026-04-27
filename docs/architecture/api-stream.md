@@ -172,6 +172,7 @@ impl TqStreamBuilder {
         trade_url: impl Into<String>,
     ) -> Self;
     pub fn replay_url(self, replay_url: impl Into<String>) -> Self;
+    pub fn commit_channel_capacity(self, capacity: usize) -> tqsdk_stream::Result<Self>;
 
     pub async fn build(self) -> tqsdk_stream::Result<TqStream>;
 }
@@ -182,6 +183,7 @@ impl TqStreamBuilder {
 - 和 `tqsdk-wait::TqApiBuilder` 保持相似建造路径
 - 继续复用 `SessionClientBuilder`
 - 优先暴露命名清楚的 market-target shortcut，避免 façade 层继续传播裸布尔 market 选择
+- 只暴露 stream 自身的连续消费配置，例如 root fan-out capacity
 - 不在 stream builder 重新定义 direct query 选项
 
 ### root facade
@@ -366,8 +368,9 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面
 - `health()` 是生产部署的 typed snapshot 读面，只从 runtime `system/session`
-  状态和 stream driver closed flag 组装 `StreamHealthSnapshot`；它不是 metrics
-  endpoint、supervisor 或 graceful shutdown 框架。
+  状态和 stream driver closed flag 组装 `StreamHealthSnapshot`，并提供
+  `status()` / `should_restart()` 作为最小状态判定；它不是 metrics endpoint、
+  supervisor 或 graceful shutdown 框架。
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
@@ -606,6 +609,19 @@ pub struct StreamHealthSnapshot {
     pub driver_closed: bool,
 }
 
+pub enum StreamHealthStatus {
+    Starting,
+    Healthy,
+    Recovering,
+    Degraded,
+    Closed,
+}
+
+impl StreamHealthSnapshot {
+    pub fn status(&self) -> StreamHealthStatus;
+    pub fn should_restart(&self) -> bool;
+}
+
 pub struct SessionReconnectEvent {
     pub attempt: u32,
     pub scheduled_backoff_ms: u64,
@@ -641,6 +657,8 @@ impl futures::Stream for TradeSessionEventStream {
 - 对 commit-backed 事件保留 `Option<CommitResult>` 中的 `Some(commit)`，不伪造 driver error 的 commit
 - 实现层直接订阅 raw driver 事件，而不是建立在 `CommitStream` 之上，以免把 `DriverEvent::Error` 提前折叠成 facade error
 - `Closed` / `Lagged` 仍保留为 stream error，因为这两个语义属于消费通道自身，而不是业务事件
+- `StreamFacadeError::diagnostic()` 将 contract/session/lag/closed/missing-value
+  错误统一成 typed kind + retry hint；它不执行 retry policy，也不解释业务拒单
 
 ## 第一版实现边界
 
@@ -697,8 +715,13 @@ impl futures::Stream for TradeSessionEventStream {
 最小语义应当是：
 
 - 慢消费者落后时，返回 `Lagged`
+- root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)` 显式配置
 - 不为慢消费者阻塞整个 session 驱动
 - 不为每个订阅者维护独立 cursor + 独立 route 驱动
+
+这个配置只控制 stream facade 内部 bounded broadcast ring。durable sink runtime、
+per-sink retry/storage policy、本地 WAL 或数据库写入隔离属于后续 daemon/tooling
+层，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。
 
 为什么第一版不做更复杂的 path/object fan-out：
 

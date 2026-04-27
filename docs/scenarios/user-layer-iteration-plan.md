@@ -315,11 +315,32 @@ crate 分层合并成一份迭代计划。
 - `tqsdk-stream`：health/recovery/error event stream、sink isolation。
 - `tqsdk-session`：底层连接和登录错误分类。
 
+已落地：
+
+- `tqsdk-core::ContractError` 提供 stable `ContractErrorKind` 与 `RetryHint`，
+  只表达底层错误类别和重试提示，不承载 stream/sink 策略。
+- `tqsdk-session::SessionFacadeError::diagnostic()` 将 core 错误映射为
+  session 级 typed diagnostic，并提供 `is_retryable()`。
+- `tqsdk-stream::StreamFacadeError::diagnostic()` 覆盖 session/contract 错误、
+  `Lagged`、`Closed` 和 missing value，慢消费者 lag 不再需要字符串判断。
+- `TqStreamBuilder::commit_channel_capacity(...)` 暴露 root fan-out buffer 配置；
+  `CommitStream` 继续使用 bounded broadcast，落后 consumer 通过 typed `Lagged`
+  观察背压。
+- `StreamHealthSnapshot::status()` / `should_restart()` 补齐生产 health snapshot
+  的最小状态判定。
+
+仍未完成、不可伪装为已支持：
+
+- metrics hook / HTTP health endpoint；
+- ctrl-c graceful shutdown 与 async close/flush contract；
+- durable sink runtime、per-sink retry/storage policy、本地 WAL；
+- 统一 retry policy orchestration 与业务拒单审计。
+
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`
-- `api_contract_s22_error_diagnosis_retry`
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag 子集已提升为正式 stream example）
+- `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
 
 ### P2：本地行情缓存与研究闭环
 
