@@ -276,28 +276,25 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s24_testable_strategy`
 
-下一批执行计划：
+已落地：
 
 - 计划文档：[`../superpowers/plans/2026-04-27-strategy-host-test-harness.md`](../superpowers/plans/2026-04-27-strategy-host-test-harness.md)
-- 批次目标：先在 `tqsdk-task` 建立最小 `StrategyHost` / `StrategyContext`
-  和 public fake market / fake broker test harness。
-- 本批应优先提升：
-  - S11 简单策略：若 formal example 能通过一个稳定 strategy context 表达
-    行情触发、typed 下单、持仓读取、止盈止损，则从“勉强”推进到“自然”。
-  - S24 最小可测试策略：若用户可以用 public fake harness 编写单元测试且不
-    调用 hidden `*_for_test` API，则从“无法表达”推进到“勉强”。
-- 本批只收窄但不关闭：
-  - S15 实盘 / 模拟 / 回放切换：先复用同一 strategy loop 形状，完整环境
-    adapter 留到下一批。
-  - S16 历史行情回放：先确定未来 replay driver 要对齐的 strategy context，
-    不在本批直接冻结历史回放驱动。
-- 边界约束：
-  - 不新增 crate。
-  - 不把 strategy/test harness 下沉到 `tqsdk-core` / `tqsdk-session` /
-    `tqsdk-wait` / `tqsdk-stream`。
-  - 不引入用户可见 Tokio task、channel、`Arc<Mutex<_>>` 或 provider protocol
-    类型。
-  - 不为了测试方便扩大 core public surface。
+- `tqsdk-task` 已建立最小 `StrategyHost` / `StrategyContext`，策略步骤可以在同一
+  task/wait 推进点内读取 quote/account/position，并复用 typed order、
+  target-pos 和 risk gate。
+- `tqsdk-task::testing` 已提供 public `StrategyTestHarness`、`FakeMarket`
+  和 `FakeBroker`，支持全成、拒单和单步部分成交测试；用户不需要 hidden
+  `*_for_test` API、runtime handle、channel 或 provider protocol。
+- S11 简单策略已提升为正式 task example；S24 最小可测试策略已新增正式
+  task example。
+
+仍未完成、不可伪装为已支持：
+
+- S15 完整 live / sim / replay environment adapter。
+- S16 `tqsdk-data` backed history replay driver。
+- S18 cache replay。
+- fake reconnect、延迟、跨 step 部分成交推进与 deterministic clock。
+- 跨进程 intent / test fixture 持久恢复。
 
 ### P2：生产守护、慢消费者隔离和错误诊断
 

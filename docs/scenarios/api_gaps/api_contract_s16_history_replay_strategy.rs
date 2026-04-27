@@ -28,9 +28,16 @@
 //! - 是否存在状态一致性风险？
 //! - 应由 `tqsdk-data` 还是新的 replay/strategy facade 承接？
 //!
-//! API gap:
+//! Current API note:
+//! `tqsdk-task::StrategyHost` 已提供策略侧应对齐的 context 形状：
+//! 策略步骤通过同一个 context 读取 quote/position/account 并提交 typed
+//! task order。
+//!
+//! Remaining API gap:
 //! `tqsdk-data` 能拉取历史序列，`tqsdk-session` 有 replay control-plane
-//! helper，但没有把历史数据转成标准 live strategy events 的 public driver。
+//! helper，但还没有把历史数据转成 `StrategyHost` 同构 update/context 的
+//! public replay driver。后续 `HistoryReplay` 应复用这一策略 context，而不是
+//! 让用户手写历史 K线到实时事件的转换循环。
 //!
 //! 理想用户代码草案：
 //! ```ignore

@@ -44,6 +44,8 @@
   - 最小 pre-trade risk gate
   - execution group foundation
   - account group / multi-account order foundation
+  - strategy host / strategy context
+  - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
 
 原因很直接：
@@ -61,6 +63,14 @@
 - `RiskEngine` / `RiskRejection` 最小前置风控
 - `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
 - `AccountGroup` / `MultiAccountOrderTicket` 多账户执行 foundation
+- `StrategyHost` / `StrategyContext`
+  - 复用 `TaskHost::wait_update()` 作为单推进点
+  - 在同一稳定 context 内读取 quote/account/position
+  - 通过同一个 context 进入 typed order builder、target-pos 和 risk gate
+- `tqsdk-task::testing`
+  - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker`
+  - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略
+  - 当前覆盖 quote/account/position seed、全成、拒单和单步部分成交
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -113,6 +123,8 @@
 - 自动 hedge / flatten、timed cancel / replace、group/account resume / audit
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
+- 完整 live / sim / replay environment adapter
+- history replay driver、cache replay、fake reconnect / latency / deterministic clock
 
 ## 为什么它必须独立成 crate
 
@@ -665,16 +677,23 @@ impl TargetPosScheduler {
    typed group outcome/exposure report。
 8. `AccountGroup` 能用 typed group id 提交比例拆分后的多账户订单、先做全账户 preflight，
    并给出 typed per-account outcome report。
-9. scheduler 能按步骤推进并给出独立 execution report。
-10. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
+9. `StrategyHost` 能提供同一 strategy context 读取 quote/account/position，并复用
+   typed order、risk 和 target-pos 入口。
+10. public test harness 能用 fake market / fake broker 测试策略，不暴露 runtime
+    handle、provider protocol、channel 或 `Arc<Mutex<_>>`。
+11. scheduler 能按步骤推进并给出独立 execution report。
+12. `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 无需为了 task 反向改写主 contract。
 
 ## 下一步建议
 
 当前 `tqsdk-task` 已经进入稳固阶段，下一步不应继续扩宽 surface，而应优先：
 
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
-2. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
-3. 保持 task runtime 独立，不把 scheduler、report、stream adapter、callback 倒灌进 core/session/wait。
+2. 在 `StrategyHost` 之上继续设计 live / sim / replay environment adapter 和
+   history replay driver。
+3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
+4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、
+   stream adapter、callback 倒灌进 core/session/wait。
 
 本轮已补充未物化 tracked order 的回归：
 

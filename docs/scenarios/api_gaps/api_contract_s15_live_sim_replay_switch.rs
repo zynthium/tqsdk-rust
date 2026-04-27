@@ -28,9 +28,15 @@
 //! - 是否保持同一策略 contract？
 //! - 是否需要新增 strategy/runtime facade？
 //!
-//! API gap:
-//! builder 已有 live/backtest/replay 相关配置入口，但没有统一的
-//! strategy runtime abstraction 让同一策略代码直接切换运行环境。
+//! Current API note:
+//! `tqsdk-task::StrategyHost` 已提供基于 `TaskHost` 的共同 strategy
+//! loop/context 形状；同一套策略步骤可以在真实 `TaskHost` 和 public
+//! `StrategyTestHarness` 之间复用。
+//!
+//! Remaining API gap:
+//! builder 已有 live/backtest/replay 相关配置入口，但还没有完整的
+//! `StrategyEnvironment` adapter 让 live / sim / replay 在构建配置层完成切换。
+//! history replay 和 provider-backed sim 也尚未实现同一个 environment contract。
 //!
 //! 理想用户代码草案：
 //! ```ignore

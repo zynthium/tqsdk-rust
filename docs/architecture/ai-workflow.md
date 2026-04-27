@@ -145,6 +145,8 @@ tqsdk-task
 - pre-trade risk gate
 - execution group foundation
 - account group / multi-account order foundation
+- strategy host / strategy context
+- public fake market / fake broker test harness
 - execution report
 - planner/executor 的本地任务状态机
 
