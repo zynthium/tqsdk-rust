@@ -37,6 +37,7 @@ pub use direct_query::{
     OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SessionMetadataQuery,
     SessionRawQuery, SessionServiceQuery, SymbolRankingType,
 };
-pub use error::{Result, SessionFacadeError};
+pub use error::{Result, SessionErrorDiagnostic, SessionErrorKind, SessionFacadeError};
 pub use order_intent::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec};
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};
+pub use tqsdk_core::RetryHint;
