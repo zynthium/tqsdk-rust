@@ -71,8 +71,8 @@ pub use shutdown::{
 pub use sink::{
     CommitSink, StreamCommitJournal, StreamCommitJournalDomain, StreamCommitJournalRecord,
     StreamCommitJournalReplayReport, StreamCommitJournalScope, StreamSinkFuture, StreamSinkHandle,
-    StreamSinkOptions, StreamSinkRetryPolicy, StreamSinkShutdownReport, StreamSinkStats,
-    StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalCompactionReport,
+    StreamSinkOptions, StreamSinkProfile, StreamSinkRetryPolicy, StreamSinkShutdownReport,
+    StreamSinkStats, StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalCompactionReport,
     StreamSinkWalFsyncPolicy, StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
     StreamSinkWalRecoveryReport,
 };

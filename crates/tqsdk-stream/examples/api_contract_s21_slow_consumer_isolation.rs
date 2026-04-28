@@ -55,7 +55,7 @@
 use futures::StreamExt;
 use tqsdk_core::CommitResult;
 use tqsdk_stream::{
-    StreamCommitJournal, StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy,
+    StreamCommitJournal, StreamSinkFuture, StreamSinkProfile, StreamSinkRetryPolicy,
     StreamSinkWalCompaction, StreamSinkWalFsyncPolicy, StreamSinkWalRecovery, TqStreamBuilder,
 };
 
@@ -73,11 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut strategy_commits = stream.commit_stream()?;
     let wal_path = std::env::temp_dir().join("tqsdk-warehouse-sink.jsonl");
     let journal_path = std::env::temp_dir().join("tqsdk-warehouse-commit-journal.jsonl");
-    let warehouse_options = StreamSinkOptions::new()
-        .retry_policy(StreamSinkRetryPolicy::limited(3)?)
-        .jsonl_wal(wal_path.clone())
-        .jsonl_commit_journal(journal_path.clone())
-        .wal_fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord);
+    let warehouse_options =
+        StreamSinkProfile::reliable_jsonl(wal_path.clone(), journal_path.clone())
+            .retry_policy(StreamSinkRetryPolicy::limited(3)?)
+            .fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord)
+            .into_options();
     let warehouse_sink = stream.spawn_commit_sink_with_options(
         "warehouse",
         write_warehouse_commit,

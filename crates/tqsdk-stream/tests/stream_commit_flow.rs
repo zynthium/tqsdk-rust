@@ -8,8 +8,8 @@ use std::sync::{
 use tqsdk_core::Quote;
 use tqsdk_stream::{
     CommitSink, StreamCommitJournal, StreamFacadeError, StreamSinkFuture, StreamSinkOptions,
-    StreamSinkRetryPolicy, StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalFsyncPolicy,
-    StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
+    StreamSinkProfile, StreamSinkRetryPolicy, StreamSinkStatus, StreamSinkWalCompaction,
+    StreamSinkWalFsyncPolicy, StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
 };
 
 mod support;
@@ -249,6 +249,25 @@ async fn managed_commit_sink_records_replayable_jsonl_commit_journal() {
 fn stream_sink_options_expose_wal_fsync_policy() {
     let options = StreamSinkOptions::new().wal_fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord);
 
+    assert_eq!(
+        options.fsync_policy(),
+        StreamSinkWalFsyncPolicy::EveryRecord
+    );
+}
+
+#[test]
+fn stream_sink_profile_builds_reliable_jsonl_options() {
+    let wal = std::env::temp_dir().join("profile-wal.jsonl");
+    let journal = std::env::temp_dir().join("profile-journal.jsonl");
+
+    let options = StreamSinkProfile::reliable_jsonl(wal.clone(), journal.clone())
+        .retry_policy(StreamSinkRetryPolicy::limited(5).unwrap())
+        .fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord)
+        .into_options();
+
+    assert_eq!(options.wal_path(), Some(wal.as_path()));
+    assert_eq!(options.commit_journal_path(), Some(journal.as_path()));
+    assert_eq!(options.retry_policy_config().max_attempts(), 5);
     assert_eq!(
         options.fsync_policy(),
         StreamSinkWalFsyncPolicy::EveryRecord
