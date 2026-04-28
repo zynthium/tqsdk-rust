@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashMap;
+
 use tqsdk_core::{AccountId, Revision, Symbol, TradeDirection, TradeOffset};
 
 use crate::{Result, TaskError, TaskOrderIntent};
@@ -38,6 +40,8 @@ pub struct RiskProjectionReport {
     projected_net: Option<i64>,
     price_basis: Option<f64>,
     estimated_price_volume: Option<f64>,
+    contract_multiplier: Option<i64>,
+    estimated_notional: Option<f64>,
 }
 
 impl RiskProjectionReport {
@@ -74,6 +78,16 @@ impl RiskProjectionReport {
     #[must_use]
     pub fn estimated_price_volume(&self) -> Option<f64> {
         self.estimated_price_volume
+    }
+
+    #[must_use]
+    pub fn contract_multiplier(&self) -> Option<i64> {
+        self.contract_multiplier
+    }
+
+    #[must_use]
+    pub fn estimated_notional(&self) -> Option<f64> {
+        self.estimated_notional
     }
 }
 
@@ -136,6 +150,17 @@ pub enum RiskRejection {
         reference_price: f64,
         max_abs_deviation: f64,
     },
+    PriceNotOnTick {
+        symbol: String,
+        limit_price: f64,
+        price_tick: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct InstrumentRiskRule {
+    price_tick: f64,
+    volume_multiple: i64,
 }
 
 /// Stateless pre-trade risk gate for task-level order entrypoints.
@@ -145,6 +170,7 @@ pub struct RiskEngine {
     min_available: Option<f64>,
     max_abs_net_position: Option<i64>,
     max_abs_price_deviation: Option<f64>,
+    instrument_rules: HashMap<String, InstrumentRiskRule>,
 }
 
 impl RiskEngine {
@@ -177,6 +203,23 @@ impl RiskEngine {
         self
     }
 
+    #[must_use]
+    pub fn instrument_specs<I>(mut self, specs: I) -> Self
+    where
+        I: IntoIterator<Item = tqsdk_session::InstrumentSpec>,
+    {
+        for spec in specs {
+            self.instrument_rules.insert(
+                spec.symbol.as_str().to_string(),
+                InstrumentRiskRule {
+                    price_tick: spec.price_tick,
+                    volume_multiple: spec.volume_multiple,
+                },
+            );
+        }
+        self
+    }
+
     pub fn check(&self, api: &tqsdk_wait::TqApi, intent: &TaskOrderIntent) -> Result<RiskDecision> {
         Ok(self.check_report(api, intent)?.into_decision())
     }
@@ -206,6 +249,17 @@ impl RiskEngine {
                 .and_then(|quote| quote.last_price.is_finite().then_some(quote.last_price))
         });
         let estimated_price_volume = price_basis.map(|price| price * intent.volume as f64);
+        let contract_multiplier = self
+            .instrument_rules
+            .get(&intent.symbol)
+            .map(|rule| {
+                validate_instrument_rule(rule)?;
+                Ok::<i64, TaskError>(rule.volume_multiple)
+            })
+            .transpose()?;
+        let estimated_notional = price_basis
+            .zip(contract_multiplier)
+            .map(|(price, multiplier)| price * intent.volume as f64 * multiplier as f64);
 
         Ok(RiskProjectionReport {
             revision,
@@ -215,6 +269,8 @@ impl RiskEngine {
             projected_net,
             price_basis,
             estimated_price_volume,
+            contract_multiplier,
+            estimated_notional,
         })
     }
 
@@ -301,6 +357,25 @@ impl RiskEngine {
             }
         }
 
+        if let Some(limit_price) = intent.limit_price {
+            if !limit_price.is_finite() {
+                return Err(TaskError::InvalidState("limit price must be finite"));
+            }
+            if let Some(rule) = self.instrument_rules.get(&intent.symbol) {
+                validate_instrument_rule(rule)?;
+                if !price_is_on_tick(limit_price, rule.price_tick) {
+                    return Ok(RiskCheckReport {
+                        revision,
+                        decision: RiskDecision::Rejected(RiskRejection::PriceNotOnTick {
+                            symbol: intent.symbol.clone(),
+                            limit_price,
+                            price_tick: rule.price_tick,
+                        }),
+                    });
+                }
+            }
+        }
+
         if let Some(max_abs_deviation) = self.max_abs_price_deviation {
             if !max_abs_deviation.is_finite() || max_abs_deviation < 0.0 {
                 return Err(TaskError::InvalidState(
@@ -352,6 +427,28 @@ impl RiskEngine {
             decision: RiskDecision::Accepted,
         })
     }
+}
+
+fn validate_instrument_rule(rule: &InstrumentRiskRule) -> Result<()> {
+    if !rule.price_tick.is_finite() || rule.price_tick <= 0.0 {
+        return Err(TaskError::InvalidState(
+            "instrument risk price_tick must be positive",
+        ));
+    }
+    if rule.volume_multiple <= 0 {
+        return Err(TaskError::InvalidState(
+            "instrument risk volume_multiple must be positive",
+        ));
+    }
+    Ok(())
+}
+
+fn price_is_on_tick(price: f64, price_tick: f64) -> bool {
+    if !price.is_finite() || !price_tick.is_finite() || price_tick <= 0.0 {
+        return false;
+    }
+    let ticks = (price / price_tick).round();
+    (price - ticks * price_tick).abs() <= price_tick * 1e-9
 }
 
 fn project_net_position(current_net: i64, intent: &TaskOrderIntent) -> i64 {

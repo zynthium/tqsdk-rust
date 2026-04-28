@@ -1,7 +1,7 @@
 //! Scenario: 风控前置
 //!
 //! User goal:
-//! - 下单前检查资金、持仓、价格和单笔限额
+//! - 下单前检查资金、持仓、价格、合约 tick size 和单笔限额
 //! - 拒绝不安全订单
 //! - 留下可审计的 typed 拒绝原因
 //!
@@ -11,6 +11,7 @@
 //! - 风控读取账户/持仓/quote 时使用同一稳定状态截面
 //! - 风控检查可以返回带 revision 的 typed report 供审计
 //! - 风控试算可以返回 revision-bound projection，供下单前解释 projected position/notional
+//! - 合约 metadata 通过 `InstrumentSpec` 接入 task risk，而不是散落在策略代码
 //! - 订单价格和方向通过 typed builder 表达
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -23,6 +24,7 @@
 //!
 //! Regression signal:
 //! - 下单前资金/持仓/quote 不是同一 revision
+//! - tick size / contract multiplier 需要用户自己查询和手写校验
 //! - 规则拒绝原因不可审计
 //! - guarded 和 unguarded order API 容易混用
 //! - 用户必须手动同步订单去重和风控状态
@@ -68,12 +70,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     api.get_quote(symbol.as_str()).await?;
+    let instrument_specs = api
+        .session()
+        .query_instrument_specs(&[symbol.as_str()])
+        .await?;
 
     let risk = RiskEngine::new()
         .max_order_volume(3)
         .min_available(1_000.0)
         .max_net_position(5)
-        .max_price_deviation(20.0);
+        .max_price_deviation(20.0)
+        .instrument_specs(instrument_specs);
     let mut host = TaskHost::new(api).with_risk(risk);
     let intent = TaskOrderIntent {
         account_id: account_id.clone(),
@@ -87,14 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(risk) = host.risk() {
         let projection = risk.project_order(host.api(), &intent)?;
         println!(
-            "risk projection rev={} account={} symbol={} current_net={:?} projected_net={:?} price_basis={:?} price_volume={:?}",
+            "risk projection rev={} account={} symbol={} current_net={:?} projected_net={:?} price_basis={:?} price_volume={:?} multiplier={:?} notional={:?}",
             projection.revision().get(),
             projection.account_id(),
             projection.symbol(),
             projection.current_net(),
             projection.projected_net(),
             projection.price_basis(),
-            projection.estimated_price_volume()
+            projection.estimated_price_volume(),
+            projection.contract_multiplier(),
+            projection.estimated_notional()
         );
 
         let report = risk.check_report(host.api(), &intent)?;

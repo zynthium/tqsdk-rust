@@ -311,6 +311,76 @@ fn risk_engine_project_order_exposes_revision_bound_position_projection() {
     );
 }
 
+#[test]
+fn risk_engine_rejects_limit_price_not_aligned_to_instrument_tick() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, 100_000.0, 0, 3_660.0);
+    let spec = tqsdk_session::InstrumentSpec {
+        symbol: tqsdk_core::Symbol::new("SHFE.rb2601"),
+        exchange_id: "SHFE".to_string(),
+        product_id: "rb".to_string(),
+        class: tqsdk_session::InstrumentClass::Future,
+        price_tick: 0.2,
+        volume_multiple: 10,
+        expire_datetime_ns: None,
+        underlying_symbol: None,
+    };
+    let intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 1,
+        limit_price: Some(3_678.1),
+    };
+
+    let report = RiskEngine::new()
+        .instrument_specs([spec])
+        .check_report(host.api(), &intent)
+        .unwrap();
+
+    assert!(matches!(
+        report.decision().rejection(),
+        Some(RiskRejection::PriceNotOnTick {
+            symbol,
+            limit_price,
+            price_tick
+        }) if symbol == "SHFE.rb2601" && *limit_price == 3_678.1 && *price_tick == 0.2
+    ));
+}
+
+#[test]
+fn risk_projection_uses_instrument_volume_multiple_for_notional() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, 100_000.0, 2, 3_660.0);
+    let spec = tqsdk_session::InstrumentSpec {
+        symbol: tqsdk_core::Symbol::new("SHFE.rb2601"),
+        exchange_id: "SHFE".to_string(),
+        product_id: "rb".to_string(),
+        class: tqsdk_session::InstrumentClass::Future,
+        price_tick: 1.0,
+        volume_multiple: 10,
+        expire_datetime_ns: None,
+        underlying_symbol: None,
+    };
+    let intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 3,
+        limit_price: Some(3_678.0),
+    };
+
+    let projection = RiskEngine::new()
+        .instrument_specs([spec])
+        .project_order(host.api(), &intent)
+        .unwrap();
+
+    assert_eq!(projection.contract_multiplier(), Some(10));
+    assert_eq!(projection.estimated_notional(), Some(3_678.0 * 3.0 * 10.0));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_guarded_insert_uses_configured_risk_engine() {
     let mut host = seeded_host().with_risk(RiskEngine::new().max_order_volume(1));
