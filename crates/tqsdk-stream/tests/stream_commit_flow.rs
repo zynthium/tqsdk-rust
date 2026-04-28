@@ -7,9 +7,9 @@ use std::sync::{
 };
 use tqsdk_core::Quote;
 use tqsdk_stream::{
-    CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy,
-    StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
-    StreamSinkWalRecordKind, StreamSinkWalRecovery,
+    CommitSink, StreamCommitJournal, StreamFacadeError, StreamSinkFuture, StreamSinkOptions,
+    StreamSinkRetryPolicy, StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalFsyncPolicy,
+    StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
 };
 
 mod support;
@@ -173,6 +173,76 @@ async fn managed_commit_sink_retries_failures_and_records_jsonl_wal() {
     );
 
     let _ = std::fs::remove_file(&wal_path);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_commit_sink_records_replayable_jsonl_commit_journal() {
+    let journal_path = temp_wal_path("stream-commit-journal");
+    let _ = std::fs::remove_file(&journal_path);
+
+    let stream = support::core_seed::seeded_stream();
+    let sink = CountingSink::new();
+    let options = StreamSinkOptions::new().jsonl_commit_journal(journal_path.clone());
+    let sink_handle = stream
+        .spawn_commit_sink_with_options("warehouse", sink, options)
+        .unwrap();
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 618.0);
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 619.0);
+
+    wait_until(|| sink_handle.stats().processed_commits() == 2).await;
+    let report = sink_handle.shutdown().await.unwrap();
+    assert_eq!(report.stats().journal_records(), 2);
+
+    let records = StreamCommitJournal::new()
+        .read_jsonl(&journal_path)
+        .expect("commit journal should be readable");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].revision(), 1);
+    assert_eq!(records[1].revision(), 2);
+    assert!(
+        records[0]
+            .paths()
+            .iter()
+            .any(|path| path == &["quotes".to_string(), "SHFE.au2602".to_string()])
+    );
+
+    let replay_sink = CountingSink::new();
+    let replay_state = replay_sink.state();
+    let replay_report = StreamCommitJournal::new()
+        .replay_jsonl(&journal_path, replay_sink)
+        .await
+        .expect("commit journal should replay into a sink");
+
+    assert_eq!(replay_report.replayed_commits(), 2);
+    assert_eq!(replay_report.last_replayed_revision(), Some(2));
+    assert_eq!(
+        *replay_state
+            .revisions
+            .lock()
+            .expect("test sink revisions mutex poisoned"),
+        vec![1, 2]
+    );
+
+    let replay_sink = CountingSink::new();
+    let replay_state = replay_sink.state();
+    let replay_report = StreamCommitJournal::new()
+        .after_revision(1)
+        .replay_jsonl(&journal_path, replay_sink)
+        .await
+        .expect("commit journal should replay after a checkpoint");
+
+    assert_eq!(replay_report.replayed_commits(), 1);
+    assert_eq!(replay_report.last_replayed_revision(), Some(2));
+    assert_eq!(
+        *replay_state
+            .revisions
+            .lock()
+            .expect("test sink revisions mutex poisoned"),
+        vec![2]
+    );
+
+    let _ = std::fs::remove_file(&journal_path);
 }
 
 #[test]
@@ -381,6 +451,7 @@ struct CountingSink {
 }
 
 struct CountingSinkState {
+    revisions: Mutex<Vec<u64>>,
     flushed: AtomicUsize,
 }
 
@@ -388,6 +459,7 @@ impl CountingSink {
     fn new() -> Self {
         Self {
             state: Arc::new(CountingSinkState {
+                revisions: Mutex::new(Vec::new()),
                 flushed: AtomicUsize::new(0),
             }),
         }
@@ -399,8 +471,16 @@ impl CountingSink {
 }
 
 impl CommitSink for CountingSink {
-    fn handle_commit(&mut self, _commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
-        Box::pin(async { Ok(()) })
+    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            state
+                .revisions
+                .lock()
+                .expect("test sink revisions mutex poisoned")
+                .push(commit.revision.get());
+            Ok(())
+        })
     }
 
     fn flush(&mut self) -> StreamSinkFuture {

@@ -1,15 +1,17 @@
-//! Scenario: 慢消费者隔离（剩余 gap：durable queue / cross-process commit replay）
+//! Scenario: 慢消费者隔离（剩余 gap：durable daemon queue / runtime state recovery）
 //!
 //! User goal:
 //! - 写库 / 日志不能拖慢核心行情循环
 //! - sink 可以独立重试、落盘、维护 WAL，并审计未完成 revision
+//! - sink commit metadata 可以按 checkpoint 重放
 //! - 核心策略消费者不受慢 sink 影响
 //!
 //! API contract:
 //! - bounded fan-out、lag diagnostics、managed commit sink、有限重试和 JSONL WAL
 //!   已由 `tqsdk-stream` 提供
-//! - WAL fsync policy、本地 compaction 和 recovery report 已由 `tqsdk-stream` 提供
-//! - durable queue 和跨进程 commit payload replay 尚未形成 public API
+//! - WAL fsync policy、本地 compaction、recovery report 和 commit metadata
+//!   journal replay 已由 `tqsdk-stream` 提供
+//! - durable daemon queue、跨进程锁和 runtime state snapshot recovery 尚未形成 public API
 //! - 不要求用户自建 channel
 //! - 不要求用户手写 Tokio supervisor task
 //!
@@ -22,7 +24,7 @@
 //! Regression signal:
 //! - sink 失败会关闭核心策略 consumer
 //! - 有限重试或 JSONL WAL policy 只能散落在业务代码里
-//! - durable queue / 跨进程 commit replay 只能散落在业务代码里
+//! - durable daemon queue / runtime state recovery 只能散落在业务代码里
 //!
 //! Review questions:
 //! - sink runtime 是否应该在 `tqsdk-stream` 之上独立成 tooling？
@@ -35,8 +37,9 @@
 //! `TqStream::spawn_commit_sink_with_options(...)` / `StreamSinkOptions` /
 //! `StreamSinkRetryPolicy` / `CommitSink` / `StreamSinkHandle`
 //! 已覆盖 managed commit sink、有限重试、JSONL WAL、typed stats 和 shutdown
-//! flush report、WAL fsync policy、本地 compaction 和 WAL recovery report。本文件只
-//! 保留 durable queue 和跨进程 commit payload replay 能力 gap。
+//! flush report、WAL fsync policy、本地 compaction、WAL recovery report 和 commit
+//! metadata journal replay。本文件只保留 durable daemon queue、跨进程锁和 runtime
+//! state snapshot recovery 能力 gap。
 //!
 //! 理想用户代码草案：
 //! ```ignore

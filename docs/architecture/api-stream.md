@@ -731,6 +731,9 @@ impl futures::Stream for TradeSessionEventStream {
 - 旧 WAL 可通过 `StreamSinkWalRecovery` 扫描出 delivered / pending / failed
   revisions、lagged records 和 flush failures；它只提供审计/恢复报告，不提供
   commit payload 重放
+- sink 可通过 `StreamSinkOptions::jsonl_commit_journal(...)` 额外写入本地
+  commit metadata journal；后续进程可通过 `StreamCommitJournal::replay_jsonl(...)`
+  按 revision checkpoint 重放到 `CommitSink`
 - 生产进程关闭时可通过 `TqStream::graceful_shutdown()` 显式 flush outbound、
   关闭 stream driver 并汇总 managed sink shutdown report
 - 生产进程可通过 `TqStream::reconnect_monitor()` 等待并报告既有 session
@@ -743,7 +746,9 @@ impl futures::Stream for TradeSessionEventStream {
 stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
 JSONL WAL 是本地审计/恢复基础，不是 durable queue；fsync policy 与本地 JSONL
 compaction 是 stream sink 的本地文件维护能力；WAL recovery report 只解释审计
-元数据，跨进程 commit payload 重放恢复仍属于后续 daemon/tooling 层。
+元数据。commit journal 只重放 `CommitResult` 级元数据，不恢复 runtime state
+snapshot，也不提供跨进程锁、调度或 daemon queue；这些仍属于后续 daemon/tooling
+层。
 `graceful_shutdown()` 是
 stream facade 的显式关闭工具；`reconnect_monitor()` 只做 typed wait/report。
 两者都不接管底层 reconnect 执行，也不应下沉到 `tqsdk-core` 或

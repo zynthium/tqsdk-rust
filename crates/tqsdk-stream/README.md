@@ -47,6 +47,11 @@
 - `StreamErrorDiagnostic`
 - `StreamErrorKind`
 - `CommitSink`
+- `StreamCommitJournal`
+- `StreamCommitJournalRecord`
+- `StreamCommitJournalReplayReport`
+- `StreamCommitJournalScope`
+- `StreamCommitJournalDomain`
 - `StreamSinkHandle`
 - `StreamSinkStats`
 - `StreamSinkShutdownReport`
@@ -244,15 +249,17 @@ SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 信息。写库 / 日志这类非核心消费者可以通过 `TqStream::spawn_commit_sink(...)`
 交给 SDK 托管，sink 在独立 consumer task 中消费 commit，并通过
 `StreamSinkStats` / `StreamSinkShutdownReport` 暴露 processed / lagged / errors /
-retry_attempts / wal_records 和 flush 结果。需要有限重试或本地 JSONL WAL 时，
+retry_attempts / wal_records / journal_records 和 flush 结果。需要有限重试或本地 JSONL WAL 时，
 使用 `TqStream::spawn_commit_sink_with_options(...)` 传入 `StreamSinkOptions`、
 `StreamSinkRetryPolicy` 和 `jsonl_wal(...)`。如果本地 WAL 需要更强落盘语义，可配置
 `StreamSinkWalFsyncPolicy::EveryRecord`；如果需要裁剪本地 JSONL WAL，可使用
 `StreamSinkWalCompaction` 按 revision 保留记录并返回 typed compaction report。
 如果新进程需要审计旧 WAL，可使用 `StreamSinkWalRecovery` 扫描 delivered /
 pending / failed revisions、lagged records 和 flush failures；它只基于 WAL
-元数据生成 report，不提供 commit payload 重放。这个 sink foundation 不是 durable
-queue，也不负责跨进程重放恢复。
+元数据生成 report。需要让后续进程按 revision checkpoint 重放 sink commit
+元数据时，可用 `StreamSinkOptions::jsonl_commit_journal(...)` 写入本地 commit
+journal，并用 `StreamCommitJournal::replay_jsonl(...)` 重放到 `CommitSink`。这个
+foundation 不是完整 durable daemon queue，也不恢复 runtime state snapshot。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
 `tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。它只负责错误分类和 retry

@@ -11,6 +11,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tqsdk_core::{
+    ChangeSet, CommandId, CommitResult, CommitScope, ProtocolDomain, Revision, StatePath,
+};
 
 use crate::{CommitStream, Result, StreamFacadeError};
 
@@ -18,7 +21,7 @@ pub type StreamSinkFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'st
 
 /// User-provided commit sink run by `tqsdk-stream`.
 pub trait CommitSink: Send + 'static {
-    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture;
+    fn handle_commit(&mut self, commit: CommitResult) -> StreamSinkFuture;
 
     fn flush(&mut self) -> StreamSinkFuture {
         Box::pin(async { Ok(()) })
@@ -31,6 +34,7 @@ pub struct StreamSinkOptions {
     retry_policy: StreamSinkRetryPolicy,
     wal_path: Option<PathBuf>,
     wal_fsync_policy: StreamSinkWalFsyncPolicy,
+    commit_journal_path: Option<PathBuf>,
 }
 
 /// Retry policy applied inside a managed stream sink task.
@@ -64,6 +68,7 @@ pub struct StreamSinkStats {
     errors: u64,
     retry_attempts: u64,
     wal_records: u64,
+    journal_records: u64,
 }
 
 /// Stable record kind written by the JSONL sink WAL.
@@ -121,6 +126,53 @@ pub struct StreamSinkWalRecoveryReport {
     flush_failed_records: u64,
 }
 
+/// JSONL commit journal used to replay commit metadata into a sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamCommitJournal {
+    after_revision: Option<u64>,
+}
+
+/// Stable JSONL record for commit journal replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamCommitJournalRecord {
+    revision: u64,
+    scope: StreamCommitJournalScope,
+    domains: Vec<StreamCommitJournalDomain>,
+    paths: Vec<Vec<String>>,
+    caused_by: Vec<u64>,
+}
+
+/// Commit scope encoded in the JSONL commit journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCommitJournalScope {
+    InitialReady,
+    RealtimeUpdate,
+    ResyncRecovery,
+    ReplayStep,
+    QueryRefresh,
+    SessionTransition,
+}
+
+/// Protocol domain encoded in the JSONL commit journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCommitJournalDomain {
+    System,
+    Market,
+    Trade,
+    Replay,
+    Query,
+    Schema,
+}
+
+/// Report returned after replaying a JSONL commit journal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamCommitJournalReplayReport {
+    replayed_commits: u64,
+    last_replayed_revision: Option<u64>,
+}
+
 /// Handle returned after spawning a managed commit sink.
 pub struct StreamSinkHandle {
     name: String,
@@ -146,11 +198,22 @@ struct StreamSinkState {
     last_error: Option<StreamFacadeError>,
 }
 
+struct StreamSinkRuntime<S> {
+    name: String,
+    commits: CommitStream,
+    sink: S,
+    shutdown_rx: oneshot::Receiver<()>,
+    shared: Arc<Mutex<StreamSinkState>>,
+    retry_policy: StreamSinkRetryPolicy,
+    wal: Option<StreamSinkWalWriter>,
+    journal: Option<StreamCommitJournalWriter>,
+}
+
 impl<F> CommitSink for F
 where
-    F: FnMut(tqsdk_core::CommitResult) -> StreamSinkFuture + Send + 'static,
+    F: FnMut(CommitResult) -> StreamSinkFuture + Send + 'static,
 {
-    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+    fn handle_commit(&mut self, commit: CommitResult) -> StreamSinkFuture {
         self(commit)
     }
 }
@@ -161,6 +224,7 @@ impl Default for StreamSinkOptions {
             retry_policy: StreamSinkRetryPolicy::none(),
             wal_path: None,
             wal_fsync_policy: StreamSinkWalFsyncPolicy::Never,
+            commit_journal_path: None,
         }
     }
 }
@@ -184,6 +248,12 @@ impl StreamSinkOptions {
     }
 
     #[must_use]
+    pub fn jsonl_commit_journal(mut self, path: impl Into<PathBuf>) -> Self {
+        self.commit_journal_path = Some(path.into());
+        self
+    }
+
+    #[must_use]
     pub fn wal_fsync_policy(mut self, policy: StreamSinkWalFsyncPolicy) -> Self {
         self.wal_fsync_policy = policy;
         self
@@ -192,6 +262,11 @@ impl StreamSinkOptions {
     #[must_use]
     pub fn fsync_policy(&self) -> StreamSinkWalFsyncPolicy {
         self.wal_fsync_policy
+    }
+
+    #[must_use]
+    pub fn commit_journal_path(&self) -> Option<&Path> {
+        self.commit_journal_path.as_deref()
     }
 }
 
@@ -297,6 +372,164 @@ impl StreamSinkWalRecoveryReport {
     }
 }
 
+impl StreamCommitJournal {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn after_revision(mut self, revision: u64) -> Self {
+        self.after_revision = Some(revision);
+        self
+    }
+
+    pub fn read_jsonl(self, path: impl AsRef<Path>) -> Result<Vec<StreamCommitJournalRecord>> {
+        Ok(read_jsonl_commit_journal(path.as_ref())?
+            .into_iter()
+            .filter(|record| should_replay_journal_revision(record.revision, self.after_revision))
+            .collect())
+    }
+
+    pub async fn replay_jsonl<S>(
+        self,
+        path: impl AsRef<Path>,
+        sink: S,
+    ) -> Result<StreamCommitJournalReplayReport>
+    where
+        S: CommitSink,
+    {
+        replay_jsonl_commit_journal(path.as_ref(), self.after_revision, sink).await
+    }
+}
+
+impl StreamCommitJournalRecord {
+    #[must_use]
+    pub fn from_commit(commit: &CommitResult) -> Self {
+        Self {
+            revision: commit.revision.get(),
+            scope: StreamCommitJournalScope::from_core(commit.scope),
+            domains: commit
+                .domains
+                .iter()
+                .copied()
+                .map(StreamCommitJournalDomain::from_core)
+                .collect(),
+            paths: commit
+                .changes
+                .path_hits
+                .iter()
+                .map(|path| path.segments().to_vec())
+                .collect(),
+            caused_by: commit.caused_by.iter().map(|id| id.get()).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> StreamCommitJournalScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub fn domains(&self) -> &[StreamCommitJournalDomain] {
+        &self.domains
+    }
+
+    #[must_use]
+    pub fn paths(&self) -> &[Vec<String>] {
+        &self.paths
+    }
+
+    #[must_use]
+    pub fn caused_by(&self) -> &[u64] {
+        &self.caused_by
+    }
+
+    #[must_use]
+    pub fn to_commit(&self) -> CommitResult {
+        CommitResult::new(
+            Revision::new(self.revision),
+            self.domains.iter().map(|domain| domain.to_core()).collect(),
+            ChangeSet {
+                path_hits: self
+                    .paths
+                    .iter()
+                    .map(|segments| StatePath::new(segments.clone()))
+                    .collect(),
+                object_hits: Vec::new(),
+                field_hits: Vec::new(),
+            },
+            self.caused_by.iter().copied().map(CommandId::new).collect(),
+            self.scope.to_core(),
+        )
+    }
+}
+
+impl StreamCommitJournalScope {
+    fn from_core(scope: CommitScope) -> Self {
+        match scope {
+            CommitScope::InitialReady => Self::InitialReady,
+            CommitScope::RealtimeUpdate => Self::RealtimeUpdate,
+            CommitScope::ResyncRecovery => Self::ResyncRecovery,
+            CommitScope::ReplayStep => Self::ReplayStep,
+            CommitScope::QueryRefresh => Self::QueryRefresh,
+            CommitScope::SessionTransition => Self::SessionTransition,
+        }
+    }
+
+    fn to_core(self) -> CommitScope {
+        match self {
+            Self::InitialReady => CommitScope::InitialReady,
+            Self::RealtimeUpdate => CommitScope::RealtimeUpdate,
+            Self::ResyncRecovery => CommitScope::ResyncRecovery,
+            Self::ReplayStep => CommitScope::ReplayStep,
+            Self::QueryRefresh => CommitScope::QueryRefresh,
+            Self::SessionTransition => CommitScope::SessionTransition,
+        }
+    }
+}
+
+impl StreamCommitJournalDomain {
+    fn from_core(domain: ProtocolDomain) -> Self {
+        match domain {
+            ProtocolDomain::System => Self::System,
+            ProtocolDomain::Market => Self::Market,
+            ProtocolDomain::Trade => Self::Trade,
+            ProtocolDomain::Replay => Self::Replay,
+            ProtocolDomain::Query => Self::Query,
+            ProtocolDomain::Schema => Self::Schema,
+        }
+    }
+
+    fn to_core(self) -> ProtocolDomain {
+        match self {
+            Self::System => ProtocolDomain::System,
+            Self::Market => ProtocolDomain::Market,
+            Self::Trade => ProtocolDomain::Trade,
+            Self::Replay => ProtocolDomain::Replay,
+            Self::Query => ProtocolDomain::Query,
+            Self::Schema => ProtocolDomain::Schema,
+        }
+    }
+}
+
+impl StreamCommitJournalReplayReport {
+    #[must_use]
+    pub fn replayed_commits(&self) -> u64 {
+        self.replayed_commits
+    }
+
+    #[must_use]
+    pub fn last_replayed_revision(&self) -> Option<u64> {
+        self.last_replayed_revision
+    }
+}
+
 impl StreamSinkRetryPolicy {
     #[must_use]
     pub fn none() -> Self {
@@ -346,21 +579,26 @@ impl StreamSinkHandle {
         S: CommitSink,
     {
         let wal = StreamSinkWalWriter::open(options.wal_path.as_deref(), options.wal_fsync_policy)?;
+        let journal = StreamCommitJournalWriter::open(
+            options.commit_journal_path.as_deref(),
+            options.wal_fsync_policy,
+        )?;
         let shared = Arc::new(Mutex::new(StreamSinkState {
             status: StreamSinkStatus::Running,
             stats: StreamSinkStats::default(),
             last_error: None,
         }));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run_sink(
-            name.clone(),
+        let task = tokio::spawn(run_sink(StreamSinkRuntime {
+            name: name.clone(),
             commits,
             sink,
             shutdown_rx,
-            Arc::clone(&shared),
-            options.retry_policy,
+            shared: Arc::clone(&shared),
+            retry_policy: options.retry_policy,
             wal,
-        ));
+            journal,
+        }));
 
         Ok(Self {
             name,
@@ -435,6 +673,11 @@ impl StreamSinkStats {
     pub fn wal_records(&self) -> u64 {
         self.wal_records
     }
+
+    #[must_use]
+    pub fn journal_records(&self) -> u64 {
+        self.journal_records
+    }
 }
 
 impl StreamSinkShutdownReport {
@@ -464,18 +707,21 @@ impl StreamSinkShutdownReport {
     }
 }
 
-async fn run_sink<S>(
-    name: String,
-    mut commits: CommitStream,
-    mut sink: S,
-    mut shutdown_rx: oneshot::Receiver<()>,
-    shared: Arc<Mutex<StreamSinkState>>,
-    retry_policy: StreamSinkRetryPolicy,
-    mut wal: Option<StreamSinkWalWriter>,
-) -> StreamSinkShutdownReport
+async fn run_sink<S>(runtime: StreamSinkRuntime<S>) -> StreamSinkShutdownReport
 where
     S: CommitSink,
 {
+    let StreamSinkRuntime {
+        name,
+        mut commits,
+        mut sink,
+        mut shutdown_rx,
+        shared,
+        retry_policy,
+        mut wal,
+        mut journal,
+    } = runtime;
+
     loop {
         tokio::select! {
             biased;
@@ -494,6 +740,7 @@ where
                             &name,
                             &shared,
                             &mut wal,
+                            &mut journal,
                             &mut sink,
                             commit,
                             retry_policy,
@@ -535,14 +782,16 @@ async fn deliver_commit<S>(
     name: &str,
     shared: &Arc<Mutex<StreamSinkState>>,
     wal: &mut Option<StreamSinkWalWriter>,
+    journal: &mut Option<StreamCommitJournalWriter>,
     sink: &mut S,
-    commit: tqsdk_core::CommitResult,
+    commit: CommitResult,
     retry_policy: StreamSinkRetryPolicy,
 ) -> Result<()>
 where
     S: CommitSink,
 {
     let mut attempt = 1;
+    write_commit_journal_record(shared, journal, &commit)?;
     write_wal_record(
         shared,
         wal,
@@ -668,6 +917,11 @@ fn increment_wal_records(shared: &Arc<Mutex<StreamSinkState>>) {
     state.stats.wal_records += 1;
 }
 
+fn increment_journal_records(shared: &Arc<Mutex<StreamSinkState>>) {
+    let mut state = shared.lock().expect("stream sink state mutex poisoned");
+    state.stats.journal_records += 1;
+}
+
 fn record_error(shared: &Arc<Mutex<StreamSinkState>>, error: StreamFacadeError) {
     let mut state = shared.lock().expect("stream sink state mutex poisoned");
     state.stats.errors += 1;
@@ -707,6 +961,18 @@ fn write_wal_record(
     if let Some(wal) = wal {
         wal.write(record)?;
         increment_wal_records(shared);
+    }
+    Ok(())
+}
+
+fn write_commit_journal_record(
+    shared: &Arc<Mutex<StreamSinkState>>,
+    journal: &mut Option<StreamCommitJournalWriter>,
+    commit: &CommitResult,
+) -> Result<()> {
+    if let Some(journal) = journal {
+        journal.write(commit)?;
+        increment_journal_records(shared);
     }
     Ok(())
 }
@@ -848,6 +1114,65 @@ fn scan_jsonl_wal(path: &Path) -> Result<StreamSinkWalRecoveryReport> {
     })
 }
 
+fn read_jsonl_commit_journal(path: &Path) -> Result<Vec<StreamCommitJournalRecord>> {
+    let input = std::fs::File::open(path).map_err(|error| StreamFacadeError::Io {
+        operation: "open stream commit journal",
+        message: error.to_string(),
+    })?;
+    let mut records = Vec::new();
+
+    for line in std::io::BufReader::new(input).lines() {
+        let line = line.map_err(|error| StreamFacadeError::Io {
+            operation: "read stream commit journal",
+            message: error.to_string(),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        records.push(
+            serde_json::from_str(&line).map_err(|error| StreamFacadeError::Io {
+                operation: "parse stream commit journal record",
+                message: error.to_string(),
+            })?,
+        );
+    }
+
+    Ok(records)
+}
+
+async fn replay_jsonl_commit_journal<S>(
+    path: &Path,
+    after_revision: Option<u64>,
+    mut sink: S,
+) -> Result<StreamCommitJournalReplayReport>
+where
+    S: CommitSink,
+{
+    let mut replayed_commits = 0;
+    let mut last_replayed_revision = None;
+
+    for record in read_jsonl_commit_journal(path)? {
+        if !should_replay_journal_revision(record.revision, after_revision) {
+            continue;
+        }
+        let revision = record.revision;
+        sink.handle_commit(record.to_commit()).await?;
+        replayed_commits += 1;
+        last_replayed_revision = Some(revision);
+    }
+
+    sink.flush().await?;
+
+    Ok(StreamCommitJournalReplayReport {
+        replayed_commits,
+        last_replayed_revision,
+    })
+}
+
+fn should_replay_journal_revision(revision: u64, after_revision: Option<u64>) -> bool {
+    after_revision.is_none_or(|checkpoint| revision > checkpoint)
+}
+
 impl StreamSinkWalCompaction {
     fn retains(&self, record: &StreamSinkWalRecord) -> bool {
         match record.revision {
@@ -875,6 +1200,11 @@ fn compaction_temp_path(path: &Path) -> PathBuf {
 }
 
 struct StreamSinkWalWriter {
+    writer: std::io::BufWriter<std::fs::File>,
+    fsync_policy: StreamSinkWalFsyncPolicy,
+}
+
+struct StreamCommitJournalWriter {
     writer: std::io::BufWriter<std::fs::File>,
     fsync_policy: StreamSinkWalFsyncPolicy,
 }
@@ -916,6 +1246,54 @@ impl StreamSinkWalWriter {
                 .sync_data()
                 .map_err(|error| StreamFacadeError::Io {
                     operation: "fsync stream sink jsonl wal record",
+                    message: error.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+impl StreamCommitJournalWriter {
+    fn open(path: Option<&Path>, fsync_policy: StreamSinkWalFsyncPolicy) -> Result<Option<Self>> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| StreamFacadeError::Io {
+                operation: "open stream commit journal",
+                message: error.to_string(),
+            })?;
+        Ok(Some(Self {
+            writer: std::io::BufWriter::new(file),
+            fsync_policy,
+        }))
+    }
+
+    fn write(&mut self, commit: &CommitResult) -> Result<()> {
+        serde_json::to_writer(
+            &mut self.writer,
+            &StreamCommitJournalRecord::from_commit(commit),
+        )
+        .map_err(|error| StreamFacadeError::Io {
+            operation: "serialize stream commit journal record",
+            message: error.to_string(),
+        })?;
+        self.writer
+            .write_all(b"\n")
+            .and_then(|()| self.writer.flush())
+            .map_err(|error| StreamFacadeError::Io {
+                operation: "write stream commit journal record",
+                message: error.to_string(),
+            })?;
+        if self.fsync_policy == StreamSinkWalFsyncPolicy::EveryRecord {
+            self.writer
+                .get_ref()
+                .sync_data()
+                .map_err(|error| StreamFacadeError::Io {
+                    operation: "fsync stream commit journal record",
                     message: error.to_string(),
                 })?;
         }

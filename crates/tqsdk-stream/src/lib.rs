@@ -66,10 +66,12 @@ pub use shutdown::{
     StreamSinkShutdownError,
 };
 pub use sink::{
-    CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkOptions, StreamSinkRetryPolicy,
-    StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalCompaction,
-    StreamSinkWalCompactionReport, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
-    StreamSinkWalRecordKind, StreamSinkWalRecovery, StreamSinkWalRecoveryReport,
+    CommitSink, StreamCommitJournal, StreamCommitJournalDomain, StreamCommitJournalRecord,
+    StreamCommitJournalReplayReport, StreamCommitJournalScope, StreamSinkFuture, StreamSinkHandle,
+    StreamSinkOptions, StreamSinkRetryPolicy, StreamSinkShutdownReport, StreamSinkStats,
+    StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalCompactionReport,
+    StreamSinkWalFsyncPolicy, StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
+    StreamSinkWalRecoveryReport,
 };
 pub use typed::{PathValueStream, ValueUpdate};
 pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};
