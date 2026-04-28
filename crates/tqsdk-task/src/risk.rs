@@ -28,6 +28,55 @@ impl RiskCheckReport {
     }
 }
 
+/// Revision-bound lightweight what-if projection for one task order intent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskProjectionReport {
+    revision: Revision,
+    account_id: String,
+    symbol: String,
+    current_net: Option<i64>,
+    projected_net: Option<i64>,
+    price_basis: Option<f64>,
+    estimated_price_volume: Option<f64>,
+}
+
+impl RiskProjectionReport {
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn current_net(&self) -> Option<i64> {
+        self.current_net
+    }
+
+    #[must_use]
+    pub fn projected_net(&self) -> Option<i64> {
+        self.projected_net
+    }
+
+    #[must_use]
+    pub fn price_basis(&self) -> Option<f64> {
+        self.price_basis
+    }
+
+    #[must_use]
+    pub fn estimated_price_volume(&self) -> Option<f64> {
+        self.estimated_price_volume
+    }
+}
+
 /// Typed result of a pre-trade risk check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RiskDecision {
@@ -130,6 +179,43 @@ impl RiskEngine {
 
     pub fn check(&self, api: &tqsdk_wait::TqApi, intent: &TaskOrderIntent) -> Result<RiskDecision> {
         Ok(self.check_report(api, intent)?.into_decision())
+    }
+
+    pub fn project_order(
+        &self,
+        api: &tqsdk_wait::TqApi,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskProjectionReport> {
+        let snapshot = api.session().reader().read();
+        let revision = snapshot.revision();
+        let view = snapshot.view();
+        let trade = view.trade_state();
+        let market = view.market_state();
+        let account_id = AccountId::new(intent.account_id.clone());
+        let symbol = Symbol::new(intent.symbol.clone());
+
+        let current_net = trade
+            .position(&account_id, &symbol)?
+            .map(|position| position.volume_long - position.volume_short);
+        let projected_net = current_net.map(|current| project_net_position(current, intent));
+        let price_basis = intent.limit_price.or_else(|| {
+            market
+                .quote(&symbol)
+                .ok()
+                .flatten()
+                .and_then(|quote| quote.last_price.is_finite().then_some(quote.last_price))
+        });
+        let estimated_price_volume = price_basis.map(|price| price * intent.volume as f64);
+
+        Ok(RiskProjectionReport {
+            revision,
+            account_id: intent.account_id.clone(),
+            symbol: intent.symbol.clone(),
+            current_net,
+            projected_net,
+            price_basis,
+            estimated_price_volume,
+        })
     }
 
     pub fn check_report(

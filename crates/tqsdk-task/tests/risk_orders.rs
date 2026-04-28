@@ -282,6 +282,35 @@ fn risk_engine_report_exposes_revision_bound_decision() {
     assert_eq!(rejected_report.revision(), accepted_report.revision());
 }
 
+#[test]
+fn risk_engine_project_order_exposes_revision_bound_position_projection() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, 100_000.0, 1, 3_660.0);
+    let intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 3,
+        limit_price: Some(3_678.0),
+    };
+
+    let report = RiskEngine::new()
+        .project_order(host.api(), &intent)
+        .expect("projection should read one runtime snapshot");
+
+    assert_eq!(report.account_id(), "sim");
+    assert_eq!(report.symbol(), "SHFE.rb2601");
+    assert_eq!(report.current_net(), Some(1));
+    assert_eq!(report.projected_net(), Some(4));
+    assert_eq!(report.price_basis(), Some(3_678.0));
+    assert_eq!(report.estimated_price_volume(), Some(11_034.0));
+    assert_eq!(
+        report.revision(),
+        host.api().session().reader().read().revision()
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_guarded_insert_uses_configured_risk_engine() {
     let mut host = seeded_host().with_risk(RiskEngine::new().max_order_volume(1));
