@@ -190,9 +190,11 @@ crate 分层合并成一份迭代计划。
 已落地：
 
 - `ExecutionGroup` foundation 支持 typed group id、两腿订单、all-leg preflight、
-  session-scoped retry idempotency 和 group outcome/exposure report。
+  session-scoped retry idempotency、group outcome/exposure report 和
+  revision-bound `ExecutionGroupReport`。
 - `AccountGroup` foundation 支持 typed account group、比例拆单、全账户 preflight、
-  session-scoped retry idempotency 和 per-account outcome report。
+  session-scoped retry idempotency、per-account outcome report 和
+  revision-bound `MultiAccountOrderGroupReport`。
 
 仍未完成、不可伪装为已支持：
 
@@ -240,11 +242,15 @@ crate 分层合并成一份迭代计划。
   client intent 去重。
 - legacy `insert_order_guarded` 在配置 risk 后也会经过同一套 risk gate。
 - 风控拒绝通过 `TaskError::RiskRejected(RiskRejection)` 返回 typed reason。
+- `RiskEngine::check_report(...)` 返回 revision-bound `RiskCheckReport`，用于
+  typed 审计风控通过或拒绝原因。
+- `RiskEngine::project_order(...)` 返回轻量 revision-bound `RiskProjectionReport`，
+  提供当前净持仓、投影净持仓和 price-volume estimate foundation。
 
 仍未完成、不可伪装为已支持：
 
 - 合约 metadata 规则驱动的 tick size、涨跌停和交易所品种规则。
-- 组合级保证金 / 持仓 what-if simulation。
+- 组合级保证金 / 组合持仓 what-if simulation。当前仅有单笔订单轻量投影。
 - 多账户 / 多腿执行组上的联合限额、最大裸露量和频率控制。
 - 风控审计日志落库与热更新。
 

@@ -31,8 +31,9 @@
 //! API gap:
 //! foundation 已支持 typed account group、比例拆单、per-account order ticket 和
 //! per-account outcome，并能在账户间裸露持续超过 `max_unhedged` 后返回 typed
-//! `NeedsAttention`。仍未支持自动补单/对冲、跨账户 TargetPos 编排、
-//! persistent resume 和 durable execution audit。
+//! `NeedsAttention`；`MultiAccountOrderTicket::report(...)` 返回 revision-bound
+//! `MultiAccountOrderGroupReport`。仍未支持自动补单/对冲、跨账户 TargetPos
+//! 编排、persistent resume 和 durable execution audit。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -41,7 +42,7 @@
 //!     .add("sim-b", Ratio::new(3, 10)?)
 //!     .min_volume_per_account(1)
 //!     .build()?;
-//! let outcome = host
+//! let ticket = host
 //!     .multi_account_order(accounts)
 //!     .client_group_id("alloc-au-001")
 //!     .max_unhedged(Duration::from_secs(2))
@@ -49,9 +50,14 @@
 //!     .buy_open("SHFE.au2602", 10)
 //!     .limit(480.0)
 //!     .send_once()
-//!     .await?
-//!     .wait_finished(&mut host, None)
 //!     .await?;
+//! let report = ticket.report(host.api())?;
+//! println!(
+//!     "multi-account revision={} status={:?}",
+//!     report.revision().get(),
+//!     report.status()
+//! );
+//! let outcome = ticket.wait_finished(&mut host, None).await?;
 //! ```
 
 fn main() {}

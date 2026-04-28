@@ -31,7 +31,8 @@
 //! Remaining API gap:
 //! `tqsdk-task` 已提供最小 `ExecutionGroup` foundation：typed group id、
 //! all-leg preflight、idempotent leg order intents、group outcome、observed
-//! `max_unhedged` exposure timeout 和 exposure report。
+//! `max_unhedged` exposure timeout、exposure report 和 revision-bound
+//! `ExecutionGroupReport`。
 //!
 //! 本文件保留的是更高阶执行缺口：
 //! - 自动 hedge / flatten filled legs；
@@ -51,6 +52,12 @@
 //!     .leg("SHFE.ag2602").sell_open(15).limit(6500.0)
 //!     .send_once()
 //!     .await?;
+//! let report = group.report(host.api())?;
+//! println!(
+//!     "group revision={} status={:?}",
+//!     report.revision().get(),
+//!     report.status()
+//! );
 //! let outcome = group.wait_finished(&mut host, deadline).await?;
 //! println!("{:?}", outcome);
 //! ```

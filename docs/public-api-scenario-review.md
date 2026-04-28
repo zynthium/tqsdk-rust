@@ -20,12 +20,14 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 
 ## 批次状态
 
-截至 2026-04-28，近期场景驱动批次已经完成并验证：
+截至 2026-04-29，近期场景驱动批次已经完成并验证：
 
 - S12 跨合约套利从“无法表达”推进到“勉强”：用户现在可以通过
   `TaskHost::execution_group(...)` 表达两腿 typed 下单、全腿 preflight、
   session-scoped retry idempotency、observed `max_unhedged` exposure timeout 和
-  group outcome / exposure report。
+  group outcome / exposure report；`ExecutionGroupTicket::report(...)` 返回
+  revision-bound `ExecutionGroupReport`，用户可以在同一 runtime revision 上审计
+  group status 与各腿状态。
 - S12 仍不能标记为“自然”：自动 hedge / flatten、timed cancel / replace、
   group resume / persistent audit log 仍是 API gap，保留在
   `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`。
@@ -33,7 +35,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `TaskHost::account_group()` / `TaskHost::multi_account_order(...)` 表达 typed
   account group、比例拆单、全账户 preflight、session-scoped retry idempotency
   和 per-account outcome report；账户间裸露持续超过 `max_unhedged` 后返回 typed
-  `NeedsAttention`。
+  `NeedsAttention`；`MultiAccountOrderTicket::report(...)` 返回 revision-bound
+  `MultiAccountOrderGroupReport`，用户可以在同一 runtime revision 上审计账户组状态。
   执行计划见
   [`superpowers/plans/2026-04-27-task-account-group-allocation.md`](superpowers/plans/2026-04-27-task-account-group-allocation.md)。
 - S11 简单策略从“勉强”推进到“自然”：用户现在可以通过
@@ -49,7 +52,9 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - S19 风控前置继续推进但仍为“勉强”：`RiskEngine::check_report(...)` 返回
   revision-bound `RiskCheckReport`，风控检查可在同一 runtime snapshot 中读取账户、
   持仓与 quote，并通过 `RiskDecision` / `RiskRejection` 输出 typed 审计信息；
-  组合级 what-if、合约规则驱动校验、风控热更新和 durable audit 仍是 gap。
+  `RiskEngine::project_order(...)` 返回 revision-bound `RiskProjectionReport`，
+  提供当前净持仓、投影净持仓和轻量 price-volume estimate；组合级保证金 what-if、
+  合约规则驱动校验、风控热更新和 durable audit 仍是 gap。
 - S16 历史行情回放从“不自然”推进到“勉强”：`tqsdk-task::StrategyReplay`
   已能消费 `tqsdk-data::MarketCacheReplay` 的有序 quote/kline/tick cache
   event，并复用 `StrategyContext`、typed order builder 和 fake broker；
@@ -107,14 +112,14 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 9. 启动后状态恢复 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s09_startup_state_recovery.rs`; `tqsdk_session::StartupRecoverySpec`; `TqApi::startup_recovery`; `TqStream::recover_state` |
 | 10. 断线重连中的订单一致性 | 自然 | 中 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s10_reconnect_order_consistency.rs`; `tqsdk_session::OrderIntentRecord`; `TqApi::limit_order`; `OrderTicket`; `OrderTicketState`; session-scoped reconnect is covered, cross-process persistence remains out of scope |
 | 11. 简单策略 | 自然 | 中 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`; `StrategyHost`; `StrategyContext`; `TaskHost::orders`; `RiskEngine`; `TargetPosTask` |
-| 12. 跨合约套利 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; `ExecutionGroupBuilder`; `ExecutionGroupOutcome`; observed `max_unhedged` exposure timeout; automatic hedge remains gap |
-| 13. 多账户下单 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `AccountGroup`; `MultiAccountOrderTicket`; observed `max_unhedged` account exposure timeout; advanced failure policy/resume/audit remains gap |
+| 12. 跨合约套利 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; `ExecutionGroupBuilder`; `ExecutionGroupOutcome`; `ExecutionGroupReport`; revision-bound group report; observed `max_unhedged` exposure timeout; automatic hedge remains gap |
+| 13. 多账户下单 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `AccountGroup`; `MultiAccountOrderTicket`; `MultiAccountOrderGroupReport`; revision-bound account group report; observed `max_unhedged` account exposure timeout; advanced failure policy/resume/audit remains gap |
 | 14. 多 provider 行情聚合 | 无法表达 | 高 | 严重 | 严重 | 中 | 高 | 颠覆性重构 | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs`; no public provider aggregation facade |
 | 15. 实盘 / 模拟 / 回放切换 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`; `docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs`; `StrategyEnvironment`; `StrategyEnvironmentContext`; `StrategyDeploymentConfig`; `StrategyDeployment`; `StrategyLifecycle`; `StrategySupervisor`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; `StrategyEnvironment::from_config`; `StrategyEnvironment::{from_task_host,from_test_harness,from_replay_builder}`; config file loader / multi-provider environment still gap |
 | 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_events`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplaySourceBuilder`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; complete daemon reconnect orchestration still gap |
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
 | 18. 本地行情缓存读写 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; live durable sink still gap |
-| 19. 风控前置 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskCheckReport`; `RiskDecision`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration; portfolio what-if / durable audit remains gap |
+| 19. 风控前置 | 勉强 | 中 | 无 | 无 | 低 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskCheckReport`; `RiskProjectionReport`; `RiskDecision`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration; lightweight single-order projection; portfolio margin what-if / durable audit remains gap |
 | 20. 生产守护进程 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::reconnect_monitor`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamReconnectMonitor`; `StreamReconnectOutcome`; `StreamReconnectReport`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; cross-process daemon orchestration still gap; Rust GUI and built-in HTTP endpoint are out of scope |
 | 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; `TqStream::spawn_commit_sink`; `TqStream::spawn_commit_sink_with_options`; `CommitSink`; `StreamSinkOptions`; `StreamSinkRetryPolicy`; `StreamSinkHandle`; `StreamSinkStats`; `StreamSinkShutdownReport`; `StreamSinkWalRecord`; `StreamSinkWalFsyncPolicy`; `StreamSinkWalCompaction`; `StreamSinkWalRecovery`; `StreamCommitJournal`; bounded fan-out / typed lag diagnostic / managed commit sink / finite retry / JSONL WAL / fsync policy / local compaction / recovery report / commit metadata journal replay 自然；durable daemon queue, runtime state snapshot recovery still gap |
 | 22. 错误诊断与重试 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; `StreamFacadeError::diagnostic`; `StreamRetryPolicy`; `StreamRetryDecision`; error kind / retry hint / stream-facing retry decision / backoff runner 自然；order/business retry audit 仍是 gap |
@@ -124,6 +129,6 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 ## 主要结论
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
-2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户高级执行策略仍需继续补齐。
+2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、revision-bound execution/risk report、轻量单笔 what-if projection、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级保证金 what-if 风控和多账户高级执行策略仍需继续补齐。
 3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、typed reconnect monitor、graceful shutdown、fan-out capacity、typed lag/error diagnostics、managed commit sink、有限重试、JSONL WAL、WAL fsync policy、本地 compaction、WAL recovery report 和 commit metadata journal replay 已有薄 facade；`tqsdk-task::StrategySupervisor` 已提供 transport-neutral typed telemetry/export hook；durable daemon queue、runtime state snapshot recovery 和跨进程 daemon orchestration 仍停留在底层组合能力之外。
 4. 多 provider 聚合、完整 production daemon 和 live durable cache sink 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、strategy environment/deployment/supervisor foundation、provider-backed TQKQ sim config、replay source builder、replay speed policy、checkpoint store、test clock、fake broker latency、fake broker reconnect 与跨 step partial fill 已落在 `tqsdk-task`。

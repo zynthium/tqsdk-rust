@@ -10,6 +10,7 @@
 //! - 下单入口能强制经过 risk gate
 //! - 风控读取账户/持仓/quote 时使用同一 revision-bound snapshot
 //! - 风控检查能返回 typed `RiskCheckReport` 供审计
+//! - 风控投影能返回 typed `RiskProjectionReport` 供下单前估算
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -31,8 +32,10 @@
 //!
 //! Remaining API gap:
 //! `tqsdk-task` 已提供最小 `RiskEngine`、typed rejection reason 和
-//! `RiskCheckReport`，`TaskHost::orders(...).limit(...).send_once(...)` 也会经过
-//! task-layer risk gate。
+//! `RiskCheckReport`；`RiskEngine::project_order(...)` 已提供 revision-bound
+//! `RiskProjectionReport`，用于单笔订单当前净持仓、投影净持仓和轻量
+//! price-volume estimate；`TaskHost::orders(...).limit(...).send_once(...)` 也会
+//! 经过 task-layer risk gate。
 //!
 //! 本文件保留的是更高阶风控缺口：
 //! - 组合级资金/保证金 what-if simulation；
@@ -50,6 +53,12 @@
 //!     .with_portfolio_margin_simulation(margin_model)
 //!     .with_contract_rules(contract_catalog);
 //! let mut host = TaskHost::new(api).with_risk(risk);
+//! let projection = host.risk().unwrap().project_order(host.api(), &intent)?;
+//! println!(
+//!     "risk projection revision={} projected_net={:?}",
+//!     projection.revision().get(),
+//!     projection.projected_net()
+//! );
 //! let report = host.risk().unwrap().check_report(host.api(), &intent)?;
 //! println!("risk revision={} decision={:?}", report.revision().get(), report.decision());
 //! host.orders("sim").buy_open("SHFE.au2602", 1).limit(480.0).send_once("entry-1").await?;
