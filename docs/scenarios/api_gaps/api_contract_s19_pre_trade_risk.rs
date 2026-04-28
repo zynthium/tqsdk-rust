@@ -8,7 +8,8 @@
 //! API contract:
 //! - 风控规则是 typed public API
 //! - 下单入口能强制经过 risk gate
-//! - 风控读取账户/持仓/quote 时使用同一稳定截面
+//! - 风控读取账户/持仓/quote 时使用同一 revision-bound snapshot
+//! - 风控检查能返回 typed `RiskCheckReport` 供审计
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -30,7 +31,8 @@
 //!
 //! Remaining API gap:
 //! `tqsdk-task` 已提供最小 `RiskEngine`、typed rejection reason 和
-//! `TaskHost::orders(...).limit(...).send_once(...)` 风控下单入口。
+//! `RiskCheckReport`，`TaskHost::orders(...).limit(...).send_once(...)` 也会经过
+//! task-layer risk gate。
 //!
 //! 本文件保留的是更高阶风控缺口：
 //! - 组合级资金/保证金 what-if simulation；
@@ -48,6 +50,8 @@
 //!     .with_portfolio_margin_simulation(margin_model)
 //!     .with_contract_rules(contract_catalog);
 //! let mut host = TaskHost::new(api).with_risk(risk);
+//! let report = host.risk().unwrap().check_report(host.api(), &intent)?;
+//! println!("risk revision={} decision={:?}", report.revision().get(), report.decision());
 //! host.orders("sim").buy_open("SHFE.au2602", 1).limit(480.0).send_once("entry-1").await?;
 //! ```
 
