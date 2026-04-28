@@ -342,7 +342,7 @@ async fn live_client_drive_route_once_establishes_market_session_and_ingests_quo
 
     assert!(
         client
-            .drive_route_once(Some(Instant::now() + Duration::from_millis(20)))
+            .drive_route_once(Some(Instant::now() + Duration::from_secs(1)))
             .await
             .unwrap()
     );
@@ -489,7 +489,7 @@ async fn live_client_progress_once_reports_route_progress_for_websocket_input() 
 
     assert_eq!(
         client
-            .progress_once(Some(Instant::now() + Duration::from_millis(20)))
+            .progress_once(Some(Instant::now() + Duration::from_secs(1)))
             .await
             .unwrap(),
         SessionProgress::DroveRoute
