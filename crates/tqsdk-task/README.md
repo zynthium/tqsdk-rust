@@ -148,7 +148,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategySupervisor` 仍是 foundation，HTTP metrics endpoint、完整 reconnect orchestration、跨进程 daemon 管理和多 provider environment 仍是后续工作
+- `StrategySupervisor` 仍是 foundation，稳定 metrics/export hook、完整 reconnect orchestration、跨进程 daemon 管理和多 provider environment 仍是后续工作；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。

@@ -228,12 +228,12 @@ tqsdk-wait  tqsdk-stream
 
 ## `tqsdk-callback`
 
-如果后续确实需要 UI / 监控 / handler-style 集成，可以独立存在。
+如果后续确实需要监控 / handler-style 集成，可以独立存在。
 
 适合进入：
 
 - callback / handler facade
-- bridge to GUI / observer systems
+- bridge to observer systems
 
 不适合进入：
 
@@ -347,7 +347,8 @@ tqsdk-wait  tqsdk-stream
 目标：
 
 - 不进入当前底座主线
-- 后续如确有需要，独立为 integration crate
+- 不作为 Rust SDK 的规划目标或 S20 完成标准
+- 如用户需要可在应用侧自行集成外部 UI / web helper
 
 能力：
 

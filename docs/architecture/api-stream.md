@@ -369,8 +369,8 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面
 - `health()` 是生产部署的 typed snapshot 读面，只从 runtime `system/session`
   状态和 stream driver closed flag 组装 `StreamHealthSnapshot`，并提供
-  `status()` / `should_restart()` 作为最小状态判定；它不是 metrics endpoint、
-  supervisor 或 graceful shutdown 框架。
+  `status()` / `should_restart()` 作为最小状态判定；它不是 metrics exporter、
+  supervisor、GUI/web helper 或 graceful shutdown 框架。
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper

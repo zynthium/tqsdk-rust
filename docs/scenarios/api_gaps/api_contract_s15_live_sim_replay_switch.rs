@@ -39,8 +39,10 @@
 //! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`。
 //!
 //! Remaining API gap:
-//! 当前仍是 deployment/supervisor foundation：配置文件反序列化、HTTP metrics
-//! endpoint、完整 reconnect orchestration 和多 provider environment 尚未冻结。
+//! 当前仍是 deployment/supervisor foundation：配置文件反序列化、稳定
+//! metrics/export hook、完整 reconnect orchestration 和多 provider environment
+//! 尚未冻结。Rust SDK 不规划 GUI 或内置 HTTP health/metrics endpoint 作为
+//! S15/S20 完成标准。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -52,7 +54,7 @@
 //! let mut supervisor = StrategySupervisor::new(deployment)
 //!     .shutdown_signal(StrategyShutdownSignal::ctrl_c())
 //!     .retry_policy(StrategyRetryPolicy::new().max_retries(3))
-//!     .metrics_endpoint("127.0.0.1:9000");
+//!     .metrics_reporter(MetricsReporter::custom(report_metrics));
 //! supervisor.run(MyStrategy::default()).await?;
 //! supervisor.shutdown().await?;
 //! ```

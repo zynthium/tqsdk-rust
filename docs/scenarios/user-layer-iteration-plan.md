@@ -119,8 +119,8 @@ crate 分层合并成一份迭代计划。
   reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
   因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
 - `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
-  reconnect diagnostics、driver closed 和 revision；完整 metrics endpoint、ctrl-c
-  graceful shutdown 与可靠 sink isolation 仍在后续 daemon/tooling 层。
+  reconnect diagnostics、driver closed 和 revision；稳定 metrics/export hook、
+  ctrl-c graceful shutdown 与可靠 sink isolation 仍在后续 daemon/tooling 层。
 
 ### P0：订单 intent 与断线一致性
 
@@ -319,7 +319,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- S15 配置文件反序列化、HTTP metrics endpoint、完整 reconnect orchestration 和
+- S15 配置文件反序列化、稳定 metrics/export hook、完整 reconnect orchestration 和
   多 provider environment。
 - 更完整 broker 行为。
 - 跨进程 intent / test fixture 持久恢复。
@@ -337,6 +337,9 @@ crate 分层合并成一份迭代计划。
 - 健康状态、恢复状态、错误分类、重试策略成为 typed event。
 - 慢消费者策略明确：drop、lag error、可靠队列、专用 sink。
 - 优雅关闭和 metrics hook 有稳定入口。
+- S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP health/metrics endpoint；
+  SDK 只提供 transport-neutral 的 typed snapshot / hook，由用户按部署环境接入
+  tracing、日志、进程守护或外部指标系统。
 
 建议落点：
 
@@ -359,7 +362,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- metrics hook / HTTP health endpoint；
+- 稳定 metrics/export hook；
 - ctrl-c graceful shutdown 与 async close/flush contract；
 - durable sink runtime、per-sink retry/storage policy、本地 WAL；
 - 统一 retry policy orchestration 与业务拒单审计。
@@ -380,7 +383,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- HTTP health/metrics endpoint。
+- 稳定 metrics/export hook。
 - 持久化 sink isolation / per-sink retry-storage policy。
 - 完整 reconnect orchestration 和跨进程 daemon 管理。
 

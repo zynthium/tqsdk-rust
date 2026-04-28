@@ -150,6 +150,8 @@ tqsdk-task
 - execution group foundation
 - account group / multi-account order foundation
 - strategy host / strategy context / strategy environment / deployment / supervisor adapter
+- strategy supervisor 的 typed health/metrics/shutdown report；生产观测导出保持
+  transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
 - strategy cache replay driver
 - public fake market / fake broker test harness
 - execution report

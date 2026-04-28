@@ -30,9 +30,10 @@
 //! - 哪些完整 daemon 能力仍是 API gap？
 //!
 //! Current API note:
-//! 本示例只验证 health snapshot 子集。metrics hook、HTTP health endpoint、
-//! ctrl-c graceful shutdown 和可靠 sink isolation 仍属于 `docs/scenarios/api_gaps/`
-//! 中的生产 daemon gap。
+//! 本示例只验证 health snapshot 子集。稳定 metrics/export hook、ctrl-c graceful
+//! shutdown 和可靠 sink isolation 仍属于 `docs/scenarios/api_gaps/` 中的生产
+//! daemon gap；Rust SDK 不规划 GUI 或内置 HTTP health/metrics endpoint 作为
+//! S20 完成标准。
 
 use futures::StreamExt;
 use tqsdk_stream::TqStreamBuilder;

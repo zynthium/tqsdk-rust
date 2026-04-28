@@ -31,9 +31,10 @@
 //! - 哪些完整 daemon 能力仍是 API gap？
 //!
 //! Current API note:
-//! 本示例验证 task-layer supervisor foundation。HTTP metrics endpoint、
+//! 本示例验证 task-layer supervisor foundation。稳定 metrics/export hook、
 //! 持久化 sink isolation、完整 reconnect orchestration 和跨进程 daemon 管理
-//! 仍属于 `docs/scenarios/api_gaps/` 中的生产 daemon gap。
+//! 仍属于 `docs/scenarios/api_gaps/` 中的生产 daemon gap；Rust SDK 不规划 GUI
+//! 或内置 HTTP health/metrics endpoint 作为 S20 完成标准。
 
 use tqsdk_core::Quote;
 use tqsdk_data::MarketCacheEvent;

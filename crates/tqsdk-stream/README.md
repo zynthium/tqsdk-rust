@@ -203,9 +203,10 @@ provider 级恢复 flag。
 生产守护进程如果只需要 typed health snapshot，可以调用 `TqStream::health()`。
 返回的 `StreamHealthSnapshot` 包含 runtime revision、session phase、最近一次
 reconnect diagnostics 和 stream driver closed 状态，并提供
-`status()` / `should_restart()` 作为生产指标和日志的最小判定；完整 metrics
-endpoint、ctrl-c graceful shutdown 和可靠 sink isolation 仍属于上层
-daemon/tooling 能力。
+`status()` / `should_restart()` 作为生产指标和日志的最小判定；稳定
+metrics/export hook、ctrl-c graceful shutdown 和可靠 sink isolation 仍属于上层
+daemon/tooling 能力。Rust SDK 不规划 GUI、web helper 或内置 HTTP
+health/metrics endpoint。
 
 慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`
 表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过
