@@ -10,6 +10,7 @@
 //! - 下单前所有腿统一经过 ownership guard 和 risk gate
 //! - 用户读取 group-level outcome，而不是手写 `Vec<OrderTicket>` 状态机
 //! - `max_unhedged` 在观察到裸露持续超时后返回 typed `NeedsHedge`
+//! - group report 绑定 runtime revision，作为审计/resume 的 public foundation
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -92,6 +93,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .limit(6500.0)
         .send_once()
         .await?;
+
+    let report = group.report(host.api())?;
+    println!(
+        "execution group rev={} group={} account={} legs={} status={:?}",
+        report.revision().get(),
+        report.group_id(),
+        report.account_id(),
+        report.legs().len(),
+        report.status()
+    );
 
     let outcome = group
         .wait_finished(

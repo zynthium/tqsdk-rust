@@ -10,6 +10,7 @@
 //! - 比例拆单、最小手数和 deterministic client order id 由 task 层处理
 //! - 每个账户订单、成交和错误隔离可追踪
 //! - `max_unhedged` 在账户间分配裸露持续超时后返回 typed `NeedsAttention`
+//! - multi-account report 绑定 runtime revision，作为审计/resume 的 public foundation
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -93,6 +94,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .limit(480.0)
         .send_once()
         .await?;
+
+    let report = ticket.report(host.api())?;
+    println!(
+        "multi-account rev={} group={} accounts={} status={:?}",
+        report.revision().get(),
+        report.group_id(),
+        report.accounts().len(),
+        report.status()
+    );
 
     match ticket.wait_finished(&mut host, Some(deadline)).await? {
         MultiAccountOrderOutcome::AllFilled { accounts } => {

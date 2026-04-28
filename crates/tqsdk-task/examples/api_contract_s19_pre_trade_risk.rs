@@ -10,6 +10,7 @@
 //! - 下单入口强制经过 `TaskHost` 的 risk gate 和 ownership guard
 //! - 风控读取账户/持仓/quote 时使用同一稳定状态截面
 //! - 风控检查可以返回带 revision 的 typed report 供审计
+//! - 风控试算可以返回 revision-bound projection，供下单前解释 projected position/notional
 //! - 订单价格和方向通过 typed builder 表达
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -84,6 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(risk) = host.risk() {
+        let projection = risk.project_order(host.api(), &intent)?;
+        println!(
+            "risk projection rev={} account={} symbol={} current_net={:?} projected_net={:?} price_basis={:?} price_volume={:?}",
+            projection.revision().get(),
+            projection.account_id(),
+            projection.symbol(),
+            projection.current_net(),
+            projection.projected_net(),
+            projection.price_basis(),
+            projection.estimated_price_volume()
+        );
+
         let report = risk.check_report(host.api(), &intent)?;
         println!(
             "risk revision={} decision={:?}",
