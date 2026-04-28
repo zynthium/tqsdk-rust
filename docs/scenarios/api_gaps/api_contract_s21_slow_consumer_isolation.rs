@@ -11,6 +11,8 @@
 //!   已由 `tqsdk-stream` 提供
 //! - WAL fsync policy、本地 compaction、recovery report 和 commit metadata
 //!   journal replay 已由 `tqsdk-stream` 提供
+//! - reusable `StreamSinkProfile` 已由 `tqsdk-stream` 提供，常见 sink 配置不再
+//!   需要用户手拼全部 options
 //! - durable daemon queue、跨进程锁和 runtime state snapshot recovery 尚未形成 public API
 //! - 不要求用户自建 channel
 //! - 不要求用户手写 Tokio supervisor task
@@ -35,7 +37,7 @@
 //! `TqStreamBuilder::commit_channel_capacity(...)` 和
 //! `StreamFacadeError::diagnostic()` 已覆盖 bounded fan-out / lag 可见性；
 //! `TqStream::spawn_commit_sink_with_options(...)` / `StreamSinkOptions` /
-//! `StreamSinkRetryPolicy` / `CommitSink` / `StreamSinkHandle`
+//! `StreamSinkProfile` / `StreamSinkRetryPolicy` / `CommitSink` / `StreamSinkHandle`
 //! 已覆盖 managed commit sink、有限重试、JSONL WAL、typed stats 和 shutdown
 //! flush report、WAL fsync policy、本地 compaction、WAL recovery report 和 commit
 //! metadata journal replay。本文件只保留 durable daemon queue、跨进程锁和 runtime

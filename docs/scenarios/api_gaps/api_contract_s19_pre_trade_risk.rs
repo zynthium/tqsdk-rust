@@ -11,6 +11,7 @@
 //! - 风控读取账户/持仓/quote 时使用同一 revision-bound snapshot
 //! - 风控检查能返回 typed `RiskCheckReport` 供审计
 //! - 风控投影能返回 typed `RiskProjectionReport` 供下单前估算
+//! - 合约 tick size / multiplier 可通过 `InstrumentSpec` 接入风控
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -34,13 +35,15 @@
 //! `tqsdk-task` 已提供最小 `RiskEngine`、typed rejection reason 和
 //! `RiskCheckReport`；`RiskEngine::project_order(...)` 已提供 revision-bound
 //! `RiskProjectionReport`，用于单笔订单当前净持仓、投影净持仓和轻量
-//! price-volume estimate；`TaskHost::orders(...).limit(...).send_once(...)` 也会
-//! 经过 task-layer risk gate。
+//! price-volume estimate；`RiskEngine::instrument_specs(...)` 已提供
+//! `InstrumentSpec` backed tick-size 校验和 contract multiplier notional
+//! projection；`TaskHost::orders(...).limit(...).send_once(...)` 也会经过
+//! task-layer risk gate。
 //!
 //! 本文件保留的是更高阶风控缺口：
 //! - 组合级资金/保证金 what-if simulation；
 //! - 多账户 / 多腿订单组的联合限额；
-//! - 合约 metadata 规则驱动的 tick size、涨跌停、品种级限额；
+//! - 涨跌停、品种级限额和更完整交易所规则；
 //! - 策略级风控策略热更新与审计日志落库。
 //!
 //! 理想用户代码草案：
@@ -50,6 +53,7 @@
 //!     .min_available(1000.0)
 //!     .max_net_position(5)
 //!     .max_price_deviation(20.0)
+//!     .instrument_specs(instrument_specs)
 //!     .with_portfolio_margin_simulation(margin_model)
 //!     .with_contract_rules(contract_catalog);
 //! let mut host = TaskHost::new(api).with_risk(risk);

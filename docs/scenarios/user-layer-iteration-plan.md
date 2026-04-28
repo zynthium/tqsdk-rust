@@ -246,10 +246,12 @@ crate 分层合并成一份迭代计划。
   typed 审计风控通过或拒绝原因。
 - `RiskEngine::project_order(...)` 返回轻量 revision-bound `RiskProjectionReport`，
   提供当前净持仓、投影净持仓和 price-volume estimate foundation。
+- `RiskEngine::instrument_specs(...)` 可接入 `tqsdk_session::InstrumentSpec`，
+  提供合约 tick size 校验和 contract multiplier notional projection foundation。
 
 仍未完成、不可伪装为已支持：
 
-- 合约 metadata 规则驱动的 tick size、涨跌停和交易所品种规则。
+- 涨跌停和交易所品种级规则。
 - 组合级保证金 / 组合持仓 what-if simulation。当前仅有单笔订单轻量投影。
 - 多账户 / 多腿执行组上的联合限额、最大裸露量和频率控制。
 - 风控审计日志落库与热更新。
@@ -381,6 +383,8 @@ crate 分层合并成一份迭代计划。
   wal_records 与 flush 结果。
 - `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` /
   `StreamSinkRetryPolicy` 提供 per-sink 有限重试和本地 JSONL WAL foundation。
+- `StreamSinkProfile` 提供 reusable sink profile，常见 JSONL WAL + commit
+  journal + retry 配置不再要求用户手拼全部 options。
 - `StreamSinkWalFsyncPolicy` 提供本地 WAL 每条记录 `sync_data` 策略；
   `StreamSinkWalCompaction` 提供按 revision 裁剪 JSONL WAL 的本地维护入口和
   typed report。
@@ -450,6 +454,8 @@ crate 分层合并成一份迭代计划。
   foundation。
 - `MarketCacheReplay` 提供按事件时间、接收时间排序的 deterministic
   offline replay iterator。
+- `MarketCacheStreamWriter` 提供单进程 live `MarketEvent` -> cache writer
+  pipe foundation，明确不承诺 durable daemon queue 或跨进程锁。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -468,7 +474,6 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- live market stream pipe；
 - durable sink runtime 和可靠队列；
 - 跨进程锁、索引和 cache compaction；
 

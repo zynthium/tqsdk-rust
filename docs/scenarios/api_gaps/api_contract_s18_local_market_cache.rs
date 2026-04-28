@@ -30,14 +30,20 @@
 //!
 //! API gap:
 //! `tqsdk-data` 已提供离线 cache record、JSONL reader/writer 和 ordered
-//! replay iterator。剩余 gap 是 live market stream pipe、可靠 sink runtime、
-//! 跨进程锁/index、cache compaction 和将 cache replay 接入 `StrategyHost`
-//! 同构 context。
+//! replay iterator；`MarketCacheStreamWriter` 已提供单进程 live `MarketEvent`
+//! -> cache writer pipe foundation。剩余 gap 是 durable daemon queue、跨进程
+//! 锁/index、cache compaction 和多进程 cache 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let writer = MarketCache::open_writer("./cache.tqcache").await?;
-//! stream.market_events().quote("SHFE.au2602").pipe_to_cache(writer).await?;
+//! let mut cache = DurableMarketCachePipe::new(writer)
+//!     .cross_process_lock("./cache.tqcache.lock")
+//!     .index("./cache.tqcache.index")
+//!     .compact_daily()
+//!     .build()
+//!     .await?;
+//! stream.market_events().quote("SHFE.au2602").pipe_to_cache(&mut cache).await?;
 //!
 //! let reader = MarketCache::open_reader("./cache.tqcache").await?;
 //! let mut replay = reader.replay().symbol("SHFE.au2602").build().await?;
