@@ -244,6 +244,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的 cache record、JSONL reader/writer、deterministic replay iterator、本地 JSONL queue、lock lease、index、compaction helper、process-local daemon facade 和 process-local supervisor，不拥有 live session、不创建 Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
+- 跨进程 cache 管理仍是后续 tooling/service facade：它应建立在
+  writer election、reader manifest、recovery scan 和 compaction ownership
+  之上，而不是把 live session、进程管理、HTTP endpoint 或 GUI 下沉进 data
 - history series replay adapter 只把 owned `KlineDataSeries` / `TickDataSeries`
   materialize 成 `MarketCacheEvent` / `MarketCacheReplay`，不引入策略执行语义
 - async history 相关入口会主动获取 auth context 并校验 `tq_dl`，避免把权限问题拖到 chart/websocket timeout

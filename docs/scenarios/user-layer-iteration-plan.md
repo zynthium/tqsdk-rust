@@ -492,10 +492,13 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_supervisor_foundation` 已提升为正式 data example，
   覆盖 process-local periodic flush / lease renewal / graceful shutdown
   foundation。
+- `api_contract_s18_cross_process_cache_service` 已补充为 desired API sketch，
+  明确剩余跨进程 service 应拆成 writer election、reader manifest、recovery
+  scan 和 compaction ownership，而不是直接扩展 core/session。
 
 仍未完成、不可伪装为已支持：
 
-- 跨进程 cache 管理服务；
+- 跨进程 cache 管理服务实现；
 
 优先提升的场景：
 
@@ -503,6 +506,7 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_maintenance`（cache maintenance foundation 已提升为正式 data example）
 - `api_contract_s18_cache_daemon_foundation`（process-local daemon foundation 已提升为正式 data example）
 - `api_contract_s18_cache_supervisor_foundation`（process-local supervisor foundation 已提升为正式 data example）
+- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 reader manifest -> recovery scan -> writer election/service facade 切分）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 
