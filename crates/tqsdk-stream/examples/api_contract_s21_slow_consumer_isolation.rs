@@ -6,6 +6,7 @@
 //! - 核心策略消费者不受影响
 //! - shutdown 时 sink 可以 flush
 //! - sink 可以配置有限重试和本地 JSONL WAL
+//! - WAL 可以配置 fsync 策略并做本地 JSONL compaction
 //!
 //! API contract:
 //! - fan-out/backpressure 的底层 capacity 是 public config
@@ -14,7 +15,8 @@
 //! - 写库 / 日志 sink 可由 SDK 托管，不要求用户手写 task/channel
 //! - sink shutdown 返回 typed stats / flush report
 //! - per-sink finite retry 和 JSONL WAL 是 public config
-//! - durable queue / WAL compaction / 跨进程恢复仍是 gap
+//! - WAL fsync policy 和 compaction 是 public config
+//! - durable queue / 跨进程恢复仍是 gap
 //! - 不要求用户自建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -30,6 +32,7 @@
 //! - 用户必须自己 spawn 任务保护核心循环
 //! - sink shutdown 无法确认是否 flush
 //! - retry/WAL policy 只能散落在业务代码里
+//! - fsync 或 WAL compaction 只能散落在业务代码里
 //!
 //! Review questions:
 //! - 当前 API 是否自然表达慢消费者隔离？
@@ -39,11 +42,15 @@
 //! Current API note:
 //! 当前 `tqsdk-stream` 暴露 root fan-out capacity、managed commit sink、
 //! typed sink stats / shutdown report、typed `Lagged` diagnostic、有限重试和
-//! JSONL WAL foundation。可靠队列、WAL compaction 和跨进程 sink 恢复仍是 gap。
+//! JSONL WAL foundation、WAL fsync policy 和本地 compaction。可靠队列和跨进程
+//! sink 恢复仍是 gap。
 
 use futures::StreamExt;
 use tqsdk_core::CommitResult;
-use tqsdk_stream::{StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy, TqStreamBuilder};
+use tqsdk_stream::{
+    StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy, StreamSinkWalCompaction,
+    StreamSinkWalFsyncPolicy, TqStreamBuilder,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,9 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut strategy_commits = stream.commit_stream()?;
+    let wal_path = std::env::temp_dir().join("tqsdk-warehouse-sink.jsonl");
     let warehouse_options = StreamSinkOptions::new()
         .retry_policy(StreamSinkRetryPolicy::limited(3)?)
-        .jsonl_wal(std::env::temp_dir().join("tqsdk-warehouse-sink.jsonl"));
+        .jsonl_wal(wal_path.clone())
+        .wal_fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord);
     let warehouse_sink = stream.spawn_commit_sink_with_options(
         "warehouse",
         write_warehouse_commit,
@@ -82,6 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.stats().retry_attempts(),
         report.stats().wal_records(),
         report.flushed()
+    );
+
+    let wal_compaction = StreamSinkWalCompaction::new()
+        .retain_revisions_from(1)
+        .retain_non_revision_records(false)
+        .compact_jsonl(&wal_path)?;
+    println!(
+        "wal original={} retained={} dropped={}",
+        wal_compaction.original_records(),
+        wal_compaction.retained_records(),
+        wal_compaction.dropped_records()
     );
 
     Ok(())

@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::future::Future;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +29,7 @@ pub trait CommitSink: Send + 'static {
 pub struct StreamSinkOptions {
     retry_policy: StreamSinkRetryPolicy,
     wal_path: Option<PathBuf>,
+    wal_fsync_policy: StreamSinkWalFsyncPolicy,
 }
 
 /// Retry policy applied inside a managed stream sink task.
@@ -36,6 +37,13 @@ pub struct StreamSinkOptions {
 pub struct StreamSinkRetryPolicy {
     max_attempts: u32,
     retry_delay: Duration,
+}
+
+/// Fsync policy for a JSONL stream sink WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSinkWalFsyncPolicy {
+    Never,
+    EveryRecord,
 }
 
 /// Runtime status for a managed stream sink.
@@ -82,6 +90,21 @@ pub struct StreamSinkWalRecord {
     pub error: Option<String>,
 }
 
+/// Local JSONL WAL compaction policy for managed stream sinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSinkWalCompaction {
+    retain_revisions_from: Option<u64>,
+    retain_non_revision_records: bool,
+}
+
+/// Report returned after compacting a JSONL stream sink WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSinkWalCompactionReport {
+    original_records: u64,
+    retained_records: u64,
+    dropped_records: u64,
+}
+
 /// Handle returned after spawning a managed commit sink.
 pub struct StreamSinkHandle {
     name: String,
@@ -121,6 +144,7 @@ impl Default for StreamSinkOptions {
         Self {
             retry_policy: StreamSinkRetryPolicy::none(),
             wal_path: None,
+            wal_fsync_policy: StreamSinkWalFsyncPolicy::Never,
         }
     }
 }
@@ -141,6 +165,66 @@ impl StreamSinkOptions {
     pub fn jsonl_wal(mut self, path: impl Into<PathBuf>) -> Self {
         self.wal_path = Some(path.into());
         self
+    }
+
+    #[must_use]
+    pub fn wal_fsync_policy(mut self, policy: StreamSinkWalFsyncPolicy) -> Self {
+        self.wal_fsync_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn fsync_policy(&self) -> StreamSinkWalFsyncPolicy {
+        self.wal_fsync_policy
+    }
+}
+
+impl Default for StreamSinkWalCompaction {
+    fn default() -> Self {
+        Self {
+            retain_revisions_from: None,
+            retain_non_revision_records: true,
+        }
+    }
+}
+
+impl StreamSinkWalCompaction {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn retain_revisions_from(mut self, revision: u64) -> Self {
+        self.retain_revisions_from = Some(revision);
+        self
+    }
+
+    #[must_use]
+    pub fn retain_non_revision_records(mut self, retain: bool) -> Self {
+        self.retain_non_revision_records = retain;
+        self
+    }
+
+    pub fn compact_jsonl(self, path: impl AsRef<Path>) -> Result<StreamSinkWalCompactionReport> {
+        compact_jsonl_wal(path.as_ref(), self)
+    }
+}
+
+impl StreamSinkWalCompactionReport {
+    #[must_use]
+    pub fn original_records(&self) -> u64 {
+        self.original_records
+    }
+
+    #[must_use]
+    pub fn retained_records(&self) -> u64 {
+        self.retained_records
+    }
+
+    #[must_use]
+    pub fn dropped_records(&self) -> u64 {
+        self.dropped_records
     }
 }
 
@@ -192,7 +276,7 @@ impl StreamSinkHandle {
     where
         S: CommitSink,
     {
-        let wal = StreamSinkWal::open(options.wal_path.as_ref())?;
+        let wal = StreamSinkWalWriter::open(options.wal_path.as_deref(), options.wal_fsync_policy)?;
         let shared = Arc::new(Mutex::new(StreamSinkState {
             status: StreamSinkStatus::Running,
             stats: StreamSinkStats::default(),
@@ -318,7 +402,7 @@ async fn run_sink<S>(
     mut shutdown_rx: oneshot::Receiver<()>,
     shared: Arc<Mutex<StreamSinkState>>,
     retry_policy: StreamSinkRetryPolicy,
-    mut wal: Option<StreamSinkWal>,
+    mut wal: Option<StreamSinkWalWriter>,
 ) -> StreamSinkShutdownReport
 where
     S: CommitSink,
@@ -381,7 +465,7 @@ where
 async fn deliver_commit<S>(
     name: &str,
     shared: &Arc<Mutex<StreamSinkState>>,
-    wal: &mut Option<StreamSinkWal>,
+    wal: &mut Option<StreamSinkWalWriter>,
     sink: &mut S,
     commit: tqsdk_core::CommitResult,
     retry_policy: StreamSinkRetryPolicy,
@@ -448,7 +532,7 @@ where
 async fn flush_sink<S>(
     name: &str,
     shared: &Arc<Mutex<StreamSinkState>>,
-    wal: &mut Option<StreamSinkWal>,
+    wal: &mut Option<StreamSinkWalWriter>,
     sink: &mut S,
 ) -> bool
 where
@@ -548,7 +632,7 @@ fn report(
 
 fn write_wal_record(
     shared: &Arc<Mutex<StreamSinkState>>,
-    wal: &mut Option<StreamSinkWal>,
+    wal: &mut Option<StreamSinkWalWriter>,
     record: &StreamSinkWalRecord,
 ) -> Result<()> {
     if let Some(wal) = wal {
@@ -558,12 +642,108 @@ fn write_wal_record(
     Ok(())
 }
 
-struct StreamSinkWal {
-    writer: std::io::BufWriter<std::fs::File>,
+fn compact_jsonl_wal(
+    path: &Path,
+    policy: StreamSinkWalCompaction,
+) -> Result<StreamSinkWalCompactionReport> {
+    let input = std::fs::File::open(path).map_err(|error| StreamFacadeError::Io {
+        operation: "open stream sink jsonl wal for compaction",
+        message: error.to_string(),
+    })?;
+    let temp_path = compaction_temp_path(path);
+    let mut output = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| StreamFacadeError::Io {
+                operation: "create compacted stream sink jsonl wal",
+                message: error.to_string(),
+            })?,
+    );
+
+    let mut original_records = 0;
+    let mut retained_records = 0;
+    for line in std::io::BufReader::new(input).lines() {
+        let line = line.map_err(|error| StreamFacadeError::Io {
+            operation: "read stream sink jsonl wal for compaction",
+            message: error.to_string(),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let record: StreamSinkWalRecord =
+            serde_json::from_str(&line).map_err(|error| StreamFacadeError::Io {
+                operation: "parse stream sink jsonl wal record for compaction",
+                message: error.to_string(),
+            })?;
+        original_records += 1;
+        if policy.retains(&record) {
+            serde_json::to_writer(&mut output, &record).map_err(|error| StreamFacadeError::Io {
+                operation: "serialize compacted stream sink jsonl wal record",
+                message: error.to_string(),
+            })?;
+            output
+                .write_all(b"\n")
+                .map_err(|error| StreamFacadeError::Io {
+                    operation: "write compacted stream sink jsonl wal record",
+                    message: error.to_string(),
+                })?;
+            retained_records += 1;
+        }
+    }
+    output.flush().map_err(|error| StreamFacadeError::Io {
+        operation: "flush compacted stream sink jsonl wal",
+        message: error.to_string(),
+    })?;
+    drop(output);
+
+    std::fs::rename(&temp_path, path).map_err(|error| StreamFacadeError::Io {
+        operation: "replace stream sink jsonl wal after compaction",
+        message: error.to_string(),
+    })?;
+
+    Ok(StreamSinkWalCompactionReport {
+        original_records,
+        retained_records,
+        dropped_records: original_records - retained_records,
+    })
 }
 
-impl StreamSinkWal {
-    fn open(path: Option<&PathBuf>) -> Result<Option<Self>> {
+impl StreamSinkWalCompaction {
+    fn retains(&self, record: &StreamSinkWalRecord) -> bool {
+        match record.revision {
+            Some(revision) => self
+                .retain_revisions_from
+                .is_none_or(|minimum| revision >= minimum),
+            None => self.retain_non_revision_records,
+        }
+    }
+}
+
+fn compaction_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("stream-sink-wal.jsonl");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(
+        ".{file_name}.compact-{}-{unique}",
+        std::process::id()
+    ))
+}
+
+struct StreamSinkWalWriter {
+    writer: std::io::BufWriter<std::fs::File>,
+    fsync_policy: StreamSinkWalFsyncPolicy,
+}
+
+impl StreamSinkWalWriter {
+    fn open(path: Option<&Path>, fsync_policy: StreamSinkWalFsyncPolicy) -> Result<Option<Self>> {
         let Some(path) = path else {
             return Ok(None);
         };
@@ -577,6 +757,7 @@ impl StreamSinkWal {
             })?;
         Ok(Some(Self {
             writer: std::io::BufWriter::new(file),
+            fsync_policy,
         }))
     }
 
@@ -591,7 +772,17 @@ impl StreamSinkWal {
             .map_err(|error| StreamFacadeError::Io {
                 operation: "write stream sink jsonl wal record",
                 message: error.to_string(),
-            })
+            })?;
+        if self.fsync_policy == StreamSinkWalFsyncPolicy::EveryRecord {
+            self.writer
+                .get_ref()
+                .sync_data()
+                .map_err(|error| StreamFacadeError::Io {
+                    operation: "fsync stream sink jsonl wal record",
+                    message: error.to_string(),
+                })?;
+        }
+        Ok(())
     }
 }
 

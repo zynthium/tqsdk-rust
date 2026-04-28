@@ -124,7 +124,8 @@ crate 分层合并成一份迭代计划。
   strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
   `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
   stream driver 关闭与 managed sink flush 的 graceful shutdown foundation 也已落在
-  `tqsdk-stream`；durable queue / WAL compaction / 跨进程恢复仍在后续 daemon/tooling
+  `tqsdk-stream`；WAL fsync policy 和本地 compaction 已落在 `tqsdk-stream`；
+  durable queue / 跨进程恢复仍在后续 daemon/tooling
   层。
 
 ### P0：订单 intent 与断线一致性
@@ -372,6 +373,9 @@ crate 分层合并成一份迭代计划。
   wal_records 与 flush 结果。
 - `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` /
   `StreamSinkRetryPolicy` 提供 per-sink 有限重试和本地 JSONL WAL foundation。
+- `StreamSinkWalFsyncPolicy` 提供本地 WAL 每条记录 `sync_data` 策略；
+  `StreamSinkWalCompaction` 提供按 revision 裁剪 JSONL WAL 的本地维护入口和
+  typed report。
 - `TqStream::graceful_shutdown()` 提供 stream driver close + managed sink flush
   orchestration，返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
@@ -381,13 +385,13 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - 跨进程 daemon orchestration；
-- durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复；
+- durable queue 和跨进程 sink 恢复；
 - 统一 retry policy orchestration 与业务拒单审计。
 
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试和 JSONL WAL foundation 已提升为正式 stream example）
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试、JSONL WAL、fsync policy 和本地 compaction 已提升为正式 stream example）
 - `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
 
 已落地：
@@ -401,7 +405,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复。
+- durable queue 和跨进程 sink 恢复。
 - 跨进程 daemon orchestration 和跨进程 daemon 管理。
 
 ### P2：本地行情缓存与研究闭环
@@ -451,7 +455,7 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - live market stream pipe；
-- durable sink runtime、可靠队列、WAL compaction；
+- durable sink runtime 和可靠队列；
 - 跨进程锁、索引和 cache compaction；
 
 优先提升的场景：

@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -8,7 +8,8 @@ use std::sync::{
 use tqsdk_core::Quote;
 use tqsdk_stream::{
     CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy,
-    StreamSinkStatus,
+    StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
+    StreamSinkWalRecordKind,
 };
 
 mod support;
@@ -170,6 +171,48 @@ async fn managed_commit_sink_retries_failures_and_records_jsonl_wal() {
             .iter()
             .any(|record| record["kind"] == "flush_succeeded")
     );
+
+    let _ = std::fs::remove_file(&wal_path);
+}
+
+#[test]
+fn stream_sink_options_expose_wal_fsync_policy() {
+    let options = StreamSinkOptions::new().wal_fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord);
+
+    assert_eq!(
+        options.fsync_policy(),
+        StreamSinkWalFsyncPolicy::EveryRecord
+    );
+}
+
+#[test]
+fn stream_sink_wal_compaction_trims_old_revision_records() {
+    let wal_path = temp_wal_path("stream-sink-compaction");
+    let _ = std::fs::remove_file(&wal_path);
+    write_wal_records(
+        &wal_path,
+        &[
+            wal_record(StreamSinkWalRecordKind::Delivered, Some(1)),
+            wal_record(StreamSinkWalRecordKind::Delivered, Some(2)),
+            wal_record(StreamSinkWalRecordKind::FlushSucceeded, None),
+            wal_record(StreamSinkWalRecordKind::Delivered, Some(3)),
+        ],
+    );
+
+    let report = StreamSinkWalCompaction::new()
+        .retain_revisions_from(2)
+        .retain_non_revision_records(false)
+        .compact_jsonl(&wal_path)
+        .unwrap();
+
+    assert_eq!(report.original_records(), 4);
+    assert_eq!(report.retained_records(), 2);
+    assert_eq!(report.dropped_records(), 2);
+
+    let records = read_wal_records(&wal_path);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["revision"], 2);
+    assert_eq!(records[1]["revision"], 3);
 
     let _ = std::fs::remove_file(&wal_path);
 }
@@ -360,7 +403,30 @@ fn temp_wal_path(name: &str) -> PathBuf {
     ))
 }
 
-fn read_wal_records(path: &PathBuf) -> Vec<Value> {
+fn wal_record(kind: StreamSinkWalRecordKind, revision: Option<u64>) -> StreamSinkWalRecord {
+    StreamSinkWalRecord {
+        sink: "warehouse".to_string(),
+        kind,
+        revision,
+        attempt: 1,
+        scope: Some("realtime_update".to_string()),
+        domains: vec!["market".to_string()],
+        paths: vec!["quotes/SHFE.au2602".to_string()],
+        error: None,
+    }
+}
+
+fn write_wal_records(path: &Path, records: &[StreamSinkWalRecord]) {
+    let mut file = std::fs::File::create(path).expect("test wal should be created");
+    for record in records {
+        serde_json::to_writer(&mut file, record).expect("test wal record should serialize");
+        use std::io::Write;
+        file.write_all(b"\n")
+            .expect("test wal record should be written");
+    }
+}
+
+fn read_wal_records(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .expect("wal file should be readable")
         .lines()

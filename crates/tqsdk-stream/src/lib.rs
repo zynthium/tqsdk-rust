@@ -67,7 +67,8 @@ pub use shutdown::{
 };
 pub use sink::{
     CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkOptions, StreamSinkRetryPolicy,
-    StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalRecord,
+    StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalCompaction,
+    StreamSinkWalCompactionReport, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
     StreamSinkWalRecordKind,
 };
 pub use typed::{PathValueStream, ValueUpdate};

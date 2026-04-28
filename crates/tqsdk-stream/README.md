@@ -53,6 +53,9 @@
 - `StreamSinkOptions`
 - `StreamSinkRetryPolicy`
 - `StreamSinkStatus`
+- `StreamSinkWalCompaction`
+- `StreamSinkWalCompactionReport`
+- `StreamSinkWalFsyncPolicy`
 - `StreamSinkWalRecord`
 - `StreamSinkWalRecordKind`
 - `StreamGracefulShutdown`
@@ -241,8 +244,10 @@ SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 `StreamSinkStats` / `StreamSinkShutdownReport` 暴露 processed / lagged / errors /
 retry_attempts / wal_records 和 flush 结果。需要有限重试或本地 JSONL WAL 时，
 使用 `TqStream::spawn_commit_sink_with_options(...)` 传入 `StreamSinkOptions`、
-`StreamSinkRetryPolicy` 和 `jsonl_wal(...)`。这个 sink foundation 不是 durable
-queue，也不负责 WAL compaction、fsync policy 或跨进程恢复。
+`StreamSinkRetryPolicy` 和 `jsonl_wal(...)`。如果本地 WAL 需要更强落盘语义，可配置
+`StreamSinkWalFsyncPolicy::EveryRecord`；如果需要裁剪本地 JSONL WAL，可使用
+`StreamSinkWalCompaction` 按 revision 保留记录并返回 typed compaction report。这个
+sink foundation 不是 durable queue，也不负责跨进程恢复。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
 `tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。它只负责错误分类和 retry
