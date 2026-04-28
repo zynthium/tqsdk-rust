@@ -4,8 +4,8 @@ use std::sync::{Arc, Weak};
 use tqsdk_core::{TradeDirection, TradeOffset};
 use tqsdk_wait::OrderRef;
 
-use crate::registry::TaskId;
 use crate::TaskError;
+use crate::registry::TaskId;
 
 use super::{TargetPosTaskExecutionReport, TargetPosTaskInner};
 

@@ -1,9 +1,9 @@
 use std::sync::atomic::Ordering;
 
+use crate::Result;
 use crate::config::PriceMode;
 use crate::shared::SharedTargetPosSchedulerStore;
 use crate::target_pos::{TargetPosBuilder, TargetPosTask};
-use crate::Result;
 
 use super::planner::{effective_step_elapsed, shanghai_now};
 use super::state::{ActiveStepClock, ActiveStepPhase, TargetPosSchedulerStore};

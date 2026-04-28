@@ -135,10 +135,7 @@ impl TargetPosSchedulerInner {
         self.state.with(f)
     }
 
-    pub(super) fn with_state_mut<R>(
-        &self,
-        f: impl FnOnce(&mut TargetPosSchedulerState) -> R,
-    ) -> R {
+    pub(super) fn with_state_mut<R>(&self, f: impl FnOnce(&mut TargetPosSchedulerState) -> R) -> R {
         self.state.with_mut(f)
     }
 }

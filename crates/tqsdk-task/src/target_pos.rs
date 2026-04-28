@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::watch;
 use tqsdk_core::{ObjectKey, Order, Position, TradeDirection, TradeOffset};
@@ -25,9 +25,9 @@ pub use report::{
     TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport, TargetPosTaskOrderReport,
     TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
 };
-use state::{DesiredBatch, LiveOrderHandling};
 pub(crate) use state::TargetPosStore;
 use state::TargetPosTaskState;
+use state::{DesiredBatch, LiveOrderHandling};
 
 /// Builder for a target position task.
 pub struct TargetPosBuilder {
@@ -686,7 +686,8 @@ impl TargetPosTaskInner {
             if !should_cancel {
                 continue;
             }
-            if let Err(error) = executor::cancel_order(api, order_ref.account_id(), &order_id).await {
+            if let Err(error) = executor::cancel_order(api, order_ref.account_id(), &order_id).await
+            {
                 self.with_state_mut(|state| {
                     state.cancel_requested_order_ids.remove(&order_id);
                 });

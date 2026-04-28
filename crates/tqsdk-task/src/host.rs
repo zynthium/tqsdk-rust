@@ -20,8 +20,8 @@ use crate::shared::{
     SharedTaskRegistry, SharedTradingCalendar,
 };
 use crate::strategy::StrategyHostBuilder;
-use crate::testing::StrategyTestRuntime;
 use crate::target_pos::{TargetPosBuilder, process_target_tasks_wait_update};
+use crate::testing::StrategyTestRuntime;
 
 /// Single-owner task host built on a wait-style API.
 pub struct TaskHost {
