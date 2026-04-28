@@ -1,10 +1,15 @@
 use futures::StreamExt;
+use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tqsdk_core::Quote;
-use tqsdk_stream::{CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkStatus};
+use tqsdk_stream::{
+    CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy,
+    StreamSinkStatus,
+};
 
 mod support;
 
@@ -116,6 +121,59 @@ async fn managed_commit_sink_runs_outside_core_consumer_loop_and_flushes_on_shut
     assert_eq!(sink_state.flushed.load(Ordering::Acquire), 1);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn managed_commit_sink_retries_failures_and_records_jsonl_wal() {
+    let wal_path = temp_wal_path("stream-sink-policy");
+    let _ = std::fs::remove_file(&wal_path);
+
+    let stream = support::core_seed::seeded_stream();
+    let sink = FlakySink::new(2);
+    let sink_state = sink.state();
+    let options = StreamSinkOptions::new()
+        .retry_policy(StreamSinkRetryPolicy::limited(3).unwrap())
+        .jsonl_wal(wal_path.clone());
+    let sink_handle = stream
+        .spawn_commit_sink_with_options("warehouse", sink, options)
+        .unwrap();
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 618.0);
+
+    wait_until(|| sink_handle.stats().processed_commits() == 1).await;
+    assert_eq!(sink_state.attempts.load(Ordering::Acquire), 3);
+    assert_eq!(sink_handle.stats().retry_attempts(), 2);
+    assert_eq!(sink_handle.stats().errors(), 2);
+
+    let report = sink_handle.shutdown().await.unwrap();
+    assert_eq!(report.status(), StreamSinkStatus::Stopped);
+    assert_eq!(report.stats().processed_commits(), 1);
+    assert_eq!(report.stats().retry_attempts(), 2);
+    assert_eq!(report.stats().errors(), 2);
+    assert_eq!(report.stats().wal_records(), 5);
+    assert!(report.flushed());
+
+    let records = read_wal_records(&wal_path);
+    assert_eq!(records[0]["kind"], "received");
+    assert_eq!(records[0]["revision"], 1);
+    assert_eq!(records[0]["attempt"], 1);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["kind"] == "attempt_failed")
+            .count(),
+        2
+    );
+    assert!(records.iter().any(|record| {
+        record["kind"] == "delivered" && record["revision"] == 1 && record["attempt"] == 3
+    }));
+    assert!(
+        records
+            .iter()
+            .any(|record| record["kind"] == "flush_succeeded")
+    );
+
+    let _ = std::fs::remove_file(&wal_path);
+}
+
 struct BlockingSink {
     state: Arc<BlockingSinkState>,
     blocker: Arc<tokio::sync::Notify>,
@@ -169,6 +227,44 @@ impl CommitSink for BlockingSink {
     }
 }
 
+struct FlakySink {
+    state: Arc<FlakySinkState>,
+    failures_before_success: usize,
+}
+
+struct FlakySinkState {
+    attempts: AtomicUsize,
+}
+
+impl FlakySink {
+    fn new(failures_before_success: usize) -> Self {
+        Self {
+            state: Arc::new(FlakySinkState {
+                attempts: AtomicUsize::new(0),
+            }),
+            failures_before_success,
+        }
+    }
+
+    fn state(&self) -> Arc<FlakySinkState> {
+        Arc::clone(&self.state)
+    }
+}
+
+impl CommitSink for FlakySink {
+    fn handle_commit(&mut self, _commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+        let attempt = self.state.attempts.fetch_add(1, Ordering::AcqRel) + 1;
+        let should_fail = attempt <= self.failures_before_success;
+        Box::pin(async move {
+            if should_fail {
+                Err(StreamFacadeError::InvalidState("transient sink failure"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 async fn wait_until(mut condition: impl FnMut() -> bool) {
     for _ in 0..50 {
         if condition() {
@@ -177,4 +273,23 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
     assert!(condition(), "condition did not become true before timeout");
+}
+
+fn temp_wal_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{name}-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ))
+}
+
+fn read_wal_records(path: &PathBuf) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .expect("wal file should be readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("wal line should be valid json"))
+        .collect()
 }

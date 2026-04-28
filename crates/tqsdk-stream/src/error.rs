@@ -11,6 +11,7 @@ pub enum StreamErrorKind {
     Auth,
     Transport,
     Http,
+    Io,
     Adapter,
     UnsupportedCommand,
     UnsupportedInput,
@@ -78,9 +79,17 @@ impl StreamErrorDiagnostic {
 pub enum StreamFacadeError {
     Contract(tqsdk_core::ContractError),
     Session(tqsdk_session::SessionFacadeError),
-    MissingValue { path: tqsdk_core::StatePath },
-    Lagged { skipped: u64 },
+    MissingValue {
+        path: tqsdk_core::StatePath,
+    },
+    Lagged {
+        skipped: u64,
+    },
     Closed,
+    Io {
+        operation: &'static str,
+        message: String,
+    },
     InvalidState(&'static str),
 }
 
@@ -120,6 +129,12 @@ impl StreamFacadeError {
                 message: "stream driver closed".to_string(),
                 lagged_commits: None,
             },
+            Self::Io { operation, message } => StreamErrorDiagnostic {
+                kind: StreamErrorKind::Io,
+                retry_hint: tqsdk_core::RetryHint::DoNotRetry,
+                message: format!("{operation}: {message}"),
+                lagged_commits: None,
+            },
             Self::InvalidState(message) => StreamErrorDiagnostic {
                 kind: StreamErrorKind::InvalidState,
                 retry_hint: tqsdk_core::RetryHint::DoNotRetry,
@@ -152,6 +167,7 @@ impl Display for StreamFacadeError {
                 write!(f, "stream receiver lagged and skipped {skipped} commit(s)")
             }
             Self::Closed => write!(f, "stream driver closed"),
+            Self::Io { operation, message } => write!(f, "{operation}: {message}"),
             Self::InvalidState(message) => write!(f, "invalid stream facade state: {message}"),
         }
     }
@@ -165,6 +181,7 @@ impl std::error::Error for StreamFacadeError {
             Self::MissingValue { .. }
             | Self::Lagged { .. }
             | Self::Closed
+            | Self::Io { .. }
             | Self::InvalidState(_) => None,
         }
     }

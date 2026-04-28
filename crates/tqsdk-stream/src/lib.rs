@@ -11,8 +11,9 @@
 //! quote/tick/kline loops, minimal commit-backed trade event streams via
 //! [`OrderEventStream`] / [`TradeEventStream`] and related account-scoped
 //! wrappers, unified [`TradeObjectEventStream`] / [`TradeSessionEventStream`]
-//! layers, managed [`CommitSink`] consumers for slow sink isolation, and direct
-//! access to the shared [`tqsdk_core::RuntimeReader`].
+//! layers, managed [`CommitSink`] consumers for slow sink isolation with finite
+//! retry / JSONL WAL options, and direct access to the shared
+//! [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
 //! helpers remain in [`tqsdk_session`]. Use [`TqStream::session`] when a
@@ -56,8 +57,9 @@ pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::QuoteSubscription;
 pub use recovery::StreamStartupRecovery;
 pub use sink::{
-    CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkShutdownReport, StreamSinkStats,
-    StreamSinkStatus,
+    CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkOptions, StreamSinkRetryPolicy,
+    StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalRecord,
+    StreamSinkWalRecordKind,
 };
 pub use typed::{PathValueStream, ValueUpdate};
 pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};

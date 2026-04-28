@@ -718,14 +718,17 @@ impl futures::Stream for TradeSessionEventStream {
 - root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)` 显式配置
 - 写库 / 日志这类 sink 可通过 `TqStream::spawn_commit_sink(...)` 由 SDK 托管，
   并通过 `StreamSinkStats` / `StreamSinkShutdownReport` 观察 processed、lagged、
-  errors 和 flush 结果
+  errors、retry_attempts、wal_records 和 flush 结果
+- per-sink 有限重试与本地 JSONL WAL 可通过
+  `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` 配置
 - 不为慢消费者阻塞整个 session 驱动
 - 不为每个订阅者维护独立 cursor + 独立 route 驱动
 
 这个配置只控制 stream facade 内部 bounded broadcast ring。managed commit sink 是
 stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
-per-sink retry/storage policy、本地 WAL 和跨进程 sink 恢复仍属于后续 daemon/tooling
-层，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。
+JSONL WAL 是本地审计/恢复基础，不是 durable queue；WAL compaction、fsync policy
+和跨进程 sink 恢复仍属于后续 daemon/tooling 层，不应下沉到 `tqsdk-core` 或
+`tqsdk-session`。
 
 为什么第一版不做更复杂的 path/object fan-out：
 

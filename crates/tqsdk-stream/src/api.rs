@@ -517,12 +517,20 @@ impl TqStream {
     where
         S: crate::sink::CommitSink,
     {
+        self.spawn_commit_sink_with_options(name, sink, crate::sink::StreamSinkOptions::default())
+    }
+
+    pub fn spawn_commit_sink_with_options<S>(
+        &self,
+        name: impl Into<String>,
+        sink: S,
+        options: crate::sink::StreamSinkOptions,
+    ) -> crate::error::Result<crate::sink::StreamSinkHandle>
+    where
+        S: crate::sink::CommitSink,
+    {
         let commits = self.commit_stream()?;
-        Ok(crate::sink::StreamSinkHandle::spawn(
-            name.into(),
-            commits,
-            sink,
-        ))
+        crate::sink::StreamSinkHandle::spawn(name.into(), commits, sink, options)
     }
 
     #[doc(hidden)]

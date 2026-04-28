@@ -47,7 +47,11 @@
 - `StreamSinkHandle`
 - `StreamSinkStats`
 - `StreamSinkShutdownReport`
+- `StreamSinkOptions`
+- `StreamSinkRetryPolicy`
 - `StreamSinkStatus`
+- `StreamSinkWalRecord`
+- `StreamSinkWalRecordKind`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -82,6 +86,7 @@
 - `StreamFacadeError::diagnostic()`
 - `StreamFacadeError::is_retryable()`
 - `spawn_commit_sink(...)`
+- `spawn_commit_sink_with_options(...)`
 - `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
@@ -219,9 +224,11 @@ graceful shutdown 和全局 close/flush orchestration 仍属于上层 daemon/too
 `StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
 信息。写库 / 日志这类非核心消费者可以通过 `TqStream::spawn_commit_sink(...)`
 交给 SDK 托管，sink 在独立 consumer task 中消费 commit，并通过
-`StreamSinkStats` / `StreamSinkShutdownReport` 暴露 processed / lagged / errors 和
-flush 结果。这个 sink foundation 不是 durable queue，也不是 per-sink
-retry/storage policy 或本地 WAL。
+`StreamSinkStats` / `StreamSinkShutdownReport` 暴露 processed / lagged / errors /
+retry_attempts / wal_records 和 flush 结果。需要有限重试或本地 JSONL WAL 时，
+使用 `TqStream::spawn_commit_sink_with_options(...)` 传入 `StreamSinkOptions`、
+`StreamSinkRetryPolicy` 和 `jsonl_wal(...)`。这个 sink foundation 不是 durable
+queue，也不负责 WAL compaction、fsync policy 或跨进程恢复。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
 `tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。它只负责错误分类和 retry

@@ -121,8 +121,9 @@ crate 分层合并成一份迭代计划。
 - `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
   reconnect diagnostics、driver closed 和 revision；strategy supervisor 的稳定
   telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
-  `tqsdk-stream`；ctrl-c graceful shutdown、per-sink retry/storage policy 和本地 WAL
-  仍在后续 daemon/tooling 层。
+  `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
+  ctrl-c graceful shutdown、durable queue / WAL compaction / 跨进程恢复仍在后续
+  daemon/tooling 层。
 
 ### P0：订单 intent 与断线一致性
 
@@ -362,7 +363,10 @@ crate 分层合并成一份迭代计划。
   的最小状态判定。
 - `TqStream::spawn_commit_sink(...)` 提供 managed commit sink foundation，写库/日志
   sink 可以由 SDK 托管在独立 consumer task 中，并通过 `StreamSinkStats` /
-  `StreamSinkShutdownReport` 观察 processed / lagged / errors 与 flush 结果。
+  `StreamSinkShutdownReport` 观察 processed / lagged / errors / retry_attempts /
+  wal_records 与 flush 结果。
+- `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` /
+  `StreamSinkRetryPolicy` 提供 per-sink 有限重试和本地 JSONL WAL foundation。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
   transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
   指标系统，不需要 SDK 内置 HTTP endpoint。
@@ -370,13 +374,13 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - daemon-level ctrl-c graceful shutdown 与全局 close/flush orchestration；
-- per-sink retry/storage policy、本地 WAL；
+- durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复；
 - 统一 retry policy orchestration 与业务拒单审计。
 
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag 和 managed commit sink foundation 已提升为正式 stream example）
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试和 JSONL WAL foundation 已提升为正式 stream example）
 - `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
 
 已落地：
@@ -389,7 +393,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- per-sink retry-storage policy、本地 WAL 和跨进程 sink 恢复。
+- durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复。
 - 完整 reconnect orchestration 和跨进程 daemon 管理。
 
 ### P2：本地行情缓存与研究闭环

@@ -38,9 +38,10 @@
 //! `StrategySupervisorHealth` / `StrategySupervisorMetrics` typed snapshot、
 //! `StrategyTelemetryEvent` / `StrategyTelemetryReporter` typed telemetry hook、
 //! 显式 `StrategyRetryPolicy`、`StrategyShutdownSignal::ctrl_c()` 和 typed
-//! shutdown report；`tqsdk-stream` 已有 managed commit sink foundation。S20 完成标准
-//! 不包含 Rust GUI、web helper 或内置 HTTP health/metrics endpoint；仍没有 per-sink
-//! retry/storage policy、本地 WAL、完整 reconnect orchestration 和跨进程 daemon 管理。
+//! shutdown report；`tqsdk-stream` 已有 managed commit sink、有限重试和 JSONL WAL
+//! foundation。S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP health/metrics
+//! endpoint；仍没有完整 reconnect orchestration、WAL compaction / fsync policy 和
+//! 跨进程 daemon 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore
