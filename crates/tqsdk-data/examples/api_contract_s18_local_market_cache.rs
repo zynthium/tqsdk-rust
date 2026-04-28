@@ -1,4 +1,4 @@
-//! Scenario: 本地行情缓存读写（cache record / replay 子集）
+//! Scenario: 本地行情缓存读写（cache record / replay foundation）
 //!
 //! User goal:
 //! - 将标准行情对象写入本地缓存文件
@@ -25,12 +25,14 @@
 //!
 //! Review questions:
 //! - 当前 API 是否自然表达本地缓存 foundation？
-//! - 剩余 live sink / durable queue gap 是否被明确排除？
+//! - cache maintenance / live sink gap 是否被明确排除？
 //! - 是否存在热路径性能风险？
 //!
 //! Current API note:
 //! 本示例只验证离线 cache record、JSONL reader/writer 和 deterministic replay。
-//! live stream pipe、durable sink runtime、跨进程锁/index 和 strategy replay driver
+//! queue / lock / index / compaction foundation 见
+//! `api_contract_s18_cache_maintenance.rs`；live stream pipe 见
+//! `api_contract_s18_live_market_cache_pipe.rs`。durable daemon orchestration
 //! 仍保留在 `docs/scenarios/api_gaps/`。
 
 use tqsdk_core::Quote;

@@ -31,19 +31,21 @@
 //! API gap:
 //! `tqsdk-data` 已提供离线 cache record、JSONL reader/writer 和 ordered
 //! replay iterator；`MarketCacheStreamWriter` 已提供单进程 live `MarketEvent`
-//! -> cache writer pipe foundation。剩余 gap 是 durable daemon queue、跨进程
-//! 锁/index、cache compaction 和多进程 cache 管理。
+//! -> cache writer pipe foundation；`MarketCacheQueue` / `MarketCacheLock` /
+//! `MarketCacheIndex` / `MarketCacheCompaction` 已提供本地 queue、lock file、
+//! index 和保留策略 compaction foundation。剩余 gap 是 durable daemon
+//! orchestration、stale lock recovery、atomic cache rotation 和多进程 cache 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let writer = MarketCache::open_writer("./cache.tqcache").await?;
-//! let mut cache = DurableMarketCachePipe::new(writer)
-//!     .cross_process_lock("./cache.tqcache.lock")
-//!     .index("./cache.tqcache.index")
-//!     .compact_daily()
+//! let mut cache = DurableMarketCacheDaemon::new("./cache.tqcache")
+//!     .queue("./cache.queue")
+//!     .lock_lease("./cache.lock")
+//!     .atomic_rotation()
+//!     .stale_lock_recovery()
 //!     .build()
 //!     .await?;
-//! stream.market_events().quote("SHFE.au2602").pipe_to_cache(&mut cache).await?;
+//! cache.attach(stream.market_events().quote("SHFE.au2602")).await?;
 //!
 //! let reader = MarketCache::open_reader("./cache.tqcache").await?;
 //! let mut replay = reader.replay().symbol("SHFE.au2602").build().await?;

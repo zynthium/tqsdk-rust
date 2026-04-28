@@ -55,6 +55,20 @@
 - `OptionGreeksRow`
 - `KlineCsvExportSummary`
 - `TickCsvExportSummary`
+- `MarketCacheEvent`
+- `MarketCachePayload`
+- `MarketCachePayloadKind`
+- `MarketCacheWriter`
+- `MarketCacheReader`
+- `MarketCacheReplay`
+- `MarketCacheQueue`
+- `MarketCacheQueueDrainReport`
+- `MarketCacheLock`
+- `MarketCacheIndex`
+- `MarketCacheIndexKey`
+- `MarketCacheIndexEntry`
+- `MarketCacheCompaction`
+- `MarketCacheCompactionReport`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -82,13 +96,19 @@
 `MarketCacheReplay` define the offline cache record and replay foundation for
 standard `Quote` / `Kline` / `Tick` payloads.
 
+`MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
+`MarketCacheCompaction` provide local file queue, lock file, index, and
+retention-policy compaction foundations. They are synchronous data-layer file
+helpers: they do not spawn a daemon, recover stale locks, rotate cache files
+atomically, or manage a multi-process cache service.
+
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` and the matching tick methods
 connect owned history series to that replay foundation without requiring users
 to hand-build cache events.
 
 This is not a live durable sink runtime: it does not spawn tasks, isolate slow
-consumers, manage WAL compaction, or drive `StrategyHost`. Those remain
+consumers, run daemon orchestration, or drive `StrategyHost`. Those remain
 scenario gaps above this data-layer foundation.
 
 ## 后续仍应承接的能力
@@ -147,6 +167,8 @@ scenario gaps above this data-layer foundation.
 - [examples/kline_export_csv.rs](examples/kline_export_csv.rs)
 - [examples/tick_data_download.rs](examples/tick_data_download.rs)
 - [examples/tick_export_csv.rs](examples/tick_export_csv.rs)
+- [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
+- [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。

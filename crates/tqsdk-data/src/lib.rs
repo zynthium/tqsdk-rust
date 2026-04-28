@@ -18,6 +18,9 @@
 //! - `DataClient::from_session(...).query_option_greeks(...)`
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
+//! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
+//! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
+//!   `MarketCacheCompaction`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -45,7 +48,10 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use market_cache::{
-    MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheReplay, MarketCacheWriter,
+    MarketCacheCompaction, MarketCacheCompactionReport, MarketCacheEvent, MarketCacheIndex,
+    MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock, MarketCachePayload,
+    MarketCachePayloadKind, MarketCacheQueue, MarketCacheQueueDrainReport, MarketCacheReader,
+    MarketCacheReplay, MarketCacheWriter,
 };
 #[cfg(feature = "stream")]
 pub use stream_cache::MarketCacheStreamWriter;

@@ -455,7 +455,13 @@ crate 分层合并成一份迭代计划。
 - `MarketCacheReplay` 提供按事件时间、接收时间排序的 deterministic
   offline replay iterator。
 - `MarketCacheStreamWriter` 提供单进程 live `MarketEvent` -> cache writer
-  pipe foundation，明确不承诺 durable daemon queue 或跨进程锁。
+  pipe foundation，明确不承诺 durable daemon orchestration。
+- `MarketCacheQueue` 提供本地 JSONL queue/spool foundation，可将 live 或
+  offline cache event 先写入可重放队列，再 drain 到 cache writer。
+- `MarketCacheLock` 提供原子 lock file foundation，用于单机多进程写入前的
+  互斥防线；stale lock detection / lease renewal 仍不承诺。
+- `MarketCacheIndex` / `MarketCacheCompaction` 提供本地 cache 统计索引与
+  保留策略 compaction foundation。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -469,17 +475,21 @@ crate 分层合并成一份迭代计划。
 - `KlineDataSeries` / `TickDataSeries` 已提供 `into_market_cache_events`
   与 `into_market_cache_replay`，覆盖 history series -> cache replay
   adapter foundation。
-- `api_contract_s18_local_market_cache` 已提升为正式 data example，明确只
-  覆盖 cache record / reader-writer / replay 子集。
+- `api_contract_s18_local_market_cache` 已提升为正式 data example，覆盖
+  cache record / reader-writer / replay foundation。
+- `api_contract_s18_cache_maintenance` 已提升为正式 data example，覆盖
+  queue / lock / index / compaction foundation。
 
 仍未完成、不可伪装为已支持：
 
-- durable sink runtime 和可靠队列；
-- 跨进程锁、索引和 cache compaction；
+- durable daemon orchestration；
+- stale lock recovery、lease/heartbeat 和 atomic cache rotation；
+- 跨进程 cache 管理服务；
 
 优先提升的场景：
 
-- `api_contract_s18_local_market_cache`（cache record/replay 子集已提升为正式 data example）
+- `api_contract_s18_local_market_cache`（cache record/replay foundation 已提升为正式 data example）
+- `api_contract_s18_cache_maintenance`（cache maintenance foundation 已提升为正式 data example）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 
