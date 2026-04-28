@@ -29,6 +29,8 @@ mod export;
 mod greeks;
 mod live_quote;
 mod market_cache;
+#[cfg(feature = "stream")]
+mod stream_cache;
 
 pub use client::{
     DataClient, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
@@ -45,3 +47,5 @@ pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use market_cache::{
     MarketCacheEvent, MarketCachePayload, MarketCacheReader, MarketCacheReplay, MarketCacheWriter,
 };
+#[cfg(feature = "stream")]
+pub use stream_cache::MarketCacheStreamWriter;

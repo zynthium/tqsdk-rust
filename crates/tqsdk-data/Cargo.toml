@@ -11,14 +11,17 @@ readme = "README.md"
 default = ["live", "services"]
 live = ["tqsdk-session/live"]
 services = ["dep:reqwest", "tqsdk-session/services"]
+stream = ["dep:futures", "dep:tqsdk-stream"]
 
 [dependencies]
 chrono.workspace = true
+futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tqsdk-core = { path = "../tqsdk-core" }
 tqsdk-session = { path = "../tqsdk-session", default-features = false }
+tqsdk-stream = { path = "../tqsdk-stream", default-features = false, optional = true }
 tokio.workspace = true
 
 [dev-dependencies]
@@ -52,3 +55,7 @@ required-features = ["live"]
 [[example]]
 name = "tick_export_csv"
 required-features = ["live"]
+
+[[example]]
+name = "api_contract_s18_live_market_cache_pipe"
+required-features = ["live", "stream"]
