@@ -86,6 +86,11 @@ impl TqStream {
     }
 
     #[must_use]
+    pub fn reconnect_monitor(&self) -> crate::reconnect::StreamReconnectMonitor<'_> {
+        crate::reconnect::StreamReconnectMonitor::new(self)
+    }
+
+    #[must_use]
     pub fn graceful_shutdown(self) -> crate::shutdown::StreamGracefulShutdown {
         crate::shutdown::StreamGracefulShutdown::new(self)
     }

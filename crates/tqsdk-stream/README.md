@@ -41,6 +41,9 @@
 - `StreamHealthSnapshot`
 - `StreamHealthStatus`
 - `StreamSessionPhase`
+- `StreamReconnectMonitor`
+- `StreamReconnectOutcome`
+- `StreamReconnectReport`
 - `StreamErrorDiagnostic`
 - `StreamErrorKind`
 - `CommitSink`
@@ -86,6 +89,7 @@
 - `health()`
 - `StreamHealthSnapshot::status()`
 - `StreamHealthSnapshot::should_restart()`
+- `reconnect_monitor()`
 - `StreamFacadeError::diagnostic()`
 - `StreamFacadeError::is_retryable()`
 - `spawn_commit_sink(...)`
@@ -219,12 +223,15 @@ provider 级恢复 flag。
 生产守护进程如果只需要 typed health snapshot，可以调用 `TqStream::health()`。
 返回的 `StreamHealthSnapshot` 包含 runtime revision、session phase、最近一次
 reconnect diagnostics 和 stream driver closed 状态，并提供
-`status()` / `should_restart()` 作为生产指标和日志的最小判定。需要显式关闭 stream
-driver 并 flush managed sink 时，可以使用 `TqStream::graceful_shutdown()`，
-把 `StreamSinkHandle` 交给 shutdown coordinator 后得到
+`status()` / `should_restart()` 作为生产指标和日志的最小判定。需要在生产守护
+进程中等待现有 session 重连恢复结果时，可以使用 `TqStream::reconnect_monitor()`
+得到 `StreamReconnectReport`，区分 already healthy、recovered、exhausted、
+timed out 和 closed；它只消费同一条 commit fan-out 与 health snapshot，不接管
+底层 reconnect 执行。需要显式关闭 stream driver 并 flush managed sink 时，可以使用
+`TqStream::graceful_shutdown()`，把 `StreamSinkHandle` 交给 shutdown coordinator 后得到
 `StreamGracefulShutdownReport`。daemon-level ctrl-c signal 位于 `tqsdk-task`
-的 strategy supervisor；完整 reconnect orchestration 仍属于后续 daemon/tooling
-能力。Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
+的 strategy supervisor；跨进程 daemon 管理仍属于后续 daemon/tooling 能力。Rust
+SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 
 慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`
 表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过

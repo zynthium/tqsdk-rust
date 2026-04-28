@@ -34,14 +34,16 @@
 //! API gap:
 //! `tqsdk-stream` 已有 session event/reconnect 事件、typed
 //! `TqStream::health()` snapshot、`StreamHealthSnapshot::status()` 和
-//! `should_restart()`；`tqsdk-task` 已有 `StrategySupervisor` foundation、
+//! `should_restart()`，并已有 `TqStream::reconnect_monitor()` 等待并报告 existing
+//! session reconnect 的 recovered / exhausted / timed out / closed outcome；
+//! `tqsdk-task` 已有 `StrategySupervisor` foundation、
 //! `StrategySupervisorHealth` / `StrategySupervisorMetrics` typed snapshot、
 //! `StrategyTelemetryEvent` / `StrategyTelemetryReporter` typed telemetry hook、
 //! 显式 `StrategyRetryPolicy`、`StrategyShutdownSignal::ctrl_c()` 和 typed
 //! shutdown report；`tqsdk-stream` 已有 managed commit sink、有限重试和 JSONL WAL
 //! foundation，并已有 `TqStream::graceful_shutdown()` 做 stream driver 关闭与 managed
 //! sink flush 的 typed report。S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP
-//! health/metrics endpoint；仍没有完整 reconnect orchestration、WAL compaction /
+//! health/metrics endpoint；仍没有跨进程 daemon orchestration、WAL compaction /
 //! fsync policy 和跨进程 daemon 管理。
 //!
 //! 理想用户代码草案：

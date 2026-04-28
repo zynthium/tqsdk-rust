@@ -198,6 +198,7 @@ impl TqStream {
     pub fn into_session(self) -> SessionClient;
     pub fn reader(&self) -> &RuntimeReader;
     pub fn health(&self) -> tqsdk_stream::Result<StreamHealthSnapshot>;
+    pub fn reconnect_monitor(&self) -> StreamReconnectMonitor<'_>;
 
     pub fn commit_stream(&self) -> tqsdk_stream::Result<CommitStream>;
     pub fn path_stream<T, I, S>(&self, path: I) -> tqsdk_stream::Result<PathValueStream<T>>
@@ -371,6 +372,10 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
   状态和 stream driver closed flag 组装 `StreamHealthSnapshot`，并提供
   `status()` / `should_restart()` 作为最小状态判定；它不是 metrics exporter、
   supervisor、GUI/web helper 或 graceful shutdown 框架。
+- `reconnect_monitor()` 是生产守护进程的 typed reconnect wait/report 工具；
+  它只消费同一条 commit fan-out 与 `StreamHealthSnapshot`，返回 already healthy /
+  recovered / exhausted / timed out / closed 等结果，不驱动或替代底层 session
+  reconnect。
 - `quote_stream()` 只是 `path_stream()` 在行情对象上的第一个包装
 - `notification_stream()` 对齐 core 的 canonical `system/notify/{id}` 路径
 - `trading_status/account/position/pre_insert_order/order/trade/risk/settlement/security` 这些 wrapper
@@ -723,6 +728,9 @@ impl futures::Stream for TradeSessionEventStream {
   `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` 配置
 - 生产进程关闭时可通过 `TqStream::graceful_shutdown()` 显式 flush outbound、
   关闭 stream driver 并汇总 managed sink shutdown report
+- 生产进程可通过 `TqStream::reconnect_monitor()` 等待并报告既有 session
+  reconnect 的恢复、耗尽、超时或关闭结果；它是 typed supervision helper，不是
+  新的 reconnect executor
 - 不为慢消费者阻塞整个 session 驱动
 - 不为每个订阅者维护独立 cursor + 独立 route 驱动
 
@@ -730,8 +738,9 @@ impl futures::Stream for TradeSessionEventStream {
 stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
 JSONL WAL 是本地审计/恢复基础，不是 durable queue；WAL compaction、fsync policy
 和跨进程 sink 恢复仍属于后续 daemon/tooling 层。`graceful_shutdown()` 是
-stream facade 的显式关闭工具，不接管完整 reconnect orchestration，也不应下沉到
-`tqsdk-core` 或 `tqsdk-session`。
+stream facade 的显式关闭工具；`reconnect_monitor()` 只做 typed wait/report。
+两者都不接管底层 reconnect 执行，也不应下沉到 `tqsdk-core` 或
+`tqsdk-session`。
 
 为什么第一版不做更复杂的 path/object fan-out：
 

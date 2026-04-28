@@ -119,8 +119,9 @@ crate 分层合并成一份迭代计划。
   reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
   因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
 - `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
-  reconnect diagnostics、driver closed 和 revision；strategy supervisor 的稳定
-  telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
+  reconnect diagnostics、driver closed 和 revision；`TqStream::reconnect_monitor()`
+  可以等待并报告 existing session reconnect 的恢复、耗尽、超时或关闭结果；
+  strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
   `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
   stream driver 关闭与 managed sink flush 的 graceful shutdown foundation 也已落在
   `tqsdk-stream`；durable queue / WAL compaction / 跨进程恢复仍在后续 daemon/tooling
@@ -362,6 +363,9 @@ crate 分层合并成一份迭代计划。
   观察背压。
 - `StreamHealthSnapshot::status()` / `should_restart()` 补齐生产 health snapshot
   的最小状态判定。
+- `TqStream::reconnect_monitor()` 提供 typed reconnect wait/report foundation，
+  返回 recovered / exhausted / timed out / closed 等结果，不要求用户自己轮询
+  session phase。
 - `TqStream::spawn_commit_sink(...)` 提供 managed commit sink foundation，写库/日志
   sink 可以由 SDK 托管在独立 consumer task 中，并通过 `StreamSinkStats` /
   `StreamSinkShutdownReport` 观察 processed / lagged / errors / retry_attempts /
@@ -376,7 +380,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- 完整 reconnect orchestration；
+- 跨进程 daemon orchestration；
 - durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复；
 - 统一 retry policy orchestration 与业务拒单审计。
 
@@ -389,7 +393,8 @@ crate 分层合并成一份迭代计划。
 已落地：
 
 - `tqsdk-stream::TqStream::health()` 已提供 typed health snapshot、health status
-  和 restart hint 子集。
+  和 restart hint 子集；`TqStream::reconnect_monitor()` 已提供 typed reconnect
+  wait/report foundation。
 - `tqsdk-task::StrategySupervisor` 已新增正式 S20 task example，覆盖 strategy
   deployment 的 typed health/metrics snapshot、显式 retry policy、ctrl-c
   shutdown signal、typed shutdown report 和 typed telemetry/export hook。
@@ -397,7 +402,7 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复。
-- 完整 reconnect orchestration 和跨进程 daemon 管理。
+- 跨进程 daemon orchestration 和跨进程 daemon 管理。
 
 ### P2：本地行情缓存与研究闭环
 

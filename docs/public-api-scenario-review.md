@@ -63,14 +63,16 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `SessionClient::subscribe_quotes(...)` 减少 raw `RuntimeCommand` 样板，同时仍通过
   `RuntimeReader::read_market_state()` 走热路径分区读面。
 - S20 生产守护进程继续推进但仍为“勉强”：`TqStream::health()` 现在返回
-  `StreamHealthSnapshot::status()` / `should_restart()`；`tqsdk-task` 新增
+  `StreamHealthSnapshot::status()` / `should_restart()`，`TqStream::reconnect_monitor()`
+  可等待并报告 existing session reconnect 的 recovered / exhausted / timed out /
+  closed outcome；`tqsdk-task` 新增
   `StrategySupervisor` foundation，提供 typed health/metrics snapshot、显式
   retry policy、ctrl-c shutdown signal、typed shutdown report 和稳定 typed
   telemetry/export hook；`tqsdk-stream` 已提供 managed commit sink、有限重试和
   JSONL WAL foundation，并提供 `TqStream::graceful_shutdown()` 做 stream driver
   关闭与 managed sink flush 的 typed report。
   S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP health/metrics endpoint；
-  剩余 gap 是完整 reconnect orchestration、WAL compaction / fsync policy 和
+  剩余 gap 是跨进程 daemon orchestration、WAL compaction / fsync policy 和
   跨进程 daemon 管理。
 - S21 慢消费者隔离的 bounded fan-out / lag 诊断 / sink policy 子集已经自然表达：`TqStreamBuilder`
   可配置 root fan-out capacity，`StreamFacadeError::diagnostic()` 暴露 typed
@@ -104,7 +106,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
 | 18. 本地行情缓存读写 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; live durable sink still gap |
 | 19. 风控前置 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskRejection`; `TaskHost::orders`; guarded insert risk integration |
-| 20. 生产守护进程 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; full reconnect orchestration still gap; Rust GUI and built-in HTTP endpoint are out of scope |
+| 20. 生产守护进程 | 勉强 | 中 | 无 | 无 | 中 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::reconnect_monitor`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamReconnectMonitor`; `StreamReconnectOutcome`; `StreamReconnectReport`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; cross-process daemon orchestration still gap; Rust GUI and built-in HTTP endpoint are out of scope |
 | 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; `TqStream::spawn_commit_sink`; `TqStream::spawn_commit_sink_with_options`; `CommitSink`; `StreamSinkOptions`; `StreamSinkRetryPolicy`; `StreamSinkHandle`; `StreamSinkStats`; `StreamSinkShutdownReport`; `StreamSinkWalRecord`; bounded fan-out / typed lag diagnostic / managed commit sink / finite retry / JSONL WAL foundation 自然；durable queue, WAL compaction, cross-process sink recovery still gap |
 | 22. 错误诊断与重试 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs`; error kind / retry hint 子集自然；retry orchestration 仍是 gap |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
@@ -114,5 +116,5 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 
 1. 当前最自然的终端用户场景是：零门槛 wait quote、低层裸行情直通、研究 K线批处理、合约 metadata 查询。
 2. 交易相关场景的主要 API gap 不是 core command 能力缺失，而是用户级 execution/risk abstraction 不足。普通登录、限价单、部分成交撤单、session-scoped reconnect-safe order intent、最小前置风控、execution group foundation、account group foundation 和最小 strategy context 已具备薄 facade；跨进程持久恢复、自动对冲、组合级 what-if 风控和多账户高级执行策略仍需继续补齐。
-3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、graceful shutdown、fan-out capacity、typed lag/error diagnostics、managed commit sink、有限重试和 JSONL WAL foundation 已有薄 facade；`tqsdk-task::StrategySupervisor` 已提供 transport-neutral typed telemetry/export hook；durable queue、WAL compaction、跨进程 sink 恢复和完整 reconnect orchestration 仍停留在底层组合能力之外。
+3. `tqsdk-stream` 的底座方向正确，quote 订阅、动态 quote handle、混合 market event、health snapshot、health status、typed reconnect monitor、graceful shutdown、fan-out capacity、typed lag/error diagnostics、managed commit sink、有限重试和 JSONL WAL foundation 已有薄 facade；`tqsdk-task::StrategySupervisor` 已提供 transport-neutral typed telemetry/export hook；durable queue、WAL compaction、跨进程 sink 恢复和跨进程 daemon orchestration 仍停留在底层组合能力之外。
 4. 多 provider 聚合、完整 production daemon 和 live durable cache sink 都是新 facade/tooling 层问题，不应下沉到 `tqsdk-core` 或 `tqsdk-session`；本地行情 cache record / JSONL reader-writer / ordered replay foundation 与 history series replay adapter 已落在 `tqsdk-data`，cache replay -> strategy context foundation、strategy environment/deployment/supervisor foundation、provider-backed TQKQ sim config、replay source builder、replay speed policy、checkpoint store、test clock、fake broker latency、fake broker reconnect 与跨 step partial fill 已落在 `tqsdk-task`。

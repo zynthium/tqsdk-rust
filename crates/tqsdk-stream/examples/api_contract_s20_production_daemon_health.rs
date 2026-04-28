@@ -3,6 +3,7 @@
 //! User goal:
 //! - 读取 daemon/runtime health snapshot
 //! - 区分 session phase、reconnect diagnostics 和 driver closed
+//! - 等待重连恢复并得到 typed reconnect outcome
 //! - 将健康状态输出给日志或指标系统
 //! - shutdown 时 flush managed sink 并关闭 stream driver
 //!
@@ -11,6 +12,7 @@
 //! - 不解析 runtime state tree 字符串路径
 //! - reconnect exhaustion 可直接读取
 //! - health status / restart hint 可直接读取
+//! - reconnect monitor 返回 typed outcome/report
 //! - graceful shutdown 返回 typed driver/sink report
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -25,6 +27,7 @@
 //! - 生产部署只能从日志字符串判断健康状态
 //! - 用户必须读取 `system/session/*` 原始路径
 //! - reconnect exhaustion 不能被指标系统读取
+//! - 用户必须自己轮询 session phase 判断重连恢复
 //! - 用户只能靠 drop 隐式关闭 driver / sink
 //!
 //! Review questions:
@@ -33,15 +36,19 @@
 //! - 哪些完整 daemon 能力仍是 API gap？
 //!
 //! Current API note:
-//! 本示例验证 stream-layer health snapshot 和 graceful shutdown 子集。
+//! 本示例验证 stream-layer health snapshot、typed reconnect monitor 和
+//! graceful shutdown 子集。
 //! strategy telemetry/export hook 和 ctrl-c shutdown signal 位于 `tqsdk-task`；
-//! 完整 reconnect orchestration、WAL compaction / fsync policy 和跨进程 daemon
-//! 管理仍属于 `docs/scenarios/api_gaps/` 中的生产 daemon gap；Rust SDK 不规划
-//! GUI 或内置 HTTP health/metrics endpoint 作为 S20 完成标准。
+//! stream-level reconnect monitor 只等待并报告既有 session 恢复结果，不接管底层
+//! reconnect 执行。WAL compaction / fsync policy 和跨进程 daemon 管理仍属于
+//! `docs/scenarios/api_gaps/` 中的生产 daemon gap；Rust SDK 不规划 GUI 或内置
+//! HTTP health/metrics endpoint 作为 S20 完成标准。
+
+use std::time::Duration;
 
 use futures::StreamExt;
 use tqsdk_core::CommitResult;
-use tqsdk_stream::{StreamSinkFuture, TqStreamBuilder};
+use tqsdk_stream::{StreamHealthStatus, StreamReconnectOutcome, StreamSinkFuture, TqStreamBuilder};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,6 +71,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             health.is_healthy(),
             health.should_restart()
         );
+
+        if health.status() == StreamHealthStatus::Recovering {
+            let reconnect = stream
+                .reconnect_monitor()
+                .timeout(Duration::from_secs(30))
+                .wait()
+                .await?;
+            println!(
+                "reconnect outcome={:?} attempts={:?} observed_commits={}",
+                reconnect.outcome(),
+                reconnect.last_reconnect().map(|event| event.attempt),
+                reconnect.observed_commits()
+            );
+            if matches!(
+                reconnect.outcome(),
+                StreamReconnectOutcome::Exhausted
+                    | StreamReconnectOutcome::TimedOut
+                    | StreamReconnectOutcome::Closed
+            ) {
+                break;
+            }
+        }
 
         if health.should_restart() {
             break;

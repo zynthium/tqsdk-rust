@@ -463,13 +463,22 @@ pub fn seed_notification_commit_for_user(stream: &TqStream, notification_id: &st
 
 #[allow(dead_code)]
 pub fn seed_session_reconnect_commit(stream: &TqStream, reason: &str) {
+    seed_session_reconnect_commit_with_exhausted(stream, reason, false);
+}
+
+#[allow(dead_code)]
+pub fn seed_session_reconnect_commit_with_exhausted(
+    stream: &TqStream,
+    reason: &str,
+    exhausted: bool,
+) {
     stream
         .handle_for_test()
         .record_session_reconnect(
             1,
             250,
             Some(5),
-            false,
+            exhausted,
             Some(json!({
                 "reason": reason,
             })),
