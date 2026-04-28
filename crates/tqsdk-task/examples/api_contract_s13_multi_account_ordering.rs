@@ -9,6 +9,7 @@
 //! - 多账户是 typed account group，而不是业务代码里的字符串循环
 //! - 比例拆单、最小手数和 deterministic client order id 由 task 层处理
 //! - 每个账户订单、成交和错误隔离可追踪
+//! - `max_unhedged` 在账户间分配裸露持续超时后返回 typed `NeedsAttention`
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -27,6 +28,9 @@
 //! - 当前 API 是否自然表达多账户执行？
 //! - 是否有状态隔离和资金安全风险？
 //! - 多账户能力是否留在 task 层，而不是下沉到 core/session/wait？
+//!
+//! Current limitation:
+//! - `AccountFailurePolicy::ReportExposure` 只报告账户间裸露，不自动补单、调仓或平仓。
 
 use std::time::Duration;
 

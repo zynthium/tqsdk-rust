@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
@@ -479,5 +481,84 @@ async fn multi_account_order_reports_mixed_account_outcome() {
             assert_eq!(accounts.len(), 2);
         }
         other => panic!("expected needs-attention outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multi_account_order_wait_finished_returns_attention_after_max_unhedged_exposure() {
+    let mut host = seeded_host();
+    let max_unhedged = Duration::from_millis(30);
+    let accounts = AccountGroup::builder()
+        .add("sim-a", Ratio::new(1, 2).unwrap())
+        .add("sim-b", Ratio::new(1, 2).unwrap())
+        .build()
+        .unwrap();
+
+    let ticket = host
+        .multi_account_order(accounts)
+        .client_group_id("alloc-timeout-001")
+        .max_unhedged(max_unhedged)
+        .on_account_failed(AccountFailurePolicy::ReportExposure)
+        .buy_open("SHFE.au2602", 4)
+        .limit(480.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-a",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-timeout-001:acct:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 0,
+            status: "FINISHED",
+        },
+    );
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim-b",
+            symbol: "SHFE.au2602",
+            order_id: "alloc-timeout-001:acct:1",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 2,
+            volume_left: 2,
+            status: "ALIVE",
+        },
+    );
+
+    let started_at = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        ticket.wait_finished(
+            &mut host,
+            Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        ),
+    )
+    .await
+    .expect("max_unhedged account exposure timeout should complete before global deadline")
+    .unwrap();
+    assert!(
+        started_at.elapsed() >= max_unhedged,
+        "account exposure timeout returned before configured max_unhedged duration"
+    );
+
+    match outcome {
+        MultiAccountOrderOutcome::NeedsAttention {
+            filled_accounts,
+            unfilled_accounts,
+            accounts,
+        } => {
+            assert_eq!(filled_accounts, vec!["sim-a".to_string()]);
+            assert_eq!(unfilled_accounts, vec!["sim-b".to_string()]);
+            assert_eq!(accounts.len(), 2);
+        }
+        other => panic!("expected account exposure timeout outcome, got {other:?}"),
     }
 }

@@ -461,11 +461,44 @@ impl MultiAccountOrderTicket {
         host: &mut TaskHost,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<MultiAccountOrderOutcome> {
+        let mut exposure_started_at = None;
         loop {
-            if let Some(outcome) = self.outcome(host.api())? {
+            let accounts = self.account_reports(host.api())?;
+            if let Some(outcome) = outcome_from_reports(&accounts) {
                 return Ok(outcome);
             }
-            if !host.wait_update(deadline).await? {
+
+            let exposure_deadline =
+                if let Some(max_unhedged) = self.max_unhedged.filter(|_| {
+                    has_open_account_exposure(&accounts)
+                }) {
+                    let started_at =
+                        *exposure_started_at.get_or_insert_with(tokio::time::Instant::now);
+                    let exposure_deadline = started_at + max_unhedged;
+                    if tokio::time::Instant::now() >= exposure_deadline {
+                        return Ok(needs_attention_from_reports(&accounts));
+                    }
+                    Some(exposure_deadline)
+                } else {
+                    exposure_started_at = None;
+                    None
+                };
+
+            let wait_deadline = match (deadline, exposure_deadline) {
+                (Some(deadline), Some(exposure_deadline)) => {
+                    Some(earlier_deadline(deadline, exposure_deadline))
+                }
+                (Some(deadline), None) => Some(deadline),
+                (None, Some(exposure_deadline)) => Some(exposure_deadline),
+                (None, None) => None,
+            };
+
+            if !host.wait_update(wait_deadline).await? {
+                if let Some(wait_deadline) = wait_deadline
+                    && tokio::time::Instant::now() < wait_deadline
+                {
+                    tokio::time::sleep_until(wait_deadline).await;
+                }
                 let accounts = self.account_reports(host.api())?;
                 return Ok(needs_attention_from_reports(&accounts));
             }
@@ -478,6 +511,13 @@ impl MultiAccountOrderTicket {
             .map(|order| account_report(api, order))
             .collect()
     }
+}
+
+fn earlier_deadline(
+    left: tokio::time::Instant,
+    right: tokio::time::Instant,
+) -> tokio::time::Instant {
+    if left <= right { left } else { right }
 }
 
 impl MultiAccountOrderLegTicket {
@@ -740,6 +780,20 @@ fn needs_attention_from_reports(accounts: &[MultiAccountOrderReport]) -> MultiAc
         unfilled_accounts,
         accounts: accounts.to_vec(),
     }
+}
+
+fn has_open_account_exposure(accounts: &[MultiAccountOrderReport]) -> bool {
+    let has_filled = accounts.iter().any(|account| account.filled_volume > 0);
+    let has_unfilled = accounts.iter().any(|account| {
+        account.volume_left > 0
+            && !matches!(
+                account.state,
+                MultiAccountOrderState::Rejected
+                    | MultiAccountOrderState::Failed
+                    | MultiAccountOrderState::Cancelled
+            )
+    });
+    has_filled && has_unfilled
 }
 
 fn is_pending_state(account: &MultiAccountOrderReport) -> bool {

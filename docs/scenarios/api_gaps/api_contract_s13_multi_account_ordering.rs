@@ -30,8 +30,9 @@
 //!
 //! API gap:
 //! foundation 已支持 typed account group、比例拆单、per-account order ticket 和
-//! per-account outcome。仍未支持自动补单/对冲、跨账户 TargetPos 编排、
-//! 跨进程 resume 和审计日志落库。
+//! per-account outcome，并能在账户间裸露持续超过 `max_unhedged` 后返回 typed
+//! `NeedsAttention`。仍未支持自动补单/对冲、跨账户 TargetPos 编排、
+//! persistent resume 和 durable execution audit。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -43,6 +44,8 @@
 //! let outcome = host
 //!     .multi_account_order(accounts)
 //!     .client_group_id("alloc-au-001")
+//!     .max_unhedged(Duration::from_secs(2))
+//!     .on_account_failed(AccountFailurePolicy::ReportExposure)
 //!     .buy_open("SHFE.au2602", 10)
 //!     .limit(480.0)
 //!     .send_once()
