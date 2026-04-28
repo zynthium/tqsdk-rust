@@ -7,8 +7,8 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
-    AccountFailurePolicy, AccountGroup, MultiAccountOrderOutcome, Ratio, RiskEngine, RiskRejection,
-    TaskError, TaskHost,
+    AccountFailurePolicy, AccountGroup, MultiAccountOrderOutcome, MultiAccountOrderStatus, Ratio,
+    RiskEngine, RiskRejection, TaskError, TaskHost,
 };
 use tqsdk_wait::TqApi;
 
@@ -273,6 +273,40 @@ async fn multi_account_order_submits_allocated_orders_with_deterministic_ids() {
     assert_eq!(second["user_id"], "sim-b");
     assert_eq!(second["order_id"], "alloc-au-001:acct:1");
     assert_eq!(second["volume"], 3);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multi_account_order_report_binds_status_to_runtime_revision() {
+    let mut host = seeded_host();
+    let accounts = AccountGroup::builder()
+        .add("sim-a", Ratio::new(1, 2).unwrap())
+        .add("sim-b", Ratio::new(1, 2).unwrap())
+        .build()
+        .unwrap();
+
+    let ticket = host
+        .multi_account_order(accounts)
+        .client_group_id("alloc-report-001")
+        .buy_open("SHFE.au2602", 4)
+        .limit(480.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    let report = ticket
+        .report(host.api())
+        .expect("multi-account report should read one runtime snapshot");
+
+    assert_eq!(
+        report.revision(),
+        host.api().session().reader().read().revision()
+    );
+    assert_eq!(report.group_id(), "alloc-report-001");
+    assert_eq!(report.accounts().len(), 2);
+    assert!(matches!(
+        report.status(),
+        MultiAccountOrderStatus::Pending { .. }
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

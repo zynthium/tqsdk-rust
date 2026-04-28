@@ -3,7 +3,10 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use tqsdk_core::{Order, OrderLifecycle, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    AccountId, CommandId, CommandStatus, Order, OrderId, OrderLifecycle, Revision, StateReadView,
+    TradeDirection, TradeOffset,
+};
 use tqsdk_wait::{OrderTicket, OrderTicketState};
 
 use crate::{Result, TaskError, TaskHost, TaskOrderIntent};
@@ -84,6 +87,14 @@ pub struct MultiAccountOrderTicket {
     orders: Vec<MultiAccountOrderLegTicket>,
 }
 
+/// Revision-bound report for one multi-account order group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiAccountOrderGroupReport {
+    revision: Revision,
+    group_id: String,
+    status: MultiAccountOrderStatus,
+}
+
 /// Submitted or recovered ticket for one account allocation.
 #[derive(Debug, Clone)]
 pub struct MultiAccountOrderLegTicket {
@@ -150,6 +161,44 @@ pub enum MultiAccountOrderOutcome {
         unfilled_accounts: Vec<String>,
         accounts: Vec<MultiAccountOrderReport>,
     },
+}
+
+impl MultiAccountOrderGroupReport {
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &MultiAccountOrderStatus {
+        &self.status
+    }
+
+    #[must_use]
+    pub fn accounts(&self) -> &[MultiAccountOrderReport] {
+        match &self.status {
+            MultiAccountOrderStatus::Pending { accounts } => accounts,
+            MultiAccountOrderStatus::Finished(outcome) => outcome.accounts(),
+        }
+    }
+}
+
+impl MultiAccountOrderOutcome {
+    #[must_use]
+    pub fn accounts(&self) -> &[MultiAccountOrderReport] {
+        match self {
+            Self::AllFilled { accounts }
+            | Self::Cancelled { accounts }
+            | Self::Rejected { accounts }
+            | Self::Failed { accounts }
+            | Self::NeedsAttention { accounts, .. } => accounts,
+        }
+    }
 }
 
 impl Ratio {
@@ -448,6 +497,21 @@ impl MultiAccountOrderTicket {
         })
     }
 
+    pub fn report(&self, api: &tqsdk_wait::TqApi) -> Result<MultiAccountOrderGroupReport> {
+        let snapshot = api.session().reader().read();
+        let revision = snapshot.revision();
+        let accounts = self.account_reports_from_view(snapshot.view())?;
+        let status = match outcome_from_reports(&accounts) {
+            Some(outcome) => MultiAccountOrderStatus::Finished(outcome),
+            None => MultiAccountOrderStatus::Pending { accounts },
+        };
+        Ok(MultiAccountOrderGroupReport {
+            revision,
+            group_id: self.group_id.clone(),
+            status,
+        })
+    }
+
     pub fn outcome(&self, api: &tqsdk_wait::TqApi) -> Result<Option<MultiAccountOrderOutcome>> {
         let accounts = self.account_reports(api)?;
         Ok(outcome_from_reports(&accounts))
@@ -502,9 +566,17 @@ impl MultiAccountOrderTicket {
     }
 
     fn account_reports(&self, api: &tqsdk_wait::TqApi) -> Result<Vec<MultiAccountOrderReport>> {
+        let snapshot = api.session().reader().read();
+        self.account_reports_from_view(snapshot.view())
+    }
+
+    fn account_reports_from_view(
+        &self,
+        view: StateReadView<'_>,
+    ) -> Result<Vec<MultiAccountOrderReport>> {
         self.orders
             .iter()
-            .map(|order| account_report(api, order))
+            .map(|order| account_report_from_view(view, order))
             .collect()
     }
 }
@@ -619,11 +691,11 @@ async fn submit_multi_account_order(
     })
 }
 
-fn account_report(
-    api: &tqsdk_wait::TqApi,
+fn account_report_from_view(
+    view: StateReadView<'_>,
     order: &MultiAccountOrderLegTicket,
 ) -> Result<MultiAccountOrderReport> {
-    let state = order.ticket.status(api)?;
+    let state = ticket_state_from_view(view, order)?;
     let (state, filled_volume, volume_left) = match state {
         OrderTicketState::Unknown { .. } => {
             (MultiAccountOrderState::Unknown, 0, order.intent.volume)
@@ -674,6 +746,101 @@ fn account_report(
         volume_left,
         state,
     })
+}
+
+fn ticket_state_from_view(
+    view: StateReadView<'_>,
+    order: &MultiAccountOrderLegTicket,
+) -> Result<OrderTicketState> {
+    let order_ref = order.ticket.order();
+    let account_id = AccountId::new(order_ref.account_id().to_owned());
+    let order_id = OrderId::new(order_ref.order_id().to_owned());
+    let order_snapshot = view.trade_state().order(&account_id, &order_id)?;
+    let command_status = command_status_from_view(view, order.ticket.command_id())?;
+
+    match order_snapshot {
+        Some(order_snapshot) => Ok(ticket_state_from_order(
+            order.ticket.command_id(),
+            order_snapshot,
+        )),
+        None => Ok(ticket_state_from_command(
+            order.ticket.command_id(),
+            command_status,
+        )),
+    }
+}
+
+fn command_status_from_view(
+    view: StateReadView<'_>,
+    command_id: Option<CommandId>,
+) -> Result<Option<CommandStatus>> {
+    let Some(command_id) = command_id else {
+        return Ok(None);
+    };
+    let command_segment = command_id.get().to_string();
+    let Some(command) =
+        view.decode_path::<serde_json::Value>(&["runtime", "commands", command_segment.as_str()])?
+    else {
+        return Ok(None);
+    };
+    let Some(status) = command.get("status").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+
+    status
+        .parse()
+        .map(Some)
+        .map_err(|()| TaskError::InvalidState("unknown command status"))
+}
+
+fn ticket_state_from_order(command_id: Option<CommandId>, order: Order) -> OrderTicketState {
+    match order.lifecycle {
+        OrderLifecycle::Filled => OrderTicketState::Filled { command_id, order },
+        OrderLifecycle::Cancelled => OrderTicketState::Cancelled {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Rejected => OrderTicketState::Rejected {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Failed => OrderTicketState::Failed {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Unknown
+        | OrderLifecycle::Submitting
+        | OrderLifecycle::Sent
+        | OrderLifecycle::Accepted
+        | OrderLifecycle::PartiallyFilled
+        | OrderLifecycle::Cancelling => OrderTicketState::Live { command_id, order },
+    }
+}
+
+fn ticket_state_from_command(
+    command_id: Option<CommandId>,
+    command_status: Option<CommandStatus>,
+) -> OrderTicketState {
+    match (command_id, command_status) {
+        (Some(command_id), Some(CommandStatus::Rejected)) => OrderTicketState::Rejected {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Cancelled)) => OrderTicketState::Cancelled {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Failed)) => OrderTicketState::Failed {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Completed)) => OrderTicketState::Unknown {
+            command_id: Some(command_id),
+        },
+        (Some(command_id), Some(status)) => OrderTicketState::CommandPending { command_id, status },
+        (None, Some(_)) => OrderTicketState::Unknown { command_id: None },
+        (command_id, None) => OrderTicketState::Unknown { command_id },
+    }
 }
 
 fn live_account_order_state(order: &Order) -> (MultiAccountOrderState, i64, i64) {

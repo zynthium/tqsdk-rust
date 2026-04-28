@@ -26,7 +26,8 @@ pub mod testing;
 pub use account_group::{
     AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
     AccountGroupBuilder, AllocatedAccountOrder, MultiAccountOrderBuilder, MultiAccountOrderDraft,
-    MultiAccountOrderLegTicket, MultiAccountOrderOutcome, MultiAccountOrderReport,
+    MultiAccountOrderGroupReport, MultiAccountOrderLegTicket, MultiAccountOrderOutcome,
+    MultiAccountOrderReport,
     MultiAccountOrderState, MultiAccountOrderStatus, MultiAccountOrderTicket, Ratio,
 };
 pub use calendar::TradingDayCalendar;
