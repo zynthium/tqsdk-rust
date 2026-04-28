@@ -34,15 +34,14 @@
 //! `StrategyLifecycle` 已覆盖 provider-backed TQKQ sim config、live trade config、
 //! fake/replay deployment wrapper、typed run stop reason 和 graceful shutdown
 //! report；`StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
-//! 已覆盖 task-layer supervisor、typed health/metrics snapshot、有限 retry 和
-//! ctrl-c shutdown hook foundation。正式 example 已更新到
+//! 已覆盖 task-layer supervisor、typed health/metrics snapshot、typed telemetry/export
+//! hook、有限 retry 和 ctrl-c shutdown hook foundation。正式 example 已更新到
 //! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`。
 //!
 //! Remaining API gap:
-//! 当前仍是 deployment/supervisor foundation：配置文件反序列化、稳定
-//! metrics/export hook、完整 reconnect orchestration 和多 provider environment
-//! 尚未冻结。Rust SDK 不规划 GUI 或内置 HTTP health/metrics endpoint 作为
-//! S15/S20 完成标准。
+//! 当前仍是 deployment/supervisor foundation：配置文件反序列化、完整 reconnect
+//! orchestration 和多 provider environment 尚未冻结。Rust SDK 不规划 GUI 或内置 HTTP
+//! health/metrics endpoint 作为 S15/S20 完成标准。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -54,7 +53,7 @@
 //! let mut supervisor = StrategySupervisor::new(deployment)
 //!     .shutdown_signal(StrategyShutdownSignal::ctrl_c())
 //!     .retry_policy(StrategyRetryPolicy::new().max_retries(3))
-//!     .metrics_reporter(MetricsReporter::custom(report_metrics));
+//!     .telemetry_reporter(report_telemetry);
 //! supervisor.run(MyStrategy::default()).await?;
 //! supervisor.shutdown().await?;
 //! ```

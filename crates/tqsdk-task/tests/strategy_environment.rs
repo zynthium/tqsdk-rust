@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use tqsdk_core::Quote;
@@ -7,7 +9,8 @@ use tqsdk_task::{
     RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
     StrategyEnvironmentContext, StrategyEnvironmentKind, StrategyEnvironmentProvider,
     StrategyLifecycle, StrategyRetryPolicy, StrategyRunStopReason, StrategyShutdownSignal,
-    StrategySupervisor, StrategySupervisorHealthStatus, StrategySupervisorStopReason, TaskError,
+    StrategySupervisor, StrategySupervisorHealthStatus, StrategySupervisorStopReason,
+    StrategyTelemetryEvent, StrategyTelemetryEventKind, TaskError,
 };
 
 const SYMBOL: &str = "SHFE.au2602";
@@ -276,6 +279,54 @@ async fn supervisor_retries_strategy_step_and_records_metrics() {
         supervisor.health().status(),
         StrategySupervisorHealthStatus::Stopped
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn supervisor_reports_typed_telemetry_events() {
+    let deployment = replay_deployment_with_events(1, StrategyLifecycle::new().max_steps(1)).await;
+    let events = Rc::new(RefCell::new(Vec::<StrategyTelemetryEvent>::new()));
+    let captured_events = Rc::clone(&events);
+    let mut supervisor = StrategySupervisor::new(deployment).telemetry_reporter(move |event| {
+        captured_events.borrow_mut().push(event);
+    });
+
+    let report = supervisor
+        .run(|_| Box::pin(async move { Ok(()) }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.stop_reason(),
+        StrategySupervisorStopReason::Deployment(StrategyRunStopReason::MaxSteps)
+    );
+
+    let events = events.borrow();
+    assert!(
+        events.iter().any(|event| {
+            event.kind() == StrategyTelemetryEventKind::HealthChanged
+                && event.health().status() == StrategySupervisorHealthStatus::Running
+        }),
+        "telemetry should report running health"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.kind() == StrategyTelemetryEventKind::MetricsUpdated
+                && event.metrics().steps() == 1
+        }),
+        "telemetry should report step metrics"
+    );
+    let stopped = events
+        .iter()
+        .find(|event| event.kind() == StrategyTelemetryEventKind::RunStopped)
+        .expect("telemetry should report final stop");
+    assert_eq!(
+        stopped.stop_reason(),
+        Some(StrategySupervisorStopReason::Deployment(
+            StrategyRunStopReason::MaxSteps
+        ))
+    );
+    assert_eq!(stopped.metrics().steps(), 1);
+    assert!(stopped.last_error().is_none());
 }
 
 async fn fake_deployment_with_lifecycle(lifecycle: StrategyLifecycle) -> StrategyDeployment {

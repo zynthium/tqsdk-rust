@@ -39,7 +39,8 @@ pub use deployment::{
     StrategyRunReport, StrategyRunStopReason, StrategyShutdownReport, StrategyShutdownSignal,
     StrategyStepFuture, StrategySupervisor, StrategySupervisorHealth,
     StrategySupervisorHealthStatus, StrategySupervisorMetrics, StrategySupervisorReport,
-    StrategySupervisorStopReason,
+    StrategySupervisorStopReason, StrategyTelemetryEvent, StrategyTelemetryEventKind,
+    StrategyTelemetryReporter,
 };
 pub use environment::{
     StrategyEnvironment, StrategyEnvironmentBuilder, StrategyEnvironmentContext,

@@ -36,16 +36,16 @@
 //! `TqStream::health()` snapshot、`StreamHealthSnapshot::status()` 和
 //! `should_restart()`；`tqsdk-task` 已有 `StrategySupervisor` foundation、
 //! `StrategySupervisorHealth` / `StrategySupervisorMetrics` typed snapshot、
+//! `StrategyTelemetryEvent` / `StrategyTelemetryReporter` typed telemetry hook、
 //! 显式 `StrategyRetryPolicy`、`StrategyShutdownSignal::ctrl_c()` 和 typed
 //! shutdown report。S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP
-//! health/metrics endpoint；仍没有稳定 metrics/export hook、持久化 sink
-//! isolation、完整 reconnect orchestration 和跨进程 daemon 管理。
+//! health/metrics endpoint；仍没有持久化 sink isolation、完整 reconnect
+//! orchestration 和跨进程 daemon 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let daemon = TqDaemon::new(TqStreamBuilder::new(user, pass).futures_market())
-//!     .health_reporter(HealthReporter::tracing())
-//!     .metrics_reporter(MetricsReporter::custom(report_metrics))
+//!     .telemetry_reporter(TelemetryReporter::custom(report_telemetry))
 //!     .graceful_shutdown_on_ctrl_c()
 //!     .build()
 //!     .await?;

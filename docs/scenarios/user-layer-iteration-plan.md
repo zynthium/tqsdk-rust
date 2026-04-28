@@ -119,8 +119,9 @@ crate 分层合并成一份迭代计划。
   reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
   因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
 - `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
-  reconnect diagnostics、driver closed 和 revision；稳定 metrics/export hook、
-  ctrl-c graceful shutdown 与可靠 sink isolation 仍在后续 daemon/tooling 层。
+  reconnect diagnostics、driver closed 和 revision；strategy supervisor 的稳定
+  telemetry/export hook 已落在 `tqsdk-task`，ctrl-c graceful shutdown 与可靠 sink
+  isolation 仍在后续 daemon/tooling 层。
 
 ### P0：订单 intent 与断线一致性
 
@@ -319,8 +320,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- S15 配置文件反序列化、稳定 metrics/export hook、完整 reconnect orchestration 和
-  多 provider environment。
+- S15 配置文件反序列化、完整 reconnect orchestration 和多 provider environment。
 - 更完整 broker 行为。
 - 跨进程 intent / test fixture 持久恢复。
 
@@ -359,10 +359,12 @@ crate 分层合并成一份迭代计划。
   观察背压。
 - `StreamHealthSnapshot::status()` / `should_restart()` 补齐生产 health snapshot
   的最小状态判定。
+- `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
+  transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
+  指标系统，不需要 SDK 内置 HTTP endpoint。
 
 仍未完成、不可伪装为已支持：
 
-- 稳定 metrics/export hook；
 - ctrl-c graceful shutdown 与 async close/flush contract；
 - durable sink runtime、per-sink retry/storage policy、本地 WAL；
 - 统一 retry policy orchestration 与业务拒单审计。
@@ -379,11 +381,10 @@ crate 分层合并成一份迭代计划。
   和 restart hint 子集。
 - `tqsdk-task::StrategySupervisor` 已新增正式 S20 task example，覆盖 strategy
   deployment 的 typed health/metrics snapshot、显式 retry policy、ctrl-c
-  shutdown signal 和 typed shutdown report。
+  shutdown signal、typed shutdown report 和 typed telemetry/export hook。
 
 仍未完成、不可伪装为已支持：
 
-- 稳定 metrics/export hook。
 - 持久化 sink isolation / per-sink retry-storage policy。
 - 完整 reconnect orchestration 和跨进程 daemon 管理。
 

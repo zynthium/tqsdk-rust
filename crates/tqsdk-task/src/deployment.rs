@@ -112,6 +112,7 @@ pub struct StrategySupervisor {
     shutdown_signal: StrategyShutdownSignal,
     metrics: StrategySupervisorMetrics,
     health: StrategySupervisorHealth,
+    telemetry_reporter: Option<Box<dyn StrategyTelemetryReporter>>,
 }
 
 /// Stable metrics snapshot produced by [`StrategySupervisor`].
@@ -156,6 +157,29 @@ pub enum StrategySupervisorStopReason {
     Deployment(StrategyRunStopReason),
     ShutdownRequested,
     RetryLimitExceeded,
+}
+
+/// Kind of telemetry event emitted by [`StrategySupervisor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyTelemetryEventKind {
+    HealthChanged,
+    MetricsUpdated,
+    RunStopped,
+}
+
+/// Typed telemetry snapshot emitted by [`StrategySupervisor`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyTelemetryEvent {
+    kind: StrategyTelemetryEventKind,
+    health: StrategySupervisorHealth,
+    metrics: StrategySupervisorMetrics,
+    stop_reason: Option<StrategySupervisorStopReason>,
+    last_error: Option<TaskError>,
+}
+
+/// Transport-neutral sink for supervisor telemetry.
+pub trait StrategyTelemetryReporter {
+    fn report(&mut self, event: StrategyTelemetryEvent);
 }
 
 pub type StrategyStepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
@@ -597,6 +621,15 @@ impl StrategyShutdownSignal {
     }
 }
 
+impl<F> StrategyTelemetryReporter for F
+where
+    F: FnMut(StrategyTelemetryEvent),
+{
+    fn report(&mut self, event: StrategyTelemetryEvent) {
+        self(event);
+    }
+}
+
 impl StrategySupervisor {
     #[must_use]
     pub fn new(deployment: StrategyDeployment) -> Self {
@@ -613,6 +646,7 @@ impl StrategySupervisor {
             shutdown_signal: StrategyShutdownSignal::manual(),
             metrics: StrategySupervisorMetrics::default(),
             health,
+            telemetry_reporter: None,
         }
     }
 
@@ -625,6 +659,15 @@ impl StrategySupervisor {
     #[must_use]
     pub fn shutdown_signal(mut self, shutdown_signal: StrategyShutdownSignal) -> Self {
         self.shutdown_signal = shutdown_signal;
+        self
+    }
+
+    #[must_use]
+    pub fn telemetry_reporter<R>(mut self, reporter: R) -> Self
+    where
+        R: StrategyTelemetryReporter + 'static,
+    {
+        self.telemetry_reporter = Some(Box::new(reporter));
         self
     }
 
@@ -762,6 +805,11 @@ impl StrategySupervisor {
         last_error: Option<TaskError>,
     ) -> StrategySupervisorReport {
         self.sync_health_metrics();
+        self.emit_telemetry(
+            StrategyTelemetryEventKind::RunStopped,
+            Some(stop_reason),
+            last_error.clone(),
+        );
         StrategySupervisorReport {
             stop_reason,
             metrics: self.metrics,
@@ -770,12 +818,35 @@ impl StrategySupervisor {
     }
 
     fn set_status(&mut self, status: StrategySupervisorHealthStatus) {
+        let event_kind = if self.health.status == status {
+            StrategyTelemetryEventKind::MetricsUpdated
+        } else {
+            StrategyTelemetryEventKind::HealthChanged
+        };
         self.health.status = status;
         self.sync_health_metrics();
+        self.emit_telemetry(event_kind, None, None);
     }
 
     fn sync_health_metrics(&mut self) {
         self.health.metrics = self.metrics;
+    }
+
+    fn emit_telemetry(
+        &mut self,
+        kind: StrategyTelemetryEventKind,
+        stop_reason: Option<StrategySupervisorStopReason>,
+        last_error: Option<TaskError>,
+    ) {
+        if let Some(reporter) = &mut self.telemetry_reporter {
+            reporter.report(StrategyTelemetryEvent {
+                kind,
+                health: self.health.clone(),
+                metrics: self.metrics,
+                stop_reason,
+                last_error,
+            });
+        }
     }
 }
 
@@ -820,6 +891,33 @@ impl StrategySupervisorHealth {
     #[must_use]
     pub fn metrics(&self) -> StrategySupervisorMetrics {
         self.metrics
+    }
+}
+
+impl StrategyTelemetryEvent {
+    #[must_use]
+    pub fn kind(&self) -> StrategyTelemetryEventKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn health(&self) -> &StrategySupervisorHealth {
+        &self.health
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> StrategySupervisorMetrics {
+        self.metrics
+    }
+
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<StrategySupervisorStopReason> {
+        self.stop_reason
+    }
+
+    #[must_use]
+    pub fn last_error(&self) -> Option<&TaskError> {
+        self.last_error.as_ref()
     }
 }
 

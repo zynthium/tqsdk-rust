@@ -54,7 +54,7 @@
   - 统一 fake/replay/live deployment wrapper、run loop、typed stop reason 和 graceful shutdown report
 - `StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
   - 在 deployment 之上提供 task-layer supervisor foundation
-  - 暴露 typed health/metrics snapshot、显式有限 retry、ctrl-c shutdown hook 和 typed shutdown report
+  - 暴露 typed health/metrics snapshot、transport-neutral telemetry/export hook、显式有限 retry、ctrl-c shutdown hook 和 typed shutdown report
   - retry 默认不隐藏启用，避免策略步骤有下单副作用时被 SDK 静默重复执行
 - `StrategyReplay`
   - 使用 `tqsdk-data::MarketCacheReplay` 作为离线 market event source
@@ -148,7 +148,7 @@
 - `RiskEngine` 仍是最小 pre-trade gate，组合级保证金 what-if、合约规则和多腿 / 多账户联合限额仍是后续工作
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
-- `StrategySupervisor` 仍是 foundation，稳定 metrics/export hook、完整 reconnect orchestration、跨进程 daemon 管理和多 provider environment 仍是后续工作；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint
+- `StrategySupervisor` 仍是 foundation，完整 reconnect orchestration、跨进程 daemon 管理、多 provider environment 和 durable sink isolation 仍是后续工作；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
@@ -206,6 +206,7 @@ match ticket.outcome(host.api())? {
 - [examples/api_contract_s13_multi_account_ordering.rs](examples/api_contract_s13_multi_account_ordering.rs)
 - [examples/api_contract_s15_live_sim_replay_switch.rs](examples/api_contract_s15_live_sim_replay_switch.rs)
 - [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
+- [examples/api_contract_s20_strategy_supervisor.rs](examples/api_contract_s20_strategy_supervisor.rs)
 - [examples/api_contract_s24_testable_strategy.rs](examples/api_contract_s24_testable_strategy.rs)
 
 `api_contract_s24_testable_strategy.rs` 使用 public fake harness，不需要真实账号或网络。

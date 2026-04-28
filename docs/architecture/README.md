@@ -117,7 +117,7 @@ V1 是：
   - execution group foundation
   - account group foundation
   - strategy host / strategy context / strategy environment / deployment / supervisor adapter
-  - supervisor typed health/metrics/shutdown report；生产观测导出保持
+  - supervisor typed health/metrics/shutdown report 和 telemetry/export hook；生产观测导出保持
     transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
   - strategy cache replay foundation
   - public fake market / fake broker test harness
