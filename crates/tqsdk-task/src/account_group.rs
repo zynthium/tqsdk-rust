@@ -245,14 +245,11 @@ impl AccountGroup {
             })
             .collect();
 
-        let mut allocated: i64 = rows.iter().map(|(_, volume, _)| *volume).sum();
+        let allocated: i64 = rows.iter().map(|(_, volume, _)| *volume).sum();
+        let remaining = (total_volume - allocated).max(0) as usize;
         rows.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
-        for row in &mut rows {
-            if allocated >= total_volume {
-                break;
-            }
+        for row in rows.iter_mut().take(remaining) {
             row.1 += 1;
-            allocated += 1;
         }
         rows.sort_by_key(|row| row.0);
 
