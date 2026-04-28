@@ -31,6 +31,7 @@
 
 use std::time::Duration;
 
+use tqsdk_core::OrderLifecycle;
 use tqsdk_task::StrategyHost;
 use tqsdk_task::testing::{
     FakeBroker, FakeBrokerConnectionStatus, FakeMarket, StrategyTestClock, StrategyTestHarness,
@@ -96,7 +97,10 @@ async fn main() -> tqsdk_task::Result<()> {
         FakeBrokerConnectionStatus::Connected
     );
     assert_eq!(first_fill.orders().len(), 1);
-    assert_eq!(first_fill.orders()[0].status, "ALIVE");
+    assert_eq!(
+        first_fill.orders()[0].lifecycle,
+        OrderLifecycle::PartiallyFilled
+    );
     assert_eq!(first_fill.orders()[0].volume_left, 2);
     assert_eq!(first_fill.trades().len(), 1);
     assert_eq!(first_fill.pending_orders(), 1);
@@ -104,7 +108,10 @@ async fn main() -> tqsdk_task::Result<()> {
 
     let second_fill = ctx.finish_test_step().await?;
     assert_eq!(second_fill.orders().len(), 1);
-    assert_eq!(second_fill.orders()[0].status, "ALIVE");
+    assert_eq!(
+        second_fill.orders()[0].lifecycle,
+        OrderLifecycle::PartiallyFilled
+    );
     assert_eq!(second_fill.orders()[0].volume_left, 1);
     assert_eq!(second_fill.trades().len(), 1);
     assert_eq!(second_fill.pending_orders(), 1);
@@ -112,7 +119,7 @@ async fn main() -> tqsdk_task::Result<()> {
 
     let report = ctx.finish_test_step().await?;
     assert_eq!(report.orders().len(), 1);
-    assert_eq!(report.orders()[0].status, "FINISHED");
+    assert_eq!(report.orders()[0].lifecycle, OrderLifecycle::Filled);
     assert_eq!(report.orders()[0].volume_left, 0);
     assert_eq!(report.trades().len(), 1);
     assert_eq!(

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tqsdk_core::OrderLifecycle;
 use tqsdk_task::StrategyHost;
 use tqsdk_task::testing::{
     FakeBroker, FakeBrokerConnectionStatus, FakeMarket, StrategyTestClock, StrategyTestHarness,
@@ -36,7 +37,7 @@ async fn strategy_test_harness_seeds_market_and_fills_orders() {
 
     let report = ctx.finish_test_step().await.unwrap();
     assert_eq!(report.orders().len(), 1);
-    assert_eq!(report.orders()[0].status, "FINISHED");
+    assert_eq!(report.orders()[0].lifecycle, OrderLifecycle::Filled);
     assert_eq!(report.orders()[0].volume_left, 0);
     assert_eq!(report.trades().len(), 1);
     assert_eq!(report.position("sim", "SHFE.rb2601").unwrap().pos_long, 1);
@@ -72,7 +73,7 @@ async fn strategy_test_harness_can_reject_orders() {
 
     let report = ctx.finish_test_step().await.unwrap();
     assert_eq!(report.orders().len(), 1);
-    assert_eq!(report.orders()[0].status, "FINISHED");
+    assert_eq!(report.orders()[0].lifecycle, OrderLifecycle::Rejected);
     assert_eq!(report.orders()[0].last_msg, "test rejection");
     assert!(report.trades().is_empty());
     assert_eq!(report.position("sim", "SHFE.rb2601").unwrap().pos_long, 0);
@@ -108,7 +109,10 @@ async fn strategy_test_harness_can_partial_fill_orders() {
 
     let report = ctx.finish_test_step().await.unwrap();
     assert_eq!(report.orders().len(), 1);
-    assert_eq!(report.orders()[0].status, "ALIVE");
+    assert_eq!(
+        report.orders()[0].lifecycle,
+        OrderLifecycle::PartiallyFilled
+    );
     assert_eq!(report.orders()[0].volume_left, 3);
     assert_eq!(report.trades().len(), 1);
     assert_eq!(report.trades()[0].volume, 2);
@@ -145,7 +149,10 @@ async fn strategy_test_harness_can_advance_partial_fills_across_steps() {
 
     let first = ctx.finish_test_step().await.unwrap();
     assert_eq!(first.orders().len(), 1);
-    assert_eq!(first.orders()[0].status, "ALIVE");
+    assert_eq!(
+        first.orders()[0].lifecycle,
+        OrderLifecycle::PartiallyFilled
+    );
     assert_eq!(first.orders()[0].volume_left, 3);
     assert_eq!(first.trades().len(), 1);
     assert_eq!(first.trades()[0].volume, 2);
@@ -154,7 +161,10 @@ async fn strategy_test_harness_can_advance_partial_fills_across_steps() {
 
     let second = ctx.finish_test_step().await.unwrap();
     assert_eq!(second.orders().len(), 1);
-    assert_eq!(second.orders()[0].status, "ALIVE");
+    assert_eq!(
+        second.orders()[0].lifecycle,
+        OrderLifecycle::PartiallyFilled
+    );
     assert_eq!(second.orders()[0].volume_left, 1);
     assert_eq!(second.trades().len(), 1);
     assert_eq!(second.trades()[0].volume, 2);
@@ -163,7 +173,7 @@ async fn strategy_test_harness_can_advance_partial_fills_across_steps() {
 
     let third = ctx.finish_test_step().await.unwrap();
     assert_eq!(third.orders().len(), 1);
-    assert_eq!(third.orders()[0].status, "FINISHED");
+    assert_eq!(third.orders()[0].lifecycle, OrderLifecycle::Filled);
     assert_eq!(third.orders()[0].volume_left, 0);
     assert_eq!(third.trades().len(), 1);
     assert_eq!(third.trades()[0].volume, 1);
@@ -247,7 +257,7 @@ async fn strategy_test_harness_can_delay_fake_broker_outcomes_by_test_steps() {
 
     let second_step = ctx.finish_test_step().await.unwrap();
     assert_eq!(second_step.orders().len(), 1);
-    assert_eq!(second_step.orders()[0].status, "FINISHED");
+    assert_eq!(second_step.orders()[0].lifecycle, OrderLifecycle::Filled);
     assert_eq!(second_step.trades().len(), 1);
     assert_eq!(second_step.pending_orders(), 0);
     assert_eq!(
@@ -306,7 +316,7 @@ async fn strategy_test_harness_defers_orders_until_fake_broker_reconnects() {
         FakeBrokerConnectionStatus::Reconnected
     );
     assert_eq!(reconnected.orders().len(), 1);
-    assert_eq!(reconnected.orders()[0].status, "FINISHED");
+    assert_eq!(reconnected.orders()[0].lifecycle, OrderLifecycle::Filled);
     assert_eq!(reconnected.trades().len(), 1);
     assert_eq!(reconnected.pending_orders(), 0);
     assert_eq!(
