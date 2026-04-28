@@ -69,7 +69,7 @@ pub use sink::{
     CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkOptions, StreamSinkRetryPolicy,
     StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalCompaction,
     StreamSinkWalCompactionReport, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
-    StreamSinkWalRecordKind,
+    StreamSinkWalRecordKind, StreamSinkWalRecovery, StreamSinkWalRecoveryReport,
 };
 pub use typed::{PathValueStream, ValueUpdate};
 pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};

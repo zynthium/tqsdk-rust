@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -103,6 +104,21 @@ pub struct StreamSinkWalCompactionReport {
     original_records: u64,
     retained_records: u64,
     dropped_records: u64,
+}
+
+/// Scanner for a local JSONL stream sink WAL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamSinkWalRecovery;
+
+/// Typed recovery report derived from a local JSONL stream sink WAL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamSinkWalRecoveryReport {
+    total_records: u64,
+    delivered_revisions: Vec<u64>,
+    pending_revisions: Vec<u64>,
+    failed_revisions: Vec<u64>,
+    lagged_records: u64,
+    flush_failed_records: u64,
 }
 
 /// Handle returned after spawning a managed commit sink.
@@ -225,6 +241,59 @@ impl StreamSinkWalCompactionReport {
     #[must_use]
     pub fn dropped_records(&self) -> u64 {
         self.dropped_records
+    }
+}
+
+impl StreamSinkWalRecovery {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn scan_jsonl(self, path: impl AsRef<Path>) -> Result<StreamSinkWalRecoveryReport> {
+        scan_jsonl_wal(path.as_ref())
+    }
+}
+
+impl StreamSinkWalRecoveryReport {
+    #[must_use]
+    pub fn total_records(&self) -> u64 {
+        self.total_records
+    }
+
+    #[must_use]
+    pub fn delivered_revisions(&self) -> &[u64] {
+        &self.delivered_revisions
+    }
+
+    #[must_use]
+    pub fn pending_revisions(&self) -> &[u64] {
+        &self.pending_revisions
+    }
+
+    #[must_use]
+    pub fn failed_revisions(&self) -> &[u64] {
+        &self.failed_revisions
+    }
+
+    #[must_use]
+    pub fn last_delivered_revision(&self) -> Option<u64> {
+        self.delivered_revisions.last().copied()
+    }
+
+    #[must_use]
+    pub fn lagged_records(&self) -> u64 {
+        self.lagged_records
+    }
+
+    #[must_use]
+    pub fn flush_failed_records(&self) -> u64 {
+        self.flush_failed_records
+    }
+
+    #[must_use]
+    pub fn has_incomplete_deliveries(&self) -> bool {
+        !self.pending_revisions.is_empty()
     }
 }
 
@@ -708,6 +777,74 @@ fn compact_jsonl_wal(
         original_records,
         retained_records,
         dropped_records: original_records - retained_records,
+    })
+}
+
+fn scan_jsonl_wal(path: &Path) -> Result<StreamSinkWalRecoveryReport> {
+    let input = std::fs::File::open(path).map_err(|error| StreamFacadeError::Io {
+        operation: "open stream sink jsonl wal for recovery scan",
+        message: error.to_string(),
+    })?;
+    let mut total_records = 0;
+    let mut started_revisions = BTreeSet::new();
+    let mut delivered_revisions = BTreeSet::new();
+    let mut failed_revisions = BTreeSet::new();
+    let mut lagged_records = 0;
+    let mut flush_failed_records = 0;
+
+    for line in std::io::BufReader::new(input).lines() {
+        let line = line.map_err(|error| StreamFacadeError::Io {
+            operation: "read stream sink jsonl wal for recovery scan",
+            message: error.to_string(),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: StreamSinkWalRecord =
+            serde_json::from_str(&line).map_err(|error| StreamFacadeError::Io {
+                operation: "parse stream sink jsonl wal record for recovery scan",
+                message: error.to_string(),
+            })?;
+        total_records += 1;
+        match record.kind {
+            StreamSinkWalRecordKind::Received => {
+                if let Some(revision) = record.revision {
+                    started_revisions.insert(revision);
+                }
+            }
+            StreamSinkWalRecordKind::AttemptFailed => {
+                if let Some(revision) = record.revision {
+                    started_revisions.insert(revision);
+                    failed_revisions.insert(revision);
+                }
+            }
+            StreamSinkWalRecordKind::Delivered => {
+                if let Some(revision) = record.revision {
+                    delivered_revisions.insert(revision);
+                }
+            }
+            StreamSinkWalRecordKind::Lagged => {
+                lagged_records += 1;
+            }
+            StreamSinkWalRecordKind::FlushSucceeded => {}
+            StreamSinkWalRecordKind::FlushFailed => {
+                flush_failed_records += 1;
+            }
+        }
+    }
+
+    let pending_revisions = started_revisions
+        .difference(&delivered_revisions)
+        .copied()
+        .collect();
+
+    Ok(StreamSinkWalRecoveryReport {
+        total_records,
+        delivered_revisions: delivered_revisions.into_iter().collect(),
+        pending_revisions,
+        failed_revisions: failed_revisions.into_iter().collect(),
+        lagged_records,
+        flush_failed_records,
     })
 }
 

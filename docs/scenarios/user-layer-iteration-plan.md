@@ -125,7 +125,7 @@ crate 分层合并成一份迭代计划。
   `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
   stream driver 关闭与 managed sink flush 的 graceful shutdown foundation 也已落在
   `tqsdk-stream`；WAL fsync policy 和本地 compaction 已落在 `tqsdk-stream`；
-  durable queue / 跨进程恢复仍在后续 daemon/tooling
+  WAL recovery report 已落在 `tqsdk-stream`；durable queue / 跨进程 commit replay 仍在后续 daemon/tooling
   层。
 
 ### P0：订单 intent 与断线一致性
@@ -376,6 +376,9 @@ crate 分层合并成一份迭代计划。
 - `StreamSinkWalFsyncPolicy` 提供本地 WAL 每条记录 `sync_data` 策略；
   `StreamSinkWalCompaction` 提供按 revision 裁剪 JSONL WAL 的本地维护入口和
   typed report。
+- `StreamSinkWalRecovery` 提供旧 WAL 的 delivered / pending / failed revision、
+  lagged records 和 flush failures 扫描报告；该 report 不提供 commit payload
+  重放。
 - `TqStream::graceful_shutdown()` 提供 stream driver close + managed sink flush
   orchestration，返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
@@ -385,13 +388,13 @@ crate 分层合并成一份迭代计划。
 仍未完成、不可伪装为已支持：
 
 - 跨进程 daemon orchestration；
-- durable queue 和跨进程 sink 恢复；
+- durable queue 和跨进程 commit payload 重放恢复；
 - 统一 retry policy orchestration 与业务拒单审计。
 
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试、JSONL WAL、fsync policy 和本地 compaction 已提升为正式 stream example）
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试、JSONL WAL、fsync policy、本地 compaction 和 recovery report 已提升为正式 stream example）
 - `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
 
 已落地：
@@ -405,7 +408,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- durable queue 和跨进程 sink 恢复。
+- durable queue 和跨进程 commit payload 重放恢复。
 - 跨进程 daemon orchestration 和跨进程 daemon 管理。
 
 ### P2：本地行情缓存与研究闭环

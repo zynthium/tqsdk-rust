@@ -9,7 +9,7 @@ use tqsdk_core::Quote;
 use tqsdk_stream::{
     CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkOptions, StreamSinkRetryPolicy,
     StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalFsyncPolicy, StreamSinkWalRecord,
-    StreamSinkWalRecordKind,
+    StreamSinkWalRecordKind, StreamSinkWalRecovery,
 };
 
 mod support;
@@ -213,6 +213,36 @@ fn stream_sink_wal_compaction_trims_old_revision_records() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["revision"], 2);
     assert_eq!(records[1]["revision"], 3);
+
+    let _ = std::fs::remove_file(&wal_path);
+}
+
+#[test]
+fn stream_sink_wal_recovery_reports_delivered_pending_and_failed_revisions() {
+    let wal_path = temp_wal_path("stream-sink-recovery");
+    let _ = std::fs::remove_file(&wal_path);
+    write_wal_records(
+        &wal_path,
+        &[
+            wal_record(StreamSinkWalRecordKind::Received, Some(1)),
+            wal_record(StreamSinkWalRecordKind::Delivered, Some(1)),
+            wal_record(StreamSinkWalRecordKind::Received, Some(2)),
+            wal_record(StreamSinkWalRecordKind::AttemptFailed, Some(2)),
+            wal_record(StreamSinkWalRecordKind::Lagged, None),
+            wal_record(StreamSinkWalRecordKind::FlushFailed, None),
+        ],
+    );
+
+    let report = StreamSinkWalRecovery::new().scan_jsonl(&wal_path).unwrap();
+
+    assert_eq!(report.total_records(), 6);
+    assert_eq!(report.delivered_revisions(), &[1]);
+    assert_eq!(report.pending_revisions(), &[2]);
+    assert_eq!(report.failed_revisions(), &[2]);
+    assert_eq!(report.last_delivered_revision(), Some(1));
+    assert_eq!(report.lagged_records(), 1);
+    assert_eq!(report.flush_failed_records(), 1);
+    assert!(report.has_incomplete_deliveries());
 
     let _ = std::fs::remove_file(&wal_path);
 }
