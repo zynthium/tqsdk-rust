@@ -4,7 +4,7 @@ use tqsdk_core::{ContractError, RetryHint, SessionPhase};
 use tqsdk_session::SessionFacadeError;
 use tqsdk_stream::{
     StreamErrorKind, StreamFacadeError, StreamHealthStatus, StreamReconnectOutcome,
-    StreamSessionPhase,
+    StreamRetryDecision, StreamRetryGiveUpReason, StreamRetryPolicy, StreamSessionPhase,
 };
 
 mod support;
@@ -24,6 +24,92 @@ fn stream_errors_expose_stable_kind_and_retry_hint() {
     assert_eq!(diagnostic.kind, StreamErrorKind::Transport);
     assert_eq!(diagnostic.retry_hint, RetryHint::RetryAfterReconnect);
     assert!(session.is_retryable());
+}
+
+#[test]
+fn stream_retry_policy_classifies_transport_http_and_non_retryable_errors() {
+    let policy = StreamRetryPolicy::new()
+        .max_attempts(3)
+        .expect("max attempts should be valid")
+        .base_delay(Duration::from_millis(10))
+        .max_delay(Duration::from_millis(25));
+
+    let transport = StreamFacadeError::Session(SessionFacadeError::from(ContractError::transport(
+        "websocket recv failed",
+    )));
+    assert_eq!(
+        policy.decide(1, &transport),
+        StreamRetryDecision::RetryAfterReconnect {
+            failed_attempt: 1,
+            delay: Duration::from_millis(10)
+        }
+    );
+
+    let http = StreamFacadeError::Session(SessionFacadeError::from(ContractError::http(
+        "query timeout",
+    )));
+    assert_eq!(
+        policy.decide(2, &http),
+        StreamRetryDecision::RetryWithBackoff {
+            failed_attempt: 2,
+            delay: Duration::from_millis(20)
+        }
+    );
+
+    assert_eq!(
+        policy.decide(1, &StreamFacadeError::Lagged { skipped: 1 }),
+        StreamRetryDecision::GiveUp {
+            failed_attempt: 1,
+            reason: StreamRetryGiveUpReason::NotRetryable
+        }
+    );
+    let auth = StreamFacadeError::Session(SessionFacadeError::from(ContractError::auth(
+        "bad password",
+    )));
+    assert_eq!(
+        policy.decide(3, &auth),
+        StreamRetryDecision::GiveUp {
+            failed_attempt: 3,
+            reason: StreamRetryGiveUpReason::NotRetryable
+        }
+    );
+    assert_eq!(
+        policy.decide(3, &transport),
+        StreamRetryDecision::GiveUp {
+            failed_attempt: 3,
+            reason: StreamRetryGiveUpReason::AttemptsExhausted
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_retry_policy_runs_retryable_operation_without_manual_backoff_loop() {
+    let policy = StreamRetryPolicy::new()
+        .max_attempts(3)
+        .expect("max attempts should be valid")
+        .base_delay(Duration::ZERO);
+    let mut attempts = 0;
+
+    let report = policy
+        .run(|attempt| {
+            attempts = attempt;
+            async move {
+                if attempt < 3 {
+                    Err(StreamFacadeError::Session(SessionFacadeError::from(
+                        ContractError::http("query timeout"),
+                    )))
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await
+        .expect("retryable operation should eventually succeed");
+
+    assert_eq!(report.value(), &"ok");
+    assert_eq!(report.attempts(), 3);
+    assert_eq!(report.retry_count(), 2);
+    assert_eq!(attempts, 3);
 }
 
 #[tokio::test(flavor = "current_thread")]

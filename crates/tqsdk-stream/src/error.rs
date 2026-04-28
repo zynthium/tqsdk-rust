@@ -1,6 +1,10 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    future::Future,
+    time::Duration,
+};
 
 /// Result alias for `tqsdk-stream`.
 pub type Result<T> = std::result::Result<T, StreamFacadeError>;
@@ -27,6 +31,46 @@ pub struct StreamErrorDiagnostic {
     pub retry_hint: tqsdk_core::RetryHint,
     pub message: String,
     pub lagged_commits: Option<u64>,
+}
+
+/// Retry policy for stream-facing fallible operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamRetryPolicy {
+    max_attempts: u32,
+    base_delay: Duration,
+    max_delay: Duration,
+}
+
+/// Retry decision derived from a [`StreamFacadeError`] diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRetryDecision {
+    RetryWithBackoff {
+        failed_attempt: u32,
+        delay: Duration,
+    },
+    RetryAfterReconnect {
+        failed_attempt: u32,
+        delay: Duration,
+    },
+    GiveUp {
+        failed_attempt: u32,
+        reason: StreamRetryGiveUpReason,
+    },
+}
+
+/// Reason a [`StreamRetryPolicy`] stopped retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRetryGiveUpReason {
+    NotRetryable,
+    AttemptsExhausted,
+}
+
+/// Report returned by [`StreamRetryPolicy::run`] after a successful operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRetryReport<T> {
+    value: T,
+    attempts: u32,
+    retry_count: u32,
 }
 
 impl StreamErrorDiagnostic {
@@ -71,6 +115,174 @@ impl StreamErrorDiagnostic {
             message: diagnostic.message,
             lagged_commits: None,
         }
+    }
+}
+
+impl Default for StreamRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(5),
+        }
+    }
+}
+
+impl StreamRetryPolicy {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn max_attempts(mut self, max_attempts: u32) -> Result<Self> {
+        if max_attempts == 0 {
+            return Err(StreamFacadeError::InvalidState(
+                "stream retry max attempts must be greater than zero",
+            ));
+        }
+        self.max_attempts = max_attempts;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn base_delay(mut self, base_delay: Duration) -> Self {
+        self.base_delay = base_delay;
+        self
+    }
+
+    #[must_use]
+    pub fn max_delay(mut self, max_delay: Duration) -> Self {
+        self.max_delay = max_delay;
+        self
+    }
+
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    #[must_use]
+    pub fn decide(&self, failed_attempt: u32, error: &StreamFacadeError) -> StreamRetryDecision {
+        let retry_hint = error.diagnostic().retry_hint;
+        if retry_hint == tqsdk_core::RetryHint::DoNotRetry {
+            return StreamRetryDecision::GiveUp {
+                failed_attempt,
+                reason: StreamRetryGiveUpReason::NotRetryable,
+            };
+        }
+
+        if failed_attempt >= self.max_attempts {
+            return StreamRetryDecision::GiveUp {
+                failed_attempt,
+                reason: StreamRetryGiveUpReason::AttemptsExhausted,
+            };
+        }
+
+        let delay = self.delay_for_attempt(failed_attempt);
+        match retry_hint {
+            tqsdk_core::RetryHint::RetryWithBackoff => StreamRetryDecision::RetryWithBackoff {
+                failed_attempt,
+                delay,
+            },
+            tqsdk_core::RetryHint::RetryAfterReconnect => {
+                StreamRetryDecision::RetryAfterReconnect {
+                    failed_attempt,
+                    delay,
+                }
+            }
+            tqsdk_core::RetryHint::DoNotRetry => unreachable!("DoNotRetry returned early"),
+        }
+    }
+
+    pub async fn run<T, F, Fut>(self, mut operation: F) -> Result<StreamRetryReport<T>>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut attempt = 1;
+        let mut retry_count = 0;
+        loop {
+            match operation(attempt).await {
+                Ok(value) => {
+                    return Ok(StreamRetryReport {
+                        value,
+                        attempts: attempt,
+                        retry_count,
+                    });
+                }
+                Err(error) => match self.decide(attempt, &error) {
+                    StreamRetryDecision::RetryWithBackoff { delay, .. }
+                    | StreamRetryDecision::RetryAfterReconnect { delay, .. } => {
+                        retry_count += 1;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        attempt += 1;
+                    }
+                    StreamRetryDecision::GiveUp { .. } => return Err(error),
+                },
+            }
+        }
+    }
+
+    fn delay_for_attempt(&self, failed_attempt: u32) -> Duration {
+        let multiplier = 1_u32
+            .checked_shl(failed_attempt.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        self.base_delay
+            .saturating_mul(multiplier)
+            .min(self.max_delay)
+    }
+}
+
+impl StreamRetryDecision {
+    #[must_use]
+    pub fn should_retry(self) -> bool {
+        matches!(
+            self,
+            Self::RetryWithBackoff { .. } | Self::RetryAfterReconnect { .. }
+        )
+    }
+
+    #[must_use]
+    pub fn failed_attempt(self) -> u32 {
+        match self {
+            Self::RetryWithBackoff { failed_attempt, .. }
+            | Self::RetryAfterReconnect { failed_attempt, .. }
+            | Self::GiveUp { failed_attempt, .. } => failed_attempt,
+        }
+    }
+
+    #[must_use]
+    pub fn delay(self) -> Option<Duration> {
+        match self {
+            Self::RetryWithBackoff { delay, .. } | Self::RetryAfterReconnect { delay, .. } => {
+                Some(delay)
+            }
+            Self::GiveUp { .. } => None,
+        }
+    }
+}
+
+impl<T> StreamRetryReport<T> {
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    #[must_use]
+    pub fn into_value(self) -> T {
+        self.value
+    }
+
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    #[must_use]
+    pub fn retry_count(&self) -> u32 {
+        self.retry_count
     }
 }
 

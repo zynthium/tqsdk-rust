@@ -359,6 +359,8 @@ crate 分层合并成一份迭代计划。
   session 级 typed diagnostic，并提供 `is_retryable()`。
 - `tqsdk-stream::StreamFacadeError::diagnostic()` 覆盖 session/contract 错误、
   `Lagged`、`Closed` 和 missing value，慢消费者 lag 不再需要字符串判断。
+- `tqsdk-stream::StreamRetryPolicy` 提供 stream-facing retry decision 和最小
+  async backoff runner；它不执行 reconnect，也不解释业务拒单。
 - `TqStreamBuilder::commit_channel_capacity(...)` 暴露 root fan-out buffer 配置；
   `CommitStream` 继续使用 bounded broadcast，落后 consumer 通过 typed `Lagged`
   观察背压。
@@ -392,13 +394,13 @@ crate 分层合并成一份迭代计划。
 
 - 跨进程 daemon orchestration；
 - durable daemon queue、跨进程锁和 runtime state snapshot recovery；
-- 统一 retry policy orchestration 与业务拒单审计。
+- order/business retry audit 与业务拒单审计。
 
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
 - `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试、JSONL WAL、fsync policy、本地 compaction、recovery report 和 commit metadata journal replay 已提升为正式 stream example）
-- `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 子集已提升为正式 stream example）
+- `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 和 stream-facing retry policy 子集已提升为正式 stream example）
 
 已落地：
 

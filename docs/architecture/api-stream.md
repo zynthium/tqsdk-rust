@@ -663,7 +663,10 @@ impl futures::Stream for TradeSessionEventStream {
 - 实现层直接订阅 raw driver 事件，而不是建立在 `CommitStream` 之上，以免把 `DriverEvent::Error` 提前折叠成 facade error
 - `Closed` / `Lagged` 仍保留为 stream error，因为这两个语义属于消费通道自身，而不是业务事件
 - `StreamFacadeError::diagnostic()` 将 contract/session/lag/closed/missing-value
-  错误统一成 typed kind + retry hint；它不执行 retry policy，也不解释业务拒单
+  错误统一成 typed kind + retry hint
+- `StreamRetryPolicy` 只把 stream-facing error diagnostic 转换成 typed retry
+  decision，并可运行最小 async backoff loop；它不执行 reconnect，不解释业务拒单，
+  也不替代 order intent 幂等和审计
 
 ## 第一版实现边界
 

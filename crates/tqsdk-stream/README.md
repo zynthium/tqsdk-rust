@@ -46,6 +46,10 @@
 - `StreamReconnectReport`
 - `StreamErrorDiagnostic`
 - `StreamErrorKind`
+- `StreamRetryPolicy`
+- `StreamRetryDecision`
+- `StreamRetryGiveUpReason`
+- `StreamRetryReport`
 - `CommitSink`
 - `StreamCommitJournal`
 - `StreamCommitJournalRecord`
@@ -262,8 +266,11 @@ journal，并用 `StreamCommitJournal::replay_jsonl(...)` 重放到 `CommitSink`
 foundation 不是完整 durable daemon queue，也不恢复 runtime state snapshot。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
-`tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。它只负责错误分类和 retry
-hint，不负责执行业务级 retry orchestration。
+`tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。`StreamRetryPolicy` 可以把
+typed diagnostic 转换成 `StreamRetryDecision`，并为 stream-facing fallible
+operation 提供一个最小 async retry runner。它不接管底层 reconnect executor，
+也不解释业务拒单；订单 intent 幂等、风控拒单和交易拒单仍应走 wait/task 的
+typed order/risk surface。
 
 如果 trade session 走官方内置模拟账户，登录命令也可以直接从共享 session 里派生：
 

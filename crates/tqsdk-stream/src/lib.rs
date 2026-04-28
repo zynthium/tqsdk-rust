@@ -45,7 +45,10 @@ mod window;
 
 pub use api::{CommitStream, TqStream};
 pub use builder::TqStreamBuilder;
-pub use error::{Result, StreamErrorDiagnostic, StreamErrorKind, StreamFacadeError};
+pub use error::{
+    Result, StreamErrorDiagnostic, StreamErrorKind, StreamFacadeError, StreamRetryDecision,
+    StreamRetryGiveUpReason, StreamRetryPolicy, StreamRetryReport,
+};
 pub use event::{
     OrderEventStream, PositionEventStream, PreInsertOrderEventStream,
     RiskManagementDataEventStream, RiskManagementRuleEventStream, SecurityOrderEventStream,
