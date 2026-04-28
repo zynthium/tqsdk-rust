@@ -9,6 +9,7 @@
 //! - 两腿 order intent 有同一个 client group id
 //! - 下单前所有腿统一经过 ownership guard 和 risk gate
 //! - 用户读取 group-level outcome，而不是手写 `Vec<OrderTicket>` 状态机
+//! - `max_unhedged` 在观察到裸露持续超时后返回 typed `NeedsHedge`
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -29,7 +30,7 @@
 //! - 自动对冲应继续留在 task 层，还是拆成独立 execution policy？
 //!
 //! Current limitation:
-//! - 本示例只要求 SDK 报告 typed exposure，不自动提交对冲 / 平仓单。
+//! - `HedgePolicy::ReportExposure` 只报告 typed exposure，不自动提交对冲 / 平仓单。
 
 use std::time::Duration;
 

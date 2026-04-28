@@ -20,7 +20,7 @@
 //!
 //! Regression signal:
 //! - 单腿成交后另一腿失败只能靠业务代码临时补救
-//! - 无法表达最大净敞口或超时撤补规则
+//! - 无法表达自动 hedge / flatten 或超时撤补规则
 //! - group outcome 无法审计
 //!
 //! Review questions:
@@ -30,14 +30,15 @@
 //!
 //! Remaining API gap:
 //! `tqsdk-task` 已提供最小 `ExecutionGroup` foundation：typed group id、
-//! all-leg preflight、idempotent leg order intents、group outcome 和 exposure report。
+//! all-leg preflight、idempotent leg order intents、group outcome、observed
+//! `max_unhedged` exposure timeout 和 exposure report。
 //!
 //! 本文件保留的是更高阶执行缺口：
 //! - 自动 hedge / flatten filled legs；
 //! - timed cancel / replace；
 //! - 最大裸露量驱动的自动撤补；
 //! - 多账户或多腿组合的联合风控；
-//! - 人工介入后的 group resume / audit。
+//! - 人工介入后的 group resume / persistent audit log。
 //!
 //! 理想用户代码草案：
 //! ```ignore

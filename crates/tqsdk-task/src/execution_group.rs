@@ -290,11 +290,39 @@ impl ExecutionGroupTicket {
         host: &mut TaskHost,
         deadline: tokio::time::Instant,
     ) -> Result<ExecutionGroupOutcome> {
+        let mut exposure_started_at = None;
         loop {
-            if let Some(outcome) = self.outcome(host.api())? {
+            let legs = self.leg_reports(host.api())?;
+            if let Some(outcome) = outcome_from_reports(&legs) {
                 return Ok(outcome);
             }
-            if !host.wait_update(Some(deadline)).await? {
+
+            let exposure_deadline =
+                if let Some(max_unhedged) = self.max_unhedged.filter(|_| has_open_exposure(&legs))
+                {
+                    let started_at =
+                        *exposure_started_at.get_or_insert_with(tokio::time::Instant::now);
+                    let exposure_deadline = started_at + max_unhedged;
+                    if tokio::time::Instant::now() >= exposure_deadline {
+                        return Ok(ExecutionGroupOutcome::NeedsHedge {
+                            exposure: exposure_from_reports(&legs),
+                            legs,
+                        });
+                    }
+                    Some(exposure_deadline)
+                } else {
+                    exposure_started_at = None;
+                    None
+                };
+
+            let wait_deadline = exposure_deadline
+                .map(|exposure_deadline| earlier_deadline(deadline, exposure_deadline))
+                .unwrap_or(deadline);
+
+            if !host.wait_update(Some(wait_deadline)).await? {
+                if tokio::time::Instant::now() < wait_deadline {
+                    tokio::time::sleep_until(wait_deadline).await;
+                }
                 let legs = self.leg_reports(host.api())?;
                 return Ok(ExecutionGroupOutcome::NeedsHedge {
                     exposure: exposure_from_reports(&legs),
@@ -307,6 +335,13 @@ impl ExecutionGroupTicket {
     fn leg_reports(&self, api: &tqsdk_wait::TqApi) -> Result<Vec<ExecutionLegReport>> {
         self.legs.iter().map(|leg| leg_report(api, leg)).collect()
     }
+}
+
+fn earlier_deadline(
+    left: tokio::time::Instant,
+    right: tokio::time::Instant,
+) -> tokio::time::Instant {
+    if left <= right { left } else { right }
 }
 
 async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<ExecutionGroupTicket> {
@@ -513,6 +548,20 @@ fn is_pending_state(leg: &ExecutionLegReport) -> bool {
         leg.state,
         ExecutionLegState::Unknown | ExecutionLegState::CommandPending | ExecutionLegState::Live
     )
+}
+
+fn has_open_exposure(legs: &[ExecutionLegReport]) -> bool {
+    let has_filled = legs.iter().any(|leg| leg.filled_volume > 0);
+    let has_unfilled = legs.iter().any(|leg| {
+        leg.volume_left > 0
+            && !matches!(
+                leg.state,
+                ExecutionLegState::Rejected
+                    | ExecutionLegState::Failed
+                    | ExecutionLegState::Cancelled
+            )
+    });
+    has_filled && has_unfilled
 }
 
 fn exposure_from_reports(legs: &[ExecutionLegReport]) -> ExecutionExposure {

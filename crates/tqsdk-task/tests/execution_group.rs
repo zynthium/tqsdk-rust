@@ -523,3 +523,76 @@ async fn execution_group_status_reports_exposure_when_one_leg_fills_and_other_re
         other => panic!("expected hedge exposure outcome, got {other:?}"),
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_wait_finished_returns_needs_hedge_after_max_unhedged_exposure() {
+    let mut host = seeded_host();
+    let max_unhedged = Duration::from_millis(30);
+    let group = host
+        .execution_group("sim")
+        .client_group_id("spread-timeout-001")
+        .max_unhedged(max_unhedged)
+        .on_leg_failed(HedgePolicy::ReportExposure)
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.au2602",
+            order_id: "spread-timeout-001:leg:0",
+            direction: "BUY",
+            offset: "OPEN",
+            volume_orign: 1,
+            volume_left: 0,
+            status: "FINISHED",
+        },
+    );
+    seed_order_status_commit(
+        &host,
+        OrderStatusSeed {
+            account_id: "sim",
+            symbol: "SHFE.ag2602",
+            order_id: "spread-timeout-001:leg:1",
+            direction: "SELL",
+            offset: "OPEN",
+            volume_orign: 15,
+            volume_left: 15,
+            status: "ALIVE",
+        },
+    );
+
+    let started_at = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        group.wait_finished(
+            &mut host,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        ),
+    )
+    .await
+    .expect("max_unhedged exposure timeout should complete before global deadline")
+    .unwrap();
+    assert!(
+        started_at.elapsed() >= max_unhedged,
+        "exposure timeout returned before configured max_unhedged duration"
+    );
+
+    match outcome {
+        ExecutionGroupOutcome::NeedsHedge { exposure, legs } => {
+            assert_eq!(legs.len(), 2);
+            assert_eq!(exposure.filled_symbols, vec!["SHFE.au2602".to_string()]);
+            assert_eq!(exposure.unfilled_symbols, vec!["SHFE.ag2602".to_string()]);
+        }
+        other => panic!("expected hedge exposure timeout outcome, got {other:?}"),
+    }
+}
