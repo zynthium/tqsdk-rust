@@ -246,7 +246,10 @@ async fn execution_group_report_binds_status_to_runtime_revision() {
     assert_eq!(report.group_id(), "spread-report-001");
     assert_eq!(report.account_id(), "sim");
     assert_eq!(report.legs().len(), 2);
-    assert!(matches!(report.status(), ExecutionGroupStatus::Pending { .. }));
+    assert!(matches!(
+        report.status(),
+        ExecutionGroupStatus::Pending { .. }
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -27,8 +27,8 @@ pub use account_group::{
     AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
     AccountGroupBuilder, AllocatedAccountOrder, MultiAccountOrderBuilder, MultiAccountOrderDraft,
     MultiAccountOrderGroupReport, MultiAccountOrderLegTicket, MultiAccountOrderOutcome,
-    MultiAccountOrderReport,
-    MultiAccountOrderState, MultiAccountOrderStatus, MultiAccountOrderTicket, Ratio,
+    MultiAccountOrderReport, MultiAccountOrderState, MultiAccountOrderStatus,
+    MultiAccountOrderTicket, Ratio,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{
@@ -50,10 +50,9 @@ pub use environment::{
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use execution_group::{
-    ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupStatus,
-    ExecutionGroupReport, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport,
-    ExecutionLegState,
-    ExecutionLegTicket, HedgePolicy,
+    ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupReport,
+    ExecutionGroupStatus, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport,
+    ExecutionLegState, ExecutionLegTicket, HedgePolicy,
 };
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
