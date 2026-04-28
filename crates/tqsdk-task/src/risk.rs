@@ -1,8 +1,32 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use tqsdk_core::{TradeDirection, TradeOffset};
+use tqsdk_core::{AccountId, Revision, Symbol, TradeDirection, TradeOffset};
 
 use crate::{Result, TaskError, TaskOrderIntent};
+
+/// Revision-bound result of a pre-trade risk check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskCheckReport {
+    revision: Revision,
+    decision: RiskDecision,
+}
+
+impl RiskCheckReport {
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn decision(&self) -> &RiskDecision {
+        &self.decision
+    }
+
+    #[must_use]
+    pub fn into_decision(self) -> RiskDecision {
+        self.decision
+    }
+}
 
 /// Typed result of a pre-trade risk check.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,16 +129,35 @@ impl RiskEngine {
     }
 
     pub fn check(&self, api: &tqsdk_wait::TqApi, intent: &TaskOrderIntent) -> Result<RiskDecision> {
+        Ok(self.check_report(api, intent)?.into_decision())
+    }
+
+    pub fn check_report(
+        &self,
+        api: &tqsdk_wait::TqApi,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskCheckReport> {
+        let snapshot = api.session().reader().read();
+        let revision = snapshot.revision();
+        let view = snapshot.view();
+        let trade = view.trade_state();
+        let market = view.market_state();
+        let account_id = AccountId::new(intent.account_id.clone());
+        let symbol = Symbol::new(intent.symbol.clone());
+
         if let Some(max) = self.max_order_volume {
             if intent.volume > max {
-                return Ok(RiskDecision::Rejected(
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(
                     RiskRejection::MaxOrderVolumeExceeded {
                         account_id: intent.account_id.clone(),
                         symbol: intent.symbol.clone(),
                         requested: intent.volume,
                         max,
                     },
-                ));
+                    ),
+                });
             }
         }
 
@@ -122,41 +165,50 @@ impl RiskEngine {
             if !min_available.is_finite() {
                 return Err(TaskError::InvalidState("risk min available must be finite"));
             }
-            let account = api.get_account(&intent.account_id).snapshot(api)?;
+            let account = trade.account(&account_id)?;
             let Some(account) = account else {
-                return Ok(RiskDecision::Rejected(RiskRejection::MissingAccount {
-                    account_id: intent.account_id.clone(),
-                }));
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(RiskRejection::MissingAccount {
+                        account_id: intent.account_id.clone(),
+                    }),
+                });
             };
             if !account.available.is_finite() {
                 return Err(TaskError::InvalidState("account available must be finite"));
             }
             if account.available < min_available {
-                return Ok(RiskDecision::Rejected(
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(
                     RiskRejection::AvailableBelowMinimum {
                         account_id: intent.account_id.clone(),
                         available: account.available,
                         min_available,
                     },
-                ));
+                    ),
+                });
             }
         }
 
         if let Some(max_abs_net) = self.max_abs_net_position {
-            let position = api
-                .get_position(&intent.account_id, &intent.symbol)
-                .snapshot(api)?;
+            let position = trade.position(&account_id, &symbol)?;
             let Some(position) = position else {
-                return Ok(RiskDecision::Rejected(RiskRejection::MissingPosition {
-                    account_id: intent.account_id.clone(),
-                    symbol: intent.symbol.clone(),
-                }));
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(RiskRejection::MissingPosition {
+                        account_id: intent.account_id.clone(),
+                        symbol: intent.symbol.clone(),
+                    }),
+                });
             };
             let current_net = position.volume_long - position.volume_short;
             let projected_net = project_net_position(current_net, intent);
             let projected_abs = projected_net.checked_abs().unwrap_or(i64::MAX);
             if projected_abs > max_abs_net {
-                return Ok(RiskDecision::Rejected(
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(
                     RiskRejection::NetPositionLimitExceeded {
                         account_id: intent.account_id.clone(),
                         symbol: intent.symbol.clone(),
@@ -164,7 +216,8 @@ impl RiskEngine {
                         projected_net,
                         max_abs_net,
                     },
-                ));
+                    ),
+                });
             }
         }
 
@@ -175,36 +228,51 @@ impl RiskEngine {
                 ));
             }
             let Some(limit_price) = intent.limit_price else {
-                return Ok(RiskDecision::Accepted);
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Accepted,
+                });
             };
             if !limit_price.is_finite() {
                 return Err(TaskError::InvalidState("limit price must be finite"));
             }
-            let quote = api.quote_ref(&intent.symbol).snapshot(api)?;
+            let quote = market.quote(&symbol)?;
             let Some(quote) = quote else {
-                return Ok(RiskDecision::Rejected(RiskRejection::MissingQuote {
-                    symbol: intent.symbol.clone(),
-                }));
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(RiskRejection::MissingQuote {
+                        symbol: intent.symbol.clone(),
+                    }),
+                });
             };
             if !quote.last_price.is_finite() {
-                return Ok(RiskDecision::Rejected(RiskRejection::MissingQuote {
-                    symbol: intent.symbol.clone(),
-                }));
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(RiskRejection::MissingQuote {
+                        symbol: intent.symbol.clone(),
+                    }),
+                });
             }
             let deviation = (limit_price - quote.last_price).abs();
             if deviation > max_abs_deviation {
-                return Ok(RiskDecision::Rejected(
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(
                     RiskRejection::PriceDeviationExceeded {
                         symbol: intent.symbol.clone(),
                         limit_price,
                         reference_price: quote.last_price,
                         max_abs_deviation,
                     },
-                ));
+                    ),
+                });
             }
         }
 
-        Ok(RiskDecision::Accepted)
+        Ok(RiskCheckReport {
+            revision,
+            decision: RiskDecision::Accepted,
+        })
     }
 }
 

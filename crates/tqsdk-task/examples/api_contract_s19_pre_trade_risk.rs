@@ -9,6 +9,7 @@
 //! - 风控规则是 typed public API
 //! - 下单入口强制经过 `TaskHost` 的 risk gate 和 ownership guard
 //! - 风控读取账户/持仓/quote 时使用同一稳定状态截面
+//! - 风控检查可以返回带 revision 的 typed report 供审计
 //! - 订单价格和方向通过 typed builder 表达
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -32,8 +33,8 @@
 
 use std::time::Duration;
 
-use tqsdk_core::TradeAccountType;
-use tqsdk_task::{RiskEngine, TaskError, TaskHost};
+use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
+use tqsdk_task::{RiskEngine, TaskError, TaskHost, TaskOrderIntent};
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
@@ -73,6 +74,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_net_position(5)
         .max_price_deviation(20.0);
     let mut host = TaskHost::new(api).with_risk(risk);
+    let intent = TaskOrderIntent {
+        account_id: account_id.clone(),
+        symbol: symbol.clone(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 1,
+        limit_price: Some(limit_price),
+    };
+
+    if let Some(risk) = host.risk() {
+        let report = risk.check_report(host.api(), &intent)?;
+        println!(
+            "risk revision={} decision={:?}",
+            report.revision().get(),
+            report.decision()
+        );
+        if let Some(rejection) = report.decision().rejection() {
+            println!("risk rejected order before submit: {rejection:?}");
+            return Ok(());
+        }
+    }
 
     match host
         .orders(account_id.as_str())

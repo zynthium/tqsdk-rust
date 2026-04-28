@@ -59,7 +59,7 @@ pub use replay::{
     StrategyReplay, StrategyReplayBuilder, StrategyReplayCheckpoint, StrategyReplayCheckpointStore,
     StrategyReplayContext, StrategyReplayEvent, StrategyReplaySourceBuilder, StrategyReplaySpeed,
 };
-pub use risk::{RiskDecision, RiskEngine, RiskRejection};
+pub use risk::{RiskCheckReport, RiskDecision, RiskEngine, RiskRejection};
 pub use scheduler::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,

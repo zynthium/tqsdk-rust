@@ -4,7 +4,7 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput, TradeDirection, TradeOffset,
 };
 use tqsdk_session::SessionClient;
-use tqsdk_task::{RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind};
+use tqsdk_task::{RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind, TaskOrderIntent};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {
@@ -242,6 +242,44 @@ async fn risk_engine_rejects_projected_net_position_limit() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn risk_engine_report_exposes_revision_bound_decision() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, 2_000.0, 0, 3_660.0);
+
+    let accepted_intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 1,
+        limit_price: Some(3_678.0),
+    };
+    let accepted_report = RiskEngine::new()
+        .max_price_deviation(20.0)
+        .check_report(host.api(), &accepted_intent)
+        .unwrap();
+
+    assert!(accepted_report.revision().get() > 0);
+    assert!(accepted_report.decision().is_accepted());
+
+    let rejected_report = RiskEngine::new()
+        .max_price_deviation(10.0)
+        .check_report(host.api(), &accepted_intent)
+        .unwrap();
+
+    assert_eq!(
+        rejected_report.decision().rejection(),
+        Some(&RiskRejection::PriceDeviationExceeded {
+            symbol: "SHFE.rb2601".to_string(),
+            limit_price: 3_678.0,
+            reference_price: 3_660.0,
+            max_abs_deviation: 10.0,
+        })
+    );
+    assert_eq!(rejected_report.revision(), accepted_report.revision());
 }
 
 #[tokio::test(flavor = "current_thread")]
