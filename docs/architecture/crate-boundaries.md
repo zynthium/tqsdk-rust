@@ -228,6 +228,7 @@
 - typed path stream
 - kline / tick window stream
 - trade 相关事件流
+- managed commit sink foundation，用于慢消费者隔离但不改变 runtime 提交模型
 
 它的价值不在于“再造一套 runtime”，而在于让高性能、多消费者、异步系统集成方可以直接消费同一套 commit 语义。
 

@@ -56,7 +56,10 @@ impl TqStream {
         Self::new_with_capacity(session, DEFAULT_COMMIT_CHANNEL_CAPACITY)
     }
 
-    pub(crate) fn new_with_capacity(session: tqsdk_session::SessionClient, capacity: usize) -> Self {
+    pub(crate) fn new_with_capacity(
+        session: tqsdk_session::SessionClient,
+        capacity: usize,
+    ) -> Self {
         let reader = session.reader_clone();
         let driver = StreamDriver::new(session.clone(), reader.clone(), capacity);
         Self {
@@ -504,6 +507,22 @@ impl TqStream {
         let receiver = self.driver.subscribe();
         self.driver.ensure_started()?;
         Ok(CommitStream::new(receiver))
+    }
+
+    pub fn spawn_commit_sink<S>(
+        &self,
+        name: impl Into<String>,
+        sink: S,
+    ) -> crate::error::Result<crate::sink::StreamSinkHandle>
+    where
+        S: crate::sink::CommitSink,
+    {
+        let commits = self.commit_stream()?;
+        Ok(crate::sink::StreamSinkHandle::spawn(
+            name.into(),
+            commits,
+            sink,
+        ))
     }
 
     #[doc(hidden)]

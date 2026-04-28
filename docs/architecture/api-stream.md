@@ -716,11 +716,15 @@ impl futures::Stream for TradeSessionEventStream {
 
 - 慢消费者落后时，返回 `Lagged`
 - root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)` 显式配置
+- 写库 / 日志这类 sink 可通过 `TqStream::spawn_commit_sink(...)` 由 SDK 托管，
+  并通过 `StreamSinkStats` / `StreamSinkShutdownReport` 观察 processed、lagged、
+  errors 和 flush 结果
 - 不为慢消费者阻塞整个 session 驱动
 - 不为每个订阅者维护独立 cursor + 独立 route 驱动
 
-这个配置只控制 stream facade 内部 bounded broadcast ring。durable sink runtime、
-per-sink retry/storage policy、本地 WAL 或数据库写入隔离属于后续 daemon/tooling
+这个配置只控制 stream facade 内部 bounded broadcast ring。managed commit sink 是
+stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
+per-sink retry/storage policy、本地 WAL 和跨进程 sink 恢复仍属于后续 daemon/tooling
 层，不应下沉到 `tqsdk-core` 或 `tqsdk-session`。
 
 为什么第一版不做更复杂的 path/object fan-out：

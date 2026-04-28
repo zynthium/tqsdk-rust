@@ -24,10 +24,7 @@ fn instrument_spec_normalizes_contract_metadata_from_quote() {
     assert_eq!(spec.class, InstrumentClass::Future);
     assert_eq!(spec.price_tick, 0.02);
     assert_eq!(spec.volume_multiple, 1000);
-    assert_eq!(
-        spec.expire_datetime_ns,
-        Some(1_770_000_000_000_000_000)
-    );
+    assert_eq!(spec.expire_datetime_ns, Some(1_770_000_000_000_000_000));
     assert!(spec.is_derivative());
 }
 

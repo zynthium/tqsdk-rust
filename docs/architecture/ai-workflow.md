@@ -126,6 +126,7 @@ tqsdk-task
 - commit/path/scope/domain/object/field filters
 - typed path stream、ready kline/tick window stream
 - trade object/session event stream
+- managed commit sink foundation for slow consumer isolation
 
 设计原因：
 

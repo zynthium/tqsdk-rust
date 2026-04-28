@@ -189,9 +189,6 @@ mod tests {
             .commit_channel_capacity(0)
             .unwrap_err();
 
-        assert_eq!(
-            err.diagnostic().kind,
-            crate::StreamErrorKind::InvalidState
-        );
+        assert_eq!(err.diagnostic().kind, crate::StreamErrorKind::InvalidState);
     }
 }

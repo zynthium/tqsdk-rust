@@ -1,6 +1,10 @@
 use futures::StreamExt;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tqsdk_core::Quote;
-use tqsdk_stream::StreamFacadeError;
+use tqsdk_stream::{CommitSink, StreamFacadeError, StreamSinkFuture, StreamSinkStatus};
 
 mod support;
 
@@ -74,4 +78,103 @@ async fn lagged_receiver_reports_backpressure_explicitly() {
         update,
         Err(StreamFacadeError::Lagged { skipped }) if skipped >= 1
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_commit_sink_runs_outside_core_consumer_loop_and_flushes_on_shutdown() {
+    let stream = support::core_seed::seeded_stream();
+    let mut strategy_commits = stream.commit_stream().unwrap();
+    let blocker = Arc::new(tokio::sync::Notify::new());
+    let sink = BlockingSink::new(Arc::clone(&blocker));
+    let sink_state = sink.state();
+    let sink_handle = stream.spawn_commit_sink("warehouse", sink).unwrap();
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 618.0);
+
+    let strategy_commit = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        strategy_commits.next(),
+    )
+    .await
+    .expect("strategy consumer should not wait for slow sink")
+    .expect("strategy consumer should receive a stream update")
+    .expect("strategy consumer should receive a commit");
+    assert_eq!(strategy_commit.revision.get(), 1);
+
+    wait_until(|| sink_state.started.load(Ordering::Acquire) == 1).await;
+    assert_eq!(sink_handle.stats().processed_commits(), 0);
+    assert_eq!(sink_handle.status(), StreamSinkStatus::Running);
+
+    blocker.notify_waiters();
+    wait_until(|| sink_handle.stats().processed_commits() == 1).await;
+
+    let report = sink_handle.shutdown().await.unwrap();
+    assert_eq!(report.name(), "warehouse");
+    assert_eq!(report.status(), StreamSinkStatus::Stopped);
+    assert_eq!(report.stats().processed_commits(), 1);
+    assert!(report.flushed());
+    assert_eq!(sink_state.flushed.load(Ordering::Acquire), 1);
+}
+
+struct BlockingSink {
+    state: Arc<BlockingSinkState>,
+    blocker: Arc<tokio::sync::Notify>,
+}
+
+struct BlockingSinkState {
+    started: AtomicUsize,
+    revisions: Mutex<Vec<u64>>,
+    flushed: AtomicUsize,
+}
+
+impl BlockingSink {
+    fn new(blocker: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            state: Arc::new(BlockingSinkState {
+                started: AtomicUsize::new(0),
+                revisions: Mutex::new(Vec::new()),
+                flushed: AtomicUsize::new(0),
+            }),
+            blocker,
+        }
+    }
+
+    fn state(&self) -> Arc<BlockingSinkState> {
+        Arc::clone(&self.state)
+    }
+}
+
+impl CommitSink for BlockingSink {
+    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+        let state = Arc::clone(&self.state);
+        let blocker = Arc::clone(&self.blocker);
+        Box::pin(async move {
+            state.started.fetch_add(1, Ordering::AcqRel);
+            blocker.notified().await;
+            state
+                .revisions
+                .lock()
+                .expect("test sink revisions mutex poisoned")
+                .push(commit.revision.get());
+            Ok(())
+        })
+    }
+
+    fn flush(&mut self) -> StreamSinkFuture {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            state.flushed.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        })
+    }
+}
+
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    for _ in 0..50 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(condition(), "condition did not become true before timeout");
 }
