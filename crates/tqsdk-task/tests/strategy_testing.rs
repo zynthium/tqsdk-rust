@@ -149,10 +149,7 @@ async fn strategy_test_harness_can_advance_partial_fills_across_steps() {
 
     let first = ctx.finish_test_step().await.unwrap();
     assert_eq!(first.orders().len(), 1);
-    assert_eq!(
-        first.orders()[0].lifecycle,
-        OrderLifecycle::PartiallyFilled
-    );
+    assert_eq!(first.orders()[0].lifecycle, OrderLifecycle::PartiallyFilled);
     assert_eq!(first.orders()[0].volume_left, 3);
     assert_eq!(first.trades().len(), 1);
     assert_eq!(first.trades()[0].volume, 2);

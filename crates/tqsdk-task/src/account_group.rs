@@ -468,21 +468,20 @@ impl MultiAccountOrderTicket {
                 return Ok(outcome);
             }
 
-            let exposure_deadline =
-                if let Some(max_unhedged) = self.max_unhedged.filter(|_| {
-                    has_open_account_exposure(&accounts)
-                }) {
-                    let started_at =
-                        *exposure_started_at.get_or_insert_with(tokio::time::Instant::now);
-                    let exposure_deadline = started_at + max_unhedged;
-                    if tokio::time::Instant::now() >= exposure_deadline {
-                        return Ok(needs_attention_from_reports(&accounts));
-                    }
-                    Some(exposure_deadline)
-                } else {
-                    exposure_started_at = None;
-                    None
-                };
+            let exposure_deadline = if let Some(max_unhedged) = self
+                .max_unhedged
+                .filter(|_| has_open_account_exposure(&accounts))
+            {
+                let started_at = *exposure_started_at.get_or_insert_with(tokio::time::Instant::now);
+                let exposure_deadline = started_at + max_unhedged;
+                if tokio::time::Instant::now() >= exposure_deadline {
+                    return Ok(needs_attention_from_reports(&accounts));
+                }
+                Some(exposure_deadline)
+            } else {
+                exposure_started_at = None;
+                None
+            };
 
             let wait_deadline = match (deadline, exposure_deadline) {
                 (Some(deadline), Some(exposure_deadline)) => {

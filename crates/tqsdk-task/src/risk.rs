@@ -149,14 +149,12 @@ impl RiskEngine {
             if intent.volume > max {
                 return Ok(RiskCheckReport {
                     revision,
-                    decision: RiskDecision::Rejected(
-                    RiskRejection::MaxOrderVolumeExceeded {
+                    decision: RiskDecision::Rejected(RiskRejection::MaxOrderVolumeExceeded {
                         account_id: intent.account_id.clone(),
                         symbol: intent.symbol.clone(),
                         requested: intent.volume,
                         max,
-                    },
-                    ),
+                    }),
                 });
             }
         }
@@ -180,13 +178,11 @@ impl RiskEngine {
             if account.available < min_available {
                 return Ok(RiskCheckReport {
                     revision,
-                    decision: RiskDecision::Rejected(
-                    RiskRejection::AvailableBelowMinimum {
+                    decision: RiskDecision::Rejected(RiskRejection::AvailableBelowMinimum {
                         account_id: intent.account_id.clone(),
                         available: account.available,
                         min_available,
-                    },
-                    ),
+                    }),
                 });
             }
         }
@@ -208,15 +204,13 @@ impl RiskEngine {
             if projected_abs > max_abs_net {
                 return Ok(RiskCheckReport {
                     revision,
-                    decision: RiskDecision::Rejected(
-                    RiskRejection::NetPositionLimitExceeded {
+                    decision: RiskDecision::Rejected(RiskRejection::NetPositionLimitExceeded {
                         account_id: intent.account_id.clone(),
                         symbol: intent.symbol.clone(),
                         current_net,
                         projected_net,
                         max_abs_net,
-                    },
-                    ),
+                    }),
                 });
             }
         }
@@ -257,14 +251,12 @@ impl RiskEngine {
             if deviation > max_abs_deviation {
                 return Ok(RiskCheckReport {
                     revision,
-                    decision: RiskDecision::Rejected(
-                    RiskRejection::PriceDeviationExceeded {
+                    decision: RiskDecision::Rejected(RiskRejection::PriceDeviationExceeded {
                         symbol: intent.symbol.clone(),
                         limit_price,
                         reference_price: quote.last_price,
                         max_abs_deviation,
-                    },
-                    ),
+                    }),
                 });
             }
         }
