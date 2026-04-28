@@ -5,7 +5,12 @@ use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Lines, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tqsdk_core::{Kline, Quote, Tick};
@@ -440,7 +445,13 @@ impl MarketCacheLock {
     }
 
     pub fn renew(&mut self) -> Result<()> {
-        self.lease_started_at_ns = write_lock_lease(&mut self.file)?;
+        let lease_started_at_ns = write_lock_lease(&mut self.file)?;
+        if read_lock_lease_started_at_ns(&self.path)? != Some(lease_started_at_ns) {
+            return Err(DataError::InvalidState(
+                "market cache lock lease file was replaced",
+            ));
+        }
+        self.lease_started_at_ns = lease_started_at_ns;
         Ok(())
     }
 
@@ -642,6 +653,114 @@ impl MarketCacheQueue {
             error,
         })?;
         Ok(report)
+    }
+
+    pub fn drain_to_writer_rotating<W: Write>(
+        &self,
+        writer: &mut MarketCacheWriter<W>,
+        processing_path: impl AsRef<Path>,
+    ) -> std::result::Result<MarketCacheQueueDrainReport, MarketCacheQueueDrainError> {
+        let processing_path = processing_path.as_ref();
+        let mut report = MarketCacheQueueDrainReport {
+            queue_path: self.path.clone(),
+            read_events: 0,
+            written_events: 0,
+        };
+        if processing_path == self.path {
+            return Err(MarketCacheQueueDrainError {
+                report,
+                error: DataError::Validation(
+                    "market cache processing queue path must differ from queue path".into(),
+                ),
+            });
+        }
+
+        self.drain_processing_file(writer, processing_path, &mut report)?;
+        if self
+            .is_empty()
+            .map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?
+        {
+            writer.flush().map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?;
+            return Ok(report);
+        }
+
+        std::fs::rename(&self.path, processing_path).map_err(|error| {
+            MarketCacheQueueDrainError {
+                report: report.clone(),
+                error: DataError::Io(error),
+            }
+        })?;
+        self.clear().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        self.drain_processing_file(writer, processing_path, &mut report)?;
+        writer.flush().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        Ok(report)
+    }
+
+    fn drain_processing_file<W: Write>(
+        &self,
+        writer: &mut MarketCacheWriter<W>,
+        processing_path: &Path,
+        report: &mut MarketCacheQueueDrainReport,
+    ) -> std::result::Result<(), MarketCacheQueueDrainError> {
+        let metadata = match std::fs::metadata(processing_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(MarketCacheQueueDrainError {
+                    report: report.clone(),
+                    error: DataError::Io(error),
+                });
+            }
+        };
+        if metadata.len() == 0 {
+            std::fs::remove_file(processing_path).map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error: DataError::Io(error),
+            })?;
+            return Ok(());
+        }
+
+        let reader = MarketCacheReader::open(processing_path).map_err(|error| {
+            MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            }
+        })?;
+        for event in reader {
+            let event = event.map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?;
+            report.read_events += 1;
+            writer
+                .write_event(&event)
+                .map_err(|error| MarketCacheQueueDrainError {
+                    report: report.clone(),
+                    error,
+                })?;
+            report.written_events += 1;
+        }
+        writer.flush().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        std::fs::remove_file(processing_path).map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error: DataError::Io(error),
+        })?;
+        Ok(())
     }
 }
 
@@ -923,7 +1042,7 @@ impl MarketCacheDaemonConfig {
 pub struct MarketCacheDaemon {
     config: MarketCacheDaemonConfig,
     queue: MarketCacheQueue,
-    _lock: MarketCacheLock,
+    lock: MarketCacheLock,
 }
 
 impl MarketCacheDaemon {
@@ -944,7 +1063,7 @@ impl MarketCacheDaemon {
         Ok(Self {
             config,
             queue,
-            _lock: lock,
+            lock,
         })
     }
 
@@ -978,6 +1097,57 @@ impl MarketCacheDaemon {
         self.queue.drain_to_writer_with_report(&mut writer)
     }
 
+    pub fn flush_queue_rotating(
+        &self,
+        processing_path: impl AsRef<Path>,
+    ) -> std::result::Result<MarketCacheQueueDrainReport, MarketCacheQueueDrainError> {
+        let mut writer = MarketCacheWriter::append(&self.config.cache_path).map_err(|error| {
+            MarketCacheQueueDrainError {
+                report: MarketCacheQueueDrainReport {
+                    queue_path: self.config.queue_path.clone(),
+                    read_events: 0,
+                    written_events: 0,
+                },
+                error,
+            }
+        })?;
+        self.queue
+            .drain_to_writer_rotating(&mut writer, processing_path)
+    }
+
+    pub fn renew_lock(&mut self) -> Result<()> {
+        self.lock.renew()
+    }
+
+    pub fn spawn_supervisor(
+        self,
+        config: MarketCacheSupervisorConfig,
+    ) -> Result<MarketCacheSupervisor> {
+        config.validate()?;
+        let processing_queue_path = config
+            .processing_queue_path
+            .clone()
+            .unwrap_or_else(|| path_with_suffix(&self.config.queue_path, ".processing"));
+        if processing_queue_path == self.config.queue_path {
+            return Err(DataError::Validation(
+                "market cache supervisor processing queue path must differ from queue path".into(),
+            ));
+        }
+
+        let queue = self.queue.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            run_market_cache_supervisor(self, config, processing_queue_path, thread_stop)
+        });
+
+        Ok(MarketCacheSupervisor {
+            queue,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
     pub fn shutdown(self) -> Result<MarketCacheDaemonShutdownReport> {
         let flush_report = self.flush_queue().map_err(DataError::from)?;
         let compaction_report = self
@@ -1005,6 +1175,161 @@ pub struct MarketCacheDaemonShutdownReport {
     pub flush_report: MarketCacheQueueDrainReport,
     pub compaction_report: Option<MarketCacheAtomicCompactionReport>,
     pub queue_empty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketCacheSupervisorConfig {
+    flush_interval: Duration,
+    lease_renew_interval: Duration,
+    idle_sleep: Duration,
+    processing_queue_path: Option<PathBuf>,
+}
+
+impl MarketCacheSupervisorConfig {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            flush_interval: Duration::from_secs(1),
+            lease_renew_interval: Duration::from_secs(5),
+            idle_sleep: Duration::from_millis(10),
+            processing_queue_path: None,
+        }
+    }
+
+    #[must_use]
+    pub fn flush_interval(mut self, flush_interval: Duration) -> Self {
+        self.flush_interval = flush_interval;
+        self
+    }
+
+    #[must_use]
+    pub fn lease_renew_interval(mut self, lease_renew_interval: Duration) -> Self {
+        self.lease_renew_interval = lease_renew_interval;
+        self
+    }
+
+    #[must_use]
+    pub fn idle_sleep(mut self, idle_sleep: Duration) -> Self {
+        self.idle_sleep = idle_sleep;
+        self
+    }
+
+    #[must_use]
+    pub fn processing_queue_path(mut self, processing_queue_path: impl AsRef<Path>) -> Self {
+        self.processing_queue_path = Some(processing_queue_path.as_ref().to_path_buf());
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.flush_interval.is_zero() {
+            return Err(DataError::Validation(
+                "market cache supervisor flush interval must be positive".into(),
+            ));
+        }
+        if self.lease_renew_interval.is_zero() {
+            return Err(DataError::Validation(
+                "market cache supervisor lease renew interval must be positive".into(),
+            ));
+        }
+        if self.idle_sleep.is_zero() {
+            return Err(DataError::Validation(
+                "market cache supervisor idle sleep must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for MarketCacheSupervisorConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct MarketCacheSupervisor {
+    queue: MarketCacheQueue,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Result<MarketCacheSupervisorShutdownReport>>>,
+}
+
+impl MarketCacheSupervisor {
+    pub fn enqueue_event(&self, event: &MarketCacheEvent) -> Result<()> {
+        self.queue.enqueue_event(event)
+    }
+
+    pub fn shutdown(mut self) -> Result<MarketCacheSupervisorShutdownReport> {
+        self.stop.store(true, Ordering::Release);
+        let handle = self.handle.take().ok_or(DataError::InvalidState(
+            "market cache supervisor is already shut down",
+        ))?;
+        handle
+            .join()
+            .map_err(|_| DataError::InvalidState("market cache supervisor thread panicked"))?
+    }
+}
+
+impl Drop for MarketCacheSupervisor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketCacheSupervisorShutdownReport {
+    pub periodic_flushes: usize,
+    pub lease_renewals: usize,
+    pub periodic_errors: usize,
+    pub pre_shutdown_flush_report: MarketCacheQueueDrainReport,
+    pub shutdown: MarketCacheDaemonShutdownReport,
+}
+
+fn run_market_cache_supervisor(
+    mut daemon: MarketCacheDaemon,
+    config: MarketCacheSupervisorConfig,
+    processing_queue_path: PathBuf,
+    stop: Arc<AtomicBool>,
+) -> Result<MarketCacheSupervisorShutdownReport> {
+    let mut periodic_flushes = 0;
+    let mut lease_renewals = 0;
+    let mut periodic_errors = 0;
+    let now = Instant::now();
+    let mut last_flush = now - config.flush_interval;
+    let mut last_renew = now - config.lease_renew_interval;
+
+    while !stop.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now.duration_since(last_flush) >= config.flush_interval {
+            match daemon.flush_queue_rotating(&processing_queue_path) {
+                Ok(_) => periodic_flushes += 1,
+                Err(_) => periodic_errors += 1,
+            }
+            last_flush = now;
+        }
+        if now.duration_since(last_renew) >= config.lease_renew_interval {
+            match daemon.renew_lock() {
+                Ok(()) => lease_renewals += 1,
+                Err(_) => periodic_errors += 1,
+            }
+            last_renew = now;
+        }
+        thread::sleep(config.idle_sleep);
+    }
+
+    let pre_shutdown_flush_report = daemon
+        .flush_queue_rotating(&processing_queue_path)
+        .map_err(DataError::from)?;
+    let shutdown = daemon.shutdown()?;
+    Ok(MarketCacheSupervisorShutdownReport {
+        periodic_flushes,
+        lease_renewals,
+        periodic_errors,
+        pre_shutdown_flush_report,
+        shutdown,
+    })
 }
 
 fn write_market_cache_event_line<W: Write>(writer: &mut W, event: &MarketCacheEvent) -> Result<()> {

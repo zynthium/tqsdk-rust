@@ -466,8 +466,10 @@ crate 分层合并成一份迭代计划。
   rotation foundation。
 - `MarketCacheDaemonConfig` / `MarketCacheDaemon` 提供同步、process-local
   daemon foundation，覆盖 lock lease、queue flush progress、compaction
-  rotation 和 shutdown report；明确不内置后台 supervisor、HTTP endpoint 或
-  GUI。
+  rotation 和 shutdown report；明确不内置 HTTP endpoint 或 GUI。
+- `MarketCacheSupervisorConfig` / `MarketCacheSupervisor` 提供 process-local
+  background supervisor foundation，覆盖 periodic rotating flush、lease renewal
+  和 graceful shutdown report；明确不承诺跨进程 cache 管理服务。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -487,11 +489,12 @@ crate 分层合并成一份迭代计划。
   queue / lock / index / compaction foundation。
 - `api_contract_s18_cache_daemon_foundation` 已提升为正式 data example，
   覆盖 lease / queue / rotation / shutdown report foundation。
+- `api_contract_s18_cache_supervisor_foundation` 已提升为正式 data example，
+  覆盖 process-local periodic flush / lease renewal / graceful shutdown
+  foundation。
 
 仍未完成、不可伪装为已支持：
 
-- 持续后台 daemon supervisor；
-- lease heartbeat 线程；
 - 跨进程 cache 管理服务；
 
 优先提升的场景：
@@ -499,6 +502,7 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_local_market_cache`（cache record/replay foundation 已提升为正式 data example）
 - `api_contract_s18_cache_maintenance`（cache maintenance foundation 已提升为正式 data example）
 - `api_contract_s18_cache_daemon_foundation`（process-local daemon foundation 已提升为正式 data example）
+- `api_contract_s18_cache_supervisor_foundation`（process-local supervisor foundation 已提升为正式 data example）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 

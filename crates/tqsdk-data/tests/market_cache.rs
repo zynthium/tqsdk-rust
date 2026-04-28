@@ -7,7 +7,7 @@ use tqsdk_data::{
     MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
     MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
     MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReplay,
-    MarketCacheWriter,
+    MarketCacheSupervisorConfig, MarketCacheWriter,
 };
 
 #[test]
@@ -240,6 +240,20 @@ fn market_cache_lock_recovers_stale_lease_file_and_can_renew() {
 }
 
 #[test]
+fn market_cache_lock_renew_detects_replaced_lease_file() {
+    let lock_path = temp_path("market-cache-replaced.lock");
+    let _ = std::fs::remove_file(&lock_path);
+
+    let mut lock = MarketCacheLock::acquire(&lock_path).unwrap();
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::write(&lock_path, "pid=1\nlease_started_at_ns=1\n").unwrap();
+
+    assert!(lock.renew().is_err());
+    drop(lock);
+    assert!(lock_path.exists());
+}
+
+#[test]
 fn market_cache_queue_drain_error_reports_progress_and_keeps_queue() {
     let queue_path = temp_path("market-cache-queue-error.jsonl");
     let _ = std::fs::remove_file(&queue_path);
@@ -418,6 +432,70 @@ fn market_cache_daemon_shutdown_flushes_queue_and_compacts_cache() {
     assert_eq!(events[0].event_time_ns(), 1_500);
 }
 
+#[test]
+fn market_cache_supervisor_flushes_periodically_renews_lease_and_shuts_down() {
+    let cache_path = temp_path("market-cache-supervisor.jsonl");
+    let queue_path = temp_path("market-cache-supervisor.queue");
+    let lock_path = temp_path("market-cache-supervisor.lock");
+    let staging_path = temp_path("market-cache-supervisor.tmp");
+    let processing_path = temp_path("market-cache-supervisor.processing");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&lock_path);
+    let _ = std::fs::remove_file(&staging_path);
+    let _ = std::fs::remove_file(&processing_path);
+
+    let daemon = MarketCacheDaemon::open(
+        MarketCacheDaemonConfig::new(&cache_path)
+            .queue_path(&queue_path)
+            .lock_path(&lock_path)
+            .compaction_staging_path(&staging_path)
+            .stale_lock_after(Duration::from_secs(30))
+            .compaction_policy(MarketCacheCompaction::new().retain_event_time_from(1_000)),
+    )
+    .unwrap();
+    let supervisor = daemon
+        .spawn_supervisor(
+            MarketCacheSupervisorConfig::new()
+                .flush_interval(Duration::from_millis(10))
+                .lease_renew_interval(Duration::from_millis(10))
+                .processing_queue_path(&processing_path),
+        )
+        .unwrap();
+
+    supervisor
+        .enqueue_event(&quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0))
+        .unwrap();
+    supervisor
+        .enqueue_event(&quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(1_500),
+            480.0,
+        ))
+        .unwrap();
+
+    wait_until(Duration::from_secs(2), || {
+        MarketCacheReader::open(&cache_path)
+            .map(|reader| reader.count() >= 2)
+            .unwrap_or(false)
+    });
+
+    let report = supervisor.shutdown().unwrap();
+
+    assert!(report.periodic_flushes > 0 || report.shutdown.flush_report.written_events > 0);
+    assert!(report.lease_renewals > 0);
+    assert!(report.shutdown.queue_empty);
+
+    let events = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .collect::<tqsdk_data::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_time_ns(), 1_500);
+}
+
 fn quote_event(
     source: &str,
     symbol: &str,
@@ -447,4 +525,18 @@ fn temp_path(file_name: &str) -> PathBuf {
         "tqsdk-data-{}-{nanos}-{file_name}",
         std::process::id()
     ))
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let started_at = SystemTime::now();
+    while !condition() {
+        if SystemTime::now()
+            .duration_since(started_at)
+            .unwrap_or_default()
+            >= timeout
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

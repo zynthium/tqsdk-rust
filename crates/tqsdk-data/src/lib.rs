@@ -22,6 +22,7 @@
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
 //! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
+//! - `MarketCacheSupervisorConfig` / `MarketCacheSupervisor`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -54,6 +55,7 @@ pub use market_cache::{
     MarketCacheIndex, MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock,
     MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
     MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReplay,
+    MarketCacheSupervisor, MarketCacheSupervisorConfig, MarketCacheSupervisorShutdownReport,
     MarketCacheWriter,
 };
 #[cfg(feature = "stream")]

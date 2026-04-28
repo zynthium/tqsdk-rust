@@ -75,6 +75,9 @@
 - `MarketCacheDaemonConfig`
 - `MarketCacheDaemon`
 - `MarketCacheDaemonShutdownReport`
+- `MarketCacheSupervisorConfig`
+- `MarketCacheSupervisor`
+- `MarketCacheSupervisorShutdownReport`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -111,16 +114,21 @@ lease heartbeat, or manage a multi-process cache service.
 `MarketCacheDaemonConfig` / `MarketCacheDaemon` add a thin local daemon
 foundation over those primitives: explicit lock lease recovery, queue
 flush-with-progress, in-place compaction rotation, and shutdown reports. The
-facade is still synchronous and process-local; it is not a background
-supervisor, health endpoint, GUI integration, or cross-process cache service.
+facade is still synchronous and process-local; it is not a health endpoint, GUI
+integration, or cross-process cache service.
+
+`MarketCacheSupervisorConfig` / `MarketCacheSupervisor` add a process-local
+background supervisor over the daemon: periodic rotating queue flush, lock
+lease renewal, and graceful shutdown reporting. It is still a local data-layer
+helper, not a live session owner or multi-process cache manager.
 
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` and the matching tick methods
 connect owned history series to that replay foundation without requiring users
 to hand-build cache events.
 
-This is not a live durable sink runtime: it does not spawn tasks, isolate slow
-consumers, run daemon orchestration, or drive `StrategyHost`. Those remain
+This is not a live durable sink runtime: it does not isolate slow consumers, run
+cross-process daemon orchestration, or drive `StrategyHost`. Those remain
 scenario gaps above this data-layer foundation.
 
 ## 后续仍应承接的能力
@@ -182,6 +190,7 @@ scenario gaps above this data-layer foundation.
 - [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
 - [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
 - [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
+- [examples/api_contract_s18_cache_supervisor_foundation.rs](examples/api_contract_s18_cache_supervisor_foundation.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。

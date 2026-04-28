@@ -35,15 +35,14 @@
 //! `MarketCacheIndex` / `MarketCacheCompaction` 已提供本地 queue、lock file、
 //! index 和保留策略 compaction foundation；`MarketCacheDaemon` 已提供同步、
 //! process-local daemon foundation，覆盖 stale lease recovery、queue flush
-//! report、in-place rotation 和 shutdown report。剩余 gap 是持续后台
-//! supervisor、lease heartbeat 和多进程 cache 管理。
+//! report、in-place rotation 和 shutdown report；`MarketCacheSupervisor` 已提供
+//! process-local background supervisor foundation，覆盖 periodic rotating flush、
+//! lease renewal 和 graceful shutdown report。剩余 gap 是跨进程 cache 管理服务。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let mut cache = MultiProcessMarketCacheService::new("./cache.tqcache")
 //!     .queue("./cache.queue")
-//!     .lease_heartbeat("./cache.lock")
-//!     .supervise_background_flush()
 //!     .coordinate_process_readers()
 //!     .build()
 //!     .await?;
