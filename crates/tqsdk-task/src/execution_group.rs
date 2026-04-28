@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use tqsdk_core::{Order, OrderLifecycle, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    AccountId, CommandId, CommandStatus, Order, OrderId, OrderLifecycle, Revision, StateReadView,
+    TradeDirection, TradeOffset,
+};
 use tqsdk_wait::{OrderTicket, OrderTicketState};
 
 use crate::{Result, TaskError, TaskHost, TaskOrderIntent};
@@ -78,6 +81,15 @@ pub struct ExecutionGroupTicket {
     legs: Vec<ExecutionLegTicket>,
 }
 
+/// Revision-bound report for an execution group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionGroupReport {
+    revision: Revision,
+    group_id: String,
+    account_id: String,
+    status: ExecutionGroupStatus,
+}
+
 /// State of one execution-group leg projected from its wait-layer order ticket.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionLegState {
@@ -141,6 +153,49 @@ pub enum ExecutionGroupOutcome {
         exposure: ExecutionExposure,
         legs: Vec<ExecutionLegReport>,
     },
+}
+
+impl ExecutionGroupReport {
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    #[must_use]
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &ExecutionGroupStatus {
+        &self.status
+    }
+
+    #[must_use]
+    pub fn legs(&self) -> &[ExecutionLegReport] {
+        match &self.status {
+            ExecutionGroupStatus::Pending { legs } => legs,
+            ExecutionGroupStatus::Finished(outcome) => outcome.legs(),
+        }
+    }
+}
+
+impl ExecutionGroupOutcome {
+    #[must_use]
+    pub fn legs(&self) -> &[ExecutionLegReport] {
+        match self {
+            Self::AllFilled { legs }
+            | Self::Cancelled { legs }
+            | Self::Rejected { legs }
+            | Self::Failed { legs }
+            | Self::NeedsHedge { legs, .. } => legs,
+        }
+    }
 }
 
 impl<'a> ExecutionGroupBuilder<'a> {
@@ -280,6 +335,22 @@ impl ExecutionGroupTicket {
         })
     }
 
+    pub fn report(&self, api: &tqsdk_wait::TqApi) -> Result<ExecutionGroupReport> {
+        let snapshot = api.session().reader().read();
+        let revision = snapshot.revision();
+        let legs = self.leg_reports_from_view(snapshot.view())?;
+        let status = match outcome_from_reports(&legs) {
+            Some(outcome) => ExecutionGroupStatus::Finished(outcome),
+            None => ExecutionGroupStatus::Pending { legs },
+        };
+        Ok(ExecutionGroupReport {
+            revision,
+            group_id: self.group_id.clone(),
+            account_id: self.account_id.clone(),
+            status,
+        })
+    }
+
     pub fn outcome(&self, api: &tqsdk_wait::TqApi) -> Result<Option<ExecutionGroupOutcome>> {
         let legs = self.leg_reports(api)?;
         Ok(outcome_from_reports(&legs))
@@ -332,7 +403,15 @@ impl ExecutionGroupTicket {
     }
 
     fn leg_reports(&self, api: &tqsdk_wait::TqApi) -> Result<Vec<ExecutionLegReport>> {
-        self.legs.iter().map(|leg| leg_report(api, leg)).collect()
+        let snapshot = api.session().reader().read();
+        self.leg_reports_from_view(snapshot.view())
+    }
+
+    fn leg_reports_from_view(&self, view: StateReadView<'_>) -> Result<Vec<ExecutionLegReport>> {
+        self.legs
+            .iter()
+            .map(|leg| leg_report_from_view(view, leg))
+            .collect()
     }
 }
 
@@ -412,8 +491,11 @@ async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<Executio
     })
 }
 
-fn leg_report(api: &tqsdk_wait::TqApi, leg: &ExecutionLegTicket) -> Result<ExecutionLegReport> {
-    let state = leg.ticket.status(api)?;
+fn leg_report_from_view(
+    view: StateReadView<'_>,
+    leg: &ExecutionLegTicket,
+) -> Result<ExecutionLegReport> {
+    let state = ticket_state_from_view(view, leg)?;
     let (state, filled_volume, volume_left) = match state {
         OrderTicketState::Unknown { .. } => (ExecutionLegState::Unknown, 0, leg.intent.volume),
         OrderTicketState::CommandPending { .. } => {
@@ -453,6 +535,98 @@ fn leg_report(api: &tqsdk_wait::TqApi, leg: &ExecutionLegTicket) -> Result<Execu
         volume_left,
         state,
     })
+}
+
+fn ticket_state_from_view(
+    view: StateReadView<'_>,
+    leg: &ExecutionLegTicket,
+) -> Result<OrderTicketState> {
+    let order_ref = leg.ticket.order();
+    let account_id = AccountId::new(order_ref.account_id().to_owned());
+    let order_id = OrderId::new(order_ref.order_id().to_owned());
+    let order = view.trade_state().order(&account_id, &order_id)?;
+    let command_status = command_status_from_view(view, leg.ticket.command_id())?;
+
+    match order {
+        Some(order) => Ok(ticket_state_from_order(leg.ticket.command_id(), order)),
+        None => Ok(ticket_state_from_command(
+            leg.ticket.command_id(),
+            command_status,
+        )),
+    }
+}
+
+fn command_status_from_view(
+    view: StateReadView<'_>,
+    command_id: Option<CommandId>,
+) -> Result<Option<CommandStatus>> {
+    let Some(command_id) = command_id else {
+        return Ok(None);
+    };
+    let command_segment = command_id.get().to_string();
+    let Some(command) =
+        view.decode_path::<serde_json::Value>(&["runtime", "commands", command_segment.as_str()])?
+    else {
+        return Ok(None);
+    };
+    let Some(status) = command.get("status").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+
+    status
+        .parse()
+        .map(Some)
+        .map_err(|()| TaskError::InvalidState("unknown command status"))
+}
+
+fn ticket_state_from_order(command_id: Option<CommandId>, order: Order) -> OrderTicketState {
+    match order.lifecycle {
+        OrderLifecycle::Filled => OrderTicketState::Filled { command_id, order },
+        OrderLifecycle::Cancelled => OrderTicketState::Cancelled {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Rejected => OrderTicketState::Rejected {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Failed => OrderTicketState::Failed {
+            command_id,
+            order: Some(order),
+        },
+        OrderLifecycle::Unknown
+        | OrderLifecycle::Submitting
+        | OrderLifecycle::Sent
+        | OrderLifecycle::Accepted
+        | OrderLifecycle::PartiallyFilled
+        | OrderLifecycle::Cancelling => OrderTicketState::Live { command_id, order },
+    }
+}
+
+fn ticket_state_from_command(
+    command_id: Option<CommandId>,
+    command_status: Option<CommandStatus>,
+) -> OrderTicketState {
+    match (command_id, command_status) {
+        (Some(command_id), Some(CommandStatus::Rejected)) => OrderTicketState::Rejected {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Cancelled)) => OrderTicketState::Cancelled {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Failed)) => OrderTicketState::Failed {
+            command_id: Some(command_id),
+            order: None,
+        },
+        (Some(command_id), Some(CommandStatus::Completed)) => OrderTicketState::Unknown {
+            command_id: Some(command_id),
+        },
+        (Some(command_id), Some(status)) => OrderTicketState::CommandPending { command_id, status },
+        (None, Some(_)) => OrderTicketState::Unknown { command_id: None },
+        (command_id, None) => OrderTicketState::Unknown { command_id },
+    }
 }
 
 fn live_leg_state(order: &Order) -> (ExecutionLegState, i64, i64) {

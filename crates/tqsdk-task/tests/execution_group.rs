@@ -7,7 +7,8 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
-    ExecutionGroupOutcome, HedgePolicy, RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind,
+    ExecutionGroupOutcome, ExecutionGroupStatus, HedgePolicy, RiskEngine, RiskRejection, TaskError,
+    TaskHost, TaskKind,
 };
 use tqsdk_wait::TqApi;
 
@@ -216,6 +217,36 @@ async fn execution_group_submits_two_typed_legs_under_one_group_id() {
     assert_eq!(leg1["offset"], "OPEN");
     assert_eq!(leg1["volume"], 15);
     assert_eq!(leg1["limit_price"], 6500.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_report_binds_status_to_runtime_revision() {
+    let mut host = seeded_host();
+    let group = host
+        .execution_group("sim")
+        .client_group_id("spread-report-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.ag2602")
+        .sell_open(15)
+        .limit(6500.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    let report = group
+        .report(host.api())
+        .expect("group report should read one runtime snapshot");
+
+    assert_eq!(
+        report.revision(),
+        host.api().session().reader().read().revision()
+    );
+    assert_eq!(report.group_id(), "spread-report-001");
+    assert_eq!(report.account_id(), "sim");
+    assert_eq!(report.legs().len(), 2);
+    assert!(matches!(report.status(), ExecutionGroupStatus::Pending { .. }));
 }
 
 #[tokio::test(flavor = "current_thread")]

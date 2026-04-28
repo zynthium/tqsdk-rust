@@ -50,7 +50,8 @@ pub use environment::{
 pub use error::{Result, TaskError, TaskKind};
 pub use execution_group::{
     ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupStatus,
-    ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport, ExecutionLegState,
+    ExecutionGroupReport, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport,
+    ExecutionLegState,
     ExecutionLegTicket, HedgePolicy,
 };
 pub use host::TaskHost;
