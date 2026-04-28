@@ -62,13 +62,19 @@
 - `MarketCacheReader`
 - `MarketCacheReplay`
 - `MarketCacheQueue`
+- `MarketCacheQueueDrainError`
 - `MarketCacheQueueDrainReport`
 - `MarketCacheLock`
+- `MarketCacheLockOptions`
 - `MarketCacheIndex`
 - `MarketCacheIndexKey`
 - `MarketCacheIndexEntry`
 - `MarketCacheCompaction`
 - `MarketCacheCompactionReport`
+- `MarketCacheAtomicCompactionReport`
+- `MarketCacheDaemonConfig`
+- `MarketCacheDaemon`
+- `MarketCacheDaemonShutdownReport`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -97,10 +103,16 @@
 standard `Quote` / `Kline` / `Tick` payloads.
 
 `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
-`MarketCacheCompaction` provide local file queue, lock file, index, and
-retention-policy compaction foundations. They are synchronous data-layer file
-helpers: they do not spawn a daemon, recover stale locks, rotate cache files
-atomically, or manage a multi-process cache service.
+`MarketCacheCompaction` provide local file queue, lock lease, index,
+retention-policy compaction, and in-place rotation foundations. They are
+synchronous data-layer file helpers: they do not spawn background tasks, run a
+lease heartbeat, or manage a multi-process cache service.
+
+`MarketCacheDaemonConfig` / `MarketCacheDaemon` add a thin local daemon
+foundation over those primitives: explicit lock lease recovery, queue
+flush-with-progress, in-place compaction rotation, and shutdown reports. The
+facade is still synchronous and process-local; it is not a background
+supervisor, health endpoint, GUI integration, or cross-process cache service.
 
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` and the matching tick methods
@@ -169,6 +181,7 @@ scenario gaps above this data-layer foundation.
 - [examples/tick_export_csv.rs](examples/tick_export_csv.rs)
 - [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
 - [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
+- [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。

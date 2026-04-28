@@ -33,16 +33,18 @@
 //! replay iterator；`MarketCacheStreamWriter` 已提供单进程 live `MarketEvent`
 //! -> cache writer pipe foundation；`MarketCacheQueue` / `MarketCacheLock` /
 //! `MarketCacheIndex` / `MarketCacheCompaction` 已提供本地 queue、lock file、
-//! index 和保留策略 compaction foundation。剩余 gap 是 durable daemon
-//! orchestration、stale lock recovery、atomic cache rotation 和多进程 cache 管理。
+//! index 和保留策略 compaction foundation；`MarketCacheDaemon` 已提供同步、
+//! process-local daemon foundation，覆盖 stale lease recovery、queue flush
+//! report、in-place rotation 和 shutdown report。剩余 gap 是持续后台
+//! supervisor、lease heartbeat 和多进程 cache 管理。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let mut cache = DurableMarketCacheDaemon::new("./cache.tqcache")
+//! let mut cache = MultiProcessMarketCacheService::new("./cache.tqcache")
 //!     .queue("./cache.queue")
-//!     .lock_lease("./cache.lock")
-//!     .atomic_rotation()
-//!     .stale_lock_recovery()
+//!     .lease_heartbeat("./cache.lock")
+//!     .supervise_background_flush()
+//!     .coordinate_process_readers()
 //!     .build()
 //!     .await?;
 //! cache.attach(stream.market_events().quote("SHFE.au2602")).await?;

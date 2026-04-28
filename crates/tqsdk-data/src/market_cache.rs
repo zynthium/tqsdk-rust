@@ -1,9 +1,11 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
+use std::io::{BufRead, BufReader, BufWriter, Lines, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tqsdk_core::{Kline, Quote, Tick};
@@ -366,29 +368,80 @@ impl MarketCacheIndex {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MarketCacheLockOptions {
+    path: PathBuf,
+    stale_after: Option<Duration>,
+}
+
+impl MarketCacheLockOptions {
+    #[must_use]
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            stale_after: None,
+        }
+    }
+
+    #[must_use]
+    pub fn stale_after(mut self, stale_after: Duration) -> Self {
+        self.stale_after = Some(stale_after);
+        self
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn stale_after_duration(&self) -> Option<Duration> {
+        self.stale_after
+    }
+}
+
 #[derive(Debug)]
 pub struct MarketCacheLock {
     path: PathBuf,
-    _file: File,
+    file: File,
+    lease_started_at_ns: i64,
 }
 
 impl MarketCacheLock {
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    DataError::InvalidState("market cache lock is already held")
-                } else {
-                    DataError::Io(error)
-                }
-            })?;
-        writeln!(file, "pid={}", std::process::id())?;
-        file.flush()?;
-        Ok(Self { path, _file: file })
+        Self::acquire_with_options(MarketCacheLockOptions::new(path))
+    }
+
+    pub fn acquire_with_options(options: MarketCacheLockOptions) -> Result<Self> {
+        let path = options.path.clone();
+        match create_lock_file(&path) {
+            Ok(file) => Self::from_file(path, file),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && lock_file_is_stale(&path, options.stale_after)? =>
+            {
+                std::fs::remove_file(&path)?;
+                Self::from_file(path.clone(), create_lock_file(&path)?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(DataError::InvalidState("market cache lock is already held"))
+            }
+            Err(error) => Err(DataError::Io(error)),
+        }
+    }
+
+    fn from_file(path: PathBuf, mut file: File) -> Result<Self> {
+        let lease_started_at_ns = write_lock_lease(&mut file)?;
+        Ok(Self {
+            path,
+            file,
+            lease_started_at_ns,
+        })
+    }
+
+    pub fn renew(&mut self) -> Result<()> {
+        self.lease_started_at_ns = write_lock_lease(&mut self.file)?;
+        Ok(())
     }
 
     #[must_use]
@@ -397,9 +450,90 @@ impl MarketCacheLock {
     }
 }
 
+fn create_lock_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+fn write_lock_lease(file: &mut File) -> Result<i64> {
+    let lease_started_at_ns = system_time_ns()?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(file, "pid={}", std::process::id())?;
+    writeln!(file, "lease_started_at_ns={lease_started_at_ns}")?;
+    file.flush()?;
+    Ok(lease_started_at_ns)
+}
+
+fn lock_file_is_stale(path: &Path, stale_after: Option<Duration>) -> Result<bool> {
+    let Some(stale_after) = stale_after else {
+        return Ok(false);
+    };
+    if stale_after.is_zero() {
+        return Ok(true);
+    }
+    if let Some(lease_started_at_ns) = read_lock_lease_started_at_ns(path)? {
+        let now = system_time_ns()?;
+        return Ok(now
+            .saturating_sub(lease_started_at_ns)
+            .try_into()
+            .is_ok_and(|age_ns: u128| age_ns >= stale_after.as_nanos()));
+    }
+    Ok(std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age >= stale_after))
+}
+
+fn read_lock_lease_started_at_ns(path: &Path) -> Result<Option<i64>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(DataError::Io(error)),
+    };
+    Ok(content.lines().find_map(|line| {
+        line.strip_prefix("lease_started_at_ns=")
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    }))
+}
+
 impl Drop for MarketCacheLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if read_lock_lease_started_at_ns(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|lease| lease == self.lease_started_at_ns)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MarketCacheQueueDrainError {
+    pub report: MarketCacheQueueDrainReport,
+    pub error: DataError,
+}
+
+impl Display for MarketCacheQueueDrainError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "market cache queue drain failed after reading {} event(s) and writing {} event(s): {}",
+            self.report.read_events, self.report.written_events, self.error
+        )
+    }
+}
+
+impl std::error::Error for MarketCacheQueueDrainError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<MarketCacheQueueDrainError> for DataError {
+    fn from(error: MarketCacheQueueDrainError) -> Self {
+        error.error
     }
 }
 
@@ -468,21 +602,46 @@ impl MarketCacheQueue {
         &self,
         writer: &mut MarketCacheWriter<W>,
     ) -> Result<MarketCacheQueueDrainReport> {
-        let mut read_events = 0usize;
-        let mut written_events = 0usize;
-        for event in self.reader()? {
-            let event = event?;
-            read_events += 1;
-            writer.write_event(&event)?;
-            written_events += 1;
-        }
-        writer.flush()?;
-        self.clear()?;
-        Ok(MarketCacheQueueDrainReport {
+        self.drain_to_writer_with_report(writer)
+            .map_err(DataError::from)
+    }
+
+    pub fn drain_to_writer_with_report<W: Write>(
+        &self,
+        writer: &mut MarketCacheWriter<W>,
+    ) -> std::result::Result<MarketCacheQueueDrainReport, MarketCacheQueueDrainError> {
+        let mut report = MarketCacheQueueDrainReport {
             queue_path: self.path.clone(),
-            read_events,
-            written_events,
-        })
+            read_events: 0,
+            written_events: 0,
+        };
+        let reader = self.reader().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        for event in reader {
+            let event = event.map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?;
+            report.read_events += 1;
+            writer
+                .write_event(&event)
+                .map_err(|error| MarketCacheQueueDrainError {
+                    report: report.clone(),
+                    error,
+                })?;
+            report.written_events += 1;
+        }
+        writer.flush().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        self.clear().map_err(|error| MarketCacheQueueDrainError {
+            report: report.clone(),
+            error,
+        })?;
+        Ok(report)
     }
 }
 
@@ -553,6 +712,27 @@ impl MarketCacheCompaction {
         let reader = MarketCacheReader::open(input_path)?;
         let mut writer = MarketCacheWriter::create(output_path)?;
         self.compact_reader_to_writer(reader, &mut writer)
+    }
+
+    pub fn compact_file_in_place(
+        &self,
+        cache_path: impl AsRef<Path>,
+        staging_path: impl AsRef<Path>,
+    ) -> Result<MarketCacheAtomicCompactionReport> {
+        let cache_path = cache_path.as_ref().to_path_buf();
+        let staging_path = staging_path.as_ref().to_path_buf();
+        if cache_path == staging_path {
+            return Err(DataError::Validation(
+                "market cache compaction cache and staging paths must differ".into(),
+            ));
+        }
+        let compaction = self.compact_file(&cache_path, &staging_path)?;
+        std::fs::rename(&staging_path, &cache_path)?;
+        Ok(MarketCacheAtomicCompactionReport {
+            cache_path,
+            staging_path,
+            compaction,
+        })
     }
 
     pub fn compact_reader_to_writer<R: BufRead, W: Write>(
@@ -649,8 +829,200 @@ pub struct MarketCacheCompactionReport {
     pub index: MarketCacheIndex,
 }
 
+#[derive(Debug, Clone)]
+pub struct MarketCacheAtomicCompactionReport {
+    pub cache_path: PathBuf,
+    pub staging_path: PathBuf,
+    pub compaction: MarketCacheCompactionReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketCacheDaemonConfig {
+    cache_path: PathBuf,
+    queue_path: PathBuf,
+    lock_path: PathBuf,
+    compaction_staging_path: PathBuf,
+    sync_on_enqueue: bool,
+    stale_lock_after: Option<Duration>,
+    compaction_policy: Option<MarketCacheCompaction>,
+}
+
+impl MarketCacheDaemonConfig {
+    #[must_use]
+    pub fn new(cache_path: impl AsRef<Path>) -> Self {
+        let cache_path = cache_path.as_ref().to_path_buf();
+        Self {
+            queue_path: path_with_suffix(&cache_path, ".queue"),
+            lock_path: path_with_suffix(&cache_path, ".lock"),
+            compaction_staging_path: path_with_suffix(&cache_path, ".compact"),
+            cache_path,
+            sync_on_enqueue: false,
+            stale_lock_after: None,
+            compaction_policy: None,
+        }
+    }
+
+    #[must_use]
+    pub fn cache_path(&self) -> &Path {
+        &self.cache_path
+    }
+
+    #[must_use]
+    pub fn queue_path_ref(&self) -> &Path {
+        &self.queue_path
+    }
+
+    #[must_use]
+    pub fn lock_path_ref(&self) -> &Path {
+        &self.lock_path
+    }
+
+    #[must_use]
+    pub fn compaction_staging_path_ref(&self) -> &Path {
+        &self.compaction_staging_path
+    }
+
+    #[must_use]
+    pub fn with_sync_on_enqueue(mut self, sync_on_enqueue: bool) -> Self {
+        self.sync_on_enqueue = sync_on_enqueue;
+        self
+    }
+
+    #[must_use]
+    pub fn queue_path(mut self, queue_path: impl AsRef<Path>) -> Self {
+        self.queue_path = queue_path.as_ref().to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn lock_path(mut self, lock_path: impl AsRef<Path>) -> Self {
+        self.lock_path = lock_path.as_ref().to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn compaction_staging_path(mut self, compaction_staging_path: impl AsRef<Path>) -> Self {
+        self.compaction_staging_path = compaction_staging_path.as_ref().to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn stale_lock_after(mut self, stale_lock_after: Duration) -> Self {
+        self.stale_lock_after = Some(stale_lock_after);
+        self
+    }
+
+    #[must_use]
+    pub fn compaction_policy(mut self, compaction_policy: MarketCacheCompaction) -> Self {
+        self.compaction_policy = Some(compaction_policy);
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct MarketCacheDaemon {
+    config: MarketCacheDaemonConfig,
+    queue: MarketCacheQueue,
+    _lock: MarketCacheLock,
+}
+
+impl MarketCacheDaemon {
+    pub fn open(config: MarketCacheDaemonConfig) -> Result<Self> {
+        let lock = MarketCacheLock::acquire_with_options({
+            let mut options = MarketCacheLockOptions::new(&config.lock_path);
+            if let Some(stale_after) = config.stale_lock_after {
+                options = options.stale_after(stale_after);
+            }
+            options
+        })?;
+        let queue = MarketCacheQueue::open(&config.queue_path)?
+            .with_sync_on_enqueue(config.sync_on_enqueue);
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.cache_path)?;
+        Ok(Self {
+            config,
+            queue,
+            _lock: lock,
+        })
+    }
+
+    #[must_use]
+    pub fn cache_path(&self) -> &Path {
+        &self.config.cache_path
+    }
+
+    #[must_use]
+    pub fn queue_path(&self) -> &Path {
+        self.queue.path()
+    }
+
+    pub fn enqueue_event(&self, event: &MarketCacheEvent) -> Result<()> {
+        self.queue.enqueue_event(event)
+    }
+
+    pub fn flush_queue(
+        &self,
+    ) -> std::result::Result<MarketCacheQueueDrainReport, MarketCacheQueueDrainError> {
+        let mut writer = MarketCacheWriter::append(&self.config.cache_path).map_err(|error| {
+            MarketCacheQueueDrainError {
+                report: MarketCacheQueueDrainReport {
+                    queue_path: self.config.queue_path.clone(),
+                    read_events: 0,
+                    written_events: 0,
+                },
+                error,
+            }
+        })?;
+        self.queue.drain_to_writer_with_report(&mut writer)
+    }
+
+    pub fn shutdown(self) -> Result<MarketCacheDaemonShutdownReport> {
+        let flush_report = self.flush_queue().map_err(DataError::from)?;
+        let compaction_report = self
+            .config
+            .compaction_policy
+            .as_ref()
+            .map(|policy| {
+                policy.compact_file_in_place(
+                    &self.config.cache_path,
+                    &self.config.compaction_staging_path,
+                )
+            })
+            .transpose()?;
+        let queue_empty = self.queue.is_empty()?;
+        Ok(MarketCacheDaemonShutdownReport {
+            flush_report,
+            compaction_report,
+            queue_empty,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketCacheDaemonShutdownReport {
+    pub flush_report: MarketCacheQueueDrainReport,
+    pub compaction_report: Option<MarketCacheAtomicCompactionReport>,
+    pub queue_empty: bool,
+}
+
 fn write_market_cache_event_line<W: Write>(writer: &mut W, event: &MarketCacheEvent) -> Result<()> {
     serde_json::to_writer(&mut *writer, event)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn system_time_ns() -> Result<i64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| DataError::InvalidState("system clock is before unix epoch"))?;
+    i64::try_from(elapsed.as_nanos())
+        .map_err(|_| DataError::InvalidState("system clock nanoseconds overflow i64"))
 }

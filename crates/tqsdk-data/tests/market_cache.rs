@@ -1,10 +1,11 @@
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::{Kline, Quote, Tick};
 use tqsdk_data::{
-    MarketCacheCompaction, MarketCacheEvent, MarketCacheIndex, MarketCacheLock, MarketCachePayload,
+    MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
+    MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
     MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReplay,
     MarketCacheWriter,
 };
@@ -220,6 +221,58 @@ fn market_cache_lock_blocks_second_holder_until_released() {
 }
 
 #[test]
+fn market_cache_lock_recovers_stale_lease_file_and_can_renew() {
+    let lock_path = temp_path("market-cache-stale.lock");
+    let _ = std::fs::remove_file(&lock_path);
+    std::fs::write(&lock_path, "pid=999999\nlease_started_at_ns=0\n").unwrap();
+
+    let mut lock = MarketCacheLock::acquire_with_options(
+        MarketCacheLockOptions::new(&lock_path).stale_after(Duration::from_secs(1)),
+    )
+    .unwrap();
+    assert_eq!(lock.path(), lock_path.as_path());
+
+    let before = std::fs::read_to_string(&lock_path).unwrap();
+    lock.renew().unwrap();
+    let after = std::fs::read_to_string(&lock_path).unwrap();
+    assert_ne!(before, after);
+    assert!(after.contains("lease_started_at_ns="));
+}
+
+#[test]
+fn market_cache_queue_drain_error_reports_progress_and_keeps_queue() {
+    let queue_path = temp_path("market-cache-queue-error.jsonl");
+    let _ = std::fs::remove_file(&queue_path);
+
+    let queue = MarketCacheQueue::open(&queue_path).unwrap();
+    queue
+        .enqueue_event(&quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(1_000),
+            480.0,
+        ))
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&queue_path)
+            .unwrap();
+        writeln!(file, "not-json").unwrap();
+    }
+
+    let mut bytes = Vec::new();
+    let mut writer = MarketCacheWriter::new(&mut bytes);
+    let error = queue.drain_to_writer_with_report(&mut writer).unwrap_err();
+
+    assert_eq!(error.report.read_events, 1);
+    assert_eq!(error.report.written_events, 1);
+    assert!(!queue.is_empty().unwrap());
+}
+
+#[test]
 fn market_cache_compaction_filters_by_event_time_and_builds_index() {
     let mut input = Vec::new();
     {
@@ -271,6 +324,98 @@ fn market_cache_compaction_filters_by_event_time_and_builds_index() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_time_ns(), 1_500);
     assert_eq!(events[0].symbol, "SHFE.au2602");
+}
+
+#[test]
+fn market_cache_compaction_rotates_cache_file_after_success() {
+    let cache_path = temp_path("market-cache-rotate.jsonl");
+    let staging_path = temp_path("market-cache-rotate.tmp");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&staging_path);
+    {
+        let mut writer = MarketCacheWriter::create(&cache_path).unwrap();
+        writer
+            .write_event(&quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0))
+            .unwrap();
+        writer
+            .write_event(&quote_event(
+                "live",
+                "SHFE.au2602",
+                2_000,
+                Some(1_500),
+                480.0,
+            ))
+            .unwrap();
+        writer.flush().unwrap();
+    }
+
+    let report = MarketCacheCompaction::new()
+        .retain_event_time_from(1_000)
+        .compact_file_in_place(&cache_path, &staging_path)
+        .unwrap();
+
+    assert_eq!(report.compaction.written_events, 1);
+    assert!(!staging_path.exists());
+
+    let events = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .collect::<tqsdk_data::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_time_ns(), 1_500);
+}
+
+#[test]
+fn market_cache_daemon_shutdown_flushes_queue_and_compacts_cache() {
+    let cache_path = temp_path("market-cache-daemon.jsonl");
+    let queue_path = temp_path("market-cache-daemon.queue");
+    let lock_path = temp_path("market-cache-daemon.lock");
+    let staging_path = temp_path("market-cache-daemon.tmp");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&lock_path);
+    let _ = std::fs::remove_file(&staging_path);
+
+    let config = MarketCacheDaemonConfig::new(&cache_path)
+        .queue_path(&queue_path)
+        .lock_path(&lock_path)
+        .compaction_staging_path(&staging_path)
+        .stale_lock_after(Duration::from_secs(30))
+        .compaction_policy(MarketCacheCompaction::new().retain_event_time_from(1_000));
+    let daemon = MarketCacheDaemon::open(config).unwrap();
+    daemon
+        .enqueue_event(&quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0))
+        .unwrap();
+    daemon
+        .enqueue_event(&quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(1_500),
+            480.0,
+        ))
+        .unwrap();
+
+    let report = daemon.shutdown().unwrap();
+
+    assert_eq!(report.flush_report.written_events, 2);
+    assert_eq!(
+        report
+            .compaction_report
+            .as_ref()
+            .unwrap()
+            .compaction
+            .written_events,
+        1
+    );
+    assert!(report.queue_empty);
+
+    let events = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .collect::<tqsdk_data::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_time_ns(), 1_500);
 }
 
 fn quote_event(

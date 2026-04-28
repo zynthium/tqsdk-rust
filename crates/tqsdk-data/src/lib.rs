@@ -21,6 +21,7 @@
 //! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
+//! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -48,10 +49,12 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use market_cache::{
-    MarketCacheCompaction, MarketCacheCompactionReport, MarketCacheEvent, MarketCacheIndex,
-    MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock, MarketCachePayload,
-    MarketCachePayloadKind, MarketCacheQueue, MarketCacheQueueDrainReport, MarketCacheReader,
-    MarketCacheReplay, MarketCacheWriter,
+    MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionReport,
+    MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheDaemonShutdownReport, MarketCacheEvent,
+    MarketCacheIndex, MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock,
+    MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
+    MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReplay,
+    MarketCacheWriter,
 };
 #[cfg(feature = "stream")]
 pub use stream_cache::MarketCacheStreamWriter;
