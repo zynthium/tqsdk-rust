@@ -52,6 +52,9 @@
 - `StreamSinkStatus`
 - `StreamSinkWalRecord`
 - `StreamSinkWalRecordKind`
+- `StreamGracefulShutdown`
+- `StreamGracefulShutdownReport`
+- `StreamShutdownError`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -87,6 +90,7 @@
 - `StreamFacadeError::is_retryable()`
 - `spawn_commit_sink(...)`
 - `spawn_commit_sink_with_options(...)`
+- `graceful_shutdown()`
 - `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
@@ -215,8 +219,11 @@ provider 级恢复 flag。
 生产守护进程如果只需要 typed health snapshot，可以调用 `TqStream::health()`。
 返回的 `StreamHealthSnapshot` 包含 runtime revision、session phase、最近一次
 reconnect diagnostics 和 stream driver closed 状态，并提供
-`status()` / `should_restart()` 作为生产指标和日志的最小判定；daemon-level ctrl-c
-graceful shutdown 和全局 close/flush orchestration 仍属于上层 daemon/tooling
+`status()` / `should_restart()` 作为生产指标和日志的最小判定。需要显式关闭 stream
+driver 并 flush managed sink 时，可以使用 `TqStream::graceful_shutdown()`，
+把 `StreamSinkHandle` 交给 shutdown coordinator 后得到
+`StreamGracefulShutdownReport`。daemon-level ctrl-c signal 位于 `tqsdk-task`
+的 strategy supervisor；完整 reconnect orchestration 仍属于后续 daemon/tooling
 能力。Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 
 慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`

@@ -85,6 +85,11 @@ impl TqStream {
         crate::health::read_health(&self.reader, self.driver.is_closed())
     }
 
+    #[must_use]
+    pub fn graceful_shutdown(self) -> crate::shutdown::StreamGracefulShutdown {
+        crate::shutdown::StreamGracefulShutdown::new(self)
+    }
+
     pub fn path_stream<T, I, S>(&self, path: I) -> crate::error::Result<PathValueStream<T>>
     where
         T: serde::de::DeserializeOwned,
@@ -560,6 +565,18 @@ impl TqStream {
     #[doc(hidden)]
     pub fn close_driver_for_test(&self) {
         self.driver.abort();
+    }
+
+    pub(crate) async fn flush_outbound_for_shutdown(&self) -> crate::error::Result<bool> {
+        self.session().flush_outbound().await.map_err(Into::into)
+    }
+
+    pub(crate) fn abort_driver_for_shutdown(&self) {
+        self.driver.abort();
+    }
+
+    pub(crate) fn driver_closed_for_shutdown(&self) -> bool {
+        self.driver.is_closed()
     }
 }
 

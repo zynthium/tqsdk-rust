@@ -122,8 +122,9 @@ crate 分层合并成一份迭代计划。
   reconnect diagnostics、driver closed 和 revision；strategy supervisor 的稳定
   telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
   `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
-  ctrl-c graceful shutdown、durable queue / WAL compaction / 跨进程恢复仍在后续
-  daemon/tooling 层。
+  stream driver 关闭与 managed sink flush 的 graceful shutdown foundation 也已落在
+  `tqsdk-stream`；durable queue / WAL compaction / 跨进程恢复仍在后续 daemon/tooling
+  层。
 
 ### P0：订单 intent 与断线一致性
 
@@ -367,13 +368,15 @@ crate 分层合并成一份迭代计划。
   wal_records 与 flush 结果。
 - `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` /
   `StreamSinkRetryPolicy` 提供 per-sink 有限重试和本地 JSONL WAL foundation。
+- `TqStream::graceful_shutdown()` 提供 stream driver close + managed sink flush
+  orchestration，返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
   transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
   指标系统，不需要 SDK 内置 HTTP endpoint。
 
 仍未完成、不可伪装为已支持：
 
-- daemon-level ctrl-c graceful shutdown 与全局 close/flush orchestration；
+- 完整 reconnect orchestration；
 - durable queue、WAL compaction、fsync policy 和跨进程 sink 恢复；
 - 统一 retry policy orchestration 与业务拒单审计。
 

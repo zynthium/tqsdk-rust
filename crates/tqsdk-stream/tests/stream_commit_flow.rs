@@ -174,6 +174,44 @@ async fn managed_commit_sink_retries_failures_and_records_jsonl_wal() {
     let _ = std::fs::remove_file(&wal_path);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn graceful_shutdown_closes_driver_and_flushes_all_managed_sinks() {
+    let stream = support::core_seed::seeded_stream();
+    let first = CountingSink::new();
+    let first_state = first.state();
+    let second = CountingSink::new();
+    let second_state = second.state();
+    let first_handle = stream.spawn_commit_sink("warehouse", first).unwrap();
+    let second_handle = stream.spawn_commit_sink("audit", second).unwrap();
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 618.0);
+
+    wait_until(|| first_handle.stats().processed_commits() == 1).await;
+    wait_until(|| second_handle.stats().processed_commits() == 1).await;
+
+    let report = stream
+        .graceful_shutdown()
+        .sink(first_handle)
+        .sink(second_handle)
+        .shutdown()
+        .await
+        .unwrap();
+
+    assert!(report.graceful());
+    assert!(report.driver_closed());
+    assert_eq!(report.outbound_flush_error(), None);
+    assert_eq!(report.sink_reports().len(), 2);
+    assert!(report.sink_errors().is_empty());
+    assert!(
+        report
+            .sink_reports()
+            .iter()
+            .all(|sink| sink.flushed() && sink.stats().processed_commits() == 1)
+    );
+    assert_eq!(first_state.flushed.load(Ordering::Acquire), 1);
+    assert_eq!(second_state.flushed.load(Ordering::Acquire), 1);
+}
+
 struct BlockingSink {
     state: Arc<BlockingSinkState>,
     blocker: Arc<tokio::sync::Notify>,
@@ -261,6 +299,42 @@ impl CommitSink for FlakySink {
             } else {
                 Ok(())
             }
+        })
+    }
+}
+
+struct CountingSink {
+    state: Arc<CountingSinkState>,
+}
+
+struct CountingSinkState {
+    flushed: AtomicUsize,
+}
+
+impl CountingSink {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(CountingSinkState {
+                flushed: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    fn state(&self) -> Arc<CountingSinkState> {
+        Arc::clone(&self.state)
+    }
+}
+
+impl CommitSink for CountingSink {
+    fn handle_commit(&mut self, _commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn flush(&mut self) -> StreamSinkFuture {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            state.flushed.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         })
     }
 }

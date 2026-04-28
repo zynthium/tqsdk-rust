@@ -107,7 +107,7 @@ V1 是：
   - root fan-out capacity 配置与 typed lag diagnostics
   - commit/path/scope/domain/object/field filters
   - typed path stream / ready kline-tick window / trade session events
-  - managed commit sink foundation for slow consumer isolation, finite retry, and local JSONL WAL
+  - managed commit sink foundation for slow consumer isolation, finite retry, local JSONL WAL, and graceful shutdown
   - health status / restart hint
   - `stream.session()` 仍然是一次性 direct query 的逃生舱，但不改变 direct query 的 crate 归属
 - `tqsdk-task`

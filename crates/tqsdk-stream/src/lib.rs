@@ -12,7 +12,8 @@
 //! [`OrderEventStream`] / [`TradeEventStream`] and related account-scoped
 //! wrappers, unified [`TradeObjectEventStream`] / [`TradeSessionEventStream`]
 //! layers, managed [`CommitSink`] consumers for slow sink isolation with finite
-//! retry / JSONL WAL options, and direct access to the shared
+//! retry / JSONL WAL options, [`StreamGracefulShutdown`] for explicit driver
+//! close and sink flush orchestration, and direct access to the shared
 //! [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
@@ -35,6 +36,7 @@ mod health;
 mod market_event;
 mod quote_subscription;
 mod recovery;
+mod shutdown;
 mod sink;
 mod typed;
 mod window;
@@ -56,6 +58,10 @@ pub use health::{StreamHealthSnapshot, StreamHealthStatus, StreamSessionPhase};
 pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::QuoteSubscription;
 pub use recovery::StreamStartupRecovery;
+pub use shutdown::{
+    StreamGracefulShutdown, StreamGracefulShutdownReport, StreamShutdownError,
+    StreamSinkShutdownError,
+};
 pub use sink::{
     CommitSink, StreamSinkFuture, StreamSinkHandle, StreamSinkOptions, StreamSinkRetryPolicy,
     StreamSinkShutdownReport, StreamSinkStats, StreamSinkStatus, StreamSinkWalRecord,
