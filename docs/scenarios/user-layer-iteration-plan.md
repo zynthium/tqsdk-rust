@@ -474,8 +474,11 @@ crate 分层合并成一份迭代计划。
   checkpoint、compaction floor 和 typed reader lag report foundation；明确不承诺
   writer election 或跨进程 service facade。
 - `MarketCacheRecoveryScan` 提供本地 cache / queue / processing queue /
-  compaction staging recovery scan foundation；明确不承诺 writer election 或自动
-  recovery action。
+  compaction staging recovery scan foundation；明确不承诺 service facade。
+- `MarketCacheWriterElection` / `MarketCacheWriterLease` 提供本地 writer
+  election 和 lease ownership substrate；`MarketCacheRecoveryAction` 要求已获得
+  writer lease 后恢复 processing queue / queue，明确不承诺跨进程 service facade
+  或 compaction ownership。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -503,9 +506,11 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_recovery_scan` 已提升为正式 data example，覆盖
   cache / queue / processing queue / compaction staging recovery scan
   foundation。
+- `api_contract_s18_cache_writer_recovery` 已提升为正式 data example，覆盖
+  writer election / lease ownership / recovery action foundation。
 - `api_contract_s18_cross_process_cache_service` 已补充为 desired API sketch，
-  明确剩余跨进程 service 应拆成 writer election、recovery action 和
-  compaction ownership，而不是直接扩展 core/session。
+  明确剩余跨进程 service 应继续拆成 compaction ownership 和 service facade，
+  而不是直接扩展 core/session。
 
 仍未完成、不可伪装为已支持：
 
@@ -519,7 +524,8 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_supervisor_foundation`（process-local supervisor foundation 已提升为正式 data example）
 - `api_contract_s18_cache_reader_manifest`（reader manifest foundation 已提升为正式 data example）
 - `api_contract_s18_cache_recovery_scan`（recovery scan foundation 已提升为正式 data example）
-- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 writer election/service facade 切分）
+- `api_contract_s18_cache_writer_recovery`（writer election/recovery action foundation 已提升为正式 data example）
+- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 compaction ownership/service facade 切分）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 

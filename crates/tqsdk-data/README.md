@@ -68,6 +68,13 @@
 - `MarketCacheRecoveryFileReport`
 - `MarketCacheRecoveryReport`
 - `MarketCacheRecoveryScan`
+- `MarketCacheWriterElection`
+- `MarketCacheWriterElectionStatus`
+- `MarketCacheWriterElectionReport`
+- `MarketCacheWriterElectionOutcome`
+- `MarketCacheWriterLease`
+- `MarketCacheRecoveryAction`
+- `MarketCacheRecoveryActionReport`
 - `MarketCacheQueue`
 - `MarketCacheQueueDrainError`
 - `MarketCacheQueueDrainReport`
@@ -120,7 +127,14 @@ cache service.
 `MarketCacheRecoveryScan` provides a typed local recovery scan over cache, queue,
 processing queue, and compaction staging files. It reports pending events,
 interrupted drain / compaction state, and partial progress for corrupt files
-without claiming writer election or service orchestration.
+without claiming service orchestration.
+
+`MarketCacheWriterElection` / `MarketCacheWriterLease` provide a typed local
+writer election substrate over the lock lease file. `MarketCacheRecoveryAction`
+requires an acquired writer lease before resuming processing queue / queue
+drain into the cache, so recovery does not silently run without write
+ownership. This remains a file-level data helper, not a cross-process cache
+service facade.
 
 `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 `MarketCacheCompaction` provide local file queue, lock lease, index,

@@ -40,7 +40,9 @@
 //! lease renewal 和 graceful shutdown report；`MarketCacheReaderManifest` 已提供
 //! 本地 reader checkpoint、compaction floor 和 reader lag report foundation；
 //! `MarketCacheRecoveryScan` 已提供本地 cache / queue / processing queue /
-//! compaction staging recovery scan foundation。
+//! compaction staging recovery scan foundation；`MarketCacheWriterElection` /
+//! `MarketCacheWriterLease` / `MarketCacheRecoveryAction` 已提供本地 writer
+//! election、lease ownership 和 queue recovery action foundation。
 //! 剩余 gap 是跨进程 cache 管理服务。
 //! 更完整的 desired API sketch 见
 //! `api_contract_s18_cross_process_cache_service.rs`。

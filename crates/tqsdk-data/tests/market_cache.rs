@@ -7,8 +7,9 @@ use tqsdk_data::{
     MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
     MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
     MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReaderCheckpoint,
-    MarketCacheReaderManifest, MarketCacheRecoveryFileKind, MarketCacheRecoveryScan,
-    MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
+    MarketCacheReaderManifest, MarketCacheRecoveryAction, MarketCacheRecoveryFileKind,
+    MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
+    MarketCacheWriterElection, MarketCacheWriterElectionStatus,
 };
 
 #[test]
@@ -348,6 +349,116 @@ fn market_cache_recovery_scan_reports_corrupt_file_without_hiding_progress() {
     assert!(report.queue.read_error.is_some());
     assert!(report.has_read_errors());
     assert!(report.requires_writer_recovery());
+}
+
+#[test]
+fn market_cache_writer_election_reports_busy_and_stale_recovery() {
+    let lock_path = temp_path("market-cache-writer-election.lock");
+    let _ = std::fs::remove_file(&lock_path);
+
+    let elected = MarketCacheWriterElection::new(&lock_path).elect().unwrap();
+    assert_eq!(
+        elected.report().status,
+        MarketCacheWriterElectionStatus::Elected
+    );
+    assert!(elected.is_elected());
+    assert!(!elected.report().recovered_stale);
+    assert!(elected.report().lease_started_at_ns.is_some());
+
+    let busy = MarketCacheWriterElection::new(&lock_path).elect().unwrap();
+    assert_eq!(busy.report().status, MarketCacheWriterElectionStatus::Busy);
+    assert!(busy.is_busy());
+    assert!(busy.into_lease().is_none());
+
+    let recovered = MarketCacheWriterElection::new(&lock_path)
+        .stale_after(Duration::ZERO)
+        .elect()
+        .unwrap();
+    assert_eq!(
+        recovered.report().status,
+        MarketCacheWriterElectionStatus::Elected
+    );
+    assert!(recovered.report().recovered_stale);
+    let recovered_lease = recovered.into_lease().unwrap();
+
+    drop(elected);
+    assert!(
+        MarketCacheWriterElection::new(&lock_path)
+            .elect()
+            .unwrap()
+            .is_busy()
+    );
+    drop(recovered_lease);
+}
+
+#[test]
+fn market_cache_recovery_action_recovers_processing_queue_then_queue_under_writer_lease() {
+    let cache_path = temp_path("market-cache-recovery-action.cache");
+    let queue_path = temp_path("market-cache-recovery-action.queue");
+    let processing_path = temp_path("market-cache-recovery-action.processing");
+    let lock_path = temp_path("market-cache-recovery-action.lock");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&processing_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    write_events(
+        &cache_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            1_000,
+            Some(1_000),
+            479.0,
+        )],
+    );
+    write_events(
+        &processing_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(2_000),
+            480.0,
+        )],
+    );
+    write_events(
+        &queue_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            3_000,
+            Some(3_000),
+            481.0,
+        )],
+    );
+
+    let mut lease = MarketCacheWriterElection::new(&lock_path)
+        .elect()
+        .unwrap()
+        .into_lease()
+        .unwrap();
+    let report = MarketCacheRecoveryAction::new(&cache_path)
+        .queue_path(&queue_path)
+        .processing_queue_path(&processing_path)
+        .recover(&mut lease)
+        .unwrap();
+
+    assert!(report.scan_before.has_pending_queue_events());
+    assert!(report.scan_before.has_interrupted_drain());
+    assert_eq!(report.queue_drain_report.read_events, 2);
+    assert_eq!(report.queue_drain_report.written_events, 2);
+    assert!(!report.scan_after.has_pending_queue_events());
+    assert!(!report.scan_after.has_interrupted_drain());
+
+    let prices = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .map(|event| match event.unwrap().payload {
+            MarketCachePayload::Quote(quote) => quote.last_price,
+            payload => panic!("expected quote payload, got {payload:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prices, vec![479.0, 480.0, 481.0]);
 }
 
 #[test]

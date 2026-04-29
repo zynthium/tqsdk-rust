@@ -42,10 +42,13 @@
 //! process-local flush、lease renewal 和 graceful shutdown foundation；
 //! `MarketCacheReaderManifest` 已提供本地 reader checkpoint、compaction floor 和
 //! typed reader lag report foundation；`MarketCacheRecoveryScan` 已提供本地
-//! cache / queue / processing queue / compaction staging recovery scan foundation。
+//! cache / queue / processing queue / compaction staging recovery scan foundation；
+//! `MarketCacheWriterElection` / `MarketCacheWriterLease` /
+//! `MarketCacheRecoveryAction` 已提供本地 writer election、lease ownership 和
+//! queue recovery action foundation。
 //!
-//! 这些 API 可以作为 service substrate，但还不能自然表达跨进程 writer election、
-//! recovery action 和 compaction ownership。
+//! 这些 API 可以作为 service substrate，但还不能自然表达跨进程 compaction
+//! ownership 和 service facade。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -98,7 +101,9 @@
 //!    不改变现有 writer API。
 //! 2. recovery scan 已作为本地 data-layer helper 落地，能识别 cache / queue /
 //!    processing / compact staging 的可恢复状态，并输出 typed report。
-//! 3. 下一步实现 writer election + service facade，把现有 process-local supervisor
-//!    包进跨进程所有权模型。
+//! 3. writer election / recovery action 已作为本地 data-layer helper 落地，能在
+//!    明确 lease ownership 下恢复 processing queue / queue。
+//! 4. 下一步实现 compaction ownership，再把现有 process-local supervisor 包进
+//!    跨进程 service facade。
 
 fn main() {}
