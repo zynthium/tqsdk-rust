@@ -1,10 +1,12 @@
+use std::future::Future;
+
 use tokio::time::{Instant, timeout};
 use tqsdk_core::internal::SessionRuntimeDeps;
-use tqsdk_core::{CommandId, CommitScope, SessionRouteEndpoint};
+use tqsdk_core::{CommandId, CommitScope, ContractError, SessionRouteEndpoint};
 
 use super::{
-    SessionClient, SessionIoState, SessionProgress, prime_all_websocket_routes,
-    prime_route_with_recover, recover_run,
+    SessionClient, SessionIoState, SessionProgress, SharedRouteExecutor,
+    prime_all_websocket_routes, prime_route_with_recover, recover_run,
 };
 
 impl SessionClient {
@@ -59,21 +61,7 @@ impl SessionClient {
             return Ok(false);
         };
         let mut io = io.lock().await;
-        let Some(route) = io.run.as_ref().and_then(|run| {
-            run.connected
-                .routes
-                .iter()
-                .find(|route| route.route.label == route_label)
-                .map(|route| route.route.clone())
-        }) else {
-            return Ok(false);
-        };
-        let Some(executor) = (match route.endpoint {
-            SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
-            SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
-            SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
-            SessionRouteEndpoint::WebSocket { .. } => None,
-        }) else {
+        let Some(executor) = pending_route_executor(&io, route_label) else {
             return Ok(false);
         };
         let Some(run) = io.run.as_mut() else {
@@ -175,17 +163,8 @@ impl SessionClient {
             CommitScope::RealtimeUpdate,
             deps,
         );
-        let outcome = if let Some(deadline) = deadline {
-            let budget = deadline.saturating_duration_since(Instant::now());
-            if budget.is_zero() {
-                return Ok(false);
-            }
-            match timeout(budget, future).await {
-                Ok(result) => result?,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            future.await?
+        let Some(outcome) = drive_with_deadline(deadline, future).await? else {
+            return Ok(false);
         };
 
         Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
@@ -219,21 +198,7 @@ impl SessionClient {
         let Some(route_label) = io.next_pending_route_label() else {
             return Ok(false);
         };
-        let Some(route) = io.run.as_ref().and_then(|run| {
-            run.connected
-                .routes
-                .iter()
-                .find(|route| route.route.label == route_label)
-                .map(|route| route.route.clone())
-        }) else {
-            return Ok(false);
-        };
-        let Some(executor) = (match route.endpoint {
-            SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
-            SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
-            SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
-            SessionRouteEndpoint::WebSocket { .. } => None,
-        }) else {
+        let Some(executor) = pending_route_executor(io, route_label.as_str()) else {
             return Ok(false);
         };
         let Some(run) = io.run.as_mut() else {
@@ -288,19 +253,51 @@ impl SessionClient {
             CommitScope::RealtimeUpdate,
             deps,
         );
-        let outcome = if let Some(deadline) = deadline {
-            let budget = deadline.saturating_duration_since(Instant::now());
-            if budget.is_zero() {
-                return Ok(false);
-            }
-            match timeout(budget, future).await {
-                Ok(result) => result?,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            future.await?
+        let Some(outcome) = drive_with_deadline(deadline, future).await? else {
+            return Ok(false);
         };
 
         Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
+    }
+}
+
+async fn drive_with_deadline<F, T>(
+    deadline: Option<Instant>,
+    future: F,
+) -> crate::error::Result<Option<T>>
+where
+    F: Future<Output = Result<T, ContractError>>,
+{
+    let Some(deadline) = deadline else {
+        return future.await.map(Some).map_err(Into::into);
+    };
+
+    let budget = deadline.saturating_duration_since(Instant::now());
+    if budget.is_zero() {
+        return Ok(None);
+    }
+
+    match timeout(budget, future).await {
+        Ok(result) => result.map(Some).map_err(Into::into),
+        Err(_) => Ok(None),
+    }
+}
+
+fn pending_route_executor(io: &SessionIoState, route_label: &str) -> Option<SharedRouteExecutor> {
+    let endpoint = &io
+        .run
+        .as_ref()?
+        .connected
+        .routes
+        .iter()
+        .find(|route| route.route.label == route_label)?
+        .route
+        .endpoint;
+
+    match endpoint {
+        SessionRouteEndpoint::Http { .. } => Some(io.http_executor.clone()),
+        SessionRouteEndpoint::Internal { .. } => Some(io.internal_executor.clone()),
+        SessionRouteEndpoint::Replay { .. } => Some(io.replay_executor.clone()),
+        SessionRouteEndpoint::WebSocket { .. } => None,
     }
 }
