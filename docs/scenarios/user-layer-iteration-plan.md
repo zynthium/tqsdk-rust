@@ -473,6 +473,9 @@ crate 分层合并成一份迭代计划。
 - `MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint` 提供本地 reader
   checkpoint、compaction floor 和 typed reader lag report foundation；明确不承诺
   writer election 或跨进程 service facade。
+- `MarketCacheRecoveryScan` 提供本地 cache / queue / processing queue /
+  compaction staging recovery scan foundation；明确不承诺 writer election 或自动
+  recovery action。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -497,9 +500,12 @@ crate 分层合并成一份迭代计划。
   foundation。
 - `api_contract_s18_cache_reader_manifest` 已提升为正式 data example，覆盖
   reader checkpoint / compaction floor / reader lag report foundation。
+- `api_contract_s18_cache_recovery_scan` 已提升为正式 data example，覆盖
+  cache / queue / processing queue / compaction staging recovery scan
+  foundation。
 - `api_contract_s18_cross_process_cache_service` 已补充为 desired API sketch，
-  明确剩余跨进程 service 应拆成 writer election、recovery scan 和 compaction
-  ownership，而不是直接扩展 core/session。
+  明确剩余跨进程 service 应拆成 writer election、recovery action 和
+  compaction ownership，而不是直接扩展 core/session。
 
 仍未完成、不可伪装为已支持：
 
@@ -512,7 +518,8 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_daemon_foundation`（process-local daemon foundation 已提升为正式 data example）
 - `api_contract_s18_cache_supervisor_foundation`（process-local supervisor foundation 已提升为正式 data example）
 - `api_contract_s18_cache_reader_manifest`（reader manifest foundation 已提升为正式 data example）
-- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 recovery scan -> writer election/service facade 切分）
+- `api_contract_s18_cache_recovery_scan`（recovery scan foundation 已提升为正式 data example）
+- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 writer election/service facade 切分）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 

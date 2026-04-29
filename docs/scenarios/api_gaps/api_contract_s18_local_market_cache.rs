@@ -38,7 +38,9 @@
 //! report、in-place rotation 和 shutdown report；`MarketCacheSupervisor` 已提供
 //! process-local background supervisor foundation，覆盖 periodic rotating flush、
 //! lease renewal 和 graceful shutdown report；`MarketCacheReaderManifest` 已提供
-//! 本地 reader checkpoint、compaction floor 和 reader lag report foundation。
+//! 本地 reader checkpoint、compaction floor 和 reader lag report foundation；
+//! `MarketCacheRecoveryScan` 已提供本地 cache / queue / processing queue /
+//! compaction staging recovery scan foundation。
 //! 剩余 gap 是跨进程 cache 管理服务。
 //! 更完整的 desired API sketch 见
 //! `api_contract_s18_cross_process_cache_service.rs`。

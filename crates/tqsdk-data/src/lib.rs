@@ -20,6 +20,7 @@
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
 //! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
 //! - `MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint`
+//! - `MarketCacheRecoveryScan` / `MarketCacheRecoveryReport`
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
 //! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
@@ -57,7 +58,8 @@ pub use market_cache::{
     MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
     MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader,
     MarketCacheReaderCheckpoint, MarketCacheReaderLag, MarketCacheReaderManifest,
-    MarketCacheReplay, MarketCacheSupervisor, MarketCacheSupervisorConfig,
+    MarketCacheRecoveryFileKind, MarketCacheRecoveryFileReport, MarketCacheRecoveryReport,
+    MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheSupervisor, MarketCacheSupervisorConfig,
     MarketCacheSupervisorShutdownReport, MarketCacheWriter,
 };
 #[cfg(feature = "stream")]

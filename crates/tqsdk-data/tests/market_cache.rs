@@ -7,7 +7,8 @@ use tqsdk_data::{
     MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
     MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
     MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReaderCheckpoint,
-    MarketCacheReaderManifest, MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
+    MarketCacheReaderManifest, MarketCacheRecoveryFileKind, MarketCacheRecoveryScan,
+    MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
 };
 
 #[test]
@@ -240,6 +241,113 @@ fn market_cache_reader_manifest_rejects_invalid_checkpoints() {
         MarketCacheReaderCheckpoint::from_event("research-a", "last-close-study", &event);
     invalid.event_time_ns = -1;
     assert!(manifest.record_checkpoint(invalid).is_err());
+}
+
+#[test]
+fn market_cache_recovery_scan_reports_pending_files_and_recovery_flags() {
+    let cache_path = temp_path("market-cache-recovery.cache");
+    let queue_path = temp_path("market-cache-recovery.queue");
+    let processing_path = temp_path("market-cache-recovery.processing");
+    let staging_path = temp_path("market-cache-recovery.compact");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&processing_path);
+    let _ = std::fs::remove_file(&staging_path);
+
+    write_events(
+        &cache_path,
+        &[
+            quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0),
+            quote_event("live", "SHFE.au2602", 2_000, Some(1_500), 480.0),
+        ],
+    );
+    write_events(
+        &queue_path,
+        &[quote_event(
+            "live",
+            "DCE.m2601",
+            3_000,
+            Some(2_500),
+            3_100.0,
+        )],
+    );
+    write_events(
+        &processing_path,
+        &[quote_event(
+            "live",
+            "DCE.m2601",
+            4_000,
+            Some(3_500),
+            3_101.0,
+        )],
+    );
+    write_events(
+        &staging_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(1_500),
+            480.0,
+        )],
+    );
+
+    let report = MarketCacheRecoveryScan::new(&cache_path)
+        .queue_path(&queue_path)
+        .processing_queue_path(&processing_path)
+        .compaction_staging_path(&staging_path)
+        .scan()
+        .unwrap();
+
+    assert_eq!(report.cache.kind, MarketCacheRecoveryFileKind::Cache);
+    assert_eq!(report.cache.readable_events, 2);
+    assert_eq!(report.cache.first_event_time_ns, Some(500));
+    assert_eq!(report.cache.last_event_time_ns, Some(1_500));
+    assert_eq!(report.queue.readable_events, 1);
+    assert_eq!(report.processing_queue.readable_events, 1);
+    assert_eq!(report.compaction_staging.readable_events, 1);
+    assert!(report.has_pending_queue_events());
+    assert!(report.has_interrupted_drain());
+    assert!(report.has_interrupted_compaction());
+    assert!(report.requires_writer_recovery());
+}
+
+#[test]
+fn market_cache_recovery_scan_reports_corrupt_file_without_hiding_progress() {
+    let cache_path = temp_path("market-cache-recovery-corrupt.cache");
+    let queue_path = temp_path("market-cache-recovery-corrupt.queue");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+
+    write_events(
+        &queue_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            2_000,
+            Some(1_500),
+            480.0,
+        )],
+    );
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&queue_path)
+            .unwrap();
+        writeln!(file, "not-json").unwrap();
+    }
+
+    let report = MarketCacheRecoveryScan::new(&cache_path)
+        .queue_path(&queue_path)
+        .scan()
+        .unwrap();
+
+    assert!(!report.cache.exists);
+    assert_eq!(report.queue.readable_events, 1);
+    assert!(report.queue.read_error.is_some());
+    assert!(report.has_read_errors());
+    assert!(report.requires_writer_recovery());
 }
 
 #[test]
@@ -590,6 +698,14 @@ fn quote_event(
         },
     )
     .unwrap()
+}
+
+fn write_events(path: impl AsRef<std::path::Path>, events: &[MarketCacheEvent]) {
+    let mut writer = MarketCacheWriter::create(path).unwrap();
+    for event in events {
+        writer.write_event(event).unwrap();
+    }
+    writer.flush().unwrap();
 }
 
 fn temp_path(file_name: &str) -> PathBuf {

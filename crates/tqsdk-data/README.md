@@ -64,6 +64,10 @@
 - `MarketCacheReaderCheckpoint`
 - `MarketCacheReaderLag`
 - `MarketCacheReaderManifest`
+- `MarketCacheRecoveryFileKind`
+- `MarketCacheRecoveryFileReport`
+- `MarketCacheRecoveryReport`
+- `MarketCacheRecoveryScan`
 - `MarketCacheQueue`
 - `MarketCacheQueueDrainError`
 - `MarketCacheQueueDrainReport`
@@ -112,6 +116,11 @@ standard `Quote` / `Kline` / `Tick` payloads.
 checkpoint tracking, compaction floor calculation, and typed reader lag reports.
 They are a substrate for future cross-process cache coordination, not a complete
 cache service.
+
+`MarketCacheRecoveryScan` provides a typed local recovery scan over cache, queue,
+processing queue, and compaction staging files. It reports pending events,
+interrupted drain / compaction state, and partial progress for corrupt files
+without claiming writer election or service orchestration.
 
 `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 `MarketCacheCompaction` provide local file queue, lock lease, index,
@@ -200,6 +209,7 @@ scenario gaps above this data-layer foundation.
 - [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
 - [examples/api_contract_s18_cache_supervisor_foundation.rs](examples/api_contract_s18_cache_supervisor_foundation.rs)
 - [examples/api_contract_s18_cache_reader_manifest.rs](examples/api_contract_s18_cache_reader_manifest.rs)
+- [examples/api_contract_s18_cache_recovery_scan.rs](examples/api_contract_s18_cache_recovery_scan.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。
