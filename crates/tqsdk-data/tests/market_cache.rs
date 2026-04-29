@@ -6,8 +6,8 @@ use tqsdk_core::{Kline, Quote, Tick};
 use tqsdk_data::{
     MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
     MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
-    MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReplay,
-    MarketCacheSupervisorConfig, MarketCacheWriter,
+    MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReaderCheckpoint,
+    MarketCacheReaderManifest, MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
 };
 
 #[test]
@@ -164,6 +164,82 @@ fn market_cache_index_groups_events_by_source_symbol_and_payload_kind() {
             .entry("history", "SHFE.au2602", MarketCachePayloadKind::Tick)
             .is_some()
     );
+}
+
+#[test]
+fn market_cache_reader_manifest_records_checkpoints_and_reports_reader_lag() {
+    let manifest_path = temp_path("market-cache-readers.json");
+    let _ = std::fs::remove_file(&manifest_path);
+
+    let first = quote_event("live", "SHFE.au2602", 2_000, Some(1_000), 480.0);
+    let second = quote_event("live", "DCE.m2601", 3_000, Some(1_500), 3_100.0);
+    let manifest = MarketCacheReaderManifest::open(&manifest_path).unwrap();
+    manifest
+        .record_checkpoint(MarketCacheReaderCheckpoint::from_event(
+            "research-a",
+            "last-close-study",
+            &first,
+        ))
+        .unwrap();
+    manifest
+        .record_checkpoint(MarketCacheReaderCheckpoint::from_event(
+            "replay-b",
+            "risk-replay",
+            &second,
+        ))
+        .unwrap();
+
+    let reopened = MarketCacheReaderManifest::open(&manifest_path).unwrap();
+    let checkpoint = reopened.checkpoint("research-a").unwrap().unwrap();
+    assert_eq!(checkpoint.reader_id, "research-a");
+    assert_eq!(checkpoint.checkpoint_id, "last-close-study");
+    assert_eq!(checkpoint.source, "live");
+    assert_eq!(checkpoint.symbol, "SHFE.au2602");
+    assert_eq!(checkpoint.payload_kind, MarketCachePayloadKind::Quote);
+    assert_eq!(checkpoint.event_time_ns, 1_000);
+    assert_eq!(checkpoint.received_at_ns, 2_000);
+    assert_eq!(
+        reopened.compaction_floor_event_time_ns().unwrap(),
+        Some(1_000)
+    );
+
+    let lag = reopened.reader_lag_report(2_500).unwrap();
+    assert_eq!(lag.len(), 2);
+    assert_eq!(lag[0].reader_id, "research-a");
+    assert_eq!(lag[0].lag_event_time_ns, 1_500);
+    assert_eq!(lag[1].reader_id, "replay-b");
+    assert_eq!(lag[1].lag_event_time_ns, 1_000);
+
+    reopened.remove_reader("research-a").unwrap();
+    assert_eq!(
+        reopened.compaction_floor_event_time_ns().unwrap(),
+        Some(1_500)
+    );
+    assert!(reopened.checkpoint("research-a").unwrap().is_none());
+}
+
+#[test]
+fn market_cache_reader_manifest_rejects_invalid_checkpoints() {
+    let manifest_path = temp_path("market-cache-invalid-readers.json");
+    let _ = std::fs::remove_file(&manifest_path);
+    let manifest = MarketCacheReaderManifest::open(&manifest_path).unwrap();
+    let event = quote_event("live", "SHFE.au2602", 2_000, Some(1_000), 480.0);
+
+    assert!(
+        MarketCacheReaderCheckpoint::from_event("", "last-close-study", &event)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        MarketCacheReaderCheckpoint::from_event("research-a", "", &event)
+            .validate()
+            .is_err()
+    );
+
+    let mut invalid =
+        MarketCacheReaderCheckpoint::from_event("research-a", "last-close-study", &event);
+    invalid.event_time_ns = -1;
+    assert!(manifest.record_checkpoint(invalid).is_err());
 }
 
 #[test]

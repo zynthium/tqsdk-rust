@@ -61,6 +61,9 @@
 - `MarketCacheWriter`
 - `MarketCacheReader`
 - `MarketCacheReplay`
+- `MarketCacheReaderCheckpoint`
+- `MarketCacheReaderLag`
+- `MarketCacheReaderManifest`
 - `MarketCacheQueue`
 - `MarketCacheQueueDrainError`
 - `MarketCacheQueueDrainReport`
@@ -104,6 +107,11 @@
 `MarketCacheEvent` / `MarketCacheWriter` / `MarketCacheReader` /
 `MarketCacheReplay` define the offline cache record and replay foundation for
 standard `Quote` / `Kline` / `Tick` payloads.
+
+`MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint` provide local reader
+checkpoint tracking, compaction floor calculation, and typed reader lag reports.
+They are a substrate for future cross-process cache coordination, not a complete
+cache service.
 
 `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 `MarketCacheCompaction` provide local file queue, lock lease, index,
@@ -191,6 +199,7 @@ scenario gaps above this data-layer foundation.
 - [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
 - [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
 - [examples/api_contract_s18_cache_supervisor_foundation.rs](examples/api_contract_s18_cache_supervisor_foundation.rs)
+- [examples/api_contract_s18_cache_reader_manifest.rs](examples/api_contract_s18_cache_reader_manifest.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。

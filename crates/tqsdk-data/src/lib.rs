@@ -19,6 +19,7 @@
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
 //! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
+//! - `MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint`
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
 //! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
@@ -54,9 +55,10 @@ pub use market_cache::{
     MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheDaemonShutdownReport, MarketCacheEvent,
     MarketCacheIndex, MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock,
     MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
-    MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReplay,
-    MarketCacheSupervisor, MarketCacheSupervisorConfig, MarketCacheSupervisorShutdownReport,
-    MarketCacheWriter,
+    MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader,
+    MarketCacheReaderCheckpoint, MarketCacheReaderLag, MarketCacheReaderManifest,
+    MarketCacheReplay, MarketCacheSupervisor, MarketCacheSupervisorConfig,
+    MarketCacheSupervisorShutdownReport, MarketCacheWriter,
 };
 #[cfg(feature = "stream")]
 pub use stream_cache::MarketCacheStreamWriter;
