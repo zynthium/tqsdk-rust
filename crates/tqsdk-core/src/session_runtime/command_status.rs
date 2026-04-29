@@ -5,7 +5,7 @@ use crate::{
     state::{CommitResult, StateReadView},
 };
 
-use super::{command_detail_from_seed, commit_touches_path, commit_touches_path_prefix};
+use super::detail::{command_detail_from_seed, commit_touches_path, commit_touches_path_prefix};
 
 pub(super) fn query_completed_status(
     snapshot: StateReadView<'_>,
