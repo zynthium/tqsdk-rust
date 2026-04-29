@@ -73,8 +73,10 @@ wait adapter 层未来可以提供：
   runtime `order_id`，并通过 `tqsdk-session` 的 session-scoped intent ledger
   防止同一 session 内相同 intent 重复提交；`OrderTicket::status()` /
   `wait_reconnect_safe_terminal*()` 可以把 runtime command ledger 和 order
-  lifecycle 合并成 typed `OrderTicketState`。它不得声明已经完成跨进程持久恢复，
-  也不得聚合成交明细或执行组状态；这些属于后续 execution/task 层能力。
+  lifecycle 合并成 typed `OrderTicketState`；`OrderTicket::wait_partially_filled*()`
+  和 `cancel_remaining()` 只是委托内部 `OrderRef`，让 reconnect-safe intent 路径
+  也能自然完成部分成交撤单流程。它不得声明已经完成跨进程持久恢复，也不得聚合
+  成交明细或执行组状态；这些属于后续 execution/task 层能力。
 - `login_trade_account(...)` 这类 typed login helper 可以作为 wait facade
   的薄便利层存在，用来从用户路径移除 `TradeLoginCommand` 构造；builder
   仍负责 trade route 配置，helper 只提交 runtime trade login command 并等待

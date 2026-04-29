@@ -7,7 +7,7 @@
 //!
 //! API contract:
 //! - public API 暴露 typed order lifecycle 和剩余量
-//! - 撤单可直接作用于订单 handle
+//! - 撤单可直接作用于 reconnect-safe order ticket / 订单 handle
 //! - 最终状态等待不要求用户写重复状态机
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -29,7 +29,7 @@
 
 use std::time::Duration;
 
-use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
+use tqsdk_core::TradeAccountType;
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
@@ -39,6 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let broker_id = std::env::var("TQ_BROKER_ID")?;
     let account_id = std::env::var("TQ_ACCOUNT_ID")?;
     let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
+    let symbol = std::env::var("TQ_ORDER_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".into());
+    let limit_price = std::env::var("TQ_ORDER_LIMIT_PRICE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(480.0);
+    let client_order_id =
+        std::env::var("TQ_CLIENT_ORDER_ID").unwrap_or_else(|_| "partial-cancel-001".into());
     let mut api = TqApiBuilder::new(user, pass)
         .futures_market()
         .trade_target(broker_id.clone(), account_id.clone())
@@ -53,18 +60,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let order = api
-        .insert_limit_order(
-            account_id.as_str(),
-            "SHFE.au2602",
-            TradeDirection::Buy,
-            Some(TradeOffset::Open),
-            3,
-            480.0,
-        )
+    let ticket = api
+        .limit_order(account_id.as_str(), symbol.as_str())
+        .client_intent(client_order_id.as_str())
+        .buy_open(3)
+        .at(limit_price)
+        .send_once()
         .await?;
 
-    let partial = order
+    let partial = ticket
         .wait_partially_filled_until(
             &mut api,
             tokio::time::Instant::now() + Duration::from_secs(30),
@@ -75,9 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         partial.order_id, partial.volume_left
     );
 
-    order.cancel_remaining(&mut api).await?;
+    ticket.cancel_remaining(&mut api).await?;
 
-    let final_state = order
+    let final_state = ticket
         .wait_terminal_until(
             &mut api,
             tokio::time::Instant::now() + Duration::from_secs(30),

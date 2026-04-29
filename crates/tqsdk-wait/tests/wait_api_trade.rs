@@ -418,6 +418,61 @@ async fn wait_reconnect_safe_terminal_returns_typed_order_terminal() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn order_ticket_helpers_wait_partial_cancel_remaining_and_terminal_state() {
+    let mut api = support::seeded_api();
+    let ticket = api
+        .limit_order("sim", "SHFE.ao2602")
+        .client_intent("strategy-a-open-001")
+        .buy_open(3)
+        .at(618.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    support::seed_order_update(
+        &mut api,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "strategy-a-open-001",
+            volume_orign: 3,
+            volume_left: 1,
+            status: "ALIVE",
+            is_dead: false,
+        },
+    );
+
+    let partial = ticket.wait_partially_filled(&mut api).await.unwrap();
+    assert_eq!(partial.lifecycle, OrderLifecycle::PartiallyFilled);
+    assert_eq!(partial.volume_left, 1);
+
+    ticket.cancel_remaining(&mut api).await.unwrap();
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let cancel_payload = transport_payload(&dispatches[1].request);
+    assert_eq!(cancel_payload["aid"], "cancel_order");
+    assert_eq!(cancel_payload["user_id"], "sim");
+    assert_eq!(cancel_payload["order_id"], "strategy-a-open-001");
+
+    support::seed_order_update(
+        &mut api,
+        support::OrderUpdateSeed {
+            account_id: "sim",
+            symbol: "SHFE.ao2602",
+            order_id: "strategy-a-open-001",
+            volume_orign: 3,
+            volume_left: 1,
+            status: "FINISHED",
+            is_dead: true,
+        },
+    );
+
+    let terminal = ticket.wait_terminal(&mut api).await.unwrap();
+    assert_eq!(terminal.lifecycle, OrderLifecycle::Cancelled);
+    assert!(terminal.lifecycle.is_terminal());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn send_once_validates_required_intent_fields() {
     let mut api = support::seeded_api();
 

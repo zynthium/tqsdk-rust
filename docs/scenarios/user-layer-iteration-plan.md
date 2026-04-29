@@ -166,6 +166,8 @@ crate 分层合并成一份迭代计划。
   可复用的轻量执行一致性 substrate。
 - `OrderTicket::status()` / `wait_reconnect_safe_terminal*()` 返回 typed
   `OrderTicketState`，业务代码不需要解析 command status 或 `order.status` 字符串。
+- `OrderTicket::wait_partially_filled*()` / `cancel_remaining()` 直接复用内部
+  `OrderRef` helper，让 stable intent 下单路径也能自然完成部分成交撤剩余量。
 
 仍未完成、不可伪装为已支持：
 

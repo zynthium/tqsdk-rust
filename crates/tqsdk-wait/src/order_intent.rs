@@ -353,6 +353,22 @@ impl OrderTicket {
         }
     }
 
+    pub async fn cancel_remaining(&self, api: &mut TqApi) -> crate::error::Result<()> {
+        self.order.cancel_remaining(api).await
+    }
+
+    pub async fn wait_partially_filled(&self, api: &mut TqApi) -> crate::error::Result<Order> {
+        self.order.wait_partially_filled(api).await
+    }
+
+    pub async fn wait_partially_filled_until(
+        &self,
+        api: &mut TqApi,
+        deadline: tokio::time::Instant,
+    ) -> crate::error::Result<Order> {
+        self.order.wait_partially_filled_until(api, deadline).await
+    }
+
     pub async fn wait_terminal(&self, api: &mut TqApi) -> crate::error::Result<Order> {
         self.order.wait_terminal(api).await
     }

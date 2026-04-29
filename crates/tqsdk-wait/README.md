@@ -82,6 +82,9 @@
 - `OrderRef::wait_partially_filled_until(...).await`
 - `OrderRef::wait_terminal(...).await`
 - `OrderRef::wait_terminal_until(...).await`
+- `OrderTicket::cancel_remaining(...).await`
+- `OrderTicket::wait_partially_filled(...).await`
+- `OrderTicket::wait_partially_filled_until(...).await`
 - `confirm_settlement(...).await`
 - `session()`
 - `into_session()`
@@ -162,7 +165,9 @@ command status 字符串或 `order.status` 字符串。契约示例见
 
 订单撤单和状态等待优先走 `OrderRef` helper：`cancel_remaining()` 会保留订单归属
 上下文，`wait_partially_filled()` / `wait_terminal()` 直接返回 typed `Order`，
-业务代码不需要解析 `status` 字符串或手写 terminal-state 轮询。契约示例见
+业务代码不需要解析 `status` 字符串或手写 terminal-state 轮询。使用 stable
+client intent 下单时，`OrderTicket` 也提供同名 partial-fill 和 cancel-remain
+helper，避免用户在 reconnect-safe 路径上绕回内部 order handle。契约示例见
 [examples/api_contract_s07_cancel_partial_fill.rs](examples/api_contract_s07_cancel_partial_fill.rs)。
 
 如果要证明 wait facade 可以复用同一个底层 session 做 direct query，而不需要额外建第二个 client，可参考 [examples/quote_wait_with_session_query.rs](examples/quote_wait_with_session_query.rs)。
