@@ -69,7 +69,10 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
 | `SessionRuntime` | auth / bootstrap / connect / recover / flush / pump 的统一编排器 |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
+| `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
+
+raw outbox envelope（例如 `OutboundEnvelope`）和 multi-source aggregation helper 不属于稳定 public contract。外部 route 消费者应依赖 `OutboundDispatch`，而不是 runtime 内部队列结构。
 
 > [!NOTE]
 > `tqsdk_core::internal` 是 `#[doc(hidden)]` 的 sibling-crate 桥接层，用于

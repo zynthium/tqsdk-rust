@@ -61,6 +61,11 @@ V1 是：
 - `UpdateCursor`
   - 独立推进的 commit 消费游标
 
+不属于稳定 public core 主线：
+
+- raw outbox envelope（例如 `OutboundEnvelope`）是 runtime 内部队列细节；低层 route 消费者应使用 `OutboundDispatch`
+- multi-source aggregation helper 不是 V1 public contract；需要时应先重新设计场景和文档
+
 仍保留的兼容/底层原语：
 
 - `StateSnapshot`

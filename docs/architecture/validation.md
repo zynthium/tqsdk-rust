@@ -45,6 +45,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
   `RuntimeCommand -> RuntimeInput / NormalizedMutation -> CommitResult`
 - `submit()` 只返回 `CommandId`，不返回完成态
 - command-scoped 结果不得通过旁路 future 暴露
+- route/outbox 测试应以 public `OutboundDispatch` 为合同；raw outbox envelope 是 runtime 内部队列细节
 
 ### 统一状态树
 - market / trade / replay / query / schema / system 状态都必须进入同一 runtime state tree
