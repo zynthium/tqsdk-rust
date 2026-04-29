@@ -569,6 +569,20 @@ fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
             Some(&json!(2))
         );
         assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "internal", "session-recovery-error", "attempt"]),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "internal", "session-recovery-error", "message"]),
+            Some(&json!(
+                "auth error: websocket reconnect failed: attempt 2"
+            ))
+        );
+        assert_eq!(
             handle.latest_snapshot().get([
                 "system",
                 "session",

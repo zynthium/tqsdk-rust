@@ -274,6 +274,96 @@ fn session_runtime_drive_timer_once_recovers_after_heartbeat_timeout() {
     );
 }
 
+#[test]
+fn session_runtime_drive_timer_once_rejects_heartbeat_due_without_route_payload() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = HeartbeatConnector::new(vec![RecvBehavior::Frame(RawFrame::Pong)]);
+    let adapters = adapter_registry();
+    let config = session_config();
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    let err = block_on(runtime.drive_timer_once(
+        &mut run,
+        TimerEvent {
+            label: "heartbeat-due",
+            payload: None,
+        },
+        vec![],
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
+    ))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "validation error: timer event 'heartbeat-due' requires payload.route string"
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "timers", "heartbeat-due"]),
+        None
+    );
+}
+
+#[test]
+fn session_runtime_drive_timer_once_rejects_unknown_heartbeat_route_before_timer_commit() {
+    let handle = runtime_with_default_adapters();
+    let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+    let connector = HeartbeatConnector::new(vec![RecvBehavior::Frame(RawFrame::Pong)]);
+    let adapters = adapter_registry();
+    let config = session_config();
+    let mut run = block_on(runtime.establish(
+        &TestAuthProvider,
+        &MarketTopologyResolver,
+        &connector,
+        &config,
+        &adapters,
+    ))
+    .unwrap();
+
+    let err = block_on(runtime.drive_timer_once(
+        &mut run,
+        TimerEvent {
+            label: "heartbeat-timeout",
+            payload: Some(json!({ "route": "trade:missing" })),
+        },
+        vec![],
+        SessionRuntimeDeps::new(
+            &TestAuthProvider,
+            &MarketTopologyResolver,
+            &connector,
+            &config,
+            &adapters,
+        ),
+    ))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "validation error: unknown connected route for timer event: trade:missing"
+    );
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["system", "timers", "heartbeat-timeout"]),
+        None
+    );
+}
+
 fn runtime_with_default_adapters() -> RuntimeHandle {
     RuntimeHandle::with_adapters(adapter_registry())
 }
