@@ -6,11 +6,9 @@ use tqsdk_core::{Kline, Tick};
 
 use crate::client::{
     DataClient, KlineDataPage, KlineDataPageRequest, KlineDataSeriesRequest, TickDataPage,
-    TickDataPageRequest, TickDataSeriesRequest,
+    TickDataPageRequest, TickDataSeriesRequest, normalize_history_view_width,
 };
 use crate::error::{DataError, Result};
-
-const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
 
 /// Progressive state for a range download request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -695,15 +693,6 @@ fn validate_tick_download_request(request: &TickDataSeriesRequest) -> Result<Tic
         page_view_width: normalize_history_view_width(request.page_view_width())?,
         timeout: request.timeout(),
     })
-}
-
-fn normalize_history_view_width(view_width: usize) -> Result<usize> {
-    if view_width == 0 {
-        return Err(DataError::Validation(
-            "view_width must be greater than zero".to_string(),
-        ));
-    }
-    Ok(view_width.min(MAX_HISTORY_VIEW_WIDTH))
 }
 
 #[cfg(test)]

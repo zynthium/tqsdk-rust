@@ -19,11 +19,34 @@ const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_h
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
-const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
+pub(crate) const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
 const MARKET_POLL_BUDGET: Duration = Duration::from_millis(250);
 const HISTORY_DOWNLOAD_PERMISSION_MESSAGE: &str = "history data download requires tq_dl permission; upgrade: https://www.shinnytech.com/tqsdk-buy/";
 
 static NEXT_HISTORY_CHART_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) trait HistoryRow {
+    fn id(&self) -> i64;
+    fn datetime(&self) -> i64;
+}
+
+impl HistoryRow for Kline {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn datetime(&self) -> i64 {
+        self.datetime
+    }
+}
+
+impl HistoryRow for Tick {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn datetime(&self) -> i64 {
+        self.datetime
+    }
+}
 
 #[derive(Debug, Clone)]
 struct DataServiceEndpoints {
@@ -1173,7 +1196,7 @@ impl DataClient {
                     .last()
                     .is_some_and(|row| row.datetime >= spec.end_datetime_ns);
 
-            extend_kline_rows_in_window(
+            extend_rows_in_window(
                 &mut rows,
                 page.into_rows(),
                 spec.start_datetime_ns,
@@ -1194,7 +1217,7 @@ impl DataClient {
             spec.duration_ns,
             spec.start_datetime_ns,
             spec.end_datetime_ns,
-            dedup_sort_klines_by_id(rows),
+            dedup_sort_rows_by_id(rows),
         ))
     }
 
@@ -1235,7 +1258,7 @@ impl DataClient {
                     .last()
                     .is_some_and(|row| row.datetime >= spec.end_datetime_ns);
 
-            extend_tick_rows_in_window(
+            extend_rows_in_window(
                 &mut rows,
                 page.into_rows(),
                 spec.start_datetime_ns,
@@ -1255,7 +1278,7 @@ impl DataClient {
             request.symbol().to_string(),
             spec.start_datetime_ns,
             spec.end_datetime_ns,
-            dedup_sort_ticks_by_id(rows),
+            dedup_sort_rows_by_id(rows),
         ))
     }
 
@@ -1695,7 +1718,7 @@ fn next_tick_page_chart_id(symbol: &str) -> String {
     format!("data-tick-page-{}-{sequence}", sanitize_chart_token(symbol))
 }
 
-fn normalize_history_view_width(view_width: usize) -> Result<usize> {
+pub(crate) fn normalize_history_view_width(view_width: usize) -> Result<usize> {
     if view_width == 0 {
         return Err(DataError::Validation(
             "view_width must be greater than zero".to_string(),
@@ -1712,56 +1735,29 @@ async fn cancel_chart_best_effort(session: &tqsdk_session::SessionClient, chart_
         .await;
 }
 
-fn extend_kline_rows_in_window(
-    target: &mut Vec<Kline>,
-    page: Vec<Kline>,
-    start_datetime_ns: i64,
-    end_datetime_ns: i64,
-) -> Option<i64> {
-    let mut next_left_kline_id = None;
-    for row in page {
-        if row.datetime == 0 || row.datetime >= end_datetime_ns {
-            break;
-        }
-        next_left_kline_id = row.id.checked_add(1);
-        if row.datetime >= start_datetime_ns {
-            target.push(row);
-        }
-    }
-    next_left_kline_id
-}
-
-fn extend_tick_rows_in_window(
-    target: &mut Vec<Tick>,
-    page: Vec<Tick>,
+fn extend_rows_in_window<R: HistoryRow>(
+    target: &mut Vec<R>,
+    page: Vec<R>,
     start_datetime_ns: i64,
     end_datetime_ns: i64,
 ) -> Option<i64> {
     let mut next_left_id = None;
     for row in page {
-        if row.datetime == 0 || row.datetime >= end_datetime_ns {
+        if row.datetime() == 0 || row.datetime() >= end_datetime_ns {
             break;
         }
-        next_left_id = row.id.checked_add(1);
-        if row.datetime >= start_datetime_ns {
+        next_left_id = row.id().checked_add(1);
+        if row.datetime() >= start_datetime_ns {
             target.push(row);
         }
     }
     next_left_id
 }
 
-fn dedup_sort_klines_by_id(rows: Vec<Kline>) -> Vec<Kline> {
+fn dedup_sort_rows_by_id<R: HistoryRow>(rows: Vec<R>) -> Vec<R> {
     let mut by_id = BTreeMap::new();
     for row in rows {
-        by_id.insert(row.id, row);
-    }
-    by_id.into_values().collect()
-}
-
-fn dedup_sort_ticks_by_id(rows: Vec<Tick>) -> Vec<Tick> {
-    let mut by_id = BTreeMap::new();
-    for row in rows {
-        by_id.insert(row.id, row);
+        by_id.insert(row.id(), row);
     }
     by_id.into_values().collect()
 }
@@ -2277,7 +2273,7 @@ mod tests {
     #[test]
     fn extend_kline_rows_in_window_applies_bounds_and_next_id() {
         let mut rows = Vec::new();
-        let next_left_kline_id = extend_kline_rows_in_window(
+        let next_left_kline_id = extend_rows_in_window(
             &mut rows,
             vec![
                 Kline {
@@ -2311,7 +2307,7 @@ mod tests {
     #[test]
     fn extend_tick_rows_in_window_applies_bounds_and_next_id() {
         let mut rows = Vec::new();
-        let next_left_id = extend_tick_rows_in_window(
+        let next_left_id = extend_rows_in_window(
             &mut rows,
             vec![
                 Tick {
@@ -2344,7 +2340,7 @@ mod tests {
 
     #[test]
     fn dedup_sort_kline_rows_by_id_keeps_latest_row_per_id() {
-        let rows = dedup_sort_klines_by_id(vec![
+        let rows = dedup_sort_rows_by_id(vec![
             Kline {
                 id: 2,
                 close: 2.0,
@@ -2370,7 +2366,7 @@ mod tests {
 
     #[test]
     fn dedup_sort_tick_rows_by_id_keeps_latest_row_per_id() {
-        let rows = dedup_sort_ticks_by_id(vec![
+        let rows = dedup_sort_rows_by_id(vec![
             Tick {
                 id: 2,
                 last_price: 2.0,
