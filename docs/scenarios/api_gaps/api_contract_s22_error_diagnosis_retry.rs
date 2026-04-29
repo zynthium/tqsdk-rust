@@ -1,4 +1,4 @@
-//! Scenario: 错误诊断与重试（剩余 gap：business/order retry audit）
+//! Scenario: 错误诊断与重试（降级能力：business/order retry audit）
 //!
 //! User goal:
 //! - 区分连接错误、登录错误、业务拒单、交易错误
@@ -9,7 +9,7 @@
 //! - low-level error kind / retry hint 已由 core/session/stream 提供
 //! - stream-facing retry decision / backoff runner 已由 `tqsdk-stream` 提供
 //! - business reject 不应和 transport failure 混在一起
-//! - order intent retry audit 尚未形成统一 public API
+//! - order intent retry audit 不属于 stream/core 诊断层核心 API
 //! - 不要求用户在 stream-facing operation 中手写指数退避任务
 //!
 //! Forbidden:
@@ -21,7 +21,7 @@
 //! Regression signal:
 //! - 登录失败和网络断开只能返回同一种 opaque error
 //! - 业务拒单被当作 transport retry
-//! - order intent retry audit 只能散落在策略代码里
+//! - low-level diagnostics / retry hint 回退为字符串判断
 //!
 //! Review questions:
 //! - order/business retry audit 应落在 wait、task 还是 daemon tooling？
@@ -32,7 +32,8 @@
 //! `ContractError::{kind, retry_hint}`、`SessionFacadeError::diagnostic()` 和
 //! `StreamFacadeError::diagnostic()` 已覆盖低层诊断。`StreamRetryPolicy` 已覆盖
 //! stream-facing retry decision / backoff runner。业务拒单应通过 typed order/risk
-//! surface 判断；本文件只保留 order/business retry audit gap。
+//! surface 判断；order/business retry audit 已降级为用户执行审计系统职责，不再
+//! 作为 `tqsdk-stream` 核心 public API 继续推进。
 //!
 //! 理想用户代码草案：
 //! ```ignore

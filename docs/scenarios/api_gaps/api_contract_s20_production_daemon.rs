@@ -30,6 +30,7 @@
 //! - 当前 API 是否自然表达 daemon 运维需求？
 //! - 错误/健康状态是否类型安全？
 //! - 这是 stream facade 扩展还是单独 runtime crate？
+//! - 该场景的完成标准是否止于核心 SDK primitive，而不是生产守护平台？
 //!
 //! API gap:
 //! `tqsdk-stream` 已有 session event/reconnect 事件、typed
@@ -43,8 +44,14 @@
 //! shutdown report；`tqsdk-stream` 已有 managed commit sink、有限重试和 JSONL WAL
 //! foundation，并已有 `TqStream::graceful_shutdown()` 做 stream driver 关闭与 managed
 //! sink flush 的 typed report。S20 完成标准不包含 Rust GUI、web helper 或内置 HTTP
-//! health/metrics endpoint；仍没有跨进程 daemon orchestration、WAL compaction /
-//! fsync policy 和跨进程 daemon 管理。
+//! health/metrics endpoint；也不包含跨进程 daemon orchestration 或跨进程 daemon
+//! 管理。
+//!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 的 `web_gui` 是策略图形展示 / 回测展示辅助，不是生产
+//! health endpoint 或 metrics 系统。Rust S20 的核心边界是 typed health snapshot、
+//! telemetry hook、retry decision 和 graceful shutdown primitive；HTTP endpoint、
+//! GUI、web helper、进程管理器和生产守护平台均由用户在 SDK 之上自行接入。
 //!
 //! 理想用户代码草案：
 //! ```ignore

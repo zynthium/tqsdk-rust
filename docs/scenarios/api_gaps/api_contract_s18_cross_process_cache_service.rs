@@ -1,4 +1,4 @@
-//! Scenario: 本地行情缓存跨进程管理服务（剩余 API gap）
+//! Scenario: 本地行情缓存跨进程管理服务（降级能力）
 //!
 //! User goal:
 //! - 一个或多个实盘进程把标准行情事件写入本地共享缓存
@@ -33,6 +33,7 @@
 //! - 跨进程 cache service 应继续落在 `tqsdk-data`，还是拆成独立 tooling crate？
 //! - writer election、recovery action、compaction ownership 和 service facade 是否必须一起冻结？
 //! - service 的 public report 能否表达 crash recovery 与 reader lag，而不暴露文件细节？
+//! - 完整跨进程 cache service 是否已经超出官方 Python SDK 的核心能力边界？
 //!
 //! Current API note:
 //! `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 已提供离线
@@ -53,6 +54,13 @@
 //!
 //! 这些 API 已覆盖本地 file service foundation，但还不能自然表达完整跨进程
 //! daemon orchestration / 多进程 cache 管理服务。
+//!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 的数据能力主要是历史 tick/K线下载、CSV 落盘、回测/复盘
+//! 接入和少量本地缓存细节，不承诺跨进程行情缓存管理服务。S18 当前核心目标到
+//! 本地 cache primitives / local file service foundation 为止；完整跨进程
+//! service、daemon orchestration、进程管理和外部运维入口降级为用户层工具或
+//! 独立项目职责，暂停作为 `tqsdk-data` 核心 public API 继续推进。
 //!
 //! 理想用户代码草案：
 //! ```ignore

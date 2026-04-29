@@ -1,4 +1,4 @@
-//! Scenario: 慢消费者隔离（剩余 gap：durable daemon queue / runtime state recovery）
+//! Scenario: 慢消费者隔离（降级能力：durable daemon queue / runtime state recovery）
 //!
 //! User goal:
 //! - 写库 / 日志不能拖慢核心行情循环
@@ -13,7 +13,7 @@
 //!   journal replay 已由 `tqsdk-stream` 提供
 //! - reusable `StreamSinkProfile` 已由 `tqsdk-stream` 提供，常见 sink 配置不再
 //!   需要用户手拼全部 options
-//! - durable daemon queue、跨进程锁和 runtime state snapshot recovery 尚未形成 public API
+//! - durable daemon queue、跨进程锁和 runtime state snapshot recovery 不属于核心 SDK
 //! - 不要求用户自建 channel
 //! - 不要求用户手写 Tokio supervisor task
 //!
@@ -26,7 +26,7 @@
 //! Regression signal:
 //! - sink 失败会关闭核心策略 consumer
 //! - 有限重试或 JSONL WAL policy 只能散落在业务代码里
-//! - durable daemon queue / runtime state recovery 只能散落在业务代码里
+//! - bounded fan-out / managed sink / WAL foundation 回退为业务代码手拼
 //!
 //! Review questions:
 //! - sink runtime 是否应该在 `tqsdk-stream` 之上独立成 tooling？
@@ -40,8 +40,9 @@
 //! `StreamSinkProfile` / `StreamSinkRetryPolicy` / `CommitSink` / `StreamSinkHandle`
 //! 已覆盖 managed commit sink、有限重试、JSONL WAL、typed stats 和 shutdown
 //! flush report、WAL fsync policy、本地 compaction、WAL recovery report 和 commit
-//! metadata journal replay。本文件只保留 durable daemon queue、跨进程锁和 runtime
-//! state snapshot recovery 能力 gap。
+//! metadata journal replay。durable daemon queue、跨进程锁和 runtime state
+//! snapshot recovery 已降级为用户运维系统职责，不再作为 `tqsdk-stream` 核心
+//! public API 继续推进。
 //!
 //! 理想用户代码草案：
 //! ```ignore

@@ -49,6 +49,13 @@
 //! foundation。剩余 gap 是面向生产策略部署的统一 live/sim/replay
 //! environment abstraction。
 //!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 的回测 / 复盘能力服务策略回放与研究，不承诺生产级 daemon
+//! reconnect orchestration。`tqsdk-rust` 的 S16 核心边界止于历史/cache event
+//! 按时间顺序驱动同一策略 context、speed policy 和 checkpoint foundation；
+//! 生产部署、跨进程恢复和 daemon lifecycle 由 S15/S20 的薄 primitive 或用户层系统
+//! 组合，不继续扩大 S16。
+//!
 //! 理想用户代码草案：
 //! ```ignore
 //! let replay = StrategyReplay::source_builder()

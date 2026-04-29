@@ -40,6 +40,11 @@
 //! Remaining API gap:
 //! 当前 test harness 仍是 foundation：持久化恢复和更完整 broker 行为仍未冻结。
 //!
+//! Boundary decision:
+//! Rust 需要比 Python 更强的可测试性基础设施，但该层仍应保持 fake market /
+//! fake broker / deterministic clock 这类最小测试 primitive。完整仿真交易所、
+//! 生产级 fixture 持久恢复和复杂撮合模型不进入核心 SDK。
+//!
 //! 理想用户代码草案：
 //! ```ignore
 //! #[tokio::test]

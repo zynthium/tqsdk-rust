@@ -16,6 +16,11 @@ crate 分层合并成一份迭代计划。
 
 官方 Python SDK 是成熟使用者语义的证据来源，不是 Rust API 的复制模板。
 
+本计划的硬边界：`tqsdk-rust` 是核心交易 SDK，不是策略平台、生产守护平台、
+行情中台或自动执行系统。Rust 分层可以提供比 Python 更清晰的 typed substrate
+和 escape hatch，但不能把官方 Python 没有承诺的高级系统能力默认升级为核心
+public API。
+
 ## 调研依据
 
 本轮主要参考：
@@ -58,7 +63,7 @@ crate 分层合并成一份迭代计划。
 | 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19 | 建立执行层抽象，不下沉到 core |
 | 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18 | 独立数据层，不污染 session/wait |
 | 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
-| 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 后续独立 facade 或 `tqsdk-stream` 上层 | 14 | 晚于事件语义稳定后推进 |
+| 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 用户层 facade / 后续独立项目 | 14 | 暂缓，非核心 SDK 目标 |
 
 ## 从 Python SDK 对齐的语义，不对齐的形状
 
@@ -80,6 +85,38 @@ crate 分层合并成一份迭代计划。
 - 不在 `tqsdk-core` 拥有 event loop 或暴露 provider 私有协议。
 - 不用原地更新 DataFrame 作为 Rust 研究层的唯一表达。
 - 不为了 API 名字兼容牺牲 crate 边界和类型安全。
+
+## 能力准入与降级规则
+
+后续新增 public API 进入正式 `examples/*.rs` 之前，必须满足以下准入条件：
+
+- 能在官方 Python SDK 的核心使用者语义中找到对应工作流，或是 Rust 分层必需的
+  薄基础设施补强。
+- 能清晰落在 `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` /
+  `tqsdk-stream` / `tqsdk-task` / `tqsdk-data` 的既有职责内。
+- 不要求用户理解 provider protocol、私有 session、raw channel、内部 command
+  pack、手写 Tokio task 编排或 `Arc<Mutex<_>>`。
+- 不把策略决策、自动补偿交易、生产部署、跨进程协调、HTTP/GUI 运维入口塞进
+  SDK 核心。
+- 能保持单一 runtime commit / revision / command lifecycle。
+
+以下能力统一降级为 desired sketch、用户层工具或外部系统职责，除非后续有新的
+官方能力边界或明确用户需求重新立项：
+
+- S12 自动 hedge / flatten / 补单引擎；
+- S13 自动资产配置、多账户失败补偿和跨进程审计；
+- S14 多 provider 行情聚合；
+- S15 多 provider environment 和部署平台化配置；
+- S16 生产级 daemon reconnect orchestration；
+- S18 跨进程行情 cache service / cache daemon 管理；
+- S19 组合保证金引擎、全局风控服务和 durable audit；
+- S20 内置 HTTP health/metrics endpoint、GUI、web helper、进程管理器；
+- S21 durable distributed queue 和 runtime state snapshot recovery 平台；
+- S24 完整仿真交易所或生产级测试 fixture 持久恢复。
+
+降级不是删除场景，而是防止把高级编排伪装成核心 SDK 缺口。降级后的内容可以
+保留在 `docs/scenarios/api_gaps/`，用于说明用户如何在 SDK primitives 之上自行
+构建。
 
 ## 推荐迭代顺序
 
@@ -185,9 +222,9 @@ crate 分层合并成一份迭代计划。
 目标：
 
 - 稳固 `TargetPosTask` ownership，避免手动下单与任务下单互相踩状态。
-- 新增 execution group 表达两腿 / 多腿订单生命周期。
-- 支持最大裸露量、超时撤单、补单、对冲和人工介入结果。
-- 新增 account group 和 allocation policy，明确多账户状态隔离。
+- 用 execution group 表达两腿 / 多腿订单生命周期和用户可审计 outcome。
+- 支持最大裸露量的 typed report，让用户策略决定撤补、对冲和人工介入。
+- 用 account group 明确多账户状态隔离和比例拆单，但不提供自动资产配置平台。
 
 已落地：
 
@@ -198,7 +235,7 @@ crate 分层合并成一份迭代计划。
   session-scoped retry idempotency、per-account outcome report 和
   revision-bound `MultiAccountOrderGroupReport`。
 
-仍未完成、不可伪装为已支持：
+已降级为用户层执行系统职责：
 
 - 自动 hedge / flatten；
 - timed cancel / replace；
@@ -208,7 +245,9 @@ crate 分层合并成一份迭代计划。
 
 建议落点：
 
-- `tqsdk-task`：在当前 `ExecutionGroup` / `AccountGroup` 上继续扩展 hedge/flatten、timed cancel、跨账户 TargetPos 和 audit policy。
+- `tqsdk-task`：维护当前 `ExecutionGroup` / `AccountGroup` 薄 foundation，
+  不继续向自动 hedge/flatten、timed cancel、跨账户 TargetPos 和 audit policy
+  膨胀。
 - `tqsdk-wait` / `tqsdk-stream`：只提供所需 live state 和 order event。
 
 优先提升的场景：
@@ -259,7 +298,7 @@ crate 分层合并成一份迭代计划。
 - `RiskEngine::instrument_specs(...)` 可接入 `tqsdk_session::InstrumentSpec`，
   提供合约 tick size 校验和 contract multiplier notional projection foundation。
 
-仍未完成、不可伪装为已支持：
+已降级为用户风控系统或上层工具职责：
 
 - 涨跌停和交易所品种级规则。
 - 组合级保证金 / 组合持仓 what-if simulation。当前仅有单笔订单轻量投影。
@@ -268,8 +307,10 @@ crate 分层合并成一份迭代计划。
 
 建议落点：
 
-- `tqsdk-task`：在当前 `RiskEngine` 上继续扩展规则组合、合约规则和执行组风控。
-- `tqsdk-data` 或 task 上层工具：离线或本地 what-if 试算，避免污染 core。
+- `tqsdk-task`：维护当前 `RiskEngine` 的基础规则、typed rejection 和单笔轻量
+  projection，不扩成组合保证金或全局风控服务。
+- 用户上层工具：需要组合级 what-if、热更新或 durable audit 时，在 SDK
+  primitives 之上自行构建。
 
 优先提升的场景：
 
@@ -341,11 +382,13 @@ crate 分层合并成一份迭代计划。
   task example；S16 history series -> strategy context 子集已提升为正式 task
   example。
 
-仍未完成、不可伪装为已支持：
+边界收口：
 
-- S15 配置文件反序列化、完整 reconnect orchestration 和多 provider environment。
-- 更完整 broker 行为。
-- 跨进程 intent / test fixture 持久恢复。
+- S15 配置文件反序列化可作为薄便利能力评估；完整 reconnect orchestration 和
+  多 provider environment 降级为用户层部署/基础设施能力。
+- S24 保持 fake market / fake broker / deterministic clock 测试 primitive；
+  更完整 broker 行为、复杂撮合模型和生产级 fixture 持久恢复不进入核心 SDK。
+- 跨进程 intent / test fixture 持久恢复由用户测试平台或外部存储实现。
 
 ### P2：生产守护、慢消费者隔离和错误诊断
 
@@ -410,7 +453,7 @@ crate 分层合并成一份迭代计划。
   transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
   指标系统，不需要 SDK 内置 HTTP endpoint。
 
-仍未完成、不可伪装为已支持：
+已降级为用户运维系统职责：
 
 - 跨进程 daemon orchestration；
 - durable daemon queue、跨进程锁和 runtime state snapshot recovery；
@@ -431,7 +474,7 @@ crate 分层合并成一份迭代计划。
   deployment 的 typed health/metrics snapshot、显式 retry policy、ctrl-c
   shutdown signal、typed shutdown report 和 typed telemetry/export hook。
 
-仍未完成、不可伪装为已支持：
+已降级为用户运维系统职责：
 
 - durable daemon queue、跨进程锁和 runtime state snapshot recovery。
 - 跨进程 daemon orchestration 和跨进程 daemon 管理。
@@ -533,7 +576,7 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cross_process_cache_service` 已补充为 desired API sketch，
   明确剩余跨进程 service facade 不应直接扩展 core/session。
 
-仍未完成、不可伪装为已支持：
+已降级为用户层工具或独立项目职责：
 
 - 完整跨进程 daemon orchestration / 多进程 cache 管理服务实现；
 
@@ -548,11 +591,12 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_writer_recovery`（writer election/recovery action foundation 已提升为正式 data example）
 - `api_contract_s18_cache_compaction_ownership`（reader-protected compaction ownership foundation 已提升为正式 data example）
 - `api_contract_s18_cache_service_foundation`（本地 file service foundation 已提升为正式 data example）
-- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按跨进程 daemon orchestration 切分）
+- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；暂停
+  作为核心 SDK 目标，后续仅在明确用户层工具需求下重新评估）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 
-### P3：多 provider 行情聚合
+### P3：多 provider 行情聚合（暂缓）
 
 服务的使用者：
 
@@ -565,10 +609,17 @@ crate 分层合并成一份迭代计划。
 - 明确冲突合并策略和 provider 级健康状态。
 - 不影响单 provider 用户的简单路径。
 
+边界判断：
+
+- 官方 Python SDK 没有多行情源聚合作为核心 public API。
+- 该能力更像用户层基础设施或行情中台，不是核心交易 SDK 的默认职责。
+- 当前保持 desired API sketch，不继续拆 public API 或 crate。
+
 建议落点：
 
-- 优先作为 `tqsdk-stream` 之上的独立聚合 facade 设计。
-- 只有当 aggregation contract 成为多个上层 crate 共同依赖时，再评估是否新增 crate。
+- 仅在未来有明确用户需求时，作为 `tqsdk-stream` 之上的独立用户层 facade
+  或独立项目重新评估。
+- 不下沉到 `tqsdk-core` / `tqsdk-session`，也不作为近期场景驱动批次目标。
 
 优先提升的场景：
 

@@ -43,6 +43,13 @@
 //! orchestration 和多 provider environment 尚未冻结。Rust SDK 不规划 GUI 或内置 HTTP
 //! health/metrics endpoint 作为 S15/S20 完成标准。
 //!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 支持实盘、模拟、回测和复盘共享策略心智，但没有把部署平台、
+//! 多 provider environment 或生产运维框架作为核心 API。`tqsdk-rust` 核心边界
+//! 是让同一策略 context 可在 live / sim / replay / test 间切换；配置文件读取可
+//! 作为薄便利能力评估，完整 deployment platform 和多 provider environment 随
+//! S14 暂缓。
+//!
 //! 理想用户代码草案：
 //! ```ignore
 //! let config = StrategyDeploymentConfig::from_file("strategy.toml")?

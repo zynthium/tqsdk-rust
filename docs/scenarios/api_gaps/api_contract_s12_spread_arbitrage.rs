@@ -41,6 +41,12 @@
 //! - 多账户或多腿组合的联合风控；
 //! - 人工介入后的 group resume / persistent audit log。
 //!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 提供 `TargetPosTask` / `InsertOrderTask` 这类基础执行任务，
+//! 但没有把跨合约自动对冲、自动补单或持久审计作为核心 API。`tqsdk-rust`
+//! 当前核心边界止于 typed execution group、状态/裸露 report 和用户可审计的
+//! outcome；自动 hedge / flatten / 补单引擎应由用户策略或上层执行系统实现。
+//!
 //! 理想用户代码草案：
 //! ```ignore
 //! let group = host

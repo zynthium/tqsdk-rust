@@ -35,6 +35,13 @@
 //! `MultiAccountOrderGroupReport`。仍未支持自动补单/对冲、跨账户 TargetPos
 //! 编排、persistent resume 和 durable execution audit。
 //!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 的 `TqMultiAccount` 要求在 get_position / insert_order /
+//! set_target_volume 等入口显式指定 account，用于状态隔离和账户路由；它不是自动
+//! 资产配置、失败补偿或组合执行平台。`tqsdk-rust` 核心边界止于显式账户组、
+//! 比例拆单、per-account outcome 和 revision-bound report；自动补单/对冲、
+//! persistent resume 与 durable audit 由用户层执行系统实现。
+//!
 //! 理想用户代码草案：
 //! ```ignore
 //! let accounts = host.account_group()

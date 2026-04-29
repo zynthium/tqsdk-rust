@@ -27,11 +27,18 @@
 //! - 当前 API 是否能自然表达多 provider 聚合？
 //! - 是否需要跨 session 的 aggregated reader/revision contract？
 //! - 这是局部 facade 扩展还是架构级新增能力？
+//! - 该能力是否已经超出官方 Python SDK 的核心能力边界？
 //!
 //! API gap:
 //! 当前 public API 基本围绕单 `SessionClient` / 单 `TqStream`。`tqsdk-core`
 //! 有 aggregated reader 相关底座，但没有终端用户可用的 provider aggregation
 //! facade。
+//!
+//! Boundary decision:
+//! 官方 `tqsdk-python` 没有把多行情源聚合作为核心 public API。该场景当前降级为
+//! 非核心用户层 / 基础设施能力，只保留 desired API sketch；不得作为近期
+//! `tqsdk-rust` 核心 public API 目标推进，也不得下沉到 `tqsdk-core` /
+//! `tqsdk-session`。
 //!
 //! 理想用户代码草案：
 //! ```ignore

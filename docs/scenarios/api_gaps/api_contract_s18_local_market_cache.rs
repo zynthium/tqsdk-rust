@@ -47,7 +47,8 @@
 //! foundation；`MarketCacheService` 已提供同步、本地 file service facade
 //! foundation，组合 writer election、recovery、reader checkpoint、queue flush
 //! 和 reader-protected compaction。
-//! 剩余 gap 是完整跨进程 daemon orchestration / 多进程 cache 管理服务。
+//! 完整跨进程 daemon orchestration / 多进程 cache 管理服务已经降级为用户层工具或
+//! 独立项目职责，不作为当前 `tqsdk-data` 核心 public API 继续推进。
 //! 更完整的 desired API sketch 见
 //! `api_contract_s18_cross_process_cache_service.rs`。
 //!
