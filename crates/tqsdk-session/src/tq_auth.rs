@@ -36,10 +36,19 @@ fn add_route_domain(topology: &mut SessionTopology, label: &str, domain: Protoco
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PasswordCredentials {
     username: String,
     password: String,
+}
+
+impl std::fmt::Debug for PasswordCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordCredentials")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl PasswordCredentials {

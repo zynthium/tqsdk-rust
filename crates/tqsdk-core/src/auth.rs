@@ -1,14 +1,25 @@
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
 use crate::Result;
 use crate::ids::AuthId;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthContext {
     pub access_token: String,
     pub auth_id: Option<AuthId>,
     pub features: Vec<String>,
+}
+
+impl fmt::Debug for AuthContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthContext")
+            .field("access_token", &"[REDACTED]")
+            .field("auth_id", &self.auth_id)
+            .field("features", &self.features)
+            .finish()
+    }
 }
 
 impl AuthContext {

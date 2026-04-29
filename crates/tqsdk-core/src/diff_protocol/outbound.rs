@@ -288,7 +288,7 @@ impl DiffSetChartRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct DiffLoginRequest {
     pub(crate) bid: String,
     pub(crate) user_name: String,
@@ -297,6 +297,20 @@ pub(crate) struct DiffLoginRequest {
     pub(crate) client_system_info: Option<String>,
     pub(crate) broker_id: Option<String>,
     pub(crate) front: Option<String>,
+}
+
+impl std::fmt::Debug for DiffLoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiffLoginRequest")
+            .field("bid", &self.bid)
+            .field("user_name", &self.user_name)
+            .field("password", &"[REDACTED]")
+            .field("client_app_id", &self.client_app_id)
+            .field("client_system_info", &self.client_system_info)
+            .field("broker_id", &self.broker_id)
+            .field("front", &self.front)
+            .finish()
+    }
 }
 
 impl DiffLoginRequest {
@@ -339,7 +353,7 @@ pub(crate) struct DiffPreInsertOrderRequest {
     pub(crate) contingent_condition: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct DiffTransferRequest {
     pub(crate) user_id: String,
     pub(crate) bank_id: String,
@@ -348,6 +362,20 @@ pub(crate) struct DiffTransferRequest {
     pub(crate) future_password: String,
     pub(crate) currency: String,
     pub(crate) amount: Value,
+}
+
+impl std::fmt::Debug for DiffTransferRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiffTransferRequest")
+            .field("user_id", &self.user_id)
+            .field("bank_id", &self.bank_id)
+            .field("bank_password", &"[REDACTED]")
+            .field("future_account", &self.future_account)
+            .field("future_password", &"[REDACTED]")
+            .field("currency", &self.currency)
+            .field("amount", &self.amount)
+            .finish()
+    }
 }
 
 #[cfg(test)]

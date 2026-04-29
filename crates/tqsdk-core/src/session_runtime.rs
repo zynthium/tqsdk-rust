@@ -850,7 +850,7 @@ impl SessionRuntime {
         err: &crate::ContractError,
         caused_by: Vec<CommandId>,
     ) -> Result<()> {
-        if let Some(_commit) = self.handle.ingest(
+        let _ = self.handle.ingest(
             RuntimeInput::Internal(InternalEvent {
                 label,
                 payload: Some(json!({
@@ -860,9 +860,9 @@ impl SessionRuntime {
             }),
             caused_by.clone(),
             CommitScope::SessionTransition,
-        )? {}
+        )?;
 
-        if let Some(_commit) = self.handle.record_session_phase(
+        let _ = self.handle.record_session_phase(
             SessionPhase::Closed,
             Some(json!({
                 "reason": label,
@@ -870,7 +870,7 @@ impl SessionRuntime {
                 "message": err.to_string(),
             })),
             caused_by,
-        )? {}
+        )?;
 
         Ok(())
     }

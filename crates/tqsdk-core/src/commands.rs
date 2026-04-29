@@ -52,7 +52,7 @@ pub struct MarketChartCommand {
     pub focus_position: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TradeCommand {
     Login(TradeLoginCommand),
     ConfirmSettlement {
@@ -89,6 +89,66 @@ pub enum TradeCommand {
     },
 }
 
+impl std::fmt::Debug for TradeCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Login(cmd) => f.debug_tuple("Login").field(cmd).finish(),
+            Self::ConfirmSettlement { account_id } => f
+                .debug_struct("ConfirmSettlement")
+                .field("account_id", account_id)
+                .finish(),
+            Self::QueryAccountInfo { account_id } => f
+                .debug_struct("QueryAccountInfo")
+                .field("account_id", account_id)
+                .finish(),
+            Self::QueryAccountRegister { account_id } => f
+                .debug_struct("QueryAccountRegister")
+                .field("account_id", account_id)
+                .finish(),
+            Self::QuerySettlementInfo {
+                account_id,
+                trading_day,
+            } => f
+                .debug_struct("QuerySettlementInfo")
+                .field("account_id", account_id)
+                .field("trading_day", trading_day)
+                .finish(),
+            Self::PreInsertOrder(cmd) => f.debug_tuple("PreInsertOrder").field(cmd).finish(),
+            Self::InsertOrder(cmd) => f.debug_tuple("InsertOrder").field(cmd).finish(),
+            Self::CancelOrder {
+                account_id,
+                order_id,
+            } => f
+                .debug_struct("CancelOrder")
+                .field("account_id", account_id)
+                .field("order_id", order_id)
+                .finish(),
+            Self::Transfer {
+                account_id,
+                bank_id,
+                future_account,
+                currency,
+                amount,
+                ..
+            } => f
+                .debug_struct("Transfer")
+                .field("account_id", account_id)
+                .field("bank_id", bank_id)
+                .field("bank_password", &"[REDACTED]")
+                .field("future_account", future_account)
+                .field("future_password", &"[REDACTED]")
+                .field("currency", currency)
+                .field("amount", amount)
+                .finish(),
+            Self::SetRiskManagementRule { account_id, rule } => f
+                .debug_struct("SetRiskManagementRule")
+                .field("account_id", account_id)
+                .field("rule", rule)
+                .finish(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeAccountType {
     Future,
@@ -104,7 +164,7 @@ impl TradeAccountType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TradeLoginCommand {
     pub account_id: AccountId,
     pub broker_id: String,
@@ -114,6 +174,21 @@ pub struct TradeLoginCommand {
     pub front_url: Option<String>,
     pub client_app_id: Option<String>,
     pub client_system_info: Option<String>,
+}
+
+impl std::fmt::Debug for TradeLoginCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TradeLoginCommand")
+            .field("account_id", &self.account_id)
+            .field("broker_id", &self.broker_id)
+            .field("password", &"[REDACTED]")
+            .field("account_type", &self.account_type)
+            .field("front_broker", &self.front_broker)
+            .field("front_url", &self.front_url)
+            .field("client_app_id", &self.client_app_id)
+            .field("client_system_info", &self.client_system_info)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
