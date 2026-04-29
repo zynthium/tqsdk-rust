@@ -994,6 +994,8 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
+        // SAFETY: the static null-data waker owns no resources and is only
+        // used to poll test futures that are expected to complete synchronously.
         unsafe { Waker::from_raw(noop_raw_waker()) }
     }
 

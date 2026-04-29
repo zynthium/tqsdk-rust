@@ -19,6 +19,10 @@ const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
+// These are ShinnyTech's public OAuth2 client identifiers, not user
+// credentials. User passwords and access tokens still come from the runtime
+// authentication flow; if the platform rotates this public client, a builder
+// injection point can be considered in a separate API design.
 const CLIENT_ID: &str = "shinny_tq";
 const CLIENT_SECRET: &str = "be30b9f4-6862-488a-99ad-21bde0400081";
 

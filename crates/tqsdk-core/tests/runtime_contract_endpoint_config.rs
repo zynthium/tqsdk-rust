@@ -25,6 +25,9 @@ fn endpoint_config_from_env_reads_only_official_runtime_override_env_vars() {
     ];
     let saved = snapshot_env(&keys);
 
+    // SAFETY: endpoint config tests hold ENV_MUTEX while mutating process-wide
+    // environment variables, so no other test in this module observes partial
+    // updates during the scoped setup.
     unsafe {
         std::env::set_var("TQ_AUTH_URL", "https://auth.env");
         std::env::set_var("TQ_MD_URL", "wss://md.env");
@@ -61,6 +64,9 @@ fn endpoint_config_from_env_ignores_non_runtime_or_misaligned_env_vars() {
     let saved = snapshot_env(&keys);
     clear_env(&keys);
 
+    // SAFETY: endpoint config tests hold ENV_MUTEX while mutating process-wide
+    // environment variables, so these ignored keys are scoped to this serialized
+    // test section.
     unsafe {
         std::env::set_var("TQ_INS_URL", "https://ins.env/graphql");
         std::env::set_var(
@@ -119,6 +125,8 @@ fn snapshot_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
 
 fn clear_env(keys: &[&str]) {
     for key in keys {
+        // SAFETY: callers hold ENV_MUTEX, serializing process-wide environment
+        // mutation for the duration of each endpoint config test.
         unsafe {
             std::env::remove_var(key);
         }
@@ -128,9 +136,14 @@ fn clear_env(keys: &[&str]) {
 fn restore_env(saved: Vec<(String, Option<String>)>) {
     for (key, value) in saved {
         match value {
+            // SAFETY: callers hold ENV_MUTEX, so restoring saved variables
+            // cannot race with another endpoint config test in this module.
             Some(value) => unsafe {
                 std::env::set_var(&key, value);
             },
+            // SAFETY: callers hold ENV_MUTEX, so removing variables absent in
+            // the saved snapshot is serialized with all other test environment
+            // mutation here.
             None => unsafe {
                 std::env::remove_var(&key);
             },

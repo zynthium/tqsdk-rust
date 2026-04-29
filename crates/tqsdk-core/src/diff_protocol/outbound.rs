@@ -99,6 +99,8 @@ pub(crate) enum DiffProtocolMessage {
     #[serde(rename = "set_risk_management_rule")]
     SetRiskManagementRule {
         user_id: String,
+        // Merged manually in `into_value()` so caller-provided rule fields
+        // cannot override reserved protocol fields such as `aid` and `user_id`.
         #[serde(skip)]
         rule: Map<String, Value>,
     },
