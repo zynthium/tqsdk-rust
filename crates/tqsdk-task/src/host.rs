@@ -201,10 +201,12 @@ impl TaskHost {
         };
         self.check_risk(&intent)?;
 
-        self.api
+        let order: tqsdk_wait::OrderRef = self
+            .api
             .insert_order(&account_id, &symbol, direction, offset, volume, limit_price)
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.record_submitted_order(&intent)?;
+        Ok(order)
     }
 
     pub(crate) async fn submit_task_order_once(
@@ -218,25 +220,29 @@ impl TaskHost {
     }
 
     pub(crate) fn preflight_task_order(&self, intent: &TaskOrderIntent) -> Result<()> {
-        if intent.volume <= 0 {
-            return Err(TaskError::InvalidState("order volume must be positive"));
-        }
-        if intent.offset.is_none() {
-            return Err(TaskError::Unsupported(
-                "task orders require explicit offset",
-            ));
-        }
-        let limit_price = intent
-            .limit_price
-            .ok_or(TaskError::InvalidState("limit price is required"))?;
-        if !limit_price.is_finite() {
-            return Err(TaskError::InvalidState("limit price must be finite"));
+        self.preflight_task_orders(std::slice::from_ref(intent))
+    }
+
+    pub(crate) fn preflight_task_orders(&self, intents: &[TaskOrderIntent]) -> Result<()> {
+        for intent in intents {
+            validate_task_order_intent(intent)?;
+            self.registry.with(|registry| {
+                registry.check_manual_order_allowed(&intent.account_id, &intent.symbol)
+            })?;
         }
 
-        self.registry.with(|registry| {
-            registry.check_manual_order_allowed(&intent.account_id, &intent.symbol)
-        })?;
-        self.check_risk(intent)?;
+        let Some(risk) = &self.risk else {
+            return Ok(());
+        };
+        let mut risk = risk.clone();
+        for intent in intents {
+            match risk.check(&self.api, intent)? {
+                RiskDecision::Accepted => risk.record_accepted_order(intent)?,
+                RiskDecision::Rejected(rejection) => {
+                    return Err(TaskError::RiskRejected(rejection));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -245,6 +251,8 @@ impl TaskHost {
         intent: TaskOrderIntent,
         client_order_id: impl Into<ClientOrderId>,
     ) -> Result<OrderTicket> {
+        validate_task_order_intent(&intent)?;
+        self.check_risk(&intent)?;
         let offset = intent.offset.ok_or(TaskError::Unsupported(
             "task orders require explicit offset",
         ))?;
@@ -252,14 +260,35 @@ impl TaskHost {
             .limit_price
             .ok_or(TaskError::InvalidState("limit price is required"))?;
 
-        self.api
-            .limit_order(intent.account_id, intent.symbol)
+        let ticket: OrderTicket = self
+            .api
+            .limit_order(intent.account_id.clone(), intent.symbol.clone())
             .client_intent(client_order_id)
             .side(intent.direction, offset, intent.volume)
             .at(limit_price)
             .send_once()
-            .await
-            .map_err(Into::into)
+            .await?;
+        if ticket.was_submitted() {
+            self.record_submitted_order(&intent)?;
+        }
+        Ok(ticket)
+    }
+
+    fn check_risk(&self, intent: &TaskOrderIntent) -> Result<()> {
+        let Some(risk) = &self.risk else {
+            return Ok(());
+        };
+        match risk.check(&self.api, intent)? {
+            RiskDecision::Accepted => Ok(()),
+            RiskDecision::Rejected(rejection) => Err(TaskError::RiskRejected(rejection)),
+        }
+    }
+
+    fn record_submitted_order(&mut self, intent: &TaskOrderIntent) -> Result<()> {
+        let Some(risk) = &mut self.risk else {
+            return Ok(());
+        };
+        risk.record_accepted_order(intent)
     }
 
     pub async fn cancel_order_guarded(
@@ -281,24 +310,39 @@ impl TaskHost {
             account_id: account_id.clone(),
             order_id: order_id.clone(),
         })?;
+        let exchange_id =
+            order_exchange_id(&order, &symbol).ok_or_else(|| TaskError::OrderNotReady {
+                account_id: account_id.clone(),
+                order_id: order_id.clone(),
+            })?;
 
         self.registry
             .with(|registry| registry.check_manual_order_allowed(&account_id, &symbol))?;
+        self.check_order_operation_risk(&account_id, exchange_id)?;
 
         self.api
             .cancel_order(&account_id, &order_id)
             .await
-            .map_err(Into::into)
+            .map_err(TaskError::from)?;
+        self.record_order_operation(&account_id, exchange_id)?;
+        Ok(())
     }
 
-    fn check_risk(&self, intent: &TaskOrderIntent) -> Result<()> {
+    fn check_order_operation_risk(&self, account_id: &str, exchange_id: &str) -> Result<()> {
         let Some(risk) = &self.risk else {
             return Ok(());
         };
-        match risk.check(&self.api, intent)? {
+        match risk.check_order_operation(account_id, exchange_id)? {
             RiskDecision::Accepted => Ok(()),
             RiskDecision::Rejected(rejection) => Err(TaskError::RiskRejected(rejection)),
         }
+    }
+
+    fn record_order_operation(&mut self, account_id: &str, exchange_id: &str) -> Result<()> {
+        let Some(risk) = &mut self.risk else {
+            return Ok(());
+        };
+        risk.record_order_operation(account_id, exchange_id)
     }
 
     #[doc(hidden)]
@@ -340,6 +384,24 @@ impl TaskHost {
     }
 }
 
+fn validate_task_order_intent(intent: &TaskOrderIntent) -> Result<()> {
+    if intent.volume <= 0 {
+        return Err(TaskError::InvalidState("order volume must be positive"));
+    }
+    if intent.offset.is_none() {
+        return Err(TaskError::Unsupported(
+            "task orders require explicit offset",
+        ));
+    }
+    let limit_price = intent
+        .limit_price
+        .ok_or(TaskError::InvalidState("limit price is required"))?;
+    if !limit_price.is_finite() {
+        return Err(TaskError::InvalidState("limit price must be finite"));
+    }
+    Ok(())
+}
+
 fn order_symbol(order: &Order) -> Option<String> {
     if order.instrument_id.is_empty() {
         return None;
@@ -354,4 +416,14 @@ fn order_symbol(order: &Order) -> Option<String> {
     }
 
     Some(format!("{}.{}", order.exchange_id, order.instrument_id))
+}
+
+fn order_exchange_id<'a>(order: &'a Order, symbol: &'a str) -> Option<&'a str> {
+    if !order.exchange_id.is_empty() {
+        return Some(order.exchange_id.as_str());
+    }
+    symbol
+        .split_once('.')
+        .map(|(exchange_id, _)| exchange_id)
+        .filter(|exchange_id| !exchange_id.is_empty())
 }

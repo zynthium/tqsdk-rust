@@ -63,6 +63,8 @@
 - guarded `insert_order` / `cancel_order`
 - typed `TaskHost::orders(...)` order builder
 - `RiskEngine` / `RiskRejection` 最小前置风控
+  - 覆盖官方 Python SDK 同类基础规则：开仓次数、开仓手数、合约组累计开仓手数和订单操作频率
+  - 这些计数是 task host 本进程内用量，不是跨进程持久风控服务
 - `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
 - `AccountGroup` / `MultiAccountOrderTicket` 多账户执行 foundation
 - `StrategyHost` / `StrategyContext`
@@ -389,15 +391,34 @@ pub struct RiskEngine {
 impl RiskEngine {
     pub fn new() -> Self;
     pub fn max_order_volume(self, max: i64) -> Self;
+    pub fn daily_open_count_limit<I, S>(self, max: i64, symbols: I) -> Self;
+    pub fn daily_open_volume_limit<I, S>(self, max: i64, symbols: I) -> Self;
+    pub fn accumulated_open_volume_limit<I, S>(self, max: i64, symbols: I) -> Self;
+    pub fn order_rate_limit_per_second<I, S>(self, max: i64, exchanges: I) -> Self;
     pub fn min_available(self, min_available: f64) -> Self;
     pub fn max_net_position(self, max_abs_net: i64) -> Self;
     pub fn max_price_deviation(self, max_abs_deviation: f64) -> Self;
+    pub fn instrument_specs<I>(self, specs: I) -> Self;
+    pub fn reset_daily_usage(&mut self);
+    pub fn record_accepted_order(&mut self, intent: &TaskOrderIntent) -> tqsdk_task::Result<()>;
 
     pub fn check(
         &self,
         api: &tqsdk_wait::TqApi,
         intent: &TaskOrderIntent,
     ) -> tqsdk_task::Result<RiskDecision>;
+
+    pub fn check_report(
+        &self,
+        api: &tqsdk_wait::TqApi,
+        intent: &TaskOrderIntent,
+    ) -> tqsdk_task::Result<RiskCheckReport>;
+
+    pub fn project_order(
+        &self,
+        api: &tqsdk_wait::TqApi,
+        intent: &TaskOrderIntent,
+    ) -> tqsdk_task::Result<RiskProjectionReport>;
 }
 
 pub enum RiskDecision {
@@ -407,12 +428,17 @@ pub enum RiskDecision {
 
 pub enum RiskRejection {
     MaxOrderVolumeExceeded { /* typed fields */ },
+    DailyOpenCountLimitExceeded { /* typed fields */ },
+    DailyOpenVolumeLimitExceeded { /* typed fields */ },
+    AccumulatedOpenVolumeLimitExceeded { /* typed fields */ },
+    OrderRateLimitExceeded { /* typed fields */ },
     MissingAccount { /* typed fields */ },
     AvailableBelowMinimum { /* typed fields */ },
     MissingPosition { /* typed fields */ },
     NetPositionLimitExceeded { /* typed fields */ },
     MissingQuote { /* typed fields */ },
     PriceDeviationExceeded { /* typed fields */ },
+    PriceNotOnTick { /* typed fields */ },
 }
 ```
 
@@ -421,9 +447,14 @@ pub enum RiskRejection {
 - 风控属于执行工具层，不下沉到 `tqsdk-core` 或 `tqsdk-session`。
 - 规则读取 `TqApi` 的 account / position / quote refs，使用同一 runtime 状态树和
   partition read 面，不维护私有资金或持仓状态。
+- `daily_open_count_limit` / `daily_open_volume_limit` /
+  `accumulated_open_volume_limit` / `order_rate_limit_per_second` 对齐官方
+  Python SDK 的基础风控规则形态，但只记录 task host 本进程内用量。
+- `TaskHost` 在成功报单后记录开仓/频率用量；`cancel_order_guarded` 也会经过订单
+  操作频率限制。
 - 风控拒绝必须是 typed reason，不能要求业务代码解析字符串拒单原因。
-- 这一版只覆盖最小 pre-trade gate；合约 metadata、组合保证金 what-if、
-  多腿 / 多账户联合限额属于后续 execution/risk layer 扩展。
+- 这一版只覆盖最小 pre-trade gate；组合保证金 what-if、涨跌停/品种级规则、
+  多腿 / 多账户联合限额、durable audit 和跨进程风控服务属于后续上层扩展。
 
 ### execution group foundation
 

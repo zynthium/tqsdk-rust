@@ -97,6 +97,53 @@ fn seed_account_position_quote(
         .expect("seed account/position commit should produce a commit");
 }
 
+fn seed_order_commit(host: &TaskHost, account_id: &str, symbol: &str, order_id: &str) {
+    let (exchange_id, instrument_id) = symbol
+        .split_once('.')
+        .expect("test symbol should contain an exchange prefix");
+    host.api()
+        .handle_for_test()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            account_id: {
+                                "orders": {
+                                    order_id: {
+                                        "seqno": 1,
+                                        "user_id": account_id,
+                                        "order_id": order_id,
+                                        "exchange_order_id": "exchange-order-1",
+                                        "exchange_id": exchange_id,
+                                        "instrument_id": instrument_id,
+                                        "direction": "BUY",
+                                        "offset": "OPEN",
+                                        "volume_orign": 1,
+                                        "volume_left": 1,
+                                        "limit_price": 3678.0,
+                                        "price_type": "LIMIT",
+                                        "volume_condition": "ANY",
+                                        "time_condition": "GFD",
+                                        "insert_date_time": 1_713_660_000_000_000_000_i64,
+                                        "status": "ALIVE",
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed order commit should produce a commit");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn task_order_builder_submits_typed_client_intent_without_json_price() {
     let mut host = seeded_host();
@@ -280,6 +327,245 @@ fn risk_engine_report_exposes_revision_bound_decision() {
         })
     );
     assert_eq!(rejected_report.revision(), accepted_report.revision());
+}
+
+#[test]
+fn risk_engine_tracks_daily_open_count_by_account_and_symbol() {
+    let host = seeded_host();
+    let mut risk = RiskEngine::new().daily_open_count_limit(1, ["SHFE.rb2601"]);
+    let intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 1,
+        limit_price: Some(3_660.0),
+    };
+
+    assert!(
+        risk.check_report(host.api(), &intent)
+            .unwrap()
+            .decision()
+            .is_accepted()
+    );
+    risk.record_accepted_order(&intent).unwrap();
+
+    let report = risk.check_report(host.api(), &intent).unwrap();
+    assert_eq!(
+        report.decision().rejection(),
+        Some(&RiskRejection::DailyOpenCountLimitExceeded {
+            account_id: "sim".to_string(),
+            symbol: "SHFE.rb2601".to_string(),
+            current: 1,
+            requested: 1,
+            max: 1,
+        })
+    );
+
+    let close_intent = TaskOrderIntent {
+        offset: Some(TradeOffset::Close),
+        ..intent
+    };
+    assert!(
+        risk.check_report(host.api(), &close_intent)
+            .unwrap()
+            .decision()
+            .is_accepted()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_host_records_daily_open_volume_after_submitted_order() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().daily_open_volume_limit(2, ["SHFE.rb2601"]));
+
+    let first = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 2)
+        .limit(3_660.0)
+        .send_once("risk-daily-volume-1")
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    assert_eq!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_660.0)
+        .send_once("risk-daily-volume-2")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TaskError::RiskRejected(RiskRejection::DailyOpenVolumeLimitExceeded {
+            account_id: "sim".to_string(),
+            symbol: "SHFE.rb2601".to_string(),
+            current: 2,
+            requested: 1,
+            max: 2,
+        })
+    );
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execution_group_checks_daily_open_count_limit_before_partial_submit() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().daily_open_count_limit(1, ["SHFE.rb2601"]));
+
+    let err = host
+        .execution_group("sim")
+        .client_group_id("risk-group-preflight")
+        .leg("SHFE.rb2601")
+        .buy_open(1)
+        .limit(3_660.0)
+        .leg("SHFE.rb2601")
+        .buy_open(1)
+        .limit(3_660.0)
+        .send_once()
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TaskError::RiskRejected(RiskRejection::DailyOpenCountLimitExceeded {
+            account_id: "sim".to_string(),
+            symbol: "SHFE.rb2601".to_string(),
+            current: 1,
+            requested: 1,
+            max: 1,
+        })
+    );
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_host_rejects_order_rate_limit_for_same_exchange() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().order_rate_limit_per_second(1, ["SHFE"]));
+
+    let first = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_660.0)
+        .send_once("risk-rate-1")
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    assert_eq!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = host
+        .orders("sim")
+        .buy_open("SHFE.rb2602", 1)
+        .limit(3_660.0)
+        .send_once("risk-rate-2")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TaskError::RiskRejected(RiskRejection::OrderRateLimitExceeded {
+            account_id: "sim".to_string(),
+            exchange_id: "SHFE".to_string(),
+            current: 1,
+            requested: 1,
+            max: 1,
+        })
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_order_guarded_uses_order_rate_limit() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().order_rate_limit_per_second(1, ["SHFE"]));
+    seed_order_commit(&host, "sim", "SHFE.rb2601", "order-1");
+
+    let first = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_660.0)
+        .send_once("risk-rate-before-cancel")
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    host.api().handle_for_test().drain_dispatches().unwrap();
+
+    let err = host
+        .cancel_order_guarded("sim", "order-1")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        TaskError::RiskRejected(RiskRejection::OrderRateLimitExceeded {
+            account_id: "sim".to_string(),
+            exchange_id: "SHFE".to_string(),
+            current: 1,
+            requested: 1,
+            max: 1,
+        })
+    );
+}
+
+#[test]
+fn risk_engine_tracks_accumulated_open_volume_across_symbol_group() {
+    let host = seeded_host();
+    let mut risk =
+        RiskEngine::new().accumulated_open_volume_limit(3, ["SHFE.rb2601", "SHFE.rb2602"]);
+    let first = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 2,
+        limit_price: Some(3_660.0),
+    };
+    let second = TaskOrderIntent {
+        symbol: "SHFE.rb2602".to_string(),
+        volume: 2,
+        ..first.clone()
+    };
+
+    risk.record_accepted_order(&first).unwrap();
+
+    let report = risk.check_report(host.api(), &second).unwrap();
+    assert_eq!(
+        report.decision().rejection(),
+        Some(&RiskRejection::AccumulatedOpenVolumeLimitExceeded {
+            account_id: "sim".to_string(),
+            symbols: vec!["SHFE.rb2601".to_string(), "SHFE.rb2602".to_string()],
+            current: 2,
+            requested: 2,
+            max: 3,
+        })
+    );
 }
 
 #[test]

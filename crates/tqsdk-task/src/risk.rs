@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use tqsdk_core::{AccountId, Revision, Symbol, TradeDirection, TradeOffset};
 
@@ -122,6 +123,34 @@ pub enum RiskRejection {
         requested: i64,
         max: i64,
     },
+    DailyOpenCountLimitExceeded {
+        account_id: String,
+        symbol: String,
+        current: i64,
+        requested: i64,
+        max: i64,
+    },
+    DailyOpenVolumeLimitExceeded {
+        account_id: String,
+        symbol: String,
+        current: i64,
+        requested: i64,
+        max: i64,
+    },
+    AccumulatedOpenVolumeLimitExceeded {
+        account_id: String,
+        symbols: Vec<String>,
+        current: i64,
+        requested: i64,
+        max: i64,
+    },
+    OrderRateLimitExceeded {
+        account_id: String,
+        exchange_id: String,
+        current: i64,
+        requested: i64,
+        max: i64,
+    },
     MissingAccount {
         account_id: String,
     },
@@ -163,13 +192,45 @@ struct InstrumentRiskRule {
     volume_multiple: i64,
 }
 
-/// Stateless pre-trade risk gate for task-level order entrypoints.
+#[derive(Debug, Clone, PartialEq)]
+struct StringListRiskRule {
+    max: i64,
+    values: Vec<String>,
+}
+
+impl StringListRiskRule {
+    fn applies_to(&self, value: &str) -> bool {
+        self.values.iter().any(|candidate| candidate == value)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RiskDailyUsage {
+    open_counts: HashMap<(String, String), i64>,
+    open_volumes: HashMap<(String, String), i64>,
+    accumulated_open_volumes: HashMap<(String, usize), i64>,
+    order_operation_timestamps: HashMap<(String, String), Vec<Instant>>,
+}
+
+const ORDER_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Pre-trade risk gate for task-level order entrypoints.
+///
+/// Snapshot checks are revision-bound. Daily open counters are process-local
+/// usage limits recorded by [`TaskHost`](crate::TaskHost) after a submitted
+/// order request, matching the core SDK rule shape without adding durable
+/// audit or cross-process risk management.
 #[derive(Debug, Clone, Default)]
 pub struct RiskEngine {
     max_order_volume: Option<i64>,
     min_available: Option<f64>,
     max_abs_net_position: Option<i64>,
     max_abs_price_deviation: Option<f64>,
+    daily_open_count_limits: Vec<StringListRiskRule>,
+    daily_open_volume_limits: Vec<StringListRiskRule>,
+    accumulated_open_volume_limits: Vec<StringListRiskRule>,
+    order_rate_limits: Vec<StringListRiskRule>,
+    daily_usage: RiskDailyUsage,
     instrument_rules: HashMap<String, InstrumentRiskRule>,
 }
 
@@ -183,6 +244,127 @@ impl RiskEngine {
     pub fn max_order_volume(mut self, max: i64) -> Self {
         self.max_order_volume = Some(max);
         self
+    }
+
+    #[must_use]
+    pub fn daily_open_count_limit<I, S>(mut self, max: i64, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.daily_open_count_limits.push(StringListRiskRule {
+            max,
+            values: collect_strings(symbols),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn daily_open_volume_limit<I, S>(mut self, max: i64, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.daily_open_volume_limits.push(StringListRiskRule {
+            max,
+            values: collect_strings(symbols),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn accumulated_open_volume_limit<I, S>(mut self, max: i64, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.accumulated_open_volume_limits
+            .push(StringListRiskRule {
+                max,
+                values: collect_strings(symbols),
+            });
+        self
+    }
+
+    #[must_use]
+    pub fn order_rate_limit_per_second<I, S>(mut self, max: i64, exchanges: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.order_rate_limits.push(StringListRiskRule {
+            max,
+            values: collect_strings(exchanges),
+        });
+        self
+    }
+
+    pub fn reset_daily_usage(&mut self) {
+        self.daily_usage = RiskDailyUsage::default();
+    }
+
+    pub fn record_accepted_order(&mut self, intent: &TaskOrderIntent) -> Result<()> {
+        self.validate_usage_limits()?;
+        self.record_order_operation_for_symbol(&intent.account_id, &intent.symbol)?;
+        if !is_open_intent(intent) {
+            return Ok(());
+        }
+
+        let account_symbol_key = (intent.account_id.clone(), intent.symbol.clone());
+        if self
+            .daily_open_count_limits
+            .iter()
+            .any(|rule| rule.applies_to(&intent.symbol))
+        {
+            increment_usage(
+                &mut self.daily_usage.open_counts,
+                account_symbol_key.clone(),
+                1,
+            );
+        }
+        if self
+            .daily_open_volume_limits
+            .iter()
+            .any(|rule| rule.applies_to(&intent.symbol))
+        {
+            increment_usage(
+                &mut self.daily_usage.open_volumes,
+                account_symbol_key,
+                intent.volume,
+            );
+        }
+        for (index, rule) in self.accumulated_open_volume_limits.iter().enumerate() {
+            if rule.applies_to(&intent.symbol) {
+                increment_usage(
+                    &mut self.daily_usage.accumulated_open_volumes,
+                    (intent.account_id.clone(), index),
+                    intent.volume,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_order_operation(
+        &self,
+        account_id: &str,
+        exchange_id: &str,
+    ) -> Result<RiskDecision> {
+        let now = Instant::now();
+        Ok(
+            match self.order_rate_rejection(account_id, exchange_id, now)? {
+                Some(rejection) => RiskDecision::Rejected(rejection),
+                None => RiskDecision::Accepted,
+            },
+        )
+    }
+
+    pub(crate) fn record_order_operation(
+        &mut self,
+        account_id: &str,
+        exchange_id: &str,
+    ) -> Result<()> {
+        self.record_order_operation_at(account_id, exchange_id, Instant::now())
     }
 
     #[must_use]
@@ -298,6 +480,105 @@ impl RiskEngine {
                         max,
                     }),
                 });
+            }
+        }
+
+        if !self.order_rate_limits.is_empty() {
+            self.validate_usage_limits()?;
+            let exchange_id = exchange_id_from_symbol(&intent.symbol).ok_or(
+                TaskError::InvalidState("risk order rate requires exchange-prefixed symbol"),
+            )?;
+            if let Some(rejection) =
+                self.order_rate_rejection(&intent.account_id, exchange_id, Instant::now())?
+            {
+                return Ok(RiskCheckReport {
+                    revision,
+                    decision: RiskDecision::Rejected(rejection),
+                });
+            }
+        }
+
+        if is_open_intent(intent) {
+            self.validate_usage_limits()?;
+            for rule in &self.daily_open_count_limits {
+                if !rule.applies_to(&intent.symbol) {
+                    continue;
+                }
+                let current = self
+                    .daily_usage
+                    .open_counts
+                    .get(&(intent.account_id.clone(), intent.symbol.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                let requested = 1;
+                if current.saturating_add(requested) > rule.max {
+                    return Ok(RiskCheckReport {
+                        revision,
+                        decision: RiskDecision::Rejected(
+                            RiskRejection::DailyOpenCountLimitExceeded {
+                                account_id: intent.account_id.clone(),
+                                symbol: intent.symbol.clone(),
+                                current,
+                                requested,
+                                max: rule.max,
+                            },
+                        ),
+                    });
+                }
+            }
+
+            for rule in &self.daily_open_volume_limits {
+                if !rule.applies_to(&intent.symbol) {
+                    continue;
+                }
+                let current = self
+                    .daily_usage
+                    .open_volumes
+                    .get(&(intent.account_id.clone(), intent.symbol.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                let requested = intent.volume;
+                if current.saturating_add(requested) > rule.max {
+                    return Ok(RiskCheckReport {
+                        revision,
+                        decision: RiskDecision::Rejected(
+                            RiskRejection::DailyOpenVolumeLimitExceeded {
+                                account_id: intent.account_id.clone(),
+                                symbol: intent.symbol.clone(),
+                                current,
+                                requested,
+                                max: rule.max,
+                            },
+                        ),
+                    });
+                }
+            }
+
+            for (index, rule) in self.accumulated_open_volume_limits.iter().enumerate() {
+                if !rule.applies_to(&intent.symbol) {
+                    continue;
+                }
+                let current = self
+                    .daily_usage
+                    .accumulated_open_volumes
+                    .get(&(intent.account_id.clone(), index))
+                    .copied()
+                    .unwrap_or(0);
+                let requested = intent.volume;
+                if current.saturating_add(requested) > rule.max {
+                    return Ok(RiskCheckReport {
+                        revision,
+                        decision: RiskDecision::Rejected(
+                            RiskRejection::AccumulatedOpenVolumeLimitExceeded {
+                                account_id: intent.account_id.clone(),
+                                symbols: rule.values.clone(),
+                                current,
+                                requested,
+                                max: rule.max,
+                            },
+                        ),
+                    });
+                }
             }
         }
 
@@ -427,6 +708,131 @@ impl RiskEngine {
             decision: RiskDecision::Accepted,
         })
     }
+
+    fn validate_usage_limits(&self) -> Result<()> {
+        for rule in self
+            .daily_open_count_limits
+            .iter()
+            .chain(self.daily_open_volume_limits.iter())
+            .chain(self.accumulated_open_volume_limits.iter())
+        {
+            if rule.max < 0 {
+                return Err(TaskError::InvalidState(
+                    "risk daily open limit must be non-negative",
+                ));
+            }
+        }
+        for rule in &self.order_rate_limits {
+            if rule.max <= 0 {
+                return Err(TaskError::InvalidState(
+                    "risk order rate limit must be positive",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn order_rate_rejection(
+        &self,
+        account_id: &str,
+        exchange_id: &str,
+        now: Instant,
+    ) -> Result<Option<RiskRejection>> {
+        self.validate_usage_limits()?;
+        for rule in &self.order_rate_limits {
+            if !rule.applies_to(exchange_id) {
+                continue;
+            }
+            let current = self.current_order_operation_count(account_id, exchange_id, now);
+            let requested = 1;
+            if current.saturating_add(requested) > rule.max {
+                return Ok(Some(RiskRejection::OrderRateLimitExceeded {
+                    account_id: account_id.to_owned(),
+                    exchange_id: exchange_id.to_owned(),
+                    current,
+                    requested,
+                    max: rule.max,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn current_order_operation_count(
+        &self,
+        account_id: &str,
+        exchange_id: &str,
+        now: Instant,
+    ) -> i64 {
+        self.daily_usage
+            .order_operation_timestamps
+            .get(&(account_id.to_owned(), exchange_id.to_owned()))
+            .map(|timestamps| {
+                timestamps
+                    .iter()
+                    .filter(|timestamp| {
+                        now.saturating_duration_since(**timestamp) < ORDER_RATE_WINDOW
+                    })
+                    .count() as i64
+            })
+            .unwrap_or(0)
+    }
+
+    fn record_order_operation_for_symbol(&mut self, account_id: &str, symbol: &str) -> Result<()> {
+        if self.order_rate_limits.is_empty() {
+            return Ok(());
+        }
+        let exchange_id = exchange_id_from_symbol(symbol).ok_or(TaskError::InvalidState(
+            "risk order rate requires exchange-prefixed symbol",
+        ))?;
+        self.record_order_operation(account_id, exchange_id)
+    }
+
+    fn record_order_operation_at(
+        &mut self,
+        account_id: &str,
+        exchange_id: &str,
+        now: Instant,
+    ) -> Result<()> {
+        self.validate_usage_limits()?;
+        if !self
+            .order_rate_limits
+            .iter()
+            .any(|rule| rule.applies_to(exchange_id))
+        {
+            return Ok(());
+        }
+        let timestamps = self
+            .daily_usage
+            .order_operation_timestamps
+            .entry((account_id.to_owned(), exchange_id.to_owned()))
+            .or_default();
+        timestamps
+            .retain(|timestamp| now.saturating_duration_since(*timestamp) < ORDER_RATE_WINDOW);
+        timestamps.push(now);
+        Ok(())
+    }
+}
+
+fn collect_strings<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    values
+        .into_iter()
+        .map(|value| value.as_ref().to_owned())
+        .collect()
+}
+
+fn increment_usage<K>(usage: &mut HashMap<K, i64>, key: K, delta: i64)
+where
+    K: std::hash::Hash + Eq,
+{
+    usage
+        .entry(key)
+        .and_modify(|current| *current = current.saturating_add(delta))
+        .or_insert(delta);
 }
 
 fn validate_instrument_rule(rule: &InstrumentRiskRule) -> Result<()> {
@@ -449,6 +855,17 @@ fn price_is_on_tick(price: f64, price_tick: f64) -> bool {
     }
     let ticks = (price / price_tick).round();
     (price - ticks * price_tick).abs() <= price_tick * 1e-9
+}
+
+fn is_open_intent(intent: &TaskOrderIntent) -> bool {
+    matches!(intent.offset, Some(TradeOffset::Open))
+}
+
+fn exchange_id_from_symbol(symbol: &str) -> Option<&str> {
+    symbol
+        .split_once('.')
+        .map(|(exchange_id, _)| exchange_id)
+        .filter(|exchange_id| !exchange_id.is_empty())
 }
 
 fn project_net_position(current_net: i64, intent: &TaskOrderIntent) -> i64 {

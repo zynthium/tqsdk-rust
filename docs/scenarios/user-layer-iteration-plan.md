@@ -233,14 +233,22 @@ crate 分层合并成一份迭代计划。
 
 - `tqsdk-task::RiskEngine` 提供最小 typed pre-trade gate：
   - 单笔最大手数；
+  - 交易日内开仓次数；
+  - 交易日内单合约开仓手数；
+  - 合约组累计开仓手数；
+  - 按账户 + 交易所的一秒订单操作频率；
   - 最低可用资金；
   - 当前持仓截面上的最大净持仓；
-  - 基于当前 quote last price 的价格偏离限制。
+  - 基于当前 quote last price 的价格偏离限制；
+  - 基于 `InstrumentSpec` 的 tick size 校验和 contract multiplier notional projection。
 - `TaskHost::with_risk` / `set_risk` 将风控挂到执行 host 上。
 - `TaskHost::orders(account).buy_open(...).limit(...).send_once(...)` 提供 typed
   task-level order builder，并复用 `tqsdk-wait::OrderTicket` 和 session-scoped
   client intent 去重。
 - legacy `insert_order_guarded` 在配置 risk 后也会经过同一套 risk gate。
+- guarded `cancel_order_guarded` 会经过订单操作频率限制。
+- 开仓限额与订单频率是 `TaskHost` 本进程内用量计数，用于对齐官方 Python SDK
+  的基础风控规则形态；不伪装为跨进程持久审计或服务端风控替代。
 - 风控拒绝通过 `TaskError::RiskRejected(RiskRejection)` 返回 typed reason。
 - `RiskEngine::check_report(...)` 返回 revision-bound `RiskCheckReport`，用于
   typed 审计风控通过或拒绝原因。

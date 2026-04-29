@@ -1,7 +1,7 @@
 //! Scenario: 风控前置
 //!
 //! User goal:
-//! - 下单前检查资金、持仓、价格、合约 tick size 和单笔限额
+//! - 下单前检查资金、持仓、价格、合约 tick size、单笔限额、开仓限额和订单频率
 //! - 拒绝不安全订单
 //! - 留下可审计的 typed 拒绝原因
 //!
@@ -12,6 +12,7 @@
 //! - 风控检查可以返回带 revision 的 typed report 供审计
 //! - 风控试算可以返回 revision-bound projection，供下单前解释 projected position/notional
 //! - 合约 metadata 通过 `InstrumentSpec` 接入 task risk，而不是散落在策略代码
+//! - 官方同类的基础开仓次数、开仓手数和订单频率规则由 `RiskEngine` 记录本进程内用量
 //! - 订单价格和方向通过 typed builder 表达
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -27,7 +28,7 @@
 //! - tick size / contract multiplier 需要用户自己查询和手写校验
 //! - 规则拒绝原因不可审计
 //! - guarded 和 unguarded order API 容易混用
-//! - 用户必须手动同步订单去重和风控状态
+//! - 用户必须手动同步订单去重、开仓限额和订单频率状态
 //!
 //! Review questions:
 //! - 当前 API 是否自然表达前置风控？
@@ -48,6 +49,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let account_id = std::env::var("TQ_ACCOUNT_ID")?;
     let account_password = std::env::var("TQ_ACCOUNT_PASSWORD")?;
     let symbol = std::env::var("TQ_ORDER_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".into());
+    let exchange_id = symbol
+        .split_once('.')
+        .map(|(exchange_id, _)| exchange_id.to_owned())
+        .unwrap_or_else(|| "SHFE".into());
     let limit_price = std::env::var("TQ_ORDER_LIMIT_PRICE")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
@@ -77,6 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let risk = RiskEngine::new()
         .max_order_volume(3)
+        .daily_open_count_limit(10, [symbol.as_str()])
+        .daily_open_volume_limit(30, [symbol.as_str()])
+        .accumulated_open_volume_limit(50, [symbol.as_str()])
+        .order_rate_limit_per_second(20, [exchange_id.as_str()])
         .min_available(1_000.0)
         .max_net_position(5)
         .max_price_deviation(20.0)

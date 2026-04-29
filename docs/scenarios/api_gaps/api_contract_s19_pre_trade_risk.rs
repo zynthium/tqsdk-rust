@@ -1,7 +1,7 @@
 //! Scenario: 风控前置
 //!
 //! User goal:
-//! - 下单前检查资金、持仓、价格、合约、限额
+//! - 下单前检查资金、持仓、价格、合约、限额和订单频率
 //! - 拒绝不安全订单
 //! - 留下可审计的拒绝原因
 //!
@@ -12,6 +12,8 @@
 //! - 风控检查能返回 typed `RiskCheckReport` 供审计
 //! - 风控投影能返回 typed `RiskProjectionReport` 供下单前估算
 //! - 合约 tick size / multiplier 可通过 `InstrumentSpec` 接入风控
+//! - 官方同类基础开仓次数、开仓手数、合约组累计开仓手数和订单频率规则可由
+//!   `TaskHost` 本进程内计数表达
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
 //!
@@ -37,19 +39,25 @@
 //! `RiskProjectionReport`，用于单笔订单当前净持仓、投影净持仓和轻量
 //! price-volume estimate；`RiskEngine::instrument_specs(...)` 已提供
 //! `InstrumentSpec` backed tick-size 校验和 contract multiplier notional
-//! projection；`TaskHost::orders(...).limit(...).send_once(...)` 也会经过
-//! task-layer risk gate。
+//! projection；`daily_open_count_limit(...)`、`daily_open_volume_limit(...)`、
+//! `accumulated_open_volume_limit(...)` 和 `order_rate_limit_per_second(...)`
+//! 已对齐官方 Python SDK 的基础风控规则形态；`TaskHost::orders(...).limit(...).send_once(...)`
+//! 和 guarded insert/cancel 也会经过 task-layer risk gate。
 //!
 //! 本文件保留的是更高阶风控缺口：
 //! - 组合级资金/保证金 what-if simulation；
 //! - 多账户 / 多腿订单组的联合限额；
 //! - 涨跌停、品种级限额和更完整交易所规则；
-//! - 策略级风控策略热更新与审计日志落库。
+//! - 策略级风控策略热更新、跨进程持久用量恢复与审计日志落库。
 //!
 //! 理想用户代码草案：
 //! ```ignore
 //! let risk = RiskEngine::new()
 //!     .max_order_volume(3)
+//!     .daily_open_count_limit(10, ["SHFE.au2602"])
+//!     .daily_open_volume_limit(30, ["SHFE.au2602"])
+//!     .accumulated_open_volume_limit(50, ["SHFE.au2602", "SHFE.ag2602"])
+//!     .order_rate_limit_per_second(20, ["SHFE"])
 //!     .min_available(1000.0)
 //!     .max_net_position(5)
 //!     .max_price_deviation(20.0)
