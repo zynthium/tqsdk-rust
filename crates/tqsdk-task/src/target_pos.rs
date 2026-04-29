@@ -64,6 +64,16 @@ struct TargetPosTaskInner {
     finished: AtomicBool,
 }
 
+enum ProcessStep {
+    Continue,
+    Stop,
+}
+
+struct TargetPlanState {
+    current_net_position: i64,
+    desired_batch: Option<DesiredBatch>,
+}
+
 impl TargetPosBuilder {
     pub(crate) fn new(
         registry: SharedTaskRegistry,
@@ -338,16 +348,13 @@ impl TargetPosTaskInner {
     async fn process_wait_update(&self, api: &mut tqsdk_wait::TqApi) {
         self.record_commit_trades(api);
 
-        if self.cancel_requested.load(Ordering::SeqCst) {
-            if let Err(error) = self.cancel_pending_orders(api).await {
+        match self.process_cancel_requested(api).await {
+            Ok(ProcessStep::Continue) => {}
+            Ok(ProcessStep::Stop) => return,
+            Err(error) => {
                 self.finish_with_error(error);
                 return;
             }
-            if self.has_live_orders(api) {
-                return;
-            }
-            self.finish();
-            return;
         }
 
         let current_seq = self.next_request_seq.load(Ordering::SeqCst);
@@ -359,23 +366,19 @@ impl TargetPosTaskInner {
             return;
         };
 
-        if let Err(error) = self.ensure_quote_subscription(api).await {
-            self.finish_with_error(error);
-            return;
-        }
-
-        let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
-        let current_net_position = net_position(&current_position);
-        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
-        let mut desired_batch = quote.as_ref().and_then(|quote| {
-            planner::desired_batch_for_target(
-                &self.symbol,
-                &self.config,
-                target_volume,
-                &current_position,
-                quote,
-            )
-        });
+        let TargetPlanState {
+            current_net_position,
+            mut desired_batch,
+        } = match self
+            .desired_batch_for_current_state(api, target_volume)
+            .await
+        {
+            Ok(plan_state) => plan_state,
+            Err(error) => {
+                self.finish_with_error(error);
+                return;
+            }
+        };
         desired_batch = match self
             .handle_live_orders(
                 api,
@@ -401,8 +404,11 @@ impl TargetPosTaskInner {
             return;
         }
 
-        if current_net_position == target_volume {
-            self.mark_reached(current_seq, target_volume);
+        if self.mark_reached_if_current_position_matches(
+            current_seq,
+            current_net_position,
+            target_volume,
+        ) {
             return;
         }
 
@@ -416,6 +422,59 @@ impl TargetPosTaskInner {
         {
             self.finish_with_error(error);
         }
+    }
+
+    async fn process_cancel_requested(&self, api: &mut tqsdk_wait::TqApi) -> Result<ProcessStep> {
+        if !self.cancel_requested.load(Ordering::SeqCst) {
+            return Ok(ProcessStep::Continue);
+        }
+
+        self.cancel_pending_orders(api).await?;
+        if self.has_live_orders(api) {
+            return Ok(ProcessStep::Stop);
+        }
+        self.finish();
+        Ok(ProcessStep::Stop)
+    }
+
+    async fn desired_batch_for_current_state(
+        &self,
+        api: &mut tqsdk_wait::TqApi,
+        target_volume: i64,
+    ) -> Result<TargetPlanState> {
+        self.ensure_quote_subscription(api).await?;
+
+        let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
+        let current_net_position = net_position(&current_position);
+        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
+        let desired_batch = quote.as_ref().and_then(|quote| {
+            planner::desired_batch_for_target(
+                &self.symbol,
+                &self.config,
+                target_volume,
+                &current_position,
+                quote,
+            )
+        });
+
+        Ok(TargetPlanState {
+            current_net_position,
+            desired_batch,
+        })
+    }
+
+    fn mark_reached_if_current_position_matches(
+        &self,
+        current_seq: u64,
+        current_net_position: i64,
+        target_volume: i64,
+    ) -> bool {
+        if current_net_position != target_volume {
+            return false;
+        }
+
+        self.mark_reached(current_seq, target_volume);
+        true
     }
 
     async fn submit_desired_batch(
@@ -675,12 +734,7 @@ impl TargetPosTaskInner {
             }
             let should_cancel = {
                 self.with_state_mut(|state| {
-                    if state.cancel_requested_order_ids.contains(&order_id) {
-                        false
-                    } else {
-                        state.cancel_requested_order_ids.insert(order_id.clone());
-                        true
-                    }
+                    state.cancel_requested_order_ids.insert(order_id.clone())
                 })
             };
             if !should_cancel {
@@ -813,16 +867,7 @@ fn order_is_terminal(order: &Order) -> bool {
 
 impl Drop for TargetPosTaskInner {
     fn drop(&mut self) {
-        if self.finished.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        self.finished_tx.send_replace(true);
-        self.registry
-            .with_mut(|registry| registry.unregister_task(self.task_id));
-        if self.managed_by_host {
-            self.store.with_mut(|store| store.unregister(self.task_id));
-        }
+        self.finish();
     }
 }
 
