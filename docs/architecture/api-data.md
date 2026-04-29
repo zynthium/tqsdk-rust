@@ -136,6 +136,8 @@
 - `MarketCacheCompaction`
 - `MarketCacheCompactionReport`
 - `MarketCacheAtomicCompactionReport`
+- `MarketCacheCompactionOwnership`
+- `MarketCacheCompactionOwnershipReport`
 - `MarketCacheDaemonConfig`
 - `MarketCacheDaemon`
 - `MarketCacheDaemonShutdownReport`
@@ -190,7 +192,7 @@
    - 已有最薄的 owned Vec materialization：`collect_remaining`
    - 已有最薄的 `AsyncWrite` CSV export
    - 已有最薄的 offline market cache record / JSONL reader-writer / ordered replay foundation
-   - 已有最薄的 local JSONL queue、lock lease、reader manifest、recovery scan、writer election、recovery action、index、保留策略 compaction、in-place rotation、shutdown flush report 与 process-local supervisor foundation
+   - 已有最薄的 local JSONL queue、lock lease、reader manifest、recovery scan、writer election、recovery action、index、保留策略 compaction、reader-protected compaction ownership、in-place rotation、shutdown flush report 与 process-local supervisor foundation
    - 后续再考虑路径管理型文件导出
    - 跨进程 daemon orchestration 与跨进程 cache 管理服务
    - 可选 tabular adapters
@@ -251,6 +253,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `MarketCacheWriterElection` / `MarketCacheWriterLease` 提供本地 writer
   election / lease ownership substrate；`MarketCacheRecoveryAction` 要求已获得
   writer lease 后才能恢复 processing queue / queue，也已经落在 `tqsdk-data`
+- `MarketCacheCompactionOwnership` 提供本地 reader-protected compaction
+  ownership substrate，会结合 writer lease 与 reader manifest compaction floor
+  运行 atomic compaction，也已经落在 `tqsdk-data`
 - `KlineDataSeries` / `TickDataSeries` 到 `MarketCacheReplay` 的 adapter
   已经落在 `tqsdk-data`
 - 它不是新的 session facade
@@ -265,11 +270,11 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
-- `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的 cache record、JSONL reader/writer、deterministic replay iterator、本地 reader manifest、本地 recovery scan、本地 writer election / recovery action、本地 JSONL queue、lock lease、index、compaction helper、process-local daemon facade 和 process-local supervisor，不拥有 live session、不创建 Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
+- `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的 cache record、JSONL reader/writer、deterministic replay iterator、本地 reader manifest、本地 recovery scan、本地 writer election / recovery action、本地 JSONL queue、lock lease、index、compaction helper、reader-protected compaction ownership、process-local daemon facade 和 process-local supervisor，不拥有 live session、不创建 Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
 - 跨进程 cache 管理仍是后续 tooling/service facade：它应建立在
   已落地 writer election / recovery action、已落地 reader manifest、已落地
-  recovery scan 和 compaction ownership 之上，而不是把 live session、进程管理、
-  HTTP endpoint 或 GUI
+  recovery scan 和已落地 compaction ownership 之上，而不是把 live session、
+  进程管理、HTTP endpoint 或 GUI
   下沉进 data
 - history series replay adapter 只把 owned `KlineDataSeries` / `TickDataSeries`
   materialize 成 `MarketCacheEvent` / `MarketCacheReplay`，不引入策略执行语义
@@ -296,5 +301,5 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
 2. 在此基础上继续保持 `DataClient + data_page + data_series + data_download` 也只是底层 substrate
-3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter、live stream pipe、local queue/lock/reader manifest/recovery scan/writer election/recovery action/index/compaction/daemon/supervisor foundation 已完成，后续重点是路径管理型 materialization 和跨进程 cache 管理服务
+3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter、live stream pipe、local queue/lock/reader manifest/recovery scan/writer election/recovery action/index/compaction ownership/compaction/daemon/supervisor foundation 已完成，后续重点是路径管理型 materialization 和跨进程 cache 管理服务
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface

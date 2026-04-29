@@ -24,6 +24,7 @@
 //! - `MarketCacheWriterElection` / `MarketCacheRecoveryAction`
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
+//! - `MarketCacheCompactionOwnership`
 //! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
 //! - `MarketCacheSupervisorConfig` / `MarketCacheSupervisor`
 //!
@@ -53,17 +54,17 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use market_cache::{
-    MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionReport,
-    MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheDaemonShutdownReport, MarketCacheEvent,
-    MarketCacheIndex, MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock,
-    MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
-    MarketCacheQueueDrainError, MarketCacheQueueDrainReport, MarketCacheReader,
-    MarketCacheReaderCheckpoint, MarketCacheReaderLag, MarketCacheReaderManifest,
-    MarketCacheRecoveryAction, MarketCacheRecoveryActionReport, MarketCacheRecoveryFileKind,
-    MarketCacheRecoveryFileReport, MarketCacheRecoveryReport, MarketCacheRecoveryScan,
-    MarketCacheReplay, MarketCacheSupervisor, MarketCacheSupervisorConfig,
-    MarketCacheSupervisorShutdownReport, MarketCacheWriter, MarketCacheWriterElection,
-    MarketCacheWriterElectionOutcome, MarketCacheWriterElectionReport,
+    MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionOwnership,
+    MarketCacheCompactionOwnershipReport, MarketCacheCompactionReport, MarketCacheDaemon,
+    MarketCacheDaemonConfig, MarketCacheDaemonShutdownReport, MarketCacheEvent, MarketCacheIndex,
+    MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock, MarketCacheLockOptions,
+    MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue, MarketCacheQueueDrainError,
+    MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReaderCheckpoint,
+    MarketCacheReaderLag, MarketCacheReaderManifest, MarketCacheRecoveryAction,
+    MarketCacheRecoveryActionReport, MarketCacheRecoveryFileKind, MarketCacheRecoveryFileReport,
+    MarketCacheRecoveryReport, MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheSupervisor,
+    MarketCacheSupervisorConfig, MarketCacheSupervisorShutdownReport, MarketCacheWriter,
+    MarketCacheWriterElection, MarketCacheWriterElectionOutcome, MarketCacheWriterElectionReport,
     MarketCacheWriterElectionStatus, MarketCacheWriterLease,
 };
 #[cfg(feature = "stream")]

@@ -4,12 +4,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::{Kline, Quote, Tick};
 use tqsdk_data::{
-    MarketCacheCompaction, MarketCacheDaemon, MarketCacheDaemonConfig, MarketCacheEvent,
-    MarketCacheIndex, MarketCacheLock, MarketCacheLockOptions, MarketCachePayload,
-    MarketCachePayloadKind, MarketCacheQueue, MarketCacheReader, MarketCacheReaderCheckpoint,
-    MarketCacheReaderManifest, MarketCacheRecoveryAction, MarketCacheRecoveryFileKind,
-    MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter,
-    MarketCacheWriterElection, MarketCacheWriterElectionStatus,
+    MarketCacheCompaction, MarketCacheCompactionOwnership, MarketCacheDaemon,
+    MarketCacheDaemonConfig, MarketCacheEvent, MarketCacheIndex, MarketCacheLock,
+    MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
+    MarketCacheReader, MarketCacheReaderCheckpoint, MarketCacheReaderManifest,
+    MarketCacheRecoveryAction, MarketCacheRecoveryFileKind, MarketCacheRecoveryScan,
+    MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter, MarketCacheWriterElection,
+    MarketCacheWriterElectionStatus,
 };
 
 #[test]
@@ -672,6 +673,97 @@ fn market_cache_compaction_rotates_cache_file_after_success() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_time_ns(), 1_500);
+}
+
+#[test]
+fn market_cache_compaction_ownership_respects_reader_floor_under_writer_lease() {
+    let cache_path = temp_path("market-cache-owned-compaction.jsonl");
+    let staging_path = temp_path("market-cache-owned-compaction.tmp");
+    let manifest_path = temp_path("market-cache-owned-compaction-readers.json");
+    let lock_path = temp_path("market-cache-owned-compaction.lock");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&staging_path);
+    let _ = std::fs::remove_file(&manifest_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let floor_event = quote_event("live", "SHFE.au2602", 2_000, Some(1_500), 480.0);
+    write_events(
+        &cache_path,
+        &[
+            quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0),
+            floor_event.clone(),
+            quote_event("live", "SHFE.au2602", 3_000, Some(2_500), 481.0),
+        ],
+    );
+    MarketCacheReaderManifest::open(&manifest_path)
+        .unwrap()
+        .record_checkpoint(MarketCacheReaderCheckpoint::from_event(
+            "research-a",
+            "checkpoint",
+            &floor_event,
+        ))
+        .unwrap();
+
+    let mut lease = MarketCacheWriterElection::new(&lock_path)
+        .elect()
+        .unwrap()
+        .into_lease()
+        .unwrap();
+    let report = MarketCacheCompactionOwnership::new(&cache_path)
+        .staging_path(&staging_path)
+        .reader_manifest_path(&manifest_path)
+        .policy(MarketCacheCompaction::new().retain_event_time_from(2_500))
+        .compact(&mut lease)
+        .unwrap();
+
+    assert_eq!(report.reader_floor_event_time_ns, Some(1_500));
+    assert_eq!(report.effective_min_event_time_ns, Some(1_500));
+    assert_eq!(report.compaction.compaction.read_events, 3);
+    assert_eq!(report.compaction.compaction.written_events, 2);
+    assert_eq!(report.compaction.compaction.dropped_events, 1);
+
+    let event_times = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .map(|event| event.unwrap().event_time_ns())
+        .collect::<Vec<_>>();
+    assert_eq!(event_times, vec![1_500, 2_500]);
+}
+
+#[test]
+fn market_cache_compaction_ownership_rejects_partition_filters_with_reader_manifest() {
+    let cache_path = temp_path("market-cache-owned-compaction-filter.jsonl");
+    let staging_path = temp_path("market-cache-owned-compaction-filter.tmp");
+    let manifest_path = temp_path("market-cache-owned-compaction-filter-readers.json");
+    let lock_path = temp_path("market-cache-owned-compaction-filter.lock");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&staging_path);
+    let _ = std::fs::remove_file(&manifest_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let event = quote_event("live", "SHFE.au2602", 2_000, Some(1_500), 480.0);
+    write_events(&cache_path, std::slice::from_ref(&event));
+    MarketCacheReaderManifest::open(&manifest_path)
+        .unwrap()
+        .record_checkpoint(MarketCacheReaderCheckpoint::from_event(
+            "research-a",
+            "checkpoint",
+            &event,
+        ))
+        .unwrap();
+
+    let mut lease = MarketCacheWriterElection::new(&lock_path)
+        .elect()
+        .unwrap()
+        .into_lease()
+        .unwrap();
+    let result = MarketCacheCompactionOwnership::new(&cache_path)
+        .staging_path(&staging_path)
+        .reader_manifest_path(&manifest_path)
+        .policy(MarketCacheCompaction::new().retain_symbol("DCE.m2601"))
+        .compact(&mut lease);
+
+    assert!(result.is_err());
+    assert!(!staging_path.exists());
 }
 
 #[test]

@@ -8,7 +8,7 @@
 //!
 //! API contract:
 //! - 当前 `tqsdk-data` 只承诺 process-local daemon / supervisor foundation
-//! - 跨进程 service 必须显式管理 writer election、lease ownership、
+//! - 跨进程 service 必须显式组合 writer election、lease ownership、
 //!   recovery action、compaction ownership 和 shutdown report
 //! - service 不拥有 live session；live attach 只能作为 `tqsdk-stream` 到 cache 的 adapter
 //! - service 不内置 HTTP health endpoint、GUI 或系统级进程管理器
@@ -30,7 +30,7 @@
 //!
 //! Review questions:
 //! - 跨进程 cache service 应继续落在 `tqsdk-data`，还是拆成独立 tooling crate？
-//! - writer election、recovery action 和 compaction ownership 是否必须一起冻结？
+//! - writer election、recovery action、compaction ownership 和 service facade 是否必须一起冻结？
 //! - service 的 public report 能否表达 crash recovery 与 reader lag，而不暴露文件细节？
 //!
 //! Current API note:
@@ -45,10 +45,10 @@
 //! cache / queue / processing queue / compaction staging recovery scan foundation；
 //! `MarketCacheWriterElection` / `MarketCacheWriterLease` /
 //! `MarketCacheRecoveryAction` 已提供本地 writer election、lease ownership 和
-//! queue recovery action foundation。
+//! queue recovery action foundation；`MarketCacheCompactionOwnership` 已提供
+//! reader-protected compaction ownership foundation。
 //!
-//! 这些 API 可以作为 service substrate，但还不能自然表达跨进程 compaction
-//! ownership 和 service facade。
+//! 这些 API 可以作为 service substrate，但还不能自然表达跨进程 service facade。
 //!
 //! 理想用户代码草案：
 //! ```ignore
@@ -103,7 +103,8 @@
 //!    processing / compact staging 的可恢复状态，并输出 typed report。
 //! 3. writer election / recovery action 已作为本地 data-layer helper 落地，能在
 //!    明确 lease ownership 下恢复 processing queue / queue。
-//! 4. 下一步实现 compaction ownership，再把现有 process-local supervisor 包进
-//!    跨进程 service facade。
+//! 4. compaction ownership 已作为本地 data-layer helper 落地，能在 writer lease
+//!    下结合 reader manifest floor 运行 atomic compaction。
+//! 5. 下一步把现有 process-local supervisor 包进跨进程 service facade。
 
 fn main() {}

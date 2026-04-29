@@ -86,6 +86,8 @@
 - `MarketCacheCompaction`
 - `MarketCacheCompactionReport`
 - `MarketCacheAtomicCompactionReport`
+- `MarketCacheCompactionOwnership`
+- `MarketCacheCompactionOwnershipReport`
 - `MarketCacheDaemonConfig`
 - `MarketCacheDaemon`
 - `MarketCacheDaemonShutdownReport`
@@ -141,6 +143,12 @@ service facade.
 retention-policy compaction, and in-place rotation foundations. They are
 synchronous data-layer file helpers: they do not spawn background tasks, run a
 lease heartbeat, or manage a multi-process cache service.
+
+`MarketCacheCompactionOwnership` combines writer lease ownership with reader
+manifest protection before running atomic compaction. It adjusts retention so
+the effective floor does not pass the earliest active reader checkpoint, and it
+rejects reader-protected source/symbol/payload filters that could delete shared
+cache data still needed by another reader.
 
 `MarketCacheDaemonConfig` / `MarketCacheDaemon` add a thin local daemon
 foundation over those primitives: explicit lock lease recovery, queue
