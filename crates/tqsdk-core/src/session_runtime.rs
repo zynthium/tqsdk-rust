@@ -17,6 +17,8 @@ use crate::{
     },
 };
 
+mod command_status;
+
 pub struct SessionRun {
     pub bootstrap: BootstrapResult,
     pub connected: ConnectedTopology,
@@ -945,26 +947,7 @@ impl SessionRuntime {
         command_id: CommandId,
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
-        let query_id = detail.get("query_id").and_then(Value::as_str)?;
-        if !commit_touches_path_prefix(commit, ["query", query_id]) {
-            return None;
-        }
-        snapshot.get(["query", query_id])?;
-
-        let mut extra_detail = Map::new();
-        if let Some(has_more) = snapshot.get(["query", query_id, "has_more"]).cloned() {
-            extra_detail.insert("has_more".to_string(), has_more);
-        }
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::query_completed_status(snapshot, route_label, commit, command_id, detail)
     }
 
     fn derive_trade_login_command_status(
@@ -975,29 +958,13 @@ impl SessionRuntime {
         command_id: CommandId,
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
-        let account_id = detail.get("account_id").and_then(Value::as_str)?;
-        if !commit_touches_path(commit, ["trade", account_id, "trade_more_data"]) {
-            return None;
-        }
-        let trade_more_data = snapshot
-            .get(["trade", account_id, "trade_more_data", "value"])?
-            .as_bool()?;
-        if trade_more_data {
-            return None;
-        }
-
-        let mut extra_detail = Map::new();
-        extra_detail.insert("trade_more_data".to_string(), json!(false));
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::trade_login_completed_status(
+            snapshot,
+            route_label,
+            commit,
+            command_id,
+            detail,
+        )
     }
 
     fn derive_trade_account_info_command_status(
@@ -1009,23 +976,17 @@ impl SessionRuntime {
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
         let account_id = detail.get("account_id").and_then(Value::as_str)?;
-        if !commit_touches_path(commit, ["trade", account_id, "accounts", "CNY"]) {
-            return None;
-        }
-        snapshot.get(["trade", account_id, "accounts", "CNY"])?;
-
         let mut extra_detail = Map::new();
         extra_detail.insert("currency".to_string(), json!("CNY"));
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::path_completed_status(
+            snapshot,
+            route_label,
+            commit,
+            command_id,
+            detail,
+            ["trade", account_id, "accounts", "CNY"],
+            extra_detail,
+        )
     }
 
     fn derive_trade_pre_insert_order_command_status(
@@ -1036,36 +997,13 @@ impl SessionRuntime {
         command_id: CommandId,
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
-        let account_id = detail.get("account_id").and_then(Value::as_str)?;
-        let order_id = detail.get("order_id").and_then(Value::as_str)?;
-        if !commit_touches_path(commit, ["trade", account_id, "pre_insert_orders", order_id]) {
-            return None;
-        }
-        snapshot.get(["trade", account_id, "pre_insert_orders", order_id])?;
-
-        let mut extra_detail = Map::new();
-        if let Some(pre_margin) = snapshot
-            .get([
-                "trade",
-                account_id,
-                "pre_insert_orders",
-                order_id,
-                "pre_margin",
-            ])
-            .cloned()
-        {
-            extra_detail.insert("pre_margin".to_string(), pre_margin);
-        }
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::pre_insert_order_completed_status(
+            snapshot,
+            route_label,
+            commit,
+            command_id,
+            detail,
+        )
     }
 
     fn derive_trade_risk_management_rule_command_status(
@@ -1078,26 +1016,17 @@ impl SessionRuntime {
     ) -> Option<(CommandStatus, Option<Value>)> {
         let account_id = detail.get("account_id").and_then(Value::as_str)?;
         let exchange_id = detail.get("exchange_id").and_then(Value::as_str)?;
-        if !commit_touches_path(
-            commit,
-            ["trade", account_id, "risk_management_rule", exchange_id],
-        ) {
-            return None;
-        }
-        snapshot.get(["trade", account_id, "risk_management_rule", exchange_id])?;
-
         let mut extra_detail = Map::new();
         extra_detail.insert("exchange_id".to_string(), json!(exchange_id));
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::path_completed_status(
+            snapshot,
+            route_label,
+            commit,
+            command_id,
+            detail,
+            ["trade", account_id, "risk_management_rule", exchange_id],
+            extra_detail,
+        )
     }
 
     fn derive_trade_settlement_query_command_status(
@@ -1110,26 +1039,17 @@ impl SessionRuntime {
     ) -> Option<(CommandStatus, Option<Value>)> {
         let account_id = detail.get("account_id").and_then(Value::as_str)?;
         let trading_day = detail.get("trading_day").and_then(Value::as_str)?;
-        if !commit_touches_path(
-            commit,
-            ["trade", account_id, "his_settlements", trading_day],
-        ) {
-            return None;
-        }
-        snapshot.get(["trade", account_id, "his_settlements", trading_day])?;
-
         let mut extra_detail = Map::new();
         extra_detail.insert("trading_day".to_string(), json!(trading_day));
-        Some((
-            CommandStatus::Completed,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::path_completed_status(
+            snapshot,
+            route_label,
+            commit,
+            command_id,
+            detail,
+            ["trade", account_id, "his_settlements", trading_day],
+            extra_detail,
+        )
     }
 
     fn derive_trade_order_command_status(
@@ -1140,54 +1060,7 @@ impl SessionRuntime {
         command_id: CommandId,
         detail: &Map<String, Value>,
     ) -> Option<(CommandStatus, Option<Value>)> {
-        let account_id = detail.get("account_id").and_then(Value::as_str)?;
-        let order_id = detail.get("order_id").and_then(Value::as_str)?;
-        if !commit_touches_path(commit, ["trade", account_id, "orders", order_id]) {
-            return None;
-        }
-        let order_status = snapshot
-            .get(["trade", account_id, "orders", order_id, "status"])?
-            .as_str()?;
-        let exchange_order_id = snapshot
-            .get(["trade", account_id, "orders", order_id, "exchange_order_id"])
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let last_msg = snapshot
-            .get(["trade", account_id, "orders", order_id, "last_msg"])
-            .cloned();
-        let volume_left = snapshot
-            .get(["trade", account_id, "orders", order_id, "volume_left"])
-            .cloned();
-
-        let status = match order_status {
-            "ALIVE" => CommandStatus::Acked,
-            "FINISHED" if exchange_order_id.is_empty() => CommandStatus::Rejected,
-            "FINISHED" => CommandStatus::Completed,
-            _ => return None,
-        };
-
-        let mut extra_detail = Map::new();
-        extra_detail.insert("order_status".to_string(), json!(order_status));
-        if !exchange_order_id.is_empty() {
-            extra_detail.insert("exchange_order_id".to_string(), json!(exchange_order_id));
-        }
-        if let Some(last_msg) = last_msg {
-            extra_detail.insert("last_msg".to_string(), last_msg);
-        }
-        if let Some(volume_left) = volume_left {
-            extra_detail.insert("volume_left".to_string(), volume_left);
-        }
-
-        Some((
-            status,
-            command_detail_from_seed(
-                detail.clone(),
-                command_id,
-                Some(route_label),
-                None,
-                extra_detail,
-            ),
-        ))
+        command_status::trade_order_status(snapshot, route_label, commit, command_id, detail)
     }
 
     fn command_status(&self, command_id: CommandId) -> Option<String> {
