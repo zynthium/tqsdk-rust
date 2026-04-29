@@ -7,6 +7,7 @@
 //! user APIs or runtime ownership.
 
 pub mod adapter;
+#[cfg(test)]
 mod aggregation;
 pub mod auth;
 pub mod commands;
@@ -34,10 +35,6 @@ pub mod internal {
 }
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
-pub use aggregation::{
-    AggregatedCommit, AggregatedCursor, AggregatedRuntimeReader, AggregatedSnapshotReadGuard,
-    StateSourceId,
-};
 pub use auth::{AuthContext, AuthProvider, DynAuthProvider};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
@@ -59,8 +56,8 @@ pub use ids::{
 };
 pub use order_lifecycle::OrderLifecycle;
 pub use runtime::{
-    CommitLog, CommitReadGuard, CursorLagged, OutboundEnvelope, Runtime, RuntimeHandle,
-    RuntimeReader, SnapshotReadGuard,
+    CommitLog, CommitReadGuard, CursorLagged, Runtime, RuntimeHandle, RuntimeReader,
+    SnapshotReadGuard,
 };
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, MarketStateReadGuard, MarketStateView,

@@ -13,7 +13,8 @@ mod reader;
 
 pub(crate) use command_ledger::CommandLedger;
 pub use commit_log::CommitLog;
-pub use handle::{OutboundEnvelope, Runtime, RuntimeHandle};
+use handle::OutboundEnvelope;
+pub use handle::{Runtime, RuntimeHandle};
 pub use reader::{CommitReadGuard, CursorLagged, RuntimeReader, SnapshotReadGuard};
 
 pub(crate) struct RuntimeCore {

@@ -4,7 +4,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, ChangeHit, CommandId, CommitScope, IoEvent, ObjectKey, OutboundEnvelope,
+    AdapterRegistry, ChangeHit, CommandId, CommitScope, IoEvent, ObjectKey, OutboundDispatch,
     OutboundFrame, OutboundRequest, ProtocolDomain, Revision, Runtime, RuntimeCommand,
     RuntimeHandle, RuntimeInput, StatePath, Symbol, UpdateCursor,
 };
@@ -22,23 +22,27 @@ fn runtime_handle_routes_commands_into_outbox_without_advancing_revision() {
     assert_eq!(handle.latest_snapshot().revision().get(), 0);
     assert_eq!(handle.commit_log().head_revision(), None);
     assert_eq!(
-        handle.drain_outbound(),
+        handle.drain_dispatches().unwrap(),
         vec![
-            OutboundEnvelope {
+            OutboundDispatch {
                 command_id,
+                domain: ProtocolDomain::Market,
+                account_id: None,
                 request: OutboundRequest::Transport(OutboundFrame::Text(
                     json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
                 )),
             },
-            OutboundEnvelope {
+            OutboundDispatch {
                 command_id,
+                domain: ProtocolDomain::Market,
+                account_id: None,
                 request: OutboundRequest::Transport(OutboundFrame::Text(
                     json!({"aid": "peek_message"}).to_string(),
                 )),
             },
         ]
     );
-    assert!(handle.drain_outbound().is_empty());
+    assert!(handle.drain_dispatches().unwrap().is_empty());
 }
 
 #[test]
@@ -50,9 +54,11 @@ fn runtime_handle_ingests_inputs_into_committed_snapshot_and_cursored_log() {
     )))
     .unwrap();
     assert_eq!(
-        handle.drain_outbound(),
-        vec![OutboundEnvelope {
+        handle.drain_dispatches().unwrap(),
+        vec![OutboundDispatch {
             command_id: submit_id,
+            domain: ProtocolDomain::System,
+            account_id: None,
             request: OutboundRequest::internal_label("refresh-auth"),
         }]
     );

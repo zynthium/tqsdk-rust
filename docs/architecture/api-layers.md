@@ -30,6 +30,9 @@ V1 只交付两类稳定 public contract：
    - `ProtocolDomain`
    - `NormalizedMutation`
    - `OutboundRequest`
+   - `OutboundDispatch`
+
+Raw runtime outbox envelopes and multi-source aggregation helpers are not part of the V1 public contract; low-level route consumers should use `OutboundDispatch` and reader/cursor primitives.
 
 V1 不交付任何用户态 facade。
 

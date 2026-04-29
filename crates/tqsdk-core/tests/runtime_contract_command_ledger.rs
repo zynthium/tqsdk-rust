@@ -6,7 +6,7 @@ use serde_json::json;
 use tqsdk_core::{
     AccountId, AdapterRegistry, ChangeHit, CommandStatus, CommitScope, ContractError,
     FieldMutation, InputPayload, IoEvent, MutationSource, NormalizedMutation, ObjectKey, OrderId,
-    OutboundEnvelope, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, Runtime,
+    OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, Runtime,
     RuntimeCommand, RuntimeHandle, RuntimeInput, StatePath, Symbol, TradeCommand, TradeDirection,
     TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
@@ -34,9 +34,11 @@ fn rejected_trade_commands_enter_runtime_command_snapshot_and_commit_log() {
     .unwrap();
 
     assert_eq!(
-        handle.drain_outbound(),
-        vec![OutboundEnvelope {
+        handle.drain_dispatches().unwrap(),
+        vec![OutboundDispatch {
             command_id,
+            domain: ProtocolDomain::Trade,
+            account_id: Some(AccountId::new("simnow")),
             request: OutboundRequest::Transport(OutboundFrame::Text(
                 json!({
                     "aid": "insert_order",

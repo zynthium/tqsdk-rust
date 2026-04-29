@@ -40,9 +40,9 @@ pub trait Runtime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundEnvelope {
-    pub command_id: CommandId,
-    pub request: OutboundRequest,
+pub(crate) struct OutboundEnvelope {
+    pub(crate) command_id: CommandId,
+    pub(crate) request: OutboundRequest,
 }
 
 /// Mutable runtime owner for command submission, input ingestion, and commit publication.
@@ -106,11 +106,6 @@ impl RuntimeHandle {
             state: Arc::clone(&self.state),
             commit_log: self.commit_log.clone(),
         }
-    }
-
-    pub fn drain_outbound(&self) -> Vec<OutboundEnvelope> {
-        let mut inner = mutex_lock(&self.inner);
-        inner.outbound.drain(..).collect()
     }
 
     pub fn drain_dispatches(&self) -> Result<Vec<OutboundDispatch>> {
