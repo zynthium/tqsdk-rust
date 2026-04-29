@@ -51,10 +51,15 @@ pub trait AuthProvider {
     async fn authenticate(&self) -> Result<AuthContext>;
 }
 
-pub struct AuthContext {
-    pub access_token: String,
-    pub auth_id: Option<AuthId>,
-    pub features: Vec<String>,
+pub struct AuthContext { /* fields private */ }
+
+impl AuthContext {
+    pub fn new(access_token: impl Into<String>) -> Self;
+    pub fn access_token(&self) -> &str;
+    pub fn auth_id(&self) -> Option<&AuthId>;
+    pub fn features(&self) -> &[String];
+    pub fn with_auth_id(self, auth_id: AuthId) -> Self;
+    pub fn with_feature(self, feature: impl Into<String>) -> Self;
 }
 ```
 

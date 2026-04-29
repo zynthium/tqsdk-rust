@@ -5,11 +5,32 @@ use std::pin::Pin;
 use crate::Result;
 use crate::ids::AuthId;
 
+/// Authentication result returned by [`AuthProvider`].
+///
+/// Use the constructor and accessor methods as the public contract:
+///
+/// ```
+/// # use tqsdk_core::{AuthContext, AuthId};
+/// let auth = AuthContext::new("access-token").with_auth_id(AuthId::new("auth-1"));
+/// assert_eq!(auth.access_token(), "access-token");
+/// assert_eq!(auth.auth_id().map(AuthId::as_str), Some("auth-1"));
+/// ```
+///
+/// Direct field construction is not part of the public contract:
+///
+/// ```compile_fail
+/// # use tqsdk_core::AuthContext;
+/// let _auth = AuthContext {
+///     access_token: String::from("access-token"),
+///     auth_id: None,
+///     features: Vec::new(),
+/// };
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthContext {
-    pub access_token: String,
-    pub auth_id: Option<AuthId>,
-    pub features: Vec<String>,
+    access_token: String,
+    auth_id: Option<AuthId>,
+    features: Vec<String>,
 }
 
 impl fmt::Debug for AuthContext {
