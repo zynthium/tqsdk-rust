@@ -6,7 +6,7 @@ use tqsdk_core::{
     RuntimeInput,
 };
 use tqsdk_session::SessionClient;
-use tqsdk_task::{StrategyHost, TaskError, TaskHost, TaskKind};
+use tqsdk_task::{RiskEngine, RiskRejection, StrategyHost, TaskError, TaskHost, TaskKind};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {
@@ -211,6 +211,51 @@ async fn strategy_context_orders_delegate_to_task_order_builder() {
 
     assert!(ticket.was_submitted());
     assert_eq!(ticket.client_order_id(), "strategy-entry-1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_context_orders_apply_risk_gate_before_dispatch() {
+    let host = seeded_host().with_risk(RiskEngine::new().max_order_volume(1));
+    seed_account_position_quote(&host, "sim", "SHFE.rb2601", 80_000.0, 0, 3_678.0);
+
+    let mut strategy = StrategyHost::builder(host)
+        .account("sim")
+        .quote("SHFE.rb2601")
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = strategy.next_once().await.unwrap();
+    ctx.task_host()
+        .api()
+        .handle_for_test()
+        .drain_dispatches()
+        .unwrap();
+
+    let err = ctx
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 2)
+        .limit(3_678.0)
+        .send_once("strategy-risk-rejected")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TaskError::RiskRejected(RiskRejection::MaxOrderVolumeExceeded {
+            account_id: "sim".to_string(),
+            symbol: "SHFE.rb2601".to_string(),
+            requested: 2,
+            max: 1,
+        })
+    );
+    assert!(
+        ctx.task_host()
+            .api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

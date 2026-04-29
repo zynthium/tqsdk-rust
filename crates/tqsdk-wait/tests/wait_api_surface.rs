@@ -26,6 +26,16 @@ fn concurrent_wait_update_is_rejected() {
     );
 }
 
+#[test]
+fn wait_driver_keeps_single_runtime_reader_without_snapshot_cache() {
+    let driver = include_str!("../src/driver.rs");
+
+    assert!(driver.contains("pub(crate) reader: tqsdk_core::RuntimeReader"));
+    assert!(driver.contains("pub(crate) cursor: tqsdk_core::UpdateCursor"));
+    assert!(!driver.contains("StateSnapshot"));
+    assert!(!driver.contains("StateStore"));
+}
+
 #[tokio::test]
 async fn wait_update_timeout_returns_false() {
     let mut api = support::seeded_api();

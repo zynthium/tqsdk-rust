@@ -7,14 +7,40 @@ use tqsdk_session::SessionClient;
 use tqsdk_wait::TqApi;
 
 #[allow(dead_code)]
+pub struct TestTqApi {
+    api: TqApi,
+}
+
+#[allow(dead_code)]
+impl TestTqApi {
+    pub fn new() -> Self {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let session = SessionClient::new_for_test_with_handle(handle.clone());
+
+        Self {
+            api: TqApi::new_for_test(handle, session),
+        }
+    }
+
+    pub fn api(&self) -> &TqApi {
+        &self.api
+    }
+
+    pub fn api_mut(&mut self) -> &mut TqApi {
+        &mut self.api
+    }
+
+    pub fn into_api(self) -> TqApi {
+        self.api
+    }
+}
+
+#[allow(dead_code)]
 pub fn seeded_api() -> TqApi {
-    let mut adapters = AdapterRegistry::new();
-    adapters.register_default_adapters();
-
-    let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle.clone());
-
-    TqApi::new_for_test(handle, session)
+    TestTqApi::new().into_api()
 }
 
 #[allow(dead_code)]
