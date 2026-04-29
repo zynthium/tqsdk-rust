@@ -44,8 +44,10 @@
 //! `MarketCacheWriterLease` / `MarketCacheRecoveryAction` 已提供本地 writer
 //! election、lease ownership 和 queue recovery action foundation；
 //! `MarketCacheCompactionOwnership` 已提供 reader-protected compaction ownership
-//! foundation。
-//! 剩余 gap 是跨进程 cache 管理服务。
+//! foundation；`MarketCacheService` 已提供同步、本地 file service facade
+//! foundation，组合 writer election、recovery、reader checkpoint、queue flush
+//! 和 reader-protected compaction。
+//! 剩余 gap 是完整跨进程 daemon orchestration / 多进程 cache 管理服务。
 //! 更完整的 desired API sketch 见
 //! `api_contract_s18_cross_process_cache_service.rs`。
 //!

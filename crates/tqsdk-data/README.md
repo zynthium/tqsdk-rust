@@ -88,6 +88,11 @@
 - `MarketCacheAtomicCompactionReport`
 - `MarketCacheCompactionOwnership`
 - `MarketCacheCompactionOwnershipReport`
+- `MarketCacheServiceConfig`
+- `MarketCacheService`
+- `MarketCacheServiceOpenReport`
+- `MarketCacheServiceOpen`
+- `MarketCacheServiceShutdownReport`
 - `MarketCacheDaemonConfig`
 - `MarketCacheDaemon`
 - `MarketCacheDaemonShutdownReport`
@@ -149,6 +154,12 @@ manifest protection before running atomic compaction. It adjusts retention so
 the effective floor does not pass the earliest active reader checkpoint, and it
 rejects reader-protected source/symbol/payload filters that could delete shared
 cache data still needed by another reader.
+
+`MarketCacheServiceConfig` / `MarketCacheService` provide a thin local file
+service facade over writer election, recovery action, reader manifest,
+queue flush, and reader-protected compaction ownership. It stays synchronous
+and local to `tqsdk-data`: no live session ownership, no HTTP endpoint, no GUI,
+and no system process manager.
 
 `MarketCacheDaemonConfig` / `MarketCacheDaemon` add a thin local daemon
 foundation over those primitives: explicit lock lease recovery, queue

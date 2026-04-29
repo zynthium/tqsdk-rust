@@ -25,6 +25,7 @@
 //! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
 //!   `MarketCacheCompaction`
 //! - `MarketCacheCompactionOwnership`
+//! - `MarketCacheServiceConfig` / `MarketCacheService`
 //! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
 //! - `MarketCacheSupervisorConfig` / `MarketCacheSupervisor`
 //!
@@ -62,9 +63,11 @@ pub use market_cache::{
     MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReaderCheckpoint,
     MarketCacheReaderLag, MarketCacheReaderManifest, MarketCacheRecoveryAction,
     MarketCacheRecoveryActionReport, MarketCacheRecoveryFileKind, MarketCacheRecoveryFileReport,
-    MarketCacheRecoveryReport, MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheSupervisor,
-    MarketCacheSupervisorConfig, MarketCacheSupervisorShutdownReport, MarketCacheWriter,
-    MarketCacheWriterElection, MarketCacheWriterElectionOutcome, MarketCacheWriterElectionReport,
+    MarketCacheRecoveryReport, MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheService,
+    MarketCacheServiceConfig, MarketCacheServiceOpen, MarketCacheServiceOpenReport,
+    MarketCacheServiceShutdownReport, MarketCacheSupervisor, MarketCacheSupervisorConfig,
+    MarketCacheSupervisorShutdownReport, MarketCacheWriter, MarketCacheWriterElection,
+    MarketCacheWriterElectionOutcome, MarketCacheWriterElectionReport,
     MarketCacheWriterElectionStatus, MarketCacheWriterLease,
 };
 #[cfg(feature = "stream")]

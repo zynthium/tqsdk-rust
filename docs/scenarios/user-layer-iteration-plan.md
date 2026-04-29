@@ -474,7 +474,8 @@ crate 分层合并成一份迭代计划。
   checkpoint、compaction floor 和 typed reader lag report foundation；明确不承诺
   writer election 或跨进程 service facade。
 - `MarketCacheRecoveryScan` 提供本地 cache / queue / processing queue /
-  compaction staging recovery scan foundation；明确不承诺 service facade。
+  compaction staging recovery scan foundation；作为底层 helper 不承诺完整跨进程
+  service orchestration。
 - `MarketCacheWriterElection` / `MarketCacheWriterLease` 提供本地 writer
   election 和 lease ownership substrate；`MarketCacheRecoveryAction` 要求已获得
   writer lease 后恢复 processing queue / queue，明确不承诺跨进程 service facade
@@ -482,7 +483,12 @@ crate 分层合并成一份迭代计划。
 - `MarketCacheCompactionOwnership` 提供本地 reader-protected compaction
   ownership substrate；它要求 writer lease，读取 reader manifest 的 compaction
   floor，并拒绝 reader-protected source / symbol / payload filters，明确不承诺跨进程
-  service facade。
+  service orchestration。
+- `MarketCacheServiceConfig` / `MarketCacheService` 提供同步、本地 file service
+  facade foundation，组合 writer election、recovery action、reader manifest、
+  queue flush 和 reader-protected compaction ownership；明确不拥有 live session，
+  不内置 HTTP endpoint、GUI 或系统级进程管理器，也不承诺完整跨进程 daemon
+  orchestration。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -519,7 +525,7 @@ crate 分层合并成一份迭代计划。
 
 仍未完成、不可伪装为已支持：
 
-- 跨进程 cache 管理服务实现；
+- 完整跨进程 daemon orchestration / 多进程 cache 管理服务实现；
 
 优先提升的场景：
 
@@ -531,7 +537,8 @@ crate 分层合并成一份迭代计划。
 - `api_contract_s18_cache_recovery_scan`（recovery scan foundation 已提升为正式 data example）
 - `api_contract_s18_cache_writer_recovery`（writer election/recovery action foundation 已提升为正式 data example）
 - `api_contract_s18_cache_compaction_ownership`（reader-protected compaction ownership foundation 已提升为正式 data example）
-- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按 service facade 切分）
+- `api_contract_s18_cache_service_foundation`（本地 file service foundation 已提升为正式 data example）
+- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；后续按跨进程 daemon orchestration 切分）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 

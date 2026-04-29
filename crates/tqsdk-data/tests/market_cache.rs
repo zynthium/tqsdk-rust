@@ -4,13 +4,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::{Kline, Quote, Tick};
 use tqsdk_data::{
-    MarketCacheCompaction, MarketCacheCompactionOwnership, MarketCacheDaemon,
+    DataError, MarketCacheCompaction, MarketCacheCompactionOwnership, MarketCacheDaemon,
     MarketCacheDaemonConfig, MarketCacheEvent, MarketCacheIndex, MarketCacheLock,
     MarketCacheLockOptions, MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue,
     MarketCacheReader, MarketCacheReaderCheckpoint, MarketCacheReaderManifest,
     MarketCacheRecoveryAction, MarketCacheRecoveryFileKind, MarketCacheRecoveryScan,
-    MarketCacheReplay, MarketCacheSupervisorConfig, MarketCacheWriter, MarketCacheWriterElection,
-    MarketCacheWriterElectionStatus,
+    MarketCacheReplay, MarketCacheService, MarketCacheServiceConfig, MarketCacheSupervisorConfig,
+    MarketCacheWriter, MarketCacheWriterElection, MarketCacheWriterElectionStatus,
 };
 
 #[test]
@@ -817,6 +817,149 @@ fn market_cache_daemon_shutdown_flushes_queue_and_compacts_cache() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_time_ns(), 1_500);
+}
+
+#[test]
+fn market_cache_service_reports_busy_writer_without_manual_lock_error() {
+    let cache_path = temp_path("market-cache-service-busy.cache");
+    let lock_path = temp_path("market-cache-service-busy.lock");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let first =
+        MarketCacheService::open(MarketCacheServiceConfig::new(&cache_path).lock_path(&lock_path))
+            .unwrap();
+    assert!(first.is_open());
+
+    let second =
+        MarketCacheService::open(MarketCacheServiceConfig::new(&cache_path).lock_path(&lock_path))
+            .unwrap();
+    assert!(second.is_busy());
+    assert_eq!(
+        second.report().writer.status,
+        MarketCacheWriterElectionStatus::Busy
+    );
+    assert!(second.into_service().is_none());
+}
+
+#[test]
+fn market_cache_service_rejects_overlapping_paths() {
+    let cache_path = temp_path("market-cache-service-overlap.cache");
+    let queue_path = temp_path("market-cache-service-overlap.queue");
+    let lock_path = temp_path("market-cache-service-overlap.lock");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let result = MarketCacheService::open(
+        MarketCacheServiceConfig::new(&cache_path)
+            .queue_path(&queue_path)
+            .processing_queue_path(&cache_path)
+            .lock_path(&lock_path),
+    );
+
+    assert!(matches!(
+        result,
+        Err(DataError::Validation(message))
+            if message.contains("market cache service cache and processing queue paths must differ")
+    ));
+}
+
+#[test]
+fn market_cache_service_recovers_flushes_and_compacts_with_reader_floor() {
+    let cache_path = temp_path("market-cache-service.cache");
+    let queue_path = temp_path("market-cache-service.queue");
+    let processing_path = temp_path("market-cache-service.processing");
+    let lock_path = temp_path("market-cache-service.lock");
+    let staging_path = temp_path("market-cache-service.compact");
+    let manifest_path = temp_path("market-cache-service-readers.json");
+    let _ = std::fs::remove_file(&cache_path);
+    let _ = std::fs::remove_file(&queue_path);
+    let _ = std::fs::remove_file(&processing_path);
+    let _ = std::fs::remove_file(&lock_path);
+    let _ = std::fs::remove_file(&staging_path);
+    let _ = std::fs::remove_file(&manifest_path);
+
+    let floor_event = quote_event("live", "SHFE.au2602", 2_000, Some(1_500), 480.0);
+    write_events(
+        &cache_path,
+        &[
+            quote_event("live", "SHFE.au2602", 1_000, Some(500), 479.0),
+            floor_event.clone(),
+        ],
+    );
+    write_events(
+        &processing_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            3_000,
+            Some(2_500),
+            481.0,
+        )],
+    );
+    write_events(
+        &queue_path,
+        &[quote_event(
+            "live",
+            "SHFE.au2602",
+            4_000,
+            Some(3_500),
+            482.0,
+        )],
+    );
+    MarketCacheReaderManifest::open(&manifest_path)
+        .unwrap()
+        .record_checkpoint(MarketCacheReaderCheckpoint::from_event(
+            "research-a",
+            "checkpoint",
+            &floor_event,
+        ))
+        .unwrap();
+
+    let opened = MarketCacheService::open(
+        MarketCacheServiceConfig::new(&cache_path)
+            .queue_path(&queue_path)
+            .processing_queue_path(&processing_path)
+            .lock_path(&lock_path)
+            .reader_manifest_path(&manifest_path)
+            .compaction_staging_path(&staging_path)
+            .compaction_policy(MarketCacheCompaction::new().retain_event_time_from(3_500)),
+    )
+    .unwrap();
+    assert_eq!(
+        opened
+            .report()
+            .recovery
+            .as_ref()
+            .unwrap()
+            .recovered_events(),
+        2
+    );
+
+    let service = opened.into_service().unwrap();
+    service
+        .enqueue_event(&quote_event(
+            "live",
+            "SHFE.au2602",
+            5_000,
+            Some(4_500),
+            483.0,
+        ))
+        .unwrap();
+    let shutdown = service.shutdown().unwrap();
+
+    assert_eq!(shutdown.flush_report.written_events, 1);
+    let compaction = shutdown.compaction_report.unwrap();
+    assert_eq!(compaction.reader_floor_event_time_ns, Some(1_500));
+    assert_eq!(compaction.effective_min_event_time_ns, Some(1_500));
+    assert!(shutdown.queue_empty);
+
+    let event_times = MarketCacheReader::open(&cache_path)
+        .unwrap()
+        .map(|event| event.unwrap().event_time_ns())
+        .collect::<Vec<_>>();
+    assert_eq!(event_times, vec![1_500, 2_500, 3_500, 4_500]);
 }
 
 #[test]

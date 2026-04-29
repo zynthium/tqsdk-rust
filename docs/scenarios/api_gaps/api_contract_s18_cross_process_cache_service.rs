@@ -7,9 +7,10 @@
 //! - 不要求用户理解 lock lease 文件、queue rotation 或 reader manifest
 //!
 //! API contract:
-//! - 当前 `tqsdk-data` 只承诺 process-local daemon / supervisor foundation
-//! - 跨进程 service 必须显式组合 writer election、lease ownership、
-//!   recovery action、compaction ownership 和 shutdown report
+//! - 当前 `tqsdk-data` 已承诺同步本地 file service facade 与 process-local
+//!   daemon / supervisor foundation
+//! - 完整跨进程 daemon orchestration 必须显式组合 writer election、
+//!   lease ownership、recovery action、compaction ownership 和 shutdown report
 //! - service 不拥有 live session；live attach 只能作为 `tqsdk-stream` 到 cache 的 adapter
 //! - service 不内置 HTTP health endpoint、GUI 或系统级进程管理器
 //! - 不要求用户手写 Tokio task、channel 或 `Arc<Mutex<_>>`
@@ -46,13 +47,16 @@
 //! `MarketCacheWriterElection` / `MarketCacheWriterLease` /
 //! `MarketCacheRecoveryAction` 已提供本地 writer election、lease ownership 和
 //! queue recovery action foundation；`MarketCacheCompactionOwnership` 已提供
-//! reader-protected compaction ownership foundation。
+//! reader-protected compaction ownership foundation；`MarketCacheService` 已提供
+//! 同步、本地 file service facade foundation，组合 writer election、recovery、
+//! reader checkpoint、queue flush 和 reader-protected compaction。
 //!
-//! 这些 API 可以作为 service substrate，但还不能自然表达跨进程 service facade。
+//! 这些 API 已覆盖本地 file service foundation，但还不能自然表达完整跨进程
+//! daemon orchestration / 多进程 cache 管理服务。
 //!
 //! 理想用户代码草案：
 //! ```ignore
-//! let service = MarketCacheService::builder("./cache/market")
+//! let service = CrossProcessMarketCacheService::builder("./cache/market")
 //!     .writer_id("prod-market-writer-1")
 //!     .lease_timeout(Duration::from_secs(30))
 //!     .flush_interval(Duration::from_millis(200))
@@ -105,6 +109,9 @@
 //!    明确 lease ownership 下恢复 processing queue / queue。
 //! 4. compaction ownership 已作为本地 data-layer helper 落地，能在 writer lease
 //!    下结合 reader manifest floor 运行 atomic compaction。
-//! 5. 下一步把现有 process-local supervisor 包进跨进程 service facade。
+//! 5. 本地 file service facade 已落地，能同步组合 writer election、recovery、
+//!    reader manifest、queue flush 与 reader-protected compaction ownership。
+//! 6. 下一步若继续推进，应设计跨进程 daemon orchestration / 管理服务层，
+//!    避免把 live session、HTTP endpoint、GUI 或系统进程管理器下沉到 data/core/session。
 
 fn main() {}
