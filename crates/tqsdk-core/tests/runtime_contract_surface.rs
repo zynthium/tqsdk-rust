@@ -280,6 +280,10 @@ fn low_level_session_wiring_is_hidden_behind_internal_bridge() {
         "session runtime implementation module should not be part of the stable public surface"
     );
     assert!(
+        !lib.contains("pub use auth::{AuthContext, AuthProvider, DynAuthProvider}"),
+        "dyn auth bridge should stay behind tqsdk_core::internal instead of the root public surface"
+    );
+    assert!(
         lib.contains("#[doc(hidden)]") && lib.contains("pub mod internal"),
         "cross-crate implementation bridge should be explicit and doc-hidden"
     );

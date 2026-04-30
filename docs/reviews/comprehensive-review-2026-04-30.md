@@ -42,6 +42,7 @@
 - `TqApi::new_for_test` 已收为私有构造路径；测试侧改用普通 `TqApi::new(SessionClient::new_for_test_with_handle(...))`，减少 hidden public surface。
 - `TqStream::new_for_test_with_capacity` 已替换为正式 `TqStream::with_commit_channel_capacity`，容量配置归属 stream facade，不再通过 hidden test 构造器暴露。
 - `DataClient::new_for_test_with_urls` 已收为 `#[cfg(test)]` 私有 helper；服务 URL 覆盖不再作为 hidden public API 暴露。
+- `DynAuthProvider` 已从 `tqsdk_core` root public re-export 收回到 `tqsdk_core::internal` sibling bridge，`AuthContext` / `AuthProvider` 保持 root contract。
 
 ### 仍保留为独立计划项
 

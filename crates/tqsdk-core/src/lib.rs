@@ -19,7 +19,7 @@
 pub mod adapter;
 #[cfg(test)]
 mod aggregation;
-pub mod auth;
+mod auth;
 pub mod commands;
 mod diff_protocol;
 mod domain_event;
@@ -39,6 +39,7 @@ pub mod types;
 /// This module is not part of the stable public contract. It exists only while
 /// `tqsdk-session` absorbs runtime assembly details from core.
 pub mod internal {
+    pub use crate::auth::DynAuthProvider;
     pub use crate::session_runtime::{
         RouteRequestExecutor, SessionRun, SessionRuntime, SessionRuntimeDeps,
     };
@@ -49,7 +50,7 @@ pub mod internal {
 }
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
-pub use auth::{AuthContext, AuthProvider, DynAuthProvider};
+pub use auth::{AuthContext, AuthProvider};
 pub use commands::{
     CausationMeta, CommandEnvelope, CommandStatus, HttpMethod, HttpRequest, InternalRequest,
     MarketChartCommand, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest,
