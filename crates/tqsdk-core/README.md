@@ -58,6 +58,10 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 - 证券对象：`SecurityAccount`、`SecurityPosition`、`SecurityOrder`、`SecurityTrade`。
 - 查询 / 元数据对象：`TradingStatus`、`SymbolSettlement`、`SymbolRanking`、`TradingCalendarDay`、`EdbIndexData`。
 
+期货 `Order` / `Trade` 的方向、开平字段，以及 `Order.price_type`，使用
+`Option<TradeDirection>`、`Option<TradeOffset>`、`Option<TradePriceType>` 表达官方协议枚举；
+缺失、`null` 或空字符串仍按 `None` 处理，避免 schema 稀疏 diff 破坏反序列化。
+
 ## 核心公开面
 
 | API | 角色 |

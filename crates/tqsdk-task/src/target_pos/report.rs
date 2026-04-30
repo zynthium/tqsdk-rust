@@ -87,8 +87,16 @@ impl From<&Trade> for TargetPosTaskTradeFill {
         Self {
             trade_id: trade.trade_id.clone(),
             order_id: trade.order_id.clone(),
-            direction: trade.direction.clone(),
-            offset: trade.offset.clone(),
+            direction: trade
+                .direction
+                .map(TradeDirection::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            offset: trade
+                .offset
+                .map(TradeOffset::as_str)
+                .unwrap_or_default()
+                .to_string(),
             volume: trade.volume,
             price: trade.price,
             trade_date_time: trade.trade_date_time,

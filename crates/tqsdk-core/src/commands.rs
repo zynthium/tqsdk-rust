@@ -1,3 +1,4 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::ids::{AccountId, CommandId, OrderId, ProtocolDomain, QueryId, SchemaId, Symbol};
@@ -204,6 +205,34 @@ impl TradeDirection {
             Self::Sell => "SELL",
         }
     }
+
+    pub fn from_protocol_str(value: &str) -> Option<Self> {
+        match value {
+            "BUY" => Some(Self::Buy),
+            "SELL" => Some(Self::Sell),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for TradeDirection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TradeDirection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_protocol_str(&value)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&value, &["BUY", "SELL"]))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +249,36 @@ impl TradeOffset {
             Self::Close => "CLOSE",
             Self::CloseToday => "CLOSETODAY",
         }
+    }
+
+    pub fn from_protocol_str(value: &str) -> Option<Self> {
+        match value {
+            "OPEN" => Some(Self::Open),
+            "CLOSE" => Some(Self::Close),
+            "CLOSETODAY" => Some(Self::CloseToday),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for TradeOffset {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TradeOffset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_protocol_str(&value).ok_or_else(|| {
+            serde::de::Error::unknown_variant(&value, &["OPEN", "CLOSE", "CLOSETODAY"])
+        })
     }
 }
 
@@ -239,6 +298,37 @@ impl TradePriceType {
             Self::Best => "BEST",
             Self::FiveLevel => "FIVELEVEL",
         }
+    }
+
+    pub fn from_protocol_str(value: &str) -> Option<Self> {
+        match value {
+            "ANY" => Some(Self::Any),
+            "LIMIT" => Some(Self::Limit),
+            "BEST" => Some(Self::Best),
+            "FIVELEVEL" => Some(Self::FiveLevel),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for TradePriceType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TradePriceType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_protocol_str(&value).ok_or_else(|| {
+            serde::de::Error::unknown_variant(&value, &["ANY", "LIMIT", "BEST", "FIVELEVEL"])
+        })
     }
 }
 

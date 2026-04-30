@@ -34,6 +34,11 @@ V1 只交付两类稳定 public contract：
 
 Raw runtime outbox envelopes and multi-source aggregation helpers are not part of the V1 public contract; low-level route consumers should use `OutboundDispatch` and reader/cursor primitives.
 
+官方 schema type 是 runtime contract 的一部分，而不是 facade 层 overlay。期货
+`Order` / `Trade` 的方向、开平字段和 `Order.price_type` 应在 core 中解码为
+`TradeDirection`、`TradeOffset`、`TradePriceType` 的可选枚举；缺失值保留为
+`None`，但已知协议字段不再暴露为裸 `String`。
+
 V1 不交付任何用户态 facade。
 
 ## V2+ 才出现的 adapter 层

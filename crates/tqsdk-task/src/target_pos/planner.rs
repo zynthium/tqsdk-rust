@@ -89,8 +89,8 @@ fn order_exactly_matches_desired(order: &Order, desired_order: &DesiredOrder) ->
 }
 
 fn order_can_satisfy_desired(order: &Order, desired_order: &DesiredOrder) -> bool {
-    order.direction == desired_order.direction.as_str()
-        && order.offset == desired_order.offset.as_str()
+    order.direction == Some(desired_order.direction)
+        && order.offset == Some(desired_order.offset)
         && order.volume_left > 0
         && order.volume_left <= desired_order.volume
         && order.limit_price == desired_order.limit_price
@@ -161,8 +161,8 @@ mod tests {
     fn reconcile_live_orders_prefers_exact_volume_match() {
         let live_orders = vec![Order {
             order_id: "order-1".to_string(),
-            direction: "BUY".to_string(),
-            offset: "OPEN".to_string(),
+            direction: Some(TradeDirection::Buy),
+            offset: Some(TradeOffset::Open),
             volume_left: 4,
             limit_price: 10.0,
             ..Order::default()

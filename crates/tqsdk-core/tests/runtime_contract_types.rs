@@ -4,8 +4,8 @@ use tqsdk_core::{
     FrequentCancellationRule, Kline, Notification, Order, Position, PreInsertOrder, Quote,
     RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
     SecurityTrade, SelfTrade, SelfTradeRule, SettlementInfo, SymbolRanking, SymbolSettlement, Tick,
-    Trade, TradePositionRatio, TradePositionRatioRule, TradingCalendarDay, TradingStatus,
-    TradingTime,
+    Trade, TradeDirection, TradeOffset, TradePositionRatio, TradePositionRatioRule, TradePriceType,
+    TradingCalendarDay, TradingStatus, TradingTime,
 };
 
 #[test]
@@ -308,6 +308,62 @@ fn trading_and_risk_schema_types_deserialize_nested_payloads() {
         Option::<PreInsertOrder>::None,
         Option::<SettlementInfo>::None,
     );
+}
+
+#[test]
+fn futures_order_and_trade_decode_typed_side_offset_and_price_type() {
+    let order = serde_json::from_value::<Order>(json!({
+        "user_id": "simnow",
+        "order_id": "order-typed-1",
+        "exchange_id": "SHFE",
+        "instrument_id": "au2602",
+        "direction": "BUY",
+        "offset": "OPEN",
+        "price_type": "LIMIT",
+        "volume_orign": 2,
+        "volume_left": 1,
+        "status": "ALIVE"
+    }))
+    .expect("typed order schema should deserialize");
+
+    assert_eq!(order.direction, Some(TradeDirection::Buy));
+    assert_eq!(order.offset, Some(TradeOffset::Open));
+    assert_eq!(order.price_type, Some(TradePriceType::Limit));
+
+    let trade = serde_json::from_value::<Trade>(json!({
+        "user_id": "simnow",
+        "trade_id": "trade-typed-1",
+        "order_id": "order-typed-1",
+        "exchange_id": "SHFE",
+        "instrument_id": "au2602",
+        "direction": "SELL",
+        "offset": "CLOSETODAY",
+        "price": 618.5,
+        "volume": 1
+    }))
+    .expect("typed trade schema should deserialize");
+
+    assert_eq!(trade.direction, Some(TradeDirection::Sell));
+    assert_eq!(trade.offset, Some(TradeOffset::CloseToday));
+}
+
+#[test]
+fn futures_order_and_trade_optional_typed_fields_preserve_missing_field_tolerance() {
+    let order = serde_json::from_value::<Order>(json!({
+        "user_id": "simnow",
+        "order_id": "order-missing-typed-fields"
+    }))
+    .expect("missing optional typed order fields should deserialize");
+
+    assert_eq!(order.direction, None);
+    assert_eq!(order.offset, None);
+    assert_eq!(order.price_type, None);
+
+    let unknown_order = serde_json::from_value::<Order>(json!({
+        "order_id": "order-unknown-direction",
+        "direction": "SIDEWAYS"
+    }));
+    assert!(unknown_order.is_err());
 }
 
 #[test]

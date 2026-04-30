@@ -1,11 +1,58 @@
 use serde::{Deserialize, Serialize};
 
 use crate::order_lifecycle::OrderLifecycle;
+use crate::{TradeDirection, TradeOffset, TradePriceType};
 
 use super::helpers::{default_currency, default_nan, deserialize_f64_or_nan};
 
 fn schema_f64_eq(left: f64, right: f64) -> bool {
     left == right || (left.is_nan() && right.is_nan())
+}
+
+fn deserialize_optional_trade_direction<'de, D>(
+    deserializer: D,
+) -> Result<Option<TradeDirection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_protocol_enum(deserializer, TradeDirection::from_protocol_str)
+}
+
+fn deserialize_optional_trade_offset<'de, D>(
+    deserializer: D,
+) -> Result<Option<TradeOffset>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_protocol_enum(deserializer, TradeOffset::from_protocol_str)
+}
+
+fn deserialize_optional_trade_price_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<TradePriceType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_protocol_enum(deserializer, TradePriceType::from_protocol_str)
+}
+
+fn deserialize_optional_protocol_enum<'de, D, T>(
+    deserializer: D,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    parse(&value)
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom(format!("unknown protocol enum value {value:?}")))
 }
 
 macro_rules! eq_non_float_fields {
@@ -274,14 +321,17 @@ pub struct Order {
     pub exchange_order_id: String,
     pub exchange_id: String,
     pub instrument_id: String,
-    pub direction: String,
-    pub offset: String,
+    #[serde(default, deserialize_with = "deserialize_optional_trade_direction")]
+    pub direction: Option<TradeDirection>,
+    #[serde(default, deserialize_with = "deserialize_optional_trade_offset")]
+    pub offset: Option<TradeOffset>,
     #[serde(default, rename = "volume_orign")]
     pub volume_origin: i64,
     pub volume_left: i64,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub limit_price: f64,
-    pub price_type: String,
+    #[serde(default, deserialize_with = "deserialize_optional_trade_price_type")]
+    pub price_type: Option<TradePriceType>,
     pub volume_condition: String,
     pub time_condition: String,
     pub insert_date_time: i64,
@@ -347,8 +397,10 @@ pub struct Trade {
     pub exchange_trade_id: String,
     pub exchange_id: String,
     pub instrument_id: String,
-    pub direction: String,
-    pub offset: String,
+    #[serde(default, deserialize_with = "deserialize_optional_trade_direction")]
+    pub direction: Option<TradeDirection>,
+    #[serde(default, deserialize_with = "deserialize_optional_trade_offset")]
+    pub offset: Option<TradeOffset>,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
     pub price: f64,
     pub volume: i64,

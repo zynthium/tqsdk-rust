@@ -47,11 +47,11 @@
 - `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
 - `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` 与 `SessionClient::drain_dispatches()` hidden public API 已删除。
 - `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 已新增显式 `testing::WaitTestDriver`，并删除 `TqApi::handle_for_test()`、`begin_wait_for_test()`、`push_deferred_commit_for_test()`。
+- 期货 `Order.direction` / `Order.offset` / `Order.price_type` 和 `Trade.direction` / `Trade.offset` 已从裸 `String` 迁移为 `Option<TradeDirection>` / `Option<TradeOffset>` / `Option<TradePriceType>`，保留缺失字段容忍；`PreInsertOrder` 与证券 schema 字符串字段不属于本批改造范围。
 
 ### 仍保留为独立计划项
 
 - `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks、wait fixture hooks 与 stream lifecycle hooks 已收口；task fixture 仍可通过公开 `api.session().handle()` 使用底层 runtime contract 做 deterministic ingest/dispatch 断言。
-- `Order.direction` / `offset` / `price_type` 从 `String` 迁移到枚举是 source-breaking schema API 改造，需要单独 public API 迁移计划。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
 - `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。
 - `transport.rs`、`account_group.rs`、`sink.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
@@ -87,7 +87,7 @@
 | MEDIUM | `Symbol`/`AccountId`/`OrderId` 等 ID 类型缺少 `Display` | `tqsdk-core/src/ids.rs` |
 | MEDIUM | `volume_orign` 公开字段拼写错误 | `tqsdk-core/src/types/trading.rs:153` |
 | MEDIUM | `Order`/`Trade`/`Account`/`Position` 缺少 `PartialEq` | `tqsdk-core/src/types/trading.rs` |
-| MEDIUM | `Order.direction`/`offset`/`price_type` 是 `String`，已有对应枚举未使用 | `tqsdk-core/src/types/trading.rs` |
+| MEDIUM | `Order.direction`/`offset`/`price_type` 是 `String`，已有对应枚举未使用（已于 2026-05-01 完成期货 `Order`/`Trade` 可选枚举迁移） | `tqsdk-core/src/types/trading.rs` |
 | MEDIUM | `StreamRetryPolicy::max_attempts` 返回 `Result<Self>` 破坏 builder 链式调用 | `tqsdk-stream/src/error.rs:137` |
 | MEDIUM | ~80 个 public 项缺少 `///` 文档注释 | 全部 crate |
 
@@ -156,5 +156,5 @@
 ### P3 — 长期优化
 
 15. 状态树从 `serde_json::Value` 迁移到 typed struct
-16. `Order`/`Trade` 字符串字段迁移到类型枚举
+16. `Order`/`Trade` 字符串字段迁移到类型枚举（已完成期货方向、开平、价格类型字段，2026-05-01）
 17. 引入 property-based 测试覆盖风控浮点边界
