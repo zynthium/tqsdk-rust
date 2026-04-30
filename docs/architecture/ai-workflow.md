@@ -8,12 +8,13 @@
 
 1. 本文档
 2. [`README.md`](../../README.md)
-3. [`docs/architecture/README.md`](README.md)
-4. [`crate-boundaries.md`](crate-boundaries.md)
-5. 受影响 crate 的 `README.md`
-6. 受影响专题文档，例如 `api-wait.md`、`api-stream.md`、`api-task.md`、`api-data.md`、`runtime-core/*.md`、`validation.md`
+3. [`docs/README.md`](../README.md)
+4. [`docs/architecture/README.md`](README.md)
+5. [`crate-boundaries.md`](crate-boundaries.md)
+6. 受影响 crate 的 `README.md`
+7. 受影响专题文档，例如 `api-wait.md`、`api-stream.md`、`api-task.md`、`api-data.md`、`runtime-core/*.md`、`validation.md`
 
-`report.md` 是审查输入，不是当前架构的唯一权威来源。若审查报告与已落地代码或 `docs/architecture` 不一致，必须先核对代码和架构文档，再决定是否把报告中的建议转化为新的计划。
+[`docs/reviews/`](../reviews/) 是当前审查和 public API 决策记录，[`docs/archive/`](../archive/) 是历史审查输入，[`docs/superpowers/`](../superpowers/) 是 specs/plans 执行记录。它们都不是当前架构的唯一权威来源。若审查报告、历史计划与已落地代码或 `docs/architecture` 不一致，必须先核对代码和架构文档，再决定是否把建议转化为新的计划。
 
 ## 当前总体架构
 

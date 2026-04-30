@@ -60,7 +60,7 @@ Non-goals:
   - Note that `StrategyHost` establishes the common loop shape, while full environment switching remains open.
 - Modify `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
   - Note that history replay should later implement the same strategy step/context shape.
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Update S11/S24 statuses only after examples compile and tests pass.
 - Modify `docs/scenarios/user-layer-iteration-plan.md`
   - Mark this batch as completed only after implementation and verification.
@@ -337,7 +337,7 @@ Expected: S11/S24 examples compile.
 ## Task 5: Review Matrix and Architecture Docs
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/architecture/api-task.md`
 - Modify: `docs/architecture/ai-workflow.md`
@@ -421,7 +421,7 @@ git commit -m "feat: add task strategy host"
 git add crates/tqsdk-task/src/testing.rs crates/tqsdk-task/src/error.rs crates/tqsdk-task/tests/strategy_testing.rs
 git commit -m "feat: add public strategy test harness"
 
-git add crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md docs/architecture/ai-workflow.md docs/architecture/README.md README.md crates/tqsdk-task/README.md
+git add crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs docs/scenarios/api_gaps/api_contract_s15_live_sim_replay_switch.rs docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md docs/architecture/ai-workflow.md docs/architecture/README.md README.md crates/tqsdk-task/README.md
 git commit -m "docs: promote strategy host testing scenarios"
 ```
 

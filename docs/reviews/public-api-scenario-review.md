@@ -16,7 +16,7 @@ reader/cursor 与 domain partition 读面；未改变 crate 边界或 runtime co
 本报告中的“当前 API 是否自然表达”应按 Rust 分层使用者判断，而不是按官方
 Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证据；Rust
 版本通过 `core/session/wait/stream/task/data` 分层服务不同用户。后续 gap
-修复顺序见 [`scenarios/user-layer-iteration-plan.md`](scenarios/user-layer-iteration-plan.md)。
+修复顺序见 [`../scenarios/user-layer-iteration-plan.md`](../scenarios/user-layer-iteration-plan.md)。
 
 ## 核心能力边界
 
@@ -63,7 +63,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `NeedsAttention`；`MultiAccountOrderTicket::report(...)` 返回 revision-bound
   `MultiAccountOrderGroupReport`，用户可以在同一 runtime revision 上审计账户组状态。
   执行计划见
-  [`superpowers/plans/2026-04-27-task-account-group-allocation.md`](superpowers/plans/2026-04-27-task-account-group-allocation.md)。
+  [`../superpowers/plans/2026-04-27-task-account-group-allocation.md`](../superpowers/plans/2026-04-27-task-account-group-allocation.md)。
 - S11 简单策略从“勉强”推进到“自然”：用户现在可以通过
   `StrategyHost` / `StrategyContext` 在同一稳定 task/wait 推进点内读取
   quote/account/position，并复用 `TaskHost::orders(...)`、`RiskEngine` 和

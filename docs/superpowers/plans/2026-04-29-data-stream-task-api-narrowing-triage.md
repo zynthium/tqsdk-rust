@@ -12,8 +12,8 @@
 
 ## Files
 
-- Read: `docs/public-api-disposition-matrix.md`
-- Read: `docs/public-api-scenario-review.md`
+- Read: `docs/reviews/public-api-disposition-matrix.md`
+- Read: `docs/reviews/public-api-scenario-review.md`
 - Read: `docs/architecture/api-data.md`
 - Read: `docs/architecture/api-stream.md`
 - Read: `docs/architecture/api-task.md`
@@ -30,7 +30,7 @@
 Run:
 
 ```bash
-rg -n "MarketCache(ReaderCheckpoint|ReaderLag|ReaderManifest|Recovery|WriterElection|Queue|Lock|Index|Compaction|ServiceOpen|DaemonShutdown|SupervisorShutdown|AtomicCompaction|CompactionOwnership)" crates/tqsdk-data docs/architecture/api-data.md docs/public-api-scenario-review.md
+rg -n "MarketCache(ReaderCheckpoint|ReaderLag|ReaderManifest|Recovery|WriterElection|Queue|Lock|Index|Compaction|ServiceOpen|DaemonShutdown|SupervisorShutdown|AtomicCompaction|CompactionOwnership)" crates/tqsdk-data docs/architecture/api-data.md docs/reviews/public-api-scenario-review.md
 ```
 
 Expected:
@@ -44,7 +44,7 @@ If S18 examples, README, or architecture docs still import or document these nam
 Run:
 
 ```bash
-rg -n "StreamSinkWal|StreamCommitJournal" crates/tqsdk-stream docs/architecture/api-stream.md docs/public-api-scenario-review.md
+rg -n "StreamSinkWal|StreamCommitJournal" crates/tqsdk-stream docs/architecture/api-stream.md docs/reviews/public-api-scenario-review.md
 ```
 
 Expected:
@@ -58,7 +58,7 @@ If S21 examples, README, or architecture docs still import or document these nam
 Run:
 
 ```bash
-rg -n "StrategySupervisorHealthStatus|StrategyRunStopReason|StrategyShutdownSignal|StrategyTelemetryEventKind|MultiAccountOrderStatus|ExecutionGroupStatus|ExecutionLegState" crates/tqsdk-task docs/architecture/api-task.md docs/public-api-scenario-review.md docs/scenarios
+rg -n "StrategySupervisorHealthStatus|StrategyRunStopReason|StrategyShutdownSignal|StrategyTelemetryEventKind|MultiAccountOrderStatus|ExecutionGroupStatus|ExecutionLegState" crates/tqsdk-task docs/architecture/api-task.md docs/reviews/public-api-scenario-review.md docs/scenarios
 ```
 
 Expected:

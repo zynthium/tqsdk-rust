@@ -17,7 +17,7 @@
   - Add unit tests using private `KlineDataSeries::new` / `TickDataSeries::new`.
 - Create `crates/tqsdk-data/examples/api_contract_s16_history_series_replay_adapter.rs`
   - Formal scenario contract showing `DataClient` history series feeding `StrategyReplay` through `MarketCacheReplay`.
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Update S16 evidence from “history adapter still gap” to “history series adapter foundation works”.
 - Modify `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
   - Narrow remaining gap to replay clock/checkpoint and full live/sim/replay environment.
@@ -199,7 +199,7 @@ git commit -m "feat: add history series replay adapters"
 
 **Files:**
 - Create: `crates/tqsdk-data/examples/api_contract_s16_history_series_replay_adapter.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `crates/tqsdk-data/README.md`
@@ -238,7 +238,7 @@ Expected: pass.
 Commit:
 
 ```bash
-git add crates/tqsdk-data/examples/api_contract_s16_history_series_replay_adapter.rs docs/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/user-layer-iteration-plan.md crates/tqsdk-data/README.md crates/tqsdk-task/README.md docs/architecture/api-data.md docs/architecture/api-task.md
+git add crates/tqsdk-data/examples/api_contract_s16_history_series_replay_adapter.rs docs/reviews/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/user-layer-iteration-plan.md crates/tqsdk-data/README.md crates/tqsdk-task/README.md docs/architecture/api-data.md docs/architecture/api-task.md
 git commit -m "docs: promote history series replay adapter"
 ```
 

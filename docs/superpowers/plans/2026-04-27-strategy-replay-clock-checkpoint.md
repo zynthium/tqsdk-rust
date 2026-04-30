@@ -123,7 +123,7 @@ Add `ctx.replay_time_ns()` and `ctx.checkpoint().next_event_index()` to the prin
 
 Update:
 
-- `docs/public-api-scenario-review.md`
+- `docs/reviews/public-api-scenario-review.md`
 - `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
 - `docs/scenarios/user-layer-iteration-plan.md`
 - `crates/tqsdk-task/README.md`
@@ -143,7 +143,7 @@ scripts/check_api_contract_examples.sh
 Commit:
 
 ```bash
-git add crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs docs/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/user-layer-iteration-plan.md crates/tqsdk-task/README.md docs/architecture/api-task.md
+git add crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs docs/reviews/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs docs/scenarios/user-layer-iteration-plan.md crates/tqsdk-task/README.md docs/architecture/api-task.md
 git commit -m "docs: promote strategy replay checkpoint contract"
 ```
 

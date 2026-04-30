@@ -28,7 +28,7 @@
   - Formal public API contract example for the S13 foundation.
 - Modify `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`
   - Narrow the remaining gap to advanced failure policy, cross-account target-pos orchestration, persistent resume, and audit log.
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Move S13 from “无法表达” to “勉强” after the formal example compiles.
 - Modify `docs/scenarios/user-layer-iteration-plan.md`
   - Mark account group foundation as landed and preserve remaining gaps.
@@ -1053,7 +1053,7 @@ git commit -m "feat: report multi-account order outcomes"
 **Files:**
 - Create: `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/architecture/api-task.md`
 - Modify: `crates/tqsdk-task/README.md`
@@ -1155,7 +1155,7 @@ async fn main() -> tqsdk_task::Result<()> {
 
 - [ ] **Step 2: Update docs**
 
-Update `docs/public-api-scenario-review.md` row 13:
+Update `docs/reviews/public-api-scenario-review.md` row 13:
 
 ```markdown
 | 13. 多账户下单 | 勉强 | 中 | 无 | 无 | 中 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`; `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`; `AccountGroup`; `MultiAccountOrderTicket`; advanced failure policy/resume/audit remains gap |
@@ -1198,7 +1198,7 @@ Expected: the example compiles.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
+git add crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
 git commit -m "docs: promote multi-account ordering scenario"
 ```
 

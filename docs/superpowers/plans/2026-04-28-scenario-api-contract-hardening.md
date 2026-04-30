@@ -33,7 +33,7 @@
   - Demonstrate typed `RiskCheckReport` / revision-aware preflight.
 - Modify: `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`
   - Replace string status assertions with `OrderLifecycle` assertions.
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
   - Update S12/S13/S19/S24 status and remaining gaps after implementation.
 - Modify: `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`
   - Remove `max_unhedged` from remaining gap once enforced.
@@ -293,12 +293,12 @@ git commit -m "test(task): use typed lifecycle in strategy test contract"
 ## Task 5: Update Scenario Review Status
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`
 
 - [ ] **Step 1: Update S12/S13 rows**
 
-In `docs/public-api-scenario-review.md`:
+In `docs/reviews/public-api-scenario-review.md`:
 - Keep S12 and S13 as `勉强` unless automatic hedge/flatten and durable audit are implemented.
 - Lower the stated timeout/exposure gap after `max_unhedged` is enforced.
 - Keep state consistency risk as `中` or `高` depending on remaining automatic compensation gap.
@@ -321,7 +321,7 @@ If examples no longer assert raw order status:
 Run:
 
 ```bash
-rg -n 'max_unhedged|RiskCheckReport|OrderLifecycle|ALIVE|FINISHED' docs/public-api-scenario-review.md docs/scenarios/api_gaps crates/tqsdk-task/examples/api_contract_s*.rs
+rg -n 'max_unhedged|RiskCheckReport|OrderLifecycle|ALIVE|FINISHED' docs/reviews/public-api-scenario-review.md docs/scenarios/api_gaps crates/tqsdk-task/examples/api_contract_s*.rs
 ```
 
 Expected:
@@ -332,7 +332,7 @@ Expected:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs
+git add docs/reviews/public-api-scenario-review.md docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs
 git commit -m "docs: update scenario api contract status"
 ```
 

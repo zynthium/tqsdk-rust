@@ -4,7 +4,7 @@
 
 **Goal:** 完成下一批不改 public API 的审查修复：继续拆分 `tqsdk-core` session runtime 的 reconnect/timer/transport/detail 逻辑，并补齐对应回归护栏。
 
-**Architecture:** 本批只修改 `tqsdk-core` 内部 runtime 编排代码，保持 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor` 单一提交路径不变。所有新模块放在 `crates/tqsdk-core/src/session_runtime/` 下，不新增面向用户的 core public API，不移动 direct-query、wait、stream、task、data 职责边界。`docs/review-2026-04-29-pending.md` 是输入清单，`docs/architecture/*` 仍是架构权威。
+**Architecture:** 本批只修改 `tqsdk-core` 内部 runtime 编排代码，保持 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor` 单一提交路径不变。所有新模块放在 `crates/tqsdk-core/src/session_runtime/` 下，不新增面向用户的 core public API，不移动 direct-query、wait、stream、task、data 职责边界。`docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md` 是输入清单，`docs/architecture/*` 仍是架构权威。
 
 **Tech Stack:** Rust, Cargo workspace, `tqsdk-core` integration tests, Tokio test runtime for reconnect backoff, Superpowers execution workflow.
 
@@ -46,9 +46,9 @@ Excluded from this batch:
   - Add reconnect exhaustion guardrails.
 - Modify: `crates/tqsdk-core/tests/runtime_contract_session_cycle.rs`
   - Add command detail preservation guardrail.
-- Modify: `docs/review-2026-04-29-pending.md`
+- Modify: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
   - Update only the status table/closure note for `3.2` after verification.
-- Modify: `docs/public-api-overdesign-audit.md`
+- Modify: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
   - No change expected. Only update if implementation proves a documented public API decision changes.
 - Do not modify: `docs/architecture/*`, unless code changes alter an architecture boundary. This plan is designed not to.
 
@@ -700,12 +700,12 @@ git commit -m "refactor(core): extract session command detail helpers"
 ## Task 5: Update Review Docs And Verify The Batch
 
 **Files:**
-- Modify: `docs/review-2026-04-29-pending.md`
+- Modify: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 - Verify: workspace commands
 
 - [ ] **Step 1: Update `3.2` closure note**
 
-In the top status table of `docs/review-2026-04-29-pending.md`, change the `3.2` row from:
+In the top status table of `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`, change the `3.2` row from:
 
 ```markdown
 | 3.2 `tqsdk-core/src/session_runtime.rs` 大文件与重复 | `done` + `moved to breaking-change batch` | command status derivation 已拆分（`7e43df8`）。更深的 reconnect/transport 分拆未纳入本批，需后续 runtime plan。 |
@@ -719,7 +719,7 @@ to:
 
 - [ ] **Step 2: Add a batch note under final verification**
 
-Under the existing “最终验证” command list in `docs/review-2026-04-29-pending.md`, add:
+Under the existing “最终验证” command list in `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`, add:
 
 ```markdown
 Next runtime hardening batch verification:
@@ -769,7 +769,7 @@ with no clippy warnings.
 - [ ] **Step 5: Commit docs and final verification record**
 
 ```bash
-git add docs/review-2026-04-29-pending.md
+git add docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md
 git commit -m "docs: close session runtime refactor audit item"
 ```
 
@@ -784,7 +784,7 @@ git commit -m "docs: close session runtime refactor audit item"
 - [ ] `cargo test -p tqsdk-core` passes.
 - [ ] `cargo test --workspace` passes.
 - [ ] `cargo clippy --workspace --examples --all-targets -- -D warnings` passes.
-- [ ] `docs/review-2026-04-29-pending.md` accurately reflects that only the `3.2` runtime-refactor remainder was closed by this batch.
+- [ ] `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md` accurately reflects that only the `3.2` runtime-refactor remainder was closed by this batch.
 
 ## Follow-Up Batches
 

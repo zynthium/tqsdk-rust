@@ -31,7 +31,7 @@ This batch must not:
 
 ## File Structure
 
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Change S21/S22 table rows from full “自然” to “勉强” or “底层子集自然，完整场景仍勉强”.
   - Update summary bullets to distinguish formal sub-contract examples from remaining gaps.
 - Modify formal examples:
@@ -120,7 +120,7 @@ impl Iterator for MarketCacheReplay {
 ## Task 1: Tighten S21/S22 Scenario Status
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`
 - Modify: `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`
 
@@ -167,7 +167,7 @@ Change the first lines of `crates/tqsdk-stream/examples/api_contract_s22_error_d
 
 - [ ] **Step 3: Update review table rows**
 
-In `docs/public-api-scenario-review.md`, update S21/S22 rows to make the full scenario status conservative:
+In `docs/reviews/public-api-scenario-review.md`, update S21/S22 rows to make the full scenario status conservative:
 
 ```markdown
 | 21. 慢消费者隔离 | 勉强 | 中 | 无 | 少量 | 低 | 低 | 局部重构 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`; bounded fan-out / typed lag diagnostic 子集自然；durable sink runtime 仍是 gap |
@@ -188,7 +188,7 @@ Expected: both pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/public-api-scenario-review.md \
+git add docs/reviews/public-api-scenario-review.md \
   crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs \
   crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs
 git commit -m "docs: clarify stream scenario subcontracts"
@@ -818,7 +818,7 @@ git commit -m "feat: add market cache replay iterator"
 
 **Files:**
 - Create: `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
@@ -899,7 +899,7 @@ fn main() -> tqsdk_data::Result<()> {
 
 - [ ] **Step 2: Update scenario review S18/S16 rows**
 
-In `docs/public-api-scenario-review.md`:
+In `docs/reviews/public-api-scenario-review.md`:
 
 ```markdown
 | 16. 历史行情回放 | 不自然 | 高 | 少量 | 少量 | 中 | 中 | 局部重构 | `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `MarketCacheReplay` provides ordered offline events, but no strategy replay driver |
@@ -960,7 +960,7 @@ Expected: both pass.
 
 ```bash
 git add crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs \
-  docs/public-api-scenario-review.md \
+  docs/reviews/public-api-scenario-review.md \
   docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs \
   docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs \
   docs/scenarios/user-layer-iteration-plan.md \

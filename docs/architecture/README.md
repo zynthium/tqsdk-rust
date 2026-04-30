@@ -5,6 +5,8 @@
 
 这里的第一原则不是先做某种用户 API，而是先做一个足以承载所有远端协议与对象的统一 runtime contract。
 
+仓库级文档职责和 AI 读取入口见 [`../README.md`](../README.md)。本目录是当前架构权威；`../reviews/`、`../archive/` 与 `../superpowers/` 中的审查记录和计划只能作为输入材料，不能覆盖本目录已经确认的 crate 边界和 runtime 不变量。
+
 重点回答：
 
 - V1 到底交付什么
@@ -214,6 +216,7 @@ V1 是：
 
 | 主题 | 当前落点 |
 | :--- | :--- |
+| 仓库级文档职责与权威层级 | [../README.md](../README.md) |
 | AI 工作流与架构守则 | [ai-workflow.md](ai-workflow.md) |
 | 总架构、阶段边界、路线图 | [README.md](README.md)、[roadmap.md](roadmap.md) |
 | 当前 workspace crate 边界审计 | [crate-boundaries.md](crate-boundaries.md) |
@@ -226,6 +229,7 @@ V1 是：
 | task facade / execution tool | [api-task.md](api-task.md) |
 | data facade / research tooling | [api-data.md](api-data.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
+| 场景审查和 public API disposition 输入 | [../reviews/README.md](../reviews/README.md) |
 
 ## 建议的概念分层
 1. `diff-core`

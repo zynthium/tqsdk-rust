@@ -16,7 +16,7 @@
 - Create: `crates/tqsdk-core/tests/runtime_contract_auth_context.rs`
 - Modify: `docs/architecture/runtime-core/session-auth.md`
 - Modify: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
-- Update planning artifact if present in the main planning workspace: `docs/public-api-disposition-matrix.md`
+- Update planning artifact if present in the main planning workspace: `docs/reviews/public-api-disposition-matrix.md`
 - Do not modify in this focused plan: `crates/tqsdk-core/src/lib.rs`
 - Do not modify in this focused plan: `crates/tqsdk-core/src/commands.rs`
 
@@ -241,15 +241,15 @@ impl AuthContext {
 
 Keep the surrounding constraints unchanged: auth results must still enter runtime state and remain observable through `RuntimeReader`.
 
-- [x] **Step 2: Update the planning copy of `docs/public-api-disposition-matrix.md`**
+- [x] **Step 2: Update the planning copy of `docs/reviews/public-api-disposition-matrix.md`**
 
-If `docs/public-api-disposition-matrix.md` exists in the main planning workspace, update the `AuthContext public fields` row disposition to `internalize` and replace the follow-up text with:
+If `docs/reviews/public-api-disposition-matrix.md` exists in the main planning workspace, update the `AuthContext public fields` row disposition to `internalize` and replace the follow-up text with:
 
 ```text
 Direct fields are removed from the public contract by `docs/superpowers/plans/2026-04-29-core-auth-context-privacy.md`; constructor and accessor APIs remain public.
 ```
 
-Do not create `docs/public-api-disposition-matrix.md` inside `.worktrees/audit-guardrails` if it is absent there; that would mix a large untracked audit artifact into this focused code commit. Do not reclassify unrelated `tqsdk-core` rows in this plan.
+Do not create `docs/reviews/public-api-disposition-matrix.md` inside `.worktrees/audit-guardrails` if it is absent there; that would mix a large untracked audit artifact into this focused code commit. Do not reclassify unrelated `tqsdk-core` rows in this plan.
 
 ## Task 5: Verify Core And Workspace Compatibility
 

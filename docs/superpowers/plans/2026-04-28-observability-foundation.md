@@ -17,7 +17,7 @@
 - Modify: `crates/tqsdk-task/src/lib.rs`
 - Modify: `crates/tqsdk-task/tests/strategy_environment.rs`
 - Modify: `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`
 
@@ -55,7 +55,7 @@ Expected: pass.
 ### Task 2: Scenario Review Update
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`
 
@@ -68,7 +68,7 @@ Record that stable telemetry/export hook foundation is now covered by `StrategyS
 Run:
 
 ```bash
-rg -n "HTTP metrics|HTTP health|metrics_endpoint|health_endpoint|web_gui" docs/public-api-scenario-review.md docs/scenarios crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs
+rg -n "HTTP metrics|HTTP health|metrics_endpoint|health_endpoint|web_gui" docs/reviews/public-api-scenario-review.md docs/scenarios crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs
 ```
 
 Expected: no endpoint implementation request appears outside explicit out-of-scope wording.

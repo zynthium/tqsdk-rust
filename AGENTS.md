@@ -1,6 +1,8 @@
 # AI 工作流守则
 
-本仓库的架构约束以 [`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md) 为准。Codex 在任何新 session 中开始做代码改动前，必须先读取该文档；如果改动涉及 crate 边界、public API、runtime 状态/提交模型、session/query 归属、wait/stream/task/data facade 归属，还必须同步读取相关架构文档。
+本仓库的架构约束以 [`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md) 为准，文档职责入口见 [`docs/README.md`](docs/README.md)。Codex 在任何新 session 中开始做代码改动前，必须先读取这些文档；如果改动涉及 crate 边界、public API、runtime 状态/提交模型、session/query 归属、wait/stream/task/data facade 归属，还必须同步读取相关架构文档。
+
+[`docs/reviews/`](docs/reviews/) 是审查和 public API 决策记录，[`docs/archive/`](docs/archive/) 是历史审查输入，[`docs/superpowers/`](docs/superpowers/) 是计划执行记录。它们可以作为上下文，但不能覆盖 `docs/architecture/*` 的当前架构权威。
 
 ## 必守架构边界
 

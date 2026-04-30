@@ -4,7 +4,7 @@
 
 **Goal:** Produce a reviewed disposition matrix for every public API symbol disputed by the 2026-04-29 audit inputs, so later remediation can separate safe internal cleanup from architecture-sensitive breaking changes.
 
-**Architecture:** This task is documentation and classification only. It must not edit Rust source, crate README files, or architecture docs except to cite them as evidence. The matrix treats `docs/architecture/*`, crate README files, and `crates/*/examples/api_contract_sXX_*.rs` as public-contract evidence; `docs/public-api-overdesign-audit.md` and `docs/review-2026-04-29-pending.md` are review inputs, not authority.
+**Architecture:** This task is documentation and classification only. It must not edit Rust source, crate README files, or architecture docs except to cite them as evidence. The matrix treats `docs/architecture/*`, crate README files, and `crates/*/examples/api_contract_sXX_*.rs` as public-contract evidence; `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md` and `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md` are review inputs, not authority.
 
 **Tech Stack:** Markdown, `rg`, Cargo examples check, existing architecture docs, crate `lib.rs` public re-exports, scenario examples.
 
@@ -12,20 +12,20 @@
 
 ## File Structure
 
-- Create: `docs/public-api-disposition-matrix.md`
+- Create: `docs/reviews/public-api-disposition-matrix.md`
   - Final matrix and decision evidence.
 - Modify: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
   - Link the completed matrix and mark Task 1 as delegated to this child plan.
 - Read-only evidence:
-  - `docs/public-api-overdesign-audit.md`
-  - `docs/review-2026-04-29-pending.md`
+  - `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
+  - `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
   - `docs/architecture/README.md`
   - `docs/architecture/api-layers.md`
   - `docs/architecture/api-data.md`
   - `docs/architecture/api-stream.md`
   - `docs/architecture/api-task.md`
   - `docs/architecture/validation.md`
-  - `docs/public-api-scenario-review.md`
+  - `docs/reviews/public-api-scenario-review.md`
   - `crates/tqsdk-core/src/lib.rs`
   - `crates/tqsdk-data/src/lib.rs`
   - `crates/tqsdk-stream/src/lib.rs`
@@ -50,9 +50,9 @@ Use exactly these values in the matrix:
 ## Task 1: Extract the Disputed Symbol Inventory
 
 **Files:**
-- Create: `docs/public-api-disposition-matrix.md`
-- Read: `docs/public-api-overdesign-audit.md`
-- Read: `docs/review-2026-04-29-pending.md`
+- Create: `docs/reviews/public-api-disposition-matrix.md`
+- Read: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
+- Read: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 - Read: `crates/tqsdk-core/src/lib.rs`
 - Read: `crates/tqsdk-data/src/lib.rs`
 - Read: `crates/tqsdk-stream/src/lib.rs`
@@ -60,12 +60,12 @@ Use exactly these values in the matrix:
 
 - [x] **Step 1: Create the matrix document header**
 
-Create `docs/public-api-disposition-matrix.md` with this header:
+Create `docs/reviews/public-api-disposition-matrix.md` with this header:
 
 ```markdown
 # Public API Disposition Matrix
 
-> Source audits: `docs/public-api-overdesign-audit.md`, `docs/review-2026-04-29-pending.md`
+> Source audits: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`, `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 > Date: 2026-04-29
 
 This document classifies disputed public API symbols before any remediation code changes.
@@ -149,7 +149,7 @@ Add rows for all public `MarketCache*` exports from `crates/tqsdk-data/src/lib.r
 Evidence command:
 
 ```bash
-rg -n "MarketCache[A-Za-z0-9_]*" crates/tqsdk-data/src/lib.rs crates/tqsdk-data/README.md crates/tqsdk-data/examples docs/architecture/api-data.md docs/public-api-scenario-review.md docs/scenarios
+rg -n "MarketCache[A-Za-z0-9_]*" crates/tqsdk-data/src/lib.rs crates/tqsdk-data/README.md crates/tqsdk-data/examples docs/architecture/api-data.md docs/reviews/public-api-scenario-review.md docs/scenarios
 ```
 
 Default classification rule:
@@ -180,12 +180,12 @@ StreamCommitJournalScope
 Evidence command:
 
 ```bash
-rg -n "StreamSinkWal|StreamCommitJournal" crates/tqsdk-stream/src/lib.rs crates/tqsdk-stream/README.md crates/tqsdk-stream/examples docs/architecture/api-stream.md docs/public-api-scenario-review.md docs/scenarios
+rg -n "StreamSinkWal|StreamCommitJournal" crates/tqsdk-stream/src/lib.rs crates/tqsdk-stream/README.md crates/tqsdk-stream/examples docs/architecture/api-stream.md docs/reviews/public-api-scenario-review.md docs/scenarios
 ```
 
 Default classification rule:
 
-- Any symbol used in `api_contract_s21_slow_consumer_isolation.rs`, `crates/tqsdk-stream/README.md`, or `docs/public-api-scenario-review.md`: `needs-arch-change`.
+- Any symbol used in `api_contract_s21_slow_consumer_isolation.rs`, `crates/tqsdk-stream/README.md`, or `docs/reviews/public-api-scenario-review.md`: `needs-arch-change`.
 - Symbols used only internally and in tests: `internalize`.
 
 - [x] **Step 5: Extract disputed `tqsdk-task` symbols**
@@ -204,7 +204,7 @@ ExecutionGroupStatus / ExecutionLegState / report groups
 Evidence command:
 
 ```bash
-rg -n "StrategySupervisorHealth|StrategySupervisorHealthStatus|StrategyRunReport|StrategyRunStopReason|StrategyShutdownReport|StrategyShutdownSignal|StrategyTelemetryEvent|StrategyTelemetryEventKind|MultiAccountOrderState|MultiAccountOrderStatus|ExecutionGroupStatus|ExecutionLegState" crates/tqsdk-task/src/lib.rs crates/tqsdk-task/README.md crates/tqsdk-task/examples docs/architecture/api-task.md docs/public-api-scenario-review.md docs/scenarios
+rg -n "StrategySupervisorHealth|StrategySupervisorHealthStatus|StrategyRunReport|StrategyRunStopReason|StrategyShutdownReport|StrategyShutdownSignal|StrategyTelemetryEvent|StrategyTelemetryEventKind|MultiAccountOrderState|MultiAccountOrderStatus|ExecutionGroupStatus|ExecutionLegState" crates/tqsdk-task/src/lib.rs crates/tqsdk-task/README.md crates/tqsdk-task/examples docs/architecture/api-task.md docs/reviews/public-api-scenario-review.md docs/scenarios
 ```
 
 Default classification rule:
@@ -217,7 +217,7 @@ Default classification rule:
 ## Task 2: Validate Evidence Against Architecture and Examples
 
 **Files:**
-- Modify: `docs/public-api-disposition-matrix.md`
+- Modify: `docs/reviews/public-api-disposition-matrix.md`
 - Read: `docs/architecture/*`
 - Read: `crates/*/examples/api_contract_sXX_*.rs`
 
@@ -240,7 +240,7 @@ Update the `Evidence` column for each protected symbol with the exact doc path, 
 Run:
 
 ```bash
-rg -n "MarketCacheWriterElection|MarketCacheRecoveryScan|MarketCacheCompactionOwnership|StreamSinkWalCompaction|StreamSinkWalRecovery|StreamCommitJournal|StrategySupervisorHealth|StrategyTelemetryEvent" crates/*/examples docs/public-api-scenario-review.md crates/*/README.md
+rg -n "MarketCacheWriterElection|MarketCacheRecoveryScan|MarketCacheCompactionOwnership|StreamSinkWalCompaction|StreamSinkWalRecovery|StreamCommitJournal|StrategySupervisorHealth|StrategyTelemetryEvent" crates/*/examples docs/reviews/public-api-scenario-review.md crates/*/README.md
 ```
 
 Update any matching row to `needs-arch-change` unless the example is first rewritten in a later plan.
@@ -271,7 +271,7 @@ Update the `## Summary` table counts so they match the rows in `## Matrix`.
 ## Task 3: Run Compatibility Check and Close Task 1
 
 **Files:**
-- Modify: `docs/public-api-disposition-matrix.md`
+- Modify: `docs/reviews/public-api-disposition-matrix.md`
 - Modify: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
 
 - [x] **Step 1: Run workspace example check**
@@ -292,7 +292,7 @@ If the command fails for an unrelated pre-existing reason, record the exact fail
 
 - [x] **Step 2: Add verification section**
 
-Append this section to `docs/public-api-disposition-matrix.md`:
+Append this section to `docs/reviews/public-api-disposition-matrix.md`:
 
 ````markdown
 ## Verification
@@ -315,7 +315,7 @@ Result:
 In `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`:
 
 - Keep Task 1 pointing to this child plan.
-- Add a link to `docs/public-api-disposition-matrix.md`.
+- Add a link to `docs/reviews/public-api-disposition-matrix.md`.
 - Do not mark Task 2 as ready unless the matrix exists and the verification section is filled.
 
 - [ ] **Step 4: Commit**
@@ -323,7 +323,7 @@ In `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`:
 Use `git add -f` for ignored plan files under `docs/superpowers/plans/` if this repository wants to track the plan:
 
 ```bash
-git add docs/public-api-disposition-matrix.md
+git add docs/reviews/public-api-disposition-matrix.md
 git add -f docs/superpowers/plans/2026-04-29-review-remediation-plan.md docs/superpowers/plans/2026-04-29-public-api-disposition-matrix.md
 git commit -m "docs: plan public api disposition matrix"
 ```

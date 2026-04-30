@@ -35,7 +35,12 @@ crates/
   tqsdk-task/      # 执行工具层
   tqsdk-data/      # 研究 / 离线数据层
 docs/
-  architecture/    # 架构说明、分层设计与验证矩阵
+  README.md        # 文档职责、权威层级和 AI 读取入口
+  architecture/    # 当前架构权威、分层设计与验证矩阵
+  scenarios/       # 场景契约草案与 API gap
+  reviews/         # 当前审查记录与 public API 决策矩阵
+  archive/         # 已闭环或已转化为计划的历史审查输入
+  superpowers/     # agentic specs / plans 执行记录
 ```
 
 ## 文档入口
@@ -47,9 +52,12 @@ docs/
 - task crate 说明见 [crates/tqsdk-task/README.md](crates/tqsdk-task/README.md)
 - data crate 说明见 [crates/tqsdk-data/README.md](crates/tqsdk-data/README.md)
 - 仓库级路线图见 [ROADMAP.md](ROADMAP.md)
+- 文档总入口见 [docs/README.md](docs/README.md)
 - 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
 - AI 工作流与架构守则见 [docs/architecture/ai-workflow.md](docs/architecture/ai-workflow.md)
 - 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
+- 场景契约与 API gap 见 [docs/scenarios/README.md](docs/scenarios/README.md)
+- public API 审查记录见 [docs/reviews/README.md](docs/reviews/README.md)
 
 ## 常用命令
 
@@ -105,7 +113,7 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 
 ## 架构文档
 
-仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明：
+仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明。文档目录职责和 AI 读取顺序见 [`docs/README.md`](docs/README.md)。
 
 - [`docs/architecture/README.md`](docs/architecture/README.md)
 - [`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md)

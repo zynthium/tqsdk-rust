@@ -140,7 +140,7 @@ examples 的处理原则：
 4. 如果重构导致 example 变长、变绕、暴露更多内部细节，应优先判定为 API
    退化。
 
-当前场景审查报告见 [`../public-api-scenario-review.md`](../public-api-scenario-review.md)；
+当前场景审查报告见 [`../reviews/public-api-scenario-review.md`](../reviews/public-api-scenario-review.md)；
 API gap sketches 见 [`../scenarios/api_gaps/`](../scenarios/api_gaps/)。
 
 ## Feature / no-default build matrix

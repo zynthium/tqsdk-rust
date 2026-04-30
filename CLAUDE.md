@@ -1,10 +1,16 @@
 ## Project Architecture Guardrails
 
 The canonical AI workflow and architecture guardrails for this repository live in
-[`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md). Read it
-before code changes in a new Claude Code session, especially before touching
-crate boundaries, public APIs, runtime state/commit semantics, session/query
-ownership, or wait/stream/task/data facade ownership.
+[`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md). The
+repository documentation map lives in [`docs/README.md`](docs/README.md). Read
+both before code changes in a new Claude Code session, especially before
+touching crate boundaries, public APIs, runtime state/commit semantics,
+session/query ownership, or wait/stream/task/data facade ownership.
+
+`docs/reviews/` contains current review and public API decision records,
+`docs/archive/` contains historical review input, and `docs/superpowers/`
+contains execution specs/plans. Treat them as context and planning evidence, not
+as authority over `docs/architecture/*` or current code.
 
 Hard constraints:
 

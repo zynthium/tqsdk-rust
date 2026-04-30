@@ -62,7 +62,7 @@ This batch should not touch:
   - `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`
   - `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`
 - Modify docs:
-  - `docs/public-api-scenario-review.md`
+  - `docs/reviews/public-api-scenario-review.md`
   - `docs/scenarios/user-layer-iteration-plan.md`
   - `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`
   - `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`
@@ -1215,7 +1215,7 @@ git commit -m "feat: expose stream fanout capacity"
 ## Task 7: Scenario Review and Architecture Docs
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs`
@@ -1228,7 +1228,7 @@ git commit -m "feat: expose stream fanout capacity"
 
 - [ ] **Step 1: Update scenario statuses conservatively**
 
-Update `docs/public-api-scenario-review.md`:
+Update `docs/reviews/public-api-scenario-review.md`:
 
 - S5 remains `自然`, but evidence should mention `SessionClient::subscribe_quotes` plus `RuntimeReader::read_market_state`.
 - S21 moves from `勉强` to `自然` only for bounded fan-out and explicit lag diagnostics. The evidence must mention that durable sink isolation is still a gap.
@@ -1267,7 +1267,7 @@ Expected: matches only in `Forbidden` header comments, not in executable example
 Commit:
 
 ```bash
-git add docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs docs/architecture/api-stream.md docs/architecture/ai-workflow.md docs/architecture/README.md crates/tqsdk-session/README.md crates/tqsdk-stream/README.md
+git add docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s20_production_daemon.rs docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs docs/scenarios/api_gaps/api_contract_s22_error_diagnosis_retry.rs docs/architecture/api-stream.md docs/architecture/ai-workflow.md docs/architecture/README.md crates/tqsdk-session/README.md crates/tqsdk-stream/README.md
 git commit -m "docs: update low-level scenario status"
 ```
 

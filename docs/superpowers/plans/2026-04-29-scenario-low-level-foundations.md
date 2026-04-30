@@ -56,7 +56,7 @@ Out of scope:
   - Formal example for the live pipe foundation, gated by `required-features = ["live", "stream"]`.
 - Modify `crates/tqsdk-data/Cargo.toml`
   - Add the S18 live pipe example with required features.
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Update S18/S19/S21 status evidence.
 - Modify relevant gap sketches:
   - `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`
@@ -624,7 +624,7 @@ git commit -m "feat(data): add live market cache stream pipe"
 ## Task 4: Scenario Docs and Review Status
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`
@@ -632,7 +632,7 @@ git commit -m "feat(data): add live market cache stream pipe"
 
 - [ ] **Step 1: Update docs**
 
-Update `docs/public-api-scenario-review.md`:
+Update `docs/reviews/public-api-scenario-review.md`:
 
 - S18 remains `勉强`, but evidence includes `MarketCacheStreamWriter` and live single-process pipe.
 - S19 remains `勉强`, but evidence includes `InstrumentSpec` backed tick-size validation and contract notional projection.
@@ -661,7 +661,7 @@ Expected: all pass. The locale warning from `scripts/check_api_contract_examples
 Commit:
 
 ```bash
-git add docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs
+git add docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s18_local_market_cache.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs docs/scenarios/api_gaps/api_contract_s21_slow_consumer_isolation.rs
 git commit -m "docs: update low-level scenario foundation status"
 ```
 

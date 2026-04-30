@@ -44,7 +44,7 @@ This batch must not:
   - Cover quote replay into context, kline replay into context, event ordering, and fake broker order submission during replay.
 - Create `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`
   - Formal S16 foundation example.
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Update S16 from `不自然` to `勉强` with foundation evidence and remaining gaps.
 - Modify `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
   - Narrow remaining gap to history-series adapter, replay clock/speed, and live/sim/replay environment switching.
@@ -1100,7 +1100,7 @@ git commit -m "feat: add strategy cache replay driver"
 
 **Files:**
 - Create: `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `crates/tqsdk-task/README.md`
@@ -1224,7 +1224,7 @@ async fn main() -> tqsdk_task::Result<()> {
 
 - [ ] **Step 2: Update scenario review S16 row**
 
-In `docs/public-api-scenario-review.md`, update S16:
+In `docs/reviews/public-api-scenario-review.md`, update S16:
 
 ```markdown
 | 16. 历史行情回放 | 勉强 | 中 | 无 | 无 | 低 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs`; `StrategyReplay`; `MarketCacheReplay`; cache event -> strategy context foundation works; replay speed/history adapter/live-sim-replay environment still gap |
@@ -1304,7 +1304,7 @@ Expected: both pass. The script may print the existing locale warning; exit code
 
 ```bash
 git add crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs \
-  docs/public-api-scenario-review.md \
+  docs/reviews/public-api-scenario-review.md \
   docs/scenarios/api_gaps/api_contract_s16_history_replay_strategy.rs \
   docs/scenarios/user-layer-iteration-plan.md \
   crates/tqsdk-task/README.md \

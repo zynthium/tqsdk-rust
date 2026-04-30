@@ -52,7 +52,7 @@ This batch implements the foundation needed before two-leg arbitrage and multi-a
 - Modify `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`
   - Replace the current broad gap with a narrower note: what-if margin simulation and portfolio-level limits remain future work.
 
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Move S19 from `不自然` to `自然` or `勉强` depending on final example shape.
   - Update S11 evidence to include `TaskHost::orders` and `RiskEngine`.
 
@@ -884,7 +884,7 @@ git commit -m "feat(task): enforce risk on guarded orders"
 **Files:**
 - Create: `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/architecture/api-task.md`
 - Modify: `crates/tqsdk-task/README.md`
@@ -1000,7 +1000,7 @@ In `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`, change `API gap
 
 - [ ] **Step 3: Update review matrix**
 
-In `docs/public-api-scenario-review.md`, update S19 row to:
+In `docs/reviews/public-api-scenario-review.md`, update S19 row to:
 
 ```markdown
 | 19. 风控前置 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `TaskHost::orders`; `RiskEngine`; `RiskRejection`; remaining what-if/portfolio risk stays in gap |
@@ -1067,7 +1067,7 @@ Expected: all pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
+git add crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
 git commit -m "docs(task): promote pre-trade risk scenario"
 ```
 
@@ -1077,7 +1077,7 @@ git commit -m "docs(task): promote pre-trade risk scenario"
 
 **Files:**
 - Modify: `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 
 - [ ] **Step 1: Update S11 example note**
@@ -1095,7 +1095,7 @@ Replace the `Current API note` block in `crates/tqsdk-task/examples/api_contract
 
 - [ ] **Step 2: Update review row**
 
-In `docs/public-api-scenario-review.md`, update S11 evidence to include:
+In `docs/reviews/public-api-scenario-review.md`, update S11 evidence to include:
 
 ```markdown
 `TaskHost::orders`; `RiskEngine`; no full StrategyHost yet
@@ -1134,7 +1134,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md
+git add crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md
 git commit -m "docs(task): reassess simple strategy scenario"
 ```
 

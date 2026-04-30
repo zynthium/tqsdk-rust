@@ -19,6 +19,6 @@ Cargo example 自动发现，也不得伪装成已经支持。
 1. 将对应 sketch 提升为正式 `crates/<crate>/examples/api_contract_sXX_*.rs`。
 2. 确保 example 顶部保留 Scenario / User goal / API contract / Forbidden /
    Regression signal / Review questions。
-3. 更新 [`docs/public-api-scenario-review.md`](../public-api-scenario-review.md)
+3. 更新 [`docs/reviews/public-api-scenario-review.md`](../reviews/public-api-scenario-review.md)
    的表达能力、风险、证据位置与建议处理方式。
 4. 运行验证矩阵中要求的 examples / workspace / clippy 命令。

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 整合 `docs/public-api-overdesign-audit.md` 与 `docs/review-2026-04-29-pending.md`，按风险、依赖和架构影响拆出一条可持续推进的修复路线，先补护栏，再做内部收敛，最后处理 public API breaking changes。
+**Goal:** 整合 `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md` 与 `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`，按风险、依赖和架构影响拆出一条可持续推进的修复路线，先补护栏，再做内部收敛，最后处理 public API breaking changes。
 
 **Architecture:** 本计划遵守 `docs/architecture/ai-workflow.md`、`docs/architecture/crate-boundaries.md` 和 `docs/architecture/api-*.md` 里已经冻结的 crate 边界。所有修复按三层推进：先处理不改 public contract 的安全/测试/注释问题，再处理不改 public shape 的内部重构，最后单独处理需要同步更新架构文档、README 和 examples 的 public API 收窄。任何与当前架构文档冲突的“收窄”建议，必须先做 disposition matrix，再决定是保留、废弃还是 internalize。
 
@@ -26,20 +26,20 @@ Child plans:
 
 Disposition outputs:
 
-- `docs/public-api-disposition-matrix.md` records the current symbol-level classification and is the gate for Task 2+ execution.
+- `docs/reviews/public-api-disposition-matrix.md` records the current symbol-level classification and is the gate for Task 2+ execution.
 
 Execution rule:
 
 - Do not execute Task 2 or later until Task 1 has produced a checked-in disposition matrix and the architecture-sensitive API decisions are explicit.
 - Do not combine no-API-change fixes, internal refactors, and public API narrowing in the same implementation branch.
-- Treat `docs/public-api-overdesign-audit.md` and `docs/review-2026-04-29-pending.md` as review inputs. They are not architecture authority when they conflict with `docs/architecture/*`.
+- Treat `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md` and `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md` as review inputs. They are not architecture authority when they conflict with `docs/architecture/*`.
 
 ## Review Findings Applied
 
 This roadmap incorporates the follow-up review performed after the first draft:
 
 - The original plan was too broad to execute as a single implementation plan. It is now explicitly an umbrella roadmap, and each major task must have a narrower child plan before edits begin.
-- Task 1 is the required gate. It now has a dedicated child plan and an output matrix: `docs/public-api-disposition-matrix.md`.
+- Task 1 is the required gate. It now has a dedicated child plan and an output matrix: `docs/reviews/public-api-disposition-matrix.md`.
 - Unresolved repository license decisions must not block low-risk safety/comment fixes. Task 2 now requires a child plan that separates license metadata from no-API-change guardrail work unless the license has already been chosen.
 - Test-harness work must name exact missing cases and helper paths before implementation. Task 3 now requires a child plan with concrete tests rather than a broad coverage mandate.
 - The high-churn internal refactors in Task 4 must be split into separate child plans for `session_runtime`, route driving, and `TargetPosTask`, each with characterization tests before extraction.
@@ -48,9 +48,9 @@ This roadmap incorporates the follow-up review performed after the first draft:
 
 ## File Structure
 
-- Modify: `docs/public-api-overdesign-audit.md`
+- Modify: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
   - 审查项完成后回填状态，或在计划执行后归档为输入文档。
-- Modify: `docs/review-2026-04-29-pending.md`
+- Modify: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
   - 审查项完成后回填状态，或在计划执行后归档为输入文档。
 - Create: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
   - 本计划主文档。
@@ -119,11 +119,11 @@ Child plan:
 
 Output:
 
-- `docs/public-api-disposition-matrix.md`
+- `docs/reviews/public-api-disposition-matrix.md`
 
 **Files:**
 - Modify: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
-- Modify: `docs/public-api-overdesign-audit.md`
+- Modify: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
 - Modify: `docs/architecture/api-layers.md`
 - Modify: `docs/architecture/api-data.md`
 - Modify: `docs/architecture/api-stream.md`
@@ -207,7 +207,7 @@ Finished `dev` profile ... or a successful workspace example check with no compi
 - [ ] **Step 6: Commit**
 
 ```bash
-git add docs/superpowers/plans/2026-04-29-review-remediation-plan.md docs/public-api-overdesign-audit.md docs/architecture/api-layers.md docs/architecture/api-data.md docs/architecture/api-stream.md docs/architecture/api-task.md
+git add docs/superpowers/plans/2026-04-29-review-remediation-plan.md docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md docs/architecture/api-layers.md docs/architecture/api-data.md docs/architecture/api-stream.md docs/architecture/api-task.md
 git commit -m "docs: classify audit findings by api disposition"
 ```
 
@@ -738,7 +738,7 @@ Child plan:
 - Modify: `docs/architecture/api-data.md`
 - Modify: `docs/architecture/api-stream.md`
 - Modify: `docs/architecture/api-task.md`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `crates/tqsdk-data/README.md`
 - Modify: `crates/tqsdk-stream/README.md`
 - Modify: `crates/tqsdk-task/README.md`
@@ -755,7 +755,7 @@ Child plan:
 
 Output:
 
-- S18 examples, `docs/architecture/api-data.md`, `crates/tqsdk-data/README.md`, and `docs/public-api-scenario-review.md` still directly document/import the candidate cache maintenance, manifest, recovery, election, queue/lock/index, compaction, service, daemon, and supervisor types.
+- S18 examples, `docs/architecture/api-data.md`, `crates/tqsdk-data/README.md`, and `docs/reviews/public-api-scenario-review.md` still directly document/import the candidate cache maintenance, manifest, recovery, election, queue/lock/index, compaction, service, daemon, and supervisor types.
 - Decision: no `tqsdk-data` public API narrowing in this batch. A future S18 cache API redesign must rewrite scenario examples and docs first.
 
 - [x] **Step 2: Narrow `tqsdk-stream` sink/WAL surface**
@@ -767,7 +767,7 @@ Output:
 
 Output:
 
-- `api_contract_s21_slow_consumer_isolation.rs`, `docs/architecture/api-stream.md`, `crates/tqsdk-stream/README.md`, `docs/public-api-scenario-review.md`, and stream tests still directly use WAL and commit journal types.
+- `api_contract_s21_slow_consumer_isolation.rs`, `docs/architecture/api-stream.md`, `crates/tqsdk-stream/README.md`, `docs/reviews/public-api-scenario-review.md`, and stream tests still directly use WAL and commit journal types.
 - Decision: no `tqsdk-stream` public API narrowing in this batch. A future S21 durability API redesign must provide replacement high-level examples first.
 
 - [x] **Step 3: Narrow `tqsdk-task` report/status explosion**
@@ -822,7 +822,7 @@ Output:
 - `docs/architecture/api-data.md`
 - `docs/architecture/api-stream.md`
 - `docs/architecture/api-task.md`
-- `docs/public-api-scenario-review.md`
+- `docs/reviews/public-api-scenario-review.md`
 - `crates/tqsdk-data/README.md`
 - `crates/tqsdk-stream/README.md`
 - `crates/tqsdk-task/README.md`
@@ -836,7 +836,7 @@ Output:
 - [x] **Step 6: Commit**
 
 ```bash
-git add crates/tqsdk-data crates/tqsdk-stream crates/tqsdk-task docs/public-api-scenario-review.md docs/architecture README.md
+git add crates/tqsdk-data crates/tqsdk-stream crates/tqsdk-task docs/reviews/public-api-scenario-review.md docs/architecture README.md
 git commit -m "refactor: narrow facade crate public surfaces"
 ```
 
@@ -850,8 +850,8 @@ Output:
 ## Task 8: Final Verification and Audit Closure
 
 **Files:**
-- Modify: `docs/public-api-overdesign-audit.md`
-- Modify: `docs/review-2026-04-29-pending.md`
+- Modify: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
+- Modify: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 - Modify: `docs/architecture/validation.md`
 
 - [x] **Step 1: Re-run the full validation matrix**
@@ -901,8 +901,8 @@ Output:
 Output:
 
 - Added closure tables to:
-  - `docs/public-api-overdesign-audit.md`
-  - `docs/review-2026-04-29-pending.md`
+  - `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
+  - `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 - Each item is classified as `done`, `won't do`, `moved to breaking-change batch`, or `blocked by architecture decision`.
 
 - [x] **Step 3: Record any intentional non-fixes**
@@ -922,13 +922,13 @@ Output:
 - [x] **Step 4: Commit**
 
 ```bash
-git add docs/public-api-overdesign-audit.md docs/review-2026-04-29-pending.md docs/architecture/validation.md
+git add docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md docs/architecture/validation.md
 git commit -m "docs: close out 2026-04-29 audit remediation"
 ```
 
 Output:
 
-- No `.worktrees/audit-guardrails` commit was created for Task 8 because `docs/public-api-overdesign-audit.md` and `docs/review-2026-04-29-pending.md` are currently untracked planning artifacts in the main workspace and absent from the worktree branch.
+- No `.worktrees/audit-guardrails` commit was created for Task 8 because `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md` and `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md` are currently untracked planning artifacts in the main workspace and absent from the worktree branch.
 - The closure updates were written to the main workspace copies of those audit documents.
 - The code worktree is clean after all committed remediation work.
 
@@ -939,7 +939,7 @@ Output:
 - Batch order is mandatory: `Task 1 -> Task 2 -> Task 3 -> Task 4 -> Task 5 -> Task 6 -> Task 7 -> Task 8`.
 - `Task 6` and `Task 7` are the only allowed breaking-change batches.
 - 如果 `Task 1` 发现某些符号已被外部文档/example 冻结，则对应项必须从“立即修复”降级为“文档先行 + 迁移后修复”。
-- 任何 public API 调整都必须同步检查 `docs/public-api-scenario-review.md` 和 `crates/*/examples/api_contract_sXX_*.rs`，否则视为计划未完成。
+- 任何 public API 调整都必须同步检查 `docs/reviews/public-api-scenario-review.md` 和 `crates/*/examples/api_contract_sXX_*.rs`，否则视为计划未完成。
 
 ## Self-Review
 

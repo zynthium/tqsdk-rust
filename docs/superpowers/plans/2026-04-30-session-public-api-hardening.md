@@ -50,7 +50,7 @@ Excluded from this batch:
 - Modify: `crates/tqsdk-core/README.md`
   - Remove `SessionRuntime` from the stable public surface table.
   - Keep the note that `tqsdk_core::internal` is a hidden sibling-crate bridge.
-- Optional modify: `docs/public-api-overdesign-audit.md`
+- Optional modify: `docs/archive/reviews/2026-04-29/public-api-overdesign-audit.md`
   - Only update if implementation changes the closure status of a listed public API finding.
 - Do not modify: `docs/architecture/*`
   - This plan hardens API visibility without changing crate responsibilities or runtime architecture.

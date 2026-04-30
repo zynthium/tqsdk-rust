@@ -109,7 +109,7 @@ Important API limits:
 - Modify `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`
   - Narrow the gap to automated hedge/flatten, timed cancel/replace, and richer hedge policies.
 
-- Modify `docs/public-api-scenario-review.md`
+- Modify `docs/reviews/public-api-scenario-review.md`
   - Move S12 from `无法表达` to `勉强` only if the formal example compiles cleanly and does not require manual leg state maps.
 
 - Modify `docs/scenarios/user-layer-iteration-plan.md`
@@ -1487,7 +1487,7 @@ git commit -m "feat: report execution group outcomes"
 **Files:**
 - Create: `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/architecture/api-task.md`
 - Modify: `crates/tqsdk-task/README.md`
@@ -1627,7 +1627,7 @@ Modify `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs` so the `AP
 
 - [ ] **Step 3: Update scenario review**
 
-Modify the S12 row in `docs/public-api-scenario-review.md`:
+Modify the S12 row in `docs/reviews/public-api-scenario-review.md`:
 
 ```markdown
 | 12. 跨合约套利 | 勉强 | 中 | 无 | 无 | 高 | 中 | 局部重构 | `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`; `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`; `ExecutionGroupBuilder`; `ExecutionGroupOutcome`; automatic hedge remains gap |
@@ -1678,7 +1678,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
+git add crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/architecture/api-task.md crates/tqsdk-task/README.md
 git commit -m "docs: promote spread execution group scenario"
 ```
 

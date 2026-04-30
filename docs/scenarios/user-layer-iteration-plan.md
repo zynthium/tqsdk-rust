@@ -48,7 +48,7 @@ public API。
 
 结合当前 Rust 侧审查材料：
 
-- [`docs/public-api-scenario-review.md`](../public-api-scenario-review.md)
+- [`docs/reviews/public-api-scenario-review.md`](../reviews/public-api-scenario-review.md)
 - [`docs/scenarios/api_gaps/`](api_gaps/)
 - [`docs/architecture/crate-boundaries.md`](../architecture/crate-boundaries.md)
 - [`docs/architecture/facade-paradigms.md`](../architecture/facade-paradigms.md)

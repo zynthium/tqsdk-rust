@@ -4,7 +4,7 @@
 
 **Goal:** 暂缓 S14，把下一批场景驱动 Public API 迭代聚焦在 S12/S13/S19 的 revision-bound execution/risk report、轻量 what-if projection 和文档状态同步。
 
-**Architecture:** 本批只在 `tqsdk-task` 扩展执行层 public contract，并同步 `docs/public-api-scenario-review.md` 与 gap sketches。不得把 execution group、account group、risk what-if、audit/report 能力下沉到 `tqsdk-core` 或 `tqsdk-session`；所有 report 必须从同一 `RuntimeReader` revision-bound snapshot 读取，不新增第二棵状态树。
+**Architecture:** 本批只在 `tqsdk-task` 扩展执行层 public contract，并同步 `docs/reviews/public-api-scenario-review.md` 与 gap sketches。不得把 execution group、account group、risk what-if、audit/report 能力下沉到 `tqsdk-core` 或 `tqsdk-session`；所有 report 必须从同一 `RuntimeReader` revision-bound snapshot 读取，不新增第二棵状态树。
 
 **Tech Stack:** Rust 2024, Tokio, `tqsdk-task`, `tqsdk-wait`, `tqsdk-core` typed state, existing scenario examples and tests.
 
@@ -61,7 +61,7 @@
   - Mark revision-bound report as supported; keep advanced failure policy/resume/durable audit as gaps.
 - Modify: `docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs`
   - Mark lightweight what-if projection as supported; keep margin/rule/audit/hot-update as gaps.
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
   - Update status rows for S12/S13/S19.
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
   - Sync the already-landed `max_unhedged`, `RiskCheckReport`, and new projection/report foundation.
@@ -587,7 +587,7 @@ git commit -m "docs(task): update scenario examples for execution risk reports"
 ## Task 5: Sync Scenario Review and Gap Documentation
 
 **Files:**
-- Modify: `docs/public-api-scenario-review.md`
+- Modify: `docs/reviews/public-api-scenario-review.md`
 - Modify: `docs/scenarios/user-layer-iteration-plan.md`
 - Modify: `docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs`
 - Modify: `docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs`
@@ -595,7 +595,7 @@ git commit -m "docs(task): update scenario examples for execution risk reports"
 
 - [ ] **Step 1: Update S12 review status**
 
-In `docs/public-api-scenario-review.md`, update S12 text to include:
+In `docs/reviews/public-api-scenario-review.md`, update S12 text to include:
 
 ```markdown
 revision-bound `ExecutionGroupReport`
@@ -605,7 +605,7 @@ Keep S12 as `勉强` because automatic hedge / flatten, timed cancel / replace, 
 
 - [ ] **Step 2: Update S13 review status**
 
-In `docs/public-api-scenario-review.md`, update S13 text to include:
+In `docs/reviews/public-api-scenario-review.md`, update S13 text to include:
 
 ```markdown
 revision-bound `MultiAccountOrderGroupReport`
@@ -615,7 +615,7 @@ Keep S13 as `勉强` because advanced failure policy, resume and durable audit r
 
 - [ ] **Step 3: Update S19 review status**
 
-In `docs/public-api-scenario-review.md`, update S19 text to include:
+In `docs/reviews/public-api-scenario-review.md`, update S19 text to include:
 
 ```markdown
 `RiskProjectionReport`
@@ -657,7 +657,7 @@ Expected: PASS. A local `LC_ALL` warning is acceptable only if the script exits 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add docs/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs
+git add docs/reviews/public-api-scenario-review.md docs/scenarios/user-layer-iteration-plan.md docs/scenarios/api_gaps/api_contract_s12_spread_arbitrage.rs docs/scenarios/api_gaps/api_contract_s13_multi_account_ordering.rs docs/scenarios/api_gaps/api_contract_s19_pre_trade_risk.rs
 git commit -m "docs: update execution risk scenario status"
 ```
 
@@ -744,7 +744,7 @@ Expected: only pre-existing unrelated files may remain untracked, and all plan c
 - S13 formal example uses `MultiAccountOrderGroupReport` and remains compilable.
 - S19 formal example uses `RiskProjectionReport` and `RiskCheckReport`.
 - No user-facing example uses provider private modules, `RuntimeCommand`, `RuntimeHandle`, manual channel orchestration, or `Arc<Mutex<_>>`.
-- `docs/public-api-scenario-review.md` and `docs/scenarios/user-layer-iteration-plan.md` agree on S12/S13/S19 status.
+- `docs/reviews/public-api-scenario-review.md` and `docs/scenarios/user-layer-iteration-plan.md` agree on S12/S13/S19 status.
 - Full required verification passes:
   - `cargo check --workspace --examples`
   - `cargo test --workspace`

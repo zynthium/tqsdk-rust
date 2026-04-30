@@ -1,0 +1,35 @@
+# 文档索引
+
+本文档是仓库级文档入口。它负责说明各类文档的职责边界，避免后续人工或 AI 代码助手把历史审查记录、执行计划和当前架构权威混用。
+
+## 权威层级
+
+1. [`architecture/ai-workflow.md`](architecture/ai-workflow.md)：AI 代码助手的新 session 入口和硬性架构守则。
+2. [`architecture/README.md`](architecture/README.md)：当前分层架构、crate 职责、runtime contract 与 API 归属总览。
+3. `architecture/api-*.md`、`architecture/runtime-core/*.md`、[`architecture/validation.md`](architecture/validation.md)：专题设计和验证矩阵。
+4. `crates/*/README.md` 与 `crates/*/examples/api_contract_sXX_*.rs`：crate 级用户入口和可编译 public API 契约。
+5. [`scenarios/`](scenarios/) 与 [`reviews/`](reviews/)：场景审查、API gap、public API 决策记录。它们用于指导迭代，但不能覆盖 `architecture/` 的权威边界。
+6. [`archive/`](archive/) 与 [`superpowers/`](superpowers/)：历史审查输入、spec 和 plan。它们是追溯材料，不是当前架构权威。
+
+## 目录分工
+
+| 目录 | 职责 | 使用规则 |
+| --- | --- | --- |
+| [`architecture/`](architecture/) | 当前架构权威、crate 边界、runtime contract、API 归属和验证矩阵 | 改动 crate 边界、public API、runtime 状态模型或 facade 归属时必须同步检查 |
+| [`scenarios/`](scenarios/) | 用户场景、API gap sketch、使用者分层迭代顺序 | gap 修复后要提升为 `crates/*/examples/api_contract_sXX_*.rs` 并更新 review |
+| [`reviews/`](reviews/) | 当前仍有决策价值的审查和 public API disposition 记录 | 作为计划输入和决策证据；与架构文档冲突时以 `architecture/` 为准 |
+| [`archive/`](archive/) | 已闭环或已转化为计划的历史审查输入 | 只作追溯，不直接驱动代码改动 |
+| [`superpowers/`](superpowers/) | agentic specs 和 implementation plans | 记录执行过程；计划中的旧判断不能覆盖当前代码和架构文档 |
+
+## AI 助手读取顺序
+
+新 session 开始代码改动前必须先读：
+
+1. [`architecture/ai-workflow.md`](architecture/ai-workflow.md)
+2. 根 [`README.md`](../README.md)
+3. 本文档
+4. [`architecture/README.md`](architecture/README.md)
+5. 受影响 crate 的 `README.md`
+6. 受影响专题文档、scenario review 或 superpowers plan
+
+如果审查记录、plan 或 archived report 与当前代码或 `architecture/` 不一致，应先核对代码和架构文档，再把审查建议转化为新的计划；不要直接按历史报告改代码。
