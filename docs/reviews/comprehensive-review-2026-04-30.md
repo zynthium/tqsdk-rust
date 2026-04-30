@@ -46,11 +46,11 @@
 - `TaskHost` 隐藏 ownership 测试 hook 已收口：`check_manual_order_allowed_for_test()` 改为正式 `check_manual_order_allowed()` dry-run API，未使用的 owner register/unregister hidden hooks 已删除，测试改用真实 scheduler builder 覆盖冲突路径。
 - `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
 - `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` 与 `SessionClient::drain_dispatches()` hidden public API 已删除。
-- `tqsdk-stream` 已删除 `TqStream::handle_for_test()`；stream 测试 support 改用公开 `stream.session().handle()`。`tqsdk-wait` 自身测试也已迁离 `TqApi::handle_for_test()`，但该 shim 暂留给 task fixture 迁移。
+- `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 自身测试也已迁离 `TqApi::handle_for_test()`，但该 shim 暂留给 task fixture 迁移。
 
 ### 仍保留为独立计划项
 
-- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership 与 TargetPos duplicate observer 已收口；剩余主要是 session/wait/stream manual test-driver 与 task fixture 的 runtime ingest/dispatch 控制，需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
+- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks 与 stream lifecycle hooks 已收口；剩余主要是 wait/task fixture 的 runtime ingest/dispatch 控制，需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
 - `Order.direction` / `offset` / `price_type` 从 `String` 迁移到枚举是 source-breaking schema API 改造，需要单独 public API 迁移计划。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
 - `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。

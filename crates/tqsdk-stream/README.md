@@ -72,6 +72,7 @@
 - `StreamGracefulShutdown`
 - `StreamGracefulShutdownReport`
 - `StreamShutdownError`
+- `testing::StreamTestDriver`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
 - `TradeObjectEventStream`
@@ -144,6 +145,10 @@
 - `reader()`
 - `session()`
 - `into_session()`
+
+`testing::StreamTestDriver` 只用于 deterministic fixture：注入合成 session error、
+closed event，或关闭 stream driver 来刻画消费者行为。普通用户代码不应把它当成运行时
+控制 API。
 
 ## 设计边界
 

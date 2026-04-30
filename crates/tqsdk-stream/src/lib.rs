@@ -51,6 +51,7 @@ mod reconnect;
 mod recovery;
 mod shutdown;
 mod sink;
+pub mod testing;
 mod typed;
 mod window;
 

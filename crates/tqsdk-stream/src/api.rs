@@ -555,18 +555,15 @@ impl TqStream {
         crate::sink::StreamSinkHandle::spawn(name.into(), commits, sink, options)
     }
 
-    #[doc(hidden)]
-    pub fn emit_session_error_for_test(&self, error: tqsdk_session::SessionFacadeError) {
+    pub(crate) fn emit_driver_session_error(&self, error: tqsdk_session::SessionFacadeError) {
         let _ = self.driver.sender.send(DriverEvent::Error(error));
     }
 
-    #[doc(hidden)]
-    pub fn emit_closed_for_test(&self) {
+    pub(crate) fn emit_driver_closed(&self) {
         let _ = self.driver.sender.send(DriverEvent::Closed);
     }
 
-    #[doc(hidden)]
-    pub fn close_driver_for_test(&self) {
+    pub(crate) fn close_driver_for_testing(&self) {
         self.driver.abort();
     }
 

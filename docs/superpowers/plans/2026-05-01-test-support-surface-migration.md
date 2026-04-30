@@ -49,8 +49,8 @@
 | `TqApi::handle_for_test()` | Fixture escape hatch for ingest/dispatch/status assertions | Move behind explicit wait test driver |
 | `TqApi::begin_wait_for_test()` | Wait concurrency guard characterization | Move behind explicit wait test driver or keep crate integration-only fixture |
 | `TqApi::push_deferred_commit_for_test()` | Wait diff/replay fixture control | Move behind explicit wait test driver |
-| `TqStream::handle_for_test()` | Stream fixture escape hatch for seeded market data | Move behind explicit stream test driver |
-| `TqStream::emit_session_error_for_test()` / `emit_closed_for_test()` / `close_driver_for_test()` | Stream driver lifecycle/error characterization | Move behind explicit stream test driver |
+| `TqStream::handle_for_test()` | Removed; seeded stream fixtures use `stream.session().handle()` | Done |
+| `TqStream::emit_session_error_for_test()` / `emit_closed_for_test()` / `close_driver_for_test()` | Removed; lifecycle/error characterization now belongs to `tqsdk_stream::testing::StreamTestDriver` | Done |
 | `TargetPosTask::applied_target_volume_for_test()` | Removed; `applied_target_volume()` is now the documented public API | Done |
 | `TargetPosTask::track_order_for_test()` | Internal unit-test-only helper | Keep crate-internal cfg(test) bridge |
 | `__tqsdk_impl_session_builder_forwarders!` | Macro exported only for sibling facade builders | Keep sibling/internal bridge |
@@ -68,7 +68,7 @@ Additional task-side duplicate hidden API removed:
 
 **Verification:** `cargo test -p tqsdk-task --test target_pos --test live_smoke --no-run` and `cargo test -p tqsdk-task --test target_pos` passed after replacing callers with `applied_target_volume()`.
 
-**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/task fixtures. This should happen before changing `TqApi::handle_for_test()` or stream driver lifecycle hooks, because current integration tests still need controlled ingest/dispatch/status behavior.
+**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/task fixtures. This should happen before changing `TqApi::handle_for_test()`, because current task integration tests still need controlled ingest/dispatch/status behavior.
 
 ## Task 3: Stabilize Low-Level Test Driver Entry Points
 
@@ -104,6 +104,14 @@ Additional task-side duplicate hidden API removed:
 - [ ] Remove `TqApi::handle_for_test()` after task fixture/test callers are migrated.
 
 **Verification:** `cargo fmt --all --check`, `cargo check --workspace`, `cargo test -p tqsdk-wait --tests`, and `cargo test -p tqsdk-stream --tests` passed.
+
+### Stream Lifecycle Subtask
+
+- [x] Add `tqsdk_stream::testing::StreamTestDriver` as the explicit fixture entry point for synthetic stream driver lifecycle events.
+- [x] Migrate stream lifecycle tests off `emit_session_error_for_test()`, `emit_closed_for_test()`, and `close_driver_for_test()`.
+- [x] Remove the `TqStream` lifecycle `_for_test` methods.
+
+**Verification:** `cargo test -p tqsdk-stream --test stream_session --test stream_surface --test stream_diagnostics` passed.
 
 ## Task 4: Reassess Feature Gating
 

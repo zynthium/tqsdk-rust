@@ -5,6 +5,7 @@ use tqsdk_session::SessionFacadeError;
 use tqsdk_stream::{
     StreamErrorKind, StreamFacadeError, StreamHealthStatus, StreamReconnectOutcome,
     StreamRetryDecision, StreamRetryGiveUpReason, StreamRetryPolicy, StreamSessionPhase,
+    testing::StreamTestDriver,
 };
 
 mod support;
@@ -131,7 +132,7 @@ async fn stream_health_status_summarizes_operational_state() {
     assert_eq!(health.status(), StreamHealthStatus::Recovering);
 
     let _commits = stream.commit_stream().unwrap();
-    stream.close_driver_for_test();
+    StreamTestDriver::new(&stream).close_driver();
     assert_eq!(
         stream.health().unwrap().status(),
         StreamHealthStatus::Closed

@@ -965,10 +965,11 @@ Additional completed items:
 - Added `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual session fixture, migrated session construction callers across session/wait/stream/task/data tests and helpers, and removed `SessionClient::new_for_test_with_handle()`.
 - Removed `SessionClient::drain_dispatches()` after moving manual outbox inspection to `ManualSession::drain_dispatches()` and stream tests to core-handle dispatch draining.
 - Removed `TqStream::handle_for_test()` after migrating stream test support to `stream.session().handle()`. Wait crate tests/support no longer call `TqApi::handle_for_test()`, but the shim remains until task fixture/test callers are migrated.
+- Removed stream lifecycle `_for_test` hooks after introducing `tqsdk_stream::testing::StreamTestDriver` for synthetic driver close/error fixture control.
 
 Remaining items are intentionally not part of this mixed remediation batch:
 
-- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection. TaskHost ownership hooks, the duplicate TargetPos observer, session hidden construction, and session hidden dispatch draining are now closed; the remaining scope is wait/stream manual test-driver hooks and task fixture ingest/dispatch control.
+- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection. TaskHost ownership hooks, the duplicate TargetPos observer, session hidden construction/dispatch draining, and stream lifecycle hooks are now closed; the remaining scope is wait/task fixture ingest/dispatch control.
 - `Order.direction` / `offset` / `price_type` enum migration is source-breaking and needs a schema API migration plan.
 - Global typed state migration and `CommitResult` ownership changes affect runtime contract and cursor semantics.
 - `transport.rs`, `account_group.rs`, and full `sink.rs` module-directory splits require child plans with characterization tests.

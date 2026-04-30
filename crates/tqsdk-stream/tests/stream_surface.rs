@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tqsdk_core::SessionPhase;
 use tqsdk_session::SessionFacadeError;
-use tqsdk_stream::{StreamFacadeError, StreamSessionPhase, TqStream};
+use tqsdk_stream::{StreamFacadeError, StreamSessionPhase, TqStream, testing::StreamTestDriver};
 
 mod support;
 
@@ -93,7 +93,7 @@ async fn commit_stream_returns_closed_after_driver_was_explicitly_closed() {
     let stream = support::core_seed::seeded_stream();
     let mut commits = stream.commit_stream().unwrap();
 
-    stream.close_driver_for_test();
+    StreamTestDriver::new(&stream).close_driver();
 
     let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
         .await
@@ -133,7 +133,7 @@ async fn stream_health_reports_session_reconnect_and_driver_state() {
     assert!(!reconnect.exhausted);
 
     let mut commits = stream.commit_stream().unwrap();
-    stream.close_driver_for_test();
+    StreamTestDriver::new(&stream).close_driver();
     let update = tokio::time::timeout(Duration::from_millis(50), commits.next())
         .await
         .expect("commit stream should observe close")

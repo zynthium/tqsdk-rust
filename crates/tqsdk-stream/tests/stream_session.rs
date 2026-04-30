@@ -6,6 +6,7 @@ use tqsdk_core::{OutboundFrame, OutboundRequest};
 use tqsdk_session::SessionFacadeError;
 use tqsdk_stream::{
     SessionReconnectEvent, StreamFacadeError, TradeSessionEvent, TradeSessionEventUpdate,
+    testing::StreamTestDriver,
 };
 
 mod support;
@@ -150,7 +151,7 @@ async fn trade_session_event_stream_emits_session_error_without_commit() {
     let stream = support::core_seed::seeded_stream();
     let mut events = stream.trade_session_event_stream("sim").unwrap();
 
-    stream.emit_session_error_for_test(SessionFacadeError::InvalidState(
+    StreamTestDriver::new(&stream).emit_session_error(SessionFacadeError::InvalidState(
         "synthetic transport failure",
     ));
 
@@ -193,7 +194,7 @@ async fn trade_session_event_stream_reports_closed_when_driver_closes() {
     let stream = support::core_seed::seeded_stream();
     let mut events = stream.trade_session_event_stream("sim").unwrap();
 
-    stream.emit_closed_for_test();
+    StreamTestDriver::new(&stream).emit_closed();
 
     let update = events
         .next()
