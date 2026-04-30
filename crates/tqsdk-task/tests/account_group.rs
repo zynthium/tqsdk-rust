@@ -31,6 +31,56 @@ fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
     }
 }
 
+#[test]
+fn account_group_is_split_into_focused_modules() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let account_group_root = root.join("src/account_group.rs");
+    let account_group_dir = root.join("src/account_group");
+
+    for module in [
+        "allocation.rs",
+        "report.rs",
+        "builder.rs",
+        "ticket.rs",
+        "submit.rs",
+        "projection.rs",
+    ] {
+        assert!(
+            account_group_dir.join(module).exists(),
+            "account_group module {module} should exist under src/account_group/"
+        );
+    }
+
+    let source = std::fs::read_to_string(&account_group_root)
+        .expect("account_group root should be readable");
+    for module_decl in [
+        "mod allocation;",
+        "mod builder;",
+        "mod projection;",
+        "mod report;",
+        "mod submit;",
+        "mod ticket;",
+    ] {
+        assert!(
+            source.contains(module_decl),
+            "account_group root should declare {module_decl}"
+        );
+    }
+
+    assert!(
+        !source.contains("pub struct AccountGroupBuilder"),
+        "allocation builder should live in src/account_group/allocation.rs"
+    );
+    assert!(
+        !source.contains("async fn submit_multi_account_order"),
+        "submit flow should live in src/account_group/submit.rs"
+    );
+    assert!(
+        !source.contains("fn account_report_from_view"),
+        "projection helpers should live in src/account_group/projection.rs"
+    );
+}
+
 fn seed_account_position_quote(
     host: &TaskHost,
     account_id: &str,

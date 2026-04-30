@@ -971,12 +971,13 @@ Additional completed items:
 - Executed child plan `docs/superpowers/plans/2026-05-01-shared-commit-result.md`: runtime commit publication and cursor/fan-out consumers now use `SharedCommitResult = Arc<CommitResult>`, removing the `apply_and_publish_locked` deep clone without changing `CommitResult` fields.
 - Executed child plan `docs/superpowers/plans/2026-05-01-stream-sink-module-split.md`: `tqsdk-stream` managed sink, WAL, commit journal, JSONL writer, state, and runtime loop were split into focused `src/sink/` modules without changing public re-exports.
 - Executed child plan `docs/superpowers/plans/2026-05-01-transport-module-split.md`: `tqsdk-core` websocket transport, endpoint/session config, topology, connected-route runtime, route connectors, frame mapping, and bootstrap orchestration were split into focused `src/transport/` modules without changing public re-exports.
+- Executed child plan `docs/superpowers/plans/2026-05-01-account-group-module-split.md`: `tqsdk-task` ratio allocation, multi-account builder/draft, public report/outcome types, submitted ticket lifecycle, submit/preflight flow, and projection helpers were split into focused `src/account_group/` modules without changing public re-exports.
 
 Remaining items are intentionally not part of this mixed remediation batch:
 
 - `_for_test` feature-gating for public facade hooks is closed for the session/wait/stream/task items covered by `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md`. Task deterministic fixtures still use the public `api.session().handle()` runtime substrate where raw ingest/dispatch assertions are the behavior under test.
 - Global typed state migration remains a runtime contract long-term evolution item and should not be mixed into bug/perf remediation batches.
-- `account_group.rs` module-directory split requires a child plan with characterization tests.
+- Module-directory split items from `docs/reviews/comprehensive-review-2026-04-30.md` are closed; each landed split has a child plan and source-level guardrail.
 - Broader public documentation coverage remains a quality batch, not a blocker for the bug/perf remediation already completed.
 
 ## Self-Review
