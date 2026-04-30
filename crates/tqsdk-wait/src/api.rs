@@ -527,18 +527,11 @@ impl TqApi {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn begin_wait_for_test(&self) -> crate::error::Result<WaitGuard<'_>> {
+    pub(crate) fn begin_fixture_wait(&self) -> crate::error::Result<WaitGuard<'_>> {
         self.driver.begin_wait()
     }
 
-    #[doc(hidden)]
-    pub fn handle_for_test(&self) -> tqsdk_core::RuntimeHandle {
-        self.driver.session.handle().clone()
-    }
-
-    #[doc(hidden)]
-    pub fn push_deferred_commit_for_test(&mut self, commit: tqsdk_core::CommitResult) {
+    pub(crate) fn push_fixture_deferred_commit(&mut self, commit: tqsdk_core::CommitResult) {
         self.driver.deferred_commits.push_back(commit);
     }
 }

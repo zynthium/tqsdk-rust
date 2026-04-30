@@ -50,6 +50,7 @@
 - `LimitOrderIntent`
 - `OrderTicket`
 - `OrderTicketState`
+- `testing::WaitTestDriver`
 - `wait_update(deadline).await`
 - `is_changing(...)`
 - `is_changing_fields(...)`
@@ -89,6 +90,10 @@
 - `confirm_settlement(...).await`
 - `session()`
 - `into_session()`
+
+`testing::WaitTestDriver` 只用于 deterministic fixture：持有 wait guard 以刻画
+并发 `wait_update()` 防线，或把已生成 commit 放回下一次 `wait_update()` 前置队列。
+普通用户代码不应把它当成运行时控制 API。
 
 ## 设计边界
 

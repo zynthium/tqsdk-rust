@@ -621,7 +621,7 @@ fn ingest_market_cache_event(
         MarketCachePayload::Tick(tick) => tick_update(&event.symbol, tick, ticks),
     };
 
-    host.api().handle_for_test().ingest(
+    host.api().session().handle().ingest(
         RuntimeInput::Io(IoEvent {
             route: "market-replay".to_string(),
             domains: vec![ProtocolDomain::Market],
@@ -643,7 +643,7 @@ fn seed_replay_serials(
 ) -> Result<()> {
     for spec in klines {
         let chart_id = kline_chart_id(&spec.symbol, spec.duration_ns, spec.view_width);
-        host.api().handle_for_test().ingest(
+        host.api().session().handle().ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market-replay-seed".to_string(),
                 domains: vec![ProtocolDomain::Market],
@@ -684,7 +684,7 @@ fn seed_replay_serials(
 
     for spec in ticks {
         let chart_id = tick_chart_id(&spec.symbol, spec.view_width);
-        host.api().handle_for_test().ingest(
+        host.api().session().handle().ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market-replay-seed".to_string(),
                 domains: vec![ProtocolDomain::Market],

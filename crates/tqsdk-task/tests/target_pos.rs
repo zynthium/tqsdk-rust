@@ -143,7 +143,8 @@ fn seed_quote_book_commit(
     last_price: f64,
 ) {
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -172,7 +173,7 @@ fn seed_quote_book_commit(
 fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i64) {
     let (pos_long, pos_short) = if pos >= 0 { (pos, 0) } else { (0, -pos) };
     host.api()
-        .handle_for_test()
+        .session().handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -220,7 +221,8 @@ fn seed_position_detail_commit(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -302,7 +304,8 @@ fn seed_order_status_commit_with_seed(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -357,7 +360,8 @@ fn seed_trade_commit(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -494,7 +498,7 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -529,7 +533,7 @@ async fn target_pos_wait_update_subscribes_quote_before_pricing_when_quote_missi
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     let subscribe = transport_payload(&dispatches[0].request);
     assert_eq!(subscribe["aid"], "subscribe_quote");
@@ -542,7 +546,7 @@ async fn target_pos_wait_update_subscribes_quote_before_pricing_when_quote_missi
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -560,7 +564,8 @@ async fn host_wait_update_timeout_still_advances_target_pos_with_existing_quote(
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -581,7 +586,7 @@ async fn host_wait_update_timeout_still_advances_target_pos_with_existing_quote(
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -602,7 +607,7 @@ async fn host_wait_update_applies_latest_target_request_only() {
 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -690,7 +695,7 @@ async fn open_only_target_pos_submits_buy_open_order_with_active_price() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -727,7 +732,7 @@ async fn open_only_target_pos_uses_passive_price_for_buy_orders() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3677.0);
@@ -748,7 +753,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -761,7 +766,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -795,7 +800,8 @@ async fn open_only_target_pos_does_not_submit_order_when_position_already_matche
 
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -819,7 +825,8 @@ async fn open_only_target_pos_does_not_resubmit_same_request_on_later_updates() 
     assert!(updated);
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -831,7 +838,8 @@ async fn open_only_target_pos_does_not_resubmit_same_request_on_later_updates() 
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -854,7 +862,7 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["volume"], 2);
@@ -866,7 +874,8 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -885,7 +894,7 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -906,7 +915,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3678.0);
@@ -916,7 +925,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -927,7 +936,8 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -946,7 +956,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -967,7 +977,7 @@ async fn open_only_target_pos_resubmits_after_terminal_order_without_position_ch
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -979,7 +989,7 @@ async fn open_only_target_pos_resubmits_after_terminal_order_without_position_ch
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -1003,7 +1013,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
     seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 2, 1);
@@ -1012,7 +1022,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1035,7 +1045,8 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1058,7 +1069,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1070,7 +1081,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1095,7 +1106,8 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
 
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1118,7 +1130,7 @@ async fn open_only_target_pos_repeated_same_target_does_not_duplicate_unmaterial
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1132,7 +1144,8 @@ async fn open_only_target_pos_repeated_same_target_does_not_duplicate_unmaterial
 
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1156,7 +1169,8 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     assert!(updated);
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -1177,7 +1191,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
             .is_err()
     );
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1189,7 +1203,8 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     assert!(!task.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1219,7 +1234,7 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     assert_eq!(
         task.execution_report().events,
@@ -1238,7 +1253,7 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     assert_eq!(
         task.execution_report().events,
@@ -1319,7 +1334,7 @@ async fn target_pos_execution_report_records_terminal_order_and_target_reached()
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
@@ -1367,7 +1382,7 @@ async fn target_pos_execution_report_records_trade_events_from_commit_deltas() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_trade_commit(
         &host,
@@ -1418,7 +1433,7 @@ async fn target_pos_execution_report_accumulates_trade_buffer_and_summary() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_trade_commit(
         &host,
@@ -1520,7 +1535,7 @@ async fn target_pos_execution_cursor_reads_only_new_events_and_trades() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     let (event_cursor, initial_events) = task.execution_events_since(0);
     assert_eq!(event_cursor, 1);
@@ -1590,7 +1605,8 @@ async fn target_pos_wait_target_reached_returns_error_when_insert_order_submissi
     assert!(task.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1617,7 +1633,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
 
     assert!(!task.is_finished());
     assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1630,7 +1646,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
     assert!(updated);
 
     assert!(!task.is_finished());
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1652,7 +1668,8 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
     assert!(task.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1680,7 +1697,7 @@ async fn open_only_target_pos_uses_opposite_open_order_to_reduce_net_position() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1700,7 +1717,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["direction"], "SELL");
@@ -1718,7 +1735,8 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1731,7 +1749,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1760,7 +1778,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1804,7 +1822,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1815,7 +1833,8 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1839,7 +1858,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1864,7 +1883,7 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1908,7 +1927,7 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1933,7 +1952,8 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -2000,7 +2020,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 3);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -2062,7 +2082,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let cancel = transport_payload(&dispatches[0].request);
     assert_eq!(cancel["aid"], "cancel_order");
@@ -2086,7 +2106,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["aid"], "insert_order");
@@ -2125,7 +2145,7 @@ async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_mis
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -2150,7 +2170,7 @@ async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_mis
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -2173,7 +2193,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     let first_close = transport_payload(&dispatches[0].request);
     assert_eq!(first_close["direction"], "SELL");
@@ -2191,7 +2211,8 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -2204,7 +2225,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -2237,7 +2258,7 @@ async fn today_yesterday_then_open_target_pos_submits_open_in_same_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 3);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["direction"], "SELL");
@@ -2271,7 +2292,7 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     let close_order = transport_payload(&dispatches[0].request);
     assert_eq!(close_order["direction"], "SELL");
@@ -2289,7 +2310,8 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -2303,7 +2325,8 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()

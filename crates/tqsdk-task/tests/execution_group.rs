@@ -40,7 +40,8 @@ fn seed_account_position_quote(
     last_price: f64,
 ) {
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -67,7 +68,8 @@ fn seed_account_position_quote(
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -124,7 +126,8 @@ fn seed_order_status_commit(host: &TaskHost, seed: OrderStatusSeed<'_>) {
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -193,7 +196,7 @@ async fn execution_group_submits_two_typed_legs_under_one_group_id() {
     assert!(group.legs()[0].ticket().was_submitted());
     assert!(group.legs()[1].ticket().was_submitted());
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
 
     let leg0 = transport_payload(&dispatches[0].request);
@@ -274,7 +277,8 @@ async fn execution_group_rejects_missing_group_id_before_dispatch() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -309,7 +313,8 @@ async fn execution_group_preflights_all_legs_before_dispatching_any_leg() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -346,7 +351,8 @@ async fn execution_group_risk_rejection_prevents_partial_dispatch() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -372,7 +378,8 @@ async fn execution_group_send_once_reuses_existing_leg_intents_on_retry() {
     assert!(first.legs().iter().all(|leg| leg.ticket().was_submitted()));
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -396,7 +403,8 @@ async fn execution_group_send_once_reuses_existing_leg_intents_on_retry() {
     assert!(retry.legs().iter().all(|leg| !leg.ticket().was_submitted()));
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -420,7 +428,8 @@ async fn execution_group_retry_with_different_leg_spec_is_rejected_by_intent_led
         .unwrap();
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -461,7 +470,7 @@ async fn execution_group_status_reports_all_filled_outcome() {
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,
@@ -518,7 +527,7 @@ async fn execution_group_status_reports_exposure_when_one_leg_fills_and_other_re
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,
@@ -576,7 +585,7 @@ async fn execution_group_wait_finished_returns_needs_hedge_after_max_unhedged_ex
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,

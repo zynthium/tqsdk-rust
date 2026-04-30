@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use tqsdk_session::SessionFacadeError;
-use tqsdk_wait::WaitFacadeError;
+use tqsdk_wait::{WaitFacadeError, testing::WaitTestDriver};
 
 mod support;
 
@@ -18,10 +18,10 @@ async fn wait_update_returns_deferred_commit_before_polling() {
 fn concurrent_wait_update_is_rejected() {
     let api = support::seeded_api();
 
-    let _guard = api.begin_wait_for_test().unwrap();
+    let _guard = WaitTestDriver::begin_wait(&api).unwrap();
 
     assert_eq!(
-        api.begin_wait_for_test(),
+        WaitTestDriver::begin_wait(&api),
         Err(WaitFacadeError::ConcurrentWaitUpdate)
     );
 }

@@ -378,7 +378,7 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
         ));
     };
 
-    let dispatches = host.api().handle_for_test().drain_dispatches()?;
+    let dispatches = host.api().session().handle().drain_dispatches()?;
     let mut report = StrategyTestReport {
         positions: runtime.positions.clone(),
         ..StrategyTestReport::default()
@@ -392,7 +392,7 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
             ingest_fake_order_outcome(host, &mut report, &mut runtime, command_id, outcome)?;
         }
         for command_id in runtime.mark_unsent_pending_orders_sent() {
-            let _ = host.api().handle_for_test().record_command_status(
+            let _ = host.api().session().handle().record_command_status(
                 command_id,
                 CommandStatus::Sent,
                 None,
@@ -407,7 +407,7 @@ pub(crate) async fn finish_test_step(host: &mut TaskHost) -> Result<StrategyTest
         };
 
         if broker_connected {
-            let _ = host.api().handle_for_test().record_command_status(
+            let _ = host.api().session().handle().record_command_status(
                 dispatch.command_id,
                 CommandStatus::Sent,
                 None,
@@ -715,7 +715,7 @@ fn ingest_fake_order_outcome(
 ) -> Result<()> {
     ingest_fake_trade_update(host, &outcome, command_id)?;
     if let Some(status) = outcome.command_status {
-        let _ = host.api().handle_for_test().record_command_status(
+        let _ = host.api().session().handle().record_command_status(
             command_id,
             status,
             None,
@@ -736,7 +736,7 @@ fn seed_market(
     market: &FakeMarket,
 ) -> Result<HashMap<(String, String), Position>> {
     if !market.quotes.is_empty() {
-        host.api().handle_for_test().ingest(
+        host.api().session().handle().ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
                 domains: vec![ProtocolDomain::Market],
@@ -812,7 +812,7 @@ fn seed_market(
             }
         }
 
-        host.api().handle_for_test().ingest(
+        host.api().session().handle().ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
                 domains: vec![ProtocolDomain::Trade],
@@ -885,7 +885,7 @@ fn ingest_fake_trade_update(
         );
     }
 
-    host.api().handle_for_test().ingest(
+    host.api().session().handle().ingest(
         RuntimeInput::Io(IoEvent {
             route: "trade".to_string(),
             domains: vec![ProtocolDomain::Trade],

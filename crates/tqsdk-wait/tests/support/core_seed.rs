@@ -4,7 +4,7 @@ use tqsdk_core::{
     RuntimeInput,
 };
 use tqsdk_session::testing::ManualSession;
-use tqsdk_wait::TqApi;
+use tqsdk_wait::{TqApi, testing::WaitTestDriver};
 
 #[allow(dead_code)]
 pub struct TestTqApi {
@@ -81,7 +81,7 @@ pub fn seed_quote_commit_with_datetime(
         .unwrap()
         .expect("seed quote commit should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -146,7 +146,7 @@ pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, v
         .unwrap()
         .expect("seed ready kline chart should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -217,7 +217,7 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
         .unwrap()
         .expect("seed ready tick chart should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -304,7 +304,7 @@ pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
         .unwrap()
         .expect("seed trade snapshot should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -373,7 +373,7 @@ pub fn seed_order_update(api: &mut TqApi, seed: OrderUpdateSeed<'_>) {
         .unwrap()
         .expect("seed order update should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -460,7 +460,7 @@ pub fn seed_trade_extended_snapshot(api: &mut TqApi, account_id: &str, symbol: &
         .unwrap()
         .expect("seed extended trade snapshot should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -500,7 +500,7 @@ pub fn seed_risk_management_rule_nested_update(
         .unwrap()
         .expect("seed risk management rule nested update should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -540,7 +540,7 @@ pub fn seed_risk_management_data_nested_update(
         .unwrap()
         .expect("seed risk management data nested update should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -574,7 +574,7 @@ pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
         .unwrap()
         .expect("seed notification commit should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]
@@ -656,5 +656,5 @@ pub fn seed_security_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &
         .unwrap()
         .expect("seed security trade snapshot should produce a commit");
 
-    api.push_deferred_commit_for_test(commit);
+    WaitTestDriver::push_deferred_commit(api, commit);
 }

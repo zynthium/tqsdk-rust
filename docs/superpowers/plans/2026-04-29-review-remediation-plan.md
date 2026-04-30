@@ -966,10 +966,11 @@ Additional completed items:
 - Removed `SessionClient::drain_dispatches()` after moving manual outbox inspection to `ManualSession::drain_dispatches()` and stream tests to core-handle dispatch draining.
 - Removed `TqStream::handle_for_test()` after migrating stream test support to `stream.session().handle()`. Wait crate tests/support no longer call `TqApi::handle_for_test()`, but the shim remains until task fixture/test callers are migrated.
 - Removed stream lifecycle `_for_test` hooks after introducing `tqsdk_stream::testing::StreamTestDriver` for synthetic driver close/error fixture control.
+- Removed `TqApi::handle_for_test()`, `begin_wait_for_test()`, and `push_deferred_commit_for_test()` after introducing `tqsdk_wait::testing::WaitTestDriver` and migrating task fixture/test callers to `api.session().handle()`.
 
 Remaining items are intentionally not part of this mixed remediation batch:
 
-- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection. TaskHost ownership hooks, the duplicate TargetPos observer, session hidden construction/dispatch draining, and stream lifecycle hooks are now closed; the remaining scope is wait/task fixture ingest/dispatch control.
+- `_for_test` feature-gating for public facade hooks is closed for the session/wait/stream/task items covered by `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md`. Task deterministic fixtures still use the public `api.session().handle()` runtime substrate where raw ingest/dispatch assertions are the behavior under test.
 - `Order.direction` / `offset` / `price_type` enum migration is source-breaking and needs a schema API migration plan.
 - Global typed state migration and `CommitResult` ownership changes affect runtime contract and cursor semantics.
 - `transport.rs`, `account_group.rs`, and full `sink.rs` module-directory splits require child plans with characterization tests.

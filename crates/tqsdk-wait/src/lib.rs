@@ -35,6 +35,7 @@ mod order_intent;
 mod price;
 mod recovery;
 mod refs;
+pub mod testing;
 mod views;
 
 pub use api::TqApi;

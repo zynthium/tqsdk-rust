@@ -3,7 +3,7 @@ use tqsdk_core::{
     CommandStatus, CommitScope, OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain,
     TradeAccountType, TradeDirection, TradeOffset,
 };
-use tqsdk_wait::{OrderPrice, OrderTicketState};
+use tqsdk_wait::{OrderPrice, OrderTicketState, testing::WaitTestDriver};
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
@@ -354,7 +354,7 @@ async fn order_ticket_status_reports_command_pending_without_order() {
         )
         .unwrap()
     {
-        api.push_deferred_commit_for_test(commit);
+        WaitTestDriver::push_deferred_commit(&mut api, commit);
     }
 
     match ticket.status(&api).unwrap() {
@@ -393,7 +393,7 @@ async fn wait_reconnect_safe_terminal_returns_rejected_command_without_order() {
         )
         .unwrap()
     {
-        api.push_deferred_commit_for_test(commit);
+        WaitTestDriver::push_deferred_commit(&mut api, commit);
     }
 
     match ticket

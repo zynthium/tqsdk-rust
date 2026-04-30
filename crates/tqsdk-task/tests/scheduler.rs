@@ -185,7 +185,8 @@ fn seed_quote_book_commit(
     last_price: f64,
 ) {
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -217,7 +218,8 @@ fn seed_position_commit(host: &TaskHost, account_id: &str, symbol: &str, pos: i6
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -265,7 +267,8 @@ fn seed_position_detail_commit(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -347,7 +350,8 @@ fn seed_order_status_commit_with_seed(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -402,7 +406,8 @@ fn seed_trade_commit(
         .split_once('.')
         .expect("symbol should contain exchange");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -536,7 +541,8 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert!(!scheduler.is_finished());
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -550,7 +556,7 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert!(updated);
     assert!(!scheduler.is_finished());
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -563,7 +569,8 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert!(!scheduler.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -631,7 +638,7 @@ async fn scheduler_execution_events_include_internal_task_commands() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     assert_eq!(
         scheduler.execution_events(),
@@ -759,7 +766,7 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
         }
     );
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -891,7 +898,7 @@ async fn scheduler_execution_cursor_reads_only_new_events_and_trades() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     let (event_cursor, initial_events) = scheduler.execution_events_since(0);
     assert_eq!(event_cursor, 1);
@@ -966,7 +973,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -978,7 +985,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -989,7 +996,8 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1008,7 +1016,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1078,7 +1086,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1122,7 +1130,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1186,7 +1194,8 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1210,7 +1219,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1271,7 +1280,7 @@ async fn scheduler_uses_step_passive_price_mode_for_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3677.0);
@@ -1302,7 +1311,8 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1328,7 +1338,8 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1340,7 +1351,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -1394,7 +1405,8 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
     assert!(updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1418,7 +1430,8 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
     assert!(!updated);
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1433,7 +1446,7 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1489,7 +1502,8 @@ async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
     scheduler.wait_finished().await.unwrap();
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1588,7 +1602,8 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
     assert!(updated);
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -1609,7 +1624,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
             .is_err()
     );
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1621,7 +1636,8 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
     assert!(!scheduler.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1676,7 +1692,8 @@ async fn scheduler_wait_finished_returns_error_when_step_insert_order_submission
     assert!(scheduler.is_finished());
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -1709,7 +1726,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
     assert!(updated);
 
     assert!(!scheduler.is_finished());
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1735,7 +1752,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
     assert!(updated);
 
     assert!(!scheduler.is_finished());
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");

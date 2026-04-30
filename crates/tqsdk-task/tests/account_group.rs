@@ -41,7 +41,8 @@ fn seed_account_position_quote(
 ) {
     let _ = host
         .api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -67,7 +68,8 @@ fn seed_account_position_quote(
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -124,7 +126,8 @@ fn seed_order_status_commit(host: &TaskHost, seed: OrderStatusSeed<'_>) {
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -259,7 +262,7 @@ async fn multi_account_order_submits_allocated_orders_with_deterministic_ids() {
     assert_eq!(ticket.orders()[1].client_order_id(), "alloc-au-001:acct:1");
     assert_eq!(ticket.orders()[1].intent().volume, 3);
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
 
     let first = transport_payload(&dispatches[0].request);
@@ -341,7 +344,8 @@ async fn multi_account_order_preflights_all_accounts_before_dispatch() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -366,7 +370,8 @@ async fn multi_account_order_retry_reuses_existing_account_intents() {
         .unwrap();
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -390,7 +395,8 @@ async fn multi_account_order_retry_reuses_existing_account_intents() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -414,7 +420,7 @@ async fn multi_account_order_reports_all_accounts_filled() {
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,
@@ -474,7 +480,7 @@ async fn multi_account_order_reports_mixed_account_outcome() {
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,
@@ -538,7 +544,7 @@ async fn multi_account_order_wait_finished_returns_attention_after_max_unhedged_
         .send_once()
         .await
         .unwrap();
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     seed_order_status_commit(
         &host,

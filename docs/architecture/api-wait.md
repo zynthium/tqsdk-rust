@@ -91,6 +91,9 @@ wait adapter 层未来可以提供：
   它们必须只读取 `read_trade_state()` 暴露的 typed order 状态并复用
   `TqApi::wait_update()` 推进，不得绕过 runtime order lifecycle 校验，也不得
   新增本地订单 overlay。
+- `tqsdk_wait::testing::WaitTestDriver` 只属于 deterministic fixture 支持面；
+  它可以刻画 wait guard 和 deferred commit 行为，但不得演变成普通用户的运行时
+  控制入口，也不得成为绕过 `TqApi::wait_update()` 的第二套状态推进模型。
 
 ## 为什么单独保留这份文档
 因为 Python 兼容性的大部分难点都在 wait facade 层，而不在 V1 contract 层。

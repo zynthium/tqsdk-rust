@@ -53,6 +53,7 @@
 - 一个 `TqStream`
 - 一个 `CommitStream`
 - 一个显式的 lag / closed error surface
+- 一个仅用于 deterministic fixture 的 `testing::StreamTestDriver`
 
 而不是一开始就铺开：
 
@@ -64,6 +65,9 @@
 - callback bridge
 
 这些能力都应该建立在最小 commit stream 先稳定之后再往上叠。
+
+`testing::StreamTestDriver` 只用于测试中注入合成 driver close/session error，
+不得作为普通用户的运行时控制 API，也不得暴露私有 channel handle 或第二棵状态树。
 
 ## 为什么不从对象级 stream 起步
 

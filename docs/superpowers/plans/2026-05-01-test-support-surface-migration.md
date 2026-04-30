@@ -13,7 +13,7 @@
 - `TaskHost::check_manual_order_allowed_for_test()` is not inherently test-only; it is a task-layer dry-run for the same ownership guard used by `insert_order_guarded()`.
 - `TaskHost::register_target_owner_for_test()` and `unregister_task_for_test()` are no longer used by integration tests and should not remain hidden public ABI.
 - `TaskHost::register_scheduler_owner_for_test()` is only used to simulate a scheduler ownership conflict; tests can use the real scheduler builder instead.
-- `TqApi::handle_for_test()`, `push_deferred_commit_for_test()`, and wait/stream/session dispatch controls still back many integration fixtures. They need a stable fake runtime/test-driver surface before they can be feature-gated or removed.
+- `TqApi::handle_for_test()`, `push_deferred_commit_for_test()`, and wait/stream/session dispatch controls originally backed many integration fixtures; they have now been replaced by explicit testing modules or the public session/runtime substrate.
 - `StrategyTestHarness` already covers user-facing fake market/fake broker strategy tests; the next migration should extend this direction rather than exposing lower-level runtime mutation.
 
 ## Task 1: Retire TaskHost Hidden Ownership Hooks
@@ -46,9 +46,9 @@
 |------|--------------|----------------|
 | `SessionClient::new_for_test_with_handle()` | Removed; callers now use `tqsdk_session::testing::ManualSession` | Done |
 | `SessionClient::drain_dispatches()` | Removed; manual/no-IO outbox inspection now belongs to `ManualSession::drain_dispatches()` | Done |
-| `TqApi::handle_for_test()` | Fixture escape hatch for ingest/dispatch/status assertions | Move behind explicit wait test driver |
-| `TqApi::begin_wait_for_test()` | Wait concurrency guard characterization | Move behind explicit wait test driver or keep crate integration-only fixture |
-| `TqApi::push_deferred_commit_for_test()` | Wait diff/replay fixture control | Move behind explicit wait test driver |
+| `TqApi::handle_for_test()` | Removed; task fixture/test callers use the public `api.session().handle()` substrate | Done |
+| `TqApi::begin_wait_for_test()` | Removed; wait concurrency characterization now belongs to `tqsdk_wait::testing::WaitTestDriver` | Done |
+| `TqApi::push_deferred_commit_for_test()` | Removed; deferred commit fixture control now belongs to `tqsdk_wait::testing::WaitTestDriver` | Done |
 | `TqStream::handle_for_test()` | Removed; seeded stream fixtures use `stream.session().handle()` | Done |
 | `TqStream::emit_session_error_for_test()` / `emit_closed_for_test()` / `close_driver_for_test()` | Removed; lifecycle/error characterization now belongs to `tqsdk_stream::testing::StreamTestDriver` | Done |
 | `TargetPosTask::applied_target_volume_for_test()` | Removed; `applied_target_volume()` is now the documented public API | Done |
@@ -68,7 +68,7 @@ Additional task-side duplicate hidden API removed:
 
 **Verification:** `cargo test -p tqsdk-task --test target_pos --test live_smoke --no-run` and `cargo test -p tqsdk-task --test target_pos` passed after replacing callers with `applied_target_volume()`.
 
-**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/task fixtures. This should happen before changing `TqApi::handle_for_test()`, because current task integration tests still need controlled ingest/dispatch/status behavior.
+**Next code slice:** Re-run hidden API inventory and reassess feature gating now that session/wait/stream public hidden test hooks have been removed.
 
 ## Task 3: Stabilize Low-Level Test Driver Entry Points
 
@@ -78,9 +78,9 @@ Additional task-side duplicate hidden API removed:
 - `crates/tqsdk-stream/src/api.rs`
 - test support modules under each crate
 
-- [ ] Add or refine explicit test-driver APIs for manual/no-IO sessions and facade fixtures.
-- [ ] Migrate integration tests away from direct `handle_for_test()`/`drain_dispatches()` where a facade-owned test driver can express the same behavior.
-- [ ] Keep raw runtime ingest confined to crate-owned test support or core runtime contract tests.
+- [x] Add or refine explicit test-driver APIs for manual/no-IO sessions and facade fixtures.
+- [x] Migrate integration tests away from direct `handle_for_test()`/`drain_dispatches()` where a facade-owned test driver can express the same behavior.
+- [x] Keep raw runtime ingest confined to explicit testing support or the public session/runtime substrate, without hidden facade hooks.
 
 ### Session Subtask
 
@@ -101,9 +101,18 @@ Additional task-side duplicate hidden API removed:
 - [x] Migrate wait crate tests/support off `TqApi::handle_for_test()` to `api.session().handle()`.
 - [x] Migrate stream crate tests/support off `TqStream::handle_for_test()` to `stream.session().handle()`.
 - [x] Remove `TqStream::handle_for_test()`.
-- [ ] Remove `TqApi::handle_for_test()` after task fixture/test callers are migrated.
+- [x] Remove `TqApi::handle_for_test()` after task fixture/test callers are migrated.
 
 **Verification:** `cargo fmt --all --check`, `cargo check --workspace`, `cargo test -p tqsdk-wait --tests`, and `cargo test -p tqsdk-stream --tests` passed.
+
+### Wait Fixture Subtask
+
+- [x] Add `tqsdk_wait::testing::WaitTestDriver` as the explicit fixture entry point for wait guard and deferred commit characterization.
+- [x] Migrate wait tests/support off `begin_wait_for_test()` and `push_deferred_commit_for_test()`.
+- [x] Migrate task fixture/test callers off `TqApi::handle_for_test()` to the public `api.session().handle()` runtime substrate.
+- [x] Remove `TqApi::begin_wait_for_test()`, `TqApi::push_deferred_commit_for_test()`, and `TqApi::handle_for_test()`.
+
+**Verification:** `cargo test -p tqsdk-wait --tests` and `cargo test -p tqsdk-task --tests` passed.
 
 ### Stream Lifecycle Subtask
 
@@ -115,9 +124,9 @@ Additional task-side duplicate hidden API removed:
 
 ## Task 4: Reassess Feature Gating
 
-- [ ] After callers are migrated, re-run the hidden API inventory.
-- [ ] Feature-gate or privatize any remaining `_for_test` functions that are no longer externally required.
-- [ ] Update `docs/reviews/comprehensive-review-2026-04-30.md` and `docs/architecture/*` only if API boundaries changed.
+- [x] After callers are migrated, re-run the hidden API inventory.
+- [x] Feature-gate or privatize any remaining `_for_test` functions that are no longer externally required.
+- [x] Update `docs/reviews/comprehensive-review-2026-04-30.md` and `docs/architecture/*` only if API boundaries changed.
 
 ## Exit Criteria
 

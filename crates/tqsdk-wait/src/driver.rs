@@ -21,8 +21,7 @@ impl WaitDriver {
     }
 }
 
-#[doc(hidden)]
-pub struct WaitGuard<'a> {
+pub(crate) struct WaitGuard<'a> {
     waiting: &'a AtomicBool,
 }
 

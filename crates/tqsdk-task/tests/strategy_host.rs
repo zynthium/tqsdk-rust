@@ -27,7 +27,8 @@ fn seed_account_position_quote(
 ) {
     let _ = host
         .api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -53,7 +54,8 @@ fn seed_account_position_quote(
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -97,7 +99,8 @@ fn seed_account_position_quote(
 
 fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -227,7 +230,8 @@ async fn strategy_context_orders_apply_risk_gate_before_dispatch() {
     let mut ctx = strategy.next_once().await.unwrap();
     ctx.task_host()
         .api()
-        .handle_for_test()
+        .session()
+        .handle()
         .drain_dispatches()
         .unwrap();
 
@@ -251,7 +255,8 @@ async fn strategy_context_orders_apply_risk_gate_before_dispatch() {
     assert!(
         ctx.task_host()
             .api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()

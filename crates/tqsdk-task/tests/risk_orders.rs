@@ -33,7 +33,8 @@ fn seed_account_position_quote(
     last_price: f64,
 ) {
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -57,7 +58,8 @@ fn seed_account_position_quote(
         .expect("seed quote commit should produce a commit");
 
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -102,7 +104,8 @@ fn seed_order_commit(host: &TaskHost, account_id: &str, symbol: &str, order_id: 
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -159,7 +162,7 @@ async fn task_order_builder_submits_typed_client_intent_without_json_price() {
     assert!(ticket.was_submitted());
     assert_eq!(ticket.client_order_id(), "strategy-entry-001");
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -193,7 +196,8 @@ async fn task_order_builder_uses_existing_task_ownership_guard() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -220,7 +224,7 @@ async fn risk_engine_allows_order_on_current_snapshot() {
         .unwrap();
 
     assert!(ticket.was_submitted());
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
 }
 
@@ -252,7 +256,8 @@ async fn risk_engine_rejects_price_outside_quote_band() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -284,7 +289,8 @@ async fn risk_engine_rejects_projected_net_position_limit() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -389,7 +395,8 @@ async fn task_host_records_daily_open_volume_after_submitted_order() {
     assert!(first.was_submitted());
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -416,7 +423,8 @@ async fn task_host_records_daily_open_volume_after_submitted_order() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -453,7 +461,8 @@ async fn execution_group_checks_daily_open_count_limit_before_partial_submit() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -475,7 +484,8 @@ async fn task_host_rejects_order_rate_limit_for_same_exchange() {
     assert!(first.was_submitted());
     assert_eq!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .len(),
@@ -516,7 +526,7 @@ async fn cancel_order_guarded_uses_order_rate_limit() {
         .await
         .unwrap();
     assert!(first.was_submitted());
-    host.api().handle_for_test().drain_dispatches().unwrap();
+    host.api().session().handle().drain_dispatches().unwrap();
 
     let err = host
         .cancel_order_guarded("sim", "order-1")
@@ -695,7 +705,8 @@ async fn legacy_guarded_insert_uses_configured_risk_engine() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()

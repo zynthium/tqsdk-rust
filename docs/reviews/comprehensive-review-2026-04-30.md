@@ -46,11 +46,11 @@
 - `TaskHost` 隐藏 ownership 测试 hook 已收口：`check_manual_order_allowed_for_test()` 改为正式 `check_manual_order_allowed()` dry-run API，未使用的 owner register/unregister hidden hooks 已删除，测试改用真实 scheduler builder 覆盖冲突路径。
 - `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
 - `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` 与 `SessionClient::drain_dispatches()` hidden public API 已删除。
-- `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 自身测试也已迁离 `TqApi::handle_for_test()`，但该 shim 暂留给 task fixture 迁移。
+- `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 已新增显式 `testing::WaitTestDriver`，并删除 `TqApi::handle_for_test()`、`begin_wait_for_test()`、`push_deferred_commit_for_test()`。
 
 ### 仍保留为独立计划项
 
-- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks 与 stream lifecycle hooks 已收口；剩余主要是 wait/task fixture 的 runtime ingest/dispatch 控制，需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
+- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks、wait fixture hooks 与 stream lifecycle hooks 已收口；task fixture 仍可通过公开 `api.session().handle()` 使用底层 runtime contract 做 deterministic ingest/dispatch 断言。
 - `Order.direction` / `offset` / `price_type` 从 `String` 迁移到枚举是 source-breaking schema API 改造，需要单独 public API 迁移计划。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
 - `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。
@@ -65,12 +65,12 @@
 
 | 严重度 | 发现 | 位置 |
 |--------|------|------|
-| MEDIUM | `_for_test` 方法用 `#[doc(hidden)]` 而非 feature flag，下游可调用 `handle_for_test()` 绕过 session 层 | 多个 crate |
+| MEDIUM | `_for_test` 方法用 `#[doc(hidden)]` 而非 feature flag，下游可调用 `handle_for_test()` 绕过 session 层（本批已删除 session/wait/stream/task facade hidden test hooks；仅保留显式 testing 模块或 sibling bridge） | 多个 crate |
 | MEDIUM | `tqsdk-stream`/`tqsdk-wait` 多处用 `reader.read()` 全量快照读 kline/tick/quote，应改用 `read_market_state()` | `stream/typed.rs:62`, `stream/window.rs:197`, `wait/refs/kline.rs:16` |
 | MEDIUM | `cargo fmt --check` 在 9 个文件上失败 | `tqsdk-core`, `tqsdk-data` |
 | LOW | `tqsdk_core::internal` 模块缺少稳定性声明 | `tqsdk-core/src/lib.rs` |
 | LOW | `tqsdk-data` 的 `stream` feature 与 `tqsdk-stream` 横向耦合（已正确 feature-gate） | `tqsdk-data/Cargo.toml` |
-| LOW | `tqsdk-task::testing` 通过 `handle_for_test()` 紧耦合 `RuntimeHandle::ingest` | `tqsdk-task/src/testing.rs` |
+| LOW | `tqsdk-task::testing` 通过 `handle_for_test()` 紧耦合 `RuntimeHandle::ingest`（已迁到公开 `api.session().handle()` runtime substrate） | `tqsdk-task/src/testing.rs` |
 
 ---
 
@@ -83,7 +83,7 @@
 | HIGH | `market_target(bool, bool)` 布尔陷阱，已有命名快捷方法覆盖所有组合 | `tqsdk-session/src/builder.rs:79` |
 | HIGH | `TargetPosConfig` 所有字段 `pub`，绕过 builder 验证。`VolumeSplitPolicy::validate()` 是 `pub(crate)` | `tqsdk-task/src/config.rs:57` |
 | HIGH | `RiskRejection` 无 `Display`，`TaskError` 回退到 `Debug` 格式 | `tqsdk-task/src/risk.rs:119` |
-| HIGH | 20+ 个 `#[doc(hidden)]` public 项属于稳定 ABI | 多个 crate |
+| HIGH | 20+ 个 `#[doc(hidden)]` public 项属于稳定 ABI（本批已清理 public facade test hooks；保留项为 `tqsdk_core::internal` / session builder macro 等已记录 sibling bridge） | 多个 crate |
 | MEDIUM | `Symbol`/`AccountId`/`OrderId` 等 ID 类型缺少 `Display` | `tqsdk-core/src/ids.rs` |
 | MEDIUM | `volume_orign` 公开字段拼写错误 | `tqsdk-core/src/types/trading.rs:153` |
 | MEDIUM | `Order`/`Trade`/`Account`/`Position` 缺少 `PartialEq` | `tqsdk-core/src/types/trading.rs` |

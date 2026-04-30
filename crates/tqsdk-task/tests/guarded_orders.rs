@@ -31,7 +31,8 @@ fn seed_order_commit(host: &TaskHost, account_id: &str, symbol: &str, order_id: 
         .split_once('.')
         .expect("test symbol should contain an exchange prefix");
     host.api()
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -100,7 +101,8 @@ async fn insert_order_guarded_blocks_symbol_owned_by_target_task() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -125,7 +127,7 @@ async fn insert_order_guarded_allows_unowned_symbol_and_delegates_to_wait_api() 
 
     assert!(!order.is_ready(host.api()).unwrap());
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
     assert_eq!(
@@ -156,7 +158,7 @@ async fn insert_order_guarded_accepts_best_magic_string() {
     .await
     .unwrap();
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
 
     let payload = transport_payload(&dispatches[0].request);
@@ -180,7 +182,7 @@ async fn insert_order_guarded_accepts_fivelevel_magic_string() {
     .await
     .unwrap();
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
 
     let payload = transport_payload(&dispatches[0].request);
@@ -211,7 +213,8 @@ async fn insert_order_guarded_rejects_unknown_legacy_price_mode() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -239,7 +242,8 @@ async fn cancel_order_guarded_blocks_ready_order_whose_symbol_is_owned() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -264,7 +268,8 @@ async fn cancel_order_guarded_rejects_missing_order_snapshot() {
     );
     assert!(
         host.api()
-            .handle_for_test()
+            .session()
+            .handle()
             .drain_dispatches()
             .unwrap()
             .is_empty()
@@ -278,7 +283,7 @@ async fn cancel_order_guarded_allows_unowned_ready_order_and_delegates_to_wait_a
 
     host.cancel_order_guarded("sim", "order-1").await.unwrap();
 
-    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
 
