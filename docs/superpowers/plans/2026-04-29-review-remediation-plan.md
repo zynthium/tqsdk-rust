@@ -963,6 +963,7 @@ Additional completed items:
 - Reduced safe hidden public surface by removing or replacing `TqApi::new_for_test`, `TqStream::new_for_test_with_capacity`, `DataClient::new_for_test_with_urls`, and the root `DynAuthProvider` re-export.
 - Opened child plan `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md` for the remaining `_for_test` surface. The first slice removed `TaskHost` hidden ownership hooks and the duplicate `TargetPosTask::applied_target_volume_for_test()` observer, replacing them with documented task-layer public APIs.
 - Added `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual session fixture, migrated session construction callers across session/wait/stream/task/data tests and helpers, and removed `SessionClient::new_for_test_with_handle()`.
+- Removed `TqStream::handle_for_test()` after migrating stream test support to `stream.session().handle()`. Wait crate tests/support no longer call `TqApi::handle_for_test()`, but the shim remains until task fixture/test callers are migrated.
 
 Remaining items are intentionally not part of this mixed remediation batch:
 

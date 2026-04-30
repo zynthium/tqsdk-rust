@@ -556,11 +556,6 @@ impl TqStream {
     }
 
     #[doc(hidden)]
-    pub fn handle_for_test(&self) -> tqsdk_core::RuntimeHandle {
-        self.session().handle().clone()
-    }
-
-    #[doc(hidden)]
     pub fn emit_session_error_for_test(&self, error: tqsdk_session::SessionFacadeError) {
         let _ = self.driver.sender.send(DriverEvent::Error(error));
     }

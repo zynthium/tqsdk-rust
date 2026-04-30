@@ -56,7 +56,8 @@ pub fn seed_quote_commit_with_datetime(
     datetime: &str,
 ) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -87,7 +88,8 @@ pub fn seed_quote_commit_with_datetime(
 pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, view_width: usize) {
     let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{view_width}");
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -151,7 +153,8 @@ pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, v
 pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
     let chart_id = format!("wait-tick-{symbol}-{view_width}");
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -220,7 +223,8 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
 #[allow(dead_code)]
 pub fn seed_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -325,7 +329,8 @@ pub fn seed_order_update(api: &mut TqApi, seed: OrderUpdateSeed<'_>) {
     let is_dead = seed.is_dead;
 
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -374,7 +379,8 @@ pub fn seed_order_update(api: &mut TqApi, seed: OrderUpdateSeed<'_>) {
 #[allow(dead_code)]
 pub fn seed_trade_extended_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -465,7 +471,8 @@ pub fn seed_risk_management_rule_nested_update(
     count_limit: i64,
 ) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -504,7 +511,8 @@ pub fn seed_risk_management_data_nested_update(
     trade_units: i64,
 ) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -538,7 +546,8 @@ pub fn seed_risk_management_data_nested_update(
 #[allow(dead_code)]
 pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market.shared".to_string(),
@@ -571,7 +580,8 @@ pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
 #[allow(dead_code)]
 pub fn seed_security_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
     let commit = api
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),

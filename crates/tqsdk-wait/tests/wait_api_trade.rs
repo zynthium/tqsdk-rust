@@ -48,7 +48,7 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
 
     assert!(!order.is_ready(&api).unwrap());
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
     assert_eq!(
@@ -78,7 +78,7 @@ async fn login_trade_account_submits_typed_login_and_waits_for_account_ready() {
 
     assert_eq!(account.load(&api).unwrap().currency, "CNY");
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
     assert_eq!(
@@ -110,7 +110,7 @@ async fn insert_limit_order_uses_typed_finite_price() {
 
     assert_eq!(order.account_id(), "sim");
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["price_type"], "LIMIT");
     assert_eq!(payload["time_condition"], "GFD");
@@ -138,7 +138,13 @@ async fn insert_limit_order_rejects_non_finite_price() {
         error,
         tqsdk_wait::WaitFacadeError::InvalidState("limit price must be finite")
     );
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -159,7 +165,7 @@ async fn limit_order_intent_uses_client_intent_as_order_id() {
     assert_eq!(ticket.order().order_id(), "strategy-a-open-001");
     assert!(ticket.command_id().is_some());
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -187,7 +193,7 @@ async fn send_once_does_not_resubmit_same_local_intent() {
         .unwrap();
     assert!(first.was_submitted());
     let first_command_id = first.command_id();
-    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+    assert_eq!(api.session().handle().drain_dispatches().unwrap().len(), 1);
 
     let second = api
         .limit_order("sim", "SHFE.ao2602")
@@ -200,7 +206,13 @@ async fn send_once_does_not_resubmit_same_local_intent() {
 
     assert!(!second.was_submitted());
     assert_eq!(second.command_id(), first_command_id);
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -217,7 +229,7 @@ async fn send_once_does_not_resubmit_same_session_intent_after_wait_rewrap() {
         .unwrap();
     assert!(first.was_submitted());
     let first_command_id = first.command_id();
-    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+    assert_eq!(api.session().handle().drain_dispatches().unwrap().len(), 1);
 
     let session = api.into_session();
     let mut api = tqsdk_wait::TqApi::new(session);
@@ -233,7 +245,13 @@ async fn send_once_does_not_resubmit_same_session_intent_after_wait_rewrap() {
 
     assert!(!second.was_submitted());
     assert_eq!(second.command_id(), first_command_id);
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -247,7 +265,7 @@ async fn send_once_rejects_same_intent_with_different_fields() {
         .send_once()
         .await
         .unwrap();
-    assert_eq!(api.handle_for_test().drain_dispatches().unwrap().len(), 1);
+    assert_eq!(api.session().handle().drain_dispatches().unwrap().len(), 1);
 
     let error = api
         .limit_order("sim", "SHFE.ao2602")
@@ -264,7 +282,13 @@ async fn send_once_rejects_same_intent_with_different_fields() {
             "client order intent already registered with different order fields"
         )
     );
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -298,7 +322,13 @@ async fn send_once_returns_existing_order_without_resubmit() {
         ticket.order().snapshot(&api).unwrap().unwrap().order_id,
         "strategy-a-open-001"
     );
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -314,7 +344,8 @@ async fn order_ticket_status_reports_command_pending_without_order() {
         .unwrap();
     let command_id = ticket.command_id().unwrap();
     if let Some(commit) = api
-        .handle_for_test()
+        .session()
+        .handle()
         .record_command_status(
             command_id,
             CommandStatus::Sent,
@@ -352,7 +383,8 @@ async fn wait_reconnect_safe_terminal_returns_rejected_command_without_order() {
     let command_id = ticket.command_id().unwrap();
 
     if let Some(commit) = api
-        .handle_for_test()
+        .session()
+        .handle()
         .record_command_status(
             command_id,
             CommandStatus::Rejected,
@@ -446,7 +478,7 @@ async fn order_ticket_helpers_wait_partial_cancel_remaining_and_terminal_state()
 
     ticket.cancel_remaining(&mut api).await.unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let cancel_payload = transport_payload(&dispatches[1].request);
     assert_eq!(cancel_payload["aid"], "cancel_order");
     assert_eq!(cancel_payload["user_id"], "sim");
@@ -499,7 +531,13 @@ async fn send_once_validates_required_intent_fields() {
         tqsdk_wait::WaitFacadeError::InvalidState("limit price must be finite")
     );
 
-    assert!(api.handle_for_test().drain_dispatches().unwrap().is_empty());
+    assert!(
+        api.session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -620,7 +658,7 @@ async fn insert_order_without_limit_price_uses_any_ioc_semantics() {
     .await
     .unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let payload = transport_payload(&dispatches[0].request);
 
     assert_eq!(payload["price_type"], "ANY");
@@ -642,7 +680,7 @@ async fn insert_order_best_price_maps_to_best_ioc_semantics() {
     .await
     .unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let payload = transport_payload(&dispatches[0].request);
 
     assert_eq!(payload["price_type"], "BEST");
@@ -664,7 +702,7 @@ async fn insert_order_five_level_price_maps_to_five_level_ioc_semantics() {
     .await
     .unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let payload = transport_payload(&dispatches[0].request);
 
     assert_eq!(payload["price_type"], "FIVELEVEL");
@@ -678,7 +716,7 @@ async fn cancel_order_and_confirm_settlement_submit_trade_commands() {
     api.cancel_order("sim", "order-1").await.unwrap();
     api.confirm_settlement("sim").await.unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
 
     let cancel_payload = transport_payload(&dispatches[0].request);
@@ -714,7 +752,7 @@ async fn order_ref_helpers_wait_cancel_remaining_and_terminal_state() {
 
     order.cancel_remaining(&mut api).await.unwrap();
 
-    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
     let cancel_payload = transport_payload(&dispatches[0].request);
     assert_eq!(cancel_payload["aid"], "cancel_order");
     assert_eq!(cancel_payload["user_id"], "sim");

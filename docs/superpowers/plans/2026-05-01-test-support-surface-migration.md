@@ -95,6 +95,15 @@ Additional task-side duplicate hidden API removed:
 - `cargo test -p tqsdk-session --test session_direct_query --test session_recovery --test session_order_intent --test session_market_command_helpers` passed after adding `ManualSession`.
 - `cargo fmt --all --check`, `cargo check --workspace`, and `cargo test --workspace --tests` passed after migrating downstream wait/stream/task/data construction callers and removing `SessionClient::new_for_test_with_handle()`.
 
+### Wait/Stream Handle Subtask
+
+- [x] Migrate wait crate tests/support off `TqApi::handle_for_test()` to `api.session().handle()`.
+- [x] Migrate stream crate tests/support off `TqStream::handle_for_test()` to `stream.session().handle()`.
+- [x] Remove `TqStream::handle_for_test()`.
+- [ ] Remove `TqApi::handle_for_test()` after task fixture/test callers are migrated.
+
+**Verification:** `cargo fmt --all --check`, `cargo check --workspace`, `cargo test -p tqsdk-wait --tests`, and `cargo test -p tqsdk-stream --tests` passed.
+
 ## Task 4: Reassess Feature Gating
 
 - [ ] After callers are migrated, re-run the hidden API inventory.

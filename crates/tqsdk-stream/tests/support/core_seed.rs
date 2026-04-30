@@ -46,7 +46,8 @@ pub fn seed_ready_kline_chart(
         sanitize_chart_token(symbol)
     );
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -108,7 +109,8 @@ pub fn seed_ready_kline_chart(
 pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize) {
     let chart_id = format!("stream-tick-{}-{view_width}", sanitize_chart_token(symbol));
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -215,7 +217,8 @@ pub fn seed_quote_fields_commit_on_domains_with_scope(
     scope: CommitScope,
 ) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -239,7 +242,8 @@ pub fn seed_quote_fields_commit_on_domains_with_scope(
 #[allow(dead_code)]
 pub fn seed_trading_status_commit(stream: &TqStream, symbol: &str, trade_status: &str) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market".to_string(),
@@ -266,7 +270,8 @@ pub fn seed_trading_status_commit(stream: &TqStream, symbol: &str, trade_status:
 #[allow(dead_code)]
 pub fn seed_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -350,7 +355,8 @@ pub fn seed_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
 #[allow(dead_code)]
 pub fn seed_trade_extended_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
@@ -439,7 +445,8 @@ pub fn seed_notification_commit(stream: &TqStream, notification_id: &str) {
 #[allow(dead_code)]
 pub fn seed_notification_commit_for_user(stream: &TqStream, notification_id: &str, user_id: &str) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "market.shared".to_string(),
@@ -479,7 +486,8 @@ pub fn seed_session_reconnect_commit_with_exhausted(
     exhausted: bool,
 ) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .record_session_reconnect(
             1,
             250,
@@ -497,7 +505,8 @@ pub fn seed_session_reconnect_commit_with_exhausted(
 #[allow(dead_code)]
 pub fn seed_session_phase_commit(stream: &TqStream, phase: SessionPhase) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .record_session_phase(phase, None, vec![])
         .unwrap()
         .expect("seed session phase commit should produce a commit");
@@ -506,7 +515,8 @@ pub fn seed_session_phase_commit(stream: &TqStream, phase: SessionPhase) {
 #[allow(dead_code)]
 pub fn seed_security_trade_snapshot(stream: &TqStream, account_id: &str, symbol: &str) {
     stream
-        .handle_for_test()
+        .session()
+        .handle()
         .ingest(
             RuntimeInput::Io(IoEvent {
                 route: "trade".to_string(),
