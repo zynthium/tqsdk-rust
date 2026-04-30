@@ -49,12 +49,13 @@
 - `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 已新增显式 `testing::WaitTestDriver`，并删除 `TqApi::handle_for_test()`、`begin_wait_for_test()`、`push_deferred_commit_for_test()`。
 - 期货 `Order.direction` / `Order.offset` / `Order.price_type` 和 `Trade.direction` / `Trade.offset` 已从裸 `String` 迁移为 `Option<TradeDirection>` / `Option<TradeOffset>` / `Option<TradePriceType>`，保留缺失字段容忍；`PreInsertOrder` 与证券 schema 字符串字段不属于本批改造范围。
 - `apply_and_publish_locked` 不再深拷贝 `CommitResult`；runtime commit 发布、写侧返回、cursor 消费、wait/stream fan-out 和 sink retry 已统一使用 `SharedCommitResult = Arc<CommitResult>` 共享不可变提交 payload。
+- `tqsdk-stream/src/sink.rs` 已拆为 `sink/` 模块目录，public `CommitSink` / WAL / commit journal surface 保持不变，并新增 source-level guardrail 防止回退成单文件。
 
 ### 仍保留为独立计划项
 
 - `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks、wait fixture hooks 与 stream lifecycle hooks 已收口；task fixture 仍可通过公开 `api.session().handle()` 使用底层 runtime contract 做 deterministic ingest/dispatch 断言。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
-- `transport.rs`、`account_group.rs`、`sink.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
+- `transport.rs`、`account_group.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
 - public 文档注释仍是质量补强任务，不影响本批已定位 bug/perf 修复。
 
 ---
@@ -119,7 +120,7 @@
 | HIGH | `MarketCacheService`/`Daemon`/`Supervisor` 无文档注释 | `market_cache.rs` |
 | MEDIUM | `transport.rs` 1135 行混合 4 个职责 | `tqsdk-core/src/transport.rs` |
 | MEDIUM | `account_group.rs` 967 行，API 与 helper 混合 | `tqsdk-task/src/account_group.rs` |
-| MEDIUM | `sink.rs` 建议拆分为 `sink/` 模块目录 | `tqsdk-stream/src/sink.rs` |
+| MEDIUM | `sink.rs` 建议拆分为 `sink/` 模块目录（已于 2026-05-01 拆分，public surface 不变） | `tqsdk-stream/src/sink.rs` |
 | MEDIUM | `WalWriter`/`JournalWriter` 结构重复，应泛化 | `sink.rs:1253-1353` |
 | MEDIUM | `run_market_cache_supervisor` 静默吞掉锁续期错误 | `market_cache.rs:2383-2395` |
 | MEDIUM | `scheduler.rs` 测试用源码字符串扫描做架构断言 | `tqsdk-task/tests/scheduler.rs:22-47` |
