@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 
-const IDLE_POLL_BACKOFF: Duration = Duration::from_millis(1);
 const ROUTE_DRIVE_BUDGET: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +137,15 @@ async fn run_driver(
             continue;
         }
 
-        tokio::time::sleep(IDLE_POLL_BACKOFF).await;
+        let notified = reader.notified().notified();
+        tokio::pin!(notified);
+
+        if let Some(commit) = reader.next(&mut cursor) {
+            let _ = sender.send(DriverEvent::Commit(commit));
+            continue;
+        }
+
+        notified.await;
     }
 
     emit_closed_once(&sender, closed.as_ref());

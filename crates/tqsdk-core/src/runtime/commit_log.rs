@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, RwLock, Weak},
 };
 
+use tokio::sync::Notify;
+
 use crate::{
     ids::{CursorId, Revision},
     state::{CommitResult, CursorTracker, UpdateCursor},
@@ -19,6 +21,7 @@ const DEFAULT_MAX_ENTRIES: usize = 8_192;
 #[derive(Debug, Clone)]
 pub struct CommitLog {
     inner: Arc<RwLock<CommitLogInner>>,
+    notified: Arc<Notify>,
 }
 
 impl CommitLog {
@@ -29,6 +32,7 @@ impl CommitLog {
     pub fn with_retention(max_entries: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(CommitLogInner::new(max_entries))),
+            notified: Arc::new(Notify::new()),
         }
     }
 
@@ -63,7 +67,13 @@ impl CommitLog {
     }
 
     pub(crate) fn commit_at(&self, revision: Revision) -> Option<CommitResult> {
-        recover_poisoned_lock(self.inner.read()).commit_at(revision).cloned()
+        recover_poisoned_lock(self.inner.read())
+            .commit_at(revision)
+            .cloned()
+    }
+
+    pub fn notified(&self) -> &Notify {
+        self.notified.as_ref()
     }
 
     pub(crate) fn oldest_revision(&self) -> Option<Revision> {
@@ -78,6 +88,8 @@ impl CommitLog {
         }
         state.entries.push_back(commit);
         state.trim();
+        drop(state);
+        self.notified.notify_waiters();
     }
 }
 

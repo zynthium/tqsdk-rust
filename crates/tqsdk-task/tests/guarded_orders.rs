@@ -142,6 +142,83 @@ async fn insert_order_guarded_allows_unowned_symbol_and_delegates_to_wait_api() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn insert_order_guarded_accepts_best_magic_string() {
+    let mut host = seeded_host();
+
+    host.insert_order_guarded(
+        "sim",
+        "SHFE.rb2601",
+        TradeDirection::Buy,
+        Some(TradeOffset::Open),
+        2,
+        Some(json!("BEST")),
+    )
+    .await
+    .unwrap();
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["price_type"], "BEST");
+    assert_eq!(payload["time_condition"], "IOC");
+    assert!(payload["limit_price"].is_null());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_order_guarded_accepts_fivelevel_magic_string() {
+    let mut host = seeded_host();
+
+    host.insert_order_guarded(
+        "sim",
+        "SHFE.rb2601",
+        TradeDirection::Buy,
+        Some(TradeOffset::Open),
+        2,
+        Some(json!("FIVELEVEL")),
+    )
+    .await
+    .unwrap();
+
+    let dispatches = host.api().handle_for_test().drain_dispatches().unwrap();
+    assert_eq!(dispatches.len(), 1);
+
+    let payload = transport_payload(&dispatches[0].request);
+    assert_eq!(payload["price_type"], "FIVELEVEL");
+    assert_eq!(payload["time_condition"], "IOC");
+    assert!(payload["limit_price"].is_null());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_order_guarded_rejects_unknown_legacy_price_mode() {
+    let mut host = seeded_host();
+
+    let error = host
+        .insert_order_guarded(
+            "sim",
+            "SHFE.rb2601",
+            TradeDirection::Buy,
+            Some(TradeOffset::Open),
+            2,
+            Some(json!("MID")),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        TaskError::InvalidState("limit price must be a number, BEST, or FIVELEVEL")
+    );
+    assert!(
+        host.api()
+            .handle_for_test()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancel_order_guarded_blocks_ready_order_whose_symbol_is_owned() {
     let mut host = seeded_host();
     seed_order_commit(&host, "sim", "SHFE.rb2601", "order-1");

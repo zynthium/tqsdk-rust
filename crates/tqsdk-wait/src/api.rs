@@ -4,16 +4,16 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde_json::{Number, Value};
 use tqsdk_core::{
     AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol,
     TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
-    TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    TradeOffset, TradeVolumeCondition,
 };
 use tqsdk_session::SessionClient;
 
 use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
+use crate::price::OrderPrice;
 use crate::refs::{
     AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
     QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
@@ -37,7 +37,7 @@ pub(crate) struct WaitInsertOrderRequest {
     pub(crate) direction: TradeDirection,
     pub(crate) offset: Option<TradeOffset>,
     pub(crate) volume: i64,
-    pub(crate) limit_price: Option<Value>,
+    pub(crate) limit_price: OrderPrice,
 }
 
 impl TqApi {
@@ -356,7 +356,7 @@ impl TqApi {
         direction: TradeDirection,
         offset: Option<TradeOffset>,
         volume: i64,
-        limit_price: Option<Value>,
+        limit_price: OrderPrice,
     ) -> crate::error::Result<OrderRef> {
         let order_seq = self.driver.next_order_seq.fetch_add(1, Ordering::Relaxed);
         let order_id = OrderId::new(format!("wait-order-{order_seq}"));
@@ -386,7 +386,7 @@ impl TqApi {
         &mut self,
         request: WaitInsertOrderRequest,
     ) -> crate::error::Result<tqsdk_core::CommandId> {
-        let (price_type, limit_price, time_condition) = map_wait_order_price(request.limit_price);
+        let (price_type, limit_price, time_condition) = request.limit_price.into_command_parts();
 
         let command_id = self
             .driver
@@ -420,16 +420,13 @@ impl TqApi {
         volume: i64,
         limit_price: f64,
     ) -> crate::error::Result<OrderRef> {
-        let limit_price = Number::from_f64(limit_price).ok_or(
-            crate::error::WaitFacadeError::InvalidState("limit price must be finite"),
-        )?;
         self.insert_order(
             account_id,
             symbol,
             direction,
             offset,
             volume,
-            Some(Value::Number(limit_price)),
+            OrderPrice::limit(limit_price)?,
         )
         .await
     }
@@ -544,24 +541,5 @@ impl TqApi {
     #[doc(hidden)]
     pub fn push_deferred_commit_for_test(&mut self, commit: tqsdk_core::CommitResult) {
         self.driver.deferred_commits.push_back(commit);
-    }
-}
-
-fn map_wait_order_price(
-    limit_price: Option<Value>,
-) -> (TradePriceType, Option<Value>, TradeTimeCondition) {
-    match limit_price {
-        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("BEST") => {
-            (TradePriceType::Best, None, TradeTimeCondition::Ioc)
-        }
-        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("FIVELEVEL") => {
-            (TradePriceType::FiveLevel, None, TradeTimeCondition::Ioc)
-        }
-        Some(limit_price) => (
-            TradePriceType::Limit,
-            Some(limit_price),
-            TradeTimeCondition::Gfd,
-        ),
-        None => (TradePriceType::Any, None, TradeTimeCondition::Ioc),
     }
 }

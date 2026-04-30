@@ -6,8 +6,8 @@ use tqsdk_core::{Chart, Kline, MarketCommand, RuntimeCommand, Tick};
 use crate::error::{DataError, Result};
 
 use super::{
-    KlineDataPage, NEXT_HISTORY_CHART_ID, TickDataPage, contract_error_into_data,
-    sanitize_chart_token, MARKET_POLL_BUDGET,
+    KlineDataPage, MARKET_POLL_BUDGET, NEXT_HISTORY_CHART_ID, TickDataPage,
+    contract_error_into_data, sanitize_chart_token,
 };
 
 pub(super) async fn wait_for_ready_chart(

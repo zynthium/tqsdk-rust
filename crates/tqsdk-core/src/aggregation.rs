@@ -234,7 +234,9 @@ mod tests {
         let read = aggregate.read();
         assert_eq!(read.source_count(), 2);
         assert_eq!(
-            read.sources().map(StateSourceId::as_str).collect::<Vec<_>>(),
+            read.sources()
+                .map(StateSourceId::as_str)
+                .collect::<Vec<_>>(),
             vec!["primary", "backup"]
         );
         assert_eq!(read.revision(&primary_id).unwrap().get(), 1);

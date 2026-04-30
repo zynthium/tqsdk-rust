@@ -1376,20 +1376,22 @@ fn session_runtime_trade_order_status_preserves_seed_detail_over_dispatch_json()
         connected,
     };
 
-    let command_id = block_on(handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
-        TradeInsertOrderCommand {
-            account_id: AccountId::new("simnow"),
-            order_id: OrderId::new("ORDER_SEED"),
-            symbol: Symbol::new("SHFE.au2602"),
-            direction: TradeDirection::Buy,
-            offset: Some(TradeOffset::Open),
-            volume: 1,
-            price_type: TradePriceType::Limit,
-            limit_price: Some(json!(618.5)),
-            time_condition: TradeTimeCondition::Gfd,
-            volume_condition: TradeVolumeCondition::Any,
-        },
-    ))))
+    let command_id = block_on(
+        handle.submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("simnow"),
+                order_id: OrderId::new("ORDER_SEED"),
+                symbol: Symbol::new("SHFE.au2602"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(618.5)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        ))),
+    )
     .unwrap();
 
     let _receipts = block_on(runtime.flush_outbound(&mut run)).unwrap();

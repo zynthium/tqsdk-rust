@@ -1,11 +1,9 @@
 mod support;
-
-use serde_json::json;
 use tqsdk_core::{
     CommandStatus, CommitScope, OrderLifecycle, OutboundFrame, OutboundRequest, ProtocolDomain,
     TradeAccountType, TradeDirection, TradeOffset,
 };
-use tqsdk_wait::OrderTicketState;
+use tqsdk_wait::{OrderPrice, OrderTicketState};
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
@@ -43,7 +41,7 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
             TradeDirection::Buy,
             Some(TradeOffset::Open),
             1,
-            Some(json!(618.0)),
+            OrderPrice::limit(618.0).unwrap(),
         )
         .await
         .unwrap();
@@ -617,7 +615,7 @@ async fn insert_order_without_limit_price_uses_any_ioc_semantics() {
         TradeDirection::Buy,
         Some(TradeOffset::Open),
         1,
-        None,
+        OrderPrice::any(),
     )
     .await
     .unwrap();
@@ -639,7 +637,7 @@ async fn insert_order_best_price_maps_to_best_ioc_semantics() {
         TradeDirection::Buy,
         Some(TradeOffset::Open),
         1,
-        Some(json!("BEST")),
+        OrderPrice::best(),
     )
     .await
     .unwrap();
@@ -648,6 +646,28 @@ async fn insert_order_best_price_maps_to_best_ioc_semantics() {
     let payload = transport_payload(&dispatches[0].request);
 
     assert_eq!(payload["price_type"], "BEST");
+    assert_eq!(payload["time_condition"], "IOC");
+    assert!(payload.get("limit_price").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn insert_order_five_level_price_maps_to_five_level_ioc_semantics() {
+    let mut api = support::seeded_api();
+    api.insert_order(
+        "sim",
+        "CFFEX.IF2606",
+        TradeDirection::Buy,
+        Some(TradeOffset::Open),
+        1,
+        OrderPrice::five_level(),
+    )
+    .await
+    .unwrap();
+
+    let dispatches = api.handle_for_test().drain_dispatches().unwrap();
+    let payload = transport_payload(&dispatches[0].request);
+
+    assert_eq!(payload["price_type"], "FIVELEVEL");
     assert_eq!(payload["time_condition"], "IOC");
     assert!(payload.get("limit_price").is_none());
 }

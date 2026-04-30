@@ -39,9 +39,14 @@ impl ProtocolAdapter for TestAdapter {
 fn ids_and_domain_surface_are_stable() {
     let revision = Revision::new(7);
     let symbol = Symbol::new("SHFE.au2602");
+    let account_id = AccountId::new("simnow");
+    let order_id = OrderId::new("order-1");
 
     assert_eq!(revision.get(), 7);
     assert_eq!(symbol.as_str(), "SHFE.au2602");
+    assert_eq!(symbol.to_string(), "SHFE.au2602");
+    assert_eq!(account_id.to_string(), "simnow");
+    assert_eq!(order_id.to_string(), "order-1");
     assert_eq!(ProtocolDomain::Trade.as_str(), "trade");
     assert_eq!(
         ContractError::validation("bad command").to_string(),

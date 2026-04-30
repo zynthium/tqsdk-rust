@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
 use tqsdk_core::{AccountId, Revision, Symbol, TradeDirection, TradeOffset};
@@ -184,6 +185,105 @@ pub enum RiskRejection {
         limit_price: f64,
         price_tick: f64,
     },
+}
+
+impl Display for RiskRejection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxOrderVolumeExceeded {
+                account_id,
+                symbol,
+                requested,
+                max,
+            } => write!(
+                f,
+                "max order volume exceeded account={account_id} symbol={symbol} requested={requested} max={max}"
+            ),
+            Self::DailyOpenCountLimitExceeded {
+                account_id,
+                symbol,
+                current,
+                requested,
+                max,
+            } => write!(
+                f,
+                "daily open count limit exceeded account={account_id} symbol={symbol} current={current} requested={requested} max={max}"
+            ),
+            Self::DailyOpenVolumeLimitExceeded {
+                account_id,
+                symbol,
+                current,
+                requested,
+                max,
+            } => write!(
+                f,
+                "daily open volume limit exceeded account={account_id} symbol={symbol} current={current} requested={requested} max={max}"
+            ),
+            Self::AccumulatedOpenVolumeLimitExceeded {
+                account_id,
+                symbols,
+                current,
+                requested,
+                max,
+            } => write!(
+                f,
+                "accumulated open volume limit exceeded account={account_id} symbols={} current={current} requested={requested} max={max}",
+                symbols.join(",")
+            ),
+            Self::OrderRateLimitExceeded {
+                account_id,
+                exchange_id,
+                current,
+                requested,
+                max,
+            } => write!(
+                f,
+                "order rate limit exceeded account={account_id} exchange_id={exchange_id} current={current} requested={requested} max={max}"
+            ),
+            Self::MissingAccount { account_id } => {
+                write!(f, "missing account account={account_id}")
+            }
+            Self::AvailableBelowMinimum {
+                account_id,
+                available,
+                min_available,
+            } => write!(
+                f,
+                "available balance below minimum account={account_id} available={available} min_available={min_available}"
+            ),
+            Self::MissingPosition { account_id, symbol } => {
+                write!(f, "missing position account={account_id} symbol={symbol}")
+            }
+            Self::NetPositionLimitExceeded {
+                account_id,
+                symbol,
+                current_net,
+                projected_net,
+                max_abs_net,
+            } => write!(
+                f,
+                "net position limit exceeded account={account_id} symbol={symbol} current_net={current_net} projected_net={projected_net} max_abs_net={max_abs_net}"
+            ),
+            Self::MissingQuote { symbol } => write!(f, "missing quote for symbol={symbol}"),
+            Self::PriceDeviationExceeded {
+                symbol,
+                limit_price,
+                reference_price,
+                max_abs_deviation,
+            } => write!(
+                f,
+                "price deviation exceeded symbol={symbol} limit_price={limit_price} reference_price={reference_price} max_abs_deviation={max_abs_deviation}"
+            ),
+            Self::PriceNotOnTick {
+                symbol,
+                limit_price,
+                price_tick,
+            } => write!(
+                f,
+                "price not on tick symbol={symbol} limit_price={limit_price} price_tick={price_tick}"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

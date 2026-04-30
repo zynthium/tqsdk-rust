@@ -421,7 +421,6 @@ impl SessionRuntime {
             .connect_topology(&bootstrap.topology, connector)
             .await
     }
-
 }
 
 impl SessionRuntime {

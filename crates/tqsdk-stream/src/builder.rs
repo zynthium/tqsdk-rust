@@ -53,7 +53,7 @@ mod tests {
         let session_builder = tqsdk_session::SessionClientBuilder::new("demo-user", "demo-pass")
             .enable_query()
             .schema_url("https://schema.example.com/latest.json")
-            .market_target(true, false)
+            .stock_market()
             .trade_target("9999", "sim")
             .replay_url("replay-driver");
 
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn market_trade_and_replay_methods_forward_to_inner_session_builder() {
         let builder = TqStreamBuilder::new("demo-user", "demo-pass")
-            .market_target(true, true)
+            .stock_backtest_market()
             .trade_target("9999", "sim")
             .trade_target_with_url("simnow", "paper", "wss://trade.example/ws")
             .replay_url("replay-driver");

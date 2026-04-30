@@ -25,7 +25,7 @@
 | 严重度 | 发现 | 位置 |
 |--------|------|------|
 | **CRITICAL** | `order_is_terminal()` 用字符串 `"FINISHED"` 判断终态，忽略 `OrderLifecycle::is_terminal()`。不同经纪商 status 字符串不同，会导致订单误判、重复撤单或任务挂起 | `tqsdk-task/src/target_pos.rs:865` |
-| HIGH | `insert_order` 的 `limit_price: Option<Value>` 接受魔法字符串，无类型安全 | `tqsdk-wait/src/api.rs:352` |
+| HIGH | `insert_order` 的 `limit_price: Option<Value>` 接受魔法字符串，无类型安全（已于 2026-05-01 改为 `OrderPrice` typed 边界，并保留 `TaskHost::insert_order_guarded` 的 legacy 兼容桥接） | `tqsdk-wait/src/api.rs:352` |
 | HIGH | `market_target(bool, bool)` 布尔陷阱，已有命名快捷方法覆盖所有组合 | `tqsdk-session/src/builder.rs:79` |
 | HIGH | `TargetPosConfig` 所有字段 `pub`，绕过 builder 验证。`VolumeSplitPolicy::validate()` 是 `pub(crate)` | `tqsdk-task/src/config.rs:57` |
 | HIGH | `RiskRejection` 无 `Display`，`TaskError` 回退到 `Debug` 格式 | `tqsdk-task/src/risk.rs:119` |
@@ -93,7 +93,7 @@
 
 8. `sink.rs` 共享状态封装为 wrapper
 9. `transport.rs` 拆分为模块目录
-10. `insert_order` 引入 `OrderPrice` 枚举
+10. `insert_order` 引入 `OrderPrice` 枚举（已完成，2026-05-01）
 11. ID 类型/`OrderLifecycle`/`RiskRejection` 实现 `Display`
 12. `reader.read()` 改为分区读
 13. `_for_test` 方法改用 feature flag

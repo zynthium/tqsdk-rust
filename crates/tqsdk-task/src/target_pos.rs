@@ -93,17 +93,17 @@ impl TargetPosBuilder {
     }
 
     pub fn price_mode(mut self, mode: PriceMode) -> Self {
-        self.config.price_mode = mode;
+        self.config.set_price_mode(mode);
         self
     }
 
     pub fn offset_priority(mut self, priority: OffsetPriority) -> Self {
-        self.config.offset_priority = priority;
+        self.config.set_offset_priority(priority);
         self
     }
 
     pub fn split_policy(mut self, policy: VolumeSplitPolicy) -> Self {
-        self.config.split_policy = Some(policy);
+        self.config.set_split_policy(policy);
         self
     }
 
@@ -122,9 +122,6 @@ impl TargetPosBuilder {
     }
 
     fn build_with_task_id(self, task_id: TaskId, managed_by_host: bool) -> Result<TargetPosTask> {
-        if let Some(policy) = self.config.split_policy {
-            policy.validate()?;
-        }
         let (reached_tx, _) = watch::channel(0_u64);
         let (finished_tx, _) = watch::channel(false);
 

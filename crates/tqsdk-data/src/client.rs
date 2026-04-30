@@ -429,10 +429,13 @@ impl DataClient {
             request.timeout(),
         )
         .await?;
-        chart_reader::read_ready_tick_data_page(&reader, request.symbol(), spec.view_width, chart_id)?
-            .ok_or_else(|| {
-                DataError::InvalidResponse("ready tick chart snapshot missing".to_string())
-            })
+        chart_reader::read_ready_tick_data_page(
+            &reader,
+            request.symbol(),
+            spec.view_width,
+            chart_id,
+        )?
+        .ok_or_else(|| DataError::InvalidResponse("ready tick chart snapshot missing".to_string()))
     }
 
     #[cfg(feature = "services")]

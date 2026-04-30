@@ -19,7 +19,7 @@ pub(super) fn desired_batch_for_target(
         &exchange_id,
         current_position,
         target_volume,
-        config.offset_priority,
+        config.offset_priority(),
     )
     .into_iter()
     .next()?;
@@ -29,8 +29,8 @@ pub(super) fn desired_batch_for_target(
         orders.push(DesiredOrder {
             direction: order.direction,
             offset: order.offset,
-            volume: split_order_volume(order.volume, config.split_policy),
-            limit_price: resolve_limit_price(quote, order.direction, config.price_mode)?,
+            volume: split_order_volume(order.volume, config.split_policy()),
+            limit_price: resolve_limit_price(quote, order.direction, config.price_mode())?,
         });
     }
 
@@ -138,13 +138,13 @@ fn first_finite(primary: f64, secondary: f64, fallback: f64) -> Option<f64> {
 fn split_order_volume(volume: i64, split_policy: Option<VolumeSplitPolicy>) -> i64 {
     match split_policy {
         None => volume,
-        Some(policy) if volume < policy.max_volume => volume,
+        Some(policy) if volume < policy.max_volume() => volume,
         Some(policy) => {
-            let tail = volume - policy.max_volume;
-            if tail > 0 && tail < policy.min_volume {
-                volume - policy.min_volume
+            let tail = volume - policy.max_volume();
+            if tail > 0 && tail < policy.min_volume() {
+                volume - policy.min_volume()
             } else {
-                policy.max_volume
+                policy.max_volume()
             }
         }
     }
@@ -155,7 +155,7 @@ mod tests {
     use tqsdk_core::{TradeDirection, TradeOffset};
 
     use super::*;
-    use crate::config::{OffsetPriority, VolumeSplitPolicy};
+    use crate::config::VolumeSplitPolicy;
 
     #[test]
     fn reconcile_live_orders_prefers_exact_volume_match() {
@@ -202,14 +202,8 @@ mod tests {
 
     #[test]
     fn desired_batch_uses_real_action_types_and_split_policy() {
-        let config = TargetPosConfig {
-            price_mode: PriceMode::Active,
-            offset_priority: OffsetPriority::default(),
-            split_policy: Some(VolumeSplitPolicy {
-                max_volume: 5,
-                min_volume: 2,
-            }),
-        };
+        let config =
+            TargetPosConfig::new().with_split_policy(VolumeSplitPolicy::new(2, 5).unwrap());
         let quote = Quote {
             exchange_id: "SHFE".to_string(),
             ask_price1: 11.0,

@@ -644,36 +644,22 @@ fn target_pos_builder_preserves_explicit_config() {
         .target_pos("sim", "SHFE.rb2601")
         .price_mode(PriceMode::Passive)
         .offset_priority(OffsetPriority::OpenOnly)
-        .split_policy(VolumeSplitPolicy {
-            min_volume: 2,
-            max_volume: 10,
-        })
+        .split_policy(VolumeSplitPolicy::new(2, 10).unwrap())
         .build()
         .unwrap();
 
     assert_eq!(
         task.config(),
-        &TargetPosConfig {
-            price_mode: PriceMode::Passive,
-            offset_priority: OffsetPriority::OpenOnly,
-            split_policy: Some(VolumeSplitPolicy {
-                min_volume: 2,
-                max_volume: 10,
-            }),
-        }
+        &TargetPosConfig::new()
+            .with_price_mode(PriceMode::Passive)
+            .with_offset_priority(OffsetPriority::OpenOnly)
+            .with_split_policy(VolumeSplitPolicy::new(2, 10).unwrap())
     );
 }
 
 #[test]
 fn target_pos_builder_rejects_invalid_split_policy() {
-    let mut host = seeded_host();
-    let err = host
-        .target_pos("sim", "SHFE.rb2601")
-        .split_policy(VolumeSplitPolicy {
-            min_volume: 5,
-            max_volume: 4,
-        })
-        .build()
+    let err = VolumeSplitPolicy::new(5, 4)
         .err()
         .expect("invalid split policy should be rejected");
 
@@ -746,10 +732,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     let task = host
         .target_pos("sim", "SHFE.rb2601")
         .offset_priority(OffsetPriority::OpenOnly)
-        .split_policy(VolumeSplitPolicy {
-            min_volume: 5,
-            max_volume: 10,
-        })
+        .split_policy(VolumeSplitPolicy::new(5, 10).unwrap())
         .build()
         .unwrap();
     task.set_target_volume(11).unwrap();

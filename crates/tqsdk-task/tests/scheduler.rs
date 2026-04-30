@@ -1644,22 +1644,15 @@ fn scheduler_builder_preserves_explicit_config() {
     let scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
         .offset_priority(OffsetPriority::YesterdayThenOpen)
-        .split_policy(VolumeSplitPolicy {
-            min_volume: 1,
-            max_volume: 4,
-        })
+        .split_policy(VolumeSplitPolicy::new(1, 4).unwrap())
         .build()
         .unwrap();
 
     assert_eq!(
         scheduler.config(),
-        &TargetPosSchedulerConfig {
-            offset_priority: OffsetPriority::YesterdayThenOpen,
-            split_policy: Some(VolumeSplitPolicy {
-                min_volume: 1,
-                max_volume: 4,
-            }),
-        }
+        &TargetPosSchedulerConfig::new()
+            .with_offset_priority(OffsetPriority::YesterdayThenOpen)
+            .with_split_policy(VolumeSplitPolicy::new(1, 4).unwrap())
     );
 }
 
@@ -1795,19 +1788,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
 
 #[test]
 fn scheduler_builder_rejects_invalid_split_policy() {
-    let mut host = seeded_host();
-    let err = host
-        .target_pos_scheduler("sim", "SHFE.rb2601")
-        .steps(vec![TargetPosScheduleStep::target(
-            Duration::from_secs(1),
-            1,
-            PriceMode::Active,
-        )])
-        .split_policy(VolumeSplitPolicy {
-            min_volume: 5,
-            max_volume: 4,
-        })
-        .build()
+    let err = VolumeSplitPolicy::new(5, 4)
         .err()
         .expect("invalid split policy should be rejected");
 

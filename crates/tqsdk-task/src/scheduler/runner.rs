@@ -153,8 +153,8 @@ impl TargetPosSchedulerInner {
             self.symbol.clone(),
         )
         .price_mode(price_mode)
-        .offset_priority(self.config.offset_priority);
-        if let Some(policy) = self.config.split_policy {
+        .offset_priority(self.config.offset_priority());
+        if let Some(policy) = self.config.split_policy() {
             builder = builder.split_policy(policy);
         }
 

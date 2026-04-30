@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use serde_json::{Number, Value};
 use tqsdk_core::{
     CommandId, CommandStatus, Order, OrderId, OrderLifecycle, TradeDirection, TradeOffset,
 };
@@ -8,7 +7,7 @@ use tqsdk_session::{
     OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, SessionFacadeError,
 };
 
-use crate::{OrderRef, TqApi, WaitFacadeError, api::WaitInsertOrderRequest};
+use crate::{OrderPrice, OrderRef, TqApi, WaitFacadeError, api::WaitInsertOrderRequest};
 
 /// User-supplied idempotency key for an order intent.
 ///
@@ -148,8 +147,7 @@ impl<'a> LimitOrderIntent<'a> {
         let price = self
             .limit_price
             .ok_or(WaitFacadeError::InvalidState("limit price is required"))?;
-        let limit_price = Number::from_f64(price)
-            .ok_or(WaitFacadeError::InvalidState("limit price must be finite"))?;
+        let limit_price = OrderPrice::limit(price)?;
 
         let order_id = client_order_id.as_str().to_owned();
         let order = self.api.get_order(&self.account_id, &order_id);
@@ -193,7 +191,7 @@ impl<'a> LimitOrderIntent<'a> {
                 direction,
                 offset,
                 volume,
-                limit_price: Some(Value::Number(limit_price)),
+                limit_price,
             })
             .await;
 

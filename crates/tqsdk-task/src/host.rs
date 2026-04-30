@@ -4,7 +4,7 @@
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
-use tqsdk_wait::{ClientOrderId, OrderTicket};
+use tqsdk_wait::{ClientOrderId, OrderPrice, OrderTicket};
 
 use crate::Result;
 use crate::TaskError;
@@ -203,7 +203,14 @@ impl TaskHost {
 
         let order: tqsdk_wait::OrderRef = self
             .api
-            .insert_order(&account_id, &symbol, direction, offset, volume, limit_price)
+            .insert_order(
+                &account_id,
+                &symbol,
+                direction,
+                offset,
+                volume,
+                map_guarded_order_price(limit_price)?,
+            )
             .await?;
         self.record_submitted_order(&intent)?;
         Ok(order)
@@ -381,6 +388,25 @@ impl TaskHost {
     pub fn unregister_task_for_test(&mut self, task_id: u64) -> bool {
         self.registry
             .with_mut(|registry| registry.unregister_task(TaskId(task_id)))
+    }
+}
+
+fn map_guarded_order_price(limit_price: Option<Value>) -> Result<OrderPrice> {
+    match limit_price {
+        None => Ok(OrderPrice::any()),
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("BEST") => Ok(OrderPrice::best()),
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("FIVELEVEL") => {
+            Ok(OrderPrice::five_level())
+        }
+        Some(Value::Number(limit_price)) => {
+            let limit_price = limit_price
+                .as_f64()
+                .ok_or(TaskError::InvalidState("limit price must be finite"))?;
+            Ok(OrderPrice::limit(limit_price)?)
+        }
+        Some(_) => Err(TaskError::InvalidState(
+            "limit price must be a number, BEST, or FIVELEVEL",
+        )),
     }
 }
 

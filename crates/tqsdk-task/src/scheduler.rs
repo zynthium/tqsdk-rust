@@ -166,19 +166,16 @@ impl TargetPosSchedulerBuilder {
     }
 
     pub fn offset_priority(mut self, priority: OffsetPriority) -> Self {
-        self.config.offset_priority = priority;
+        self.config.set_offset_priority(priority);
         self
     }
 
     pub fn split_policy(mut self, policy: VolumeSplitPolicy) -> Self {
-        self.config.split_policy = Some(policy);
+        self.config.set_split_policy(policy);
         self
     }
 
     pub fn build(self) -> Result<TargetPosScheduler> {
-        if let Some(policy) = self.config.split_policy {
-            policy.validate()?;
-        }
         let task = self
             .registry
             .with_mut(|registry| registry.register_scheduler(&self.account_id, &self.symbol))?;

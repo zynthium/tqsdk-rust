@@ -1,5 +1,4 @@
-use serde_json::json;
-use tqsdk_wait::{OrderRef, TqApi};
+use tqsdk_wait::{OrderPrice, OrderRef, TqApi};
 
 use crate::{Result, TaskError};
 
@@ -17,7 +16,7 @@ pub(super) async fn insert_desired_order(
         desired_order.direction,
         Some(desired_order.offset),
         desired_order.volume,
-        Some(json!(desired_order.limit_price)),
+        OrderPrice::limit(desired_order.limit_price).map_err(TaskError::from)?,
     )
     .await
     .map_err(TaskError::from)

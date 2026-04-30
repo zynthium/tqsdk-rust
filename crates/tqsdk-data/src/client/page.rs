@@ -6,8 +6,7 @@ use crate::error::{DataError, Result};
 use crate::market_cache::{MarketCacheEvent, MarketCacheReplay};
 
 use super::{
-    DEFAULT_HISTORY_PAGE_VIEW_WIDTH, DEFAULT_HISTORY_REQUEST_TIMEOUT,
-    normalize_history_view_width,
+    DEFAULT_HISTORY_PAGE_VIEW_WIDTH, DEFAULT_HISTORY_REQUEST_TIMEOUT, normalize_history_view_width,
 };
 
 /// Request for a one-shot owned kline history page backed by the market chart contract.

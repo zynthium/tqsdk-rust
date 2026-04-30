@@ -86,7 +86,7 @@ impl Display for TaskError {
             Self::Core(error) => write!(f, "{error}"),
             Self::Wait(error) => write!(f, "{error}"),
             Self::Session(error) => write!(f, "{error}"),
-            Self::RiskRejected(rejection) => write!(f, "risk rejected order: {rejection:?}"),
+            Self::RiskRejected(rejection) => write!(f, "risk rejected order: {rejection}"),
             Self::ExecutionGroupPartialSubmit {
                 group_id,
                 submitted_legs,
@@ -167,5 +167,23 @@ impl std::error::Error for TaskError {
             | Self::Unsupported(_)
             | Self::InvalidState(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskError;
+    use crate::risk::RiskRejection;
+
+    #[test]
+    fn risk_rejected_error_uses_human_readable_display() {
+        let error = TaskError::RiskRejected(RiskRejection::MissingQuote {
+            symbol: "SHFE.au2602".to_string(),
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "risk rejected order: missing quote for symbol=SHFE.au2602"
+        );
     }
 }

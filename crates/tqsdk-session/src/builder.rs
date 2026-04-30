@@ -76,6 +76,9 @@ impl SessionClientBuilder {
     }
 
     #[must_use]
+    #[deprecated(
+        note = "use stock_market, futures_market, stock_backtest_market, or futures_backtest_market instead"
+    )]
     pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
         self.market_target = MarketSessionTarget::new(stock, backtest);
         self
@@ -215,6 +218,10 @@ macro_rules! __tqsdk_impl_session_builder_forwarders {
         }
 
         #[must_use]
+        #[deprecated(
+            note = "use stock_market, futures_market, stock_backtest_market, or futures_backtest_market instead"
+        )]
+        #[allow(deprecated)]
         pub fn market_target(mut self, stock: bool, backtest: bool) -> Self {
             self.inner = self.inner.market_target(stock, backtest);
             self

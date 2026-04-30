@@ -66,6 +66,25 @@ async fn multiple_commit_receivers_observe_same_revision() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn commit_stream_wakes_after_becoming_idle() {
+    let stream = support::core_seed::seeded_stream();
+    let mut commits = stream.commit_stream().unwrap();
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    support::core_seed::seed_quote_commit(&stream, "SHFE.au2602", 619.5);
+
+    let commit = tokio::time::timeout(std::time::Duration::from_millis(50), commits.next())
+        .await
+        .expect("idle commit stream should wake on the next commit")
+        .expect("commit stream should yield a commit after waking")
+        .expect("woken commit stream should receive a commit event");
+
+    assert_eq!(commit.revision.get(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn lagged_receiver_reports_backpressure_explicitly() {
     let stream = support::core_seed::seeded_stream_with_capacity(1);
     let mut commits = stream.commit_stream().unwrap();

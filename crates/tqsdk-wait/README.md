@@ -46,6 +46,7 @@
 - `KlineWindow`
 - `TickWindow`
 - `ClientOrderId`
+- `OrderPrice`
 - `LimitOrderIntent`
 - `OrderTicket`
 - `OrderTicketState`
@@ -72,7 +73,7 @@
 - `get_security_order(...)`
 - `get_security_trade(...)`
 - `login_trade_account(...).await`
-- `insert_order(...).await`
+- `insert_order(..., OrderPrice).await`
 - `insert_limit_order(...).await`
 - `limit_order(...).client_intent(...).send_once().await`
 - `cancel_order(...).await`
@@ -93,7 +94,7 @@
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
-- `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态
+- `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
@@ -141,6 +142,22 @@ session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户
 交易登录优先走 `TqApi::login_trade_account(...)`：builder 负责配置 trade route，
 该 helper 负责提交 typed login request 并等待账户对象 ready，业务代码不需要构造
 `TradeLoginCommand`。
+
+如果需要直接提交市价 / 对手价 / 五档 IOC / 限价单，优先使用 typed `OrderPrice`：
+
+```rust
+use tqsdk_wait::OrderPrice;
+
+api.insert_order(
+    "sim",
+    "SHFE.au2602",
+    tqsdk_core::TradeDirection::Buy,
+    Some(tqsdk_core::TradeOffset::Open),
+    1,
+    OrderPrice::best(),
+)
+.await?;
+```
 
 普通限价单如果需要稳定的下单意图 id，优先使用 intent builder：
 

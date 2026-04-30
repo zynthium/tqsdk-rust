@@ -169,6 +169,13 @@ impl RuntimeReader {
         self.commit_log.head_revision()
     }
 
+    /// Returns a reference to the commit notification primitive.
+    ///
+    /// Use `notified().notified().await` to wait for the next commit.
+    pub fn notified(&self) -> &tokio::sync::Notify {
+        self.commit_log.notified()
+    }
+
     /// Creates a cursor positioned after the current head revision.
     pub fn cursor(&self) -> UpdateCursor {
         let next_revision = Revision::new(

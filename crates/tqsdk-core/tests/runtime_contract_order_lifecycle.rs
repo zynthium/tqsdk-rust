@@ -2,8 +2,8 @@ use serde_json::{Value, json};
 use tqsdk_core::{
     AccountId, CommitScope, DomainEvent, FieldMutation, InputPayload, IoEvent, MutationSource,
     NormalizedMutation, ObjectKey, Order, OrderId, OrderLifecycle, OutboundRequest,
-    ProtocolAdapter, ProtocolDomain, Runtime, RuntimeHandle, RuntimeInput, StatePath,
-    TradeEvent, collect_domain_events,
+    ProtocolAdapter, ProtocolDomain, Runtime, RuntimeHandle, RuntimeInput, StatePath, TradeEvent,
+    collect_domain_events,
 };
 
 mod support;
@@ -178,7 +178,10 @@ fn runtime_accepts_order_lifecycle_forward_progression() {
             .expect("forward lifecycle update should publish a commit");
     }
 
-    assert_eq!(lifecycle_value(&handle, "order-forward"), Some(json!("filled")));
+    assert_eq!(
+        lifecycle_value(&handle, "order-forward"),
+        Some(json!("filled"))
+    );
 }
 
 #[test]

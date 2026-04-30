@@ -64,8 +64,9 @@ wait adapter 层未来可以提供：
   的薄便利层存在，但必须仍通过同一个 session 提交订阅、通过同一个
   `RuntimeReader` 等待 ready snapshot，并且不得偷改用户随后看到的
   `last_commit()` / `is_changing()` 语义。
-- `insert_limit_order(...)` 这类 typed trade helper 可以作为 wait facade
-  的薄便利层存在，用来从用户路径移除 `serde_json::Value` 价格参数；
+- `insert_order(..., OrderPrice)` / `insert_limit_order(...)` 这类 typed trade
+  helper 可以作为 wait facade 的薄便利层存在，用来从用户路径移除
+  `serde_json::Value` 价格参数和 `"BEST"` / `"FIVELEVEL"` 这类魔法字符串；
   它仍必须只提交到底层 command contract，不做本地伪造订单状态或第二棵
   trade state。
 - `limit_order(...).client_intent(...).send_once()` 这类订单 intent helper
