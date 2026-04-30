@@ -355,11 +355,6 @@ impl SessionClient {
         Ok(self.handle.drain_dispatches()?)
     }
 
-    #[doc(hidden)]
-    pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
-        self.drain_manual_dispatches()
-    }
-
     pub fn remember_order_intent(
         &self,
         record: OrderIntentRecord,

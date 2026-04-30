@@ -119,23 +119,6 @@ fn facade_error_converts_core_errors_and_formats_messages() {
 
 #[cfg(feature = "live")]
 #[test]
-fn live_session_client_rejects_manual_dispatch_drain() {
-    let client = SessionClientBuilder::new("user", "pass")
-        .build()
-        .expect("building a live client should not perform network IO");
-
-    let err = client
-        .drain_dispatches()
-        .expect_err("live clients must not expose manual outbox draining");
-
-    assert_eq!(
-        err.to_string(),
-        "invalid session facade state: drain_dispatches is only available for test/manual sessions without live IO; use progress_once() to drive live sessions"
-    );
-}
-
-#[cfg(feature = "live")]
-#[test]
 fn builder_rejects_invalid_tqkq_numbered_targets_before_live_session_build() {
     let zero = match SessionClientBuilder::new("user", "pass")
         .trade_target_tqkq_numbered(0)

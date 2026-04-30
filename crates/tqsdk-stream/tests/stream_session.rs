@@ -56,7 +56,7 @@ async fn recover_state_waits_for_quote_and_trade_account_ready() {
     assert!(status.missing_quotes.is_empty());
     assert!(status.pending_trade_accounts.is_empty());
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = stream.session().handle().drain_dispatches().unwrap();
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))

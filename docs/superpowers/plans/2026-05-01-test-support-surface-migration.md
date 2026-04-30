@@ -45,7 +45,7 @@
 | Item | Current role | Classification |
 |------|--------------|----------------|
 | `SessionClient::new_for_test_with_handle()` | Removed; callers now use `tqsdk_session::testing::ManualSession` | Done |
-| `SessionClient::drain_dispatches()` | Manual/no-IO outbox inspection; already guarded against live IO | Move behind explicit testing API |
+| `SessionClient::drain_dispatches()` | Removed; manual/no-IO outbox inspection now belongs to `ManualSession::drain_dispatches()` | Done |
 | `TqApi::handle_for_test()` | Fixture escape hatch for ingest/dispatch/status assertions | Move behind explicit wait test driver |
 | `TqApi::begin_wait_for_test()` | Wait concurrency guard characterization | Move behind explicit wait test driver or keep crate integration-only fixture |
 | `TqApi::push_deferred_commit_for_test()` | Wait diff/replay fixture control | Move behind explicit wait test driver |
@@ -68,7 +68,7 @@ Additional task-side duplicate hidden API removed:
 
 **Verification:** `cargo test -p tqsdk-task --test target_pos --test live_smoke --no-run` and `cargo test -p tqsdk-task --test target_pos` passed after replacing callers with `applied_target_volume()`.
 
-**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/stream fixtures. This should happen before changing `SessionClient::drain_dispatches()`, `TqApi::handle_for_test()`, or stream driver lifecycle hooks, because current integration tests still need controlled ingest/dispatch/status behavior.
+**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/task fixtures. This should happen before changing `TqApi::handle_for_test()` or stream driver lifecycle hooks, because current integration tests still need controlled ingest/dispatch/status behavior.
 
 ## Task 3: Stabilize Low-Level Test Driver Entry Points
 
@@ -89,6 +89,7 @@ Additional task-side duplicate hidden API removed:
 - [x] Migrate session integration tests that need manual construction/dispatch draining to `ManualSession`.
 - [x] Migrate downstream session construction in wait/stream/task/data tests and helpers to `ManualSession`.
 - [x] Remove `SessionClient::new_for_test_with_handle()`.
+- [x] Remove `SessionClient::drain_dispatches()` after moving manual outbox inspection to `ManualSession::drain_dispatches()` and core-handle based stream tests.
 
 **Verification:**
 

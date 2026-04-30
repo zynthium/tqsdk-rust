@@ -3,11 +3,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::Value;
 use tqsdk_core::{
-    Account, Notification, Order, OutboundFrame, OutboundRequest, Position, PreInsertOrder,
-    ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder,
-    SecurityPosition, SecurityTrade, SettlementInfo, Trade, TradingStatus,
+    Account, Notification, Order, OutboundDispatch, OutboundFrame, OutboundRequest, Position,
+    PreInsertOrder, ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount,
+    SecurityOrder, SecurityPosition, SecurityTrade, SettlementInfo, Trade, TradingStatus,
 };
-use tqsdk_stream::{KlineWindow, MarketEvent, TickWindow};
+use tqsdk_stream::{KlineWindow, MarketEvent, TickWindow, TqStream};
 
 mod support;
 
@@ -20,6 +20,10 @@ fn transport_payload(request: &OutboundRequest) -> Value {
             .expect("transport frame should contain valid json payload"),
         other => panic!("expected transport request, got {other:?}"),
     }
+}
+
+fn drain_dispatches(stream: &TqStream) -> Vec<OutboundDispatch> {
+    stream.session().handle().drain_dispatches().unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -50,7 +54,7 @@ async fn subscribe_and_unsubscribe_quotes_submit_market_requests_without_protoco
         .await
         .unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -60,7 +64,7 @@ async fn subscribe_and_unsubscribe_quotes_submit_market_requests_without_protoco
 
     stream.unsubscribe_quotes(["SHFE.ag2606"]).await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -76,7 +80,7 @@ async fn quote_subscription_adds_removes_and_streams_current_symbols() {
 
     assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec!["SHFE.au2602"]);
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -99,7 +103,7 @@ async fn quote_subscription_adds_removes_and_streams_current_symbols() {
         vec!["SHFE.ag2606", "SHFE.au2602"]
     );
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -110,7 +114,7 @@ async fn quote_subscription_adds_removes_and_streams_current_symbols() {
     quotes.remove("SHFE.au2602").await.unwrap();
     assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec!["SHFE.ag2606"]);
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -137,10 +141,10 @@ async fn quote_subscription_close_unsubscribes_current_symbols() {
     let stream = support::core_seed::seeded_stream();
     let quotes = stream.quotes(["SHFE.au2602", "SHFE.ag2606"]).await.unwrap();
 
-    stream.session().drain_dispatches().unwrap();
+    drain_dispatches(&stream);
     quotes.close().await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payload = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -341,7 +345,7 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
         .await
         .unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
     assert!(
         dispatches
@@ -388,7 +392,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
     let stream = support::core_seed::seeded_stream();
     let mut windows = stream.tick_stream("SHFE.au2602", 32).await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
     assert!(
         dispatches
@@ -424,7 +428,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
 
     windows.close().await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
 
     let payload = dispatches
@@ -450,7 +454,7 @@ async fn market_event_stream_subscribes_mixed_market_data_and_yields_typed_event
         .await
         .unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payloads = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -531,10 +535,10 @@ async fn market_event_stream_close_unsubscribes_quotes_and_cancels_charts() {
         .await
         .unwrap();
 
-    stream.session().drain_dispatches().unwrap();
+    drain_dispatches(&stream);
     events.close().await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     let payloads = dispatches
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
@@ -564,10 +568,10 @@ async fn kline_window_close_submits_cancel_chart_request() {
         .await
         .unwrap();
 
-    stream.session().drain_dispatches().unwrap();
+    drain_dispatches(&stream);
     windows.close().await.unwrap();
 
-    let dispatches = stream.session().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
 
     let payload = dispatches

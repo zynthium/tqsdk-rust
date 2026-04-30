@@ -45,7 +45,7 @@
 - `DynAuthProvider` 已从 `tqsdk_core` root public re-export 收回到 `tqsdk_core::internal` sibling bridge，`AuthContext` / `AuthProvider` 保持 root contract。
 - `TaskHost` 隐藏 ownership 测试 hook 已收口：`check_manual_order_allowed_for_test()` 改为正式 `check_manual_order_allowed()` dry-run API，未使用的 owner register/unregister hidden hooks 已删除，测试改用真实 scheduler builder 覆盖冲突路径。
 - `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
-- `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` hidden public 构造器已删除。`drain_dispatches()` 暂时保留，等待 wait/stream/task dispatch fixture 迁移。
+- `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` 与 `SessionClient::drain_dispatches()` hidden public API 已删除。
 - `tqsdk-stream` 已删除 `TqStream::handle_for_test()`；stream 测试 support 改用公开 `stream.session().handle()`。`tqsdk-wait` 自身测试也已迁离 `TqApi::handle_for_test()`，但该 shim 暂留给 task fixture 迁移。
 
 ### 仍保留为独立计划项
