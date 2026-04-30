@@ -862,7 +862,7 @@ fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: 
 }
 
 fn order_is_terminal(order: &Order) -> bool {
-    order.status == "FINISHED"
+    order.lifecycle.is_terminal()
 }
 
 impl Drop for TargetPosTaskInner {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{fmt, sync::Arc};
 
 use crate::events::NormalizedMutation;
@@ -9,7 +10,7 @@ pub(crate) trait CursorTracker: Send + Sync {
     fn update(&self, next_revision: Revision);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChangeHit {
     pub path: StatePath,
     pub object: ObjectKey,
@@ -35,15 +36,19 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
+        let mut path_seen = HashSet::with_capacity(mutations.len());
+        let mut object_seen = HashSet::with_capacity(mutations.len());
+        let mut field_seen = HashSet::with_capacity(mutations.len());
+
         let mut changes = Self::default();
 
         for mutation in mutations {
-            if !changes.path_hits.contains(&mutation.path) {
+            if path_seen.insert(mutation.path.clone()) {
                 changes.path_hits.push(mutation.path.clone());
             }
 
             if let Some(object) = &mutation.object {
-                if !changes.object_hits.contains(object) {
+                if object_seen.insert(object.clone()) {
                     changes.object_hits.push(object.clone());
                 }
 
@@ -53,7 +58,7 @@ impl ChangeSet {
                         object.clone(),
                         field.field.clone(),
                     );
-                    if !changes.field_hits.contains(&hit) {
+                    if field_seen.insert(hit.clone()) {
                         changes.field_hits.push(hit);
                     }
                 }

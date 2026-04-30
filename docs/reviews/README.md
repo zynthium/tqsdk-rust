@@ -6,6 +6,7 @@
 
 | 文档 | 职责 |
 | --- | --- |
+| [`comprehensive-review-2026-04-30.md`](comprehensive-review-2026-04-30.md) | 全面审查：架构设计、Public API、性能、可读性与可维护性，含优先修复计划 |
 | [`public-api-scenario-review.md`](public-api-scenario-review.md) | 场景驱动 public API 表达能力审查，记录哪些场景自然、勉强或暂缓 |
 | [`public-api-disposition-matrix.md`](public-api-disposition-matrix.md) | public API 符号级 disposition gate，区分 keep、internalize、needs-arch-change 和 split-plan |
 
