@@ -12,29 +12,82 @@ use tqsdk_core::{
 };
 
 #[test]
+fn transport_is_split_into_focused_modules() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let transport_root = root.join("src/transport.rs");
+    let transport_dir = root.join("src/transport");
+
+    for module in [
+        "frame.rs",
+        "websocket.rs",
+        "config.rs",
+        "topology.rs",
+        "connected.rs",
+        "connector.rs",
+        "bootstrap.rs",
+    ] {
+        assert!(
+            transport_dir.join(module).exists(),
+            "transport module {module} should exist under src/transport/"
+        );
+    }
+
+    let source =
+        std::fs::read_to_string(&transport_root).expect("transport root should be readable");
+    for module_decl in [
+        "mod bootstrap;",
+        "mod config;",
+        "mod connected;",
+        "mod connector;",
+        "mod frame;",
+        "mod topology;",
+        "mod websocket;",
+    ] {
+        assert!(
+            source.contains(module_decl),
+            "transport root should declare {module_decl}"
+        );
+    }
+
+    assert!(
+        !source.contains("pub struct WebSocketTransport"),
+        "websocket implementation should live in src/transport/websocket.rs"
+    );
+    assert!(
+        !source.contains("pub struct ConnectedTopology"),
+        "connected topology runtime should live in src/transport/connected.rs"
+    );
+    assert!(
+        !source.contains("pub struct SessionBootstrap"),
+        "bootstrap orchestration should live in src/transport/bootstrap.rs"
+    );
+}
+
+#[test]
 fn transport_orchestration_methods_do_not_box_futures() {
-    let source = include_str!("../src/transport.rs");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let connected_source = std::fs::read_to_string(root.join("src/transport/connected.rs"))
+        .expect("connected transport module should be readable");
+    let bootstrap_source = std::fs::read_to_string(root.join("src/transport/bootstrap.rs"))
+        .expect("bootstrap transport module should be readable");
     let blocks = [
         (
             "ConnectedSessionRoute",
-            source
+            connected_source
                 .split("impl ConnectedSessionRoute {")
                 .nth(1)
                 .and_then(|tail| tail.split("#[derive(Default)]").next()),
         ),
         (
             "ConnectedTopology",
-            source
+            connected_source
                 .split("impl ConnectedTopology {")
                 .nth(1)
-                .and_then(|tail| tail.split("#[doc(hidden)]").next()),
+                .and_then(|tail| tail.split("pub type DynRouteConnectFuture").next()),
         ),
         (
             "SessionBootstrap",
-            source
-                .split("impl SessionBootstrap {")
-                .nth(1)
-                .and_then(|tail| tail.split("#[cfg(test)]").next()),
+            bootstrap_source.split("impl SessionBootstrap {").nth(1),
         ),
     ];
 

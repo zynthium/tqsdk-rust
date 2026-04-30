@@ -50,12 +50,13 @@
 - 期货 `Order.direction` / `Order.offset` / `Order.price_type` 和 `Trade.direction` / `Trade.offset` 已从裸 `String` 迁移为 `Option<TradeDirection>` / `Option<TradeOffset>` / `Option<TradePriceType>`，保留缺失字段容忍；`PreInsertOrder` 与证券 schema 字符串字段不属于本批改造范围。
 - `apply_and_publish_locked` 不再深拷贝 `CommitResult`；runtime commit 发布、写侧返回、cursor 消费、wait/stream fan-out 和 sink retry 已统一使用 `SharedCommitResult = Arc<CommitResult>` 共享不可变提交 payload。
 - `tqsdk-stream/src/sink.rs` 已拆为 `sink/` 模块目录，public `CommitSink` / WAL / commit journal surface 保持不变，并新增 source-level guardrail 防止回退成单文件。
+- `tqsdk-core/src/transport.rs` 已拆为 `transport/` 模块目录，public transport/session contract 保持不变，并新增 source-level guardrail 防止回退成单文件。
 
 ### 仍保留为独立计划项
 
 - `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks、wait fixture hooks 与 stream lifecycle hooks 已收口；task fixture 仍可通过公开 `api.session().handle()` 使用底层 runtime contract 做 deterministic ingest/dispatch 断言。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
-- `transport.rs`、`account_group.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
+- `account_group.rs` 模块级拆分仍属于较大内部重构，应分 child plan 执行并先补 characterization tests。
 - public 文档注释仍是质量补强任务，不影响本批已定位 bug/perf 修复。
 
 ---
@@ -118,7 +119,7 @@
 | HIGH | `market_cache.rs` 2430 行混合 7 个职责，必须拆分 | `tqsdk-data/src/market_cache.rs` |
 | HIGH | `sink.rs` 10 个自由函数共享 `Arc<Mutex<StreamSinkState>>`，复合操作无原子性 | `tqsdk-stream/src/sink.rs:937-1005` |
 | HIGH | `MarketCacheService`/`Daemon`/`Supervisor` 无文档注释 | `market_cache.rs` |
-| MEDIUM | `transport.rs` 1135 行混合 4 个职责 | `tqsdk-core/src/transport.rs` |
+| MEDIUM | `transport.rs` 1135 行混合 4 个职责（已于 2026-05-01 拆分为 `transport/` 模块目录，public surface 不变） | `tqsdk-core/src/transport.rs` |
 | MEDIUM | `account_group.rs` 967 行，API 与 helper 混合 | `tqsdk-task/src/account_group.rs` |
 | MEDIUM | `sink.rs` 建议拆分为 `sink/` 模块目录（已于 2026-05-01 拆分，public surface 不变） | `tqsdk-stream/src/sink.rs` |
 | MEDIUM | `WalWriter`/`JournalWriter` 结构重复，应泛化 | `sink.rs:1253-1353` |
@@ -147,7 +148,7 @@
 ### P2 — 中期改进
 
 8. `sink.rs` 共享状态封装为 wrapper
-9. `transport.rs` 拆分为模块目录
+9. `transport.rs` 拆分为模块目录（已完成，2026-05-01）
 10. `insert_order` 引入 `OrderPrice` 枚举（已完成，2026-05-01）
 11. ID 类型/`OrderLifecycle`/`RiskRejection` 实现 `Display`
 12. `reader.read()` 改为分区读
