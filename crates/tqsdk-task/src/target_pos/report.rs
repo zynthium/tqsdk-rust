@@ -152,7 +152,7 @@ impl TargetPosTaskExecutionReport {
         self.finished_order_count += 1;
         if let Some(order_report) = self.order_report_mut(&order.order_id) {
             order_report.status = Some(order.status.clone());
-            order_report.filled_volume = order.volume_orign - order.volume_left;
+            order_report.filled_volume = order.volume_origin - order.volume_left;
             order_report.remaining_volume = order.volume_left;
             order_report.last_msg = Some(order.last_msg.clone());
         }
@@ -160,7 +160,7 @@ impl TargetPosTaskExecutionReport {
             .push(TargetPosTaskExecutionEvent::OrderFinished {
                 order_id: order.order_id.clone(),
                 status: order.status.clone(),
-                filled_volume: order.volume_orign - order.volume_left,
+                filled_volume: order.volume_origin - order.volume_left,
                 remaining_volume: order.volume_left,
                 last_msg: order.last_msg.clone(),
             });

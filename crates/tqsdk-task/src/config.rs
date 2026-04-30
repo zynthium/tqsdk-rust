@@ -39,7 +39,6 @@ pub struct VolumeSplitPolicy {
 }
 
 impl VolumeSplitPolicy {
-    #[must_use]
     pub fn new(min_volume: i64, max_volume: i64) -> Result<Self> {
         let policy = Self {
             min_volume,

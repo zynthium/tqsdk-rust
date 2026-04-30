@@ -12,7 +12,7 @@ pub struct TickSerialRef {
 
 impl TickSerialRef {
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        let guard = api.driver.reader.read();
+        let guard = api.driver.reader.read_market_state();
         let ready = guard
             .get_path(&["charts", self.chart_id.as_str(), "ready"])
             .and_then(|value| value.as_bool())
@@ -26,7 +26,7 @@ impl TickSerialRef {
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<TickWindow> {
-        let guard = api.driver.reader.read();
+        let guard = api.driver.reader.read_market_state();
         let mut rows = Vec::new();
 
         if let Some(data) = guard

@@ -24,6 +24,9 @@ enum MarketStateSource<'a> {
         revision: Revision,
         quotes: &'a Value,
         trading_status: &'a Value,
+        charts: &'a Value,
+        klines: &'a Value,
+        ticks: &'a Value,
     },
 }
 
@@ -38,12 +41,18 @@ impl<'a> MarketStateView<'a> {
         revision: Revision,
         quotes: &'a Value,
         trading_status: &'a Value,
+        charts: &'a Value,
+        klines: &'a Value,
+        ticks: &'a Value,
     ) -> Self {
         Self {
             source: MarketStateSource::Partitions {
                 revision,
                 quotes,
                 trading_status,
+                charts,
+                klines,
+                ticks,
             },
         }
     }
@@ -53,6 +62,45 @@ impl<'a> MarketStateView<'a> {
             MarketStateSource::Snapshot(read) => read.revision(),
             MarketStateSource::Partitions { revision, .. } => revision,
         }
+    }
+
+    /// Returns a raw value from a market-rooted path such as
+    /// `quotes/{symbol}`, `charts/{chart_id}`, `klines/...`, or `ticks/...`.
+    pub fn get_path(&self, path: &[&str]) -> Option<&'a Value> {
+        match self.source {
+            MarketStateSource::Snapshot(read) => read.get_path(path),
+            MarketStateSource::Partitions {
+                quotes,
+                trading_status,
+                charts,
+                klines,
+                ticks,
+                ..
+            } => {
+                let (root, rest) = path.split_first()?;
+                let partition = match *root {
+                    "quotes" => quotes,
+                    "trading_status" => trading_status,
+                    "charts" => charts,
+                    "klines" => klines,
+                    "ticks" => ticks,
+                    _ => return None,
+                };
+                get_at_path(partition, rest.iter().copied())
+            }
+        }
+    }
+
+    /// Decodes a value from a market-rooted path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let Some(value) = self.get_path(path) else {
+            return Ok(None);
+        };
+
+        decode_value_at_path(value, path).map(Some)
     }
 
     pub fn quote(&self, symbol: &Symbol) -> Result<Option<Quote>> {
@@ -82,6 +130,9 @@ pub struct MarketStateReadGuard<'a> {
     revision: Revision,
     quotes: RwLockReadGuard<'a, Value>,
     trading_status: RwLockReadGuard<'a, Value>,
+    charts: RwLockReadGuard<'a, Value>,
+    klines: RwLockReadGuard<'a, Value>,
+    ticks: RwLockReadGuard<'a, Value>,
 }
 
 impl<'a> MarketStateReadGuard<'a> {
@@ -89,16 +140,29 @@ impl<'a> MarketStateReadGuard<'a> {
         revision: Revision,
         quotes: RwLockReadGuard<'a, Value>,
         trading_status: RwLockReadGuard<'a, Value>,
+        charts: RwLockReadGuard<'a, Value>,
+        klines: RwLockReadGuard<'a, Value>,
+        ticks: RwLockReadGuard<'a, Value>,
     ) -> Self {
         Self {
             revision,
             quotes,
             trading_status,
+            charts,
+            klines,
+            ticks,
         }
     }
 
     pub fn view(&self) -> MarketStateView<'_> {
-        MarketStateView::from_partitions(self.revision, &self.quotes, &self.trading_status)
+        MarketStateView::from_partitions(
+            self.revision,
+            &self.quotes,
+            &self.trading_status,
+            &self.charts,
+            &self.klines,
+            &self.ticks,
+        )
     }
 
     pub fn revision(&self) -> Revision {
@@ -111,6 +175,19 @@ impl<'a> MarketStateReadGuard<'a> {
 
     pub fn trading_status(&self, symbol: &Symbol) -> Result<Option<TradingStatus>> {
         self.view().trading_status(symbol)
+    }
+
+    /// Returns a raw value from a market-rooted path.
+    pub fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        self.view().get_path(path)
+    }
+
+    /// Decodes a value from a market-rooted path.
+    pub fn decode_path<T>(&self, path: &[&str]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        self.view().decode_path(path)
     }
 }
 

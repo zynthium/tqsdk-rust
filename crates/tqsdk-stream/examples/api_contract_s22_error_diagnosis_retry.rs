@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
     let diagnostic = error.diagnostic();
     let retry_policy = StreamRetryPolicy::new()
-        .max_attempts(3)?
+        .max_attempts(3)
         .base_delay(Duration::from_millis(200))
         .max_delay(Duration::from_secs(2));
 

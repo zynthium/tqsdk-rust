@@ -13,7 +13,7 @@ pub struct KlineSerialRef {
 
 impl KlineSerialRef {
     pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        let guard = api.driver.reader.read();
+        let guard = api.driver.reader.read_market_state();
         let ready = guard
             .get_path(&["charts", self.chart_id.as_str(), "ready"])
             .and_then(|value| value.as_bool())
@@ -27,7 +27,7 @@ impl KlineSerialRef {
     }
 
     pub fn load(&self, api: &TqApi) -> crate::error::Result<KlineWindow> {
-        let guard = api.driver.reader.read();
+        let guard = api.driver.reader.read_market_state();
         let mut rows = Vec::new();
         let duration_key = self.duration_ns.to_string();
         let data_path = [

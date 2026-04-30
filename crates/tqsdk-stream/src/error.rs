@@ -134,7 +134,13 @@ impl StreamRetryPolicy {
         Self::default()
     }
 
-    pub fn max_attempts(mut self, max_attempts: u32) -> Result<Self> {
+    #[must_use]
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts.max(1);
+        self
+    }
+
+    pub fn try_max_attempts(mut self, max_attempts: u32) -> Result<Self> {
         if max_attempts == 0 {
             return Err(StreamFacadeError::InvalidState(
                 "stream retry max attempts must be greater than zero",

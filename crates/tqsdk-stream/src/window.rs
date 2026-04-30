@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{Kline, MarketCommand, RuntimeCommand, SnapshotReadGuard, Tick};
+use tqsdk_core::{Kline, MarketCommand, MarketStateReadGuard, RuntimeCommand, Tick};
 
 use crate::{PathCommitStream, Result, ValueUpdate};
 
@@ -161,7 +161,7 @@ struct ProjectedValueStream<T, C> {
     inner: PathCommitStream,
     reader: tqsdk_core::RuntimeReader,
     context: C,
-    projector: for<'a> fn(SnapshotReadGuard<'a>, &C) -> Result<Option<T>>,
+    projector: for<'a> fn(MarketStateReadGuard<'a>, &C) -> Result<Option<T>>,
     marker: PhantomData<fn() -> T>,
 }
 
@@ -170,7 +170,7 @@ impl<T, C> ProjectedValueStream<T, C> {
         inner: PathCommitStream,
         reader: tqsdk_core::RuntimeReader,
         context: C,
-        projector: for<'a> fn(SnapshotReadGuard<'a>, &C) -> Result<Option<T>>,
+        projector: for<'a> fn(MarketStateReadGuard<'a>, &C) -> Result<Option<T>>,
     ) -> Self {
         Self {
             inner,
@@ -194,8 +194,8 @@ where
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(commit))) => {
-                    let snapshot = this.reader.read();
-                    match (this.projector)(snapshot, &this.context) {
+                    let market = this.reader.read_market_state();
+                    match (this.projector)(market, &this.context) {
                         Ok(Some(value)) => {
                             return Poll::Ready(Some(Ok(ValueUpdate { commit, value })));
                         }
@@ -343,21 +343,21 @@ fn sanitize_chart_token(raw: &str) -> String {
 }
 
 pub(crate) fn project_kline_window(
-    snapshot: SnapshotReadGuard<'_>,
+    market: MarketStateReadGuard<'_>,
     spec: &KlineWindowSpec,
 ) -> Result<Option<KlineWindow>> {
-    project_kline_window_from_snapshot(&snapshot, spec)
+    project_kline_window_from_market(&market, spec)
 }
 
-pub(crate) fn project_kline_window_from_snapshot(
-    snapshot: &SnapshotReadGuard<'_>,
+pub(crate) fn project_kline_window_from_market(
+    market: &MarketStateReadGuard<'_>,
     spec: &KlineWindowSpec,
 ) -> Result<Option<KlineWindow>> {
-    if !chart_is_ready(snapshot, spec.chart_id.as_str()) {
+    if !chart_is_ready(market, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_kline_window(snapshot, spec)?;
+    let window = read_kline_window(market, spec)?;
     if window.is_empty() {
         return Ok(None);
     }
@@ -366,21 +366,21 @@ pub(crate) fn project_kline_window_from_snapshot(
 }
 
 pub(crate) fn project_tick_window(
-    snapshot: SnapshotReadGuard<'_>,
+    market: MarketStateReadGuard<'_>,
     spec: &TickWindowSpec,
 ) -> Result<Option<TickWindow>> {
-    project_tick_window_from_snapshot(&snapshot, spec)
+    project_tick_window_from_market(&market, spec)
 }
 
-pub(crate) fn project_tick_window_from_snapshot(
-    snapshot: &SnapshotReadGuard<'_>,
+pub(crate) fn project_tick_window_from_market(
+    market: &MarketStateReadGuard<'_>,
     spec: &TickWindowSpec,
 ) -> Result<Option<TickWindow>> {
-    if !chart_is_ready(snapshot, spec.chart_id.as_str()) {
+    if !chart_is_ready(market, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_tick_window(snapshot, spec)?;
+    let window = read_tick_window(market, spec)?;
     if window.is_empty() {
         return Ok(None);
     }
@@ -388,12 +388,12 @@ pub(crate) fn project_tick_window_from_snapshot(
     Ok(Some(window))
 }
 
-fn chart_is_ready(snapshot: &SnapshotReadGuard<'_>, chart_id: &str) -> bool {
-    let ready = snapshot
+fn chart_is_ready(market: &MarketStateReadGuard<'_>, chart_id: &str) -> bool {
+    let ready = market
         .get_path(&["charts", chart_id, "ready"])
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    let more_data = snapshot
+    let more_data = market
         .get_path(&["charts", chart_id, "more_data"])
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
@@ -402,7 +402,7 @@ fn chart_is_ready(snapshot: &SnapshotReadGuard<'_>, chart_id: &str) -> bool {
 }
 
 fn read_kline_window(
-    snapshot: &SnapshotReadGuard<'_>,
+    market: &MarketStateReadGuard<'_>,
     spec: &KlineWindowSpec,
 ) -> Result<KlineWindow> {
     let duration_key = spec.duration_ns.to_string();
@@ -414,7 +414,7 @@ fn read_kline_window(
     ];
     let mut rows = Vec::new();
 
-    if let Some(data) = snapshot
+    if let Some(data) = market
         .get_path(&data_path)
         .and_then(|value| value.as_object())
     {
@@ -426,7 +426,7 @@ fn read_kline_window(
 
         for id in ids.into_iter().rev().take(spec.view_width).rev() {
             let id_key = id.to_string();
-            if let Some(row) = snapshot.decode_path::<Kline>(&[
+            if let Some(row) = market.decode_path::<Kline>(&[
                 "klines",
                 spec.symbol.as_str(),
                 duration_key.as_str(),
@@ -447,10 +447,13 @@ fn read_kline_window(
     ))
 }
 
-fn read_tick_window(snapshot: &SnapshotReadGuard<'_>, spec: &TickWindowSpec) -> Result<TickWindow> {
+fn read_tick_window(
+    market: &MarketStateReadGuard<'_>,
+    spec: &TickWindowSpec,
+) -> Result<TickWindow> {
     let mut rows = Vec::new();
 
-    if let Some(data) = snapshot
+    if let Some(data) = market
         .get_path(&["ticks", spec.symbol.as_str(), "data"])
         .and_then(|value| value.as_object())
     {
@@ -462,7 +465,7 @@ fn read_tick_window(snapshot: &SnapshotReadGuard<'_>, spec: &TickWindowSpec) -> 
 
         for id in ids.into_iter().rev().take(spec.view_width).rev() {
             let id_key = id.to_string();
-            if let Some(row) = snapshot.decode_path::<Tick>(&[
+            if let Some(row) = market.decode_path::<Tick>(&[
                 "ticks",
                 spec.symbol.as_str(),
                 "data",

@@ -182,7 +182,7 @@ pub struct StreamCommitJournalReplayReport {
 /// Handle returned after spawning a managed commit sink.
 pub struct StreamSinkHandle {
     name: String,
-    shared: Arc<Mutex<StreamSinkState>>,
+    shared: SharedStreamSinkState,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<StreamSinkShutdownReport>,
 }
@@ -204,12 +204,43 @@ struct StreamSinkState {
     last_error: Option<StreamFacadeError>,
 }
 
+#[derive(Debug, Clone)]
+struct SharedStreamSinkState {
+    inner: Arc<Mutex<StreamSinkState>>,
+}
+
+impl SharedStreamSinkState {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(StreamSinkState {
+                status: StreamSinkStatus::Running,
+                stats: StreamSinkStats::default(),
+                last_error: None,
+            })),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&StreamSinkState) -> R) -> R {
+        let state = self.inner.lock().expect("stream sink state mutex poisoned");
+        f(&state)
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut StreamSinkState) -> R) -> R {
+        let mut state = self.inner.lock().expect("stream sink state mutex poisoned");
+        f(&mut state)
+    }
+
+    fn snapshot(&self) -> StreamSinkState {
+        self.with(Clone::clone)
+    }
+}
+
 struct StreamSinkRuntime<S> {
     name: String,
     commits: CommitStream,
     sink: S,
     shutdown_rx: oneshot::Receiver<()>,
-    shared: Arc<Mutex<StreamSinkState>>,
+    shared: SharedStreamSinkState,
     retry_policy: StreamSinkRetryPolicy,
     wal: Option<StreamSinkWalWriter>,
     journal: Option<StreamCommitJournalWriter>,
@@ -634,18 +665,14 @@ impl StreamSinkHandle {
             options.commit_journal_path.as_deref(),
             options.wal_fsync_policy,
         )?;
-        let shared = Arc::new(Mutex::new(StreamSinkState {
-            status: StreamSinkStatus::Running,
-            stats: StreamSinkStats::default(),
-            last_error: None,
-        }));
+        let shared = SharedStreamSinkState::new();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(run_sink(StreamSinkRuntime {
             name: name.clone(),
             commits,
             sink,
             shutdown_rx,
-            shared: Arc::clone(&shared),
+            shared: shared.clone(),
             retry_policy: options.retry_policy,
             wal,
             journal,
@@ -666,27 +693,17 @@ impl StreamSinkHandle {
 
     #[must_use]
     pub fn status(&self) -> StreamSinkStatus {
-        self.shared
-            .lock()
-            .expect("stream sink state mutex poisoned")
-            .status
+        current_status(&self.shared)
     }
 
     #[must_use]
     pub fn stats(&self) -> StreamSinkStats {
-        self.shared
-            .lock()
-            .expect("stream sink state mutex poisoned")
-            .stats
+        self.shared.with(|state| state.stats)
     }
 
     #[must_use]
     pub fn last_error(&self) -> Option<StreamFacadeError> {
-        self.shared
-            .lock()
-            .expect("stream sink state mutex poisoned")
-            .last_error
-            .clone()
+        self.shared.with(|state| state.last_error.clone())
     }
 
     pub async fn shutdown(mut self) -> Result<StreamSinkShutdownReport> {
@@ -831,7 +848,7 @@ where
 
 async fn deliver_commit<S>(
     name: &str,
-    shared: &Arc<Mutex<StreamSinkState>>,
+    shared: &SharedStreamSinkState,
     wal: &mut Option<StreamSinkWalWriter>,
     journal: &mut Option<StreamCommitJournalWriter>,
     sink: &mut S,
@@ -900,7 +917,7 @@ where
 
 async fn flush_sink<S>(
     name: &str,
-    shared: &Arc<Mutex<StreamSinkState>>,
+    shared: &SharedStreamSinkState,
     wal: &mut Option<StreamSinkWalWriter>,
     sink: &mut S,
 ) -> bool
@@ -934,67 +951,47 @@ where
     }
 }
 
-fn current_status(shared: &Arc<Mutex<StreamSinkState>>) -> StreamSinkStatus {
-    shared
-        .lock()
-        .expect("stream sink state mutex poisoned")
-        .status
+fn current_status(shared: &SharedStreamSinkState) -> StreamSinkStatus {
+    shared.with(|state| state.status)
 }
 
-fn set_status(shared: &Arc<Mutex<StreamSinkState>>, status: StreamSinkStatus) {
-    shared
-        .lock()
-        .expect("stream sink state mutex poisoned")
-        .status = status;
+fn set_status(shared: &SharedStreamSinkState, status: StreamSinkStatus) {
+    shared.with_mut(|state| state.status = status);
 }
 
-fn increment_processed(shared: &Arc<Mutex<StreamSinkState>>) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.processed_commits += 1;
+fn increment_processed(shared: &SharedStreamSinkState) {
+    shared.with_mut(|state| state.stats.processed_commits += 1);
 }
 
-fn add_lagged(shared: &Arc<Mutex<StreamSinkState>>, skipped: u64) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.lagged_commits += skipped;
+fn add_lagged(shared: &SharedStreamSinkState, skipped: u64) {
+    shared.with_mut(|state| state.stats.lagged_commits += skipped);
 }
 
-fn increment_retry_attempts(shared: &Arc<Mutex<StreamSinkState>>) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.retry_attempts += 1;
+fn increment_retry_attempts(shared: &SharedStreamSinkState) {
+    shared.with_mut(|state| state.stats.retry_attempts += 1);
 }
 
-fn increment_wal_records(shared: &Arc<Mutex<StreamSinkState>>) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.wal_records += 1;
+fn increment_wal_records(shared: &SharedStreamSinkState) {
+    shared.with_mut(|state| state.stats.wal_records += 1);
 }
 
-fn increment_journal_records(shared: &Arc<Mutex<StreamSinkState>>) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.journal_records += 1;
+fn increment_journal_records(shared: &SharedStreamSinkState) {
+    shared.with_mut(|state| state.stats.journal_records += 1);
 }
 
-fn record_error(shared: &Arc<Mutex<StreamSinkState>>, error: StreamFacadeError) {
-    let mut state = shared.lock().expect("stream sink state mutex poisoned");
-    state.stats.errors += 1;
-    state.last_error = Some(error);
+fn record_error(shared: &SharedStreamSinkState, error: StreamFacadeError) {
+    shared.with_mut(|state| {
+        state.stats.errors += 1;
+        state.last_error = Some(error);
+    });
 }
 
-fn clear_error(shared: &Arc<Mutex<StreamSinkState>>) {
-    shared
-        .lock()
-        .expect("stream sink state mutex poisoned")
-        .last_error = None;
+fn clear_error(shared: &SharedStreamSinkState) {
+    shared.with_mut(|state| state.last_error = None);
 }
 
-fn report(
-    name: String,
-    shared: Arc<Mutex<StreamSinkState>>,
-    flushed: bool,
-) -> StreamSinkShutdownReport {
-    let state = shared
-        .lock()
-        .expect("stream sink state mutex poisoned")
-        .clone();
+fn report(name: String, shared: SharedStreamSinkState, flushed: bool) -> StreamSinkShutdownReport {
+    let state = shared.snapshot();
     StreamSinkShutdownReport {
         name,
         status: state.status,
@@ -1005,7 +1002,7 @@ fn report(
 }
 
 fn write_wal_record(
-    shared: &Arc<Mutex<StreamSinkState>>,
+    shared: &SharedStreamSinkState,
     wal: &mut Option<StreamSinkWalWriter>,
     record: &StreamSinkWalRecord,
 ) -> Result<()> {
@@ -1017,7 +1014,7 @@ fn write_wal_record(
 }
 
 fn write_commit_journal_record(
-    shared: &Arc<Mutex<StreamSinkState>>,
+    shared: &SharedStreamSinkState,
     journal: &mut Option<StreamCommitJournalWriter>,
     commit: &CommitResult,
 ) -> Result<()> {

@@ -280,7 +280,11 @@ fn low_level_session_wiring_is_hidden_behind_internal_bridge() {
         "session runtime implementation module should not be part of the stable public surface"
     );
     assert!(
-        lib.contains("#[doc(hidden)]\npub mod internal"),
+        lib.contains("#[doc(hidden)]") && lib.contains("pub mod internal"),
         "cross-crate implementation bridge should be explicit and doc-hidden"
+    );
+    assert!(
+        lib.contains("not part of the stable public contract"),
+        "internal bridge should document its unstable sibling-crate-only status"
     );
 }

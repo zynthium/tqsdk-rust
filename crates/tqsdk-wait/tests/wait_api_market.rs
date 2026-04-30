@@ -8,11 +8,17 @@ fn compact_source(source: &str) -> String {
 fn market_refs_read_market_partitions_instead_of_full_snapshot() {
     let quote_ref = include_str!("../src/refs/quote.rs");
     let trading_status_ref = include_str!("../src/refs/trading_status.rs");
+    let kline_ref = include_str!("../src/refs/kline.rs");
+    let tick_ref = include_str!("../src/refs/tick.rs");
 
     assert!(quote_ref.contains("read_market_state()"));
     assert!(trading_status_ref.contains("read_market_state()"));
+    assert!(kline_ref.contains("read_market_state()"));
+    assert!(tick_ref.contains("read_market_state()"));
     assert!(!compact_source(quote_ref).contains("reader.read()"));
     assert!(!compact_source(trading_status_ref).contains("reader.read()"));
+    assert!(!compact_source(kline_ref).contains("reader.read()"));
+    assert!(!compact_source(tick_ref).contains("reader.read()"));
 }
 
 #[tokio::test(flavor = "current_thread")]

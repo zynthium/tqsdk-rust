@@ -130,7 +130,8 @@ pub struct SecurityOrder {
     pub exchange_id: String,
     pub instrument_id: String,
     pub direction: String,
-    pub volume_orign: i64,
+    #[serde(default, rename = "volume_orign")]
+    pub volume_origin: i64,
     pub volume_left: i64,
     pub price_type: String,
     #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]

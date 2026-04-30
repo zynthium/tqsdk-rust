@@ -33,6 +33,46 @@ fn trade_event_streams_read_trade_partition_instead_of_full_snapshot() {
     );
 }
 
+#[test]
+fn market_window_streams_read_market_partitions_instead_of_full_snapshot() {
+    let source = include_str!("../src/window.rs");
+    let projected_stream_impl = source
+        .split("impl<T, C> Stream for ProjectedValueStream")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("/// Commit-driven stream of ready kline windows.")
+                .next()
+        })
+        .expect("ProjectedValueStream implementation should remain in window.rs");
+
+    assert!(
+        projected_stream_impl.contains("read_market_state()"),
+        "market window streams should read market partitions directly"
+    );
+    assert!(
+        !projected_stream_impl.contains("reader.read()"),
+        "market window streams should not materialize a full snapshot"
+    );
+}
+
+#[test]
+fn stream_sink_state_is_accessed_through_shared_state_wrapper() {
+    let source = include_str!("../src/sink.rs");
+
+    assert!(
+        source.contains("struct SharedStreamSinkState"),
+        "managed sink state should be hidden behind a wrapper"
+    );
+    assert!(
+        !source.contains("shared: Arc<Mutex<StreamSinkState>>"),
+        "runtime structs should not expose raw Arc<Mutex<StreamSinkState>> fields"
+    );
+    assert!(
+        !source.contains("&Arc<Mutex<StreamSinkState>>"),
+        "sink helpers should not pass raw Arc<Mutex<StreamSinkState>> handles around"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn position_event_stream_emits_matching_account_positions_only() {
     let stream = support::core_seed::seeded_stream();

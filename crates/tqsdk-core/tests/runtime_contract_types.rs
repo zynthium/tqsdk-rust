@@ -181,6 +181,7 @@ fn trading_and_risk_schema_types_deserialize_nested_payloads() {
     }))
     .expect("account schema should deserialize");
     assert_eq!(account.user_id, "simnow");
+    assert_eq!(account.clone(), account);
 
     let position = serde_json::from_value::<Position>(json!({
         "user_id": "simnow",
@@ -191,6 +192,7 @@ fn trading_and_risk_schema_types_deserialize_nested_payloads() {
     }))
     .expect("position schema should deserialize");
     assert_eq!(position.pos_long, 2);
+    assert_eq!(position.clone(), position);
 
     let order = serde_json::from_value::<Order>(json!({
         "user_id": "simnow",
@@ -205,6 +207,8 @@ fn trading_and_risk_schema_types_deserialize_nested_payloads() {
     }))
     .expect("order schema should deserialize");
     assert_eq!(order.order_id, "order-1");
+    assert_eq!(order.volume_origin, 2);
+    assert_eq!(order.clone(), order);
 
     let trade = serde_json::from_value::<Trade>(json!({
         "user_id": "simnow",
@@ -219,6 +223,7 @@ fn trading_and_risk_schema_types_deserialize_nested_payloads() {
     }))
     .expect("trade schema should deserialize");
     assert_eq!(trade.trade_id, "trade-1");
+    assert_eq!(trade.clone(), trade);
 
     let pre_insert_order = serde_json::from_value::<PreInsertOrder>(json!({
         "user_id": "simnow",
@@ -340,6 +345,7 @@ fn security_schema_types_deserialize_payloads() {
     }))
     .expect("security order schema should deserialize");
     assert_eq!(order.order_id, "stock-order-1");
+    assert_eq!(order.volume_origin, 100);
 
     let trade = serde_json::from_value::<SecurityTrade>(json!({
         "user_id": "stock-demo",

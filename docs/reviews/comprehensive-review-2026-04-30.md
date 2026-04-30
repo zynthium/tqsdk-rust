@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-05-01 接续执行状态
+
+本节记录 Codex 接手后的复核和落地状态。原始审查表保留为问题来源；后续计划应优先读取本节、当前代码和 `docs/architecture/*`，不要把下方原始表格中的旧状态当作未复核事实。
+
+### 已修复并提交到 checkpoint
+
+- `order_is_terminal()` 已改用 `OrderLifecycle::is_terminal()`，避免字符串状态误判。
+- `ChangeSet::from_mutations` 已用集合去重，避免 O(N²) 热路径退化。
+- `CommitLog` 已改为读写锁，降低多 consumer 读取竞争。
+- `market_cache.rs` 已拆分为模块目录。
+- `TargetPosConfig` / `VolumeSplitPolicy` 已收口字段和验证构造路径。
+- `run_driver` 已改用 `Notify` 唤醒，移除 1ms idle polling。
+- `insert_order` 已引入 `OrderPrice` typed 边界，并保留 legacy 兼容桥。
+- ID 类型、`OrderLifecycle`、`RiskRejection` 已补充 `Display`。
+
+### 本批代码已落地，随当前批次验证和提交
+
+- `tqsdk_core::internal` 已补充 `#[doc(hidden)]` sibling-crate bridge 稳定性声明，并用 runtime contract surface test 固化。
+- wait/stream 的 kline/tick/quote 热路径已改用 `read_market_state()`；generic path stream、health/system event 仍允许使用 full snapshot。
+- `Order` / `Trade` / `Account` / `Position` / `PreInsertOrder` 已实现可处理 schema 默认 `NaN` 的 `PartialEq`。
+- `Order.volume_orign` / `SecurityOrder.volume_orign` public 字段已改为 `volume_origin`，serde 仍兼容协议字段 `"volume_orign"`。
+- `StreamRetryPolicy::max_attempts` 已恢复链式 builder 语义，严格校验路径保留为 `try_max_attempts`。
+- `StreamSinkHandle` 共享状态已封装为 `SharedStreamSinkState`，调用点不再传递裸 `Arc<Mutex<StreamSinkState>>`。
+- `MarketCacheQueue::enqueue_event` 已改为复用持久 writer；queue 读取、清理和 rotating drain 会先 flush writer，rotating drain 后重开 append writer。
+- `run_market_cache_supervisor` 续租错误复核结果：当前代码已计入 `periodic_errors` 并写入 report，不再是静默吞错。
+
+### 仍保留为独立计划项
+
+- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
+- `Order.direction` / `offset` / `price_type` 从 `String` 迁移到枚举是 source-breaking schema API 改造，需要单独 public API 迁移计划。
+- 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
+- `transport.rs`、`account_group.rs`、`sink.rs` 模块级拆分和 `WalWriter` / `JournalWriter` 泛化属于较大内部重构，应分 child plan 执行并先补 characterization tests。
+- public 文档注释、doc-test、`RiskEngine` property-based tests 仍是质量补强任务，不影响本批已定位 bug/perf 修复。
+
+---
+
 ## 一、架构设计 — WARNING
 
 6 个 crate 分层清晰，依赖 DAG 无环，四项 runtime 不变量全部代码级强制执行。

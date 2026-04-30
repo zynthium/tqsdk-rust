@@ -30,7 +30,6 @@ fn stream_errors_expose_stable_kind_and_retry_hint() {
 fn stream_retry_policy_classifies_transport_http_and_non_retryable_errors() {
     let policy = StreamRetryPolicy::new()
         .max_attempts(3)
-        .expect("max attempts should be valid")
         .base_delay(Duration::from_millis(10))
         .max_delay(Duration::from_millis(25));
 
@@ -86,7 +85,6 @@ fn stream_retry_policy_classifies_transport_http_and_non_retryable_errors() {
 async fn stream_retry_policy_runs_retryable_operation_without_manual_backoff_loop() {
     let policy = StreamRetryPolicy::new()
         .max_attempts(3)
-        .expect("max attempts should be valid")
         .base_delay(Duration::ZERO);
     let mut attempts = 0;
 

@@ -24,6 +24,10 @@ mod transport;
 pub mod types;
 
 #[doc(hidden)]
+/// Temporary implementation bridge for sibling crates.
+///
+/// This module is not part of the stable public contract. It exists only while
+/// `tqsdk-session` absorbs runtime assembly details from core.
 pub mod internal {
     pub use crate::session_runtime::{
         RouteRequestExecutor, SessionRun, SessionRuntime, SessionRuntimeDeps,

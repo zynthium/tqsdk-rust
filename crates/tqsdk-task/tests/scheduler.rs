@@ -1788,9 +1788,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
 
 #[test]
 fn scheduler_builder_rejects_invalid_split_policy() {
-    let err = VolumeSplitPolicy::new(5, 4)
-        .err()
-        .expect("invalid split policy should be rejected");
+    let err = VolumeSplitPolicy::new(5, 4).expect_err("invalid split policy should be rejected");
 
     assert_eq!(
         err,

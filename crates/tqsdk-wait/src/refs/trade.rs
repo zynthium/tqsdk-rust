@@ -301,9 +301,9 @@ impl OrderRef {
 
 fn is_partially_filled(order: &Order) -> bool {
     order.lifecycle == OrderLifecycle::PartiallyFilled
-        || (order.volume_orign > 0
+        || (order.volume_origin > 0
             && order.volume_left > 0
-            && order.volume_left < order.volume_orign)
+            && order.volume_left < order.volume_origin)
 }
 
 impl ChangeTrackedRef for OrderRef {

@@ -157,7 +157,17 @@ impl StateStore {
     pub(crate) fn read_market_state(&self) -> MarketStateReadGuard<'_> {
         let quotes = rwlock_read(&self.quotes);
         let trading_status = rwlock_read(&self.trading_status);
-        MarketStateReadGuard::new(self.revision(), quotes, trading_status)
+        let charts = rwlock_read(&self.charts);
+        let klines = rwlock_read(&self.klines);
+        let ticks = rwlock_read(&self.ticks);
+        MarketStateReadGuard::new(
+            self.revision(),
+            quotes,
+            trading_status,
+            charts,
+            klines,
+            ticks,
+        )
     }
 
     pub(crate) fn read_trade_state(&self) -> TradeStateReadGuard<'_> {

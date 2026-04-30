@@ -30,15 +30,17 @@ impl From<MarketCacheQueueDrainError> for DataError {
 pub struct MarketCacheQueue {
     path: PathBuf,
     sync_on_enqueue: bool,
+    writer: Arc<Mutex<File>>,
 }
 
 impl MarketCacheQueue {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        OpenOptions::new().create(true).append(true).open(&path)?;
+        let writer = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
             sync_on_enqueue: false,
+            writer: Arc::new(Mutex::new(writer)),
         })
     }
 
@@ -54,11 +56,9 @@ impl MarketCacheQueue {
     }
 
     pub fn enqueue_event(&self, event: &MarketCacheEvent) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        write_market_cache_event_line(&mut file, event)?;
+        let mut file = self.writer()?;
+        let file = &mut *file;
+        write_market_cache_event_line(file, event)?;
         file.flush()?;
         if self.sync_on_enqueue {
             file.sync_data()?;
@@ -67,6 +67,7 @@ impl MarketCacheQueue {
     }
 
     pub fn reader(&self) -> Result<MarketCacheReader<BufReader<File>>> {
+        self.flush_writer()?;
         MarketCacheReader::open(&self.path)
     }
 
@@ -75,15 +76,34 @@ impl MarketCacheQueue {
     }
 
     pub fn is_empty(&self) -> Result<bool> {
+        self.flush_writer()?;
         Ok(std::fs::metadata(&self.path)?.len() == 0)
     }
 
     pub fn clear(&self) -> Result<()> {
-        OpenOptions::new()
+        let mut file = self.writer()?;
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+
+    fn writer(&self) -> Result<std::sync::MutexGuard<'_, File>> {
+        self.writer
+            .lock()
+            .map_err(|_| DataError::Validation("market cache queue writer lock poisoned".into()))
+    }
+
+    fn flush_writer(&self) -> Result<()> {
+        self.writer()?.flush()?;
+        Ok(())
+    }
+
+    fn reopen_empty_writer(&self) -> Result<()> {
+        let file = OpenOptions::new()
             .create(true)
-            .write(true)
-            .truncate(true)
+            .append(true)
             .open(&self.path)?;
+        *self.writer()? = file;
         Ok(())
     }
 
@@ -154,6 +174,11 @@ impl MarketCacheQueue {
         }
 
         self.drain_processing_file(writer, processing_path, &mut report)?;
+        self.flush_writer()
+            .map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?;
         if self
             .is_empty()
             .map_err(|error| MarketCacheQueueDrainError {
@@ -174,10 +199,11 @@ impl MarketCacheQueue {
                 error: DataError::Io(error),
             }
         })?;
-        self.clear().map_err(|error| MarketCacheQueueDrainError {
-            report: report.clone(),
-            error,
-        })?;
+        self.reopen_empty_writer()
+            .map_err(|error| MarketCacheQueueDrainError {
+                report: report.clone(),
+                error,
+            })?;
         self.drain_processing_file(writer, processing_path, &mut report)?;
         writer.flush().map_err(|error| MarketCacheQueueDrainError {
             report: report.clone(),

@@ -706,7 +706,7 @@ fn account_report_from_view(
         OrderTicketState::Live { order, .. } => live_account_order_state(&order),
         OrderTicketState::Filled { order, .. } => {
             let volume_left = order.volume_left;
-            let filled = (order.volume_orign - volume_left).max(0);
+            let filled = (order.volume_origin - volume_left).max(0);
             (MultiAccountOrderState::Filled, filled, volume_left)
         }
         OrderTicketState::Cancelled {
@@ -843,7 +843,7 @@ fn ticket_state_from_command(
 
 fn live_account_order_state(order: &Order) -> (MultiAccountOrderState, i64, i64) {
     let volume_left = order.volume_left;
-    let filled = (order.volume_orign - volume_left).max(0);
+    let filled = (order.volume_origin - volume_left).max(0);
     if filled > 0 {
         (
             MultiAccountOrderState::PartiallyFilled {
@@ -867,7 +867,7 @@ fn terminal_optional_order_state(
         return (fallback, 0, requested_volume);
     };
     let volume_left = order.volume_left;
-    let filled = (order.volume_orign - volume_left).max(0);
+    let filled = (order.volume_origin - volume_left).max(0);
     let state = match (order.lifecycle, filled > 0, volume_left == 0) {
         (OrderLifecycle::Filled, _, _) => MultiAccountOrderState::Filled,
         (_, true, false) => MultiAccountOrderState::PartiallyFilled {

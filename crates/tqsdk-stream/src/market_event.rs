@@ -16,7 +16,7 @@ use crate::filter::PathCommitStream;
 use crate::typed::ValueUpdate;
 use crate::window::{
     KlineWindow, KlineWindowSpec, TickWindow, TickWindowSpec, kline_chart_id,
-    project_kline_window_from_snapshot, project_tick_window_from_snapshot, tick_chart_id,
+    project_kline_window_from_market, project_tick_window_from_market, tick_chart_id,
 };
 use crate::{Result, StreamFacadeError};
 
@@ -304,9 +304,9 @@ impl MarketEventStream {
             .collect::<Vec<_>>();
 
         if !tick_hits.is_empty() || !kline_hits.is_empty() {
-            let snapshot = self.reader.read();
+            let market = self.reader.read_market_state();
             for spec in tick_hits {
-                if let Some(value) = project_tick_window_from_snapshot(&snapshot, &spec.window)? {
+                if let Some(value) = project_tick_window_from_market(&market, &spec.window)? {
                     self.pending
                         .push_back(Ok(MarketEvent::TickWindow(ValueUpdate {
                             commit: commit.clone(),
@@ -315,7 +315,7 @@ impl MarketEventStream {
                 }
             }
             for spec in kline_hits {
-                if let Some(value) = project_kline_window_from_snapshot(&snapshot, &spec.window)? {
+                if let Some(value) = project_kline_window_from_market(&market, &spec.window)? {
                     self.pending
                         .push_back(Ok(MarketEvent::KlineWindow(ValueUpdate {
                             commit: commit.clone(),
