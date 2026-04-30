@@ -3,13 +3,13 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
     RuntimeInput,
 };
-use tqsdk_session::{SessionClient, StartupRecoverySpec};
+use tqsdk_session::{SessionClient, StartupRecoverySpec, testing::ManualSession};
 
 fn seeded_session() -> SessionClient {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let handle = RuntimeHandle::with_adapters(adapters);
-    SessionClient::new_for_test_with_handle(handle)
+    ManualSession::from_runtime(handle).into_client()
 }
 
 fn seed_quote(session: &SessionClient, symbol: &str) {

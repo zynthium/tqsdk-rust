@@ -82,6 +82,14 @@ Additional task-side duplicate hidden API removed:
 - [ ] Migrate integration tests away from direct `handle_for_test()`/`drain_dispatches()` where a facade-owned test driver can express the same behavior.
 - [ ] Keep raw runtime ingest confined to crate-owned test support or core runtime contract tests.
 
+### Session Subtask
+
+- [x] Add `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual fixture wrapper.
+- [x] Refactor `SessionClient::new_for_test_with_handle()` and `SessionClient::drain_dispatches()` to delegate to internal manual-session helpers, preventing behavior drift while downstream callers migrate.
+- [x] Migrate session integration tests that need manual construction/dispatch draining to `ManualSession`.
+
+**Verification:** `cargo test -p tqsdk-session --test session_direct_query --test session_recovery --test session_order_intent --test session_market_command_helpers` passed.
+
 ## Task 4: Reassess Feature Gating
 
 - [ ] After callers are migrated, re-run the hidden API inventory.

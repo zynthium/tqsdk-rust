@@ -1,5 +1,7 @@
 use tqsdk_core::{CommandId, RuntimeHandle, TradeDirection, TradeOffset};
-use tqsdk_session::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, SessionClient};
+use tqsdk_session::{
+    OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, testing::ManualSession,
+};
 
 fn order_intent(client_order_id: &str, volume: i64, limit_price: f64) -> OrderIntentRecord {
     OrderIntentRecord::new(OrderIntentSpec {
@@ -16,7 +18,8 @@ fn order_intent(client_order_id: &str, volume: i64, limit_price: f64) -> OrderIn
 
 #[test]
 fn session_order_intent_ledger_is_shared_across_client_clones() {
-    let client = SessionClient::new_for_test_with_handle(RuntimeHandle::new());
+    let manual = ManualSession::from_runtime(RuntimeHandle::new());
+    let client = manual.client();
     let clone = client.clone();
     let record = order_intent("strategy-a-open-001", 1, 618.0);
 
@@ -45,7 +48,8 @@ fn session_order_intent_ledger_is_shared_across_client_clones() {
 
 #[test]
 fn session_order_intent_ledger_rejects_mismatched_retry() {
-    let client = SessionClient::new_for_test_with_handle(RuntimeHandle::new());
+    let manual = ManualSession::from_runtime(RuntimeHandle::new());
+    let client = manual.client();
     client
         .remember_order_intent(order_intent("strategy-a-open-001", 1, 618.0))
         .unwrap();

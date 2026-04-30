@@ -2,7 +2,7 @@ use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, OutboundRequest, ProtocolDomain, Revision, RuntimeHandle, SessionPhase,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::testing::ManualSession;
 
 fn runtime_handle_with_default_adapters() -> RuntimeHandle {
     let mut adapters = AdapterRegistry::new();
@@ -14,7 +14,8 @@ fn runtime_handle_with_default_adapters() -> RuntimeHandle {
 fn test_only_session_client_keeps_handle_and_reader_aligned() {
     let handle = RuntimeHandle::new();
     let shared_handle = handle.clone();
-    let client = SessionClient::new_for_test_with_handle(handle);
+    let manual = ManualSession::from_runtime(handle);
+    let client = manual.client();
 
     shared_handle
         .record_session_phase(SessionPhase::Running, None, vec![])
@@ -30,7 +31,8 @@ fn test_only_session_client_keeps_handle_and_reader_aligned() {
 #[test]
 fn graphql_fetch_submits_query_command() {
     let handle = runtime_handle_with_default_adapters();
-    let client = SessionClient::new_for_test_with_handle(handle);
+    let manual = ManualSession::from_runtime(handle);
+    let client = manual.client();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -50,7 +52,7 @@ fn graphql_fetch_submits_query_command() {
     assert!(first_command_id.get() > 0);
     assert!(second_command_id.get() > first_command_id.get());
 
-    let dispatches = client.drain_dispatches().unwrap();
+    let dispatches = manual.drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Query);
     assert_eq!(dispatches[1].domain, ProtocolDomain::Query);

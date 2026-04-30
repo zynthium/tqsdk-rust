@@ -345,8 +345,7 @@ impl SessionClient {
         self.reader.clone()
     }
 
-    #[doc(hidden)]
-    pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
+    pub(crate) fn drain_manual_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
         if self.io.is_some() {
             return Err(crate::error::SessionFacadeError::InvalidState(
                 "drain_dispatches is only available for test/manual sessions without live IO; use progress_once() to drive live sessions",
@@ -354,6 +353,11 @@ impl SessionClient {
         }
 
         Ok(self.handle.drain_dispatches()?)
+    }
+
+    #[doc(hidden)]
+    pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
+        self.drain_manual_dispatches()
     }
 
     pub fn remember_order_intent(
@@ -429,8 +433,7 @@ impl SessionClient {
         &self.context.service_endpoints
     }
 
-    #[doc(hidden)]
-    pub fn new_for_test_with_handle(handle: RuntimeHandle) -> Self {
+    pub(crate) fn new_manual_with_handle(handle: RuntimeHandle) -> Self {
         Self::new_without_io(
             handle,
             SessionClientContext::new(
@@ -439,6 +442,11 @@ impl SessionClient {
                 tqsdk_core::EndpointConfig::default(),
             ),
         )
+    }
+
+    #[doc(hidden)]
+    pub fn new_for_test_with_handle(handle: RuntimeHandle) -> Self {
+        Self::new_manual_with_handle(handle)
     }
 
     #[cfg(all(test, feature = "live"))]

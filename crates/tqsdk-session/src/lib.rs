@@ -36,6 +36,7 @@ mod order_intent;
 mod recovery;
 #[cfg(feature = "services")]
 mod services;
+pub mod testing;
 #[cfg(feature = "tq-auth")]
 mod tq_auth;
 #[cfg(feature = "tq-auth")]
