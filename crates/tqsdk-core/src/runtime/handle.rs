@@ -574,8 +574,7 @@ fn normalize_order_lifecycle_mutations(
         return Ok(mutations);
     }
 
-    let snapshot = state.snapshot();
-    let read = snapshot.read();
+    let trade_guard = state.read_trade_state();
     let mut normalized = Vec::with_capacity(mutations.len());
 
     for mut mutation in mutations {
@@ -584,14 +583,15 @@ fn normalize_order_lifecycle_mutations(
             continue;
         };
 
-        let segments = mutation
+        let partition_segments = mutation
             .path
             .segments()
             .iter()
+            .skip(1)
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let current_order = read
-            .get_path(&segments)
+        let current_order = trade_guard
+            .get_path(&partition_segments)
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
         let mut next_order = current_order.clone();

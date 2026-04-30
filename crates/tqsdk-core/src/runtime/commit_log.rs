@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, RwLock, Weak},
 };
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     state::{CommitResult, CursorTracker, UpdateCursor},
 };
 
-use super::mutex_lock;
+use super::recover_poisoned_lock;
 
 const DEFAULT_MAX_ENTRIES: usize = 8_192;
 
@@ -18,7 +18,7 @@ const DEFAULT_MAX_ENTRIES: usize = 8_192;
 /// the shared log primitive is specifically required.
 #[derive(Debug, Clone)]
 pub struct CommitLog {
-    inner: Arc<Mutex<CommitLogInner>>,
+    inner: Arc<RwLock<CommitLogInner>>,
 }
 
 impl CommitLog {
@@ -28,16 +28,16 @@ impl CommitLog {
 
     pub fn with_retention(max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(CommitLogInner::new(max_entries))),
+            inner: Arc::new(RwLock::new(CommitLogInner::new(max_entries))),
         }
     }
 
     pub fn head_revision(&self) -> Option<Revision> {
-        mutex_lock(&self.inner).head
+        recover_poisoned_lock(self.inner.read()).head
     }
 
     pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
-        let state = mutex_lock(&self.inner);
+        let state = recover_poisoned_lock(self.inner.read());
         let commit = state.commit_at(cursor.next_revision())?.clone();
         drop(state);
 
@@ -46,7 +46,7 @@ impl CommitLog {
     }
 
     pub(crate) fn new_cursor(&self, next_revision: Revision) -> UpdateCursor {
-        let mut state = mutex_lock(&self.inner);
+        let mut state = recover_poisoned_lock(self.inner.write());
         let cursor_id = CursorId::new(state.next_cursor_id);
         state.next_cursor_id += 1;
         state.cursor_positions.insert(cursor_id, next_revision);
@@ -63,15 +63,15 @@ impl CommitLog {
     }
 
     pub(crate) fn commit_at(&self, revision: Revision) -> Option<CommitResult> {
-        mutex_lock(&self.inner).commit_at(revision).cloned()
+        recover_poisoned_lock(self.inner.read()).commit_at(revision).cloned()
     }
 
     pub(crate) fn oldest_revision(&self) -> Option<Revision> {
-        mutex_lock(&self.inner).oldest_revision()
+        recover_poisoned_lock(self.inner.read()).oldest_revision()
     }
 
     pub(crate) fn publish(&self, commit: CommitResult) {
-        let mut state = mutex_lock(&self.inner);
+        let mut state = recover_poisoned_lock(self.inner.write());
         state.head = Some(commit.revision);
         if state.entries.is_empty() {
             state.first_retained_revision = Some(commit.revision);
@@ -150,7 +150,7 @@ impl CommitLogInner {
 }
 
 struct CommitLogCursorTracker {
-    inner: Weak<Mutex<CommitLogInner>>,
+    inner: Weak<RwLock<CommitLogInner>>,
     cursor_id: CursorId,
 }
 
@@ -159,7 +159,7 @@ impl CursorTracker for CommitLogCursorTracker {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut state = mutex_lock(&inner);
+        let mut state = recover_poisoned_lock(inner.write());
         if let Some(cursor_revision) = state.cursor_positions.get_mut(&self.cursor_id)
             && next_revision.get() > cursor_revision.get()
         {
@@ -174,7 +174,7 @@ impl Drop for CommitLogCursorTracker {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut state = mutex_lock(&inner);
+        let mut state = recover_poisoned_lock(inner.write());
         state.cursor_positions.remove(&self.cursor_id);
         state.trim();
     }
@@ -188,13 +188,13 @@ mod tests {
     use super::CommitLog;
 
     #[test]
-    fn commit_log_recovers_from_poisoned_mutex() {
+    fn commit_log_recovers_from_poisoned_rwlock() {
         let log = CommitLog::new();
         let inner = Arc::clone(&log.inner);
 
         let panic = catch_unwind(AssertUnwindSafe(move || {
-            let _guard = inner.lock().unwrap();
-            panic!("poison commit log mutex");
+            let _guard = inner.write().unwrap();
+            panic!("poison commit log rwlock");
         }));
         assert!(panic.is_err());
 

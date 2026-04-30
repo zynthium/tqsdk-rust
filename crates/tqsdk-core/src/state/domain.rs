@@ -246,6 +246,11 @@ impl<'a> TradeStateReadGuard<'a> {
     {
         self.view().decode_path(path)
     }
+
+    /// Returns a raw `Value` reference at a partition-relative path.
+    pub(crate) fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        get_at_path(&self.trade, path.iter().copied())
+    }
 }
 
 fn decode_partition_path<T>(
