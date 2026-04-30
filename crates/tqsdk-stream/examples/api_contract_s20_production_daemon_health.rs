@@ -47,7 +47,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use tqsdk_core::CommitResult;
+use tqsdk_core::SharedCommitResult;
 use tqsdk_stream::{StreamHealthStatus, StreamReconnectOutcome, StreamSinkFuture, TqStreamBuilder};
 
 #[tokio::main(flavor = "current_thread")]
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_health_log(commit: CommitResult) -> StreamSinkFuture {
+fn write_health_log(commit: SharedCommitResult) -> StreamSinkFuture {
     Box::pin(async move {
         println!("health-log revision={}", commit.revision.get());
         Ok(())

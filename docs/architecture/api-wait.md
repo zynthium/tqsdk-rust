@@ -26,6 +26,7 @@
 - `RuntimeReader`
 - `SnapshotReadGuard` / `StateReadView`
 - `CommitResult`
+- `SharedCommitResult`
 - `ChangeSet`
 - `UpdateCursor`
 - `StatePath` / `ObjectKey`

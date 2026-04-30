@@ -7,7 +7,7 @@ use crate::{
     Result,
     ids::Revision,
     runtime::{RuntimeReader, SnapshotReadGuard},
-    state::{CommitResult, UpdateCursor},
+    state::{SharedCommitResult, UpdateCursor},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -120,7 +120,7 @@ impl Default for AggregatedRuntimeReader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregatedCommit {
     pub source_id: StateSourceId,
-    pub commit: CommitResult,
+    pub commit: SharedCommitResult,
 }
 
 #[derive(Debug, Clone)]

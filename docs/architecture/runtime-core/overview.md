@@ -15,6 +15,7 @@
 - 将 mutation 写入统一状态树
 - 运行投影与变更归并
 - 组装 `CommitResult`
+- 用 `SharedCommitResult` 共享提交所有权
 - 推进 `Revision`
 - 发布底层 `CommitLog`
 - 提供官方对象的纯 typed schema contract
@@ -66,6 +67,7 @@ pub struct CommandId(u64);
 pub struct CursorId(u64);
 
 pub struct CommitResult;
+pub type SharedCommitResult = Arc<CommitResult>;
 pub struct ChangeSet;
 pub struct UpdateCursor;
 pub struct StateSnapshot; // compatibility
@@ -91,6 +93,8 @@ pub trait Runtime {
 - `RuntimeHandle` 是 V1 的写入与控制入口
 - `RuntimeReader` 是 V1 的 canonical read-side entry point
 - `RuntimeReader::read()` 提供当前 head 的 zero-copy 读视图
+- `RuntimeReader::next()` 返回 `SharedCommitResult`，使写侧返回、commit log
+  和 fan-out 消费共享同一份不可变提交元数据
 - `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
 - `SnapshotReadGuard` / `CommitReadGuard` / `StateReadView` 可以按路径 `decode<T>()` 成官方 schema，但这仍然只是底层 schema decode，不是 typed state facade
 - `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为

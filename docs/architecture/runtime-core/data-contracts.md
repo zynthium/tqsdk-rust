@@ -120,6 +120,8 @@ pub struct CommandEnvelope {
 
 ## `CommitResult`
 ```rust
+pub type SharedCommitResult = Arc<CommitResult>;
+
 pub struct CommitResult {
     pub revision: Revision,
     pub changes: ChangeSet,
@@ -136,6 +138,11 @@ pub enum CommitScope {
     SessionTransition,
 }
 ```
+
+`CommitResult` 是不可变提交元数据 payload；runtime 发布和 cursor 消费使用
+`SharedCommitResult = Arc<CommitResult>`。这样 `CommitLog`、写侧即时返回值、
+stream fan-out 和 managed sink retry 可以共享同一个提交对象，不深拷贝
+`ChangeSet` 或 causality 向量。
 
 ## `RuntimeReader`
 ```rust
@@ -161,6 +168,7 @@ RuntimeCommand
   -> ProjectionEngine.project()
   -> CommitAssembler.assemble()
   -> CommitResult
+  -> SharedCommitResult
   -> CommitLog.publish()
   -> RuntimeReader.next()
   -> SnapshotReadGuard / StateReadView

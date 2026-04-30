@@ -16,6 +16,7 @@
 - 一套统一命令模型：`RuntimeCommand -> OutboundDispatch -> RuntimeInput -> NormalizedMutation -> CommitResult`。
 - 一棵统一的 runtime state tree，用于承载所有上层可见状态。
 - 以 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`UpdateCursor` 为核心的 reader-first 消费模型。
+- 以 `SharedCommitResult = Arc<CommitResult>` 共享提交所有权，避免 commit log、写侧返回和上层 fan-out 深拷贝提交元数据。
 - 官方对象与相关 metadata/query 结果的 typed schema contract。
 - transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语。
 
@@ -94,7 +95,7 @@ RuntimeCommand
   -> RuntimeInput
   -> ProtocolAdapter decode
   -> NormalizedMutation
-  -> CommitResult + Revision
+  -> CommitResult + SharedCommitResult + Revision
   -> RuntimeReader / UpdateCursor
 ```
 

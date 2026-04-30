@@ -422,7 +422,7 @@ impl BlockingSink {
 }
 
 impl CommitSink for BlockingSink {
-    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+    fn handle_commit(&mut self, commit: tqsdk_core::SharedCommitResult) -> StreamSinkFuture {
         let state = Arc::clone(&self.state);
         let blocker = Arc::clone(&self.blocker);
         Box::pin(async move {
@@ -471,7 +471,7 @@ impl FlakySink {
 }
 
 impl CommitSink for FlakySink {
-    fn handle_commit(&mut self, _commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+    fn handle_commit(&mut self, _commit: tqsdk_core::SharedCommitResult) -> StreamSinkFuture {
         let attempt = self.state.attempts.fetch_add(1, Ordering::AcqRel) + 1;
         let should_fail = attempt <= self.failures_before_success;
         Box::pin(async move {
@@ -509,7 +509,7 @@ impl CountingSink {
 }
 
 impl CommitSink for CountingSink {
-    fn handle_commit(&mut self, commit: tqsdk_core::CommitResult) -> StreamSinkFuture {
+    fn handle_commit(&mut self, commit: tqsdk_core::SharedCommitResult) -> StreamSinkFuture {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             state

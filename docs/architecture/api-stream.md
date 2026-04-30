@@ -395,7 +395,7 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 pub struct CommitStream { /* private */ }
 
 impl futures::Stream for CommitStream {
-    type Item = tqsdk_stream::Result<tqsdk_core::CommitResult>;
+    type Item = tqsdk_stream::Result<tqsdk_core::SharedCommitResult>;
 }
 
 impl CommitStream {
@@ -460,7 +460,7 @@ pub enum StreamFacadeError {
 
 ```rust
 pub struct ValueUpdate<T> {
-    pub commit: CommitResult,
+    pub commit: SharedCommitResult,
     pub value: T,
 }
 
@@ -651,7 +651,7 @@ pub enum TradeSessionEvent {
 }
 
 pub struct TradeSessionEventUpdate {
-    pub commit: Option<CommitResult>,
+    pub commit: Option<SharedCommitResult>,
     pub event: TradeSessionEvent,
 }
 
@@ -667,7 +667,7 @@ impl futures::Stream for TradeSessionEventStream {
 - 统一账户级 trade session 消费入口，同时覆盖 trade object、system notification、session reconnect 与底层 session error
 - health snapshot 是同一 session 状态的当前截面读面，服务生产指标/日志读取；
   它不启动额外 task，也不拥有独立健康状态树
-- 对 commit-backed 事件保留 `Option<CommitResult>` 中的 `Some(commit)`，不伪造 driver error 的 commit
+- 对 commit-backed 事件保留 `Option<SharedCommitResult>` 中的 `Some(commit)`，不伪造 driver error 的 commit
 - 实现层直接订阅 raw driver 事件，而不是建立在 `CommitStream` 之上，以免把 `DriverEvent::Error` 提前折叠成 facade error
 - `Closed` / `Lagged` 仍保留为 stream error，因为这两个语义属于消费通道自身，而不是业务事件
 - `StreamFacadeError::diagnostic()` 将 contract/session/lag/closed/missing-value
@@ -758,7 +758,8 @@ impl futures::Stream for TradeSessionEventStream {
 stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
 JSONL WAL 是本地审计/恢复基础，不是 durable queue；fsync policy 与本地 JSONL
 compaction 是 stream sink 的本地文件维护能力；WAL recovery report 只解释审计
-元数据。commit journal 只重放 `CommitResult` 级元数据，不恢复 runtime state
+元数据。commit journal 只重放 `CommitResult` 级元数据并在投递时包装为
+`SharedCommitResult`，不恢复 runtime state
 snapshot，也不提供跨进程锁、调度或 daemon queue；这些仍属于后续 daemon/tooling
 层。
 `graceful_shutdown()` 是
@@ -781,7 +782,7 @@ stream facade 的显式关闭工具；`reconnect_monitor()` 只做 typed wait/re
 - `RuntimeReader`
 - `UpdateCursor`
 - 同一棵状态树
-- 同一套 `CommitResult`
+- 同一套 `CommitResult` payload / `SharedCommitResult` 所有权模型
 
 两者不同：
 

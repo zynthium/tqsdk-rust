@@ -10,7 +10,7 @@ use crate::{
     events::{InternalEvent, RuntimeInput},
     ids::CommandId,
     runtime::RuntimeHandle,
-    state::{CommitResult, CommitScope},
+    state::{CommitResult, CommitScope, SharedCommitResult},
     transport::{
         BootstrapResult, ConnectedTopology, DispatchReceipt, SessionBootstrap, SessionConfig,
         SessionPhase, SessionRouteConnector, SessionTopologyResolver,
@@ -34,7 +34,7 @@ pub struct SessionRun {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutePumpOutcome {
-    pub commits: Vec<CommitResult>,
+    pub commits: Vec<SharedCommitResult>,
     pub reconnect_required: bool,
     pub reconnect_reason: Option<&'static str>,
 }
@@ -42,14 +42,14 @@ pub struct RoutePumpOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionStepOutcome {
     pub dispatches: Vec<DispatchReceipt>,
-    pub commits: Vec<CommitResult>,
+    pub commits: Vec<SharedCommitResult>,
     pub recovered: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingRouteStepOutcome {
     pub requests: Vec<OutboundDispatch>,
-    pub commits: Vec<CommitResult>,
+    pub commits: Vec<SharedCommitResult>,
 }
 
 pub trait RouteRequestExecutor: Send + Sync {
@@ -234,7 +234,7 @@ impl SessionRuntime {
         route_label: &str,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let Some(input) = run.connected.recv_route_input(route_label).await? else {
             return Ok(None);
         };
@@ -291,7 +291,7 @@ impl SessionRuntime {
         run: &mut SessionRun,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let inputs = run.connected.drain_queued_inputs();
         if inputs.is_empty() {
             return Ok(None);

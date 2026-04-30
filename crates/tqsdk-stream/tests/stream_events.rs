@@ -11,8 +11,7 @@ mod support;
 #[test]
 fn trade_event_streams_read_trade_partition_instead_of_full_snapshot() {
     let source = include_str!("../src/event.rs");
-    let collect_fn_signature =
-        "type CollectFn<T, C> = for<'a> fn(\n    &CommitResult,\n    &TradeStateReadGuard<'a>,";
+    let collect_fn_signature = "type CollectFn<T, C> = for<'a> fn(\n    &SharedCommitResult,\n    &TradeStateReadGuard<'a>,";
     assert!(
         source.contains(collect_fn_signature),
         "trade event collectors should receive TradeStateReadGuard"

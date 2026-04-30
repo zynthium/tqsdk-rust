@@ -6,20 +6,20 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use serde::de::DeserializeOwned;
-use tqsdk_core::{CommitResult, RuntimeReader, StatePath};
+use tqsdk_core::{RuntimeReader, SharedCommitResult, StatePath};
 
 use crate::{PathCommitStream, Result, StreamFacadeError};
 
 /// Decoded value paired with the commit that made it visible.
 #[derive(Debug, Clone)]
 pub struct ValueUpdate<T> {
-    pub commit: CommitResult,
+    pub commit: SharedCommitResult,
     pub value: T,
 }
 
 impl<T> ValueUpdate<T> {
     #[must_use]
-    pub fn into_parts(self) -> (CommitResult, T) {
+    pub fn into_parts(self) -> (SharedCommitResult, T) {
         (self.commit, self.value)
     }
 }

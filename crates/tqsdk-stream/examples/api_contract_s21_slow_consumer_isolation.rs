@@ -53,7 +53,7 @@
 //! 可靠 daemon queue 和完整状态快照恢复仍是 gap。
 
 use futures::StreamExt;
-use tqsdk_core::CommitResult;
+use tqsdk_core::SharedCommitResult;
 use tqsdk_stream::{
     StreamCommitJournal, StreamSinkFuture, StreamSinkProfile, StreamSinkRetryPolicy,
     StreamSinkWalCompaction, StreamSinkWalFsyncPolicy, StreamSinkWalRecovery, TqStreamBuilder,
@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_warehouse_commit(commit: CommitResult) -> StreamSinkFuture {
+fn write_warehouse_commit(commit: SharedCommitResult) -> StreamSinkFuture {
     Box::pin(async move {
         println!("warehouse revision={}", commit.revision.get());
         Ok(())

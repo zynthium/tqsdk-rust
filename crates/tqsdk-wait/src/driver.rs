@@ -9,8 +9,8 @@ pub(crate) struct WaitDriver {
     pub(crate) session: tqsdk_session::SessionClient,
     pub(crate) reader: tqsdk_core::RuntimeReader,
     pub(crate) cursor: tqsdk_core::UpdateCursor,
-    pub(crate) deferred_commits: VecDeque<tqsdk_core::CommitResult>,
-    pub(crate) last_commit: Option<tqsdk_core::CommitResult>,
+    pub(crate) deferred_commits: VecDeque<tqsdk_core::SharedCommitResult>,
+    pub(crate) last_commit: Option<tqsdk_core::SharedCommitResult>,
     pub(crate) waiting: AtomicBool,
     pub(crate) next_order_seq: AtomicU64,
 }

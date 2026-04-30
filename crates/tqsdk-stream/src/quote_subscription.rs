@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{CommitResult, Quote, RuntimeReader, Symbol};
+use tqsdk_core::{CommitResult, Quote, RuntimeReader, SharedCommitResult, Symbol};
 
 use crate::api::CommitStream;
 use crate::typed::ValueUpdate;
@@ -71,7 +71,7 @@ impl QuoteSubscription {
         submit_unsubscribe(&self.session, self.symbols).await
     }
 
-    fn collect_quotes(&mut self, commit: CommitResult) -> Result<()> {
+    fn collect_quotes(&mut self, commit: SharedCommitResult) -> Result<()> {
         let hits = self
             .symbols
             .iter()

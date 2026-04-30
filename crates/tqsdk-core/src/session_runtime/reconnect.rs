@@ -7,7 +7,7 @@ use crate::{
     events::{InternalEvent, RuntimeInput},
     ids::CommandId,
     runtime::Runtime,
-    state::{CommitResult, CommitScope},
+    state::{CommitScope, SharedCommitResult},
     transport::{SessionConfig, SessionPhase},
 };
 
@@ -15,7 +15,7 @@ use super::{SessionRun, SessionRuntime, SessionRuntimeDeps};
 
 pub(super) struct RecoveryOutcome {
     pub(super) run: SessionRun,
-    pub(super) commits: Vec<CommitResult>,
+    pub(super) commits: Vec<SharedCommitResult>,
 }
 
 impl SessionRuntime {

@@ -4,7 +4,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{CommitResult, CommitScope, ObjectKey, ProtocolDomain, StatePath};
+use tqsdk_core::{
+    CommitResult, CommitScope, ObjectKey, ProtocolDomain, SharedCommitResult, StatePath,
+};
 
 use crate::{CommitStream, Result};
 
@@ -21,7 +23,7 @@ impl PathCommitStream {
 }
 
 impl Stream for PathCommitStream {
-    type Item = Result<CommitResult>;
+    type Item = Result<SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -44,7 +46,7 @@ impl ScopeCommitStream {
 }
 
 impl Stream for ScopeCommitStream {
-    type Item = Result<CommitResult>;
+    type Item = Result<SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -67,7 +69,7 @@ impl DomainCommitStream {
 }
 
 impl Stream for DomainCommitStream {
-    type Item = Result<CommitResult>;
+    type Item = Result<SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -90,7 +92,7 @@ impl ObjectCommitStream {
 }
 
 impl Stream for ObjectCommitStream {
-    type Item = Result<CommitResult>;
+    type Item = Result<SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -118,7 +120,7 @@ impl FieldCommitStream {
 }
 
 impl Stream for FieldCommitStream {
-    type Item = Result<CommitResult>;
+    type Item = Result<SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -169,7 +171,7 @@ fn poll_next_filtered<F>(
     inner: &mut CommitStream,
     cx: &mut Context<'_>,
     mut predicate: F,
-) -> Poll<Option<Result<CommitResult>>>
+) -> Poll<Option<Result<SharedCommitResult>>>
 where
     F: FnMut(&CommitResult) -> bool,
 {

@@ -62,6 +62,9 @@ V1 是：
   - 为 `wait_update`、stream/callback facade 提供共同读面
 - `UpdateCursor`
   - 独立推进的 commit 消费游标
+- `CommitResult` / `SharedCommitResult`
+  - `CommitResult` 是不可变提交元数据；`SharedCommitResult = Arc<CommitResult>`
+    是 runtime 发布、cursor 消费和 stream fan-out 的共享所有权句柄
 
 不属于稳定 public core 主线：
 

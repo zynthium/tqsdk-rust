@@ -150,6 +150,11 @@
 closed event，或关闭 stream driver 来刻画消费者行为。普通用户代码不应把它当成运行时
 控制 API。
 
+`CommitStream` 和 managed `CommitSink` 传递的是
+`tqsdk_core::SharedCommitResult = Arc<CommitResult>`。这保持 commit payload
+不可变，同时让 fan-out、过滤和 retry 复用同一份提交元数据，而不是深拷贝
+`ChangeSet`。
+
 ## 设计边界
 
 - 第一版只提供 raw commit stream，不预先冻结对象级 stream 形状

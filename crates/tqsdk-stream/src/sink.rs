@@ -12,7 +12,8 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tqsdk_core::{
-    ChangeSet, CommandId, CommitResult, CommitScope, ProtocolDomain, Revision, StatePath,
+    ChangeSet, CommandId, CommitResult, CommitScope, ProtocolDomain, Revision, SharedCommitResult,
+    StatePath,
 };
 
 use crate::{CommitStream, Result, StreamFacadeError};
@@ -21,7 +22,7 @@ pub type StreamSinkFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'st
 
 /// User-provided commit sink run by `tqsdk-stream`.
 pub trait CommitSink: Send + 'static {
-    fn handle_commit(&mut self, commit: CommitResult) -> StreamSinkFuture;
+    fn handle_commit(&mut self, commit: SharedCommitResult) -> StreamSinkFuture;
 
     fn flush(&mut self) -> StreamSinkFuture {
         Box::pin(async { Ok(()) })
@@ -248,9 +249,9 @@ struct StreamSinkRuntime<S> {
 
 impl<F> CommitSink for F
 where
-    F: FnMut(CommitResult) -> StreamSinkFuture + Send + 'static,
+    F: FnMut(SharedCommitResult) -> StreamSinkFuture + Send + 'static,
 {
-    fn handle_commit(&mut self, commit: CommitResult) -> StreamSinkFuture {
+    fn handle_commit(&mut self, commit: SharedCommitResult) -> StreamSinkFuture {
         self(commit)
     }
 }
@@ -852,7 +853,7 @@ async fn deliver_commit<S>(
     wal: &mut Option<StreamSinkWalWriter>,
     journal: &mut Option<StreamCommitJournalWriter>,
     sink: &mut S,
-    commit: CommitResult,
+    commit: SharedCommitResult,
     retry_policy: StreamSinkRetryPolicy,
 ) -> Result<()>
 where
@@ -873,7 +874,7 @@ where
     )?;
 
     loop {
-        match sink.handle_commit(commit.clone()).await {
+        match sink.handle_commit(Arc::clone(&commit)).await {
             Ok(()) => {
                 clear_error(shared);
                 write_wal_record(
@@ -1204,7 +1205,7 @@ where
             continue;
         }
         let revision = record.revision;
-        sink.handle_commit(record.to_commit()).await?;
+        sink.handle_commit(record.to_commit().into()).await?;
         replayed_commits += 1;
         last_replayed_revision = Some(revision);
     }

@@ -106,6 +106,8 @@ impl CommitResult {
     }
 }
 
+pub type SharedCommitResult = Arc<CommitResult>;
+
 pub struct UpdateCursor {
     id: CursorId,
     next_revision: Revision,

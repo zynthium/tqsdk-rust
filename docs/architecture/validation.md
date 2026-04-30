@@ -68,6 +68,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 ### 统一 cursor / log 语义
 - 所有消费者都必须通过 `RuntimeReader::cursor()` / `RuntimeReader::next()` 或兼容的 `CommitLog` / `UpdateCursor` 读取提交结果
+- `RuntimeReader::next()` / `CommitLog::next()` 返回共享提交句柄 `SharedCommitResult = Arc<CommitResult>`；同一轮写侧返回值和 log 中提交必须指向同一个不可变 payload，不得通过深拷贝制造第二份 commit 元数据
 - 需要 exact revision 读面的消费者必须能通过 `RuntimeReader::next_view()` 获得一致视图，或明确得到 lagged 信号
 - runtime core 不得为不同 future facade 维护不同的提交通道
 - 多个 cursor 必须能独立推进，不互相污染
@@ -103,7 +104,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | auth/session/system 控制 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_tq_auth.rs`、`crates/tqsdk-core/tests/runtime_contract_session_state.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
 | GraphQL / HTTP query | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_session_topology.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
-| reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged` 与兼容 surface |
+| reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`CursorLagged`、共享 commit identity 与兼容 surface |
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 
 推荐的 V1 回归入口：

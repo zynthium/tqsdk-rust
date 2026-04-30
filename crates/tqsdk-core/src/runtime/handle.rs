@@ -13,8 +13,8 @@ use crate::{
     ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision},
     order_lifecycle::OrderLifecycle,
     state::{
-        CommitResult, CommitScope, ObjectKey, StatePartitionReadGuard, StatePath, StateSnapshot,
-        StateStore, UpdateCursor,
+        CommitScope, ObjectKey, SharedCommitResult, StatePartitionReadGuard, StatePath,
+        StateSnapshot, StateStore, UpdateCursor,
     },
     transport::{BootstrapResult, SessionPhase},
 };
@@ -147,7 +147,7 @@ impl RuntimeHandle {
         input: RuntimeInput,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mut inner = mutex_lock(&self.inner);
         let mutations = inner.adapters.decode_input(&input)?;
         self.apply_and_publish_locked(
@@ -164,7 +164,7 @@ impl RuntimeHandle {
         inputs: Vec<RuntimeInput>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mut inner = mutex_lock(&self.inner);
         let mut mutations = Vec::new();
         for input in &inputs {
@@ -185,7 +185,7 @@ impl RuntimeHandle {
         status: CommandStatus,
         detail: Option<Value>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mut inner = mutex_lock(&self.inner);
         let domain_from_ledger = inner.command_ledger.domain(command_id);
         let detail_seed_from_ledger = inner.command_ledger.detail_seed(command_id);
@@ -281,7 +281,7 @@ impl RuntimeHandle {
         phase: SessionPhase,
         detail: Option<Value>,
         caused_by: Vec<CommandId>,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         self.record_mutations(
             vec![session_lifecycle_mutation(phase, detail)],
             vec![ProtocolDomain::System],
@@ -294,7 +294,7 @@ impl RuntimeHandle {
         &self,
         result: &BootstrapResult,
         caused_by: Vec<CommandId>,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         self.record_mutations(
             session_snapshot_mutations(result),
             vec![ProtocolDomain::System],
@@ -307,7 +307,7 @@ impl RuntimeHandle {
         &self,
         result: &BootstrapResult,
         caused_by: Vec<CommandId>,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         self.record_mutations(
             session_snapshot_mutations(result),
             vec![ProtocolDomain::System],
@@ -324,7 +324,7 @@ impl RuntimeHandle {
         exhausted: bool,
         detail: Option<Value>,
         caused_by: Vec<CommandId>,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mut fields = vec![
             FieldMutation {
                 field: "attempt".to_string(),
@@ -368,7 +368,7 @@ impl RuntimeHandle {
         domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mut inner = mutex_lock(&self.inner);
         self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
     }
@@ -380,7 +380,7 @@ impl RuntimeHandle {
         domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-    ) -> Result<Option<CommitResult>> {
+    ) -> Result<Option<SharedCommitResult>> {
         let mutations = normalize_order_lifecycle_mutations(&self.state, mutations)?;
         validate_mutation_domains(&mutations)?;
         let commit = CommitEngine::apply(
@@ -389,7 +389,7 @@ impl RuntimeHandle {
             domains,
             caused_by,
             scope,
-            |commit| self.commit_log.publish(commit.clone()),
+            |commit| self.commit_log.publish(commit),
         );
         Ok(commit)
     }

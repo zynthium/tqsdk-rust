@@ -48,12 +48,12 @@
 - `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` 与 `SessionClient::drain_dispatches()` hidden public API 已删除。
 - `tqsdk-stream` 已删除 `TqStream::handle_for_test()` 和 lifecycle `_for_test` hooks；stream 测试 support 改用公开 `stream.session().handle()` 与显式 `testing::StreamTestDriver`。`tqsdk-wait` 已新增显式 `testing::WaitTestDriver`，并删除 `TqApi::handle_for_test()`、`begin_wait_for_test()`、`push_deferred_commit_for_test()`。
 - 期货 `Order.direction` / `Order.offset` / `Order.price_type` 和 `Trade.direction` / `Trade.offset` 已从裸 `String` 迁移为 `Option<TradeDirection>` / `Option<TradeOffset>` / `Option<TradePriceType>`，保留缺失字段容忍；`PreInsertOrder` 与证券 schema 字符串字段不属于本批改造范围。
+- `apply_and_publish_locked` 不再深拷贝 `CommitResult`；runtime commit 发布、写侧返回、cursor 消费、wait/stream fan-out 和 sink retry 已统一使用 `SharedCommitResult = Arc<CommitResult>` 共享不可变提交 payload。
 
 ### 仍保留为独立计划项
 
 - `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership、TargetPos duplicate observer、session manual hooks、wait fixture hooks 与 stream lifecycle hooks 已收口；task fixture 仍可通过公开 `api.session().handle()` 使用底层 runtime contract 做 deterministic ingest/dispatch 断言。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
-- `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。
 - `transport.rs`、`account_group.rs`、`sink.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
 - public 文档注释仍是质量补强任务，不影响本批已定位 bug/perf 修复。
 
@@ -104,7 +104,7 @@
 | HIGH | `StreamSinkHandle` 每次 commit 投递 7 次独立 Mutex lock/unlock | `sink.rs:937-987` |
 | HIGH | `run_driver` 用 1ms sleep 轮询，空闲 1000 次/秒唤醒 | `stream/driver.rs:121-143` |
 | HIGH | `MarketCacheQueue::enqueue_event` 每次事件 open/write/flush/close 文件 | `market_cache.rs:1153-1163` |
-| MEDIUM | `apply_and_publish_locked` 克隆整个 `CommitResult` | `handle.rs:392` |
+| MEDIUM | `apply_and_publish_locked` 克隆整个 `CommitResult`（已于 2026-05-01 改为 `SharedCommitResult = Arc<CommitResult>` 共享提交 payload） | `handle.rs:392` |
 | MEDIUM | `normalize_order_lifecycle_mutations` 每个交易订单 mutation 两次 `Value` 克隆 | `handle.rs:593-598` |
 | MEDIUM | `serde_json::Value` 状态树是读路径最大性能天花板 | 全局 |
 

@@ -249,7 +249,7 @@ fn runtime_with_order_lifecycle_adapter() -> RuntimeHandle {
 fn ingest_order(
     handle: &RuntimeHandle,
     order: Value,
-) -> tqsdk_core::Result<Option<tqsdk_core::CommitResult>> {
+) -> tqsdk_core::Result<Option<tqsdk_core::SharedCommitResult>> {
     handle.ingest(
         RuntimeInput::Io(IoEvent {
             route: "order-lifecycle".to_string(),

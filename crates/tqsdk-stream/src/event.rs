@@ -14,14 +14,15 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
     Account, CommitResult, Notification, ObjectKey, Order, Position, PreInsertOrder,
     RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
-    SecurityTrade, SettlementInfo, SnapshotReadGuard, Trade, TradeStateReadGuard,
+    SecurityTrade, SettlementInfo, SharedCommitResult, SnapshotReadGuard, Trade,
+    TradeStateReadGuard,
 };
 
 use crate::driver::DriverEvent;
 use crate::{DomainCommitStream, Result, StreamFacadeError, ValueUpdate};
 
 type CollectFn<T, C> = for<'a> fn(
-    &CommitResult,
+    &SharedCommitResult,
     &TradeStateReadGuard<'a>,
     &C,
     &mut VecDeque<ValueUpdate<T>>,
@@ -134,7 +135,7 @@ pub enum TradeSessionEvent {
 
 #[derive(Debug, Clone)]
 pub struct TradeSessionEventUpdate {
-    pub commit: Option<CommitResult>,
+    pub commit: Option<SharedCommitResult>,
     pub event: TradeSessionEvent,
 }
 
@@ -334,7 +335,7 @@ define_account_event_stream!(
 );
 
 fn push_decoded_update<T>(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     pending: &mut VecDeque<ValueUpdate<T>>,
     path: &[&str],
@@ -353,7 +354,7 @@ where
 }
 
 fn push_trade_object_event(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
     value: TradeObjectEvent,
 ) {
@@ -364,7 +365,7 @@ fn push_trade_object_event(
 }
 
 fn push_trade_session_event(
-    commit: Option<&CommitResult>,
+    commit: Option<&SharedCommitResult>,
     pending: &mut VecDeque<TradeSessionEventUpdate>,
     event: TradeSessionEvent,
 ) {
@@ -507,7 +508,7 @@ where
 }
 
 fn collect_trade_object_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<TradeObjectEvent>>,
@@ -518,7 +519,7 @@ fn collect_trade_object_events(
 }
 
 fn collect_trade_session_commit_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     snapshot: &SnapshotReadGuard<'_>,
     spec: &AccountScopedSpec,
@@ -567,7 +568,7 @@ fn collect_trade_session_commit_events(
 }
 
 fn collect_position_events<T>(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
@@ -592,7 +593,7 @@ where
 }
 
 fn collect_pre_insert_order_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<PreInsertOrder>>,
@@ -617,7 +618,7 @@ fn collect_pre_insert_order_events(
 }
 
 fn collect_order_events<T>(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
@@ -645,7 +646,7 @@ where
 }
 
 fn collect_trade_events<T>(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<T>>,
@@ -673,7 +674,7 @@ where
 }
 
 fn collect_risk_management_rule_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<RiskManagementRule>>,
@@ -702,7 +703,7 @@ fn collect_risk_management_rule_events(
 }
 
 fn collect_risk_management_data_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<RiskManagementData>>,
@@ -724,7 +725,7 @@ fn collect_risk_management_data_events(
 }
 
 fn collect_settlement_info_events(
-    commit: &CommitResult,
+    commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<ValueUpdate<SettlementInfo>>,

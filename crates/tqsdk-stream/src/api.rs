@@ -42,8 +42,8 @@ pub(crate) fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
 /// Shared-session stream facade over [`tqsdk_session::SessionClient`].
 ///
 /// [`TqStream`] lazily starts a single background driver task that advances the
-/// underlying session and fans out canonical [`tqsdk_core::CommitResult`]
-/// values to multiple async consumers.
+/// underlying session and fans out canonical
+/// [`tqsdk_core::SharedCommitResult`] values to multiple async consumers.
 pub struct TqStream {
     session: Option<tqsdk_session::SessionClient>,
     reader: tqsdk_core::RuntimeReader,
@@ -659,7 +659,7 @@ impl CommitStream {
 }
 
 impl Stream for CommitStream {
-    type Item = crate::error::Result<tqsdk_core::CommitResult>;
+    type Item = crate::error::Result<tqsdk_core::SharedCommitResult>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();

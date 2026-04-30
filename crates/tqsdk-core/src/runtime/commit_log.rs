@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 
 use crate::{
     ids::{CursorId, Revision},
-    state::{CommitResult, CursorTracker, UpdateCursor},
+    state::{CursorTracker, SharedCommitResult, UpdateCursor},
 };
 
 use super::recover_poisoned_lock;
@@ -40,7 +40,7 @@ impl CommitLog {
         recover_poisoned_lock(self.inner.read()).head
     }
 
-    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
+    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<SharedCommitResult> {
         let state = recover_poisoned_lock(self.inner.read());
         let commit = state.commit_at(cursor.next_revision())?.clone();
         drop(state);
@@ -66,7 +66,7 @@ impl CommitLog {
         )
     }
 
-    pub(crate) fn commit_at(&self, revision: Revision) -> Option<CommitResult> {
+    pub(crate) fn commit_at(&self, revision: Revision) -> Option<SharedCommitResult> {
         recover_poisoned_lock(self.inner.read())
             .commit_at(revision)
             .cloned()
@@ -80,7 +80,7 @@ impl CommitLog {
         recover_poisoned_lock(self.inner.read()).oldest_revision()
     }
 
-    pub(crate) fn publish(&self, commit: CommitResult) {
+    pub(crate) fn publish(&self, commit: SharedCommitResult) {
         let mut state = recover_poisoned_lock(self.inner.write());
         state.head = Some(commit.revision);
         if state.entries.is_empty() {
@@ -104,7 +104,7 @@ struct CommitLogInner {
     next_cursor_id: u64,
     head: Option<Revision>,
     first_retained_revision: Option<Revision>,
-    entries: VecDeque<CommitResult>,
+    entries: VecDeque<SharedCommitResult>,
     cursor_positions: BTreeMap<CursorId, Revision>,
     max_entries: usize,
 }
@@ -125,7 +125,7 @@ impl CommitLogInner {
         self.first_retained_revision
     }
 
-    fn commit_at(&self, revision: Revision) -> Option<&CommitResult> {
+    fn commit_at(&self, revision: Revision) -> Option<&SharedCommitResult> {
         let first = self.first_retained_revision?;
         if revision.get() < first.get() {
             return None;

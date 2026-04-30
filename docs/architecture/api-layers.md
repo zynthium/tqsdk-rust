@@ -4,7 +4,8 @@
 future API 层的职责是消费 runtime contract 的提交结果，而不是重新定义状态机。
 
 共同点：
-- 都建立在同一份 `CommitResult`
+- 都建立在同一份不可变 `CommitResult` payload 上；commit 发布和 cursor 消费用
+  `SharedCommitResult = Arc<CommitResult>` 共享所有权
 - 都读取同一棵 runtime state tree
 - 都通过 `RuntimeReader::read()` / `SnapshotReadGuard` 获得 revision-bound 读视图
 - 都遵守同一套 `Revision / ChangeSet` 语义
@@ -23,6 +24,7 @@ V1 只交付两类稳定 public contract：
    - `RuntimeCommand`
    - `RuntimeInput`
    - `CommitResult`
+   - `SharedCommitResult`
    - `UpdateCursor`
    - `StateSnapshot` / `CommitLog`（兼容与底层原语）
 2. protocol adapter contract
@@ -61,7 +63,7 @@ V1 不交付任何用户态 facade。
 ### `tqsdk-api-stream`
 ```rust
 pub trait CommitStreamApi {
-    type CommitStream: Stream<Item = CommitResult>;
+    type CommitStream: Stream<Item = SharedCommitResult>;
     fn commit_stream(&self) -> Self::CommitStream;
 }
 ```
@@ -80,7 +82,7 @@ pub trait CommitStreamApi {
 pub trait CallbackApi {
     async fn on_commit<F>(&self, f: F)
     where
-        F: Fn(CommitResult) + Send + Sync + 'static;
+        F: Fn(SharedCommitResult) + Send + Sync + 'static;
 }
 ```
 

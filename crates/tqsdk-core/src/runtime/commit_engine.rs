@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use crate::{
     events::{FieldMutation, MutationSource, NormalizedMutation},
     ids::{CommandId, ProtocolDomain, Revision},
-    state::{ChangeSet, CommitResult, CommitScope, ObjectKey, StatePath, StateStore},
+    state::{
+        ChangeSet, CommitResult, CommitScope, ObjectKey, SharedCommitResult, StatePath, StateStore,
+    },
     transport::{BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget},
 };
 
@@ -16,8 +20,8 @@ impl CommitEngine {
         domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
-        on_commit: impl FnOnce(&CommitResult),
-    ) -> Option<CommitResult> {
+        on_commit: impl FnOnce(SharedCommitResult),
+    ) -> Option<SharedCommitResult> {
         if mutations.is_empty() {
             return None;
         }
@@ -25,8 +29,14 @@ impl CommitEngine {
         let next_revision = Revision::new(snapshot.revision().get() + 1);
         snapshot.apply_with(next_revision, &mutations, |applied| {
             let changes = ChangeSet::from_mutations(&applied);
-            let commit = CommitResult::new(next_revision, domains, changes, caused_by, scope);
-            on_commit(&commit);
+            let commit = Arc::new(CommitResult::new(
+                next_revision,
+                domains,
+                changes,
+                caused_by,
+                scope,
+            ));
+            on_commit(Arc::clone(&commit));
             commit
         })
     }

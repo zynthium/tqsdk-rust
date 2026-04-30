@@ -76,7 +76,7 @@ pub use runtime::{
 };
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, MarketStateReadGuard, MarketStateView,
-    ObjectKey, PathSegment, SeriesKey, StatePath, StateReadView, StateSnapshot,
+    ObjectKey, PathSegment, SeriesKey, SharedCommitResult, StatePath, StateReadView, StateSnapshot,
     TradeStateReadGuard, TradeStateView, UpdateCursor,
 };
 pub use transport::{

@@ -1,6 +1,6 @@
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::{future::Future, sync::Arc};
 
 use serde_json::json;
 use tqsdk_core::{
@@ -156,6 +156,40 @@ fn runtime_handle_ingests_inputs_into_committed_snapshot_and_cursored_log() {
     assert_eq!(ignored, None);
     assert_eq!(handle.latest_snapshot().revision(), Revision::new(1));
     assert_eq!(log.head_revision(), Some(Revision::new(1)));
+}
+
+#[test]
+fn runtime_publishes_and_returns_the_same_shared_commit() {
+    let handle = runtime_with_default_adapters();
+    let returned = handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market.shared".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: tqsdk_core::InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "last_price": 618.5
+                            }
+                        }
+                    }]
+                })),
+            }),
+            Vec::new(),
+            CommitScope::RealtimeUpdate,
+        )
+        .expect("ingest should succeed")
+        .expect("quote update should publish a commit");
+
+    let mut cursor = handle.cursor_from(returned.revision);
+    let logged = handle
+        .commit_log()
+        .next(&mut cursor)
+        .expect("published commit should be retained in the log");
+
+    assert!(Arc::ptr_eq(&returned, &logged));
 }
 
 #[test]

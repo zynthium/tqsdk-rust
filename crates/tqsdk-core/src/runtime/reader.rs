@@ -7,8 +7,8 @@ use crate::{
     Result,
     ids::Revision,
     state::{
-        CommitResult, MarketStateReadGuard, StateReadView, StateSnapshot, TradeStateReadGuard,
-        UpdateCursor,
+        CommitResult, MarketStateReadGuard, SharedCommitResult, StateReadView, StateSnapshot,
+        TradeStateReadGuard, UpdateCursor,
     },
 };
 
@@ -67,7 +67,7 @@ impl SnapshotReadGuard<'_> {
 
 /// Revision-consistent read of a just-consumed commit.
 pub struct CommitReadGuard<'a> {
-    commit: CommitResult,
+    commit: SharedCommitResult,
     snapshot: StateSnapshot,
     _marker: PhantomData<&'a ()>,
 }
@@ -205,7 +205,7 @@ impl RuntimeReader {
     }
 
     /// Returns the next retained commit for the provided cursor, if available.
-    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult> {
+    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<SharedCommitResult> {
         self.commit_log.next(cursor)
     }
 

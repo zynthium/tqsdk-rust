@@ -147,6 +147,10 @@ pub trait CommitAssembler {
 }
 ```
 
+`CommitResult` 只表示不可变提交 payload。进入发布、cursor、fan-out 和 retry
+路径后，runtime 使用 `SharedCommitResult = Arc<CommitResult>` 共享同一份提交，
+避免深拷贝 `ChangeSet` 与 causality。
+
 ### runtime_reader
 ```rust
 pub struct RuntimeReader;
@@ -155,7 +159,7 @@ pub struct SnapshotReadGuard<'a>;
 impl RuntimeReader {
     pub fn cursor(&self) -> UpdateCursor;
     pub fn read(&self) -> SnapshotReadGuard<'_>;
-    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<CommitResult>;
+    pub fn next(&self, cursor: &mut UpdateCursor) -> Option<SharedCommitResult>;
 }
 ```
 

@@ -18,8 +18,11 @@ impl WaitTestDriver {
     }
 
     /// Queue a commit so the next `wait_update()` observes it before polling IO.
-    pub fn push_deferred_commit(api: &mut TqApi, commit: tqsdk_core::CommitResult) {
-        api.push_fixture_deferred_commit(commit);
+    pub fn push_deferred_commit(
+        api: &mut TqApi,
+        commit: impl Into<tqsdk_core::SharedCommitResult>,
+    ) {
+        api.push_fixture_deferred_commit(commit.into());
     }
 }
 

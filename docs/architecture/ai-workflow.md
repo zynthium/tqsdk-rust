@@ -206,6 +206,7 @@ RuntimeCommand / RuntimeInput
     -> RuntimeHandle
     -> StateStore
     -> CommitResult
+    -> SharedCommitResult
     -> RuntimeReader / UpdateCursor
 ```
 
@@ -218,6 +219,7 @@ RuntimeCommand / RuntimeInput
 
 - 只有 runtime core 可以推进 `Revision`。
 - facade 只能消费 `RuntimeReader::cursor()` / `RuntimeReader::next()` / `RuntimeReader::next_view()`。
+- `CommitResult` 是不可变提交 payload；写侧返回、`CommitLog`、`RuntimeReader::next()` 和 stream fan-out 应共享 `SharedCommitResult = Arc<CommitResult>`，不得用深拷贝绕过同一提交身份。
 - `CommitLog` 是底层共享原语，不是新 facade 的首选 public contract。
 - 慢消费者应得到明确 lag/closed/error surface，不得反向改变 commit 生成策略。
 

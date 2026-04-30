@@ -10,7 +10,7 @@ const ROUTE_DRIVE_BUDGET: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DriverEvent {
-    Commit(tqsdk_core::CommitResult),
+    Commit(tqsdk_core::SharedCommitResult),
     Error(tqsdk_session::SessionFacadeError),
     Closed,
 }

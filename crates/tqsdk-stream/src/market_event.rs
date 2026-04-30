@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::Stream;
 use tqsdk_core::{
     CommitResult, MarketChartCommand, MarketCommand, Quote, RuntimeCommand, RuntimeReader,
-    StatePath, Symbol,
+    SharedCommitResult, StatePath, Symbol,
 };
 
 use crate::api::{TqStream, duration_to_ns};
@@ -268,7 +268,7 @@ impl MarketEventStream {
         Ok(())
     }
 
-    fn collect_events(&mut self, commit: CommitResult) -> Result<()> {
+    fn collect_events(&mut self, commit: SharedCommitResult) -> Result<()> {
         let quote_hits = self
             .quote_specs
             .iter()

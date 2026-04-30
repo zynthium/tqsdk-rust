@@ -96,7 +96,7 @@ impl TqApi {
 
     #[must_use]
     pub fn last_commit(&self) -> Option<&tqsdk_core::CommitResult> {
-        self.driver.last_commit.as_ref()
+        self.driver.last_commit.as_deref()
     }
 
     #[must_use]
@@ -531,7 +531,7 @@ impl TqApi {
         self.driver.begin_wait()
     }
 
-    pub(crate) fn push_fixture_deferred_commit(&mut self, commit: tqsdk_core::CommitResult) {
+    pub(crate) fn push_fixture_deferred_commit(&mut self, commit: tqsdk_core::SharedCommitResult) {
         self.driver.deferred_commits.push_back(commit);
     }
 }
