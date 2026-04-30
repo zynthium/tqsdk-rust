@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use tqsdk_core::{
-    AccountId, AdapterRegistry, EndpointConfig, MarketSessionTarget, ProtocolDomain, RuntimeHandle,
-    SessionConfig, TradeSessionTarget,
+    AccountId, AdapterRegistry, AuthDerivedTradeTarget, EndpointConfig, MarketSessionTarget,
+    ProtocolDomain, RuntimeHandle, SessionConfig, TradeSessionTarget,
 };
 
 use crate::{
@@ -190,6 +190,7 @@ impl SessionClientBuilder {
             market_target,
             trade_targets,
         } = self;
+        validate_trade_targets(&trade_targets)?;
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
@@ -296,6 +297,37 @@ macro_rules! __tqsdk_impl_session_builder_forwarders {
             self
         }
     };
+}
+
+fn validate_trade_targets(trade_targets: &[TradeSessionTarget]) -> Result<()> {
+    for target in trade_targets {
+        match target.auth_derived {
+            Some(AuthDerivedTradeTarget::TqKqFuture {
+                number: Some(number),
+            })
+            | Some(AuthDerivedTradeTarget::TqKqStock {
+                number: Some(number),
+            }) => validate_tqkq_number(number)?,
+            Some(
+                AuthDerivedTradeTarget::TqKqFuture { number: None }
+                | AuthDerivedTradeTarget::TqKqStock { number: None },
+            )
+            | None => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tqkq_number(number: u8) -> Result<()> {
+    if (1..=99).contains(&number) {
+        Ok(())
+    } else {
+        Err(tqsdk_core::ContractError::validation(format!(
+            "TqKq assistant account number must be within 1..=99, got {number}"
+        ))
+        .into())
+    }
 }
 
 fn session_config(

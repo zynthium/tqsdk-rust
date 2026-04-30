@@ -67,7 +67,6 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `SnapshotReadGuard` / `StateReadView` | revision-bound 的快照读取 |
 | `CommitReadGuard` | exact revision 的 commit + state 读面 |
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
-| `SessionRuntime` | auth / bootstrap / connect / recover / flush / pump 的统一编排器 |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
 | `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |

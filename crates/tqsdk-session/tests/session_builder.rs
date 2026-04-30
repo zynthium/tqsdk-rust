@@ -116,3 +116,48 @@ fn facade_error_converts_core_errors_and_formats_messages() {
     );
     assert!(std::error::Error::source(&invalid_state).is_none());
 }
+
+#[cfg(feature = "live")]
+#[test]
+fn live_session_client_rejects_manual_dispatch_drain() {
+    let client = SessionClientBuilder::new("user", "pass")
+        .build()
+        .expect("building a live client should not perform network IO");
+
+    let err = client
+        .drain_dispatches()
+        .expect_err("live clients must not expose manual outbox draining");
+
+    assert_eq!(
+        err.to_string(),
+        "invalid session facade state: drain_dispatches is only available for test/manual sessions without live IO; use progress_once() to drive live sessions"
+    );
+}
+
+#[cfg(feature = "live")]
+#[test]
+fn builder_rejects_invalid_tqkq_numbered_targets_before_live_session_build() {
+    let zero = match SessionClientBuilder::new("user", "pass")
+        .trade_target_tqkq_numbered(0)
+        .build()
+    {
+        Ok(_) => panic!("number 0 should be rejected before live session construction"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        zero.to_string(),
+        "validation error: TqKq assistant account number must be within 1..=99, got 0"
+    );
+
+    let too_large = match SessionClientBuilder::new("user", "pass")
+        .trade_target_tqkq_stock_numbered(100)
+        .build()
+    {
+        Ok(_) => panic!("number 100 should be rejected before live session construction"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        too_large.to_string(),
+        "validation error: TqKq assistant account number must be within 1..=99, got 100"
+    );
+}

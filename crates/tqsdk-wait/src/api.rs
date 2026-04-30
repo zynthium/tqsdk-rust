@@ -52,14 +52,12 @@ impl TqApi {
     pub fn new_for_test(handle: tqsdk_core::RuntimeHandle, session: SessionClient) -> Self {
         let reader = handle.reader();
         let cursor = reader.cursor();
-        let runtime = session.runtime_clone();
 
         Self {
             driver: WaitDriver {
                 session,
                 reader,
                 cursor,
-                runtime,
                 deferred_commits: VecDeque::new(),
                 last_commit: None,
                 waiting: AtomicBool::new(false),
@@ -540,7 +538,7 @@ impl TqApi {
 
     #[doc(hidden)]
     pub fn handle_for_test(&self) -> tqsdk_core::RuntimeHandle {
-        self.driver.runtime.handle()
+        self.driver.session.handle().clone()
     }
 
     #[doc(hidden)]

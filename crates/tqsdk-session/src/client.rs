@@ -341,21 +341,18 @@ impl SessionClient {
     }
 
     #[must_use]
-    pub fn runtime(&self) -> &SessionRuntime {
-        &self.runtime
-    }
-
-    #[must_use]
     pub fn reader_clone(&self) -> RuntimeReader {
         self.reader.clone()
     }
 
-    #[must_use]
-    pub fn runtime_clone(&self) -> SessionRuntime {
-        self.runtime.clone()
-    }
-
+    #[doc(hidden)]
     pub fn drain_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
+        if self.io.is_some() {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "drain_dispatches is only available for test/manual sessions without live IO; use progress_once() to drive live sessions",
+            ));
+        }
+
         Ok(self.handle.drain_dispatches()?)
     }
 

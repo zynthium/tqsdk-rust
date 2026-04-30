@@ -4,13 +4,11 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{Result, WaitFacadeError};
-use tqsdk_core::internal::SessionRuntime;
 
 pub(crate) struct WaitDriver {
     pub(crate) session: tqsdk_session::SessionClient,
     pub(crate) reader: tqsdk_core::RuntimeReader,
     pub(crate) cursor: tqsdk_core::UpdateCursor,
-    pub(crate) runtime: SessionRuntime,
     pub(crate) deferred_commits: VecDeque<tqsdk_core::CommitResult>,
     pub(crate) last_commit: Option<tqsdk_core::CommitResult>,
     pub(crate) waiting: AtomicBool,
