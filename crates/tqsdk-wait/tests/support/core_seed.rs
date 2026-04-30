@@ -18,10 +18,10 @@ impl TestTqApi {
         adapters.register_default_adapters();
 
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle.clone());
+        let session = SessionClient::new_for_test_with_handle(handle);
 
         Self {
-            api: TqApi::new_for_test(handle, session),
+            api: TqApi::new(session),
         }
     }
 

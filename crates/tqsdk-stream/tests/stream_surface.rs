@@ -3,9 +3,22 @@ use std::time::Duration;
 use futures::StreamExt;
 use tqsdk_core::SessionPhase;
 use tqsdk_session::SessionFacadeError;
-use tqsdk_stream::{StreamFacadeError, StreamSessionPhase};
+use tqsdk_stream::{StreamFacadeError, StreamSessionPhase, TqStream};
 
 mod support;
+
+#[test]
+fn stream_rejects_zero_commit_channel_capacity() {
+    let err = match TqStream::with_commit_channel_capacity(support::core_seed::seeded_session(), 0)
+    {
+        Ok(_) => panic!("zero commit channel capacity should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err,
+        StreamFacadeError::InvalidState("commit channel capacity must be greater than zero")
+    );
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn stream_exposes_underlying_session_for_direct_queries() {

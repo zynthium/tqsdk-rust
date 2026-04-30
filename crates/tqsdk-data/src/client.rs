@@ -109,9 +109,9 @@ impl DataClient {
         self
     }
 
-    #[doc(hidden)]
+    #[cfg(test)]
     #[must_use]
-    pub fn new_for_test_with_urls(
+    fn new_for_test_with_urls(
         holiday_url: impl Into<String>,
         continuous_table_url: impl Into<String>,
     ) -> Self {

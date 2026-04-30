@@ -31,13 +31,17 @@
 - `MarketCacheQueue::enqueue_event` 已改为复用持久 writer；queue 读取、清理和 rotating drain 会先 flush writer，rotating drain 后重开 append writer。
 - `run_market_cache_supervisor` 续租错误复核结果：当前代码已计入 `periodic_errors` 并写入 report，不再是静默吞错。
 
-### 2026-05-01 后续批次已落地，待随下一提交合入
+### 2026-05-01 后续批次已落地
 
 - `record_command_status` fallback 已从全量 `StateStore::snapshot()` 改为只借读 runtime 分区；`StateStore::read_partition(root)` / `read_runtime_state()` 作为内部读面支撑该路径。
 - `normalize_order_lifecycle_mutations` 已减少订单状态 overlay 的 `serde_json::Value` clone；后续 typed state migration 前不再扩大该路径改造范围。
 - `StreamSinkWalWriter` / `StreamCommitJournalWriter` 已抽出共享 `JsonlRecordWriter`，保留 WAL 和 commit journal 的语义 wrapper。
 - `MarketCacheService` / `MarketCacheDaemon` / `MarketCacheSupervisor` 及其关键配置、报告、方法已补公开文档注释。
 - 6 个 crate 的 crate-level docs 已补最小可编译 doctest；后续仍应继续补 public API 的细粒度示例。
+- `RiskEngine` 已补浮点 tick 对齐和净持仓投影的 property-style 边界测试，不引入额外测试依赖。
+- `TqApi::new_for_test` 已收为私有构造路径；测试侧改用普通 `TqApi::new(SessionClient::new_for_test_with_handle(...))`，减少 hidden public surface。
+- `TqStream::new_for_test_with_capacity` 已替换为正式 `TqStream::with_commit_channel_capacity`，容量配置归属 stream facade，不再通过 hidden test 构造器暴露。
+- `DataClient::new_for_test_with_urls` 已收为 `#[cfg(test)]` 私有 helper；服务 URL 覆盖不再作为 hidden public API 暴露。
 
 ### 仍保留为独立计划项
 
@@ -46,7 +50,7 @@
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
 - `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。
 - `transport.rs`、`account_group.rs`、`sink.rs` 模块级拆分属于较大内部重构，应分 child plan 执行并先补 characterization tests。
-- public 文档注释、`RiskEngine` property-based tests 仍是质量补强任务，不影响本批已定位 bug/perf 修复。
+- public 文档注释仍是质量补强任务，不影响本批已定位 bug/perf 修复。
 
 ---
 

@@ -44,12 +44,11 @@ impl TqApi {
     #[must_use]
     pub fn new(session: SessionClient) -> Self {
         let handle = session.handle().clone();
-        Self::new_for_test(handle, session)
+        Self::from_runtime_parts(handle, session)
     }
 
-    #[doc(hidden)]
     #[must_use]
-    pub fn new_for_test(handle: tqsdk_core::RuntimeHandle, session: SessionClient) -> Self {
+    fn from_runtime_parts(handle: tqsdk_core::RuntimeHandle, session: SessionClient) -> Self {
         let reader = handle.reader();
         let cursor = reader.cursor();
 

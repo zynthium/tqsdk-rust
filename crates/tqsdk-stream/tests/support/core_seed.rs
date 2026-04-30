@@ -14,13 +14,19 @@ pub fn seeded_stream() -> TqStream {
 
 #[allow(dead_code)]
 pub fn seeded_stream_with_capacity(capacity: usize) -> TqStream {
+    let session = seeded_session();
+
+    TqStream::with_commit_channel_capacity(session, capacity)
+        .expect("test stream capacity should be valid")
+}
+
+#[allow(dead_code)]
+pub fn seeded_session() -> SessionClient {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
 
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle.clone());
-
-    TqStream::new_for_test_with_capacity(session, capacity)
+    SessionClient::new_for_test_with_handle(handle)
 }
 
 #[allow(dead_code)]

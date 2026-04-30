@@ -981,3 +981,100 @@ fn project_net_position(current_net: i64, intent: &TaskOrderIntent) -> i64 {
         _ => current_net,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent(
+        direction: TradeDirection,
+        offset: Option<TradeOffset>,
+        volume: i64,
+    ) -> TaskOrderIntent {
+        TaskOrderIntent {
+            account_id: "sim".to_owned(),
+            symbol: "SHFE.rb2601".to_owned(),
+            direction,
+            offset,
+            volume,
+            limit_price: Some(3600.0),
+        }
+    }
+
+    #[test]
+    fn price_tick_check_accepts_exact_multiples_across_common_tick_sizes() {
+        for price_tick in [0.01, 0.2, 0.5, 1.0, 2.5] {
+            for multiple in -10_000..=10_000 {
+                let price = multiple as f64 * price_tick;
+                assert!(
+                    price_is_on_tick(price, price_tick),
+                    "price={price} should be accepted for tick={price_tick}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn price_tick_check_rejects_half_tick_offsets_across_common_tick_sizes() {
+        for price_tick in [0.01, 0.2, 0.5, 1.0, 2.5] {
+            for multiple in -1_000..=1_000 {
+                let price = (multiple as f64 * price_tick) + (price_tick / 2.0);
+                assert!(
+                    !price_is_on_tick(price, price_tick),
+                    "price={price} should be rejected for tick={price_tick}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn price_tick_check_rejects_non_finite_prices_and_invalid_ticks() {
+        for price in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!price_is_on_tick(price, 0.2));
+        }
+        for price_tick in [f64::NAN, f64::INFINITY, 0.0, -0.2] {
+            assert!(!price_is_on_tick(3600.0, price_tick));
+        }
+    }
+
+    #[test]
+    fn net_position_projection_matches_directional_signed_volume_properties() {
+        for current_net in -1_000..=1_000 {
+            for volume in 1..=100 {
+                let buy_open = intent(TradeDirection::Buy, Some(TradeOffset::Open), volume);
+                let buy_close = intent(TradeDirection::Buy, Some(TradeOffset::Close), volume);
+                let sell_open = intent(TradeDirection::Sell, Some(TradeOffset::Open), volume);
+                let sell_close = intent(TradeDirection::Sell, Some(TradeOffset::Close), volume);
+
+                assert_eq!(
+                    project_net_position(current_net, &buy_open),
+                    current_net.saturating_add(volume)
+                );
+                assert_eq!(
+                    project_net_position(current_net, &buy_close),
+                    current_net.saturating_add(volume)
+                );
+                assert_eq!(
+                    project_net_position(current_net, &sell_open),
+                    current_net.saturating_sub(volume)
+                );
+                assert_eq!(
+                    project_net_position(current_net, &sell_close),
+                    current_net.saturating_sub(volume)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn net_position_projection_leaves_unspecified_offsets_unchanged() {
+        let order_without_offset = intent(TradeDirection::Buy, None, 5);
+
+        for current_net in -1_000..=1_000 {
+            assert_eq!(
+                project_net_position(current_net, &order_without_offset),
+                current_net
+            );
+        }
+    }
+}

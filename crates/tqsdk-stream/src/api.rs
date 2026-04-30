@@ -56,6 +56,18 @@ impl TqStream {
         Self::new_with_capacity(session, DEFAULT_COMMIT_CHANNEL_CAPACITY)
     }
 
+    pub fn with_commit_channel_capacity(
+        session: tqsdk_session::SessionClient,
+        capacity: usize,
+    ) -> crate::error::Result<Self> {
+        if capacity == 0 {
+            return Err(crate::error::StreamFacadeError::InvalidState(
+                "commit channel capacity must be greater than zero",
+            ));
+        }
+        Ok(Self::new_with_capacity(session, capacity))
+    }
+
     pub(crate) fn new_with_capacity(
         session: tqsdk_session::SessionClient,
         capacity: usize,
@@ -541,15 +553,6 @@ impl TqStream {
     {
         let commits = self.commit_stream()?;
         crate::sink::StreamSinkHandle::spawn(name.into(), commits, sink, options)
-    }
-
-    #[doc(hidden)]
-    #[must_use]
-    pub fn new_for_test_with_capacity(
-        session: tqsdk_session::SessionClient,
-        capacity: usize,
-    ) -> Self {
-        Self::new_with_capacity(session, capacity)
     }
 
     #[doc(hidden)]

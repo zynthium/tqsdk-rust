@@ -193,6 +193,10 @@ pub struct TqStream { /* private */ }
 
 impl TqStream {
     pub fn new(session: SessionClient) -> Self;
+    pub fn with_commit_channel_capacity(
+        session: SessionClient,
+        capacity: usize,
+    ) -> tqsdk_stream::Result<Self>;
 
     pub fn session(&self) -> &SessionClient;
     pub fn into_session(self) -> SessionClient;
@@ -723,7 +727,8 @@ impl futures::Stream for TradeSessionEventStream {
 最小语义应当是：
 
 - 慢消费者落后时，返回 `Lagged`
-- root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)` 显式配置
+- root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)`
+  或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)` 显式配置
 - 写库 / 日志这类 sink 可通过 `TqStream::spawn_commit_sink(...)` 由 SDK 托管，
   并通过 `StreamSinkStats` / `StreamSinkShutdownReport` 观察 processed、lagged、
   errors、retry_attempts、wal_records 和 flush 结果

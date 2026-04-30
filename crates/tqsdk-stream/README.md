@@ -210,6 +210,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqStreamBuilder::from_session_builder(...)` 包装成 stream facade。
+如果调用方已经持有 `SessionClient`，可以直接使用 `TqStream::new(session)`；
+需要显式设置 root fan-out 容量时使用
+`TqStream::with_commit_channel_capacity(session, capacity)`。
 
 如果要证明 stream facade 可以复用同一个底层 session 做一次性 metadata/direct query，而不需要额外建第二个 client，可参考 `examples/quote_stream_with_session_query.rs`。
 
@@ -248,6 +251,7 @@ timed out 和 closed；它只消费同一条 commit fan-out 与 health snapshot�
 SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 
 慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`
+或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)`
 表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过
 `StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
 信息。写库 / 日志这类非核心消费者可以通过 `TqStream::spawn_commit_sink(...)`
