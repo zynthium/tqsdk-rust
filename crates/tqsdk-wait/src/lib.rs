@@ -14,6 +14,17 @@
 //!
 //! `tqsdk-wait` is a pure async substrate. Callers must provide their own
 //! Tokio runtime.
+//!
+//! # Example
+//!
+//! ```
+//! let price = tqsdk_wait::OrderPrice::limit(618.5).unwrap();
+//! let _ = price;
+//!
+//! let builder = tqsdk_wait::TqApiBuilder::new("demo-user", "demo-pass")
+//!     .futures_market();
+//! let _ = builder;
+//! ```
 
 mod api;
 mod builder;

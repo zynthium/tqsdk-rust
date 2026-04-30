@@ -12,6 +12,25 @@ use tqsdk_core::{
 };
 
 #[test]
+fn command_status_fallback_reads_runtime_partition_without_full_snapshot() {
+    let source = include_str!("../src/runtime/handle.rs");
+    let record_command_status_block = source
+        .split("pub fn record_command_status")
+        .nth(1)
+        .and_then(|tail| tail.split("let Some(domain) = domain else").next())
+        .expect("RuntimeHandle::record_command_status should exist");
+
+    assert!(
+        record_command_status_block.contains("read_runtime_state()"),
+        "command status fallback should read the runtime partition directly"
+    );
+    assert!(
+        !record_command_status_block.contains("state.snapshot()"),
+        "command status fallback should not materialize a full snapshot"
+    );
+}
+
+#[test]
 fn rejected_trade_commands_enter_runtime_command_snapshot_and_commit_log() {
     let handle = runtime_with_default_adapters();
 

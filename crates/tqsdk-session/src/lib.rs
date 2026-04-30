@@ -13,6 +13,16 @@
 //!
 //! `tqsdk-session` is a pure async substrate. Callers must provide their own
 //! Tokio runtime.
+//!
+//! # Example
+//!
+//! ```
+//! let builder = tqsdk_session::SessionClientBuilder::new("demo-user", "demo-pass")
+//!     .enable_query()
+//!     .futures_market();
+//!
+//! assert!(builder.query_enabled());
+//! ```
 
 mod builder;
 mod client;

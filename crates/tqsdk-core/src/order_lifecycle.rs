@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +104,15 @@ impl OrderLifecycle {
             return Some(lifecycle);
         }
 
+        Self::infer_from_order_object(order)
+    }
+
+    pub(crate) fn infer_from_order_value_ignoring_lifecycle(order: &Value) -> Option<Self> {
+        let order = order.as_object()?;
+        Self::infer_from_order_object(order)
+    }
+
+    fn infer_from_order_object(order: &Map<String, Value>) -> Option<Self> {
         let status = order.get("status").and_then(Value::as_str);
         let is_dead = order.get("is_dead").and_then(Value::as_bool);
         let is_error = order.get("is_error").and_then(Value::as_bool);

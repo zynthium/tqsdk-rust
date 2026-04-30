@@ -73,6 +73,24 @@ fn stream_sink_state_is_accessed_through_shared_state_wrapper() {
     );
 }
 
+#[test]
+fn stream_sink_jsonl_writers_share_the_same_low_level_writer() {
+    let source = include_str!("../src/sink.rs");
+
+    assert!(
+        source.contains("struct JsonlRecordWriter"),
+        "WAL and commit journal should share one JSONL writer implementation"
+    );
+    assert!(
+        !source.contains("struct StreamSinkWalWriter {\n    writer: std::io::BufWriter"),
+        "WAL writer should not duplicate BufWriter/fsync plumbing"
+    );
+    assert!(
+        !source.contains("struct StreamCommitJournalWriter {\n    writer: std::io::BufWriter"),
+        "commit journal writer should not duplicate BufWriter/fsync plumbing"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn position_event_stream_emits_matching_account_positions_only() {
     let stream = support::core_seed::seeded_stream();

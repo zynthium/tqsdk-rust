@@ -26,6 +26,17 @@
 //!
 //! `tqsdk-stream` is a pure async substrate. Callers must provide their own
 //! Tokio runtime.
+//!
+//! # Example
+//!
+//! ```
+//! let retry = tqsdk_stream::StreamRetryPolicy::new().max_attempts(3);
+//! assert_eq!(retry.attempts(), 3);
+//!
+//! let builder = tqsdk_stream::TqStreamBuilder::new("demo-user", "demo-pass")
+//!     .futures_market();
+//! let _ = builder;
+//! ```
 
 mod api;
 mod builder;

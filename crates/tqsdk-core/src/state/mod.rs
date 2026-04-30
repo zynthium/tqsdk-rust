@@ -10,4 +10,4 @@ pub use domain::{MarketStateReadGuard, MarketStateView, TradeStateReadGuard, Tra
 pub use path::{ObjectKey, PathSegment, SeriesKey, StatePath};
 pub use read::StateReadView;
 pub use store::StateSnapshot;
-pub(crate) use store::StateStore;
+pub(crate) use store::{StatePartitionReadGuard, StateStore};

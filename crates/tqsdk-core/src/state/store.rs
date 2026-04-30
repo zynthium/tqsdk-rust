@@ -12,7 +12,7 @@ use crate::{Result, events::NormalizedMutation, ids::Revision};
 
 use super::{
     MarketStateReadGuard, MarketStateView, PathSegment, StateReadView, TradeStateReadGuard,
-    TradeStateView,
+    TradeStateView, read::get_at_path,
 };
 
 /// Owned snapshot clone of the runtime state tree.
@@ -108,6 +108,20 @@ impl StateSnapshot {
     }
 }
 
+pub(crate) struct StatePartitionReadGuard<'a> {
+    partition: RwLockReadGuard<'a, Value>,
+}
+
+impl<'a> StatePartitionReadGuard<'a> {
+    fn new(partition: RwLockReadGuard<'a, Value>) -> Self {
+        Self { partition }
+    }
+
+    pub(crate) fn get_path(&self, path: &[&str]) -> Option<&Value> {
+        get_at_path(&self.partition, path.iter().copied())
+    }
+}
+
 impl StateStore {
     pub(crate) fn new(revision: Revision) -> Self {
         Self {
@@ -173,6 +187,17 @@ impl StateStore {
     pub(crate) fn read_trade_state(&self) -> TradeStateReadGuard<'_> {
         let trade = rwlock_read(&self.trade);
         TradeStateReadGuard::new(self.revision(), trade)
+    }
+
+    pub(crate) fn read_partition(&self, root: &str) -> Option<StatePartitionReadGuard<'_>> {
+        let root = StateRoot::from_segment(root)?;
+        let partition = rwlock_read(root.partition(self));
+        Some(StatePartitionReadGuard::new(partition))
+    }
+
+    pub(crate) fn read_runtime_state(&self) -> StatePartitionReadGuard<'_> {
+        self.read_partition("runtime")
+            .expect("runtime partition root should be known")
     }
 
     #[cfg(test)]

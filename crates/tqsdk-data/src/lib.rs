@@ -31,6 +31,15 @@
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
+//!
+//! # Example
+//!
+//! ```
+//! let config = tqsdk_data::MarketCacheServiceConfig::new("cache.jsonl")
+//!     .with_sync_on_enqueue(false);
+//!
+//! assert_eq!(config.cache_path(), std::path::Path::new("cache.jsonl"));
+//! ```
 
 mod client;
 mod download;

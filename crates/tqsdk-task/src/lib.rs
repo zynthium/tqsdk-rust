@@ -3,6 +3,14 @@
 //!
 //! This crate hosts task ownership, guarded command entrypoints, and host-driven
 //! execution helpers built on the wait-style facade.
+//!
+//! # Example
+//!
+//! ```
+//! let split = tqsdk_task::VolumeSplitPolicy::new(1, 10).unwrap();
+//! assert_eq!(split.min_volume(), 1);
+//! assert_eq!(split.max_volume(), 10);
+//! ```
 
 mod account_group;
 mod calendar;

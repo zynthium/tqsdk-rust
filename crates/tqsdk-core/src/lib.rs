@@ -5,6 +5,16 @@
 //! transport/runtime coordination, state projection, schema/query/bootstrap
 //! interaction, and trade/replay/session control. It does not add facade-style
 //! user APIs or runtime ownership.
+//!
+//! # Example
+//!
+//! ```
+//! let handle = tqsdk_core::RuntimeHandle::new();
+//! let reader = handle.reader();
+//! let cursor = reader.cursor();
+//!
+//! assert_eq!(cursor.next_revision().get(), 1);
+//! ```
 
 pub mod adapter;
 #[cfg(test)]

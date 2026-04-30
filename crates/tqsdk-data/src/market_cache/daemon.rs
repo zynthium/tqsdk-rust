@@ -1,3 +1,8 @@
+/// Configuration for a local market cache daemon.
+///
+/// The daemon owns a cache writer lock, accepts queued events, and provides
+/// explicit flush/shutdown operations. For periodic background maintenance use
+/// [`MarketCacheDaemon::spawn_supervisor`].
 #[derive(Debug, Clone)]
 pub struct MarketCacheDaemonConfig {
     cache_path: PathBuf,
@@ -10,6 +15,7 @@ pub struct MarketCacheDaemonConfig {
 }
 
 impl MarketCacheDaemonConfig {
+    /// Creates a config using sidecar paths derived from the cache path.
     #[must_use]
     pub fn new(cache_path: impl AsRef<Path>) -> Self {
         let cache_path = cache_path.as_ref().to_path_buf();
@@ -24,56 +30,66 @@ impl MarketCacheDaemonConfig {
         }
     }
 
+    /// Returns the main JSONL cache path.
     #[must_use]
     pub fn cache_path(&self) -> &Path {
         &self.cache_path
     }
 
+    /// Returns the pending queue path.
     #[must_use]
     pub fn queue_path_ref(&self) -> &Path {
         &self.queue_path
     }
 
+    /// Returns the writer lock path.
     #[must_use]
     pub fn lock_path_ref(&self) -> &Path {
         &self.lock_path
     }
 
+    /// Returns the temporary compaction staging path.
     #[must_use]
     pub fn compaction_staging_path_ref(&self) -> &Path {
         &self.compaction_staging_path
     }
 
+    /// Controls whether each enqueue is flushed and fsynced immediately.
     #[must_use]
     pub fn with_sync_on_enqueue(mut self, sync_on_enqueue: bool) -> Self {
         self.sync_on_enqueue = sync_on_enqueue;
         self
     }
 
+    /// Overrides the pending queue path.
     #[must_use]
     pub fn queue_path(mut self, queue_path: impl AsRef<Path>) -> Self {
         self.queue_path = queue_path.as_ref().to_path_buf();
         self
     }
 
+    /// Overrides the writer lock path.
     #[must_use]
     pub fn lock_path(mut self, lock_path: impl AsRef<Path>) -> Self {
         self.lock_path = lock_path.as_ref().to_path_buf();
         self
     }
 
+    /// Overrides the temporary compaction staging path.
     #[must_use]
     pub fn compaction_staging_path(mut self, compaction_staging_path: impl AsRef<Path>) -> Self {
         self.compaction_staging_path = compaction_staging_path.as_ref().to_path_buf();
         self
     }
 
+    /// Allows recovering a stale lock after the provided duration.
     #[must_use]
     pub fn stale_lock_after(mut self, stale_lock_after: Duration) -> Self {
         self.stale_lock_after = Some(stale_lock_after);
         self
     }
 
+    /// Enables local compaction during daemon shutdown.
     #[must_use]
     pub fn compaction_policy(mut self, compaction_policy: MarketCacheCompaction) -> Self {
         self.compaction_policy = Some(compaction_policy);
@@ -81,6 +97,11 @@ impl MarketCacheDaemonConfig {
     }
 }
 
+/// Local writer daemon for the market cache queue and cache file.
+///
+/// This is a file-backed helper for one process. It is not a distributed
+/// service; cross-process coordination is limited to the cache lock and queue
+/// recovery primitives.
 #[derive(Debug)]
 pub struct MarketCacheDaemon {
     config: MarketCacheDaemonConfig,
@@ -89,6 +110,7 @@ pub struct MarketCacheDaemon {
 }
 
 impl MarketCacheDaemon {
+    /// Acquires the writer lock and opens the local queue.
     pub fn open(config: MarketCacheDaemonConfig) -> Result<Self> {
         let lock = MarketCacheLock::acquire_with_options({
             let mut options = MarketCacheLockOptions::new(&config.lock_path);
@@ -110,20 +132,24 @@ impl MarketCacheDaemon {
         })
     }
 
+    /// Returns the main JSONL cache path.
     #[must_use]
     pub fn cache_path(&self) -> &Path {
         &self.config.cache_path
     }
 
+    /// Returns the pending queue path.
     #[must_use]
     pub fn queue_path(&self) -> &Path {
         self.queue.path()
     }
 
+    /// Enqueues one cache event for later flushing.
     pub fn enqueue_event(&self, event: &MarketCacheEvent) -> Result<()> {
         self.queue.enqueue_event(event)
     }
 
+    /// Flushes the pending queue into the cache file.
     pub fn flush_queue(
         &self,
     ) -> std::result::Result<MarketCacheQueueDrainReport, MarketCacheQueueDrainError> {
@@ -140,6 +166,7 @@ impl MarketCacheDaemon {
         self.queue.drain_to_writer_with_report(&mut writer)
     }
 
+    /// Flushes the queue through a rotating processing file.
     pub fn flush_queue_rotating(
         &self,
         processing_path: impl AsRef<Path>,
@@ -158,10 +185,12 @@ impl MarketCacheDaemon {
             .drain_to_writer_rotating(&mut writer, processing_path)
     }
 
+    /// Renews the daemon writer lock.
     pub fn renew_lock(&mut self) -> Result<()> {
         self.lock.renew()
     }
 
+    /// Spawns a background supervisor that periodically flushes and renews the lease.
     pub fn spawn_supervisor(
         self,
         config: MarketCacheSupervisorConfig,
@@ -191,6 +220,7 @@ impl MarketCacheDaemon {
         })
     }
 
+    /// Flushes pending events, runs optional compaction, and releases ownership.
     pub fn shutdown(self) -> Result<MarketCacheDaemonShutdownReport> {
         let flush_report = self.flush_queue().map_err(DataError::from)?;
         let compaction_report = self
@@ -213,13 +243,18 @@ impl MarketCacheDaemon {
     }
 }
 
+/// Shutdown report for a market cache daemon.
 #[derive(Debug, Clone)]
 pub struct MarketCacheDaemonShutdownReport {
+    /// Final queue flush report.
     pub flush_report: MarketCacheQueueDrainReport,
+    /// Optional compaction report produced during shutdown.
     pub compaction_report: Option<MarketCacheAtomicCompactionReport>,
+    /// Whether the queue was empty after shutdown flushing.
     pub queue_empty: bool,
 }
 
+/// Configuration for background daemon supervision.
 #[derive(Debug, Clone)]
 pub struct MarketCacheSupervisorConfig {
     flush_interval: Duration,
@@ -229,6 +264,7 @@ pub struct MarketCacheSupervisorConfig {
 }
 
 impl MarketCacheSupervisorConfig {
+    /// Creates a supervisor config with conservative local defaults.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -239,24 +275,28 @@ impl MarketCacheSupervisorConfig {
         }
     }
 
+    /// Sets how often the supervisor flushes queued events.
     #[must_use]
     pub fn flush_interval(mut self, flush_interval: Duration) -> Self {
         self.flush_interval = flush_interval;
         self
     }
 
+    /// Sets how often the supervisor renews the writer lease.
     #[must_use]
     pub fn lease_renew_interval(mut self, lease_renew_interval: Duration) -> Self {
         self.lease_renew_interval = lease_renew_interval;
         self
     }
 
+    /// Sets the sleep interval between supervisor checks.
     #[must_use]
     pub fn idle_sleep(mut self, idle_sleep: Duration) -> Self {
         self.idle_sleep = idle_sleep;
         self
     }
 
+    /// Overrides the rotating processing queue path.
     #[must_use]
     pub fn processing_queue_path(mut self, processing_queue_path: impl AsRef<Path>) -> Self {
         self.processing_queue_path = Some(processing_queue_path.as_ref().to_path_buf());
@@ -289,6 +329,10 @@ impl Default for MarketCacheSupervisorConfig {
     }
 }
 
+/// Handle for a background market cache supervisor thread.
+///
+/// Dropping the handle requests shutdown and joins the thread. Call
+/// [`Self::shutdown`] to receive the final maintenance report.
 #[derive(Debug)]
 pub struct MarketCacheSupervisor {
     queue: MarketCacheQueue,
@@ -297,10 +341,12 @@ pub struct MarketCacheSupervisor {
 }
 
 impl MarketCacheSupervisor {
+    /// Enqueues one cache event through the supervised queue.
     pub fn enqueue_event(&self, event: &MarketCacheEvent) -> Result<()> {
         self.queue.enqueue_event(event)
     }
 
+    /// Requests supervisor shutdown and returns the final maintenance report.
     pub fn shutdown(mut self) -> Result<MarketCacheSupervisorShutdownReport> {
         self.stop.store(true, Ordering::Release);
         let handle = self.handle.take().ok_or(DataError::InvalidState(
@@ -321,12 +367,18 @@ impl Drop for MarketCacheSupervisor {
     }
 }
 
+/// Shutdown report for a market cache supervisor.
 #[derive(Debug, Clone)]
 pub struct MarketCacheSupervisorShutdownReport {
+    /// Number of periodic flush attempts that succeeded.
     pub periodic_flushes: usize,
+    /// Number of lease renewals that succeeded.
     pub lease_renewals: usize,
+    /// Number of periodic flush or lease renewal errors observed.
     pub periodic_errors: usize,
+    /// Flush report captured immediately before daemon shutdown.
     pub pre_shutdown_flush_report: MarketCacheQueueDrainReport,
+    /// Final daemon shutdown report.
     pub shutdown: MarketCacheDaemonShutdownReport,
 }
 

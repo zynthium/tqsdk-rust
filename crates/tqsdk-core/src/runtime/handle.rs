@@ -13,7 +13,8 @@ use crate::{
     ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision},
     order_lifecycle::OrderLifecycle,
     state::{
-        CommitResult, CommitScope, ObjectKey, StatePath, StateSnapshot, StateStore, UpdateCursor,
+        CommitResult, CommitScope, ObjectKey, StatePartitionReadGuard, StatePath, StateSnapshot,
+        StateStore, UpdateCursor,
     },
     transport::{BootstrapResult, SessionPhase},
 };
@@ -196,11 +197,10 @@ impl RuntimeHandle {
             } else if inner.command_ledger.is_evicted_terminal(command_id) {
                 return Ok(None);
             } else {
-                let snapshot_guard = self.state.snapshot();
-                let snapshot = snapshot_guard.read();
-                let domain = command_domain_from_snapshot(snapshot, command_id);
-                let seed = command_detail_seed_from_snapshot(snapshot, command_id);
-                let current_status = command_status_from_snapshot(snapshot, command_id);
+                let runtime = self.state.read_runtime_state();
+                let domain = command_domain_from_runtime(&runtime, command_id);
+                let seed = command_detail_seed_from_runtime(&runtime, command_id);
+                let current_status = command_status_from_runtime(&runtime, command_id);
                 (domain, seed, current_status)
             };
 
@@ -463,13 +463,13 @@ fn batch_input_domains(inputs: &[RuntimeInput]) -> Vec<ProtocolDomain> {
     domains
 }
 
-fn command_domain_from_snapshot(
-    snapshot: crate::state::StateReadView<'_>,
+fn command_domain_from_runtime(
+    runtime: &StatePartitionReadGuard<'_>,
     command_id: CommandId,
 ) -> Option<ProtocolDomain> {
     let command_segment = command_id.get().to_string();
-    let domain = snapshot
-        .get(["runtime", "commands", command_segment.as_str(), "domain"])?
+    let domain = runtime
+        .get_path(&["commands", command_segment.as_str(), "domain"])?
         .as_str()?;
     match domain {
         "system" => Some(ProtocolDomain::System),
@@ -482,24 +482,24 @@ fn command_domain_from_snapshot(
     }
 }
 
-fn command_detail_seed_from_snapshot(
-    snapshot: crate::state::StateReadView<'_>,
+fn command_detail_seed_from_runtime(
+    runtime: &StatePartitionReadGuard<'_>,
     command_id: CommandId,
 ) -> Option<serde_json::Map<String, Value>> {
     let command_segment = command_id.get().to_string();
-    snapshot
-        .get(["runtime", "commands", command_segment.as_str(), "detail"])
+    runtime
+        .get_path(&["commands", command_segment.as_str(), "detail"])
         .and_then(Value::as_object)
         .cloned()
 }
 
-fn command_status_from_snapshot(
-    snapshot: crate::state::StateReadView<'_>,
+fn command_status_from_runtime(
+    runtime: &StatePartitionReadGuard<'_>,
     command_id: CommandId,
 ) -> Option<CommandStatus> {
     let command_segment = command_id.get().to_string();
-    snapshot
-        .get(["runtime", "commands", command_segment.as_str(), "status"])
+    runtime
+        .get_path(&["commands", command_segment.as_str(), "status"])
         .and_then(Value::as_str)
         .and_then(|status| status.parse().ok())
 }
@@ -590,14 +590,13 @@ fn normalize_order_lifecycle_mutations(
             .skip(1)
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let current_order = trade_guard
-            .get_path(&partition_segments)
+        let current_order = trade_guard.get_path(&partition_segments);
+        let current_lifecycle = current_order.and_then(OrderLifecycle::infer_from_order_value);
+        let mut next_order = current_order
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        let mut next_order = current_order.clone();
         apply_order_fields_to_value(&mut next_order, &mutation.fields);
 
-        let current_lifecycle = OrderLifecycle::infer_from_order_value(&current_order);
         let next_lifecycle = infer_order_lifecycle_after_mutation(&next_order);
         if let Some(next_lifecycle) = next_lifecycle {
             if let Some(current_lifecycle) = current_lifecycle
@@ -658,11 +657,7 @@ fn apply_order_fields_to_value(order: &mut Value, fields: &[FieldMutation]) {
 }
 
 fn infer_order_lifecycle_after_mutation(order: &Value) -> Option<OrderLifecycle> {
-    let mut inferred_order = order.clone();
-    if let Some(map) = inferred_order.as_object_mut() {
-        map.remove("lifecycle");
-    }
-    OrderLifecycle::infer_from_order_value(&inferred_order)
+    OrderLifecycle::infer_from_order_value_ignoring_lifecycle(order)
 }
 
 fn upsert_order_lifecycle_field(fields: &mut Vec<FieldMutation>, lifecycle: OrderLifecycle) {
