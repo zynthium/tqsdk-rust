@@ -26,6 +26,7 @@ use super::{
     SessionReplayExecutor, SharedAuthProvider, SharedRouteConnector, SharedRouteExecutor,
     SharedTopologyResolver,
 };
+use crate::testing::ManualSession;
 #[derive(Clone, Default)]
 struct TestAuthProvider {
     auth_id: Option<String>,
@@ -569,7 +570,7 @@ async fn wait_command_completed_drives_http_query_command_to_completion() {
 #[tokio::test(flavor = "current_thread")]
 async fn wait_command_completed_errors_when_command_cannot_reach_terminal_state() {
     let handle = runtime_with_default_adapters();
-    let client = SessionClient::new_for_test_with_handle(handle.clone());
+    let client = ManualSession::from_runtime(handle.clone()).into_client();
     let command_id = handle
         .submit(RuntimeCommand::Query(QueryCommand::Fetch {
             query_id: QueryId::new("query-1"),
@@ -857,7 +858,7 @@ async fn replay_value_helpers_drive_replay_route_and_return_current_state() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn query_value_helper_requires_enabled_query_route() {
-    let client = SessionClient::new_for_test_with_handle(runtime_with_default_adapters());
+    let client = ManualSession::from_runtime(runtime_with_default_adapters()).into_client();
 
     let error = client
         .query_graphql_value("query { ping }", None)
@@ -892,7 +893,7 @@ async fn query_value_helper_rejects_non_stock_websocket_query_without_http_overr
 
 #[tokio::test(flavor = "current_thread")]
 async fn replay_value_helpers_require_explicit_replay_route() {
-    let client = SessionClient::new_for_test_with_handle(runtime_with_default_adapters());
+    let client = ManualSession::from_runtime(runtime_with_default_adapters()).into_client();
 
     let error = client.replay_step_value("rb-test").await.unwrap_err();
 

@@ -444,11 +444,6 @@ impl SessionClient {
         )
     }
 
-    #[doc(hidden)]
-    pub fn new_for_test_with_handle(handle: RuntimeHandle) -> Self {
-        Self::new_manual_with_handle(handle)
-    }
-
     #[cfg(all(test, feature = "live"))]
     pub(crate) fn auth_user(&self) -> &str {
         &self.context.auth_user

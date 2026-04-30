@@ -39,13 +39,13 @@
 - `MarketCacheService` / `MarketCacheDaemon` / `MarketCacheSupervisor` 及其关键配置、报告、方法已补公开文档注释。
 - 6 个 crate 的 crate-level docs 已补最小可编译 doctest；后续仍应继续补 public API 的细粒度示例。
 - `RiskEngine` 已补浮点 tick 对齐和净持仓投影的 property-style 边界测试，不引入额外测试依赖。
-- `TqApi::new_for_test` 已收为私有构造路径；测试侧改用普通 `TqApi::new(SessionClient::new_for_test_with_handle(...))`，减少 hidden public surface。
+- `TqApi::new_for_test` 已收为私有构造路径；测试侧改用普通 `TqApi::new(...)` 配合 `tqsdk_session::testing::ManualSession`，减少 hidden public surface。
 - `TqStream::new_for_test_with_capacity` 已替换为正式 `TqStream::with_commit_channel_capacity`，容量配置归属 stream facade，不再通过 hidden test 构造器暴露。
 - `DataClient::new_for_test_with_urls` 已收为 `#[cfg(test)]` 私有 helper；服务 URL 覆盖不再作为 hidden public API 暴露。
 - `DynAuthProvider` 已从 `tqsdk_core` root public re-export 收回到 `tqsdk_core::internal` sibling bridge，`AuthContext` / `AuthProvider` 保持 root contract。
 - `TaskHost` 隐藏 ownership 测试 hook 已收口：`check_manual_order_allowed_for_test()` 改为正式 `check_manual_order_allowed()` dry-run API，未使用的 owner register/unregister hidden hooks 已删除，测试改用真实 scheduler builder 覆盖冲突路径。
 - `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
-- `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session 自身集成测试已迁移，旧 hidden 构造/dispatch API 暂时委托到同一内部路径，等待 wait/stream/task fixture 迁移后再收缩。
+- `tqsdk-session` 已新增 `testing::ManualSession` 作为明确的 no-IO/manual 测试入口；session、wait、stream、task、data 的手动 session 构造调用已迁移，`SessionClient::new_for_test_with_handle()` hidden public 构造器已删除。`drain_dispatches()` 暂时保留，等待 wait/stream/task dispatch fixture 迁移。
 
 ### 仍保留为独立计划项
 

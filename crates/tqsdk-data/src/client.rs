@@ -1436,7 +1436,8 @@ mod tests {
         adapters.register_default_adapters();
 
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle.clone());
+        let session =
+            tqsdk_session::testing::ManualSession::from_runtime(handle.clone()).into_client();
 
         (session, handle)
     }

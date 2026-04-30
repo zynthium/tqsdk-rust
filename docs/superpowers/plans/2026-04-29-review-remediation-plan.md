@@ -962,11 +962,11 @@ Additional completed items:
 - Added `RiskEngine` property-style boundary tests for price tick alignment and net-position projection.
 - Reduced safe hidden public surface by removing or replacing `TqApi::new_for_test`, `TqStream::new_for_test_with_capacity`, `DataClient::new_for_test_with_urls`, and the root `DynAuthProvider` re-export.
 - Opened child plan `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md` for the remaining `_for_test` surface. The first slice removed `TaskHost` hidden ownership hooks and the duplicate `TargetPosTask::applied_target_volume_for_test()` observer, replacing them with documented task-layer public APIs.
-- Added `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual session fixture and migrated session integration tests to it while preserving temporary compatibility shims for downstream wait/stream/task migration.
+- Added `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual session fixture, migrated session construction callers across session/wait/stream/task/data tests and helpers, and removed `SessionClient::new_for_test_with_handle()`.
 
 Remaining items are intentionally not part of this mixed remediation batch:
 
-- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection. TaskHost ownership hooks and the duplicate TargetPos observer are now closed; the remaining scope is session/wait/stream manual test-driver and task fixture ingest/dispatch control.
+- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection. TaskHost ownership hooks, the duplicate TargetPos observer, and session hidden construction are now closed; the remaining scope is session dispatch draining, wait/stream manual test-driver hooks, and task fixture ingest/dispatch control.
 - `Order.direction` / `offset` / `price_type` enum migration is source-breaking and needs a schema API migration plan.
 - Global typed state migration and `CommitResult` ownership changes affect runtime contract and cursor semantics.
 - `transport.rs`, `account_group.rs`, and full `sink.rs` module-directory splits require child plans with characterization tests.

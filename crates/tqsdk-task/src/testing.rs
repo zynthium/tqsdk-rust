@@ -8,7 +8,7 @@ use tqsdk_core::{
     AdapterRegistry, CommandId, CommandStatus, CommitScope, InputPayload, IoEvent, Order,
     OutboundFrame, OutboundRequest, Position, ProtocolDomain, RuntimeHandle, RuntimeInput, Trade,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::testing::ManualSession;
 use tqsdk_wait::TqApi;
 
 use crate::{Result, TaskError, TaskHost};
@@ -162,7 +162,7 @@ impl StrategyTestHarness {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle);
+        let session = ManualSession::from_runtime(handle).into_client();
         let mut host = TaskHost::new(TqApi::new(session));
         let positions = seed_market(&host, &self.market)?;
         host.strategy_test = Some(StrategyTestRuntime {

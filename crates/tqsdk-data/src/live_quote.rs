@@ -127,7 +127,7 @@ mod tests {
         AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
         RuntimeInput,
     };
-    use tqsdk_session::SessionClient;
+    use tqsdk_session::testing::ManualSession;
 
     use super::*;
 
@@ -136,7 +136,7 @@ mod tests {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle.clone());
+        let session = ManualSession::from_runtime(handle.clone()).into_client();
 
         seed_quote(
             &handle,

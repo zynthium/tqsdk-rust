@@ -4,7 +4,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
     RuntimeInput, SessionPhase,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::{SessionClient, testing::ManualSession};
 use tqsdk_stream::TqStream;
 
 #[allow(dead_code)]
@@ -26,7 +26,7 @@ pub fn seeded_session() -> SessionClient {
     adapters.register_default_adapters();
 
     let handle = RuntimeHandle::with_adapters(adapters);
-    SessionClient::new_for_test_with_handle(handle)
+    ManualSession::from_runtime(handle).into_client()
 }
 
 #[allow(dead_code)]

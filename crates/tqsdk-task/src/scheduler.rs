@@ -318,14 +318,14 @@ mod tests {
     use chrono::TimeZone;
     use tqsdk_core::adapter::MarketAdapter;
     use tqsdk_core::{AdapterRegistry, RuntimeHandle};
-    use tqsdk_session::SessionClient;
+    use tqsdk_session::testing::ManualSession;
     use tqsdk_wait::TqApi;
 
     fn market_only_api() -> TqApi {
         let mut adapters = AdapterRegistry::new();
         adapters.register_adapter(MarketAdapter::default());
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle);
+        let session = ManualSession::from_runtime(handle).into_client();
         TqApi::new(session)
     }
 

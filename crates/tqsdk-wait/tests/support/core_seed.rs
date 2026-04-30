@@ -3,7 +3,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
     RuntimeInput,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::testing::ManualSession;
 use tqsdk_wait::TqApi;
 
 #[allow(dead_code)]
@@ -18,7 +18,7 @@ impl TestTqApi {
         adapters.register_default_adapters();
 
         let handle = RuntimeHandle::with_adapters(adapters);
-        let session = SessionClient::new_for_test_with_handle(handle);
+        let session = ManualSession::from_runtime(handle).into_client();
 
         Self {
             api: TqApi::new(session),

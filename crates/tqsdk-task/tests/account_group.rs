@@ -5,7 +5,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest,
     ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::testing::ManualSession;
 use tqsdk_task::{
     AccountFailurePolicy, AccountGroup, MultiAccountOrderOutcome, MultiAccountOrderStatus, Ratio,
     RiskEngine, RiskRejection, TaskError, TaskHost,
@@ -16,7 +16,7 @@ fn seeded_host() -> TaskHost {
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let handle = RuntimeHandle::with_adapters(adapters);
-    let session = SessionClient::new_for_test_with_handle(handle);
+    let session = ManualSession::from_runtime(handle).into_client();
     TaskHost::new(TqApi::new(session))
 }
 

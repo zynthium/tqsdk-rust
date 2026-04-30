@@ -44,7 +44,7 @@
 
 | Item | Current role | Classification |
 |------|--------------|----------------|
-| `SessionClient::new_for_test_with_handle()` | Build no-IO/manual sessions for integration fixtures and facade test harnesses | Move behind explicit testing API |
+| `SessionClient::new_for_test_with_handle()` | Removed; callers now use `tqsdk_session::testing::ManualSession` | Done |
 | `SessionClient::drain_dispatches()` | Manual/no-IO outbox inspection; already guarded against live IO | Move behind explicit testing API |
 | `TqApi::handle_for_test()` | Fixture escape hatch for ingest/dispatch/status assertions | Move behind explicit wait test driver |
 | `TqApi::begin_wait_for_test()` | Wait concurrency guard characterization | Move behind explicit wait test driver or keep crate integration-only fixture |
@@ -68,7 +68,7 @@ Additional task-side duplicate hidden API removed:
 
 **Verification:** `cargo test -p tqsdk-task --test target_pos --test live_smoke --no-run` and `cargo test -p tqsdk-task --test target_pos` passed after replacing callers with `applied_target_volume()`.
 
-**Next code slice:** Introduce explicit facade-owned test-driver entry points for manual/no-IO sessions and wait/stream fixtures. This should happen before changing `SessionClient::new_for_test_with_handle()`, `SessionClient::drain_dispatches()`, `TqApi::handle_for_test()`, or stream driver lifecycle hooks, because current integration tests still need controlled ingest/dispatch/status behavior.
+**Next code slice:** Introduce explicit facade-owned test-driver entry points for wait/stream fixtures. This should happen before changing `SessionClient::drain_dispatches()`, `TqApi::handle_for_test()`, or stream driver lifecycle hooks, because current integration tests still need controlled ingest/dispatch/status behavior.
 
 ## Task 3: Stabilize Low-Level Test Driver Entry Points
 
@@ -85,10 +85,15 @@ Additional task-side duplicate hidden API removed:
 ### Session Subtask
 
 - [x] Add `tqsdk_session::testing::ManualSession` as the explicit no-IO/manual fixture wrapper.
-- [x] Refactor `SessionClient::new_for_test_with_handle()` and `SessionClient::drain_dispatches()` to delegate to internal manual-session helpers, preventing behavior drift while downstream callers migrate.
+- [x] Refactor session manual construction/dispatch draining to internal manual-session helpers, preventing behavior drift while downstream callers migrate.
 - [x] Migrate session integration tests that need manual construction/dispatch draining to `ManualSession`.
+- [x] Migrate downstream session construction in wait/stream/task/data tests and helpers to `ManualSession`.
+- [x] Remove `SessionClient::new_for_test_with_handle()`.
 
-**Verification:** `cargo test -p tqsdk-session --test session_direct_query --test session_recovery --test session_order_intent --test session_market_command_helpers` passed.
+**Verification:**
+
+- `cargo test -p tqsdk-session --test session_direct_query --test session_recovery --test session_order_intent --test session_market_command_helpers` passed after adding `ManualSession`.
+- `cargo fmt --all --check`, `cargo check --workspace`, and `cargo test --workspace --tests` passed after migrating downstream wait/stream/task/data construction callers and removing `SessionClient::new_for_test_with_handle()`.
 
 ## Task 4: Reassess Feature Gating
 
