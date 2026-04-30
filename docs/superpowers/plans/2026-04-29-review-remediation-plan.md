@@ -941,6 +941,35 @@ Output:
 - 如果 `Task 1` 发现某些符号已被外部文档/example 冻结，则对应项必须从“立即修复”降级为“文档先行 + 迁移后修复”。
 - 任何 public API 调整都必须同步检查 `docs/reviews/public-api-scenario-review.md` 和 `crates/*/examples/api_contract_sXX_*.rs`，否则视为计划未完成。
 
+## 2026-05-01 Comprehensive Review Continuation
+
+This section records the follow-up remediation driven by
+`docs/reviews/comprehensive-review-2026-04-30.md`.
+
+Additional checkpoints:
+
+- `e2d9712 refactor: close review remediation surfaces`
+- `213d04e refactor: continue review remediation cleanup`
+- `42cb229 refactor: narrow test support public surface`
+- `b0dc62e refactor: keep dyn auth bridge internal`
+
+Additional completed items:
+
+- Removed full-snapshot fallback from `record_command_status` by adding runtime partition reads.
+- Reduced order lifecycle overlay cloning without expanding the typed-state migration scope.
+- Shared stream WAL and commit journal JSONL writer plumbing.
+- Added minimal crate-level doctests for all six crates and public docs for market cache service/daemon/supervisor types.
+- Added `RiskEngine` property-style boundary tests for price tick alignment and net-position projection.
+- Reduced safe hidden public surface by removing or replacing `TqApi::new_for_test`, `TqStream::new_for_test_with_capacity`, `DataClient::new_for_test_with_urls`, and the root `DynAuthProvider` re-export.
+
+Remaining items are intentionally not part of this mixed remediation batch:
+
+- `_for_test` feature-gating still needs a dedicated stable fake-harness migration because task/testing and multiple integration contracts rely on runtime injection.
+- `Order.direction` / `offset` / `price_type` enum migration is source-breaking and needs a schema API migration plan.
+- Global typed state migration and `CommitResult` ownership changes affect runtime contract and cursor semantics.
+- `transport.rs`, `account_group.rs`, and full `sink.rs` module-directory splits require child plans with characterization tests.
+- Broader public documentation coverage remains a quality batch, not a blocker for the bug/perf remediation already completed.
+
 ## Self-Review
 
 - 两份输入审查的所有主项都已归类到 8 个任务里，没有未归属项。
