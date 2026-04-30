@@ -303,8 +303,13 @@ impl TargetPosTask {
         self.inner.process_wait_update(api).await;
     }
 
+    /// Return the latest target volume that has been applied by host processing.
+    ///
+    /// A newly requested target is only applied when the owning [`TaskHost`]
+    /// advances via `wait_update()`, so this can lag behind
+    /// [`TargetPosTask::current_target_volume`].
     #[must_use]
-    pub(crate) fn applied_target_volume(&self) -> Option<i64> {
+    pub fn applied_target_volume(&self) -> Option<i64> {
         self.inner.with_state(|state| state.applied_target_volume)
     }
 
@@ -318,12 +323,6 @@ impl TargetPosTask {
 
     pub(crate) fn has_live_orders(&self, api: &tqsdk_wait::TqApi) -> bool {
         self.inner.has_live_orders(api)
-    }
-
-    #[doc(hidden)]
-    #[must_use]
-    pub fn applied_target_volume_for_test(&self) -> Option<i64> {
-        self.applied_target_volume()
     }
 
     #[cfg(test)]

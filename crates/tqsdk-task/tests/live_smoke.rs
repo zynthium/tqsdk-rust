@@ -523,7 +523,7 @@ async fn wait_for_task_target_reached(
         if let Some(error) = task.last_error() {
             return Err(error.to_string());
         }
-        if task.applied_target_volume_for_test() == Some(target_volume) {
+        if task.applied_target_volume() == Some(target_volume) {
             task.wait_target_reached()
                 .await
                 .map_err(|error| error.to_string())?;

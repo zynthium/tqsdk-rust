@@ -12,7 +12,6 @@ use crate::account_group::{AccountGroup, AccountGroupBuilder, MultiAccountOrderB
 use crate::calendar::TradingDayCalendar;
 use crate::execution_group::ExecutionGroupBuilder;
 use crate::order::{TaskOrderBuilder, TaskOrderIntent};
-use crate::registry::TaskId;
 use crate::risk::{RiskDecision, RiskEngine};
 use crate::scheduler::{TargetPosSchedulerBuilder, process_schedulers_wait_update};
 use crate::shared::{
@@ -137,6 +136,19 @@ impl TaskHost {
     #[must_use]
     pub fn account_group(&self) -> AccountGroupBuilder {
         AccountGroup::builder()
+    }
+
+    /// Check whether a manual order can be submitted for an account/symbol pair.
+    ///
+    /// This is the dry-run counterpart of the ownership guard enforced by
+    /// [`TaskHost::insert_order_guarded`].
+    pub fn check_manual_order_allowed(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> Result<()> {
+        self.registry
+            .with(|registry| registry.check_manual_order_allowed(account_id, symbol))
     }
 
     #[must_use]
@@ -350,44 +362,6 @@ impl TaskHost {
             return Ok(());
         };
         risk.record_order_operation(account_id, exchange_id)
-    }
-
-    #[doc(hidden)]
-    pub fn register_target_owner_for_test(
-        &mut self,
-        account_id: impl AsRef<str>,
-        symbol: impl AsRef<str>,
-    ) -> Result<u64> {
-        self.registry
-            .with_mut(|registry| registry.register_target_task(account_id, symbol))
-            .map(|task| task.id.0)
-    }
-
-    #[doc(hidden)]
-    pub fn register_scheduler_owner_for_test(
-        &mut self,
-        account_id: impl AsRef<str>,
-        symbol: impl AsRef<str>,
-    ) -> Result<u64> {
-        self.registry
-            .with_mut(|registry| registry.register_scheduler(account_id, symbol))
-            .map(|task| task.id.0)
-    }
-
-    #[doc(hidden)]
-    pub fn check_manual_order_allowed_for_test(
-        &self,
-        account_id: impl AsRef<str>,
-        symbol: impl AsRef<str>,
-    ) -> Result<()> {
-        self.registry
-            .with(|registry| registry.check_manual_order_allowed(account_id, symbol))
-    }
-
-    #[doc(hidden)]
-    pub fn unregister_task_for_test(&mut self, task_id: u64) -> bool {
-        self.registry
-            .with_mut(|registry| registry.unregister_task(TaskId(task_id)))
     }
 }
 

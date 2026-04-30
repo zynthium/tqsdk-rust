@@ -489,7 +489,7 @@ async fn empty_scheduler_finishes_immediately_and_releases_ownership() {
             ..TargetPosExecutionReport::default()
         }
     );
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released immediately for empty schedulers");
 }
 
@@ -612,7 +612,7 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
         }
     );
     assert!(scheduler.is_finished());
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after the last scheduler step");
 }
 
@@ -871,7 +871,7 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
             filled_turnover: 7356.0,
         }
     );
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released once the last step reaches target");
 }
 
@@ -1566,7 +1566,7 @@ async fn scheduler_cancel_releases_ownership_and_wait_finished() {
     scheduler.wait_finished().await.unwrap();
     assert!(scheduler.is_finished());
 
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler cancellation");
 }
 
@@ -1605,7 +1605,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
     assert!(updated);
     assert!(!scheduler.is_finished());
     assert!(
-        host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        host.check_manual_order_allowed("sim", "SHFE.rb2601")
             .is_err()
     );
 
@@ -1634,7 +1634,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
 
     scheduler.wait_finished().await.unwrap();
     assert!(scheduler.is_finished());
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler live order finishes");
 }
 
@@ -1686,7 +1686,7 @@ async fn scheduler_wait_finished_returns_error_when_step_insert_order_submission
         scheduler.wait_finished().await,
         Err(TaskError::Wait(_))
     ));
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler submit failure");
 }
 
@@ -1782,7 +1782,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
         scheduler.wait_finished().await,
         Err(TaskError::Wait(_))
     ));
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after scheduler partial batch submission failure");
 }
 

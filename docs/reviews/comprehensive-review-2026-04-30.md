@@ -43,10 +43,12 @@
 - `TqStream::new_for_test_with_capacity` 已替换为正式 `TqStream::with_commit_channel_capacity`，容量配置归属 stream facade，不再通过 hidden test 构造器暴露。
 - `DataClient::new_for_test_with_urls` 已收为 `#[cfg(test)]` 私有 helper；服务 URL 覆盖不再作为 hidden public API 暴露。
 - `DynAuthProvider` 已从 `tqsdk_core` root public re-export 收回到 `tqsdk_core::internal` sibling bridge，`AuthContext` / `AuthProvider` 保持 root contract。
+- `TaskHost` 隐藏 ownership 测试 hook 已收口：`check_manual_order_allowed_for_test()` 改为正式 `check_manual_order_allowed()` dry-run API，未使用的 owner register/unregister hidden hooks 已删除，测试改用真实 scheduler builder 覆盖冲突路径。
+- `TargetPosTask::applied_target_volume_for_test()` 已删除，`applied_target_volume()` 成为正式公开观测 API 并补文档。
 
 ### 仍保留为独立计划项
 
-- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
+- `_for_test` feature-gating 不能直接机械改：`tqsdk-task::testing` 和多个 integration contract 仍依赖测试 runtime 注入。TaskHost ownership 与 TargetPos duplicate observer 已收口；剩余主要是 session/wait/stream manual test-driver 与 task fixture 的 runtime ingest/dispatch 控制，需要先设计 stable fake harness 注入面，再收缩 hidden runtime handle。
 - `Order.direction` / `offset` / `price_type` 从 `String` 迁移到枚举是 source-breaking schema API 改造，需要单独 public API 迁移计划。
 - 全局 `serde_json::Value` 状态树 typed migration 属于 runtime contract 长期演进，不应混入本批修复。
 - `apply_and_publish_locked` 的 `CommitResult` clone 受当前 public `CommitResult` 返回值和 commit log 持有所有权约束；若要彻底消除，需要单独评估 `Arc<CommitResult>` 或 cursor API contract。

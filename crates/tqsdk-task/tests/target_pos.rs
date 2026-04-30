@@ -9,7 +9,7 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 use tqsdk_task::{
-    OffsetPriority, PriceMode, TargetPosConfig, TargetPosTaskExecutionEvent,
+    OffsetPriority, PriceMode, TargetPosConfig, TargetPosScheduleStep, TargetPosTaskExecutionEvent,
     TargetPosTaskOrderReport, TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError,
     TaskHost, TaskKind, VolumeSplitPolicy,
 };
@@ -419,9 +419,18 @@ async fn target_pos_task_owns_symbol_until_cancelled() {
     let mut host = seeded_host();
     let task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();
 
-    let err = host
-        .register_scheduler_owner_for_test("sim", "SHFE.rb2601")
-        .expect_err("scheduler should not take ownership while target task is active");
+    let err = match host
+        .target_pos_scheduler("sim", "SHFE.rb2601")
+        .steps(vec![TargetPosScheduleStep::target(
+            Duration::from_secs(60),
+            1,
+            PriceMode::Active,
+        )])
+        .build()
+    {
+        Ok(_) => panic!("scheduler should not take ownership while target task is active"),
+        Err(err) => err,
+    };
     assert_eq!(
         err,
         TaskError::OwnershipConflict {
@@ -436,7 +445,7 @@ async fn target_pos_task_owns_symbol_until_cancelled() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("manual order should be allowed after target task cancellation");
 }
 
@@ -461,12 +470,12 @@ fn dropping_target_pos_task_releases_ownership() {
     {
         let _task = host.target_pos("sim", "SHFE.rb2601").build().unwrap();
         assert!(
-            host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+            host.check_manual_order_allowed("sim", "SHFE.rb2601")
                 .is_err()
         );
     }
 
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after the last task handle drops");
 }
 
@@ -479,7 +488,7 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
 
     let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
     assert!(pending.is_err());
-    assert_eq!(task.applied_target_volume_for_test(), None);
+    assert_eq!(task.applied_target_volume(), None);
 
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
 
@@ -502,7 +511,7 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(5));
+    assert_eq!(task.applied_target_volume(), Some(5));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -610,7 +619,7 @@ async fn host_wait_update_applies_latest_target_request_only() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(8));
+    assert_eq!(task.applied_target_volume(), Some(8));
     assert_eq!(task.current_target_volume(), Some(8));
 }
 
@@ -633,7 +642,7 @@ async fn target_pos_task_wait_finished_resolves_after_cancel() {
     task.wait_finished().await.unwrap();
     assert!(task.is_finished());
 
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after cancellation");
 }
 
@@ -700,7 +709,7 @@ async fn open_only_target_pos_submits_buy_open_order_with_active_price() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(2));
+    assert_eq!(task.applied_target_volume(), Some(2));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -766,7 +775,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(11));
+    assert_eq!(task.applied_target_volume(), Some(11));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -792,7 +801,7 @@ async fn open_only_target_pos_does_not_submit_order_when_position_already_matche
             .is_empty()
     );
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(2));
+    assert_eq!(task.applied_target_volume(), Some(2));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1033,7 +1042,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     );
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(1));
+    assert_eq!(task.applied_target_volume(), Some(1));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1069,7 +1078,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
 
     let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
     assert!(pending.is_err());
-    assert_eq!(task.applied_target_volume_for_test(), None);
+    assert_eq!(task.applied_target_volume(), None);
 
     seed_order_status_commit(
         &host,
@@ -1092,7 +1101,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
             .is_empty()
     );
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(0));
+    assert_eq!(task.applied_target_volume(), Some(0));
     assert_eq!(task.execution_report().cancel_request_count, 1);
 }
 
@@ -1164,7 +1173,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     assert!(updated);
     assert!(!task.is_finished());
     assert!(
-        host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+        host.check_manual_order_allowed("sim", "SHFE.rb2601")
             .is_err()
     );
 
@@ -1193,7 +1202,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
 
     task.wait_finished().await.unwrap();
     assert!(task.is_finished());
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after live order finishes");
 }
 
@@ -1591,7 +1600,7 @@ async fn target_pos_wait_target_reached_returns_error_when_insert_order_submissi
         task.wait_target_reached().await,
         Err(TaskError::Wait(_))
     ));
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after task submit failure");
 }
 
@@ -1652,7 +1661,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
         task.wait_finished().await,
         Err(TaskError::Wait(_))
     ));
-    host.check_manual_order_allowed_for_test("sim", "SHFE.rb2601")
+    host.check_manual_order_allowed("sim", "SHFE.rb2601")
         .expect("ownership should be released after partial batch submission failure cleanup");
 }
 
@@ -1737,7 +1746,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(-1));
+    assert_eq!(task.applied_target_volume(), Some(-1));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2210,7 +2219,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     assert!(updated);
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(-1));
+    assert_eq!(task.applied_target_volume(), Some(-1));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2301,5 +2310,5 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     );
 
     task.wait_target_reached().await.unwrap();
-    assert_eq!(task.applied_target_volume_for_test(), Some(0));
+    assert_eq!(task.applied_target_volume(), Some(0));
 }
