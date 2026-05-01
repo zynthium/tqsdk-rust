@@ -57,7 +57,7 @@ public API。
 
 | 使用者 | 主要需求 | Rust 推荐入口 | 对应场景 | 迭代判断 |
 | --- | --- | --- | --- | --- |
-| 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情 | `tqsdk-core` + `tqsdk-session` | 5, 23 | 维持薄底座，不上移厚 facade |
+| 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27 | 维持薄底座，不上移厚 facade |
 | 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10, 25 | 继承 Python 语义，不复制 Python 单体 |
 | async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk-stream` + `tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
 | 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19 | 建立执行层抽象，不下沉到 core |
@@ -166,6 +166,40 @@ public API。
   `tqsdk-stream`；WAL fsync policy 和本地 compaction 已落在 `tqsdk-stream`；
   WAL recovery report 和 commit metadata journal replay 已落在 `tqsdk-stream`；
   durable daemon queue / runtime state snapshot recovery 仍在后续 daemon/tooling 层。
+
+### P0：Session direct-query / metadata pack
+
+服务的使用者：
+
+- 低层 / 高频用户
+- direct-query 用户
+- 需要一次性 metadata/service 查询的系统集成方
+
+目标：
+
+- 一次性 metadata / service request/response 明确归属 `tqsdk-session`。
+- 合约列表、主连、期权、交易日历、结算价、排名和 EDB 有正式可编译契约。
+- wait/stream 只通过 `session()` 复用底层 session，不复制 direct-query API。
+
+建议落点：
+
+- `tqsdk-session`：metadata/service one-shot direct query 与 raw GraphQL escape hatch。
+- `tqsdk-wait` / `tqsdk-stream`：只保留 live refs / continuous consumption。
+- `tqsdk-data`：历史下载、Greeks、DataFrame/polars 和研究派生。
+
+优先提升的场景：
+
+- `api_contract_s23_contract_metadata`
+- `api_contract_s27_metadata_service_queries`（新增）：覆盖 metadata/service query
+  pack，确认合约列表、主连、期权、交易日历、结算价、排名和 EDB 仍是 session
+  one-shot request/response。
+
+已落地：
+
+- `api_contract_s27_metadata_service_queries` 已提升为正式 session example，覆盖
+  `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`。
+- `SessionRawQuery::query_graphql_value` 仍是低层 escape hatch；示例主路径不要求用户解析
+  `serde_json::Value`。
 
 ### P0：订单 intent 与断线一致性
 

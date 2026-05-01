@@ -137,6 +137,7 @@
 - [examples/query_command_wait.rs](examples/query_command_wait.rs)
 - [examples/quote_progress.rs](examples/quote_progress.rs)
 - [examples/trade_login_tqkq.rs](examples/trade_login_tqkq.rs)
+- [examples/api_contract_s27_metadata_service_queries.rs](examples/api_contract_s27_metadata_service_queries.rs)
 
 这个示例展示的是最推荐的 direct-query 使用路径：
 
@@ -150,6 +151,14 @@
 - 调用方直接提交 `RuntimeCommand::Query(QueryCommand::Fetch { .. })`
 - 用 `wait_command_completed(command_id).await` 等到底层命令完成
 - 再通过 `query_result(query_id)` 回到统一状态树读取结果
+
+而 `api_contract_s27_metadata_service_queries.rs` 展示的是完整 metadata /
+service direct-query pack：
+
+- 合约列表、主连、期权链和多档期权查询继续属于 session metadata one-shot API
+- 交易日历、结算价、排名和 EDB 继续属于 session service one-shot API
+- wait/stream 可以通过 `session()` 复用同一个底层 session，但不复制这些
+  direct-query API
 
 而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
 

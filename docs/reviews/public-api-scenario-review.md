@@ -76,8 +76,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `RiskManagementDataRef`、证券账户 / 持仓 / 委托 / 成交 ref 与
   `confirm_settlement` 场景；这些属于 live trade/system refs 的覆盖完整性。
 - `tqsdk-session`：`query_quotes`、`query_cont_quotes`、options、calendar、
-  settlement、ranking、EDB 的 direct-query pack 场景；这些属于一次性
-  metadata/service query，不应下沉到 wait/stream。
+  settlement、ranking、EDB 的 direct-query pack 场景已补正式 S27 contract；
+  这些属于一次性 metadata/service query，不应下沉到 wait/stream。
 - `tqsdk-data`：`query_his_cont_quotes`、tick/K线 download、CSV export、
   `query_option_greeks` 场景；这些属于研究 / 离线数据层，不应进入 session/wait。
 - `tqsdk-task`：独立 `TargetPosTask` / scheduler ownership 场景；S11 已在策略里
@@ -195,6 +195,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   order/business retry audit 属于用户执行审计系统职责。
 - S23 合约信息查询与标准化继续保持“自然”：`SessionClient::query_instrument_specs`
   返回 `InstrumentSpec`，用户不再把 live `Quote` 当作合约规格对象。
+- S27 Session metadata 与 service query pack 继续保持“自然”：`SessionClient`
+  直接提供合约列表、主连、期权、交易日历、结算价、排名和 EDB 的 typed
+  one-shot request/response；raw GraphQL 仍只是 `SessionRawQuery::query_graphql_value`
+  低层逃生舱，direct query 不复制到 wait/stream。
 
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -223,6 +227,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
 | 24. 最小可测试策略 | 自然（核心 test foundation） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `OrderLifecycle`; `FakeBroker::partial_fills`; `FakeBroker::latency_steps`; `FakeBroker::disconnect_for_steps`; `FakeBrokerConnectionStatus`; durable fixtures and richer broker behavior remain non-core gap |
 | 25. Wait 行情序列与交易状态 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`; `TqApi::{get_trading_status,get_kline_serial,get_tick_serial,wait_update,is_changing,is_changing_fields}`; 实时序列窗口属于 wait，不属于 data download 或 session direct query |
+| 27. Session metadata 与 service query pack | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`; `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`; direct query 继续归属 session |
 
 ## 主要结论
 
@@ -230,9 +235,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
    可表达；历史上被归为“勉强”的场景，不应再解释为 core SDK 必须补平台能力，
    而应解释为已有 foundation 之上的用户层系统能力未承诺。
 2. 当前仍需要补的是核心能力的契约覆盖，而不是继续扩大能力边界：wait serial /
-   trading-status 已由 S25 补正式 contract；live trade/system refs、session metadata/service query pack、data
-   download/export/Greeks，以及独立 TargetPosTask / scheduler ownership 都应补
-   正式 `api_contract_sXX_*.rs`。
+   trading-status 已由 S25 补正式 contract；session metadata/service query pack
+   已由 S27 补正式 contract；live trade/system refs、data download/export/Greeks，
+   以及独立 TargetPosTask / scheduler ownership 仍应补正式
+   `api_contract_sXX_*.rs`。
 3. 交易相关核心能力已经覆盖普通登录、限价单、部分成交撤单、
    session-scoped reconnect-safe order intent、基础前置风控、官方同类基础开仓 /
    频率限额、revision-bound execution/risk report、轻量单笔 what-if projection、
