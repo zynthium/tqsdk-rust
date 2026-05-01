@@ -273,6 +273,14 @@ runtime apply 前必须校验 mutation 来源和根路径：
 - 不要用字符串终态判断替代 `CommandStatus` / `OrderLifecycle`。
 - 不要绕过 `RuntimeHandle::record_command_status()`。
 
+## 提交与归档纪律
+
+- 当一个改动单元已经足够自洽、验证通过，并且不需要继续耦合其他无关任务时，AI 助手应优先提交代码，再继续下一项工作或结束 session。
+- 在 superpowers 的 spec-driven / plan-driven 流程里，默认收尾顺序是：实现 -> 验证 -> 提交 -> 归档执行文档。
+- `superpowers` 的 spec / plan / execution review 属于执行记录，不是当前架构权威。对应的代码修改闭环并验证后，应把这些文档移到 `docs/archive/superpowers/` 的相应目录，并同步更新归档索引。
+- `docs/architecture/*`、crate README，以及仍在指导未闭环工作的 review / scenario 文档不是自动归档对象；它们必须留在活跃位置，直到它们不再承担当前权威或当前决策职责。
+- 如果一个文档同时承担当前权威和执行记录的角色，以当前权威为准，不得自动归档；应就地更新。
+
 ## 开始工作前的分类流程
 
 每个新 session 开始改代码前，先把任务归类：

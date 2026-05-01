@@ -5,7 +5,7 @@
 
 这里的第一原则不是先做某种用户 API，而是先做一个足以承载所有远端协议与对象的统一 runtime contract。
 
-仓库级文档职责和 AI 读取入口见 [`../README.md`](../README.md)。本目录是当前架构权威；`../reviews/`、`../archive/` 与 `../superpowers/` 中的审查记录和计划只能作为输入材料，不能覆盖本目录已经确认的 crate 边界和 runtime 不变量。
+仓库级文档职责和 AI 读取入口见 [`../README.md`](../README.md)。本目录是当前架构权威；`../reviews/`、`../archive/` 与 `../superpowers/` 中的审查记录和计划只能作为输入材料，不能覆盖本目录已经确认的 crate 边界和 runtime 不变量。`superpowers` 里的 spec / plan / execution review 以执行记录为主，闭环后应迁入 `../archive/superpowers/`。
 
 重点回答：
 

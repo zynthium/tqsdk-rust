@@ -4,6 +4,8 @@
 
 [`docs/reviews/`](docs/reviews/) 是审查和 public API 决策记录，[`docs/archive/`](docs/archive/) 是历史审查输入，[`docs/superpowers/`](docs/superpowers/) 是计划执行记录。它们可以作为上下文，但不能覆盖 `docs/architecture/*` 的当前架构权威。
 
+完成并验证一个可提交的改动单元后，优先自动提交，再继续下一项任务。用于指导已完成代码修改的 spec / plan / review 文档，在闭环后应自动迁入 `docs/archive/superpowers/`；当前架构权威文档不要自动归档。
+
 ## 必守架构边界
 
 - `tqsdk-core` 是 protocol-complete runtime substrate，只负责命令、状态、commit/revision、cursor、adapter、schema types 与底层 session/runtime contract；不得重新塞入 high-level facade、direct query convenience、task/data/downloader 语义。

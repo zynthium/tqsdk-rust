@@ -1,6 +1,6 @@
 # Superpowers Specs And Plans
 
-本目录现在只保留历史入口说明；活跃 spec / plan 已移到 `docs/archive/superpowers/`。
+本目录现在只保留历史入口说明；活跃 spec / plan 已移到 `docs/archive/superpowers/`。当某个 spec / plan 已经完成其代码指导职责时，默认收尾动作是先提交对应代码，再把执行文档迁入归档区。
 
 ## 职责边界
 
@@ -22,3 +22,4 @@
 - 如果计划引用的路径已经移动，以 [`../README.md`](../README.md) 和 [`../reviews/README.md`](../reviews/README.md) 为准。
 - 如果计划要求修改 public API，必须同步检查 [`../reviews/public-api-scenario-review.md`](../reviews/public-api-scenario-review.md)、[`../reviews/public-api-disposition-matrix.md`](../reviews/public-api-disposition-matrix.md)、相关架构专题文档和 crate README。
 - 如果计划中的判断与当前代码不一致，应更新计划或创建新计划，不要盲目执行旧步骤。
+- 如果一个执行文档已经闭环，就不要继续留在本目录；先完成提交，再移入 `../archive/superpowers/`。

@@ -12,6 +12,12 @@ session/query ownership, or wait/stream/task/data facade ownership.
 contains execution specs/plans. Treat them as context and planning evidence, not
 as authority over `docs/architecture/*` or current code.
 
+When a code-change batch reaches a coherent, verified checkpoint, commit it
+before switching topics or ending the session. When a spec/plan/review document
+has finished driving a code change, archive it to `docs/archive/...`; keep
+`docs/architecture/*` active and update them in place when they remain the
+authority.
+
 Hard constraints:
 
 - `tqsdk-core` remains the protocol-complete runtime substrate. Do not move
