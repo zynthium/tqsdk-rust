@@ -252,7 +252,7 @@ git commit -m "test: cover wait change and window helpers"
 - Verify: `crates/tqsdk-task/src/execution_group.rs`
 - Verify: `crates/tqsdk-task/tests/execution_group.rs`
 
-- [ ] **Step 1: Add failing shared-state tests**
+- [x] **Step 1: Add failing shared-state tests**
 
 Add private tests to `crates/tqsdk-task/src/shared.rs` named:
 
@@ -262,7 +262,7 @@ Add private tests to `crates/tqsdk-task/src/shared.rs` named:
 
 Do not expose the wrappers publicly. Test through existing crate-private methods only.
 
-- [ ] **Step 2: Add failing deployment helper tests**
+- [x] **Step 2: Add failing deployment helper tests**
 
 Add private tests to `crates/tqsdk-task/src/deployment.rs` named:
 
@@ -275,7 +275,7 @@ Add private tests to `crates/tqsdk-task/src/deployment.rs` named:
 
 Use existing public builders and crate-private helpers. If a test requires async strategy execution, use `#[tokio::test]` and the existing manual session/test fixtures rather than new hidden public APIs.
 
-- [ ] **Step 3: Reconcile execution group coverage**
+- [x] **Step 3: Reconcile execution group coverage**
 
 Read `crates/tqsdk-task/tests/execution_group.rs` and verify it still covers:
 
@@ -292,12 +292,16 @@ Read `crates/tqsdk-task/tests/execution_group.rs` and verify it still covers:
 
 If any item is missing, add one focused integration test to `crates/tqsdk-task/tests/execution_group.rs`. If all items are present, make no code change for `execution_group.rs` and record that in the final note.
 
-- [ ] **Step 4: Run task helper tests**
+Execution note: `crates/tqsdk-task/tests/execution_group.rs` already covers all listed scenarios with 10 integration tests, so this plan step made no code change to `execution_group.rs`.
+
+- [x] **Step 4: Run task helper tests**
 
 Run:
 
 ```bash
-cargo test -p tqsdk-task shared deployment execution_group -- --nocapture
+cargo test -p tqsdk-task shared::tests -- --nocapture
+cargo test -p tqsdk-task deployment::tests -- --nocapture
+cargo test -p tqsdk-task --test execution_group -- --nocapture
 ```
 
 Expected:
@@ -306,7 +310,7 @@ Expected:
 All task helper and execution group tests pass.
 ```
 
-- [ ] **Step 5: Commit task coverage**
+- [x] **Step 5: Commit task coverage**
 
 ```bash
 git add crates/tqsdk-task/src/shared.rs crates/tqsdk-task/src/deployment.rs crates/tqsdk-task/tests/execution_group.rs

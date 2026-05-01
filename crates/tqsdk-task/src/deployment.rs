@@ -1063,3 +1063,180 @@ async fn build_task_environment(
         .build()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::testing::{FakeMarket, StrategyTestHarness};
+
+    use super::*;
+
+    #[test]
+    fn strategy_lifecycle_defaults_are_unlimited_until_configured() {
+        let lifecycle = StrategyLifecycle::new();
+
+        assert_eq!(lifecycle.max_steps_limit(), None);
+        assert_eq!(lifecycle.max_steps(3).max_steps_limit(), Some(3));
+        assert_eq!(
+            lifecycle
+                .max_steps(3)
+                .without_step_limit()
+                .max_steps_limit(),
+            None
+        );
+        assert_eq!(lifecycle.max_steps_opt(Some(5)).max_steps_limit(), Some(5));
+    }
+
+    #[test]
+    fn strategy_retry_policy_allows_only_configured_attempts() {
+        let policy = StrategyRetryPolicy::new().max_retries(2);
+
+        assert!(policy.should_retry(0));
+        assert!(policy.should_retry(1));
+        assert!(!policy.should_retry(2));
+        assert_eq!(policy.max_retries_limit(), 2);
+        assert!(!policy.without_retries().should_retry(0));
+    }
+
+    #[test]
+    fn strategy_shutdown_signal_is_idempotent_and_tracks_ctrl_c_mode() {
+        let manual = StrategyShutdownSignal::manual();
+        assert!(!manual.is_shutdown_requested());
+        assert!(!manual.listens_to_ctrl_c());
+
+        manual.request_shutdown();
+        manual.request_shutdown();
+
+        assert!(manual.is_shutdown_requested());
+
+        let ctrl_c = StrategyShutdownSignal::ctrl_c();
+        assert!(ctrl_c.listens_to_ctrl_c());
+        assert!(!ctrl_c.is_shutdown_requested());
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn strategy_deployment_config_market_builders_set_modes() {
+        let config = StrategyDeploymentConfig::tqkq_sim("user", "pass")
+            .stock_market()
+            .startup_timeout(Duration::from_secs(7))
+            .lifecycle(StrategyLifecycle::new().max_steps(9));
+
+        assert_eq!(config.provider(), StrategyEnvironmentProvider::TqKqSim);
+        assert_eq!(config.market, StrategyMarketMode::StockLive);
+        assert_eq!(config.startup_timeout_value(), Duration::from_secs(7));
+        assert_eq!(config.lifecycle_policy().max_steps_limit(), Some(9));
+        assert!(config.risk_engine().is_none());
+    }
+
+    #[tokio::test]
+    async fn strategy_supervisor_health_reflects_initial_deployment() {
+        let deployment = test_deployment().await;
+
+        let supervisor = StrategySupervisor::new(deployment);
+
+        assert_eq!(
+            supervisor.health().status(),
+            StrategySupervisorHealthStatus::Starting
+        );
+        assert_eq!(
+            supervisor.health().provider(),
+            StrategyEnvironmentProvider::TaskHost
+        );
+        assert_eq!(
+            supervisor.health().kind(),
+            StrategyEnvironmentKind::TaskHost
+        );
+        assert_eq!(supervisor.health().account_id(), Some("sim"));
+        assert_eq!(supervisor.metrics(), StrategySupervisorMetrics::default());
+    }
+
+    #[tokio::test]
+    async fn strategy_supervisor_records_retry_then_retry_limit_report() {
+        let deployment = test_deployment().await;
+        let mut supervisor = StrategySupervisor::new(deployment)
+            .retry_policy(StrategyRetryPolicy::new().max_retries(1));
+        let mut consecutive_retries = 0;
+
+        let first = supervisor.record_error(
+            TaskError::InvalidState("first failure"),
+            &mut consecutive_retries,
+        );
+
+        assert!(first.is_none());
+        assert_eq!(consecutive_retries, 1);
+        assert_eq!(supervisor.metrics().errors(), 1);
+        assert_eq!(supervisor.metrics().retries(), 1);
+        assert_eq!(
+            supervisor.health().status(),
+            StrategySupervisorHealthStatus::Recovering
+        );
+
+        let report = supervisor
+            .record_error(
+                TaskError::InvalidState("second failure"),
+                &mut consecutive_retries,
+            )
+            .expect("retry limit should produce a report");
+
+        assert_eq!(
+            report.stop_reason(),
+            StrategySupervisorStopReason::RetryLimitExceeded
+        );
+        assert_eq!(report.metrics().errors(), 2);
+        assert_eq!(report.metrics().retries(), 1);
+        assert!(matches!(
+            report.last_error(),
+            Some(TaskError::InvalidState("second failure"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn strategy_supervisor_report_marks_shutdown_reason() {
+        let deployment = test_deployment().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mut supervisor = StrategySupervisor::new(deployment).telemetry_reporter(move |event| {
+            captured
+                .lock()
+                .expect("telemetry event lock poisoned")
+                .push(event);
+        });
+
+        let report = supervisor.stop(StrategySupervisorStopReason::ShutdownRequested, None);
+
+        assert_eq!(
+            report.stop_reason(),
+            StrategySupervisorStopReason::ShutdownRequested
+        );
+        assert_eq!(report.metrics(), StrategySupervisorMetrics::default());
+        let events = events.lock().expect("telemetry event lock poisoned");
+        assert!(events.iter().any(|event| {
+            event.kind() == StrategyTelemetryEventKind::RunStopped
+                && event.stop_reason() == Some(StrategySupervisorStopReason::ShutdownRequested)
+        }));
+    }
+
+    async fn test_deployment() -> StrategyDeployment {
+        let harness = StrategyTestHarness::new()
+            .market(
+                FakeMarket::new()
+                    .quote("SHFE.au2606", 610.0)
+                    .account("sim", 100_000.0),
+            )
+            .build()
+            .expect("strategy test harness should build");
+        let environment = StrategyEnvironment::from_test_harness(harness)
+            .quote("SHFE.au2606")
+            .account("sim")
+            .build()
+            .await
+            .expect("strategy environment should build");
+        StrategyDeployment::from_environment(environment)
+            .account_id("sim")
+            .build()
+            .await
+            .expect("strategy deployment should build")
+    }
+}

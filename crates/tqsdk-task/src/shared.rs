@@ -120,3 +120,73 @@ impl SharedTradingCalendar {
             .try_extend_days(days)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use super::*;
+
+    #[test]
+    fn shared_task_state_read_and_update_round_trips_value() {
+        let shared = SharedTaskState::<usize>::default();
+        let cloned = shared.clone();
+
+        shared.with_mut(|value| *value = 42);
+
+        assert_eq!(shared.with(|value| *value), 42);
+        assert_eq!(cloned.with(|value| *value), 42);
+    }
+
+    #[test]
+    fn task_state_cell_get_mut_updates_before_shared_access() {
+        let mut cell = TaskStateCell::<Vec<&'static str>>::default();
+
+        cell.get_mut().push("seeded");
+        cell.with_mut(|items| items.push("updated"));
+
+        assert_eq!(cell.with(|items| items.clone()), vec!["seeded", "updated"]);
+    }
+
+    #[test]
+    fn shared_quote_subscriptions_deduplicates_symbols() {
+        let subscriptions = SharedQuoteSubscriptions::default();
+        let cloned = subscriptions.clone();
+
+        subscriptions.insert("SHFE.au2606");
+        subscriptions.insert("SHFE.au2606");
+
+        assert!(subscriptions.contains("SHFE.au2606"));
+        assert!(cloned.contains("SHFE.au2606"));
+        assert!(!subscriptions.contains("DCE.m2605"));
+    }
+
+    #[test]
+    fn shared_trading_calendar_replaces_days_atomically() {
+        let calendar = SharedTradingCalendar::default();
+        calendar
+            .extend([
+                TradingCalendarDay {
+                    date: "2026-05-01".to_string(),
+                    trading: false,
+                },
+                TradingCalendarDay {
+                    date: "2026-05-04".to_string(),
+                    trading: true,
+                },
+            ])
+            .expect("calendar extension should succeed");
+
+        let may_1 = NaiveDate::from_ymd_opt(2026, 5, 1).expect("fixture date should exist");
+        let may_4 = NaiveDate::from_ymd_opt(2026, 5, 4).expect("fixture date should exist");
+        assert_eq!(calendar.snapshot().day_status(may_1), Some(false));
+        assert_eq!(calendar.snapshot().day_status(may_4), Some(true));
+
+        calendar.replace(TradingDayCalendar::from_entries([(may_1, true)]));
+
+        let snapshot = calendar.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.day_status(may_1), Some(true));
+        assert_eq!(snapshot.day_status(may_4), None);
+    }
+}
