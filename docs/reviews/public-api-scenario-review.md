@@ -73,8 +73,9 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - `tqsdk-wait`：wait 风格 `get_trading_status`、`get_kline_serial`、`get_tick_serial`
   场景已补正式 S25 contract；这些属于单策略作者的稳定截面和行情序列心智。
 - `tqsdk-wait`：`NotificationRef`、`SettlementInfoRef`、`RiskManagementRuleRef`、
-  `RiskManagementDataRef`、证券账户 / 持仓 / 委托 / 成交 ref 与
-  `confirm_settlement` 场景；这些属于 live trade/system refs 的覆盖完整性。
+  `RiskManagementDataRef` 与 `confirm_settlement` 场景已补正式 S26 trade/system
+  contract；证券账户 / 持仓 / 委托 / 成交 ref 已拆为正式 S26 security trade
+  contract。这两组都属于 live trade/system refs 的覆盖完整性。
 - `tqsdk-session`：`query_quotes`、`query_cont_quotes`、options、calendar、
   settlement、ranking、EDB 的 direct-query pack 场景已补正式 S27 contract；
   这些属于一次性 metadata/service query，不应下沉到 wait/stream。
@@ -139,8 +140,9 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   多序列 event source 合并入口。完整 daemon reconnect orchestration 属于生产
   运维/用户层工具，不作为核心 SDK 近期目标。
 - S25/S26 的 wait 契约已补齐：wait 风格 trading status、K 线 serial、tick serial、
-  notification、settlement、risk management 以及证券 account/position/order/trade
-  live refs 都已在 `tqsdk-wait` 中获得正式 contract example，`confirm_settlement`
+  notification、settlement、risk management 已由
+  `api_contract_s26_trade_system_refs` 覆盖，证券 account/position/order/trade
+  live refs 已由 `api_contract_s26_security_trade_refs` 覆盖，`confirm_settlement`
   仍保留在 wait trade command wrapper 边界内。
 - S18 本地行情缓存 foundation 已进入核心自然表达范围：`MarketCacheWriter` /
   `MarketCacheReader` / `MarketCacheReplay` 已覆盖离线 cache record、JSONL

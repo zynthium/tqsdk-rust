@@ -149,8 +149,11 @@ public API。
 - `api_contract_s20_production_daemon` 的健康状态子集（已新增 typed health snapshot）
 - `api_contract_s25_wait_serial_trading_status`（新增）：覆盖 wait 风格 trading status、
   K线 serial、tick serial 和 `is_changing` 契约，确认实时窗口不回流到 session/data。
-- `api_contract_s26_trade_system_refs`（新增）：覆盖 notification、settlement、risk management、
-  证券交易对象 ref 与 `confirm_settlement`，确认这些对象是 wait live refs，不是 session direct query。
+- `api_contract_s26_trade_system_refs`（新增）：覆盖 notification、settlement、
+  risk management 与 `confirm_settlement`，确认这些对象是 wait live refs，不是
+  session direct query。
+- `api_contract_s26_security_trade_refs`（新增）：覆盖证券 account/position/order/trade
+  refs，确认证券交易对象是 wait live refs，不是 session direct query。
 
 已落地：
 

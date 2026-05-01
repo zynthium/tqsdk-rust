@@ -146,10 +146,14 @@ metadata direct query。契约示例见
 [examples/api_contract_s25_wait_serial_trading_status.rs](examples/api_contract_s25_wait_serial_trading_status.rs)。
 
 较少见的 trade/system live refs 也属于 wait facade：`NotificationRef`、
-`SettlementInfoRef`、`RiskManagementRuleRef`、`RiskManagementDataRef` 以及证券
-account/position/order/trade refs 都通过同一 runtime state tree 和
-`is_changing()` 观察。`confirm_settlement` 是 wait 风格 trade command wrapper。
-契约示例见 [examples/api_contract_s26_trade_system_refs.rs](examples/api_contract_s26_trade_system_refs.rs)。
+`SettlementInfoRef`、`RiskManagementRuleRef`、`RiskManagementDataRef` 都通过同一
+runtime state tree 和 `is_changing()` 观察。`confirm_settlement` 是 wait 风格
+trade command wrapper，默认示例运行不会提交确认命令。契约示例见
+[examples/api_contract_s26_trade_system_refs.rs](examples/api_contract_s26_trade_system_refs.rs)。
+
+证券 account/position/order/trade refs 使用独立 typed refs，同样属于 wait 的
+diff-backed live state surface，不是 session direct query。契约示例见
+[examples/api_contract_s26_security_trade_refs.rs](examples/api_contract_s26_security_trade_refs.rs)。
 
 如果策略启动前需要同时确认行情订阅和交易初始同步完成，可以使用
 `TqApi::startup_recovery()` 构造 typed barrier。它会提交 quote 订阅，并等待
