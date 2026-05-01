@@ -114,9 +114,10 @@ public API。
 - S21 durable distributed queue 和 runtime state snapshot recovery 平台；
 - S24 完整仿真交易所或生产级测试 fixture 持久恢复。
 
-降级不是删除场景，而是防止把高级编排伪装成核心 SDK 缺口。降级后的内容可以
-保留在 `docs/scenarios/api_gaps/`，用于说明用户如何在 SDK primitives 之上自行
-构建。
+降级不是删除场景，而是防止把高级编排伪装成核心 SDK 缺口。已经有正式 example、
+且剩余需求已明确降级的历史 sketch 应归档到 `docs/archive/scenarios/`；只有仍未
+支持、仍需要作为当前边界样本跟踪的 desired sketch 才保留在
+`docs/scenarios/api_gaps/`，用于说明用户如何在 SDK primitives 之上自行构建。
 
 ## 推荐迭代顺序
 

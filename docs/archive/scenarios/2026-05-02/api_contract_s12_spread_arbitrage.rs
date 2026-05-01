@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`.
+//! The remaining automatic hedge / flatten / replenish / persistent audit
+//! scope was explicitly downgraded to user-side execution tooling, so this
+//! sketch is kept only as historical context.
+//!
 //! Scenario: 跨合约套利
 //!
 //! User goal:

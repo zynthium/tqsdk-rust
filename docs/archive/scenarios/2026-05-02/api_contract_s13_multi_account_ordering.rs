@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`.
+//! The remaining automatic allocation / compensation / cross-account TargetPos
+//! / durable audit scope was explicitly downgraded to user-side execution
+//! tooling, so this sketch is kept only as historical context.
+//!
 //! Scenario: 多账户下单
 //!
 //! User goal:

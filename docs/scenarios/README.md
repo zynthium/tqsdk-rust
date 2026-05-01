@@ -6,13 +6,14 @@
 `cargo check --workspace --examples` 和 CI 保持可编译。它们代表当前 public
 API 已经支持或至少可以自然组合表达的终端用户代码。
 
-当前 API 尚不支持、或只能用明显绕路方式表达的场景，必须保存在
-`docs/scenarios/api_gaps/`。这些文件只记录理想用户代码草案和审查结论，不参与
-Cargo example 自动发现，也不得伪装成已经支持。
+当前 API 尚不支持、或只能用明显绕路方式表达，并且仍需要作为当前 desired sketch
+跟踪的场景，必须保存在 `docs/scenarios/api_gaps/`。这些文件只记录理想用户代码草案
+和审查结论，不参与 Cargo example 自动发现，也不得伪装成已经支持。
 
 当某个场景已经有正式 example，且当前 review 已把它判定为“自然表达”或把剩余需求
 明确降级为非核心用户层能力时，应将原 gap sketch 归档到 `docs/archive/scenarios/`，
-避免 `api_gaps/` 继续混入已闭环历史输入。
+避免 `api_gaps/` 继续混入已闭环历史输入。active `api_gaps/` 只保留仍未支持、仍需
+作为当前边界样本跟踪的草案。
 
 场景评审时应先判断示例主要服务哪类 Rust 使用者，而不是按官方 Python SDK 的
 方法名逐项对齐。使用者分层与迭代顺序见

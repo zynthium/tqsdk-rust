@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario's SDK primitive subset is now naturally expressible by the
+//! formal compiled S20 stream/task examples. The remaining HTTP endpoint / GUI
+//! / web helper / process manager scope was explicitly downgraded to
+//! user-side operations tooling, so this sketch is kept only as historical
+//! context.
+//!
 //! Scenario: 生产守护进程
 //!
 //! User goal:

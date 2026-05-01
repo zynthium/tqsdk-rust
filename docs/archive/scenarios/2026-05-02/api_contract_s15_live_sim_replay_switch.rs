@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`.
+//! The remaining multi-provider environment / deployment platform scope was
+//! explicitly downgraded to user-side tooling, so this sketch is kept only as
+//! historical context.
+//!
 //! Scenario: 实盘 / 模拟 / 回放切换
 //!
 //! User goal:

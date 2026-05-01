@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This local cache foundation is now naturally expressible by the formal
+//! compiled data examples for S18. The remaining cross-process cache service
+//! scope is tracked separately in
+//! `docs/scenarios/api_gaps/api_contract_s18_cross_process_cache_service.rs`,
+//! so this local-cache sketch is kept only as historical context.
+//!
 //! Scenario: 本地行情缓存读写
 //!
 //! User goal:

@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`.
+//! The remaining portfolio margin / global risk service / durable audit scope
+//! was explicitly downgraded to user-side risk tooling, so this sketch is kept
+//! only as historical context.
+//!
 //! Scenario: 风控前置
 //!
 //! User goal:

@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`.
+//! The remaining production daemon reconnect orchestration scope was
+//! explicitly downgraded to user-side operations tooling, so this sketch is
+//! kept only as historical context.
+//!
 //! Scenario: 历史行情回放
 //!
 //! User goal:

@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`.
+//! The remaining complete exchange simulator / production fixture persistence
+//! scope was explicitly downgraded to user-side testing tooling, so this
+//! sketch is kept only as historical context.
+//!
 //! Scenario: 最小可测试策略
 //!
 //! User goal:
