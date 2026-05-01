@@ -9,9 +9,9 @@ crate 分层合并成一份迭代计划。
 
 - 策略作者需要低样板、稳定状态截面和清晰的交易一致性。
 - 系统集成方需要 async-native、多消费者、背压和健康状态。
-- 高频或基础设施用户需要薄底座、可控推进和热路径读面。
+- 高频或基础设施用户需要薄底座、可控推进、热路径读面和可观测低延迟链路。
 - 执行工具用户需要订单 intent、任务 ownership、风控和多账户隔离。
-- 研究用户需要历史数据、批处理、缓存和回放。
+- 看盘软件和研究用户需要历史数据、批处理、缓存、快速图表回看和回放。
 - 测试用户需要 fake market / fake broker / deterministic clock。
 
 官方 Python SDK 是成熟使用者语义的证据来源，不是 Rust API 的复制模板。
@@ -57,11 +57,11 @@ public API。
 
 | 使用者 | 主要需求 | Rust 推荐入口 | 对应场景 | 迭代判断 |
 | --- | --- | --- | --- | --- |
-| 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27 | 维持薄底座，不上移厚 facade |
+| 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情、低延迟柜台链路 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27, 31 | 维持薄底座，不上移厚 facade |
 | 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10, 25, 26 | 继承 Python 语义，不复制 Python 单体 |
 | async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk-stream` + `tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
 | 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19, 29 | 建立执行层抽象，不下沉到 core |
-| 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18, 28 | 独立数据层，不污染 session/wait |
+| 看盘 / 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析、快速图表回看 | `tqsdk-data` | 16, 17, 18, 28, 30 | 独立数据层，不污染 session/wait |
 | 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
 | 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 用户层 facade / 后续独立项目 | 14 | 暂缓，非核心 SDK 目标 |
 
@@ -76,7 +76,7 @@ public API。
 - 多账户模式必须显式账户归属，不能共享模糊状态。
 - 风控应在下单入口统一执行，而不是散落在策略代码里。
 - 实盘、模拟、回放、测试应尽可能共享同一套策略事件模型。
-- 历史数据、缓存、下载和研究批处理应有独立用户入口。
+- 历史数据、缓存、下载、研究批处理和看盘软件历史回看应有独立用户入口。
 
 不应照搬的 API 形状：
 
@@ -637,11 +637,42 @@ public API。
 - `api_contract_s18_cache_service_foundation`（本地 file service foundation 已提升为正式 data example）
 - `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；暂停
   作为核心 SDK 目标，后续仅在明确用户层工具需求下重新评估）
+- `api_contract_s30_history_series_cache`（desired API sketch 已补齐）：覆盖
+  看盘软件 / 交易终端所需的 typed history series range cache、缺口下载、
+  manifest、schema version、mutable tail refresh 和损坏恢复；应作为 `tqsdk-data`
+  的显式 opt-in materialization/cache foundation，不改变 `get_*_data_series`
+  默认无缓存语义，mmap/memmap 只作为后续可选 backend 评估。
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 - `api_contract_s28_download_export` 与 `api_contract_s28_option_greeks`（新增）：
   覆盖历史主连、下载进度、CSV materialization 和 Greeks research query，确认这些
   能力不进入 session/wait/stream。
+
+### P2：高频交易柜台低延迟 profile
+
+服务的使用者：
+
+- 高频 / 基础设施用户
+- 自研交易柜台开发者
+
+目标：
+
+- 在同一低延迟循环里消费行情、读取交易状态、运行基础风控并提交订单。
+- hot path 使用 `RuntimeReader` 与 market/trade partition read surface。
+- 决策链路可以记录 market receive、commit、decision、risk、order submit 和 ack 时间点。
+- 慢日志、指标、落盘和 replay journal 通过 stream sink 隔离，不阻塞主循环。
+
+建议落点：
+
+- `tqsdk-core` / `tqsdk-session`：hot path runtime reader、cursor、session progress 与底层命令提交。
+- `tqsdk-task`：typed order intent、pre-trade risk gate 与 revision-bound report。
+- `tqsdk-stream`：慢消费者隔离、managed sink、WAL、journal 和 telemetry export。
+- 不进入 `tqsdk-data`；历史序列缓存和 memmap cache 不是柜台 hot path 能力。
+
+优先提升的场景：
+
+- `api_contract_s31_low_latency_trading_desk`（desired API sketch 已补齐）：覆盖
+  低延迟柜台链路的 crate 组合、hot path 禁止项、typed latency report 和 sink isolation。
 
 ### P3：多 provider 行情聚合（暂缓）
 
