@@ -102,6 +102,13 @@ cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 - `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`
 - `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`
 - `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`
+- `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`
+- `crates/tqsdk-wait/examples/api_contract_s26_trade_system_refs.rs`
+- `crates/tqsdk-wait/examples/api_contract_s26_security_trade_refs.rs`
+- `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`
+- `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`
+- `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`
+- `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
 - `crates/tqsdk-data/examples/kline_data_page.rs`
 - `crates/tqsdk-data/examples/kline_data_series.rs`
