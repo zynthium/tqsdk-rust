@@ -138,6 +138,13 @@ session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户
 `last_commit()` / `is_changing()` 截面解释不被内部等待破坏。契约示例见
 [examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
 
+实时交易状态、K 线 serial 和 tick serial 属于 wait continuous consumption：
+用户通过 `get_trading_status`、`get_kline_serial`、`get_tick_serial` 获取 live ref，
+再在 `wait_update()` 后用 `is_changing()` / `is_changing_fields()` 判断是否加载当前
+typed status 或窗口。这不是 `tqsdk-data` 的历史下载，也不是 `tqsdk-session` 的
+metadata direct query。契约示例见
+[examples/api_contract_s25_wait_serial_trading_status.rs](examples/api_contract_s25_wait_serial_trading_status.rs)。
+
 如果策略启动前需要同时确认行情订阅和交易初始同步完成，可以使用
 `TqApi::startup_recovery()` 构造 typed barrier。它会提交 quote 订阅，并等待
 指定交易账户的 account 对象和官方 `trade_more_data=false` 标记同时出现，业务代码

@@ -71,7 +71,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 后续应优先补正式 `api_contract_sXX_*.rs` 或把已有普通 example 提升为 contract：
 
 - `tqsdk-wait`：wait 风格 `get_trading_status`、`get_kline_serial`、`get_tick_serial`
-  场景；这些属于单策略作者的稳定截面和行情序列心智。
+  场景已补正式 S25 contract；这些属于单策略作者的稳定截面和行情序列心智。
 - `tqsdk-wait`：`NotificationRef`、`SettlementInfoRef`、`RiskManagementRuleRef`、
   `RiskManagementDataRef`、证券账户 / 持仓 / 委托 / 成交 ref 与
   `confirm_settlement` 场景；这些属于 live trade/system refs 的覆盖完整性。
@@ -222,14 +222,15 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 22. 错误诊断与重试 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s22_error_diagnosis_retry.rs`; `StreamFacadeError::diagnostic`; `StreamRetryPolicy`; `StreamRetryDecision`; error kind / retry hint / stream-facing retry decision / backoff runner 自然；order/business retry audit 由用户层执行审计系统实现 |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
 | 24. 最小可测试策略 | 自然（核心 test foundation） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `OrderLifecycle`; `FakeBroker::partial_fills`; `FakeBroker::latency_steps`; `FakeBroker::disconnect_for_steps`; `FakeBrokerConnectionStatus`; durable fixtures and richer broker behavior remain non-core gap |
+| 25. Wait 行情序列与交易状态 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`; `TqApi::{get_trading_status,get_kline_serial,get_tick_serial,wait_update,is_changing,is_changing_fields}`; 实时序列窗口属于 wait，不属于 data download 或 session direct query |
 
 ## 主要结论
 
-1. 按当前 SDK 边界，S1-S24 中除 S14 外都已经有核心 SDK 路径或 foundation
+1. 按当前 SDK 边界，S1-S25 中除 S14 外都已经有核心 SDK 路径或 foundation
    可表达；历史上被归为“勉强”的场景，不应再解释为 core SDK 必须补平台能力，
    而应解释为已有 foundation 之上的用户层系统能力未承诺。
 2. 当前仍需要补的是核心能力的契约覆盖，而不是继续扩大能力边界：wait serial /
-   trading-status、live trade/system refs、session metadata/service query pack、data
+   trading-status 已由 S25 补正式 contract；live trade/system refs、session metadata/service query pack、data
    download/export/Greeks，以及独立 TargetPosTask / scheduler ownership 都应补
    正式 `api_contract_sXX_*.rs`。
 3. 交易相关核心能力已经覆盖普通登录、限价单、部分成交撤单、
