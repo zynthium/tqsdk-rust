@@ -344,3 +344,174 @@ where
 
     decode_value_at_path(value, display_path).map(Some)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::{AccountId, OrderId, Symbol};
+
+    use super::*;
+
+    #[test]
+    fn market_state_view_reads_quote_and_returns_none_for_missing_symbol() {
+        let data = json!({
+            "quotes": {
+                "SHFE.au2606": {
+                    "instrument_id": "au2606",
+                    "exchange_id": "SHFE",
+                    "last_price": 610.5
+                }
+            }
+        });
+        let read = StateReadView::new(Revision::new(12), &data);
+        let market = read.market_state();
+
+        let quote = market
+            .quote(&Symbol::new("SHFE.au2606"))
+            .expect("quote decode should succeed")
+            .expect("quote should exist");
+
+        assert_eq!(market.revision(), Revision::new(12));
+        assert_eq!(quote.instrument_id, "au2606");
+        assert_eq!(quote.exchange_id, "SHFE");
+        assert_eq!(quote.last_price, 610.5);
+        assert!(
+            market
+                .quote(&Symbol::new("DCE.m2605"))
+                .expect("missing quote lookup should not fail")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn market_state_view_reads_from_partitions_without_full_snapshot() {
+        let quotes = json!({
+            "SHFE.au2606": {
+                "instrument_id": "au2606",
+                "exchange_id": "SHFE",
+                "last_price": 611.0
+            }
+        });
+        let empty = json!({});
+        let market = MarketStateView::from_partitions(
+            Revision::new(13),
+            &quotes,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+        );
+
+        let quote = market
+            .quote(&Symbol::new("SHFE.au2606"))
+            .expect("partition quote decode should succeed")
+            .expect("partition quote should exist");
+
+        assert_eq!(market.revision(), Revision::new(13));
+        assert_eq!(quote.last_price, 611.0);
+        assert_eq!(
+            market.get_path(&["quotes", "SHFE.au2606", "instrument_id"]),
+            Some(&json!("au2606"))
+        );
+        assert!(market.get_path(&["trade", "sim"]).is_none());
+    }
+
+    #[test]
+    fn trade_state_view_reads_account_position_order_and_trade() {
+        let data = json!({
+            "trade": {
+                "sim": {
+                    "accounts": {
+                        "CNY": {
+                            "user_id": "sim",
+                            "balance": 100000.0
+                        }
+                    },
+                    "positions": {
+                        "SHFE.au2606": {
+                            "user_id": "sim",
+                            "exchange_id": "SHFE",
+                            "instrument_id": "au2606",
+                            "pos": 3
+                        }
+                    },
+                    "orders": {
+                        "ORDER-1": {
+                            "user_id": "sim",
+                            "order_id": "ORDER-1",
+                            "exchange_id": "SHFE",
+                            "instrument_id": "au2606",
+                            "volume_left": 2
+                        }
+                    },
+                    "trades": {
+                        "TRADE-1": {
+                            "user_id": "sim",
+                            "order_id": "ORDER-1",
+                            "trade_id": "TRADE-1",
+                            "exchange_id": "SHFE",
+                            "instrument_id": "au2606",
+                            "volume": 1
+                        }
+                    }
+                }
+            }
+        });
+        let trade = StateReadView::new(Revision::new(14), &data).trade_state();
+        let account_id = AccountId::new("sim");
+        let symbol = Symbol::new("SHFE.au2606");
+
+        let account = trade
+            .account(&account_id)
+            .expect("account decode should succeed")
+            .expect("account should exist");
+        let position = trade
+            .position(&account_id, &symbol)
+            .expect("position decode should succeed")
+            .expect("position should exist");
+        let order = trade
+            .order(&account_id, &OrderId::new("ORDER-1"))
+            .expect("order decode should succeed")
+            .expect("order should exist");
+        let trade_value: crate::Trade = trade
+            .decode_path(&["sim", "trades", "TRADE-1"])
+            .expect("trade decode should succeed")
+            .expect("trade should exist");
+
+        assert_eq!(trade.revision(), Revision::new(14));
+        assert_eq!(account.user_id, "sim");
+        assert_eq!(position.pos, 3);
+        assert_eq!(order.volume_left, 2);
+        assert_eq!(trade_value.volume, 1);
+    }
+
+    #[test]
+    fn trade_state_view_reads_from_partition_without_full_snapshot() {
+        let trade_partition = json!({
+            "sim": {
+                "accounts": {
+                    "CNY": {
+                        "user_id": "sim",
+                        "available": 999.0
+                    }
+                }
+            }
+        });
+        let trade = TradeStateView::from_partition(Revision::new(15), &trade_partition);
+
+        let account = trade
+            .account(&AccountId::new("sim"))
+            .expect("partition account decode should succeed")
+            .expect("partition account should exist");
+
+        assert_eq!(trade.revision(), Revision::new(15));
+        assert_eq!(account.available, 999.0);
+        assert!(
+            trade
+                .account(&AccountId::new("missing"))
+                .expect("missing partition account should not fail")
+                .is_none()
+        );
+    }
+}

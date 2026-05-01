@@ -177,3 +177,107 @@ impl PartialEq for UpdateCursor {
 }
 
 impl Eq for UpdateCursor {}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use crate::{
+        FieldMutation, MutationSource, NormalizedMutation,
+        ids::{CursorId, Revision, Symbol},
+    };
+
+    use super::*;
+
+    #[test]
+    fn change_set_deduplicates_path_object_and_field_hits() {
+        let path = StatePath::new(["quotes", "SHFE.au2606"]);
+        let object = ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.au2606"),
+        };
+        let mutations = vec![
+            mutation(path.clone(), object.clone(), "last_price", json!(610.0)),
+            mutation(path.clone(), object.clone(), "last_price", json!(611.0)),
+            mutation(path.clone(), object.clone(), "ask_price1", json!(611.2)),
+        ];
+
+        let changes = ChangeSet::from_mutations(&mutations);
+
+        assert_eq!(changes.path_hits, vec![path.clone()]);
+        assert_eq!(changes.object_hits, vec![object.clone()]);
+        assert_eq!(
+            changes.field_hits,
+            vec![
+                ChangeHit::field(path.clone(), object.clone(), "last_price"),
+                ChangeHit::field(path, object, "ask_price1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_cursor_notifies_tracker_when_revision_advances() {
+        let tracker = Arc::new(RecordingTracker::default());
+        let mut cursor =
+            UpdateCursor::with_tracker(CursorId::new(7), Revision::new(10), tracker.clone());
+
+        cursor.set_next_revision(Revision::new(11));
+
+        assert_eq!(cursor.id(), CursorId::new(7));
+        assert_eq!(cursor.next_revision(), Revision::new(11));
+        assert_eq!(tracker.revisions(), vec![Revision::new(11)]);
+    }
+
+    #[test]
+    fn update_cursor_clone_keeps_identity_and_next_revision() {
+        let cursor = UpdateCursor::new(CursorId::new(3), Revision::new(42));
+        let cloned = cursor.clone();
+
+        assert_eq!(cursor, cloned);
+        assert_eq!(
+            format!("{cloned:?}"),
+            "UpdateCursor { id: CursorId(3), next_revision: Revision(42) }"
+        );
+    }
+
+    fn mutation(
+        path: StatePath,
+        object: ObjectKey,
+        field: &str,
+        value: serde_json::Value,
+    ) -> NormalizedMutation {
+        NormalizedMutation {
+            path,
+            object: Some(object),
+            fields: vec![FieldMutation {
+                field: field.to_string(),
+                value,
+            }],
+            source: MutationSource::MarketDiff,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTracker {
+        revisions: Mutex<Vec<Revision>>,
+    }
+
+    impl RecordingTracker {
+        fn revisions(&self) -> Vec<Revision> {
+            self.revisions
+                .lock()
+                .expect("tracker lock poisoned")
+                .clone()
+        }
+    }
+
+    impl CursorTracker for RecordingTracker {
+        fn update(&self, next_revision: Revision) {
+            self.revisions
+                .lock()
+                .expect("tracker lock poisoned")
+                .push(next_revision);
+        }
+    }
+}

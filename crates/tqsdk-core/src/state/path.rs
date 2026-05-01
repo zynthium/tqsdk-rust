@@ -104,3 +104,48 @@ pub enum ObjectKey {
         notification_id: NotificationId,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn state_path_preserves_segment_order() {
+        let path = StatePath::new(["trade", "sim", "orders", "ORDER-1"]);
+
+        assert_eq!(
+            path.segments(),
+            &[
+                "trade".to_string(),
+                "sim".to_string(),
+                "orders".to_string(),
+                "ORDER-1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn object_key_equality_distinguishes_domain_identity() {
+        let quote = ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.au2606"),
+        };
+        let position = ObjectKey::Position {
+            account_id: AccountId::new("sim"),
+            symbol: Symbol::new("SHFE.au2606"),
+        };
+        let same_quote = ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.au2606"),
+        };
+
+        let mut keys = HashSet::new();
+        keys.insert(quote.clone());
+        keys.insert(position.clone());
+        keys.insert(same_quote);
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&quote));
+        assert!(keys.contains(&position));
+    }
+}

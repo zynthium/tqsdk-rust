@@ -130,3 +130,63 @@ where
         formatted
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn state_read_get_at_path_returns_nested_values() {
+        let data = json!({
+            "quotes": {
+                "SHFE.au2606": {
+                    "last_price": 610.5,
+                    "volume": 12
+                }
+            }
+        });
+        let read = StateReadView::new(Revision::new(9), &data);
+
+        assert_eq!(read.revision(), Revision::new(9));
+        assert_eq!(
+            read.get_path(&["quotes", "SHFE.au2606", "last_price"]),
+            Some(&json!(610.5))
+        );
+        let decoded = read
+            .decode_path::<VolumeFixture>(&["quotes", "SHFE.au2606"])
+            .expect("volume fixture decode should succeed")
+            .expect("volume fixture should exist");
+        assert_eq!(decoded.volume, 12);
+        assert!(read.get_path(&["quotes", "DCE.m2605"]).is_none());
+    }
+
+    #[test]
+    fn state_read_decode_value_reports_path_on_type_error() {
+        let data = json!({"quotes": {"SHFE.au2606": {"volume": "not-a-number"}}});
+        let read = StateReadView::new(Revision::new(1), &data);
+
+        let error = read
+            .decode_path::<VolumeFixture>(&["quotes", "SHFE.au2606"])
+            .expect_err("invalid nested type should report validation error");
+
+        let message = error.to_string();
+        assert!(message.contains("quotes.SHFE.au2606"));
+        assert!(message.contains("VolumeFixture"));
+    }
+
+    #[test]
+    fn decode_value_at_path_formats_root_path_for_root_errors() {
+        let error = decode_value_at_path::<VolumeFixture, &str>(&json!("invalid"), &[])
+            .expect_err("root decode should fail");
+
+        assert!(error.to_string().contains("<root>"));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct VolumeFixture {
+        volume: i64,
+    }
+}

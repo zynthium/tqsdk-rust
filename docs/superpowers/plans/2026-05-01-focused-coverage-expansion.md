@@ -80,7 +80,7 @@ Out of scope:
 - Modify: `crates/tqsdk-core/src/state/read.rs`
 - Modify: `crates/tqsdk-core/src/state/domain.rs`
 
-- [ ] **Step 1: Add failing tests for `ChangeSet` and `UpdateCursor`**
+- [x] **Step 1: Add failing tests for `ChangeSet` and `UpdateCursor`**
 
 Add a `#[cfg(test)] mod tests` to `crates/tqsdk-core/src/state/changes.rs` containing tests named:
 
@@ -90,7 +90,7 @@ Add a `#[cfg(test)] mod tests` to `crates/tqsdk-core/src/state/changes.rs` conta
 
 The tests must construct repeated `NormalizedMutation` values with the same `StatePath`, `ObjectKey`, and field names, then assert that `ChangeSet::from_mutations()` keeps one path hit, one object hit, and one field hit per distinct field.
 
-- [ ] **Step 2: Verify the new `changes.rs` tests fail before implementation**
+- [x] **Step 2: Verify the new `changes.rs` tests fail before implementation**
 
 Run:
 
@@ -104,7 +104,7 @@ Expected:
 FAIL or compile error because the new tests have just been added and may expose missing imports/test helpers.
 ```
 
-- [ ] **Step 3: Add tests for state path/read/domain behavior**
+- [x] **Step 3: Add tests for state path/read/domain behavior**
 
 Add private unit tests with these names:
 
@@ -116,7 +116,7 @@ Add private unit tests with these names:
 
 Use `serde_json::json!` fixtures and existing typed schema structs. Do not add new public helpers.
 
-- [ ] **Step 4: Run core state tests**
+- [x] **Step 4: Run core state tests**
 
 Run:
 
@@ -130,7 +130,7 @@ Expected:
 All core state helper tests pass.
 ```
 
-- [ ] **Step 5: Commit core coverage**
+- [x] **Step 5: Commit core coverage**
 
 ```bash
 git add crates/tqsdk-core/src/state/changes.rs crates/tqsdk-core/src/state/path.rs crates/tqsdk-core/src/state/read.rs crates/tqsdk-core/src/state/domain.rs
