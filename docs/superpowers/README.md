@@ -1,14 +1,13 @@
 # Superpowers Specs And Plans
 
-本目录保存 agentic 工作流产生的 spec 和 implementation plan。
+本目录现在只保留历史入口说明；活跃 spec / plan 已移到 `docs/archive/superpowers/`。
 
 ## 职责边界
 
-- [`specs/`](specs/)：设计阶段产物，用于记录当前仍直接服务实现的需求、方案和约束。
-- [`plans/`](plans/)：执行阶段产物，用于拆分任务、记录验证命令和阶段性决策。
+- [`../archive/superpowers/`](../archive/superpowers/)：历史 spec 与 implementation plan 的归档入口。
+- `docs/architecture/*`：当前架构权威。
 
-较早、且已经被 `docs/architecture/*` 吸收的设计 spec 应归档到
-[`../archive/superpowers/`](../archive/superpowers/)；不要把已经失效的早期设计草稿继续留在活跃入口。
+不要把已经闭环的 spec/plan 再放回本目录；如果需要追溯，请直接看归档区。
 
 这些文档是过程记录，不是当前架构权威。AI 助手可以用它们理解为什么做过某个改动，但不能用历史 plan 覆盖以下来源：
 
