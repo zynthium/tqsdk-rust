@@ -324,15 +324,22 @@ git commit -m "test: cover task shared and deployment helpers"
 - Modify: `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`
 - Modify: `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`
 
-- [ ] **Step 1: Mark completed tasks in this plan**
+- [x] **Step 1: Mark completed tasks in this plan**
 
 Update each completed checkbox in this file. Add a short execution note listing commits produced by Tasks 1-4.
 
-- [ ] **Step 2: Update the umbrella remediation roadmap**
+Execution note:
+
+- `1d7f237 test: cover core state helper behavior`
+- `d011286 test: cover session query helper behavior`
+- `0fb5e74 test: cover wait change and window helpers`
+- `1896bf2 test: cover task shared and deployment helpers`
+
+- [x] **Step 2: Update the umbrella remediation roadmap**
 
 In `docs/superpowers/plans/2026-04-29-review-remediation-plan.md`, update the remaining-items section to say that focused coverage expansion has been executed and only global numeric coverage tooling remains out of scope if no coverage tool was added.
 
-- [ ] **Step 3: Update the archived review status table**
+- [x] **Step 3: Update the archived review status table**
 
 In `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`, change:
 
@@ -342,7 +349,7 @@ In `docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md`, change:
 
 Do not remove the original historical finding text below the table.
 
-- [ ] **Step 4: Run workspace verification**
+- [x] **Step 4: Run workspace verification**
 
 Run:
 
@@ -361,7 +368,18 @@ Expected:
 All commands pass.
 ```
 
-- [ ] **Step 5: Commit documentation closure**
+Verification result:
+
+- `cargo fmt --all --check`
+- `cargo check --workspace`
+- `cargo test --workspace --tests`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo check --workspace --examples`
+- `git diff --check`
+
+All commands passed.
+
+- [x] **Step 5: Commit documentation closure**
 
 ```bash
 git add docs/superpowers/plans/2026-05-01-focused-coverage-expansion.md docs/superpowers/plans/2026-04-29-review-remediation-plan.md docs/archive/reviews/2026-04-29/review-2026-04-29-pending.md

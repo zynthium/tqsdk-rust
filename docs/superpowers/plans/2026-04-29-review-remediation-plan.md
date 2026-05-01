@@ -977,7 +977,7 @@ Additional completed items:
 Remaining items are intentionally not part of this mixed remediation batch:
 
 - `_for_test` feature-gating for public facade hooks is closed for the session/wait/stream/task items covered by `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md`. Task deterministic fixtures still use the public `api.session().handle()` runtime substrate where raw ingest/dispatch assertions are the behavior under test.
-- Focused unit-test coverage remains open as a separate batch: `docs/superpowers/plans/2026-05-01-focused-coverage-expansion.md`. Task 3 closed the high-risk P0 guardrails only; it did not claim the historical 80% coverage target or the P1/P2 helper modules were fully covered.
+- Focused unit-test coverage expansion has been executed through `docs/superpowers/plans/2026-05-01-focused-coverage-expansion.md`: core state helpers, session metadata/services helpers, wait change/window helpers, and task shared/deployment helpers now have focused unit coverage; execution-group coverage was reconciled against existing integration tests. A global numeric 80% coverage threshold and coverage tooling remain out of scope for this remediation batch.
 - Global typed state migration remains a runtime contract long-term evolution item and should not be mixed into bug/perf remediation batches.
 - Module-directory split items from `docs/reviews/comprehensive-review-2026-04-30.md` are closed; each landed split has a child plan and source-level guardrail.
 - Broader public documentation coverage remains a quality batch, not a blocker for the bug/perf remediation already completed.

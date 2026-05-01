@@ -15,9 +15,9 @@
 | 1.3 `AuthContext` public token fields | `done` | `AuthContext` 字段已私有化并保留 `new` / accessor / builder-style methods（`418f7ee`），新增 compile-fail doctest 防止直接字段构造回归。 |
 | 1.4 workspace crate license 字段缺失 | `blocked by architecture decision` | 已从低风险 guardrail 批次排除；需要项目 license 明确选择后才能修改 workspace metadata。 |
 | 1.5 yawc WebSocket 审计 | `blocked by architecture decision` | 这是持续安全审计流程项，不在本批代码修复范围；后续应接入 `cargo audit` / dependency review。 |
-| 2.1 总体覆盖率不足 | `moved to breaking-change batch` | 本批未承诺 80% 覆盖率目标；已补高风险 guardrail tests 和回归入口，并完成 `cargo test --workspace`。覆盖率提升需单独测试计划。 |
-| 2.2 缺少测试的关键模块 | `done` + `moved to breaking-change batch` | 已补 core/order lifecycle、runtime guardrails、task/wait/stream/data 关键路径测试（`a94c887` 等）。未完全覆盖的 helper 模块保留为后续测试扩展。 |
-| 2.3 测试基础设施利用不足 | `done` + `moved to breaking-change batch` | 已新增/使用 core test support 与 task harness guardrails（`a94c887`）；跨 crate fake 层扩展不是本批目标。 |
+| 2.1 总体覆盖率不足 | `focused batch done; global threshold out of scope` | 已执行 focused coverage expansion（`1d7f237`、`d011286`、`0fb5e74`、`1896bf2`），覆盖 core/session/wait/task 的剩余 helper 模块；本批仍不承诺全局 80% 数字目标或覆盖率工具接入。 |
+| 2.2 缺少测试的关键模块 | `focused batch done` | P0 guardrails 已由 `a94c887` 等覆盖；P1/P2 helper 覆盖由 focused coverage expansion 补齐，`execution_group` 经核对已有 10 个集成测试覆盖计划列出的关键场景。 |
+| 2.3 测试基础设施利用不足 | `focused batch done; cross-crate fake expansion out of scope` | 已继续复用 explicit testing fixtures 和私有单元测试覆盖 helper 行为；跨 crate fake 层扩展与全局覆盖率工具不是本批目标。 |
 | 3.1 `tqsdk-data/src/client.rs` 大文件与重复 | `done` | 已拆分 `client/page.rs`、`chart_reader.rs`、`cont_quotes.rs`、`permissions.rs`，并保留 source-compatible public API（`8c11d14`）。 |
 | 3.2 `tqsdk-core/src/session_runtime.rs` 大文件与重复 | `done` | command status derivation 已拆分（`7e43df8`），reconnect/timer/transport/detail helpers 已在下一批 runtime hardening 中拆入 `session_runtime/*` 子模块并由 session runtime 回归测试覆盖。 |
 | 3.3 `tqsdk-task/src/target_pos.rs` 控制流复杂 | `done` | 已提取 target plan state / cancel / desired batch / target reached 辅助并简化 drop/cancel 流程（`49ff822`）。 |
