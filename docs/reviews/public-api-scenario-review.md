@@ -81,8 +81,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - `tqsdk-data`：`query_his_cont_quotes`、tick/K线 download、CSV export、
   `query_option_greeks` 场景已补正式 S28 contract；这些属于研究 / 离线数据层，
   不应进入 session/wait。
-- `tqsdk-task`：独立 `TargetPosTask` / scheduler ownership 场景；S11 已在策略里
-  使用它，但目标持仓本身仍值得有单独 public API 契约。
+- `tqsdk-task`：独立 `TargetPosTask` / scheduler ownership 场景已补正式 S29
+  contract；S11 仍展示策略内复用，S29 单独确认目标持仓 ownership 与手动下单 guard。
 
 ## 批次状态
 
@@ -200,6 +200,12 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   直接提供合约列表、主连、期权、交易日历、结算价、排名和 EDB 的 typed
   one-shot request/response；raw GraphQL 仍只是 `SessionRawQuery::query_graphql_value`
   低层逃生舱，direct query 不复制到 wait/stream。
+- S29 TargetPosTask ownership 已补正式 task contract：`TaskHost::target_pos(...)`
+  / `TargetPosTask` 覆盖同账户同合约 owner 注册、重复 owner 拒绝、手动下单
+  guard 和 command-level execution events；`TaskHost::target_pos_scheduler(...)` /
+  `TargetPosScheduler` 覆盖 scheduler ownership，并继续由 `TaskHost::wait_update()`
+  统一推进。跨账户 TargetPos 编排、自动 hedge / flatten / 补单和 durable audit
+  仍保持在用户层执行系统之外，不进入核心 SDK。
 
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -230,6 +236,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 25. Wait 行情序列与交易状态 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`; `TqApi::{get_trading_status,get_kline_serial,get_tick_serial,wait_update,is_changing,is_changing_fields}`; 实时序列窗口属于 wait，不属于 data download 或 session direct query |
 | 27. Session metadata 与 service query pack | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`; `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`; direct query 继续归属 session |
 | 28. Data 下载 / 导出 / Greeks | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`; `DataClient::{query_his_cont_quotes,kline_data_download,tick_data_download,export_kline_data_csv,export_tick_data_csv,query_option_greeks}`; research/download/Greeks 继续归属 data |
+| 29. TargetPosTask ownership | 自然 | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`; `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed,wait_update}`; `TargetPosTask`; `TargetPosScheduler`; 同账户同合约 ownership 属于 task，跨账户 TargetPos 编排和 durable audit 不进入核心 SDK |
 
 ## 主要结论
 
@@ -239,8 +246,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 2. 当前仍需要补的是核心能力的契约覆盖，而不是继续扩大能力边界：wait serial /
    trading-status 已由 S25 补正式 contract；session metadata/service query pack
    已由 S27 补正式 contract；data download/export/Greeks 已由 S28 补正式
-   contract；live trade/system refs 以及独立 TargetPosTask / scheduler ownership 仍应补正式
-   `api_contract_sXX_*.rs`。
+   contract；独立 TargetPosTask / scheduler ownership 已由 S29 补正式 contract；
+   live trade/system refs 仍应补正式 `api_contract_sXX_*.rs`。
 3. 交易相关核心能力已经覆盖普通登录、限价单、部分成交撤单、
    session-scoped reconnect-safe order intent、基础前置风控、官方同类基础开仓 /
    频率限额、revision-bound execution/risk report、轻量单笔 what-if projection、

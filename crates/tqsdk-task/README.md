@@ -209,8 +209,14 @@ match ticket.outcome(host.api())? {
 - [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
 - [examples/api_contract_s20_strategy_supervisor.rs](examples/api_contract_s20_strategy_supervisor.rs)
 - [examples/api_contract_s24_testable_strategy.rs](examples/api_contract_s24_testable_strategy.rs)
+- [examples/api_contract_s29_target_pos_ownership.rs](examples/api_contract_s29_target_pos_ownership.rs)
 
 `api_contract_s24_testable_strategy.rs` 使用 public fake harness，不需要真实账号或网络。
+
+`api_contract_s29_target_pos_ownership.rs` 单独覆盖 `TargetPosTask` /
+`TargetPosScheduler` ownership 契约。它默认 dry-run，只创建 task host 并验证同账户同合约
+owner 冲突、手动下单 guard 和 scheduler 通过 `TaskHost::wait_update()` 推进；只有显式设置
+`TQ_TASK_ALLOW_ORDERS=1` 与 `TQ_TARGET_VOLUME=<目标手数>` 时才会登录 TQKQ 并进入真实调仓 loop。
 
 `target_pos.rs`、`target_pos_scheduler.rs` 和 live API contract examples 运行时需要：
 

@@ -60,7 +60,7 @@ public API。
 | 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27 | 维持薄底座，不上移厚 facade |
 | 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10, 25 | 继承 Python 语义，不复制 Python 单体 |
 | async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk-stream` + `tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
-| 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19 | 建立执行层抽象，不下沉到 core |
+| 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19, 29 | 建立执行层抽象，不下沉到 core |
 | 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18, 28 | 独立数据层，不污染 session/wait |
 | 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
 | 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 用户层 facade / 后续独立项目 | 14 | 暂缓，非核心 SDK 目标 |
@@ -291,6 +291,9 @@ public API。
 - `api_contract_s11_simple_strategy`
 - `api_contract_s12_spread_arbitrage`（foundation 已提升为正式 task example）
 - `api_contract_s13_multi_account_ordering`（foundation 已提升为正式 task example）
+- `api_contract_s29_target_pos_ownership`（新增）：把 TargetPosTask / scheduler ownership
+  从 S11 策略示例中独立出来，确认同账户同合约 owner、手动下单 guard 和
+  `TaskHost::wait_update()` 统一推进。
 
 ### P1：风控前置与 what-if 试算
 
