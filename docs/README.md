@@ -9,7 +9,7 @@
 3. `architecture/api-*.md`、`architecture/runtime-core/*.md`、[`architecture/validation.md`](architecture/validation.md)：专题设计和验证矩阵。
 4. `crates/*/README.md` 与 `crates/*/examples/api_contract_sXX_*.rs`：crate 级用户入口和可编译 public API 契约。
 5. [`scenarios/`](scenarios/) 与 [`reviews/`](reviews/)：场景审查、API gap、public API 决策记录。它们用于指导迭代，但不能覆盖 `architecture/` 的权威边界。
-6. [`archive/`](archive/) 与 [`superpowers/`](superpowers/)：历史审查输入、已归档 spec 与 plan。它们是追溯材料，不是当前架构权威。
+6. [`archive/`](archive/)：历史审查输入、已闭环 spec 与 plan。[`superpowers/`](superpowers/) 只保留仍在执行或需要继续跟踪的 agentic 记录。两者都不是当前架构权威。
 
 ## 目录分工
 
@@ -18,8 +18,8 @@
 | [`architecture/`](architecture/) | 当前架构权威、crate 边界、runtime contract、API 归属和验证矩阵 | 改动 crate 边界、public API、runtime 状态模型或 facade 归属时必须同步检查 |
 | [`scenarios/`](scenarios/) | 用户场景、API gap sketch、使用者分层迭代顺序 | gap 修复后要提升为 `crates/*/examples/api_contract_sXX_*.rs` 并更新 review |
 | [`reviews/`](reviews/) | 当前仍有决策价值的审查和 public API disposition 记录 | 作为计划输入和决策证据；与架构文档冲突时以 `architecture/` 为准 |
-| [`archive/`](archive/) | 已闭环或已转化为计划的历史审查输入、已归档 gap sketch 和旧 spec | 只作追溯，不直接驱动代码改动 |
-| [`superpowers/`](superpowers/) | agentic specs 和 implementation plans | 记录执行过程；计划中的旧判断不能覆盖当前代码和架构文档 |
+| [`archive/`](archive/) | 已闭环或已转化为计划的历史审查输入、已归档 gap sketch、旧 spec 与闭环 plan | 只作追溯，不直接驱动代码改动 |
+| [`superpowers/`](superpowers/) | 当前仍在执行或需要继续跟踪的 agentic specs / plans | 闭环后迁入 `archive/superpowers/`；计划中的旧判断不能覆盖当前代码和架构文档 |
 
 ## AI 助手读取顺序
 

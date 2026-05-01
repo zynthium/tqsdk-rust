@@ -39,8 +39,8 @@ docs/
   architecture/    # 当前架构权威、分层设计与验证矩阵
   scenarios/       # 场景契约草案与 API gap
   reviews/         # 当前审查记录与 public API 决策矩阵
-  archive/         # 已闭环或已转化为计划的历史审查输入
-  superpowers/     # agentic specs / plans 执行记录
+  archive/         # 已闭环或已转化为计划的历史审查输入、spec 与 plan
+  superpowers/     # 当前仍在执行的 agentic specs / plans 记录
 ```
 
 ## 文档入口
@@ -68,14 +68,14 @@ cargo clippy --workspace --examples --all-targets -- -D warnings
 cargo check --workspace --no-default-features
 cargo check --workspace --all-features --examples
 cargo test -p tqsdk-core -q
-cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocapture
+cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 ```
 
 ## 当前状态
 
 - V1 core 已独立为子 crate，可单独发布。
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
-- `tqsdk-session` 现已提供 `progress_once()` 与 `wait_command_completed()` 这两个最小 substrate/control-plane 原语，并用真实联机示例验证了纯 substrate 的行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
+- `tqsdk-session` 现已提供 `progress_once()` 与 `wait_command_completed()` 这两个最小 substrate/control-plane 原语，并用可编译示例覆盖行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`，并已用真实示例验证 `stream.session()` 复用同一底层 session 做 direct query 的边界；后续重点转向 notification/transport-error 级 trade session 事件流。
 - `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、execution group foundation、account group foundation、`StrategyHost` / `StrategyContext` / `StrategyEnvironment` / `StrategyDeployment` / `StrategySupervisor`、public fake market / fake broker test harness、ownership / guarded order / execution report（原始事件流 + 聚合摘要）；生产观测以 typed health/metrics/shutdown report 为边界，不内置 GUI、web helper 或 HTTP health/metrics endpoint。
@@ -85,8 +85,6 @@ cargo test -p tqsdk-core --test runtime_contract_live_smoke -- --ignored --nocap
 
 当前 workspace 里的最小可编译示例：
 
-- `crates/tqsdk-core/examples/live_probe.rs`
-- `crates/tqsdk-core/examples/live_market_history.rs`
 - `crates/tqsdk-session/examples/query_symbol_info.rs`
 - `crates/tqsdk-session/examples/query_command_wait.rs`
 - `crates/tqsdk-session/examples/quote_progress.rs`

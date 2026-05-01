@@ -1,10 +1,11 @@
 # Superpowers Specs And Plans
 
-本目录现在只保留历史入口说明；活跃 spec / plan 已移到 `docs/archive/superpowers/`。当某个 spec / plan 已经完成其代码指导职责时，默认收尾动作是先提交对应代码，再把执行文档迁入归档区。
+本目录现在只保留入口说明；当前没有未闭环的活跃 spec / plan。已闭环的历史记录位于 `docs/archive/superpowers/`。当某个 spec / plan 完成其代码指导职责时，默认收尾动作是先提交对应代码，再把执行文档迁入归档区。
 
 ## 职责边界
 
-- [`../archive/superpowers/`](../archive/superpowers/)：历史 spec 与 implementation plan 的归档入口。
+- 本目录：未闭环、仍需要继续跟踪的 agentic spec 与 implementation plan。
+- [`../archive/superpowers/`](../archive/superpowers/)：已闭环历史 spec 与 implementation plan 的归档入口。
 - `docs/architecture/*`：当前架构权威。
 
 不要把已经闭环的 spec/plan 再放回本目录；如果需要追溯，请直接看归档区。
