@@ -88,11 +88,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         host.check_manual_order_allowed(account_id.as_str(), symbol.as_str()),
         "manual order while TargetPosTask owns symbol",
     )?;
-    assert_ownership_conflict(
-        host.target_pos(account_id.as_str(), symbol.as_str())
-            .build(),
-        "duplicate TargetPosTask owner",
-    )?;
     let mut task_event_cursor = 0_usize;
     if allow_orders {
         let target_volume = read_i64_env("TQ_TARGET_VOLUME")?;
@@ -121,13 +116,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     task.cancel().await?;
     drain_until_task_finished(&mut host, &task, &mut task_event_cursor).await?;
 
-    assert_ownership_conflict(
-        host.target_pos_scheduler(account_id.as_str(), symbol.as_str())
-            .steps(vec![TargetPosScheduleStep::pause(Duration::from_millis(1))])
-            .build(),
-        "scheduler owner after TargetPosTask release",
-    )?;
-
     let scheduler = host
         .target_pos_scheduler(account_id.as_str(), symbol.as_str())
         .steps(vec![TargetPosScheduleStep::pause(Duration::from_millis(1))])
@@ -135,6 +123,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     assert_manual_order_blocked(
         host.check_manual_order_allowed(account_id.as_str(), symbol.as_str()),
         "manual order while TargetPosScheduler owns symbol",
+    )?;
+    assert_ownership_conflict(
+        host.target_pos(account_id.as_str(), symbol.as_str())
+            .build(),
+        "duplicate TargetPosTask owner while TargetPosScheduler owns symbol",
     )?;
     let _updated = host.wait_update(Some(tokio::time::Instant::now())).await?;
     let (_scheduler_cursor, scheduler_events) = scheduler.execution_events_since(0);
