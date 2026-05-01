@@ -159,6 +159,7 @@ impl TqStreamBuilder {
     pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self;
     pub fn from_session_builder(inner: SessionClientBuilder) -> Self;
 
+    // legacy compatibility only; prefer the named market selectors below
     pub fn market_target(self, stock: bool, backtest: bool) -> Self;
     pub fn stock_market(self) -> Self;
     pub fn futures_market(self) -> Self;
@@ -187,6 +188,7 @@ impl TqStreamBuilder {
 - 和 `tqsdk-wait::TqApiBuilder` 保持相似建造路径
 - 继续复用 `SessionClientBuilder`
 - 优先暴露命名清楚的 market-target shortcut，避免 façade 层继续传播裸布尔 market 选择
+- `market_target(bool, bool)` 只作为兼容入口存在，不是推荐 surface
 - 只暴露 stream 自身的连续消费配置，例如 root fan-out capacity
 - 不在 stream builder 重新定义 direct query 选项
 

@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-01
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`.
+//! The remaining durable daemon queue / runtime state recovery scope was
+//! explicitly downgraded to user-side tooling, so this sketch is kept only as
+//! historical context.
+//!
 //! Scenario: 慢消费者隔离（降级能力：durable daemon queue / runtime state recovery）
 //!
 //! User goal:

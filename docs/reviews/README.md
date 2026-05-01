@@ -6,7 +6,6 @@
 
 | 文档 | 职责 |
 | --- | --- |
-| [`comprehensive-review-2026-04-30.md`](comprehensive-review-2026-04-30.md) | 全面审查：架构设计、Public API、性能、可读性与可维护性，含优先修复计划 |
 | [`public-api-scenario-review.md`](public-api-scenario-review.md) | 场景驱动 public API 表达能力审查，记录哪些场景自然、勉强或暂缓 |
 | [`public-api-disposition-matrix.md`](public-api-disposition-matrix.md) | public API 符号级 disposition gate，区分 keep、internalize、needs-arch-change 和 split-plan |
 
@@ -16,5 +15,7 @@
 
 - [`public-api-overdesign-audit.md`](../archive/reviews/2026-04-29/public-api-overdesign-audit.md)
 - [`review-2026-04-29-pending.md`](../archive/reviews/2026-04-29/review-2026-04-29-pending.md)
+
+2026-04-30 的全面审查已闭环并归档到 [`../archive/reviews/2026-04-30/comprehensive-review-2026-04-30.md`](../archive/reviews/2026-04-30/comprehensive-review-2026-04-30.md)。
 
 这些文件保留原始问题背景和闭环状态，但不再作为直接改代码的入口。

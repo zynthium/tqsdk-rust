@@ -203,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `TqStreamBuilder` 只补一层和 stream facade 直接相关的便利配置，例如：
 
-- `market_target(...)`
+- `legacy compatibility: market_target(...)`
 - `stock_market()`
 - `futures_market()`
 - `stock_backtest_market()`
@@ -218,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `commit_channel_capacity(...)`
 
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
+`market_target(...)` 仅保留兼容用途，不应作为新的推荐入口。
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqStreamBuilder::from_session_builder(...)` 包装成 stream facade。
 如果调用方已经持有 `SessionClient`，可以直接使用 `TqStream::new(session)`；

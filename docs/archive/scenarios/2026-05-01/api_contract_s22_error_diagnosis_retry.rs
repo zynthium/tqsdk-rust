@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-01
+//!
+//! This scenario is now naturally expressible by the formal compiled example
+//! `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`.
+//! The remaining business/order retry audit scope was explicitly downgraded to
+//! user-side execution tooling, so this sketch is kept only as historical
+//! context.
+//!
 //! Scenario: 错误诊断与重试（降级能力：business/order retry audit）
 //!
 //! User goal:
