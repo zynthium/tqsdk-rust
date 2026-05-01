@@ -237,6 +237,8 @@ scenario gaps above this data-layer foundation.
 - [examples/kline_export_csv.rs](examples/kline_export_csv.rs)
 - [examples/tick_data_download.rs](examples/tick_data_download.rs)
 - [examples/tick_export_csv.rs](examples/tick_export_csv.rs)
+- [examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
+- [examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
 - [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
 - [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
 - [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
@@ -252,5 +254,12 @@ session-backed 的时间范围历史示例见 [examples/kline_data_series.rs](ex
 session-backed 的按页下载示例见 [examples/kline_data_download.rs](examples/kline_data_download.rs)。
 
 session-backed 的期权 Greeks 示例见 [examples/option_greeks.rs](examples/option_greeks.rs)。
+S28 contract 把这两类能力拆成两个正式场景文件：
+[examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
+覆盖历史主连、K线/tick pull-based download、`collect_remaining()` 和 CSV
+materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
+覆盖 session-backed Greeks research query。它们都继续归属 `tqsdk-data`：
+历史下载、导出和 Greeks 不回流到 `tqsdk-session`、`tqsdk-wait` 或
+`tqsdk-stream`。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

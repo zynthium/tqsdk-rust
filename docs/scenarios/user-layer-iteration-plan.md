@@ -61,7 +61,7 @@ public API。
 | 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10, 25 | 继承 Python 语义，不复制 Python 单体 |
 | async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk-stream` + `tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
 | 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk-task` | 10, 11, 12, 13, 19 | 建立执行层抽象，不下沉到 core |
-| 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18 | 独立数据层，不污染 session/wait |
+| 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析 | `tqsdk-data` | 16, 17, 18, 28 | 独立数据层，不污染 session/wait |
 | 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
 | 多 provider 基础设施用户 | 多行情源聚合、标准事件、provider 隔离 | 用户层 facade / 后续独立项目 | 14 | 暂缓，非核心 SDK 目标 |
 
@@ -630,6 +630,9 @@ public API。
   作为核心 SDK 目标，后续仅在明确用户层工具需求下重新评估）
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
+- `api_contract_s28_download_export` 与 `api_contract_s28_option_greeks`（新增）：
+  覆盖历史主连、下载进度、CSV materialization 和 Greeks research query，确认这些
+  能力不进入 session/wait/stream。
 
 ### P3：多 provider 行情聚合（暂缓）
 

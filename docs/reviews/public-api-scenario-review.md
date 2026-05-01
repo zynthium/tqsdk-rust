@@ -79,7 +79,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   settlement、ranking、EDB 的 direct-query pack 场景已补正式 S27 contract；
   这些属于一次性 metadata/service query，不应下沉到 wait/stream。
 - `tqsdk-data`：`query_his_cont_quotes`、tick/K线 download、CSV export、
-  `query_option_greeks` 场景；这些属于研究 / 离线数据层，不应进入 session/wait。
+  `query_option_greeks` 场景已补正式 S28 contract；这些属于研究 / 离线数据层，
+  不应进入 session/wait。
 - `tqsdk-task`：独立 `TargetPosTask` / scheduler ownership 场景；S11 已在策略里
   使用它，但目标持仓本身仍值得有单独 public API 契约。
 
@@ -228,6 +229,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 24. 最小可测试策略 | 自然（核心 test foundation） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/scenarios/api_gaps/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `OrderLifecycle`; `FakeBroker::partial_fills`; `FakeBroker::latency_steps`; `FakeBroker::disconnect_for_steps`; `FakeBrokerConnectionStatus`; durable fixtures and richer broker behavior remain non-core gap |
 | 25. Wait 行情序列与交易状态 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`; `TqApi::{get_trading_status,get_kline_serial,get_tick_serial,wait_update,is_changing,is_changing_fields}`; 实时序列窗口属于 wait，不属于 data download 或 session direct query |
 | 27. Session metadata 与 service query pack | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`; `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`; direct query 继续归属 session |
+| 28. Data 下载 / 导出 / Greeks | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`; `DataClient::{query_his_cont_quotes,kline_data_download,tick_data_download,export_kline_data_csv,export_tick_data_csv,query_option_greeks}`; research/download/Greeks 继续归属 data |
 
 ## 主要结论
 
@@ -236,8 +238,8 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
    而应解释为已有 foundation 之上的用户层系统能力未承诺。
 2. 当前仍需要补的是核心能力的契约覆盖，而不是继续扩大能力边界：wait serial /
    trading-status 已由 S25 补正式 contract；session metadata/service query pack
-   已由 S27 补正式 contract；live trade/system refs、data download/export/Greeks，
-   以及独立 TargetPosTask / scheduler ownership 仍应补正式
+   已由 S27 补正式 contract；data download/export/Greeks 已由 S28 补正式
+   contract；live trade/system refs 以及独立 TargetPosTask / scheduler ownership 仍应补正式
    `api_contract_sXX_*.rs`。
 3. 交易相关核心能力已经覆盖普通登录、限价单、部分成交撤单、
    session-scoped reconnect-safe order intent、基础前置风控、官方同类基础开仓 /
