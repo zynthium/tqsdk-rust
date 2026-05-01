@@ -213,13 +213,14 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `TargetPosScheduler` 覆盖 scheduler ownership，并继续由 `TaskHost::wait_update()`
   统一推进。跨账户 TargetPos 编排、自动 hedge / flatten / 补单和 durable audit
   仍保持在用户层执行系统之外，不进入核心 SDK。
-- S30 看盘软件历史序列缓存仍无法自然表达：`tqsdk-data` 已有 history
-  page/series/download、CSV export、JSONL `MarketCache*` event cache 和
-  history series -> replay adapter，但没有 typed history series range cache、
-  manifest、schema version、缺口下载、mutable tail refresh 与损坏恢复 contract。
-  该能力服务看盘软件和研究/回放用户，应作为 `tqsdk-data` 显式 opt-in
-  materialization/cache foundation 重新评估；mmap/memmap 只是 backend 选择，不应
-  提前冻结为 public contract。
+- S30 看盘软件历史序列缓存已能自然表达为 `tqsdk-data` 的显式 opt-in 能力：
+  `DataClientBuilder::history_cache_enabled(true)` 让原
+  `get_kline_data_series` / `get_tick_data_series` 隐式读写 Python 兼容 mmap
+  历史缓存，默认目录为 `~/.tqsdk/data_series_1`，并可通过
+  `history_cache_dir(...)` 覆盖。cache miss 下载对齐官方 Python `DataSeries`
+  的 `set_chart` / `focus_datetime` / `left_kline_id` 序列。剩余 gap 是
+  manifest/schema version、更丰富的 cache-only reader、容量/保留策略以及
+  Python/Rust 同时写同一目录的协调。
 - S31 高频交易柜台低延迟 profile 仍无法自然表达为单一 contract：S5/S6/S7/S10/S19/S21
   分别覆盖裸行情、下单、订单一致性、风控和慢消费者隔离，但还没有一个示例把
   market/trade partition hot read、typed risk gate、order intent、latency report
@@ -257,7 +258,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 27. Session metadata 与 service query pack | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`; `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`; direct query 继续归属 session |
 | 28. Data 下载 / 导出 / Greeks | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`; `DataClient::{query_his_cont_quotes,kline_data_download,tick_data_download,export_kline_data_csv,export_tick_data_csv,query_option_greeks}`; research/download/Greeks 继续归属 data |
 | 29. TargetPosTask ownership | 自然 | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`; `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed,wait_update}`; `TargetPosTask`; `TargetPosScheduler`; 同账户同合约 ownership 属于 task，跨账户 TargetPos 编排和 durable audit 不进入核心 SDK |
-| 30. 看盘软件历史序列缓存 | 无法表达 | 高 | 中 | 中 | 中 | 低 | 补场景后设计 | `docs/scenarios/api_gaps/api_contract_s30_history_series_cache.rs`; `tqsdk-data` 已有 history series/download 和 JSONL market cache foundation，但缺少 typed history series range cache、manifest、schema version、缺口下载、mutable tail refresh 与损坏恢复；mmap/memmap 仅作为后续 backend 评估 |
+| 30. 看盘软件历史序列缓存 | 自然（opt-in mmap cache foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`; `docs/scenarios/api_gaps/api_contract_s30_history_series_cache.rs`; `DataClientBuilder::{history_cache_enabled,history_cache_dir,build}`; `HistorySeriesCache`; `HistorySeriesCacheReport`; `KlineDataSeries::cache_report`; `TickDataSeries::cache_report`; 默认 `DataClient::from_session` 无缓存，builder opt-in 后读写 Python 兼容 `~/.tqsdk/data_series_1` / 自定义目录，cache miss 下载对齐官方 `DataSeries`；manifest/schema version/cache-only reader/容量策略/跨 SDK 同时写仍保留为后续 gap |
 | 31. 高频交易柜台低延迟 profile | 无法表达（跨 primitive 契约不足） | 中 | 中 | 中 | 中 | 中 | 补场景后设计 | `docs/scenarios/api_gaps/api_contract_s31_low_latency_trading_desk.rs`; S5/S6/S7/S10/S19/S21 的 primitive 分散存在，但缺少同一低延迟链路 contract；hot path 应保持在 core/session/task/stream，不进入 data/history cache |
 
 ## 主要结论

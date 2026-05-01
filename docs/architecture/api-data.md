@@ -90,6 +90,7 @@
 - README 与 crate-level docs
 - 后续实现的依赖方向约束
 - `DataClient`
+- `DataClientBuilder`
 - `DataClient::new()`
 - `DataClient::from_session(...)`
 - `query_his_cont_quotes(symbols, days, end_date)`
@@ -98,6 +99,11 @@
 - `get_tick_data_page(TickDataPageRequest)`
 - `get_kline_data_series(KlineDataSeriesRequest)`
 - `get_tick_data_series(TickDataSeriesRequest)`
+- `DataClientBuilder::history_cache_enabled(true)`
+- `DataClientBuilder::history_cache_dir(...)`
+- `HistorySeriesCache`
+- `HistorySeriesCacheBackend`
+- `HistorySeriesCacheReport`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataDownload::collect_remaining()`
@@ -175,7 +181,7 @@
 - 后台 downloader task
 - live durable cache sink daemon/runtime
 - 多进程 cache 管理服务与跨进程 daemon orchestration
-- Python 兼容层
+- Python 与 Rust 进程同时写同一历史序列缓存目录
 
 ## 后续能力落点
 
@@ -196,6 +202,12 @@
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`
    - 已有最薄的 `AsyncWrite` CSV export
+   - 已有显式 opt-in 的 Python 兼容 mmap 历史序列缓存：
+     `DataClientBuilder::history_cache_enabled(true)` 让
+     `get_kline_data_series` / `get_tick_data_series` 在同一 API 上隐式读写
+     `~/.tqsdk/data_series_1` 或自定义目录；cache miss 使用官方
+     `DataSeries` 的 `set_chart` / `focus_datetime` / `left_kline_id`
+     下载序列补齐缺口
    - 已有最薄的 offline market cache record / JSONL reader-writer / ordered replay foundation
    - 已有最薄的 local JSONL queue、lock lease、reader manifest、recovery scan、writer election、recovery action、index、保留策略 compaction、reader-protected compaction ownership、本地 file service facade、in-place rotation、shutdown flush report 与 process-local supervisor foundation
    - 后续再考虑路径管理型文件导出
@@ -236,6 +248,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `get_kline_data_page` / `get_tick_data_page` 已经落在 `tqsdk-data`
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
+- `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的 Python 兼容
+  mmap 历史序列缓存，也已经落在 `tqsdk-data`
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`

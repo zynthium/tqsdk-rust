@@ -9,6 +9,7 @@
 - `DataClient::from_session(...).get_tick_data_page(...)`
 - `DataClient::from_session(...).get_kline_data_series(...)`
 - `DataClient::from_session(...).get_tick_data_series(...)`
+- `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
 - `KlineDataDownload::collect_remaining()`
@@ -22,6 +23,16 @@
 - `query_his_cont_quotes` 是纯 HTTP 的一次性 direct query，不需要 live session
 - `get_*_data_page` 是最底层的 chart/history page substrate，并显式暴露 chart 的 `more_data` 分页信号
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`，分页继续与否以 `more_data` 为准
+- `DataClient::from_session(...)` 默认不启用历史序列缓存；通过
+  `DataClientBuilder::history_cache_enabled(true)` 显式开启后，
+  `get_*_data_series` 会隐式读写 Python 兼容 mmap 历史缓存
+- 未指定缓存目录时使用 `~/.tqsdk/data_series_1`；可以通过
+  `DataClientBuilder::history_cache_dir(...)` 指定目录
+- 历史序列缓存首版使用 Python `DataSeries` 兼容的文件名与二进制列布局：
+  `symbol.duration_ns.start_id.end_id`，并通过 mmap 读取大文件窗口
+- cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用
+  `focus_datetime=start_datetime_ns`、`focus_position=0`、`view_width=2000`，
+  后续用 `left_kline_id=current_id` 翻页，结束后释放 chart
 - `*_data_download` 是纯 async、pull-based 的范围下载 substrate，按页推进，不内建文件写盘或后台线程，终止条件同样以远端 chart pagination signal 为准，而不是用当前页行数推断
 - `KlineDataDownload::collect_remaining()` / `TickDataDownload::collect_remaining()` 是最薄的 owned Vec materialization helper，只收集尚未消费的剩余页
 - `query_option_greeks` 是一次性 owned 研究接口，内部会临时拉起 live quote snapshot 并做本地 Black-Scholes / 隐波计算
@@ -36,6 +47,7 @@
 ## 当前已稳定的 surface
 
 - `DataClient`
+- `DataClientBuilder`
 - `HistoricalContQuotesRow`
 - `KlineDataPageRequest`
 - `KlineDataPage`
@@ -45,6 +57,9 @@
 - `KlineDataSeries`
 - `TickDataSeriesRequest`
 - `TickDataSeries`
+- `HistorySeriesCache`
+- `HistorySeriesCacheBackend`
+- `HistorySeriesCacheReport`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -102,11 +117,12 @@
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
-这三层接口适合承接：
+这几层接口适合承接：
 
 - 历史 K 线 / tick 一次性拉取
 - page 级分页读取
 - 按时间范围组装完整历史序列
+- 显式 opt-in 的 Python 兼容 mmap 历史序列缓存
 - 大时间范围按页推进的批量读
 - research/offline 侧的渐进式 materialization
 - 后续更高层 CSV writer / DataFrame / polars / downloader tool 的底座
@@ -183,18 +199,21 @@ scenario gaps above this data-layer foundation.
 
 ## 后续仍应承接的能力
 
-- 文件缓存
 - 路径管理型导出与落盘
 - 可选的 DataFrame / polars 适配层
 
-当前“文件导出、落盘”已经有最薄的一层：
+当前“文件导出、落盘、历史序列缓存”已经有最薄的一层：
 
 - `KlineDataDownload::collect_remaining`
 - `TickDataDownload::collect_remaining`
 - `export_kline_data_csv`
 - `export_tick_data_csv`
+- `DataClientBuilder::history_cache_enabled(true)`
+- `HistorySeriesCache::open(...)`
 
-但它仍然只负责把下载结果收敛到调用方可接管的 `Vec` 或写入调用方给定的 `AsyncWrite`，不负责路径管理、后台任务或缓存策略。
+但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
+`AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；
+不负责后台 downloader、GUI viewport 状态、跨进程 cache service 或高频交易 hot path。
 
 ## 当前明确不做
 
@@ -245,6 +264,7 @@ scenario gaps above this data-layer foundation.
 - [examples/api_contract_s18_cache_supervisor_foundation.rs](examples/api_contract_s18_cache_supervisor_foundation.rs)
 - [examples/api_contract_s18_cache_reader_manifest.rs](examples/api_contract_s18_cache_reader_manifest.rs)
 - [examples/api_contract_s18_cache_recovery_scan.rs](examples/api_contract_s18_cache_recovery_scan.rs)
+- [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。
@@ -261,5 +281,12 @@ materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_cont
 覆盖 session-backed Greeks research query。它们都继续归属 `tqsdk-data`：
 历史下载、导出和 Greeks 不回流到 `tqsdk-session`、`tqsdk-wait` 或
 `tqsdk-stream`。
+
+S30 contract
+[examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
+覆盖看盘软件 / 交易终端的历史序列 mmap 缓存。该能力只在 builder 显式开启后
+影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session`
+仍保持无缓存行为。首版支持 Python 兼容目录和文件格式，但不承诺 Python 与 Rust
+进程同时写同一目录。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

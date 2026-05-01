@@ -1,4 +1,4 @@
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(not(test), deny(unsafe_code))]
 //! Research and offline data tooling for `tqsdk-rust`.
 //!
 //! `tqsdk-data` hosts research/offline helpers that should not widen the
@@ -46,14 +46,15 @@ mod download;
 mod error;
 mod export;
 mod greeks;
+mod history_series_cache;
 mod live_quote;
 mod market_cache;
 #[cfg(feature = "stream")]
 mod stream_cache;
 
 pub use client::{
-    DataClient, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
-    KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
+    DataClient, DataClientBuilder, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest,
+    KlineDataSeries, KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
     TickDataSeriesRequest,
 };
 pub use download::{
@@ -63,6 +64,9 @@ pub use download::{
 pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
+pub use history_series_cache::{
+    HistorySeriesCache, HistorySeriesCacheBackend, HistorySeriesCacheReport,
+};
 pub use market_cache::{
     MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionOwnership,
     MarketCacheCompactionOwnershipReport, MarketCacheCompactionReport, MarketCacheDaemon,

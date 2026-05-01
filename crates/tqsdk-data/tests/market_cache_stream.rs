@@ -1,7 +1,9 @@
 #![cfg(feature = "stream")]
 
 use futures::stream;
-use tqsdk_core::{CommitResult, CommitScope, Kline, ProtocolDomain, Quote, Revision, Tick};
+use tqsdk_core::{
+    CommitResult, CommitScope, Kline, ProtocolDomain, Quote, Revision, SharedCommitResult, Tick,
+};
 use tqsdk_data::{
     MarketCachePayload, MarketCacheReader, MarketCacheStreamWriter, MarketCacheWriter,
 };
@@ -127,7 +129,7 @@ async fn market_cache_stream_writer_records_latest_kline_and_tick_window_rows() 
     let _ = std::fs::remove_file(&path);
 }
 
-fn market_commit(revision: u64) -> CommitResult {
+fn market_commit(revision: u64) -> SharedCommitResult {
     CommitResult::new(
         Revision::new(revision),
         vec![ProtocolDomain::Market],
@@ -135,4 +137,5 @@ fn market_commit(revision: u64) -> CommitResult {
         Vec::new(),
         CommitScope::RealtimeUpdate,
     )
+    .into()
 }

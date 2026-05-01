@@ -19,6 +19,8 @@ futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+fs2 = "0.4"
+memmap2 = "0.9"
 tqsdk-core = { path = "../tqsdk-core" }
 tqsdk-session = { path = "../tqsdk-session", default-features = false }
 tqsdk-stream = { path = "../tqsdk-stream", default-features = false, optional = true }

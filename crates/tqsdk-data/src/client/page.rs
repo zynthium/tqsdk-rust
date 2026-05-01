@@ -3,6 +3,7 @@ use std::time::Duration;
 use tqsdk_core::{Kline, Tick};
 
 use crate::error::{DataError, Result};
+use crate::history_series_cache::HistorySeriesCacheReport;
 use crate::market_cache::{MarketCacheEvent, MarketCacheReplay};
 
 use super::{
@@ -552,6 +553,7 @@ pub struct KlineDataSeries {
     start_datetime_ns: i64,
     end_datetime_ns: i64,
     rows: Vec<Kline>,
+    cache_report: Option<HistorySeriesCacheReport>,
 }
 
 impl KlineDataSeries {
@@ -568,7 +570,13 @@ impl KlineDataSeries {
             start_datetime_ns,
             end_datetime_ns,
             rows,
+            cache_report: None,
         }
+    }
+
+    pub(super) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
+        self.cache_report = Some(cache_report);
+        self
     }
 
     #[must_use]
@@ -623,6 +631,11 @@ impl KlineDataSeries {
     #[must_use]
     pub fn into_rows(self) -> Vec<Kline> {
         self.rows
+    }
+
+    #[must_use]
+    pub fn cache_report(&self) -> Option<&HistorySeriesCacheReport> {
+        self.cache_report.as_ref()
     }
 
     pub fn into_market_cache_events(
@@ -739,6 +752,7 @@ pub struct TickDataSeries {
     start_datetime_ns: i64,
     end_datetime_ns: i64,
     rows: Vec<Tick>,
+    cache_report: Option<HistorySeriesCacheReport>,
 }
 
 impl TickDataSeries {
@@ -753,7 +767,13 @@ impl TickDataSeries {
             start_datetime_ns,
             end_datetime_ns,
             rows,
+            cache_report: None,
         }
+    }
+
+    pub(super) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
+        self.cache_report = Some(cache_report);
+        self
     }
 
     #[must_use]
@@ -803,6 +823,11 @@ impl TickDataSeries {
     #[must_use]
     pub fn into_rows(self) -> Vec<Tick> {
         self.rows
+    }
+
+    #[must_use]
+    pub fn cache_report(&self) -> Option<&HistorySeriesCacheReport> {
+        self.cache_report.as_ref()
     }
 
     pub fn into_market_cache_events(

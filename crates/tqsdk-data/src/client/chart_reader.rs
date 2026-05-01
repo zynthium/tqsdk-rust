@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use tqsdk_core::{Chart, Kline, MarketCommand, RuntimeCommand, Tick};
+use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Tick};
 
 use crate::error::{DataError, Result};
 
@@ -14,13 +14,14 @@ pub(super) async fn wait_for_ready_chart(
     session: &tqsdk_session::SessionClient,
     reader: &tqsdk_core::RuntimeReader,
     chart_id: &str,
+    expected: &ExpectedChartState,
     command_id: tqsdk_core::CommandId,
     timeout: Duration,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
-        if chart_is_ready(reader, chart_id)? {
+        if chart_is_ready(reader, chart_id, expected)? {
             return Ok(());
         }
 
@@ -58,7 +59,39 @@ pub(super) async fn wait_for_ready_chart(
     }
 }
 
-fn chart_is_ready(reader: &tqsdk_core::RuntimeReader, chart_id: &str) -> Result<bool> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExpectedChartState {
+    ins_list: String,
+    duration_ns: i64,
+    view_width: usize,
+    left_kline_id: Option<i64>,
+    focus_datetime_ns: Option<i64>,
+    focus_position: Option<usize>,
+}
+
+impl ExpectedChartState {
+    pub(super) fn from_command(command: &MarketChartCommand) -> Self {
+        Self {
+            ins_list: command
+                .symbols
+                .iter()
+                .map(|symbol| symbol.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            duration_ns: command.duration_ns,
+            view_width: command.view_width,
+            left_kline_id: command.left_kline_id,
+            focus_datetime_ns: command.focus_datetime_ns,
+            focus_position: command.focus_position,
+        }
+    }
+}
+
+fn chart_is_ready(
+    reader: &tqsdk_core::RuntimeReader,
+    chart_id: &str,
+    expected: &ExpectedChartState,
+) -> Result<bool> {
     let snapshot = reader.read();
     let Some(chart) = snapshot
         .decode_path::<Chart>(&["charts", chart_id])
@@ -68,7 +101,40 @@ fn chart_is_ready(reader: &tqsdk_core::RuntimeReader, chart_id: &str) -> Result<
     };
     // For history windows, `more_data` means there are more pages to paginate, not
     // that the current chart snapshot is unreadable.
-    Ok(chart.ready)
+    Ok(chart.ready && chart_state_matches(&chart, expected))
+}
+
+fn chart_state_matches(chart: &Chart, expected: &ExpectedChartState) -> bool {
+    state_str(chart, "ins_list") == Some(expected.ins_list.as_str())
+        && state_i64(chart, "duration") == Some(expected.duration_ns)
+        && state_usize(chart, "view_width") == Some(expected.view_width)
+        && match expected.left_kline_id {
+            Some(value) => state_i64(chart, "left_kline_id") == Some(value),
+            None => true,
+        }
+        && match (expected.focus_datetime_ns, expected.focus_position) {
+            (Some(datetime), Some(position)) => {
+                state_i64(chart, "focus_datetime") == Some(datetime)
+                    && state_usize(chart, "focus_position") == Some(position)
+            }
+            _ => true,
+        }
+}
+
+fn state_str<'a>(chart: &'a Chart, key: &str) -> Option<&'a str> {
+    chart.state.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn state_i64(chart: &Chart, key: &str) -> Option<i64> {
+    chart.state.get(key).and_then(serde_json::Value::as_i64)
+}
+
+fn state_usize(chart: &Chart, key: &str) -> Option<usize> {
+    chart
+        .state
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 pub(super) fn read_ready_kline_data_page(
