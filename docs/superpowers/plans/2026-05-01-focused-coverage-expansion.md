@@ -143,7 +143,7 @@ git commit -m "test: cover core state helper behavior"
 - Modify: `crates/tqsdk-session/src/metadata_helpers.rs`
 - Modify: `crates/tqsdk-session/src/services_helpers.rs`
 
-- [ ] **Step 1: Add failing metadata helper tests**
+- [x] **Step 1: Add failing metadata helper tests**
 
 Add private tests named:
 
@@ -155,11 +155,11 @@ Add private tests named:
 - `filter_option_nodes_applies_class_expire_and_price_filters`
 - `sort_options_and_get_atm_index_orders_by_strike`
 - `timestamp_nano_to_datetime_converts_nanoseconds`
-- `validate_finance_nearbys_rejects_empty_or_negative_nearby`
+- `validate_finance_nearbys_rejects_negative_or_out_of_range_nearby`
 
 Use compact JSON fixtures local to the tests. Keep tests in the helper module so `pub(super)` helpers remain non-public.
 
-- [ ] **Step 2: Add failing services helper tests**
+- [x] **Step 2: Add failing services helper tests**
 
 Add private tests named:
 
@@ -171,12 +171,12 @@ Add private tests named:
 - `json_value_to_f64_handles_numbers_strings_and_invalid_values`
 - `truncate_body_limits_error_payload_size`
 
-- [ ] **Step 3: Run session helper tests**
+- [x] **Step 3: Run session helper tests**
 
 Run:
 
 ```bash
-cargo test -p tqsdk-session metadata_helpers services_helpers -- --nocapture
+cargo test -p tqsdk-session helpers::tests -- --nocapture
 ```
 
 Expected:
@@ -185,7 +185,7 @@ Expected:
 All session helper tests pass.
 ```
 
-- [ ] **Step 4: Commit session coverage**
+- [x] **Step 4: Commit session coverage**
 
 ```bash
 git add crates/tqsdk-session/src/metadata_helpers.rs crates/tqsdk-session/src/services_helpers.rs

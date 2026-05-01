@@ -692,3 +692,248 @@ fn strip_null_object_fields(value: &mut Value) {
         object.retain(|_, value| !value.is_null());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Datelike, TimeZone, Utc};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn non_empty_str_rejects_empty_input() {
+        assert_eq!(
+            non_empty_str(Some("SHFE"), "exchange").unwrap(),
+            Some("SHFE")
+        );
+        assert_eq!(non_empty_str(None, "exchange").unwrap(), None);
+
+        let error = non_empty_str(Some(""), "exchange").expect_err("empty input should fail");
+        assert!(error.to_string().contains("exchange must not be empty"));
+    }
+
+    #[test]
+    fn parse_query_quotes_result_extracts_symbols() {
+        let payload = json!({
+            "result": {
+                "multi_symbol_info": [
+                    {"instrument_id": "SHFE.au2606"},
+                    {"instrument_id": "DCE.m2605"},
+                    {"instrument_id": 42}
+                ]
+            }
+        });
+
+        assert_eq!(
+            parse_query_quotes_result(&payload, None),
+            vec!["SHFE.au2606".to_string(), "DCE.m2605".to_string()]
+        );
+        assert_eq!(
+            parse_query_quotes_result(&payload, Some("SHFE")),
+            vec!["SHFE.au2606".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_query_cont_quotes_result_filters_nested_nodes() {
+        let payload = json!({
+            "result": {
+                "multi_symbol_info": [{
+                    "underlying": {
+                        "edges": [
+                            {"node": {"instrument_id": "KQ.m@DCE.m", "exchange_id": "DCE", "product_id": "m"}},
+                            {"node": {"instrument_id": "KQ.rb@SHFE.rb", "exchange_id": "SHFE", "product_id": "rb"}}
+                        ]
+                    }
+                }]
+            }
+        });
+
+        assert_eq!(
+            parse_query_cont_quotes_result(&payload, Some("DCE"), Some("m")),
+            vec!["KQ.m@DCE.m".to_string()]
+        );
+        assert!(parse_query_cont_quotes_result(&json!({"result": {}}), None, None).is_empty());
+    }
+
+    #[test]
+    fn parse_option_nodes_flattens_nested_option_payload() {
+        let payload = option_payload();
+
+        let nodes = parse_option_nodes(&payload);
+
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].instrument_id, "C1");
+        assert_eq!(nodes[0].call_or_put, "CALL");
+        assert_eq!(nodes[0].exercise_year, 2026);
+        assert_eq!(nodes[0].exercise_month, 5);
+    }
+
+    #[test]
+    fn parse_query_options_result_applies_basic_filters() {
+        let payload = option_payload();
+
+        assert_eq!(
+            parse_query_options_result(
+                &payload,
+                Some("CALL"),
+                Some(2026),
+                Some(5),
+                None,
+                None,
+                None
+            ),
+            vec!["C1".to_string(), "C2".to_string()]
+        );
+        assert_eq!(
+            parse_query_options_result(
+                &payload,
+                Some("PUT"),
+                None,
+                None,
+                Some(590.0),
+                Some(false),
+                None
+            ),
+            vec!["P1".to_string()]
+        );
+    }
+
+    #[test]
+    fn bisect_value_index_respects_left_and_right_priority() {
+        let values = [590.0, 600.0, 610.0];
+
+        assert_eq!(bisect_value_index(&values, 595.0, BisectPriority::Left), 0);
+        assert_eq!(bisect_value_index(&values, 595.0, BisectPriority::Right), 1);
+        assert_eq!(bisect_value_index(&values, 580.0, BisectPriority::Right), 0);
+        assert_eq!(bisect_value_index(&values, 620.0, BisectPriority::Left), 2);
+    }
+
+    #[test]
+    fn filter_option_nodes_applies_class_expiry_and_nearby_filters() {
+        let nodes = parse_option_nodes(&option_payload());
+
+        let filtered = filter_option_nodes(
+            nodes,
+            Some("CALL"),
+            Some(2026),
+            Some(5),
+            Some(true),
+            Some(&[0]),
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].instrument_id, "C2");
+        assert!(!filtered[0].expired);
+    }
+
+    #[test]
+    fn sort_options_and_get_atm_index_orders_by_strike() {
+        let mut calls = parse_option_nodes(&option_payload())
+            .into_iter()
+            .filter(|node| node.call_or_put == "CALL")
+            .collect::<Vec<_>>();
+
+        let atm = sort_options_and_get_atm_index(&mut calls, 595.0, "CALL")
+            .expect("CALL ATM selection should succeed");
+
+        assert_eq!(calls[atm].instrument_id, "C2");
+        assert_eq!(
+            calls
+                .iter()
+                .map(|node| node.instrument_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C1", "C2"]
+        );
+
+        let mut puts = parse_option_nodes(&option_payload())
+            .into_iter()
+            .filter(|node| node.call_or_put == "PUT")
+            .collect::<Vec<_>>();
+        let put_atm = sort_options_and_get_atm_index(&mut puts, 600.0, "PUT")
+            .expect("PUT ATM selection should succeed");
+        assert_eq!(puts[put_atm].instrument_id, "P1");
+    }
+
+    #[test]
+    fn timestamp_nano_to_datetime_converts_nanoseconds() {
+        let nanos = Utc
+            .with_ymd_and_hms(2026, 5, 1, 12, 30, 45)
+            .single()
+            .expect("fixture timestamp should be valid")
+            .timestamp_nanos_opt()
+            .expect("fixture timestamp should fit nanos");
+
+        let datetime = timestamp_nano_to_datetime(Some(nanos)).expect("nanos should decode");
+
+        assert_eq!(datetime.year(), 2026);
+        assert_eq!(datetime.month(), 5);
+        assert_eq!(datetime.day(), 1);
+        assert_eq!(timestamp_nano_to_datetime(None), None);
+    }
+
+    #[test]
+    fn validate_finance_nearbys_rejects_negative_or_out_of_range_nearby() {
+        assert!(validate_finance_nearbys("SSE.000300", &[0, 5]).is_ok());
+        assert!(validate_finance_nearbys("SSE.510050", &[0, 3]).is_ok());
+        assert!(validate_finance_nearbys("SSE.000300", &[-1]).is_err());
+        assert!(validate_finance_nearbys("SSE.510050", &[4]).is_err());
+    }
+
+    #[test]
+    fn option_validators_reject_unsupported_inputs() {
+        assert!(validate_option_class("CALL").is_ok());
+        assert!(validate_option_class("STRADDLE").is_err());
+        assert!(validate_price_levels(&[-100, 0, 100]).is_ok());
+        assert!(validate_price_levels(&[-101]).is_err());
+        assert!(validate_finance_underlying("SSE.000300").is_ok());
+        assert!(validate_finance_underlying("SHFE.au2606").is_err());
+    }
+
+    fn option_payload() -> Value {
+        let may_2026 = Utc
+            .with_ymd_and_hms(2026, 5, 20, 7, 0, 0)
+            .single()
+            .expect("fixture timestamp should be valid")
+            .timestamp_nanos_opt()
+            .expect("fixture timestamp should fit nanos");
+        json!({
+            "result": {
+                "multi_symbol_info": [{
+                    "derivatives": {
+                        "edges": [
+                            {"node": {
+                                "instrument_id": "C1",
+                                "english_name": "Plain Call",
+                                "call_or_put": "CALL",
+                                "strike_price": 590.0,
+                                "expired": true,
+                                "last_exercise_datetime": may_2026
+                            }},
+                            {"node": {
+                                "instrument_id": "C2",
+                                "english_name": "Alpha Call A",
+                                "call_or_put": "CALL",
+                                "strike_price": 600.0,
+                                "expired": false,
+                                "last_exercise_datetime": may_2026
+                            }},
+                            {"node": {
+                                "instrument_id": "P1",
+                                "english_name": "Plain Put",
+                                "call_or_put": "PUT",
+                                "strike_price": 590.0,
+                                "expired": false,
+                                "last_exercise_datetime": may_2026
+                            }},
+                            {"node": {
+                                "instrument_id": "BROKEN",
+                                "call_or_put": "CALL"
+                            }}
+                        ]
+                    }
+                }]
+            }
+        })
+    }
+}

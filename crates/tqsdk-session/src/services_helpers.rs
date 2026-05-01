@@ -177,3 +177,113 @@ fn require_tokio_runtime() -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn split_symbol_splits_exchange_and_instrument() {
+        assert_eq!(split_symbol("SHFE.au2606"), ("SHFE", "au2606"));
+        assert_eq!(split_symbol("au2606"), ("", "au2606"));
+    }
+
+    #[test]
+    fn ranking_value_returns_selected_numeric_field() {
+        let row = SymbolRanking {
+            volume_ranking: 1.0,
+            long_ranking: 2.0,
+            short_ranking: 3.0,
+            ..SymbolRanking::default()
+        };
+
+        assert_eq!(ranking_value(&row, "volume_ranking"), 1.0);
+        assert_eq!(ranking_value(&row, "long_ranking"), 2.0);
+        assert_eq!(ranking_value(&row, "short_ranking"), 3.0);
+        assert!(ranking_value(&row, "unknown").is_nan());
+    }
+
+    #[test]
+    fn parse_service_url_reports_label_on_invalid_url() {
+        let url = parse_service_url("https://example.test/service", "ranking")
+            .expect("valid URL should parse");
+        assert_eq!(url.host_str(), Some("example.test"));
+
+        let error = parse_service_url("not a url", "ranking").expect_err("invalid URL should fail");
+        assert!(error.to_string().contains("invalid ranking service url"));
+    }
+
+    #[test]
+    fn parse_iso_date_rejects_invalid_dates() {
+        assert_eq!(
+            parse_iso_date("2026-05-01").expect("valid date should parse"),
+            NaiveDate::from_ymd_opt(2026, 5, 1).expect("fixture date should exist")
+        );
+
+        let error = parse_iso_date("2026-02-30").expect_err("invalid date should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid date string `2026-02-30`")
+        );
+    }
+
+    #[test]
+    fn next_day_rejects_overflow() {
+        assert_eq!(
+            next_day(NaiveDate::from_ymd_opt(2026, 5, 1).expect("fixture date should exist"))
+                .expect("normal next day should succeed"),
+            NaiveDate::from_ymd_opt(2026, 5, 2).expect("fixture date should exist")
+        );
+        assert!(next_day(NaiveDate::MAX).is_err());
+    }
+
+    #[test]
+    fn json_value_to_f64_handles_numbers_strings_and_invalid_values() {
+        assert_eq!(json_value_to_f64(&json!(12.5)), 12.5);
+        assert_eq!(json_value_to_f64(&json!("13.5")), 13.5);
+        assert!(json_value_to_f64(&json!("NaN")).is_nan());
+        assert!(json_value_to_f64(&json!("-")).is_nan());
+        assert!(json_value_to_f64(&json!("")).is_nan());
+        assert!(json_value_to_f64(&json!({"value": 1})).is_nan());
+        assert!(json_value_to_f64(&Value::Null).is_nan());
+    }
+
+    #[test]
+    fn truncate_body_limits_error_payload_size() {
+        let short = "short body";
+        assert_eq!(truncate_body(short), short);
+
+        let long = "x".repeat(300);
+        let truncated = truncate_body(&long);
+
+        assert_eq!(truncated.chars().count(), 259);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn auth_headers_builds_bearer_authorization() {
+        let headers =
+            auth_headers(&AuthContext::new("token-1")).expect("auth headers should build");
+
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .expect("authorization header should exist")
+                .to_str()
+                .expect("authorization header should be valid"),
+            "Bearer token-1"
+        );
+        assert_eq!(
+            headers
+                .get(USER_AGENT)
+                .expect("user agent header should exist")
+                .to_str()
+                .expect("user agent header should be valid"),
+            DEFAULT_USER_AGENT
+        );
+    }
+}
