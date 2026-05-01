@@ -343,7 +343,6 @@ public API。
 
 已落地：
 
-- 计划文档：[`../superpowers/plans/2026-04-27-strategy-host-test-harness.md`](../superpowers/plans/2026-04-27-strategy-host-test-harness.md)
 - `tqsdk-task` 已建立最小 `StrategyHost` / `StrategyContext`，策略步骤可以在同一
   task/wait 推进点内读取 quote/account/position，并复用 typed order、
   target-pos 和 risk gate。
