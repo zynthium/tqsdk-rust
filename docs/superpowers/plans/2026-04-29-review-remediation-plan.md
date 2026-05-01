@@ -19,6 +19,7 @@ Child plans:
 - `docs/superpowers/plans/2026-04-29-public-api-disposition-matrix.md` covers Task 1.
 - `docs/superpowers/plans/2026-04-29-audit-guardrail-fixes.md` covers Task 2.
 - `docs/superpowers/plans/2026-04-29-test-harness-guardrails.md` covers Task 3.
+- `docs/superpowers/plans/2026-05-01-focused-coverage-expansion.md` covers the residual focused coverage expansion left after Task 3.
 - `docs/superpowers/plans/2026-04-29-session-runtime-command-status-refactor.md` covers Task 4 Step 1.
 - `docs/superpowers/plans/2026-04-29-session-route-driving-refactor.md` covers Task 4 Step 2.
 - `docs/superpowers/plans/2026-04-29-target-pos-control-flow-refactor.md` covers Task 4 Step 3.
@@ -976,6 +977,7 @@ Additional completed items:
 Remaining items are intentionally not part of this mixed remediation batch:
 
 - `_for_test` feature-gating for public facade hooks is closed for the session/wait/stream/task items covered by `docs/superpowers/plans/2026-05-01-test-support-surface-migration.md`. Task deterministic fixtures still use the public `api.session().handle()` runtime substrate where raw ingest/dispatch assertions are the behavior under test.
+- Focused unit-test coverage remains open as a separate batch: `docs/superpowers/plans/2026-05-01-focused-coverage-expansion.md`. Task 3 closed the high-risk P0 guardrails only; it did not claim the historical 80% coverage target or the P1/P2 helper modules were fully covered.
 - Global typed state migration remains a runtime contract long-term evolution item and should not be mixed into bug/perf remediation batches.
 - Module-directory split items from `docs/reviews/comprehensive-review-2026-04-30.md` are closed; each landed split has a child plan and source-level guardrail.
 - Broader public documentation coverage remains a quality batch, not a blocker for the bug/perf remediation already completed.
