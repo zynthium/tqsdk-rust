@@ -59,3 +59,56 @@ impl TickWindow {
         &self.chart_id
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_window_exposes_owned_metadata_and_rows() {
+        let rows = vec![
+            Tick {
+                id: 10,
+                last_price: 610.0,
+                ..Tick::default()
+            },
+            Tick {
+                id: 11,
+                last_price: 611.0,
+                ..Tick::default()
+            },
+        ];
+        let window = TickWindow::new(
+            "SHFE.au2606".to_string(),
+            30,
+            "tick-chart-1".to_string(),
+            rows,
+        );
+
+        assert_eq!(window.symbol(), "SHFE.au2606");
+        assert_eq!(window.view_width(), 30);
+        assert_eq!(window.chart_id(), "tick-chart-1");
+        assert_eq!(window.len(), 2);
+        assert!(!window.is_empty());
+        assert_eq!(window.get(0).expect("first row should exist").id, 10);
+        assert_eq!(
+            window.last().expect("last row should exist").last_price,
+            611.0
+        );
+        assert_eq!(
+            window.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+    }
+
+    #[test]
+    fn tick_window_empty_reports_no_last_row() {
+        let window = TickWindow::default();
+
+        assert_eq!(window.len(), 0);
+        assert!(window.is_empty());
+        assert!(window.last().is_none());
+        assert!(window.get(0).is_none());
+        assert_eq!(window.iter().count(), 0);
+    }
+}

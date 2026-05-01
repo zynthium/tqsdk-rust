@@ -199,7 +199,7 @@ git commit -m "test: cover session query helper behavior"
 - Modify: `crates/tqsdk-wait/src/views/kline_window.rs`
 - Modify: `crates/tqsdk-wait/src/views/tick_window.rs`
 
-- [ ] **Step 1: Add failing `change.rs` tests**
+- [x] **Step 1: Add failing `change.rs` tests**
 
 Add private tests named:
 
@@ -211,7 +211,7 @@ Add private tests named:
 
 Create a tiny test-only `Tracked` struct implementing `ChangeTrackedRef`. Use `ChangeSet`, `ChangeHit`, `StatePath`, and `ObjectKey` directly.
 
-- [ ] **Step 2: Add failing window tests**
+- [x] **Step 2: Add failing window tests**
 
 Add private tests named:
 
@@ -222,12 +222,13 @@ Add private tests named:
 
 Use `Kline::default()` and `Tick::default()` rows. Assert `len`, `is_empty`, `last`, `get`, `iter().count()`, and metadata accessors.
 
-- [ ] **Step 3: Run wait helper tests**
+- [x] **Step 3: Run wait helper tests**
 
 Run:
 
 ```bash
-cargo test -p tqsdk-wait change views -- --nocapture
+cargo test -p tqsdk-wait change::tests -- --nocapture
+cargo test -p tqsdk-wait window::tests -- --nocapture
 ```
 
 Expected:
@@ -236,7 +237,7 @@ Expected:
 All wait change/window tests pass.
 ```
 
-- [ ] **Step 4: Commit wait coverage**
+- [x] **Step 4: Commit wait coverage**
 
 ```bash
 git add crates/tqsdk-wait/src/change.rs crates/tqsdk-wait/src/views/kline_window.rs crates/tqsdk-wait/src/views/tick_window.rs
