@@ -35,6 +35,12 @@
 //! - service 的 public report 能否表达 crash recovery 与 reader lag，而不暴露文件细节？
 //! - 完整跨进程 cache service 是否已经超出官方 Python SDK 的核心能力边界？
 //!
+//! Active gap status:
+//! 仍保留在 `api_gaps/`。S18 本地 file/cache foundation 已有正式 examples；
+//! 本文件只跟踪“完整跨进程 service / daemon orchestration”这一尚未支持且已降级为
+//! 用户层工具边界的 desired sketch，避免把 HTTP/GUI/系统进程管理器或 live
+//! session ownership 下沉到 `tqsdk-data`。
+//!
 //! Current API note:
 //! `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 已提供离线
 //! cache record、JSONL reader/writer 和 ordered replay；`MarketCacheStreamWriter`

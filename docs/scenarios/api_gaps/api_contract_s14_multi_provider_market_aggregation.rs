@@ -29,6 +29,11 @@
 //! - 这是局部 facade 扩展还是架构级新增能力？
 //! - 该能力是否已经超出官方 Python SDK 的核心能力边界？
 //!
+//! Active gap status:
+//! 仍保留在 `api_gaps/`。该能力未被当前 public API 支持，但也不是近期核心
+//! SDK 目标；本文件只作为多 provider 基础设施边界样本，防止能力下沉到
+//! core/session 或污染单 provider 用户路径。
+//!
 //! API gap:
 //! 当前 public API 基本围绕单 `SessionClient` / 单 `TqStream`。`tqsdk-core`
 //! 有 aggregated reader 相关底座，但没有终端用户可用的 provider aggregation

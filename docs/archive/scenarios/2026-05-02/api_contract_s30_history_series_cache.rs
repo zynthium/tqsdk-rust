@@ -1,3 +1,11 @@
+//! Archived gap sketch: 2026-05-02
+//!
+//! S30 is now naturally expressible by the formal compiled data example
+//! `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`.
+//! The only rejected portion is Python/Rust simultaneous writes to the same
+//! cache directory, which is explicitly a non-goal rather than an active SDK
+//! gap. This sketch is kept only as historical context.
+//!
 //! Scenario: 看盘软件历史序列缓存
 //!
 //! Primary user layer:
@@ -77,12 +85,13 @@
 //!   必须不承诺，因为 Python 官方 `DataSeries` 自身也不支持同合约周期多进程/
 //!   多线程/多协程并发写
 //!
-//! Current API gap:
+//! Closed status:
 //! `tqsdk-data` 已落地 `DataClientBuilder` 和 `HistorySeriesCache`，覆盖
 //! builder opt-in、Python 兼容默认目录 / 自定义目录、mmap 读、官方 `DataSeries`
 //! miss 下载序列、mutable tail refresh、temp segment publish、相邻 segment merge、
 //! typed `cache_report()`、typed cache miss、cache-only reader、scan/schema report
-//! 和容量/保留策略。Python/Rust 同目录同时写被明确保留为 non-goal。
+//! 和容量/保留策略。Python/Rust 同目录同时写被明确保留为 non-goal，因此不再
+//! 作为 active api_gap 跟踪。
 //!
 //! 理想用户代码草案：
 //! ```ignore

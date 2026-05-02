@@ -218,9 +218,9 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `get_kline_data_series` / `get_tick_data_series` 隐式读写 Python 兼容 mmap
   历史缓存，默认目录为 `~/.tqsdk/data_series_1`，并可通过
   `history_cache_dir(...)` 覆盖。cache miss 下载对齐官方 Python `DataSeries`
-  的 `set_chart` / `focus_datetime` / `left_kline_id` 序列。剩余 gap 是
-  manifest/schema version、更丰富的 cache-only reader、容量/保留策略以及
-  Python/Rust 同时写同一目录的协调。
+  的 `set_chart` / `focus_datetime` / `left_kline_id` 序列；cache-only reader、
+  scan/schema report、容量/保留策略和 typed cache miss 已落地。Python/Rust
+  同目录同时写已明确为 non-goal，原 gap sketch 已归档。
 - S31 高频交易柜台低延迟 profile 仍无法自然表达为单一 contract：S5/S6/S7/S10/S19/S21
   分别覆盖裸行情、下单、订单一致性、风控和慢消费者隔离，但还没有一个示例把
   market/trade partition hot read、typed risk gate、order intent、latency report
@@ -258,7 +258,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 27. Session metadata 与 service query pack | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`; `SessionClient::{query_quotes,query_cont_quotes,query_options,query_atm_options,query_all_level_options,query_all_level_finance_options,get_trading_calendar,query_symbol_settlement,query_symbol_ranking,query_edb_data}`; direct query 继续归属 session |
 | 28. Data 下载 / 导出 / Greeks | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`; `DataClient::{query_his_cont_quotes,kline_data_download,tick_data_download,export_kline_data_csv,export_tick_data_csv,query_option_greeks}`; research/download/Greeks 继续归属 data |
 | 29. TargetPosTask ownership | 自然 | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`; `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed,wait_update}`; `TargetPosTask`; `TargetPosScheduler`; 同账户同合约 ownership 属于 task，跨账户 TargetPos 编排和 durable audit 不进入核心 SDK |
-| 30. 看盘软件历史序列缓存 | 自然（opt-in mmap cache foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`; `docs/scenarios/api_gaps/api_contract_s30_history_series_cache.rs`; `DataClientBuilder::{history_cache_enabled,history_cache_dir,build}`; `HistorySeriesCache`; `HistorySeriesCacheReport`; `KlineDataSeries::cache_report`; `TickDataSeries::cache_report`; 默认 `DataClient::from_session` 无缓存，builder opt-in 后读写 Python 兼容 `~/.tqsdk/data_series_1` / 自定义目录，cache miss 下载对齐官方 `DataSeries`；manifest/schema version/cache-only reader/容量策略/跨 SDK 同时写仍保留为后续 gap |
+| 30. 看盘软件历史序列缓存 | 自然（opt-in mmap cache foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s30_history_series_cache.rs`; `DataClientBuilder::{history_cache_enabled,history_cache_dir,history_cache_max_bytes,history_cache_retention_days,build}`; `HistorySeriesCache`; `HistorySeriesCacheReport`; `HistorySeriesCacheMiss`; `HistorySeriesCacheScanReport`; `HistorySeriesCacheMaintenanceReport`; `KlineDataSeries::cache_report`; `TickDataSeries::cache_report`; 默认 `DataClient::from_session` 无缓存，builder opt-in 后读写 Python 兼容 `~/.tqsdk/data_series_1` / 自定义目录，cache miss 下载对齐官方 `DataSeries`；cache-only reader、scan/schema report、容量/保留策略已落地；Python/Rust 同目录同时写是 non-goal |
 | 31. 高频交易柜台低延迟 profile | 无法表达（跨 primitive 契约不足） | 中 | 中 | 中 | 中 | 中 | 补场景后设计 | `docs/scenarios/api_gaps/api_contract_s31_low_latency_trading_desk.rs`; S5/S6/S7/S10/S19/S21 的 primitive 分散存在，但缺少同一低延迟链路 contract；hot path 应保持在 core/session/task/stream，不进入 data/history cache |
 
 ## 主要结论
@@ -289,7 +289,6 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
    都是用户层 facade/tooling 问题，当前暂停作为核心 SDK 目标；它们不得下沉到
    `tqsdk-core`、`tqsdk-session`，也不得通过继续扩张 `tqsdk-data` /
    `tqsdk-task` 伪装为核心能力。后续优先维护已落地的薄基础设施，不继续向平台化能力膨胀。
-6. 面向看盘软件与高频柜台的产品级使用方式需要补充独立场景锚点：S30 将历史
-   序列缓存限定为 `tqsdk-data` 的 opt-in materialization/cache 能力，S31 将低延迟
-   交易柜台限定为 core/session/task/stream 的 hot-path profile。两者边界不同，
-   不能用 memmap 历史缓存替代高频 hot path 设计。
+6. 面向看盘软件的 S30 历史序列缓存已闭环为 `tqsdk-data` 的 opt-in
+   materialization/cache 能力；S31 低延迟交易柜台仍需要正式 hot-path profile。
+   两者边界不同，不能用 memmap 历史缓存替代高频 hot path 设计。

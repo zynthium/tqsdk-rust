@@ -637,12 +637,14 @@ public API。
 - `api_contract_s18_cache_service_foundation`（本地 file service foundation 已提升为正式 data example）
 - `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；暂停
   作为核心 SDK 目标，后续仅在明确用户层工具需求下重新评估）
-- `api_contract_s30_history_series_cache`（desired API sketch 已补齐）：覆盖
+- `api_contract_s30_history_series_cache` 已提升为正式 data example，覆盖
   看盘软件 / 交易终端所需的 typed history series range cache、缺口下载、
   Python 兼容默认目录 / 自定义目录、mmap 读、mutable tail refresh、segment
-  merge 和损坏恢复；已提升为正式 data example，作为 `tqsdk-data` 的显式
-  opt-in materialization/cache foundation，不改变 `DataClient::from_session`
-  默认无缓存语义。
+  merge、cache-only reader、scan/schema report、容量/保留策略和损坏恢复；
+  原 gap sketch 已归档到 `docs/archive/scenarios/2026-05-02/`。该能力作为
+  `tqsdk-data` 的显式 opt-in materialization/cache foundation，不改变
+  `DataClient::from_session` 默认无缓存语义；Python/Rust 同目录同时写已明确为
+  non-goal。
 - `api_contract_s16_history_replay_strategy`
 - `api_contract_s17_research_kline_batch`
 - `api_contract_s28_download_export` 与 `api_contract_s28_option_greeks`（新增）：
