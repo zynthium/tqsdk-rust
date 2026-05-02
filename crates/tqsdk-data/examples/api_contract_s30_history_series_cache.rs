@@ -13,8 +13,12 @@
 //! - `DataClientBuilder::history_cache_enabled(true)` 显式开启缓存
 //! - 未设置目录时使用 Python 兼容默认目录 `~/.tqsdk/data_series_1`
 //! - `history_cache_dir(...)` 可以指定自定义目录
+//! - `history_cache_max_bytes(...)` / `history_cache_retention_days(...)` 可以配置容量和保留期
 //! - 首版 backend 是 mmap，并使用 Python `DataSeries` 兼容文件名和二进制列布局
+//! - Python/Rust 历史缓存文件可互通和交替使用，但首版不承诺同目录同时写
 //! - cache miss 使用官方 `DataSeries` 的 `set_chart` 序列补齐缺口
+//! - `HistorySeriesCache::read_*_data_series` 提供 cache-only 读取，缺口返回 typed miss
+//! - `HistorySeriesCache::scan()` 提供 schema/version 与损坏文件 report
 //!
 //! Forbidden:
 //! - `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` 拥有历史文件缓存
@@ -58,7 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let mut builder = DataClientBuilder::new()
         .with_session(session)
-        .history_cache_enabled(true);
+        .history_cache_enabled(true)
+        .history_cache_retention_days(30);
     if let Some(cache_dir) = cache_dir {
         builder = builder.history_cache_dir(cache_dir);
     }

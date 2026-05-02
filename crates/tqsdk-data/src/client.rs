@@ -77,11 +77,24 @@ impl Default for DataServiceEndpoints {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct HistorySeriesCacheMaintenanceConfig {
+    max_bytes: Option<u64>,
+    retention_days: Option<u64>,
+}
+
+impl HistorySeriesCacheMaintenanceConfig {
+    fn enabled(self) -> bool {
+        self.max_bytes.is_some() || self.retention_days.is_some()
+    }
+}
+
 /// Thin research/offline data wrapper over [`tqsdk_session::SessionClient`].
 #[derive(Clone)]
 pub struct DataClient {
     session: Option<tqsdk_session::SessionClient>,
     history_cache: Option<Arc<HistorySeriesCache>>,
+    history_cache_maintenance: HistorySeriesCacheMaintenanceConfig,
     #[cfg(feature = "services")]
     http: reqwest::Client,
     endpoints: DataServiceEndpoints,
@@ -99,6 +112,7 @@ impl DataClient {
         Self {
             session: None,
             history_cache: None,
+            history_cache_maintenance: HistorySeriesCacheMaintenanceConfig::default(),
             #[cfg(feature = "services")]
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints::default(),
@@ -131,6 +145,7 @@ impl DataClient {
         Self {
             session: None,
             history_cache: None,
+            history_cache_maintenance: HistorySeriesCacheMaintenanceConfig::default(),
             #[cfg(feature = "services")]
             http: reqwest::Client::new(),
             endpoints: DataServiceEndpoints {
@@ -480,7 +495,7 @@ impl DataClient {
         let requested_range = (spec.start_datetime_ns, spec.end_datetime_ns);
         let missing_ranges = {
             let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            cache.missing_kline_datetime_ranges(
+            cache.missing_kline_datetime_ranges_unlocked(
                 request.symbol(),
                 spec.duration_ns,
                 requested_range.0,
@@ -495,7 +510,7 @@ impl DataClient {
                 continue;
             }
             let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            let still_missing = cache.missing_kline_datetime_ranges(
+            let still_missing = cache.missing_kline_datetime_ranges_unlocked(
                 request.symbol(),
                 spec.duration_ns,
                 requested_range.0,
@@ -506,9 +521,11 @@ impl DataClient {
             if rows_to_write.is_empty() {
                 continue;
             }
-            if let Some(id_range) =
-                cache.write_kline_segment(request.symbol(), spec.duration_ns, &rows_to_write)?
-            {
+            if let Some(id_range) = cache.write_kline_segment_unlocked(
+                request.symbol(),
+                spec.duration_ns,
+                &rows_to_write,
+            )? {
                 downloaded_id_ranges.push(id_range);
                 downloaded_datetime_ranges.push(missing);
             }
@@ -516,8 +533,8 @@ impl DataClient {
 
         let rows = {
             let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            cache.merge_adjacent_files(request.symbol(), spec.duration_ns)?;
-            cache.read_kline_window(
+            cache.merge_adjacent_files_unlocked(request.symbol(), spec.duration_ns)?;
+            cache.read_kline_window_unlocked(
                 request.symbol(),
                 spec.duration_ns,
                 spec.start_datetime_ns,
@@ -525,7 +542,7 @@ impl DataClient {
             )?
         };
         let hit_rows = cache_hit_rows(&rows, &downloaded_id_ranges);
-        Ok(KlineDataSeries::new(
+        let series = KlineDataSeries::new(
             request.symbol().to_string(),
             spec.duration_ns,
             spec.start_datetime_ns,
@@ -536,7 +553,9 @@ impl DataClient {
             cache.root_dir().to_path_buf(),
             hit_rows,
             downloaded_datetime_ranges,
-        )))
+        ));
+        self.enforce_history_cache_limits(cache.as_ref())?;
+        Ok(series)
     }
 
     async fn get_cached_tick_data_series(
@@ -550,7 +569,7 @@ impl DataClient {
         let requested_range = (spec.start_datetime_ns, spec.end_datetime_ns);
         let missing_ranges = {
             let _guard = cache.lock_series(request.symbol(), 0)?;
-            cache.missing_tick_datetime_ranges(
+            cache.missing_tick_datetime_ranges_unlocked(
                 request.symbol(),
                 requested_range.0,
                 requested_range.1,
@@ -564,7 +583,7 @@ impl DataClient {
                 continue;
             }
             let _guard = cache.lock_series(request.symbol(), 0)?;
-            let still_missing = cache.missing_tick_datetime_ranges(
+            let still_missing = cache.missing_tick_datetime_ranges_unlocked(
                 request.symbol(),
                 requested_range.0,
                 requested_range.1,
@@ -574,7 +593,9 @@ impl DataClient {
             if rows_to_write.is_empty() {
                 continue;
             }
-            if let Some(id_range) = cache.write_tick_segment(request.symbol(), &rows_to_write)? {
+            if let Some(id_range) =
+                cache.write_tick_segment_unlocked(request.symbol(), &rows_to_write)?
+            {
                 downloaded_id_ranges.push(id_range);
                 downloaded_datetime_ranges.push(missing);
             }
@@ -582,15 +603,15 @@ impl DataClient {
 
         let rows = {
             let _guard = cache.lock_series(request.symbol(), 0)?;
-            cache.merge_adjacent_files(request.symbol(), 0)?;
-            cache.read_tick_window(
+            cache.merge_adjacent_files_unlocked(request.symbol(), 0)?;
+            cache.read_tick_window_unlocked(
                 request.symbol(),
                 spec.start_datetime_ns,
                 spec.end_datetime_ns,
             )?
         };
         let hit_rows = cache_hit_rows(&rows, &downloaded_id_ranges);
-        Ok(TickDataSeries::new(
+        let series = TickDataSeries::new(
             request.symbol().to_string(),
             spec.start_datetime_ns,
             spec.end_datetime_ns,
@@ -600,7 +621,19 @@ impl DataClient {
             cache.root_dir().to_path_buf(),
             hit_rows,
             downloaded_datetime_ranges,
-        )))
+        ));
+        self.enforce_history_cache_limits(cache.as_ref())?;
+        Ok(series)
+    }
+
+    fn enforce_history_cache_limits(&self, cache: &HistorySeriesCache) -> Result<()> {
+        if self.history_cache_maintenance.enabled() {
+            cache.enforce_limits(
+                self.history_cache_maintenance.max_bytes,
+                self.history_cache_maintenance.retention_days,
+            )?;
+        }
+        Ok(())
     }
 
     async fn download_official_kline_range(
@@ -722,6 +755,7 @@ pub struct DataClientBuilder {
     session: Option<tqsdk_session::SessionClient>,
     history_cache_enabled: bool,
     history_cache_dir: Option<PathBuf>,
+    history_cache_maintenance: HistorySeriesCacheMaintenanceConfig,
 }
 
 impl DataClientBuilder {
@@ -748,11 +782,24 @@ impl DataClientBuilder {
         self
     }
 
+    #[must_use]
+    pub fn history_cache_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.history_cache_maintenance.max_bytes = Some(max_bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn history_cache_retention_days(mut self, retention_days: u64) -> Self {
+        self.history_cache_maintenance.retention_days = Some(retention_days);
+        self
+    }
+
     pub fn build(self) -> Result<DataClient> {
         let mut client = DataClient::new();
         if let Some(session) = self.session {
             client = client.with_session(session);
         }
+        client.history_cache_maintenance = self.history_cache_maintenance;
         if self.history_cache_enabled {
             let cache = if let Some(dir) = self.history_cache_dir {
                 HistorySeriesCache::open(dir)

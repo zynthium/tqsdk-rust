@@ -8,7 +8,10 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, OutboundFrame, OutboundRequest,
     ProtocolDomain, RuntimeHandle, RuntimeInput, Tick,
 };
-use tqsdk_data::{DataClientBuilder, DataError, HistorySeriesCache, KlineDataSeriesRequest};
+use tqsdk_data::{
+    DataClientBuilder, DataError, HistorySeriesCache, HistorySeriesCacheFileStatus,
+    KlineDataSeriesRequest,
+};
 use tqsdk_session::testing::ManualSession;
 
 #[test]
@@ -271,6 +274,161 @@ fn corrupted_cache_file_returns_typed_error() {
         .unwrap_err();
 
     assert!(matches!(err, DataError::InvalidResponse(message) if message.contains("row width")));
+}
+
+#[test]
+fn cache_only_kline_reader_returns_series_without_session() {
+    let dir = temp_dir("cache-only-hit");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+        )
+        .unwrap();
+
+    let series = cache
+        .read_kline_data_series(KlineDataSeriesRequest::new(
+            "SHFE.au2602",
+            Duration::from_secs(60),
+            0,
+            60_000_000_000,
+        ))
+        .unwrap();
+
+    assert_eq!(series.len(), 1);
+    assert_eq!(series.rows()[0].id, 1);
+    let report = series
+        .cache_report()
+        .expect("cache-only read reports cache");
+    assert_eq!(report.hit_rows, 1);
+    assert!(report.downloaded_ranges.is_empty());
+}
+
+#[test]
+fn cache_only_kline_reader_reports_missing_ranges_without_download() {
+    let dir = temp_dir("cache-only-miss");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    let err = cache
+        .read_kline_data_series(KlineDataSeriesRequest::new(
+            "SHFE.au2602",
+            Duration::from_secs(60),
+            0,
+            60_000_000_000,
+        ))
+        .unwrap_err();
+
+    assert!(matches!(err, DataError::CacheMiss(miss)
+            if miss.symbol == "SHFE.au2602"
+                && miss.duration_ns == 60_000_000_000
+                && miss.missing_ranges == vec![(0, 60_000_000_000)]));
+}
+
+#[test]
+fn cache_scan_reports_schema_and_corrupt_segment_status() {
+    let dir = temp_dir("scan-corrupt");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
+        .unwrap();
+    std::fs::write(dir.join("SHFE.au2602.60000000000.10.11"), [1_u8, 2, 3]).unwrap();
+    std::fs::write(dir.join("SHFE.au2602.60000000000.temp"), [1_u8, 2, 3]).unwrap();
+
+    let report = cache.scan().unwrap();
+
+    assert_eq!(report.schema_version, 1);
+    assert!(report.files.iter().any(|file| {
+        file.file_name == "SHFE.au2602.60000000000.1.2"
+            && file.status == HistorySeriesCacheFileStatus::Readable
+            && file.rows == 1
+    }));
+    assert!(report.files.iter().any(|file| {
+        file.file_name == "SHFE.au2602.60000000000.10.11"
+            && file.status == HistorySeriesCacheFileStatus::InvalidRowWidth
+    }));
+    assert!(report.files.iter().any(|file| {
+        file.file_name == "SHFE.au2602.60000000000.temp"
+            && file.status == HistorySeriesCacheFileStatus::IncompleteWrite
+    }));
+}
+
+#[test]
+fn cache_enforce_limits_removes_expired_and_oldest_segments_only() {
+    let dir = temp_dir("enforce-limits");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
+        .unwrap();
+    std::fs::write(dir.join(".SHFE.au2602.60000000000.lock"), b"lock").unwrap();
+    std::fs::write(dir.join("SHFE.au2602.60000000000.temp"), b"temp").unwrap();
+
+    let report = cache.enforce_limits(None, Some(0)).unwrap();
+
+    assert_eq!(report.removed_files, 1);
+    assert!(!dir.join("SHFE.au2602.60000000000.1.2").exists());
+    assert!(dir.join(".SHFE.au2602.60000000000.lock").exists());
+    assert!(dir.join("SHFE.au2602.60000000000.temp").exists());
+
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(10, 600_000_000_000, 10.0)],
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(20, 1_200_000_000_000, 20.0)],
+        )
+        .unwrap();
+
+    let report = cache.enforce_limits(Some(72), None).unwrap();
+
+    assert_eq!(report.removed_files, 1);
+    assert!(!dir.join("SHFE.au2602.60000000000.10.11").exists());
+    assert!(dir.join("SHFE.au2602.60000000000.20.21").exists());
+}
+
+#[test]
+fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
+    run_on_tokio(async {
+        let dir = temp_dir("builder-retention-policy");
+        let cache = HistorySeriesCache::open(&dir).unwrap();
+        cache
+            .write_kline_segment(
+                "SHFE.ao2609",
+                60_000_000_000,
+                &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+            )
+            .unwrap();
+        let (manual, handle) = manual_session_and_handle();
+        seed_auth_features(&handle, &["tq_dl"]);
+        let client = DataClientBuilder::new()
+            .with_session(manual.client_clone())
+            .history_cache_enabled(true)
+            .history_cache_dir(&dir)
+            .history_cache_retention_days(0)
+            .build()
+            .unwrap();
+
+        let series = client
+            .get_kline_data_series(KlineDataSeriesRequest::new(
+                "SHFE.ao2609",
+                Duration::from_secs(60),
+                0,
+                60_000_000_000,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(series.len(), 1);
+        assert!(!dir.join("SHFE.ao2609.60000000000.1.3").exists());
+    });
 }
 
 #[test]

@@ -101,9 +101,17 @@
 - `get_tick_data_series(TickDataSeriesRequest)`
 - `DataClientBuilder::history_cache_enabled(true)`
 - `DataClientBuilder::history_cache_dir(...)`
+- `DataClientBuilder::history_cache_max_bytes(...)`
+- `DataClientBuilder::history_cache_retention_days(...)`
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
+- `HistorySeriesCacheMiss`
+- `HistorySeriesCacheScanReport`
+- `HistorySeriesCacheFileReport`
+- `HistorySeriesCacheFileKind`
+- `HistorySeriesCacheFileStatus`
+- `HistorySeriesCacheMaintenanceReport`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataDownload::collect_remaining()`
@@ -208,6 +216,9 @@
      `~/.tqsdk/data_series_1` 或自定义目录；cache miss 使用官方
      `DataSeries` 的 `set_chart` / `focus_datetime` / `left_kline_id`
      下载序列补齐缺口
+   - 已有 cache-only history series reader、schema/version scan report、
+     typed cache miss，以及最薄的容量/保留期清理策略；Python/Rust 文件格式
+     互通但不承诺同目录同时写
    - 已有最薄的 offline market cache record / JSONL reader-writer / ordered replay foundation
    - 已有最薄的 local JSONL queue、lock lease、reader manifest、recovery scan、writer election、recovery action、index、保留策略 compaction、reader-protected compaction ownership、本地 file service facade、in-place rotation、shutdown flush report 与 process-local supervisor foundation
    - 后续再考虑路径管理型文件导出
@@ -250,6 +261,10 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
 - `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的 Python 兼容
   mmap 历史序列缓存，也已经落在 `tqsdk-data`
+- `HistorySeriesCache::read_kline_data_series` /
+  `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
+  `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
+  提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
@@ -294,6 +309,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
 - `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的 cache record、JSONL reader/writer、deterministic replay iterator、本地 reader manifest、本地 recovery scan、本地 writer election / recovery action、本地 JSONL queue、lock lease、index、compaction helper、reader-protected compaction ownership、本地 file service facade、process-local daemon facade 和 process-local supervisor，不拥有 live session、不创建 Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
+- 历史序列 mmap cache 与 Python `DataSeries` 文件格式兼容，适合迁移和交替使用；
+  同目录同时写仍是 non-goal，因为 Python 官方实现自身也没有承诺同一合约周期
+  多进程/线程/协程并发写
 - 跨进程 cache 管理仍是后续 tooling/service facade：它应建立在
   已落地 writer election / recovery action、已落地 reader manifest、已落地
   recovery scan 和已落地 compaction ownership 之上，而不是把 live session、

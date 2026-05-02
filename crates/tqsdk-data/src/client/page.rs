@@ -517,7 +517,7 @@ impl KlineDataSeriesRequest {
         self.timeout
     }
 
-    pub(super) fn validate(&self) -> Result<KlineDataSeriesSpec> {
+    pub(crate) fn validate(&self) -> Result<KlineDataSeriesSpec> {
         if self.symbol.is_empty() {
             return Err(DataError::Validation(
                 "symbol must not be empty".to_string(),
@@ -557,7 +557,7 @@ pub struct KlineDataSeries {
 }
 
 impl KlineDataSeries {
-    pub(super) fn new(
+    pub(crate) fn new(
         symbol: String,
         duration_ns: i64,
         start_datetime_ns: i64,
@@ -574,7 +574,7 @@ impl KlineDataSeries {
         }
     }
 
-    pub(super) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
+    pub(crate) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
         self.cache_report = Some(cache_report);
         self
     }
@@ -726,7 +726,7 @@ impl TickDataSeriesRequest {
         self.timeout
     }
 
-    pub(super) fn validate(&self) -> Result<TickDataSeriesSpec> {
+    pub(crate) fn validate(&self) -> Result<TickDataSeriesSpec> {
         if self.symbol.is_empty() {
             return Err(DataError::Validation(
                 "symbol must not be empty".to_string(),
@@ -756,7 +756,7 @@ pub struct TickDataSeries {
 }
 
 impl TickDataSeries {
-    pub(super) fn new(
+    pub(crate) fn new(
         symbol: String,
         start_datetime_ns: i64,
         end_datetime_ns: i64,
@@ -771,7 +771,7 @@ impl TickDataSeries {
         }
     }
 
-    pub(super) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
+    pub(crate) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
         self.cache_report = Some(cache_report);
         self
     }
@@ -869,16 +869,16 @@ pub(super) struct TickDataPageSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct KlineDataSeriesSpec {
-    pub(super) duration_ns: i64,
-    pub(super) start_datetime_ns: i64,
-    pub(super) end_datetime_ns: i64,
-    pub(super) page_view_width: usize,
+pub(crate) struct KlineDataSeriesSpec {
+    pub(crate) duration_ns: i64,
+    pub(crate) start_datetime_ns: i64,
+    pub(crate) end_datetime_ns: i64,
+    pub(crate) page_view_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct TickDataSeriesSpec {
-    pub(super) start_datetime_ns: i64,
-    pub(super) end_datetime_ns: i64,
-    pub(super) page_view_width: usize,
+pub(crate) struct TickDataSeriesSpec {
+    pub(crate) start_datetime_ns: i64,
+    pub(crate) end_datetime_ns: i64,
+    pub(crate) page_view_width: usize,
 }

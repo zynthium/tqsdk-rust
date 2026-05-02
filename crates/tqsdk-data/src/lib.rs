@@ -65,7 +65,10 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use history_series_cache::{
-    HistorySeriesCache, HistorySeriesCacheBackend, HistorySeriesCacheReport,
+    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache, HistorySeriesCacheBackend,
+    HistorySeriesCacheFileKind, HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
+    HistorySeriesCacheScanReport,
 };
 pub use market_cache::{
     MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionOwnership,

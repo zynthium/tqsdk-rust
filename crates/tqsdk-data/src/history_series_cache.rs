@@ -5,15 +5,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use memmap2::Mmap;
 use tqsdk_core::{Kline, Tick};
 
+use crate::client::{
+    KlineDataSeries, KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
+};
 use crate::error::{DataError, Result};
 
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
+pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 1;
 const KLINE_DATA_COLS: usize = 7;
 const TICK_1_LEVEL_DATA_COLS: usize = 11;
 const TICK_5_LEVEL_DATA_COLS: usize = 27;
@@ -52,6 +56,90 @@ impl HistorySeriesCacheReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCacheMiss {
+    pub cache_dir: PathBuf,
+    pub symbol: String,
+    pub duration_ns: i64,
+    pub start_datetime_ns: i64,
+    pub end_datetime_ns: i64,
+    pub missing_ranges: Vec<(i64, i64)>,
+}
+
+impl HistorySeriesCacheMiss {
+    fn new(
+        cache_dir: PathBuf,
+        symbol: impl Into<String>,
+        duration_ns: i64,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+        missing_ranges: Vec<(i64, i64)>,
+    ) -> Self {
+        Self {
+            cache_dir,
+            symbol: symbol.into(),
+            duration_ns,
+            start_datetime_ns,
+            end_datetime_ns,
+            missing_ranges,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySeriesCacheFileKind {
+    Segment,
+    Lock,
+    Temp,
+    MergeTemp,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySeriesCacheFileStatus {
+    Readable,
+    EmptySegment,
+    InvalidRowWidth,
+    IncompleteWrite,
+    Ignored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCacheFileReport {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub kind: HistorySeriesCacheFileKind,
+    pub status: HistorySeriesCacheFileStatus,
+    pub symbol: Option<String>,
+    pub duration_ns: Option<i64>,
+    pub id_range: Option<(i64, i64)>,
+    pub row_width: Option<usize>,
+    pub rows: usize,
+    pub size_bytes: u64,
+    pub schema_version: Option<u32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCacheScanReport {
+    pub cache_dir: PathBuf,
+    pub schema_version: u32,
+    pub files: Vec<HistorySeriesCacheFileReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistorySeriesCacheMaintenanceReport {
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+impl HistorySeriesCacheMaintenanceReport {
+    fn record_removed(&mut self, size_bytes: u64) {
+        self.removed_files += 1;
+        self.removed_bytes = self.removed_bytes.saturating_add(size_bytes);
+    }
+}
+
 #[derive(Clone)]
 pub struct HistorySeriesCache {
     inner: Arc<HistorySeriesCacheInner>,
@@ -60,6 +148,12 @@ pub struct HistorySeriesCache {
 struct HistorySeriesCacheInner {
     root_dir: PathBuf,
     lock: Mutex<()>,
+}
+
+struct CacheFileMeta {
+    path: PathBuf,
+    size_bytes: u64,
+    modified: SystemTime,
 }
 
 pub struct HistorySeriesCacheGuard<'a> {
@@ -189,6 +283,22 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<(i64, i64)>> {
+        let _guard = self.lock_series(symbol, duration_ns)?;
+        self.missing_kline_datetime_ranges_unlocked(
+            symbol,
+            duration_ns,
+            start_datetime_ns,
+            end_datetime_ns,
+        )
+    }
+
+    pub(crate) fn missing_kline_datetime_ranges_unlocked(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Vec<(i64, i64)>> {
         let id_ranges = self.cached_id_ranges(symbol, duration_ns)?;
         let mut dt_ranges = self
             .cached_segments(symbol, duration_ns, &id_ranges)?
@@ -208,6 +318,16 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<(i64, i64)>> {
+        let _guard = self.lock_series(symbol, 0)?;
+        self.missing_tick_datetime_ranges_unlocked(symbol, start_datetime_ns, end_datetime_ns)
+    }
+
+    pub(crate) fn missing_tick_datetime_ranges_unlocked(
+        &self,
+        symbol: &str,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Vec<(i64, i64)>> {
         let id_ranges = self.cached_id_ranges(symbol, 0)?;
         let mut dt_ranges = self
             .cached_segments(symbol, 0, &id_ranges)?
@@ -221,7 +341,99 @@ impl HistorySeriesCache {
         ))
     }
 
+    pub fn read_kline_data_series(
+        &self,
+        request: KlineDataSeriesRequest,
+    ) -> Result<KlineDataSeries> {
+        let spec = request.validate()?;
+        let _guard = self.lock_series(request.symbol(), spec.duration_ns)?;
+        let missing_ranges = self.missing_kline_datetime_ranges_unlocked(
+            request.symbol(),
+            spec.duration_ns,
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
+        if !missing_ranges.is_empty() {
+            return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
+                self.root_dir().to_path_buf(),
+                request.symbol(),
+                spec.duration_ns,
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+                missing_ranges,
+            ))));
+        }
+        self.merge_adjacent_files_unlocked(request.symbol(), spec.duration_ns)?;
+        let rows = self.read_kline_window_unlocked(
+            request.symbol(),
+            spec.duration_ns,
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
+        let hit_rows = rows.len();
+        Ok(KlineDataSeries::new(
+            request.symbol().to_string(),
+            spec.duration_ns,
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+            rows,
+        )
+        .with_cache_report(HistorySeriesCacheReport::new(
+            self.root_dir().to_path_buf(),
+            hit_rows,
+            Vec::new(),
+        )))
+    }
+
+    pub fn read_tick_data_series(&self, request: TickDataSeriesRequest) -> Result<TickDataSeries> {
+        let spec = request.validate()?;
+        let _guard = self.lock_series(request.symbol(), 0)?;
+        let missing_ranges = self.missing_tick_datetime_ranges_unlocked(
+            request.symbol(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
+        if !missing_ranges.is_empty() {
+            return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
+                self.root_dir().to_path_buf(),
+                request.symbol(),
+                0,
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+                missing_ranges,
+            ))));
+        }
+        self.merge_adjacent_files_unlocked(request.symbol(), 0)?;
+        let rows = self.read_tick_window_unlocked(
+            request.symbol(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
+        let hit_rows = rows.len();
+        Ok(TickDataSeries::new(
+            request.symbol().to_string(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+            rows,
+        )
+        .with_cache_report(HistorySeriesCacheReport::new(
+            self.root_dir().to_path_buf(),
+            hit_rows,
+            Vec::new(),
+        )))
+    }
+
     pub fn write_kline_segment(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+        rows: &[Kline],
+    ) -> Result<Option<(i64, i64)>> {
+        let _guard = self.lock_series(symbol, duration_ns)?;
+        self.write_kline_segment_unlocked(symbol, duration_ns, rows)
+    }
+
+    pub(crate) fn write_kline_segment_unlocked(
         &self,
         symbol: &str,
         duration_ns: i64,
@@ -255,6 +467,15 @@ impl HistorySeriesCache {
     }
 
     pub fn write_tick_segment(&self, symbol: &str, rows: &[Tick]) -> Result<Option<(i64, i64)>> {
+        let _guard = self.lock_series(symbol, 0)?;
+        self.write_tick_segment_unlocked(symbol, rows)
+    }
+
+    pub(crate) fn write_tick_segment_unlocked(
+        &self,
+        symbol: &str,
+        rows: &[Tick],
+    ) -> Result<Option<(i64, i64)>> {
         if rows.is_empty() {
             return Ok(None);
         }
@@ -327,6 +548,17 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<Kline>> {
+        let _guard = self.lock_series(symbol, duration_ns)?;
+        self.read_kline_window_unlocked(symbol, duration_ns, start_datetime_ns, end_datetime_ns)
+    }
+
+    pub(crate) fn read_kline_window_unlocked(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Vec<Kline>> {
         let id_ranges = self.cached_id_ranges(symbol, duration_ns)?;
         let segments = self.cached_segments(symbol, duration_ns, &id_ranges)?;
         let rows = self.read_window(
@@ -345,6 +577,16 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<Tick>> {
+        let _guard = self.lock_series(symbol, 0)?;
+        self.read_tick_window_unlocked(symbol, start_datetime_ns, end_datetime_ns)
+    }
+
+    pub(crate) fn read_tick_window_unlocked(
+        &self,
+        symbol: &str,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Vec<Tick>> {
         let id_ranges = self.cached_id_ranges(symbol, 0)?;
         let segments = self.cached_segments(symbol, 0, &id_ranges)?;
         let rows = self.read_window(
@@ -358,6 +600,15 @@ impl HistorySeriesCache {
     }
 
     pub fn merge_adjacent_files(&self, symbol: &str, duration_ns: i64) -> Result<()> {
+        let _guard = self.lock_series(symbol, duration_ns)?;
+        self.merge_adjacent_files_unlocked(symbol, duration_ns)
+    }
+
+    pub(crate) fn merge_adjacent_files_unlocked(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+    ) -> Result<()> {
         let ranges = self.cached_id_ranges(symbol, duration_ns)?;
         if ranges.len() <= 1 {
             return Ok(());
@@ -391,6 +642,182 @@ impl HistorySeriesCache {
                 temp_path,
                 self.data_file_path(symbol, duration_ns, first_start, last_end),
             )?;
+        }
+        Ok(())
+    }
+
+    pub fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
+        let _guard = self
+            .inner
+            .lock
+            .lock()
+            .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+        let mut files = Vec::new();
+        if self.inner.root_dir.exists() {
+            for entry in fs::read_dir(&self.inner.root_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                files.push(self.scan_file(entry.path())?);
+            }
+        }
+        files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        Ok(HistorySeriesCacheScanReport {
+            cache_dir: self.root_dir().to_path_buf(),
+            schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            files,
+        })
+    }
+
+    pub fn enforce_limits(
+        &self,
+        max_bytes: Option<u64>,
+        retention_days: Option<u64>,
+    ) -> Result<HistorySeriesCacheMaintenanceReport> {
+        let _guard = self
+            .inner
+            .lock
+            .lock()
+            .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+        let mut report = HistorySeriesCacheMaintenanceReport::default();
+        self.evict_expired_files(retention_days, &mut report)?;
+        self.evict_by_total_size(max_bytes, &mut report)?;
+        Ok(report)
+    }
+
+    fn scan_file(&self, path: PathBuf) -> Result<HistorySeriesCacheFileReport> {
+        let metadata = fs::metadata(&path)?;
+        let size_bytes = metadata.len();
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some((symbol, duration_ns, id_range)) = parse_data_file_name(&file_name) {
+            let layout = layout_for(&symbol, duration_ns);
+            let row_width = layout.row_size();
+            let (status, rows, schema_version, error) = if size_bytes == 0 {
+                (
+                    HistorySeriesCacheFileStatus::EmptySegment,
+                    0,
+                    Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION),
+                    None,
+                )
+            } else if size_bytes % row_width as u64 != 0 {
+                (
+                    HistorySeriesCacheFileStatus::InvalidRowWidth,
+                    0,
+                    Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION),
+                    Some(format!(
+                        "file length {size_bytes} is not a multiple of row width {row_width}"
+                    )),
+                )
+            } else {
+                (
+                    HistorySeriesCacheFileStatus::Readable,
+                    (size_bytes / row_width as u64) as usize,
+                    Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION),
+                    None,
+                )
+            };
+            return Ok(HistorySeriesCacheFileReport {
+                path,
+                file_name,
+                kind: HistorySeriesCacheFileKind::Segment,
+                status,
+                symbol: Some(symbol),
+                duration_ns: Some(duration_ns),
+                id_range: Some(id_range),
+                row_width: Some(row_width),
+                rows,
+                size_bytes,
+                schema_version,
+                error,
+            });
+        }
+
+        let (kind, status) = classify_non_segment_file(&file_name);
+        Ok(HistorySeriesCacheFileReport {
+            path,
+            file_name,
+            kind,
+            status,
+            symbol: None,
+            duration_ns: None,
+            id_range: None,
+            row_width: None,
+            rows: 0,
+            size_bytes,
+            schema_version: None,
+            error: None,
+        })
+    }
+
+    fn list_segment_files(&self) -> Result<Vec<CacheFileMeta>> {
+        if !self.inner.root_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.inner.root_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if parse_data_file_name(&file_name).is_none() {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            files.push(CacheFileMeta {
+                path: entry.path(),
+                size_bytes: metadata.len(),
+                modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+            });
+        }
+        Ok(files)
+    }
+
+    fn evict_expired_files(
+        &self,
+        retention_days: Option<u64>,
+        report: &mut HistorySeriesCacheMaintenanceReport,
+    ) -> Result<()> {
+        let Some(days) = retention_days else {
+            return Ok(());
+        };
+        let ttl = Duration::from_secs(days.saturating_mul(24 * 60 * 60));
+        let cutoff = SystemTime::now().checked_sub(ttl).unwrap_or(UNIX_EPOCH);
+        for file in self.list_segment_files()? {
+            if file.modified <= cutoff && fs::remove_file(&file.path).is_ok() {
+                report.record_removed(file.size_bytes);
+            }
+        }
+        Ok(())
+    }
+
+    fn evict_by_total_size(
+        &self,
+        max_bytes: Option<u64>,
+        report: &mut HistorySeriesCacheMaintenanceReport,
+    ) -> Result<()> {
+        let Some(limit) = max_bytes else {
+            return Ok(());
+        };
+        let mut files = self.list_segment_files()?;
+        let mut total = files.iter().map(|file| file.size_bytes).sum::<u64>();
+        if total <= limit {
+            return Ok(());
+        }
+        files.sort_by_key(|file| file.modified);
+        for file in files {
+            if total <= limit {
+                break;
+            }
+            if fs::remove_file(&file.path).is_ok() {
+                total = total.saturating_sub(file.size_bytes);
+                report.record_removed(file.size_bytes);
+            }
         }
         Ok(())
     }
@@ -725,6 +1152,32 @@ fn parse_data_file_name(filename: &str) -> Option<(String, i64, (i64, i64))> {
         return None;
     }
     Some((symbol, duration_ns, (start, end)))
+}
+
+fn classify_non_segment_file(
+    filename: &str,
+) -> (HistorySeriesCacheFileKind, HistorySeriesCacheFileStatus) {
+    if filename.starts_with('.') || filename.ends_with(".lock") {
+        (
+            HistorySeriesCacheFileKind::Lock,
+            HistorySeriesCacheFileStatus::Ignored,
+        )
+    } else if filename.ends_with(".temp") {
+        (
+            HistorySeriesCacheFileKind::Temp,
+            HistorySeriesCacheFileStatus::IncompleteWrite,
+        )
+    } else if filename.contains(".merge.") {
+        (
+            HistorySeriesCacheFileKind::MergeTemp,
+            HistorySeriesCacheFileStatus::IncompleteWrite,
+        )
+    } else {
+        (
+            HistorySeriesCacheFileKind::Unknown,
+            HistorySeriesCacheFileStatus::Ignored,
+        )
+    }
 }
 
 fn layout_for(symbol: &str, duration_ns: i64) -> SeriesLayout {

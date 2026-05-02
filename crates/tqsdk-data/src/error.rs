@@ -3,6 +3,8 @@
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
+use crate::history_series_cache::HistorySeriesCacheMiss;
+
 /// Result alias for `tqsdk-data`.
 pub type Result<T> = std::result::Result<T, DataError>;
 
@@ -11,6 +13,7 @@ pub type Result<T> = std::result::Result<T, DataError>;
 pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
     PermissionDenied(String),
+    CacheMiss(Box<HistorySeriesCacheMiss>),
     Validation(String),
     InvalidState(&'static str),
     InvalidResponse(String),
@@ -51,6 +54,15 @@ impl Display for DataError {
         match self {
             Self::Session(error) => write!(f, "{error}"),
             Self::PermissionDenied(message) => write!(f, "{message}"),
+            Self::CacheMiss(miss) => write!(
+                f,
+                "history series cache miss for {} duration {} in [{}, {}): {:?}",
+                miss.symbol,
+                miss.duration_ns,
+                miss.start_datetime_ns,
+                miss.end_datetime_ns,
+                miss.missing_ranges
+            ),
             Self::Validation(message) => write!(f, "invalid data query input: {message}"),
             Self::InvalidState(message) => write!(f, "invalid data client state: {message}"),
             Self::InvalidResponse(message) => {
@@ -76,6 +88,7 @@ impl std::error::Error for DataError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::PermissionDenied(_)
+            | Self::CacheMiss(_)
             | Self::Validation(_)
             | Self::InvalidState(_)
             | Self::InvalidResponse(_)

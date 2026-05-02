@@ -28,8 +28,18 @@
   `get_*_data_series` 会隐式读写 Python 兼容 mmap 历史缓存
 - 未指定缓存目录时使用 `~/.tqsdk/data_series_1`；可以通过
   `DataClientBuilder::history_cache_dir(...)` 指定目录
+- 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
+  `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
 - 历史序列缓存首版使用 Python `DataSeries` 兼容的文件名与二进制列布局：
   `symbol.duration_ns.start_id.end_id`，并通过 mmap 读取大文件窗口
+- Python/Rust 可交替使用同一目录里的历史序列缓存文件，但首版不承诺同目录
+  同时写；Python 官方 `DataSeries` 本身也不支持同一合约周期多进程/线程/
+  协程并发写
+- `HistorySeriesCache::read_kline_data_series` /
+  `HistorySeriesCache::read_tick_data_series` 是显式 cache-only reader，
+  缺口返回 typed `DataError::CacheMiss`，不会联网补齐
+- `HistorySeriesCache::scan()` 输出 schema version、segment 状态、未完成写入
+  和 row-width 损坏报告；首版不额外写 manifest 文件，以保持 Python 目录互通
 - cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用
   `focus_datetime=start_datetime_ns`、`focus_position=0`、`view_width=2000`，
   后续用 `left_kline_id=current_id` 翻页，结束后释放 chart
@@ -60,6 +70,12 @@
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
+- `HistorySeriesCacheMiss`
+- `HistorySeriesCacheScanReport`
+- `HistorySeriesCacheFileReport`
+- `HistorySeriesCacheFileKind`
+- `HistorySeriesCacheFileStatus`
+- `HistorySeriesCacheMaintenanceReport`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -210,10 +226,15 @@ scenario gaps above this data-layer foundation.
 - `export_tick_data_csv`
 - `DataClientBuilder::history_cache_enabled(true)`
 - `HistorySeriesCache::open(...)`
+- `HistorySeriesCache::read_kline_data_series(...)`
+- `HistorySeriesCache::read_tick_data_series(...)`
+- `HistorySeriesCache::scan()`
+- `HistorySeriesCache::enforce_limits(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；
-不负责后台 downloader、GUI viewport 状态、跨进程 cache service 或高频交易 hot path。
+不负责后台 downloader、GUI viewport 状态、Python/Rust 同目录同时写、跨进程
+cache service 或高频交易 hot path。
 
 ## 当前明确不做
 
