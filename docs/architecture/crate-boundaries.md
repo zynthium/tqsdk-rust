@@ -48,6 +48,7 @@
 - 统一命令模型
 - 统一状态树
 - 统一 commit / revision / causality 语义
+- market/trade 分区读面，以及同 revision 的 market+trade 组合读 guard
 - protocol adapter
 - auth / bootstrap / transport / session runtime orchestration
 - typed schema contract
@@ -99,6 +100,7 @@
 - auth refresh
 - session-scoped order intent ledger（只记录 client order id 与 runtime order id
   的进程内/session 内对应关系，不做订单状态 overlay）
+- typed command status helper（只解析 runtime command ledger 状态，不绕过状态机）
 - replay step / reset 的 one-shot helper
 
 这些能力都具有同一个特征：
@@ -263,6 +265,10 @@
 - execution report
 - strategy host / strategy context / strategy environment / deployment / supervisor adapter
 - strategy cache replay driver
+- 低延迟 trading desk thin profile：
+  - hot path 使用 shared `SessionClient + RuntimeReader`
+  - 风控与下单契约复用 `RiskEngine` / `TaskOrderIntent`
+  - 订单状态和 latency report 保持 typed API
 - public fake market / fake broker test harness
 - 规划与执行之间的本地任务状态机
 
@@ -270,6 +276,9 @@
 它可以消费 `tqsdk-data` cache/history event 构建 strategy replay driver；这是
 上层集成路径，不代表 cache storage 进入 task，也不代表 strategy execution
 进入 data。
+S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
+但不复用 `TaskHost::wait_update()` hot path，也不把 `tqsdk-stream` slow sink
+塞进 profile public API。
 
 ### 不应吸收的能力
 
@@ -302,6 +311,8 @@
 
 - `tqsdk-core + tqsdk-session`
 - 如需现成但仍很薄的用户 API，再加 `tqsdk-stream`
+- 如需在同一 hot path 上做 typed risk / order intent / latency report，可使用
+  `tqsdk-task::TradingDeskProfile`
 
 判断：
 

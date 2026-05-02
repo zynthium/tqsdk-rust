@@ -336,6 +336,37 @@ fn risk_engine_report_exposes_revision_bound_decision() {
 }
 
 #[test]
+fn risk_engine_can_check_and_project_on_combined_market_trade_state() {
+    let host = seeded_host();
+    seed_account_position_quote(&host, 100_000.0, 1, 3_660.0);
+    let intent = TaskOrderIntent {
+        account_id: "sim".to_string(),
+        symbol: "SHFE.rb2601".to_string(),
+        direction: TradeDirection::Buy,
+        offset: Some(TradeOffset::Open),
+        volume: 3,
+        limit_price: Some(3_678.0),
+    };
+    let state = host.api().session().reader().read_market_trade_state();
+    let risk = RiskEngine::new()
+        .max_price_deviation(20.0)
+        .max_net_position(5);
+
+    let report = risk
+        .check_report_on_state(&state, &intent)
+        .expect("risk report should use combined state");
+    let projection = risk
+        .project_order_on_state(&state, &intent)
+        .expect("projection should use combined state");
+
+    assert_eq!(report.revision(), state.revision());
+    assert!(report.decision().is_accepted());
+    assert_eq!(projection.revision(), state.revision());
+    assert_eq!(projection.current_net(), Some(1));
+    assert_eq!(projection.projected_net(), Some(4));
+}
+
+#[test]
 fn risk_engine_tracks_daily_open_count_by_account_and_symbol() {
     let host = seeded_host();
     let mut risk = RiskEngine::new().daily_open_count_limit(1, ["SHFE.rb2601"]);

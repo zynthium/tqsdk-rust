@@ -30,6 +30,7 @@ mod shared;
 mod strategy;
 mod target_pos;
 pub mod testing;
+mod trading_desk;
 
 pub use account_group::{
     AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
@@ -78,4 +79,9 @@ pub use strategy::{StrategyContext, StrategyHost, StrategyHostBuilder, StrategyU
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,
     TargetPosTaskOrderReport, TargetPosTaskReachedTarget, TargetPosTaskTradeFill,
+};
+pub use trading_desk::{
+    TradingDeskMarketEvent, TradingDeskOrderState, TradingDeskOrderStatusReport,
+    TradingDeskOrderTicket, TradingDeskPrecheckedOrder, TradingDeskProfile,
+    TradingDeskProfileBuilder, TradingLatencyCycle, TradingLatencyProbe, TradingLatencyReport,
 };

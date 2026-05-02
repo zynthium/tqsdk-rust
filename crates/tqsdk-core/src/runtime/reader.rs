@@ -7,8 +7,8 @@ use crate::{
     Result,
     ids::Revision,
     state::{
-        CommitResult, MarketStateReadGuard, SharedCommitResult, StateReadView, StateSnapshot,
-        TradeStateReadGuard, UpdateCursor,
+        CommitResult, MarketStateReadGuard, MarketTradeStateReadGuard, SharedCommitResult,
+        StateReadView, StateSnapshot, TradeStateReadGuard, UpdateCursor,
     },
 };
 
@@ -202,6 +202,11 @@ impl RuntimeReader {
     /// Borrows only the trade state partition needed by typed trade readers.
     pub fn read_trade_state(&self) -> TradeStateReadGuard<'_> {
         self.state.read_trade_state()
+    }
+
+    /// Borrows market and trade partitions under one revision-bound guard.
+    pub fn read_market_trade_state(&self) -> MarketTradeStateReadGuard<'_> {
+        self.state.read_market_trade_state()
     }
 
     /// Returns the next retained commit for the provided cursor, if available.

@@ -149,11 +149,18 @@ stream fan-out 和 managed sink retry 可以共享同一个提交对象，不深
 pub struct RuntimeReader;
 pub struct SnapshotReadGuard<'a>;
 pub struct StateReadView<'a>;
+pub struct MarketStateReadGuard<'a>;
+pub struct TradeStateReadGuard<'a>;
+pub struct MarketTradeStateReadGuard<'a>;
 ```
 
 - `RuntimeReader` 是稳定的读侧入口
 - `SnapshotReadGuard` 将一次读取绑定到单个 revision
 - `StateReadView` 是零拷贝借用视图
+- `MarketStateReadGuard` / `TradeStateReadGuard` 是 market / trade 分区读面，
+  用于 hot path 避免 full snapshot 读锁和全量 clone
+- `MarketTradeStateReadGuard` 按固定顺序同时持有 market + trade 分区读锁，并暴露
+  `revision()`、`market_state()`、`trade_state()`，用于同一低延迟决策链路中的一致截面读取
 - `StateSnapshot` 只在确实需要 detached owned snapshot 时使用
 
 ## 一条完整数据链

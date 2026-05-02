@@ -59,18 +59,17 @@
 //! - typed latency report 应落在 `tqsdk-session`、`tqsdk-task` 还是独立 profiling helper？
 //! - 如何保证该 profile 不演变成策略平台、OMS 或自动执行系统？
 //!
-//! Active gap status:
-//! 仍保留在 `api_gaps/`。该场景缺少正式 compiled contract，把现有
-//! core/session/task/stream primitives 串成同一条低延迟 hot-path 链路；S30
-//! history mmap cache 已闭环但明确不进入该 hot path。
+//! Archived status:
+//! S31 已提升为正式 compiled contract：
+//! `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`。
+//! 该 example 将现有 core/session/task/stream primitives 串成同一条低延迟
+//! hot-path 链路；S30 history mmap cache 已闭环但明确不进入该 hot path。
 //!
-//! Current API gap:
-//! 当前 S5 覆盖低层裸行情直通，S6/S7/S10 覆盖 wait 风格下单与订单一致性，
-//! S19 覆盖基础风控，S21 覆盖慢消费者隔离。但还没有一个面向自研柜台的
-//! contract，把 market hot path、trade partition read、risk gate、typed order
-//! intent、latency report 和 slow sink isolation 放在同一条低延迟链路里验证。
-//! 这会导致柜台用户在实现时需要自行决定哪些 crate 能进入 hot path，容易把
-//! data/cache、full snapshot、字符串状态或手写 channel 带进关键链路。
+//! Closed API gap:
+//! 正式 S31 example 覆盖 session 自驱动 quote hot path、同 revision
+//! market/trade 分区读、risk gate、typed order intent、latency report 和
+//! slow sink isolation，避免柜台用户自行把 data/cache、full snapshot、字符串状态或
+//! 手写 channel 带进关键链路。
 //!
 //! 理想用户代码草案：
 //! ```ignore

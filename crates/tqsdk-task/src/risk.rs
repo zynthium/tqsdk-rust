@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
-use tqsdk_core::{AccountId, Revision, Symbol, TradeDirection, TradeOffset};
+use tqsdk_core::{
+    AccountId, MarketStateView, MarketTradeStateReadGuard, Revision, Symbol, TradeDirection,
+    TradeOffset, TradeStateView,
+};
 
 use crate::{Result, TaskError, TaskOrderIntent};
 
@@ -514,8 +517,32 @@ impl RiskEngine {
         let snapshot = api.session().reader().read();
         let revision = snapshot.revision();
         let view = snapshot.view();
-        let trade = view.trade_state();
         let market = view.market_state();
+        let trade = view.trade_state();
+
+        self.project_order_from_views(revision, market, trade, intent)
+    }
+
+    pub fn project_order_on_state(
+        &self,
+        state: &MarketTradeStateReadGuard<'_>,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskProjectionReport> {
+        self.project_order_from_views(
+            state.revision(),
+            state.market_state(),
+            state.trade_state(),
+            intent,
+        )
+    }
+
+    fn project_order_from_views(
+        &self,
+        revision: Revision,
+        market: MarketStateView<'_>,
+        trade: TradeStateView<'_>,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskProjectionReport> {
         let account_id = AccountId::new(intent.account_id.clone());
         let symbol = Symbol::new(intent.symbol.clone());
 
@@ -556,6 +583,19 @@ impl RiskEngine {
         })
     }
 
+    pub fn check_report_on_state(
+        &self,
+        state: &MarketTradeStateReadGuard<'_>,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskCheckReport> {
+        self.check_report_from_views(
+            state.revision(),
+            state.market_state(),
+            state.trade_state(),
+            intent,
+        )
+    }
+
     pub fn check_report(
         &self,
         api: &tqsdk_wait::TqApi,
@@ -564,8 +604,19 @@ impl RiskEngine {
         let snapshot = api.session().reader().read();
         let revision = snapshot.revision();
         let view = snapshot.view();
-        let trade = view.trade_state();
         let market = view.market_state();
+        let trade = view.trade_state();
+
+        self.check_report_from_views(revision, market, trade, intent)
+    }
+
+    fn check_report_from_views(
+        &self,
+        revision: Revision,
+        market: MarketStateView<'_>,
+        trade: TradeStateView<'_>,
+        intent: &TaskOrderIntent,
+    ) -> Result<RiskCheckReport> {
         let account_id = AccountId::new(intent.account_id.clone());
         let symbol = Symbol::new(intent.symbol.clone());
 

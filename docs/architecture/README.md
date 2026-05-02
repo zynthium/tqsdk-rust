@@ -57,6 +57,8 @@ V1 是：
 - `RuntimeReader`
   - canonical read-side 入口
   - 提供 cursor 创建、commit 消费、zero-copy 状态读取
+  - 提供 market/trade 分区读面，以及同 revision 的
+    `read_market_trade_state()` 组合读面
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
   - 为 `wait_update`、stream/callback facade 提供共同读面
@@ -97,6 +99,7 @@ V1 是：
   - `progress_once()` 这个最小 substrate 推进原语
   - `subscribe_quotes()` / `unsubscribe_quotes()` 这类低层命令 helper
   - `wait_command_completed()` 这个最小 control-plane 等待原语
+  - `command_status_typed()` 这个 additive typed 命令状态读取 helper
   - direct query / schema refresh 薄层入口
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
   - `InstrumentSpec` / `InstrumentClass` 这类一次性 metadata 标准化对象
@@ -131,6 +134,10 @@ V1 是：
   - supervisor typed health/metrics/shutdown report 和 telemetry/export hook；生产观测导出保持
     transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
   - strategy cache replay foundation
+  - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
+    `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
+    latency/order status report；慢 sink 仍由 `tqsdk-stream` sidecar 承担，不进入
+    profile public API
   - public fake market / fake broker test harness
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
 - `tqsdk-data`
@@ -150,6 +157,9 @@ V1 是：
 - `tqsdk-task` 可以消费 `tqsdk-data` cache/history event 构建 strategy replay
   driver；这是上层集成路径，不代表 cache storage 进入 task，也不代表 strategy
   execution 进入 data
+- S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
+  `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 stream sink 变成
+  task profile 的 public dependency。
 
 ## API 归属总表
 

@@ -330,6 +330,45 @@ impl<'a> TradeStateReadGuard<'a> {
     }
 }
 
+/// Combined market/trade partition read guard bound to one runtime revision.
+///
+/// This guard lets latency-sensitive callers read quote and trade state from
+/// the partition read surface without materializing a full snapshot.
+pub struct MarketTradeStateReadGuard<'a> {
+    revision: Revision,
+    market: MarketStateReadGuard<'a>,
+    trade: TradeStateReadGuard<'a>,
+}
+
+impl<'a> MarketTradeStateReadGuard<'a> {
+    pub(crate) fn new(
+        revision: Revision,
+        market: MarketStateReadGuard<'a>,
+        trade: TradeStateReadGuard<'a>,
+    ) -> Self {
+        Self {
+            revision,
+            market,
+            trade,
+        }
+    }
+
+    /// Returns the runtime revision shared by both partition views.
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    /// Returns the market-domain partition view.
+    pub fn market_state(&self) -> MarketStateView<'_> {
+        self.market.view()
+    }
+
+    /// Returns the trade-domain partition view.
+    pub fn trade_state(&self) -> TradeStateView<'_> {
+        self.trade.view()
+    }
+}
+
 fn decode_partition_path<T>(
     partition: &Value,
     lookup_path: &[&str],

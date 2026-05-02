@@ -15,7 +15,7 @@
 - 覆盖 market diff、trade、replay、query、schema、auth、session、system 的 protocol-complete runtime contract。
 - 一套统一命令模型：`RuntimeCommand -> OutboundDispatch -> RuntimeInput -> NormalizedMutation -> CommitResult`。
 - 一棵统一的 runtime state tree，用于承载所有上层可见状态。
-- 以 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`UpdateCursor` 为核心的 reader-first 消费模型。
+- 以 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`UpdateCursor` 为核心的 reader-first 消费模型。
 - 以 `SharedCommitResult = Arc<CommitResult>` 共享提交所有权，避免 commit log、写侧返回和上层 fan-out 深拷贝提交元数据。
 - 官方对象与相关 metadata/query 结果的 typed schema contract。
 - transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语。
@@ -70,6 +70,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `RuntimeHandle` | 写侧入口，负责命令提交、输入摄取、命令状态与 session 状态投影 |
 | `RuntimeReader` | 标准读侧入口 |
 | `SnapshotReadGuard` / `StateReadView` | revision-bound 的快照读取 |
+| `MarketStateReadGuard` / `TradeStateReadGuard` / `MarketTradeStateReadGuard` | hot path 分区读面；组合 guard 用于同 revision 读取 market + trade |
 | `CommitReadGuard` | exact revision 的 commit + state 读面 |
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
@@ -180,6 +181,8 @@ live 示例另外会用到：
 - adapter 可以编解码，但没有自行发布 commit 的权限。
 - adapter 可以提供重连后的 recovery commands，用于恢复行情订阅或 chart 请求；
   这些命令必须重新进入 `RuntimeHandle::submit()` / outbound dispatch 链路。
+- hot path 应优先使用 `read_market_state()` / `read_trade_state()`；同一决策需要同时
+  读取行情与交易状态时使用 `read_market_trade_state()`，不要退回 full snapshot clone。
 - 未来 `wait_update`、stream、callback facade 都应该只消费这个 substrate，而不是重定义内核。
 - `StateSnapshot`、`CommitLog` 这类兼容/底层原语仍然保留，但它们不定义主要读模型。
 

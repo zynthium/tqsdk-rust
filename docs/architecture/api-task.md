@@ -34,7 +34,8 @@
 - `tqsdk-core` 不承接任务语义
 - `tqsdk-session` 不承接任务语义
 - `tqsdk-stream` 不承接任务 ownership / scheduler
-- `tqsdk-task` 先以 `tqsdk-wait` 为 canonical substrate
+- `tqsdk-task` 的 task/scheduler/strategy host 仍以 `tqsdk-wait` 为 canonical substrate；
+  S31 trading desk profile 是独立的 session/reader hot-path 薄 profile
 - `tqsdk-task` 第一版只做：
   - `TargetPosTask`
   - `TargetPosScheduler`
@@ -49,6 +50,7 @@
   - strategy cache replay driver
   - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
+  - S31 低延迟 trading desk thin profile
 
 原因很直接：
 
@@ -97,6 +99,21 @@
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略
   - 当前覆盖 quote/account/position seed、全成、拒单、单步/跨 step 部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
+- `TradingDeskProfile`
+  - 使用 shared `SessionClient + RuntimeReader` 作为行情与下单 hot path
+  - builder 在构建时提交 quote subscribe command
+  - `next_market_event(deadline)` 消费同一 runtime commit/cursor 语义
+  - `read_market_trade_state()` 返回同 revision 的 market + trade 分区读 guard
+  - `precheck_order(&state, intent, client_order_id)` 在该 guard 上运行
+    `RiskEngine::check_report_on_state` / `project_order_on_state`
+  - `submit_prechecked_order(...)` 注册 session-scoped client order id 并提交
+    runtime trade command；重复 client id 返回 existing ticket，不重复发单
+  - `TradingDeskOrderTicket::status(&desk)` 通过 typed command/order lifecycle
+    返回 `TradingDeskOrderStatusReport`
+  - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 是 typed
+    本进程 latency marker API，缺 marker 时返回 `None`
+  - 慢日志、WAL 和 journal 通过 `tqsdk-stream` managed sink sidecar 组合，不进入
+    trading desk profile 的 public API
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -228,7 +245,7 @@ Python 的 `TargetPosTask` 给出了三个关键约束：
 - 把 `TqRuntime` 做成一个很宽的总入口
 - 让 task runtime 顺手承接 downloader / data manager / callback 等无关能力
 
-## 为什么第一版先绑定 `tqsdk-wait`
+## 为什么 task / scheduler 第一版先绑定 `tqsdk-wait`
 
 `tqsdk-task` 理论上可以建立在 `wait` 或 `stream` 之上，但第一版不应同时抽象两套 substrate。
 
@@ -247,10 +264,58 @@ Python 的 `TargetPosTask` 给出了三个关键约束：
 
 结论：
 
-- 第一版 `tqsdk-task` 只依赖 `tqsdk-wait`
+- `TargetPosTask`、scheduler、strategy host 这类任务编排能力仍以
+  `tqsdk-wait` 为 canonical substrate
+- S31 trading desk profile 是低延迟柜台薄 profile，hot path 固定在
+  `tqsdk-session + RuntimeReader`，只复用 task 层 `RiskEngine` / `TaskOrderIntent`
+  / typed report 契约
 - 后续若确实需要 stream 驱动的执行任务，再追加单独 adapter，而不是先做泛化抽象
 
 ## 最小 canonical API 草图
+
+### low-latency trading desk profile
+
+```rust
+let mut desk = TradingDeskProfile::builder(session)
+    .subscribe_quotes(["SHFE.au2602"])
+    .risk_engine(risk_engine)
+    .latency_probe(TradingLatencyProbe::enabled())
+    .build()
+    .await?;
+
+while let Some(event) = desk.next_market_event(deadline).await? {
+    let mut latency = event.into_latency_cycle();
+    let state = desk.read_market_trade_state();
+    let intent = decide_on_state(&state)?;
+
+    if let Some(intent) = intent {
+        let prechecked = desk.precheck_order(&state, intent, "client-order-001")?;
+        if let Some(cycle) = &mut latency {
+            cycle.mark_risk();
+        }
+        drop(state);
+
+        let ticket = desk.submit_prechecked_order(prechecked).await?;
+        if let Some(cycle) = &mut latency {
+            cycle.mark_submit();
+        }
+        let status = ticket.status(&desk)?;
+    }
+}
+```
+
+设计意图：
+
+- 这是 task 层为了 S31 提供的薄执行 profile，不是 OMS、策略平台或自动 hedge /
+  flatten 引擎。
+- market/trade 读取必须来自同一 `MarketTradeStateReadGuard`，避免低延迟主循环在
+  full snapshot 和分区读一致性之间二选一。
+- session-scoped order intent ledger 只做同一 session 内 client order id 去重和
+  command 关联，不创建 task 私有订单状态树。
+- typed latency report 只记录 SDK 本进程 `Instant` 与 runtime revision，不承诺
+  交易所或服务器时钟同步延迟。
+- 慢消费者隔离属于 `tqsdk-stream` sidecar 组合能力；profile public API 不持有
+  sink、WAL 或 journal。
 
 ### root host
 

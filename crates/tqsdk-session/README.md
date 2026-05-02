@@ -26,6 +26,7 @@
 - `wait_command_completed(command_id).await`
 - `command_state()`
 - `command_status()`
+- `command_status_typed()`
 - `auth_context()`
 - `refreshed_auth()`
 - `has_feature(...).await`
@@ -145,6 +146,8 @@
 - 用 `SessionClientBuilder::enable_query()` 打开官方 query domain
 - 直接通过 `SessionClient` 发起一次性 metadata query
 - 如果调用方自己提交了底层 `RuntimeCommand`，可以用 `wait_command_completed(command_id).await` 只等待该命令完成，而不引入更高层 facade 语义
+- 需要自己读取命令状态时，优先使用 `command_status_typed(command_id)`，保留旧
+  `command_status(command_id)` 作为字符串兼容 helper
 
 其中 `query_command_wait.rs` 展示的是最底层的一种写法：
 

@@ -155,6 +155,9 @@ tqsdk-task
 - strategy supervisor 的 typed health/metrics/shutdown report 和 telemetry/export hook；
   生产观测导出保持 transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
 - strategy cache replay driver
+- S31 低延迟 trading desk thin profile，hot path 使用
+  `tqsdk-session + RuntimeReader`，并复用 task 层 `RiskEngine` / `TaskOrderIntent`
+  / typed latency report
 - public fake market / fake broker test harness
 - execution report
 - planner/executor 的本地任务状态机
@@ -230,6 +233,8 @@ RuntimeCommand / RuntimeInput
 - 对外仍保持一棵兼容的 runtime state tree 语义。
 - 内部用 domain partitions 降低跨领域污染和热路径锁竞争。
 - market/trade 热读优先走 `RuntimeReader::read_market_state()` / `RuntimeReader::read_trade_state()`。
+- 同一低延迟决策需要同时读取 market 与 trade 时，优先走
+  `RuntimeReader::read_market_trade_state()`，让两个分区读锁绑定到同一 revision。
 - generic path、system、query/schema/replay 或尚无 typed partition view 的路径，可以继续通过 `RuntimeReader::read()` 读取 full snapshot。
 
 设计原因：

@@ -11,8 +11,8 @@ use serde_json::{Map, Value};
 use crate::{Result, events::NormalizedMutation, ids::Revision};
 
 use super::{
-    MarketStateReadGuard, MarketStateView, PathSegment, StateReadView, TradeStateReadGuard,
-    TradeStateView, read::get_at_path,
+    MarketStateReadGuard, MarketStateView, MarketTradeStateReadGuard, PathSegment, StateReadView,
+    TradeStateReadGuard, TradeStateView, read::get_at_path,
 };
 
 /// Owned snapshot clone of the runtime state tree.
@@ -187,6 +187,20 @@ impl StateStore {
     pub(crate) fn read_trade_state(&self) -> TradeStateReadGuard<'_> {
         let trade = rwlock_read(&self.trade);
         TradeStateReadGuard::new(self.revision(), trade)
+    }
+
+    pub(crate) fn read_market_trade_state(&self) -> MarketTradeStateReadGuard<'_> {
+        let quotes = rwlock_read(&self.quotes);
+        let trading_status = rwlock_read(&self.trading_status);
+        let charts = rwlock_read(&self.charts);
+        let klines = rwlock_read(&self.klines);
+        let ticks = rwlock_read(&self.ticks);
+        let trade = rwlock_read(&self.trade);
+        let revision = self.revision();
+        let market =
+            MarketStateReadGuard::new(revision, quotes, trading_status, charts, klines, ticks);
+        let trade = TradeStateReadGuard::new(revision, trade);
+        MarketTradeStateReadGuard::new(revision, market, trade)
     }
 
     pub(crate) fn read_partition(&self, root: &str) -> Option<StatePartitionReadGuard<'_>> {

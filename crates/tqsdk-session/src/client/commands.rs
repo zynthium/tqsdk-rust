@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 use tokio::time::Instant;
 use tqsdk_core::{
-    CommandId, MarketCommand, QueryCommand, QueryId, ReplayCommand, Runtime, RuntimeCommand,
-    SchemaCommand, SchemaId, Symbol, SystemCommand,
+    CommandId, CommandStatus, MarketCommand, QueryCommand, QueryId, ReplayCommand, Runtime,
+    RuntimeCommand, SchemaCommand, SchemaId, Symbol, SystemCommand,
 };
 
 use super::{
@@ -106,6 +106,20 @@ impl SessionClient {
         }))
     }
 
+    pub fn command_status_typed(
+        &self,
+        command_id: CommandId,
+    ) -> crate::error::Result<Option<CommandStatus>> {
+        let Some(status) = self.command_status(command_id)? else {
+            return Ok(None);
+        };
+
+        status
+            .parse()
+            .map(Some)
+            .map_err(|()| crate::error::SessionFacadeError::InvalidState("unknown command status"))
+    }
+
     /// Drives the substrate until the specified command reaches a completed
     /// terminal status.
     ///
@@ -204,12 +218,9 @@ impl SessionClient {
     }
 
     fn command_completed(&self, command_id: CommandId) -> crate::error::Result<bool> {
-        let Some(command) = self.command_state(command_id)? else {
-            return Ok(false);
-        };
-        match command.get("status").and_then(Value::as_str) {
-            Some("completed") => Ok(true),
-            Some("rejected" | "failed" | "cancelled") => {
+        match self.command_status_typed(command_id)? {
+            Some(CommandStatus::Completed) => Ok(true),
+            Some(status) if status.is_terminal() => {
                 Err(crate::error::SessionFacadeError::InvalidState(
                     "command reached a non-completed terminal status",
                 ))

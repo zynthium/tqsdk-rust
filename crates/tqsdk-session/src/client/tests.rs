@@ -11,12 +11,13 @@ use tqsdk_core::TradeAccountType;
 use tqsdk_core::internal::{DynRouteConnectFuture, DynTransport, SessionBootstrap};
 use tqsdk_core::internal::{RouteRequestExecutor, SessionRuntime};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommitScope, EndpointConfig, InputPayload,
-    IoEvent, MarketCommand, OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolDomain,
-    QueryCommand, QueryId, RawFrame, ReplaySessionId, Result as CoreResult, Runtime,
-    RuntimeCommand, RuntimeHandle, RuntimeInput, SessionConfig, SessionRoute,
-    SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    SessionTopologyResolver, Transport,
+    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommandId, CommandStatus, CommitScope,
+    EndpointConfig, FieldMutation, InputPayload, IoEvent, MarketCommand, MutationSource,
+    NormalizedMutation, ObjectKey, OutboundDispatch, OutboundFrame, OutboundRequest,
+    ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId,
+    Result as CoreResult, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SessionConfig,
+    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
+    SessionTopologyResolver, StatePath, Transport,
 };
 
 #[cfg(feature = "live")]
@@ -562,8 +563,48 @@ async fn wait_command_completed_drives_http_query_command_to_completion() {
         Some("completed".to_string())
     );
     assert_eq!(
+        client.command_status_typed(command_id).unwrap(),
+        Some(CommandStatus::Completed)
+    );
+    assert_eq!(
         handle.latest_snapshot().get(["query", "query-1", "quotes"]),
         Some(&json!(["SHFE.au2602"]))
+    );
+}
+
+#[test]
+fn command_status_typed_rejects_unknown_status_strings() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(CommandStatusFixtureAdapter {
+        command_id: CommandId::new(99),
+        status: "mystery".to_string(),
+    });
+    let handle = RuntimeHandle::with_adapters(registry);
+    let client = ManualSession::from_runtime(handle.clone()).into_client();
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "command-status-fixture".to_string(),
+                domains: vec![ProtocolDomain::System],
+                payload: InputPayload::Json(json!({})),
+            }),
+            vec![],
+            CommitScope::SessionTransition,
+        )
+        .unwrap()
+        .expect("fixture command status mutation should publish a commit");
+
+    assert_eq!(
+        client.command_status(CommandId::new(99)).unwrap(),
+        Some("mystery".to_string())
+    );
+    let error = client
+        .command_status_typed(CommandId::new(99))
+        .expect_err("unknown status must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "invalid session facade state: unknown command status"
     );
 }
 
@@ -1170,4 +1211,55 @@ fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
     RuntimeHandle::with_adapters(registry)
+}
+
+struct CommandStatusFixtureAdapter {
+    command_id: CommandId,
+    status: String,
+}
+
+impl ProtocolAdapter for CommandStatusFixtureAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        ProtocolDomain::System
+    }
+
+    fn accepts_command(&self, _cmd: &RuntimeCommand) -> bool {
+        false
+    }
+
+    fn encode(&mut self, _cmd: &RuntimeCommand) -> CoreResult<Vec<OutboundRequest>> {
+        Ok(Vec::new())
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(
+            input,
+            RuntimeInput::Io(IoEvent { route, .. }) if route == "command-status-fixture"
+        )
+    }
+
+    fn decode(&mut self, _input: &RuntimeInput) -> CoreResult<Vec<NormalizedMutation>> {
+        let command_segment = self.command_id.get().to_string();
+        Ok(vec![NormalizedMutation {
+            path: StatePath::new(vec![
+                "runtime".to_string(),
+                "commands".to_string(),
+                command_segment,
+            ]),
+            object: Some(ObjectKey::Command {
+                command_id: self.command_id,
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "domain".to_string(),
+                    value: json!("trade"),
+                },
+                FieldMutation {
+                    field: "status".to_string(),
+                    value: json!(self.status),
+                },
+            ],
+            source: MutationSource::SessionControl,
+        }])
+    }
 }

@@ -1,6 +1,8 @@
 # `tqsdk-task`
 
-`tqsdk-task` 是建立在 `tqsdk-wait` 之上的执行工具层。
+`tqsdk-task` 是执行工具层。`TaskHost`、`TargetPosTask`、scheduler 和 strategy
+host 以 `tqsdk-wait` 为 canonical substrate；S31 低延迟 trading desk profile
+则是薄的 `tqsdk-session + RuntimeReader` hot-path profile。
 
 它的目标不是提供新的协议层能力，而是承接：
 
@@ -16,6 +18,7 @@
 - strategy host / strategy context
 - strategy environment adapter
 - strategy cache replay driver
+- low-latency trading desk profile
 - public fake market / fake broker test harness
 
 当前已落地的最小能力：
@@ -31,6 +34,23 @@
   - 开仓限额和订单频率是 task host 本进程内用量计数；不承诺跨进程持久审计或服务端风控替代
   - 拒绝结果通过 typed `RiskRejection` 暴露
   - 读取现有 account / position / quote refs，不维护第二份资金或持仓状态
+- `TradingDeskProfile`
+  - 面向 S31 自研低延迟柜台主循环，使用 shared `SessionClient + RuntimeReader`
+    消费行情 commit 并提交 trade command
+  - builder 支持 `subscribe_quotes(...)`、`risk_engine(...)` 和
+    `latency_probe(...)`
+  - `read_market_trade_state()` 返回同 revision 的 market + trade 分区读 guard，
+    让 risk check、position/quote 读取和下单决策共享一致截面
+  - `precheck_order(...)` 复用 `TaskOrderIntent` 与 `RiskEngine`
+    `check_report_on_state` / `project_order_on_state`
+  - `submit_prechecked_order(...)` 使用 session-scoped order intent ledger 做
+    client order id 去重；重复 client id 返回 existing ticket，不重复提交订单
+  - `TradingDeskOrderTicket::status(&desk)` 返回 typed
+    `TradingDeskOrderStatusReport` / `TradingDeskOrderState`，不要求用户解析字符串
+  - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 提供 typed
+    本进程 cycle marker；marker 不完整时 `report()` 返回 `None`
+  - 慢日志、WAL 和 journal 使用 `tqsdk-stream` sidecar managed sink 组合，sink
+    不进入 profile public API
 - `ExecutionGroup`
   - 通过 typed group id 管理两腿订单 intent
   - 所有腿在提交前统一经过 ownership guard、risk gate 和本地参数校验
@@ -150,6 +170,9 @@
 - `ExecutionGroup` 仍是 foundation，自动 hedge / flatten、timed cancel / replace、group resume / audit 仍是后续工作
 - `AccountGroup` 仍是 foundation，自动补单 / 跨账户 TargetPos 编排、resume / audit 仍是后续工作
 - `StrategySupervisor` 仍是 foundation，完整 reconnect orchestration、跨进程 daemon 管理、多 provider environment 和 durable sink isolation 仍是后续工作；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint
+- `TradingDeskProfile` 仍是低延迟柜台薄 profile，不做 OMS、自动 hedge /
+  flatten、补单引擎、GUI 或 HTTP endpoint；hot path 不进入 `tqsdk-data` 或历史
+  mmap cache
 - `StrategyTestHarness` 仍是 foundation，更完整 broker 行为和持久化测试 fixture 恢复仍是后续工作
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
@@ -210,6 +233,7 @@ match ticket.outcome(host.api())? {
 - [examples/api_contract_s20_strategy_supervisor.rs](examples/api_contract_s20_strategy_supervisor.rs)
 - [examples/api_contract_s24_testable_strategy.rs](examples/api_contract_s24_testable_strategy.rs)
 - [examples/api_contract_s29_target_pos_ownership.rs](examples/api_contract_s29_target_pos_ownership.rs)
+- [examples/api_contract_s31_low_latency_trading_desk.rs](examples/api_contract_s31_low_latency_trading_desk.rs)
 
 `api_contract_s24_testable_strategy.rs` 使用 public fake harness，不需要真实账号或网络。
 
@@ -217,6 +241,12 @@ match ticket.outcome(host.api())? {
 `TargetPosScheduler` ownership 契约。它默认 dry-run，只创建 task host 并验证同账户同合约
 owner 冲突、手动下单 guard 和 scheduler 通过 `TaskHost::wait_update()` 推进；只有显式设置
 `TQ_TASK_ALLOW_ORDERS=1` 与 `TQ_TARGET_VOLUME=<目标手数>` 时才会登录 TQKQ 并进入真实调仓 loop。
+
+`api_contract_s31_low_latency_trading_desk.rs` 单独覆盖低延迟柜台 thin profile：
+session 自驱动 quote hot path、同 revision market/trade 分区读、risk precheck、
+typed order ticket/status、typed latency cycle，以及 `tqsdk-stream` sidecar managed
+sink / WAL / journal 的慢消费者隔离。它默认不会发单；只有显式设置
+`TQ_DESK_ALLOW_ORDER=1` 才会尝试提交示例订单。
 
 `target_pos.rs`、`target_pos_scheduler.rs` 和 live API contract examples 运行时需要：
 

@@ -174,6 +174,93 @@ fn runtime_reader_exposes_partition_scoped_domain_state_reads() {
 }
 
 #[test]
+fn runtime_reader_exposes_combined_market_trade_partition_read_guard() {
+    let symbol = Symbol::new("SHFE.au2602");
+    let account_id = AccountId::new("simnow");
+    let order_id = OrderId::new("order-1");
+
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(DomainStateAdapter {
+        decoded: vec![
+            quote_mutation(symbol.clone(), 620.5),
+            trading_status_mutation(symbol.clone(), "CONTINOUS"),
+            account_mutation(account_id.clone(), 3000.0),
+            position_mutation(account_id.clone(), symbol.clone(), 4),
+            order_mutation(
+                account_id.clone(),
+                order_id.clone(),
+                symbol.clone(),
+                "ALIVE",
+            ),
+        ],
+    });
+
+    let handle = RuntimeHandle::with_adapters(registry);
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "domain-state".to_string(),
+                domains: vec![ProtocolDomain::Market, ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({})),
+            }),
+            Vec::new(),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("domain state mutations should publish a commit");
+
+    let reader = handle.reader();
+    let market_trade = reader.read_market_trade_state();
+
+    assert_eq!(market_trade.revision(), handle.latest_snapshot().revision());
+    assert_eq!(
+        market_trade
+            .market_state()
+            .quote(&symbol)
+            .unwrap()
+            .unwrap()
+            .last_price,
+        620.5
+    );
+    assert_eq!(
+        market_trade
+            .market_state()
+            .trading_status(&symbol)
+            .unwrap()
+            .unwrap()
+            .trade_status,
+        "CONTINOUS"
+    );
+    assert_eq!(
+        market_trade
+            .trade_state()
+            .account(&account_id)
+            .unwrap()
+            .unwrap()
+            .balance,
+        3000.0
+    );
+    assert_eq!(
+        market_trade
+            .trade_state()
+            .position(&account_id, &symbol)
+            .unwrap()
+            .unwrap()
+            .pos_long,
+        4
+    );
+    assert_eq!(
+        market_trade
+            .trade_state()
+            .order(&account_id, &order_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "ALIVE"
+    );
+}
+
+#[test]
 fn runtime_reader_domain_state_reads_do_not_materialize_full_snapshot() {
     let source = include_str!("../src/runtime/reader.rs");
 

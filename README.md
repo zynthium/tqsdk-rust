@@ -10,7 +10,7 @@
 | `tqsdk-session` | `crates/tqsdk-session` | mode-agnostic 的共享 session / direct-query thin layer |
 | `tqsdk-wait` | `crates/tqsdk-wait` | Python 风格 single-owner wait facade，基于 core/session |
 | `tqsdk-stream` | `crates/tqsdk-stream` | Rust async-native multi-consumer commit stream facade，基于 core/session |
-| `tqsdk-task` | `crates/tqsdk-task` | 建立在 wait facade 之上的执行工具层 |
+| `tqsdk-task` | `crates/tqsdk-task` | 执行工具层，含 wait-based task/scheduler 与 S31 session/reader 低延迟柜台 profile |
 | `tqsdk-data` | `crates/tqsdk-data` | 研究 / 离线数据与批量查询能力的独立落点 |
 
 后续计划继续在这个 workspace 下补充多种 V2 facade crate，例如：
@@ -75,10 +75,10 @@ cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 
 - V1 core 已独立为子 crate，可单独发布。
 - `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
-- `tqsdk-session` 现已提供 `progress_once()` 与 `wait_command_completed()` 这两个最小 substrate/control-plane 原语，并用可编译示例覆盖行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
+- `tqsdk-session` 现已提供 `progress_once()`、`wait_command_completed()` 与 `command_status_typed()` 这些最小 substrate/control-plane 原语，并用可编译示例覆盖行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
 - `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
 - `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`，并已用真实示例验证 `stream.session()` 复用同一底层 session 做 direct query 的边界；后续重点转向 notification/transport-error 级 trade session 事件流。
-- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、execution group foundation、account group foundation、`StrategyHost` / `StrategyContext` / `StrategyEnvironment` / `StrategyDeployment` / `StrategySupervisor`、public fake market / fake broker test harness、ownership / guarded order / execution report（原始事件流 + 聚合摘要）；生产观测以 typed health/metrics/shutdown report 为边界，不内置 GUI、web helper 或 HTTP health/metrics endpoint。
+- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、execution group foundation、account group foundation、`StrategyHost` / `StrategyContext` / `StrategyEnvironment` / `StrategyDeployment` / `StrategySupervisor`、S31 `TradingDeskProfile` 低延迟柜台 thin profile、public fake market / fake broker test harness、ownership / guarded order / execution report（原始事件流 + 聚合摘要）；生产观测以 typed health/metrics/shutdown report 为边界，不内置 GUI、web helper 或 HTTP health/metrics endpoint。
 - `tqsdk-data` 已落地独立 crate 骨架、`DataClient`、`query_his_cont_quotes`、history `data_page` / `data_series` 与 pull-based `data_download` substrate。
 - workspace 根 README 现在只承载仓库级说明。
 - crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
@@ -109,6 +109,7 @@ cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 - `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`
 - `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`
 - `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`
+- `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`
 - `crates/tqsdk-data/examples/his_cont_quotes.rs`
 - `crates/tqsdk-data/examples/kline_data_page.rs`
 - `crates/tqsdk-data/examples/kline_data_series.rs`

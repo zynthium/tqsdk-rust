@@ -419,18 +419,9 @@ impl OrderTicket {
         let Some(command_id) = self.command_id else {
             return Ok(None);
         };
-        let Some(status) = api
-            .session()
-            .command_status(command_id)
-            .map_err(WaitFacadeError::Session)?
-        else {
-            return Ok(None);
-        };
-
-        status
-            .parse()
-            .map(Some)
-            .map_err(|()| WaitFacadeError::InvalidState("unknown command status"))
+        api.session()
+            .command_status_typed(command_id)
+            .map_err(WaitFacadeError::Session)
     }
 }
 

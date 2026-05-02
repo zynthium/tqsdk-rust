@@ -672,10 +672,13 @@ public API。
 - `tqsdk-stream`：慢消费者隔离、managed sink、WAL、journal 和 telemetry export。
 - 不进入 `tqsdk-data`；历史序列缓存和 memmap cache 不是柜台 hot path 能力。
 
-优先提升的场景：
+已提升的场景：
 
-- `api_contract_s31_low_latency_trading_desk`（desired API sketch 已补齐）：覆盖
-  低延迟柜台链路的 crate 组合、hot path 禁止项、typed latency report 和 sink isolation。
+- `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`：覆盖
+  低延迟柜台链路的 crate 组合、session 自驱动 quote hot path、同 revision
+  market/trade 分区读、typed risk/order status、typed latency report 和
+  `tqsdk-stream` sidecar sink isolation；原 desired sketch 已归档到
+  `docs/archive/scenarios/2026-05-02/`。
 
 ### P3：多 provider 行情聚合（暂缓）
 
