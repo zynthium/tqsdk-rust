@@ -9,7 +9,7 @@ use tqsdk_core::{
 };
 use tqsdk_task::{
     TargetPosExecutionReport, TargetPosExecutionStep, TargetPosScheduleStep, TargetPosScheduler,
-    TargetPosTask, TaskHost,
+    TargetPosStepOutcomeReport, TargetPosTask, TaskHost,
 };
 use tqsdk_wait::TqApiBuilder;
 
@@ -236,6 +236,11 @@ async fn live_scheduler_pause_step_smoke() {
             applied_steps: vec![TargetPosExecutionStep {
                 step_index: 0,
                 target_volume: 0,
+            }],
+            step_outcomes: vec![TargetPosStepOutcomeReport {
+                step_index: 0,
+                target_volume: 0,
+                ..TargetPosStepOutcomeReport::default()
             }],
             ..TargetPosExecutionReport::default()
         }
