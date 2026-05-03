@@ -2,371 +2,205 @@
 
 ## 文档定位
 
-这份文档是仓库级的 canonical roadmap，用于指导后续逐步迭代。
+这份文档是仓库级执行路线图。它描述当前阶段状态、后续优先级和明确不做的方向。
 
-它回答的不是“最终想做多少功能”，而是：
+权威关系：
 
-- 接下来应按什么顺序推进
-- 每一阶段的目标是什么
-- 哪些能力应该进入哪个 crate
-- 哪些能力当前明确不该做
-- 什么情况下才算一个阶段完成，可以进入下一阶段
+- crate 边界、runtime contract、public API 归属和 AI 工作流约束，以 `docs/architecture/*` 为准。
+- 场景状态和 API gap，以 `docs/scenarios/*` 与 `docs/reviews/*` 为准。
+- 本文件只决定“下一轮先做什么、暂缓什么”，不能覆盖架构文档。
 
-如果架构文档和这里有冲突，以这里的执行顺序为准；如果 crate 边界不明确，以 `docs/architecture/crate-boundaries.md` 和 `docs/architecture/crate-blueprint.md` 为准。
+如果本文件与 `docs/architecture/*` 或当前代码冲突，先按架构文档和代码修正本文件。
 
 ## 总原则
 
-- 优先保护 `tqsdk-core` 的稳定、高性能、纯 async substrate 边界。
-- 共享 session 与 one-shot request/response 能力继续集中在 `tqsdk-session`。
-- diff-backed continuous consumption 能力只进入 `tqsdk-wait` 和 `tqsdk-stream`。
-- `TargetPosTask`、downloader、DataFrame/polars、回测报告、GUI 都不应倒灌到底层。
-- 后续迭代对齐的是不同 Rust 使用者的合理路径，不是照搬官方 Python SDK 的
-  public API 名称。详见
-  [`docs/scenarios/user-layer-iteration-plan.md`](docs/scenarios/user-layer-iteration-plan.md)。
-- 每一阶段都要求：
-  - 清晰 crate 边界
-  - 可验证的验收标准
-  - 最小必要 public surface
-  - 测试与示例同步更新
+- `tqsdk-core` 继续保持 protocol-complete runtime substrate，只负责命令、状态、commit/revision、cursor、adapter、schema types 与底层 session/runtime contract。
+- `tqsdk-session` 继续承载 shared session、one-shot request/response、direct query、metadata/schema/service query 与 control-plane helper。
+- `tqsdk-wait` 和 `tqsdk-stream` 只负责 diff-backed continuous consumption。
+- `tqsdk-task` 是执行工具层，不演化成完整策略平台、OMS 或生产 daemon。
+- `tqsdk-data` 是 research/offline data 层，不演化成 session owner、live facade 或跨进程 cache service。
+- 后续迭代按 Rust 使用者分层推进，不按 Python SDK 方法清单机械补 API。
+- 每一轮改动都要求清晰 crate 边界、可验证验收标准、最小必要 public surface，以及同步更新测试/示例/文档。
 
 ## 当前基线
 
-当前已完成并稳定的基础层：
+截至 2026-05-03，当前核心 SDK foundation 已经大体闭环：
 
 - `tqsdk-core`
   - protocol-complete runtime contract
-  - DIFF / trade / replay / auth / session / system / query / schema
+  - 单一 commit/revision/cursor 语义
+  - compatible state tree + market/trade domain partitions
+  - `MutationSource` 根路径防线
+  - command/order 状态机与 typed order lifecycle
+  - shared commit identity 与 reader-first hot path
 - `tqsdk-session`
   - shared session shell
+  - lazy establish / reconnect-resync / route driving substrate
   - direct query / schema / metadata / calendar / settlement / ranking / EDB
+  - session-scoped order intent ledger
+  - startup/recovery、command status 和 replay one-shot control-plane helper
 - `tqsdk-wait`
-  - Python 风格单 owner `wait_update()` facade
-  - live quote / trading status / kline / tick / futures account-position-order-trade / security account-position-order-trade / pre-insert order / risk / settlement / notification
-  - trade command 的 wait 风格薄包装
+  - single-owner `TqApi`
+  - `wait_update()`、`is_changing()`、live quote/trade/system refs
+  - kline/tick serial window
+  - startup recovery、reconnect-safe order ticket、partial fill cancel flow
+  - futures/security trade refs 与 wait 风格交易命令包装
 - `tqsdk-stream`
-  - shared-session multi-consumer commit stream facade
+  - multi-consumer commit stream facade
   - commit/path/scope/domain/object/field filters
-  - typed path stream / ready kline-tick window / trade session event stream
+  - typed market/trade stream、ready kline/tick window、trade session event stream
+  - health snapshot、reconnect monitor、graceful shutdown
+  - managed commit sink、finite retry、JSONL WAL、fsync policy、local compaction、recovery report、commit journal
 - `tqsdk-task`
-  - `TaskHost`
-  - `TargetPosTask`
-  - `TargetPosScheduler`
-  - ownership / guarded order / execution report
-  - scheduler 交易时段 interval 已支持显式交易日历缓存，calendar 缺失时回退 weekday
-
-当前已进入架构与第一批实现的后续层：
-
+  - `TaskHost`、`TargetPosTask`、`TargetPosScheduler`
+  - order builder、ownership / guarded order、execution report
+  - `ExecutionGroup`、`AccountGroup`
+  - `RiskEngine`、risk/projection report
+  - `StrategyHost`、strategy environment/deployment/supervisor
+  - public fake market / fake broker / deterministic clock test harness
+  - `TradingDeskProfile` 低延迟柜台 thin profile
 - `tqsdk-data`
-  - crate skeleton
   - `DataClient`
-  - `query_his_cont_quotes`
-  - `get_kline_data_page`
-  - `get_tick_data_page`
-  - `get_kline_data_series`
-  - `get_tick_data_series`
-  - `kline_data_download`
-  - `tick_data_download`
-  - `query_option_greeks`
-  - `KlineDataDownload::collect_remaining`
-  - `TickDataDownload::collect_remaining`
-  - `export_kline_data_csv`
-  - `export_tick_data_csv`
-  - history page 已保留 `more_data` 分页信号，series/download 不再用页行数推断远端结束
+  - history page/series/download、CSV export
+  - `query_his_cont_quotes`、`query_option_greeks`
+  - local market cache record/replay、single-process live cache pipe
+  - history series cache / mmap-compatible opt-in materialization
+  - history series -> strategy replay adapter
 
-当前仍未进入实现、但已经明确方向的后续层：
+场景契约状态：
 
-- 可选的 `tqsdk-backtest`
-- 可选的 `tqsdk-callback`
+- S1-S13、S15-S31 已有核心 SDK path 或 foundation，并以正式 examples / review 记录作为证据。
+- S14 多 provider 行情聚合仍是唯一 active `docs/scenarios/api_gaps/` 项，当前暂缓。
+- 已归档的 gap sketch 不应重新作为当前实现入口，除非新需求重新立项。
 
-## 推荐执行顺序
+## 当前执行阶段
 
-原始的推荐顺序已经完成到 `tqsdk-stream` 与 `tqsdk-task`。
+当前不再处于“补齐第一批 facade 能力”的阶段，而是进入：
 
-从当前时点继续推进，应先按使用者分层收敛，而不是继续按 Python
-方法清单补 facade。当前优先级是：
+1. **发布前稳定化**
+2. **public API 边界维护**
+3. **验证矩阵常态化**
+4. **文档同步和历史计划归档**
 
-1. P0：启动 ready / 重连 resync / 订阅恢复 / 交易同步屏障
-2. P0：订单 intent、client order id、断线恢复后的订单对账
-3. P1：执行层抽象，包括 `TargetPosTask` ownership、execution group、多账户隔离
-4. P1：风控前置与 what-if 试算
-5. P1：策略运行时、fake market / fake broker、live / sim / replay 一致事件模型
-6. P2：生产守护、慢消费者隔离、错误诊断与重试
-7. P2：本地行情缓存、历史数据和 replay 研究闭环
-8. P3：多 provider 行情聚合
+近期工作应优先服务这四件事，而不是继续扩大 public surface。
 
-原因：
-
-- 官方 Python SDK 证明了初始截面、重连恢复、订单对账、任务 ownership、
-  多账户、风控、回放和数据下载都是高价值用户语义。
-- Rust 版本的设计哲学是分层满足不同用户；这些语义必须按用户类型落在
-  `session` / `wait` / `stream` / `task` / `data`，不能重新合并成单体 API。
-- `tqsdk-data` 已有基础实现，后续仍应继续推进，但在交易安全语义 P0
-  补齐前，不应把研究层能力当成唯一下一阶段。
-- `tqsdk-backtest` 与 `tqsdk-callback` 的独立价值，要等策略运行时、stream
-  健康事件和 replay 数据路径稳定后再判断。
-
-## Phase 1（已完成）：稳固当前基础层
+## P0：边界与验证守护
 
 ### 目标
 
-把当前已经落地的 `tqsdk-core`、`tqsdk-session`、`tqsdk-wait`、`tqsdk-stream`、`tqsdk-task` 收敛成一个长期稳定、适合继续叠加 facade 的底座。
+防止已闭环 foundation 在后续小改中退化。
 
-### 本阶段应完成
+### 应持续做
 
-- 继续审计并收口 public API surface
-- 把当前 core typed schema 对应的 diff-backed live 对象覆盖补齐到 `tqsdk-wait` 的合理边界
-- 补足更多实际可运行示例，覆盖：
-  - live 行情
-  - trade 命令
-  - session direct query
-  - replay step/reset 的底层使用方式
-- 补足文档和测试矩阵，使“哪些能力在哪层”不会再模糊
-- 继续排查性能和实现上的明显低效点，但不做凭感觉的大重构
-
-### 本阶段最适合补齐的能力
-
-当前 Phase 1 中原本列出的 diff-backed live refs 已全部补齐。
-
-接下来的重点不再是继续扩 public surface，而是：
-
-- 继续审计 `core/session/wait/stream/task` 的职责边界
-- 补更多真实联机示例
-- 继续压实 `tqsdk-stream` 的最小稳定 API 与 `tqsdk-task` 的执行边界
-
-### 本阶段明确不做
-
-- downloader
-- DataFrame / polars
-- callback facade
-- 回测报告系统
-
-### 进入下一阶段的退出条件
-
-- `core/session/wait/stream/task` 的 crate 边界不再频繁变化
-- `tqsdk-wait` 与 `tqsdk-stream` 已覆盖当前 core 中最关键的 diff-backed live 对象
-- 核心示例足以证明当前底座可用于真实联机与基础交易
-- workspace 文档能清楚说明每一层职责
-
-## Phase 2（已实现，继续稳固）：`tqsdk-stream`
-
-### 目标
-
-在不修改 `tqsdk-core` commit/revision 语义的前提下，提供 Rust async-native 的 continuous-consumption facade。
-
-### 这个 crate 应负责
-
-- diff-backed live object 的 stream 消费
-- 多消费者等待点
-- 按对象 / 按协议域 / 按路径的 stream facade
-- 背压策略与订阅生命周期管理
-- 可靠事件流与状态流分层
-
-### 推荐 API 方向
-
-- 与 `tqsdk-wait` 共享同一底层 `SessionClient`
-- 暴露尽量少的 canonical stream 入口
-- 避免复制第二棵状态树
-- 不把 one-shot query 搬进来
-
-### 本阶段验收重点
-
-- 是否能自然表达现有 `tqsdk-rs` 的多消费者场景
-- 是否不破坏 `tqsdk-core` 的统一 commit 语义
-- 是否与 `tqsdk-wait` 形成并列消费形状，而不是互相污染
-
-### 本阶段明确不做
-
-- `TargetPosTask`
-- downloader
-- DataFrame / polars
-- GUI / callback integration
-
-### 进入下一阶段的退出条件
-
-- `tqsdk-stream` 的 canonical API 稳定
-- 与 `tqsdk-wait` 的职责边界清楚
-- 可靠事件流与状态流的分层方式被锁定
-- 有 live 示例验证其基本可用性
-
-## Phase 3（已实现，继续稳固）：`tqsdk-task`
-
-### 目标
-
-把“持续读状态 + 持续发命令 + 维护内部任务状态”的高层执行工具独立出来，而不是继续塞进 wait/stream facade。
-
-### 这个 crate 应负责
-
-- `TargetPosTask`
-- 调仓 scheduler
-- 任务 ownership / symbol ownership
-- 执行规划器
-- quote hint / offset priority / volume split policy
-- task execution report
-- scheduler 交易日历缓存与交易时段 deadline gating
-
-### 设计要求
-
-- 依赖 `tqsdk-wait` 或 `tqsdk-stream`，但不反向进入底层
-- task 内部状态与用户态 live state 明确区分
-- 不得倒逼 `tqsdk-core` 改写提交模型
-
-### 本阶段验收重点
-
-- 是否能承接 `tqsdk-python` 的 `TargetPosTask`
-- 是否能吸收现有 `tqsdk-rs` 的 runtime/task registry 经验
-- 是否没有污染底层 crate 的边界
-
-### 本阶段明确不做
-
-- DataFrame / 数据下载
-- 报表系统
-- GUI
-
-### 进入下一阶段的退出条件
-
-- `TargetPosTask` 基本语义稳定
-- task ownership 与手动下单冲突策略被明确
-- scheduler deadline 不再只依赖 weekday，能显式使用官方 calendar 或调用方注入的本地 calendar
-- 关键 live/replay 场景下都能工作
-
-## Phase 4：`tqsdk-data`
-
-### 目标
-
-独立承接离线/研究/批处理数据能力，而不是把研究接口堆进 `tqsdk-session` 或 `tqsdk-wait`。
-
-### 这个 crate 应负责
-
-- downloader
-- 历史数据批量拉取
-- `get_kline_data_page`
-- `get_tick_data_page`
-- `get_kline_data_series`
-- `get_tick_data_series`
-- `kline_data_download`
-- `tick_data_download`
-- `query_his_cont_quotes`
-- `query_option_greeks`
-- pandas/polars/DataFrame 兼容层
-- 文件导出、缓存、落盘
-
-### 设计要求
-
-- 尽量复用 `tqsdk-session` 的 one-shot query 能力
-- 如需 replay/history，建立在已有 replay contract 之上
-- 研究型视图和高性能底层 API 分层明确
-
-### 本阶段验收重点
-
-- 是否能对齐 `tqsdk-python` 中研究/数据接口的主要能力
-- 是否不会让 `session` / `wait` 重新变胖
-
-### 本阶段明确不做
-
-- 把 DataFrame/polars 倒灌到底层 crate
-- 让 downloader 侵入 core runtime contract
-
-### 进入下一阶段的退出条件
-
-- 数据研究类接口已有明确独立落点
-- 当前三层底座未被污染
-
-## Phase 5：回放与回测用户层能力
-
-### 目标
-
-决定 replay/backtest 用户层能力是否需要独立为 `tqsdk-backtest`。
-
-### 优先判断标准
-
-如果未来只需要：
-
-- replay step/reset
-- live object 读取
-
-那么继续让 replay contract 留在 `core/session` 即可。
-
-如果未来还要明显扩展：
-
-- 回测执行编排
-- 回测报告
-- 指标统计
-- 资金曲线
-- 结果归档
-
-那么应独立为 `tqsdk-backtest`。
-
-### 本阶段明确不做
-
-- 为了“看起来完整”而过早拆 crate
+- 保持 `docs/architecture/validation.md` 的验证矩阵与 CI / release gate 同步。
+- public API、feature flags、crate dependency 变动后，运行对应 examples、no-default、all-features 和 clippy 检查。
+- live smoke 继续保持 ignored/env-gated，不进入普通本地验证默认路径。
+- 新增或修改场景契约时运行 `scripts/check_api_contract_examples.sh`，保持正式 examples 和 gap sketches 的场景头完整。
+- 每次文档更新确认 `ROADMAP.md`、`docs/scenarios/user-layer-iteration-plan.md`、`docs/reviews/public-api-scenario-review.md` 没有互相漂移。
 
 ### 退出条件
 
-- 是否独立为 `tqsdk-backtest` 已有明确结论
+- 验证矩阵进入稳定 CI 或明确的 release-check 流程。
+- README、ROADMAP、architecture、scenarios、reviews 对当前阶段描述一致。
 
-## Phase 6：`tqsdk-callback` 或 callback integration
+## P1：维护核心 SDK foundation
 
 ### 目标
 
-只在真实需求明确存在时，再决定是否独立 callback facade。
+维护已落地能力的可用性、清晰度和最小 public surface。
 
-### 适合进入
+### 重点
 
-- callback / handler 风格 facade
-- UI / 监控 / observer integration
+- `tqsdk-core`：保持 runtime contract 克制；只按高风险/高频需求扩 typed read surface。
+- `tqsdk-session`：继续维护 metadata/service query、startup/recovery、order intent substrate，不吸收 live facade 配置。
+- `tqsdk-wait`：维护单策略用户的稳定截面、live refs 和交易一致性，不复制 direct query。
+- `tqsdk-stream`：维护 health/recovery/sink isolation foundation，不承诺跨进程 daemon queue 或 runtime state snapshot recovery。
+- `tqsdk-task`：维护 execution/risk/strategy/test/trading-desk thin foundation，不扩成自动执行平台。
+- `tqsdk-data`：维护 history/cache/replay/research foundation，不扩成跨进程 cache service。
 
-### 不适合进入
+### 可接受的新工作
 
-- query
-- downloader
-- task runtime
+- 缩短明显绕路的正式场景示例，但不改变架构边界。
+- 给已有 foundation 补最小缺失测试、文档或 typed diagnostic。
+- 修复 public API 退化、feature flag 退化或 no-default 构建退化。
 
-### 判断标准
+### 明确不做
 
-- 如果 callback 只是 stream 的薄包装，优先不要独立 crate
-- 只有当 handler-style 用户面明显独立、维护成本合理时才拆
+- 因为“方便”把 task/data/session/wait/stream 能力互相下沉或复制。
+- 为了单个示例好看扩大 core root re-export。
+- 为了自动化平台能力加入大面积 public API。
 
-## 跨阶段的长期工作
+## P2：按需求评估的后续能力
 
-这些事情不属于单独 crate，但应持续推进：
+这些能力可以未来评估，但不应抢在 P0/P1 稳定化之前推进。
 
-- 持续 public API 审计
-- 性能回归检查
-- 更多 live smoke 示例
-- 更严格的错误语义与文档
-- 发布元信息和文档站整理
-- 测试矩阵继续补强
+### DataFrame / polars 适配层
 
-## 不建议的路线
+- 只应进入 `tqsdk-data`。
+- 应作为 opt-in adapter，而不是默认 data surface。
+- 不得让 polars/DataFrame 依赖传播到 core/session/wait/stream/task。
 
-下面这些方向当前应明确避免：
+### 路径管理型导出工具
 
-- 回到单体 `TqApi` crate
-- 把 direct query 重新塞进 `tqsdk-wait`
-- 把 downloader / DataFrame / polars 塞进 `tqsdk-session`
-- 把 task runtime 塞进 `tqsdk-core`
-- 为了提前对齐所有 `tqsdk-python` 接口而牺牲 crate 边界
-- 复制第二棵用户态状态树
+- 可作为 `tqsdk-data` 的薄便利层评估。
+- 应建立在现有 `AsyncWrite` CSV export 与 history download substrate 之上。
+- 不应引入后台 downloader、GUI viewport 或跨进程服务语义。
+
+### `tqsdk-callback`
+
+- 只有当 handler-style 用户面明显独立于 stream，且维护成本合理时才考虑。
+- 如果只是 stream 的薄包装，优先不拆 crate。
+- 不承载 query、downloader 或 task runtime。
+
+### `tqsdk-backtest`
+
+- 只有当回测执行编排、指标统计、资金曲线、报告归档等用户层能力形成明确需求时再评估。
+- replay step/reset、history series -> strategy replay、fake broker/test harness 目前已有落点，不足以单独证明需要新 crate。
+
+## P3：暂缓能力
+
+### 多 provider 行情聚合
+
+当前唯一 active API gap 是 S14 多 provider 行情聚合。
+
+暂缓原因：
+
+- 官方 Python SDK 没有将多 provider 聚合作为核心 public API。
+- 该能力更像行情中台或用户层基础设施。
+- 它会引入 provider id、质量状态、冲突合并、健康策略等复杂语义，不能顺手下沉到 core/session。
+
+未来只有在明确用户需求和架构计划同时存在时，才重新评估为 `tqsdk-stream` 之上的独立 facade 或独立项目。
+
+## 不建议路线
+
+下面方向当前明确避免：
+
+- 回到单体 `TqApi` crate。
+- 把 direct query 重新塞进 `tqsdk-wait` / `tqsdk-stream`。
+- 把 downloader、DataFrame/polars 或 research helper 塞进 `tqsdk-session`。
+- 把 task runtime、strategy supervisor 或 cache storage 塞进 `tqsdk-core`。
+- 把 production daemon、HTTP health/metrics endpoint、GUI/web helper 做成 SDK 核心能力。
+- 把跨进程 cache service、distributed queue、writer election、runtime snapshot recovery 做成 `tqsdk-data` 默认 public surface。
+- 为了提前对齐所有 `tqsdk-python` 接口而牺牲 crate 边界和类型安全。
+- 复制第二棵用户态状态树、第二套 revision 或 facade 私有 commit model。
 
 ## 每轮迭代的工作方式
 
-建议后续每一轮开发都按下面模式推进：
-
-1. 只选择一个阶段中的一个明确子目标
-2. 先确认它属于哪个 crate，不跨层乱放
-3. 先补测试与文档，再补实现
-4. 完成后立即更新相关 README / 架构文档
-5. 小步提交，保持每一阶段都可回退
+1. 只选择一个明确子目标。
+2. 先确认它属于哪个 crate，不跨层乱放。
+3. 如果涉及 public API，先写或更新正式 `api_contract_sXX_*.rs` / review 记录。
+4. 实现保持最小 surface，不用平台能力填补核心 SDK 边界之外的问题。
+5. 按风险运行 `docs/architecture/validation.md` 中的验证命令。
+6. 同步更新相关 README、architecture、scenarios、reviews 或 roadmap。
+7. 完成并验证一个可提交单元后小步提交。
 
 ## 当前建议的下一步
 
-如果按当前优先级继续推进，建议下一轮实际开发优先做下面两件事：
+下一轮实际开发优先级：
 
-1. 设计并落地启动 ready / 重连 resync 的最小 public contract，优先服务
-   `tqsdk-wait` 的单策略用户和 `tqsdk-stream` 的 async 多消费者用户。
-2. 设计订单 intent 与 client order id 的用户级契约，使场景 10
-   “断线重连中的订单一致性”不再依赖用户手写重试和本地状态推断。
+1. 把验证矩阵与 release-check 流程固化，尤其是 examples、no-default/all-features、clippy、doc/package gate。
+2. 审查当前 public API export surface，确认已降级的平台能力没有重新进入 root exports 或 crate README。
+3. 补齐与当前已落地 S30/S31 foundation 相关的 README / docs 索引漂移。
+4. 只在真实用户需求出现后，再评估 DataFrame/polars、callback 或 backtest 独立 crate。
 
-这两件事完成前，不建议先做更多便利 facade。它们是资金安全和状态一致性的
-前置条件，也是把 `docs/scenarios/api_gaps/` 中 P0 gap 提升为正式 example
-的入口。
+在这些完成前，不建议新增大块 facade 或启动新 crate。
