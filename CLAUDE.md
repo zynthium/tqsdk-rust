@@ -13,19 +13,25 @@
 
 ## code-review-graph MCP
 
-Claude Code 环境可能提供 `code-review-graph` MCP 知识图谱。工具可用时，先用图谱
-理解结构和影响面，再读取具体文件：
+Claude Code 环境可能提供 `code-review-graph` MCP 知识图谱。工具可用时，先调用
+`get_minimal_context_tool` 获取最小上下文，再按任务选择图谱工具；最后才读取具体文件：
 
 | 工具 | 使用场景 |
 | --- | --- |
-| `detect_changes` | 审查当前改动，获取风险评分和变化摘要 |
-| `get_review_context` | 获取审查所需源码片段，减少整文件读取 |
-| `get_impact_radius` | 理解改动影响面 |
-| `get_affected_flows` | 查找受影响执行路径 |
-| `query_graph` | 追踪 callers、callees、imports、tests、dependencies |
-| `semantic_search_nodes` | 按名称或关键词查找函数、类型、模块 |
-| `get_architecture_overview` | 获取高层代码结构 |
-| `list_communities` | 获取图谱社区和架构分组 |
+| `get_minimal_context_tool` | 首次进入任务时获取约 100 tokens 的最小上下文 |
+| `build_or_update_graph_tool` | 构建或增量更新图谱 |
+| `detect_changes_tool` | 审查当前改动，获取风险评分和变化摘要 |
+| `get_review_context_tool` | 获取审查所需源码片段，减少整文件读取 |
+| `get_impact_radius_tool` | 理解改动影响面 |
+| `get_affected_flows_tool` | 查找受影响执行路径 |
+| `query_graph_tool` | 追踪 callers、callees、imports、tests、dependencies |
+| `traverse_graph_tool` | 从任意节点做 BFS/DFS 遍历 |
+| `semantic_search_nodes_tool` | 按名称或关键词查找函数、类型、模块 |
+| `list_graph_stats_tool` | 查看图谱规模和健康状态 |
+| `get_architecture_overview_tool` | 获取高层代码结构 |
+| `list_communities_tool` | 获取图谱社区和架构分组 |
+| `get_hub_nodes_tool` / `get_bridge_nodes_tool` | 识别架构热点和瓶颈 |
+| `get_knowledge_gaps_tool` / `get_surprising_connections_tool` | 识别结构弱点和意外耦合 |
 | `refactor_tool` | 规划重命名、删除死代码或局部重构 |
 
 如果当前 Claude Code session 没有这些 MCP 工具，或图谱不覆盖目标区域，说明原因后

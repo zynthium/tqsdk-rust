@@ -66,18 +66,24 @@ public API、runtime contract、feature flags 或 facade 边界，必须同步�
 
 ## 探索与工具优先级
 
-本项目可能配置 `code-review-graph` MCP 知识图谱。具备这些工具时，必须先用图谱
-理解结构，再回退到文本搜索：
+本项目可能配置 `code-review-graph` MCP 知识图谱。具备这些工具时，先调用
+`get_minimal_context_tool` 获取最小上下文，再按任务使用图谱工具；只有图谱不覆盖时
+才回退到文本搜索。
 
 | 场景 | 优先工具 |
 | --- | --- |
-| 探索代码 | `semantic_search_nodes` 或 `query_graph` |
-| 理解影响面 | `get_impact_radius`、`get_affected_flows` |
-| 代码审查 | `detect_changes` + `get_review_context` |
-| 查调用、依赖、测试关系 | `query_graph` |
-| 架构问题 | `get_architecture_overview` + `list_communities` |
+| 首次进入任务 | `get_minimal_context_tool` |
+| 构建或刷新图谱 | `build_or_update_graph_tool` |
+| 探索代码 | `semantic_search_nodes_tool` 或 `query_graph_tool` |
+| 理解影响面 | `get_impact_radius_tool`、`get_affected_flows_tool` |
+| 代码审查 | `detect_changes_tool` + `get_review_context_tool` |
+| 查调用、依赖、测试关系 | `query_graph_tool` |
+| 架构问题 | `get_architecture_overview_tool` + `list_communities_tool` |
 | 计划重构 | `refactor_tool` |
+| 查结构风险 | `get_hub_nodes_tool`、`get_bridge_nodes_tool`、`get_knowledge_gaps_tool` |
 
+不同客户端可能给 MCP 工具追加命名空间前缀，例如
+`mcp__code-review-graph__query_graph_tool`；语义以 README 中的 `*_tool` 名称为准。
 如果当前代理环境没有这些 MCP 工具，或图谱不覆盖目标文件，明确说明原因后使用
 `rg` / `rg --files` / 文件读取。普通文本搜索优先用 `rg`，不要用慢速全仓
 `grep` 扫描。
