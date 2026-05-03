@@ -1,79 +1,41 @@
-## Project Architecture Guardrails
+# Claude Code 补充说明
 
-The canonical AI workflow and architecture guardrails for this repository live in
-[`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md). The
-repository documentation map lives in [`docs/README.md`](docs/README.md). Read
-both before code changes in a new Claude Code session, especially before
-touching crate boundaries, public APIs, runtime state/commit semantics,
-session/query ownership, or wait/stream/task/data facade ownership.
+本仓库的跨工具 AI 工作流入口是 [`AGENTS.md`](AGENTS.md)。Claude Code 在开始代码
+改动前必须先遵循 `AGENTS.md` 的必读顺序和架构边界；本文件只保留 Claude Code
+环境下的补充约束。
 
-`docs/reviews/` contains current review and public API decision records,
-`docs/archive/` contains historical review input, and `docs/superpowers/`
-contains execution specs/plans. Treat them as context and planning evidence, not
-as authority over `docs/architecture/*` or current code.
+## 文档权威
 
-When a code-change batch reaches a coherent, verified checkpoint, commit it
-before switching topics or ending the session. When a spec/plan/review document
-has finished driving a code change, archive it to `docs/archive/...`; keep
-`docs/architecture/*` active and update them in place when they remain the
-authority.
+- 当前架构权威仍是 [`docs/architecture/*`](docs/architecture/)。
+- `docs/reviews/`、`docs/archive/`、`docs/superpowers/` 只能作为上下文和计划证据。
+- 如果 `CLAUDE.md`、`AGENTS.md` 与架构文档冲突，以 `docs/architecture/*` 为准；
+  如果只是 Claude Code 工具用法差异，以本文件的工具说明补充 `AGENTS.md`。
 
-Hard constraints:
+## code-review-graph MCP
 
-- `tqsdk-core` remains the protocol-complete runtime substrate. Do not move
-  high-level facades, direct-query convenience APIs, task/data/downloader logic,
-  or Tianqin-specific public auth/http helpers back into core.
-- `tqsdk-session` owns shared session and one-shot request/response/direct-query
-  helpers. `tqsdk-wait` and `tqsdk-stream` own only diff-backed continuous
-  consumption shapes.
-- All visible state changes must flow through the runtime commit model:
-  `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`.
-  Do not add side caches, private facade revisions, or bypass notifications.
-- Domain writes must keep the `MutationSource` root guard. Hot reads should use
-  partition read surfaces such as `read_market_state()` and `read_trade_state()`
-  when available.
-- Command/order status updates must go through the runtime state machine; do not
-  reintroduce string-based terminal checks or adapter-local rollback behavior.
-- If an implementation changes the architecture, update the architecture docs in
-  the same change. At minimum check `docs/architecture/ai-workflow.md`,
-  `docs/architecture/README.md`, the affected architecture topic docs, affected
-  crate READMEs, and this file.
+Claude Code 环境可能提供 `code-review-graph` MCP 知识图谱。工具可用时，先用图谱
+理解结构和影响面，再读取具体文件：
 
-<!-- code-review-graph MCP tools -->
-## MCP Tools: code-review-graph
+| 工具 | 使用场景 |
+| --- | --- |
+| `detect_changes` | 审查当前改动，获取风险评分和变化摘要 |
+| `get_review_context` | 获取审查所需源码片段，减少整文件读取 |
+| `get_impact_radius` | 理解改动影响面 |
+| `get_affected_flows` | 查找受影响执行路径 |
+| `query_graph` | 追踪 callers、callees、imports、tests、dependencies |
+| `semantic_search_nodes` | 按名称或关键词查找函数、类型、模块 |
+| `get_architecture_overview` | 获取高层代码结构 |
+| `list_communities` | 获取图谱社区和架构分组 |
+| `refactor_tool` | 规划重命名、删除死代码或局部重构 |
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
-the codebase.** The graph is faster, cheaper (fewer tokens), and gives
-you structural context (callers, dependents, test coverage) that file
-scanning cannot.
+如果当前 Claude Code session 没有这些 MCP 工具，或图谱不覆盖目标区域，说明原因后
+回退到 `rg`、`rg --files` 和文件读取。不要因为图谱不可用而跳过
+`AGENTS.md` 要求的架构阅读和验证。
 
-### When to use graph tools FIRST
+## Claude Code 工作习惯
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
-
-Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
-
-### Key Tools
-
-| Tool | Use when |
-|------|----------|
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of a change |
-| `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
-| `refactor_tool` | Planning renames, finding dead code |
-
-### Workflow
-
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern="tests_for" to check coverage.
+- 先检查 `git status --short`，不要覆盖用户已有改动。
+- 优先使用非交互命令；需要搜索时优先 `rg`。
+- 手工编辑文件使用补丁方式，避免顺手改动无关格式。
+- 完成文档-only 改动至少运行 `git diff --check`。
+- 完成 Rust 代码改动时按 `AGENTS.md` 和 `docs/architecture/validation.md` 选择验证命令。
