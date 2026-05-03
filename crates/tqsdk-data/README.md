@@ -92,44 +92,6 @@
 - `MarketCacheWriter`
 - `MarketCacheReader`
 - `MarketCacheReplay`
-- `MarketCacheReaderCheckpoint`
-- `MarketCacheReaderLag`
-- `MarketCacheReaderManifest`
-- `MarketCacheRecoveryFileKind`
-- `MarketCacheRecoveryFileReport`
-- `MarketCacheRecoveryReport`
-- `MarketCacheRecoveryScan`
-- `MarketCacheWriterElection`
-- `MarketCacheWriterElectionStatus`
-- `MarketCacheWriterElectionReport`
-- `MarketCacheWriterElectionOutcome`
-- `MarketCacheWriterLease`
-- `MarketCacheRecoveryAction`
-- `MarketCacheRecoveryActionReport`
-- `MarketCacheQueue`
-- `MarketCacheQueueDrainError`
-- `MarketCacheQueueDrainReport`
-- `MarketCacheLock`
-- `MarketCacheLockOptions`
-- `MarketCacheIndex`
-- `MarketCacheIndexKey`
-- `MarketCacheIndexEntry`
-- `MarketCacheCompaction`
-- `MarketCacheCompactionReport`
-- `MarketCacheAtomicCompactionReport`
-- `MarketCacheCompactionOwnership`
-- `MarketCacheCompactionOwnershipReport`
-- `MarketCacheServiceConfig`
-- `MarketCacheService`
-- `MarketCacheServiceOpenReport`
-- `MarketCacheServiceOpen`
-- `MarketCacheServiceShutdownReport`
-- `MarketCacheDaemonConfig`
-- `MarketCacheDaemon`
-- `MarketCacheDaemonShutdownReport`
-- `MarketCacheSupervisorConfig`
-- `MarketCacheSupervisor`
-- `MarketCacheSupervisorShutdownReport`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -158,60 +120,20 @@
 `MarketCacheReplay` define the offline cache record and replay foundation for
 standard `Quote` / `Kline` / `Tick` payloads.
 
-`MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint` provide local reader
-checkpoint tracking, compaction floor calculation, and typed reader lag reports.
-They are a substrate for future cross-process cache coordination, not a complete
-cache service.
-
-`MarketCacheRecoveryScan` provides a typed local recovery scan over cache, queue,
-processing queue, and compaction staging files. It reports pending events,
-interrupted drain / compaction state, and partial progress for corrupt files
-without claiming service orchestration.
-
-`MarketCacheWriterElection` / `MarketCacheWriterLease` provide a typed local
-writer election substrate over the lock lease file. `MarketCacheRecoveryAction`
-requires an acquired writer lease before resuming processing queue / queue
-drain into the cache, so recovery does not silently run without write
-ownership. This remains a file-level data helper, not a cross-process cache
-service facade.
-
-`MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
-`MarketCacheCompaction` provide local file queue, lock lease, index,
-retention-policy compaction, and in-place rotation foundations. They are
-synchronous data-layer file helpers: they do not spawn background tasks, run a
-lease heartbeat, or manage a multi-process cache service.
-
-`MarketCacheCompactionOwnership` combines writer lease ownership with reader
-manifest protection before running atomic compaction. It adjusts retention so
-the effective floor does not pass the earliest active reader checkpoint, and it
-rejects reader-protected source/symbol/payload filters that could delete shared
-cache data still needed by another reader.
-
-`MarketCacheServiceConfig` / `MarketCacheService` provide a thin local file
-service facade over writer election, recovery action, reader manifest,
-queue flush, and reader-protected compaction ownership. It stays synchronous
-and local to `tqsdk-data`: no live session ownership, no HTTP endpoint, no GUI,
-and no system process manager.
-
-`MarketCacheDaemonConfig` / `MarketCacheDaemon` add a thin local daemon
-foundation over those primitives: explicit lock lease recovery, queue
-flush-with-progress, in-place compaction rotation, and shutdown reports. The
-facade is still synchronous and process-local; it is not a health endpoint, GUI
-integration, or cross-process cache service.
-
-`MarketCacheSupervisorConfig` / `MarketCacheSupervisor` add a process-local
-background supervisor over the daemon: periodic rotating queue flush, lock
-lease renewal, and graceful shutdown reporting. It is still a local data-layer
-helper, not a live session owner or multi-process cache manager.
+With the `stream` feature enabled, `MarketCacheStreamWriter` is the only live
+bridge in this area. It pipes typed `tqsdk-stream::MarketEvent` values into a
+caller-owned cache writer inside the current process.
 
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` and the matching tick methods
 connect owned history series to that replay foundation without requiring users
 to hand-build cache events.
 
-This is not a live durable sink runtime: it does not isolate slow consumers, run
-cross-process daemon orchestration, or drive `StrategyHost`. Those remain
-scenario gaps above this data-layer foundation.
+This is not a live durable sink runtime or cache service: it does not expose
+queue files, lock leases, reader manifests, writer election, compaction
+ownership, daemon/supervisor orchestration, HTTP endpoints, GUI integration, or
+cross-process cache management. Those belong in user tooling or a separate
+service if they are needed.
 
 ## 后续仍应承接的能力
 
@@ -280,11 +202,7 @@ cache service 或高频交易 hot path。
 - [examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
 - [examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
 - [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
-- [examples/api_contract_s18_cache_maintenance.rs](examples/api_contract_s18_cache_maintenance.rs)
-- [examples/api_contract_s18_cache_daemon_foundation.rs](examples/api_contract_s18_cache_daemon_foundation.rs)
-- [examples/api_contract_s18_cache_supervisor_foundation.rs](examples/api_contract_s18_cache_supervisor_foundation.rs)
-- [examples/api_contract_s18_cache_reader_manifest.rs](examples/api_contract_s18_cache_reader_manifest.rs)
-- [examples/api_contract_s18_cache_recovery_scan.rs](examples/api_contract_s18_cache_recovery_scan.rs)
+- [examples/api_contract_s18_live_market_cache_pipe.rs](examples/api_contract_s18_live_market_cache_pipe.rs)
 - [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。

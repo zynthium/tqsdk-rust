@@ -148,24 +148,11 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - S18 本地行情缓存 foundation 已进入核心自然表达范围：`MarketCacheWriter` /
   `MarketCacheReader` / `MarketCacheReplay` 已覆盖离线 cache record、JSONL
   reader/writer 和 ordered replay；`MarketCacheStreamWriter` 已提供单进程 live
-  `MarketEvent` -> cache writer pipe foundation；`MarketCacheQueue` /
-  `MarketCacheLock` / `MarketCacheIndex` / `MarketCacheCompaction` 已提供本地
-  JSONL queue、lock lease、索引、保留策略 compaction 与 in-place rotation
-  foundation；`MarketCacheDaemon` 已提供 process-local cache daemon foundation，
-  覆盖 stale lock recovery、queue flush progress 和 shutdown report；
-  `MarketCacheSupervisor` 已提供 process-local background supervisor
-  foundation，覆盖 periodic rotating flush、lease renewal 与 graceful shutdown
-  report；`MarketCacheReaderManifest` 已提供本地 reader checkpoint、compaction
-  floor 与 reader lag report foundation；`MarketCacheRecoveryScan` 已提供本地
-  cache / queue / processing queue / compaction staging recovery scan foundation；
-  `MarketCacheWriterElection` / `MarketCacheWriterLease` 已提供 typed writer
-  election / lease ownership substrate；`MarketCacheRecoveryAction` 要求 writer
-  lease 后恢复 processing queue / queue；`MarketCacheCompactionOwnership` 已提供
-  reader-protected compaction ownership foundation，会结合 reader manifest floor
-  和 writer lease 运行 atomic compaction；`MarketCacheService` 已提供同步、
-  本地 file service facade foundation，组合 writer election、recovery、reader
-  checkpoint、queue flush 和 reader-protected compaction；完整跨进程 daemon
-  orchestration 已降级为非核心用户层/工具层能力，暂停继续作为 S18 核心目标推进。
+  `MarketEvent` -> cache writer pipe foundation。queue、lock、index、
+  compaction、reader manifest、recovery scan、writer election、service、daemon
+  和 supervisor 等跨进程或准跨进程编排表面已从 `tqsdk-data` public contract
+  回退；完整跨进程 daemon orchestration / cache 管理服务归属用户层工具或独立
+  service，不作为 S18 核心目标推进。
 - S15 实盘 / 模拟 / 回放切换的核心 deployment/lifecycle 子集已进入自然表达范围。
   `StrategyDeploymentConfig` 支持 live trade
   与 TQKQ sim provider 配置，`StrategyDeployment` / `StrategyLifecycle` 提供统一
@@ -247,7 +234,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 15. 实盘 / 模拟 / 回放切换 | 自然（核心 lifecycle） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s15_live_sim_replay_switch.rs`; `StrategyEnvironment`; `StrategyEnvironmentContext`; `StrategyDeploymentConfig`; `StrategyDeployment`; `StrategyLifecycle`; `StrategySupervisor`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; `StrategyEnvironment::from_config`; `StrategyEnvironment::{from_task_host,from_test_harness,from_replay_builder}`; config loader 可评估为薄便利能力；multi-provider environment 随 S14 暂缓，历史 sketch 仅作为非核心部署平台上下文 |
 | 16. 历史行情回放 | 自然（核心 replay foundation） | 中 | 无 | 无 | 低 | 中 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s16_history_replay_strategy.rs`; `KlineDataSeries::into_market_cache_events`; `TickDataSeries::into_market_cache_events`; `StrategyReplay`; `StrategyReplaySourceBuilder`; `StrategyReplayCheckpoint`; `StrategyReplaySpeed`; `StrategyReplayCheckpointStore`; `StrategyReplayBuilder::{resume_from,resume_from_store,speed}`; daemon reconnect orchestration 不进入核心 SDK，历史 sketch 仅作为非核心运维上下文 |
 | 17. 研究场景 | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs`; `DataClient::get_kline_data_series` |
-| 18. 本地行情缓存读写 | 自然（核心 file/cache foundation） | 中 | 无 | 无 | 低 | 中 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_maintenance.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_daemon_foundation.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_supervisor_foundation.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_reader_manifest.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_recovery_scan.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_writer_recovery.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_compaction_ownership.rs`; `crates/tqsdk-data/examples/api_contract_s18_cache_service_foundation.rs`; `crates/tqsdk-data/examples/api_contract_s18_live_market_cache_pipe.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s18_local_market_cache.rs`; `docs/scenarios/api_gaps/api_contract_s18_cross_process_cache_service.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; `MarketCacheReaderManifest`; `MarketCacheRecoveryScan`; `MarketCacheWriterElection`; `MarketCacheWriterLease`; `MarketCacheRecoveryAction`; `MarketCacheCompactionOwnership`; `MarketCacheService`; `MarketCacheStreamWriter`; `MarketCacheQueue`; `MarketCacheLock`; `MarketCacheIndex`; `MarketCacheCompaction`; `MarketCacheDaemon`; `MarketCacheSupervisor`; local file/cache foundation 足够；cross-process cache service 继续保留为 active non-core desired sketch |
+| 18. 本地行情缓存读写 | 自然（核心 record/replay foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `crates/tqsdk-data/examples/api_contract_s18_live_market_cache_pipe.rs`; `docs/archive/scenarios/2026-05-03/api_contract_s18_cross_process_cache_service.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; `MarketCacheStreamWriter`; 本地 cache record/replay 与单进程 live pipe 足够；跨进程 cache service、queue/lock/election/recovery/compaction/service/daemon/supervisor 编排表面已回退到用户层工具或独立 service 边界 |
 | 19. 风控前置 | 自然（基础风控） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskCheckReport`; `RiskProjectionReport`; `RiskDecision`; `RiskRejection`; `TaskHost::orders`; `InstrumentSpec`; guarded insert/cancel risk integration; daily open count / symbol open volume / accumulated open volume / order rate limit; tick-size validation; lightweight single-order projection; portfolio margin what-if / durable audit 不进入核心 SDK，历史 sketch 仅作为非核心风控系统上下文 |
 | 20. 生产守护进程 | 自然（SDK runtime primitives） | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::reconnect_monitor`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamReconnectMonitor`; `StreamReconnectOutcome`; `StreamReconnectReport`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; S20 完成标准止于 typed health / telemetry / graceful shutdown primitives；Rust GUI、HTTP endpoint 和跨进程 daemon 管理均 out of scope |
 | 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s21_slow_consumer_isolation.rs`; `TqStream::spawn_commit_sink`; `TqStream::spawn_commit_sink_with_options`; `CommitSink`; `StreamSinkOptions`; `StreamSinkProfile`; `StreamSinkRetryPolicy`; `StreamSinkHandle`; `StreamSinkStats`; `StreamSinkShutdownReport`; `StreamSinkWalRecord`; `StreamSinkWalFsyncPolicy`; `StreamSinkWalCompaction`; `StreamSinkWalRecovery`; `StreamCommitJournal`; bounded fan-out / typed lag diagnostic / managed commit sink / finite retry / JSONL WAL / reusable sink profile / fsync policy / local compaction / recovery report / commit metadata journal replay 自然；durable distributed queue 和 runtime state snapshot recovery 不进入核心 SDK |

@@ -553,39 +553,9 @@ public API。
   offline replay iterator。
 - `MarketCacheStreamWriter` 提供单进程 live `MarketEvent` -> cache writer
   pipe foundation，明确不承诺 durable daemon orchestration。
-- `MarketCacheQueue` 提供本地 JSONL queue/spool foundation，可将 live 或
-  offline cache event 先写入可重放队列，再 drain 到 cache writer。
-- `MarketCacheLock` 提供原子 lock file foundation，用于单机多进程写入前的
-  互斥防线；`MarketCacheLockOptions` / `MarketCacheLock::renew` 提供显式
-  stale lease recovery / lease renewal foundation。
-- `MarketCacheIndex` / `MarketCacheCompaction` 提供本地 cache 统计索引与
-  保留策略 compaction foundation；`compact_file_in_place` 提供 in-place
-  rotation foundation。
-- `MarketCacheDaemonConfig` / `MarketCacheDaemon` 提供同步、process-local
-  daemon foundation，覆盖 lock lease、queue flush progress、compaction
-  rotation 和 shutdown report；明确不内置 HTTP endpoint 或 GUI。
-- `MarketCacheSupervisorConfig` / `MarketCacheSupervisor` 提供 process-local
-  background supervisor foundation，覆盖 periodic rotating flush、lease renewal
-  和 graceful shutdown report；明确不承诺跨进程 cache 管理服务。
-- `MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint` 提供本地 reader
-  checkpoint、compaction floor 和 typed reader lag report foundation；明确不承诺
-  writer election 或跨进程 service facade。
-- `MarketCacheRecoveryScan` 提供本地 cache / queue / processing queue /
-  compaction staging recovery scan foundation；作为底层 helper 不承诺完整跨进程
-  service orchestration。
-- `MarketCacheWriterElection` / `MarketCacheWriterLease` 提供本地 writer
-  election 和 lease ownership substrate；`MarketCacheRecoveryAction` 要求已获得
-  writer lease 后恢复 processing queue / queue，明确不承诺跨进程 service facade
-  或 compaction ownership。
-- `MarketCacheCompactionOwnership` 提供本地 reader-protected compaction
-  ownership substrate；它要求 writer lease，读取 reader manifest 的 compaction
-  floor，并拒绝 reader-protected source / symbol / payload filters，明确不承诺跨进程
-  service orchestration。
-- `MarketCacheServiceConfig` / `MarketCacheService` 提供同步、本地 file service
-  facade foundation，组合 writer election、recovery action、reader manifest、
-  queue flush 和 reader-protected compaction ownership；明确不拥有 live session，
-  不内置 HTTP endpoint、GUI 或系统级进程管理器，也不承诺完整跨进程 daemon
-  orchestration。
+- queue、lock、index、compaction、reader manifest、recovery scan、writer
+  election、service、daemon 和 supervisor 等跨进程或准跨进程编排表面已回退，
+  不再作为 `tqsdk-data` public contract。
 - `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
@@ -601,42 +571,21 @@ public API。
   adapter foundation。
 - `api_contract_s18_local_market_cache` 已提升为正式 data example，覆盖
   cache record / reader-writer / replay foundation。
-- `api_contract_s18_cache_maintenance` 已提升为正式 data example，覆盖
-  queue / lock / index / compaction foundation。
-- `api_contract_s18_cache_daemon_foundation` 已提升为正式 data example，
-  覆盖 lease / queue / rotation / shutdown report foundation。
-- `api_contract_s18_cache_supervisor_foundation` 已提升为正式 data example，
-  覆盖 process-local periodic flush / lease renewal / graceful shutdown
-  foundation。
-- `api_contract_s18_cache_reader_manifest` 已提升为正式 data example，覆盖
-  reader checkpoint / compaction floor / reader lag report foundation。
-- `api_contract_s18_cache_recovery_scan` 已提升为正式 data example，覆盖
-  cache / queue / processing queue / compaction staging recovery scan
-  foundation。
-- `api_contract_s18_cache_writer_recovery` 已提升为正式 data example，覆盖
-  writer election / lease ownership / recovery action foundation。
-- `api_contract_s18_cache_compaction_ownership` 已提升为正式 data example，覆盖
-  reader-protected compaction ownership foundation。
-- `api_contract_s18_cross_process_cache_service` 已补充为 desired API sketch，
-  明确剩余跨进程 service facade 不应直接扩展 core/session。
+- `api_contract_s18_live_market_cache_pipe` 已提升为正式 data example，覆盖
+  单进程 live stream -> cache writer pipe foundation。
+- 已撤回的 S18 cache maintenance / reader manifest / recovery / writer
+  election / compaction ownership / service / daemon / supervisor examples 与
+  cross-process cache service sketch 已归档到 `docs/archive/scenarios/2026-05-03/`。
 
 已降级为用户层工具或独立项目职责：
 
 - 完整跨进程 daemon orchestration / 多进程 cache 管理服务实现；
+- queue / lock / election / recovery / compaction ownership 等文件编排表面；
 
 优先提升的场景：
 
 - `api_contract_s18_local_market_cache`（cache record/replay foundation 已提升为正式 data example）
-- `api_contract_s18_cache_maintenance`（cache maintenance foundation 已提升为正式 data example）
-- `api_contract_s18_cache_daemon_foundation`（process-local daemon foundation 已提升为正式 data example）
-- `api_contract_s18_cache_supervisor_foundation`（process-local supervisor foundation 已提升为正式 data example）
-- `api_contract_s18_cache_reader_manifest`（reader manifest foundation 已提升为正式 data example）
-- `api_contract_s18_cache_recovery_scan`（recovery scan foundation 已提升为正式 data example）
-- `api_contract_s18_cache_writer_recovery`（writer election/recovery action foundation 已提升为正式 data example）
-- `api_contract_s18_cache_compaction_ownership`（reader-protected compaction ownership foundation 已提升为正式 data example）
-- `api_contract_s18_cache_service_foundation`（本地 file service foundation 已提升为正式 data example）
-- `api_contract_s18_cross_process_cache_service`（desired API sketch 已补齐；暂停
-  作为核心 SDK 目标，后续仅在明确用户层工具需求下重新评估）
+- `api_contract_s18_live_market_cache_pipe`（单进程 live pipe foundation 已提升为正式 data example）
 - `api_contract_s30_history_series_cache` 已提升为正式 data example，覆盖
   看盘软件 / 交易终端所需的 typed history series range cache、缺口下载、
   Python 兼容默认目录 / 自定义目录、mmap 读、mutable tail refresh、segment

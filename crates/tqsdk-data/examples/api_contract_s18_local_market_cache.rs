@@ -30,10 +30,9 @@
 //!
 //! Current API note:
 //! 本示例只验证离线 cache record、JSONL reader/writer 和 deterministic replay。
-//! queue / lock / index / compaction foundation 见
-//! `api_contract_s18_cache_maintenance.rs`；live stream pipe 见
-//! `api_contract_s18_live_market_cache_pipe.rs`。durable daemon orchestration
-//! 仍保留在 `docs/scenarios/api_gaps/`。
+//! `tqsdk-data` 不再公开 queue / lock / index / compaction /
+//! service / daemon / supervisor 这类跨进程或准跨进程编排表面；live stream
+//! pipe 见 `api_contract_s18_live_market_cache_pipe.rs`。
 
 use tqsdk_core::Quote;
 use tqsdk_data::{MarketCacheEvent, MarketCacheReader, MarketCacheReplay, MarketCacheWriter};

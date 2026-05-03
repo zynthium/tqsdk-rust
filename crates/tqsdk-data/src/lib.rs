@@ -19,15 +19,6 @@
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
 //! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
-//! - `MarketCacheReaderManifest` / `MarketCacheReaderCheckpoint`
-//! - `MarketCacheRecoveryScan` / `MarketCacheRecoveryReport`
-//! - `MarketCacheWriterElection` / `MarketCacheRecoveryAction`
-//! - `MarketCacheQueue` / `MarketCacheLock` / `MarketCacheIndex` /
-//!   `MarketCacheCompaction`
-//! - `MarketCacheCompactionOwnership`
-//! - `MarketCacheServiceConfig` / `MarketCacheService`
-//! - `MarketCacheDaemonConfig` / `MarketCacheDaemon`
-//! - `MarketCacheSupervisorConfig` / `MarketCacheSupervisor`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -35,10 +26,19 @@
 //! # Example
 //!
 //! ```
-//! let config = tqsdk_data::MarketCacheServiceConfig::new("cache.jsonl")
-//!     .with_sync_on_enqueue(false);
+//! let event = tqsdk_data::MarketCacheEvent::quote(
+//!     "example",
+//!     "SHFE.au2602",
+//!     1_000,
+//!     Some(900),
+//!     tqsdk_core::Quote::default(),
+//! )?;
 //!
-//! assert_eq!(config.cache_path(), std::path::Path::new("cache.jsonl"));
+//! let mut bytes = Vec::new();
+//! let mut writer = tqsdk_data::MarketCacheWriter::new(&mut bytes);
+//! writer.write_event(&event)?;
+//! writer.flush()?;
+//! # Ok::<(), tqsdk_data::DataError>(())
 //! ```
 
 mod client;
@@ -71,20 +71,8 @@ pub use history_series_cache::{
     HistorySeriesCacheScanReport,
 };
 pub use market_cache::{
-    MarketCacheAtomicCompactionReport, MarketCacheCompaction, MarketCacheCompactionOwnership,
-    MarketCacheCompactionOwnershipReport, MarketCacheCompactionReport, MarketCacheDaemon,
-    MarketCacheDaemonConfig, MarketCacheDaemonShutdownReport, MarketCacheEvent, MarketCacheIndex,
-    MarketCacheIndexEntry, MarketCacheIndexKey, MarketCacheLock, MarketCacheLockOptions,
-    MarketCachePayload, MarketCachePayloadKind, MarketCacheQueue, MarketCacheQueueDrainError,
-    MarketCacheQueueDrainReport, MarketCacheReader, MarketCacheReaderCheckpoint,
-    MarketCacheReaderLag, MarketCacheReaderManifest, MarketCacheRecoveryAction,
-    MarketCacheRecoveryActionReport, MarketCacheRecoveryFileKind, MarketCacheRecoveryFileReport,
-    MarketCacheRecoveryReport, MarketCacheRecoveryScan, MarketCacheReplay, MarketCacheService,
-    MarketCacheServiceConfig, MarketCacheServiceOpen, MarketCacheServiceOpenReport,
-    MarketCacheServiceShutdownReport, MarketCacheSupervisor, MarketCacheSupervisorConfig,
-    MarketCacheSupervisorShutdownReport, MarketCacheWriter, MarketCacheWriterElection,
-    MarketCacheWriterElectionOutcome, MarketCacheWriterElectionReport,
-    MarketCacheWriterElectionStatus, MarketCacheWriterLease,
+    MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReader,
+    MarketCacheReplay, MarketCacheWriter,
 };
 #[cfg(feature = "stream")]
 pub use stream_cache::MarketCacheStreamWriter;

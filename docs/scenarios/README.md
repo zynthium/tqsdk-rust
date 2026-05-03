@@ -19,8 +19,6 @@ API 已经支持或至少可以自然组合表达的终端用户代码。
 
 - `api_contract_s14_multi_provider_market_aggregation.rs`：非近期核心 SDK 目标，
   作为多 provider 基础设施边界样本保留。
-- `api_contract_s18_cross_process_cache_service.rs`：本地 cache foundation 已有正式
-  S18 examples；完整跨进程 service / daemon orchestration 仍只作为用户层工具边界样本保留。
 
 已闭环的 gap sketch 应归档到 `docs/archive/scenarios/<date>/`。例如 S30
 历史序列 mmap cache 已提升为
@@ -28,6 +26,9 @@ API 已经支持或至少可以自然组合表达的终端用户代码。
 S31 低延迟柜台 profile 已提升为
 `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`，原 sketch
 也已归档到 `docs/archive/scenarios/2026-05-02/`。
+S18 跨进程 cache service sketch 已随 public API 回退归档到
+`docs/archive/scenarios/2026-05-03/`；当前核心契约只保留本地 record/replay 与
+单进程 live pipe。
 
 场景评审时应先判断示例主要服务哪类 Rust 使用者，而不是按官方 Python SDK 的
 方法名逐项对齐。使用者分层与迭代顺序见
