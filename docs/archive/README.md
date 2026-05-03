@@ -10,6 +10,6 @@
 
 当前归档内容：
 
-- [`reviews/`](reviews/)：已闭环审查报告与历史审查输入
+- [`reviews/`](reviews/)：已闭环审查报告与历史审查输入；根目录 `report.md` 已归档为 [`reviews/2026-05-03/architecture-review-report.md`](reviews/2026-05-03/architecture-review-report.md)
 - [`scenarios/`](scenarios/)：已归档的场景 gap sketch
 - [`superpowers/`](superpowers/)：已归档的早期设计 spec

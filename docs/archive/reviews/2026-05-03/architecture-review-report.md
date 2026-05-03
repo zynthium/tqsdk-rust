@@ -7,7 +7,7 @@
 - **主要依据**：`README.md`、`ROADMAP.md`、`docs/README.md`、`docs/architecture/*`、`docs/scenarios/*`、`docs/reviews/*`、各 crate `README.md`、当前 `crates/*/examples/api_contract_sXX_*.rs`
 - **验证状态**：本次整理只做文档审查与定向核对，未重新运行全仓 Rust 测试矩阵；提交前应至少运行 `git diff --check`
 
-`report.md` 是审查输入和风险备忘，不是架构权威。若本报告与 `docs/architecture/*` 或当前代码冲突，应以架构文档和代码为准，再决定是否把建议转化为新的计划。
+本文原位于根目录 `report.md`，现已归档为历史审查输入和风险备忘，不是架构权威。若本报告与 `docs/architecture/*` 或当前代码冲突，应以架构文档和代码为准，再决定是否把建议转化为新的计划。
 
 ## 1. 执行摘要
 
@@ -103,7 +103,7 @@ RuntimeCommand / RuntimeInput
   - `docs/architecture/*` 是架构权威。
   - `ROADMAP.md` 只描述执行顺序和阶段状态。
   - `docs/scenarios/user-layer-iteration-plan.md` 与 `docs/reviews/public-api-scenario-review.md` 描述场景层状态。
-  - `report.md` 只保留审查输入，不承担路线图权威。
+  - 本报告只保留审查输入，不承担路线图权威。
 - **建议**：每次场景闭环后，同步更新 roadmap/current status，避免“已落地项”继续排在下一步。
 
 ### P1：public API 继续膨胀为平台能力
