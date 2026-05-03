@@ -24,7 +24,7 @@
 
 ## 当前基线
 
-截至 2026-05-03，当前核心 SDK foundation 已经大体闭环：
+截至 2026-05-04，当前核心 SDK foundation 已经大体闭环：
 
 - `tqsdk-core`
   - protocol-complete runtime contract
@@ -77,22 +77,24 @@
 
 当前不再处于“补齐第一批 facade 能力”的阶段，而是进入：
 
-1. **发布前稳定化**
+1. **发布门禁维护**
 2. **public API 边界维护**
-3. **验证矩阵常态化**
+3. **文档索引同步**
 4. **文档同步和历史计划归档**
 
 近期工作应优先服务这四件事，而不是继续扩大 public surface。
 
-## P0：边界与验证守护
+## P0：边界与发布门禁守护
 
 ### 目标
 
-防止已闭环 foundation 在后续小改中退化。
+防止已闭环 foundation 在后续小改中退化，并保持当前 CI / release gate 对
+public API 契约、feature flags 和 packaging 的覆盖。
 
 ### 应持续做
 
-- 保持 `docs/architecture/validation.md` 的验证矩阵与 CI / release gate 同步。
+- 保持 `.github/workflows/ci.yml` 与 `docs/architecture/validation.md` 的发布门禁同步。
+- 发布前按 `docs/architecture/validation.md` 的内部生产发布门禁复核本地或离线环境。
 - public API、feature flags、crate dependency 变动后，运行对应 examples、no-default、all-features 和 clippy 检查。
 - live smoke 继续保持 ignored/env-gated，不进入普通本地验证默认路径。
 - 新增或修改场景契约时运行 `scripts/check_api_contract_examples.sh`，保持正式 examples 和 gap sketches 的场景头完整。
@@ -100,7 +102,7 @@
 
 ### 退出条件
 
-- 验证矩阵进入稳定 CI 或明确的 release-check 流程。
+- CI 持续覆盖 `fmt`、examples、workspace/all-features tests、clippy、no-default、docs、cargo-deny 和 package gate。
 - README、ROADMAP、architecture、scenarios、reviews 对当前阶段描述一致。
 
 ## P1：维护核心 SDK foundation
@@ -198,9 +200,9 @@
 
 下一轮实际开发优先级：
 
-1. 把验证矩阵与 release-check 流程固化，尤其是 examples、no-default/all-features、clippy、doc/package gate。
-2. 审查当前 public API export surface，确认已降级的平台能力没有重新进入 root exports 或 crate README。
-3. 补齐与当前已落地 S30/S31 foundation 相关的 README / docs 索引漂移。
+1. 保持 CI / release gate 绿色；若发布流程需要本地一键入口，再补最薄的 release-check 脚本。
+2. 补齐 README / docs 索引漂移，尤其是正式场景 examples 列表与 S30/S31 当前状态。
+3. 审查当前 public API export surface，确认已降级的平台能力没有重新进入 root exports 或 crate README。
 4. 只在真实用户需求出现后，再评估 DataFrame/polars、callback 或 backtest 独立 crate。
 
 在这些完成前，不建议新增大块 facade 或启动新 crate。
