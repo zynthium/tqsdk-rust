@@ -6,6 +6,8 @@ rust-version = "1.85"
 description = "Low-level async protocol substrate for Tianqin/TQSDK services"
 documentation = "https://docs.rs/tqsdk-core"
 readme = "README.md"
+license = "MIT"
+repository = "https://github.com/zynthium/tqsdk-rust"
 
 [dependencies]
 futures.workspace = true

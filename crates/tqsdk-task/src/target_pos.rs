@@ -305,7 +305,7 @@ impl TargetPosTask {
 
     /// Return the latest target volume that has been applied by host processing.
     ///
-    /// A newly requested target is only applied when the owning [`TaskHost`]
+    /// A newly requested target is only applied when the owning [`TaskHost`](crate::TaskHost)
     /// advances via `wait_update()`, so this can lag behind
     /// [`TargetPosTask::current_target_volume`].
     #[must_use]

@@ -129,7 +129,9 @@ facade 或 runtime 消费方式重构后，都必须确认这些 examples 仍能
 如果 feature flags、workspace 依赖或 crate feature 传播被修改，还必须运行：
 
 1. `cargo check --workspace --no-default-features`
-2. `cargo check --workspace --all-features --examples`
+2. `cargo check --workspace --no-default-features --examples`
+3. `cargo test -p tqsdk-session --no-default-features`
+4. `cargo check --workspace --all-features --examples`
 
 examples 的处理原则：
 
@@ -148,6 +150,29 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 `cargo check -p tqsdk-task --example api_contract_s31_low_latency_trading_desk`
 单独覆盖。
 
+## 内部生产发布门禁
+
+内部生产版本发布前，必须在离线 CI 或本地 release-check 环境通过：
+
+1. `cargo fmt --all --check`
+2. `cargo check --workspace --examples`
+3. `cargo test --workspace`
+4. `cargo test --workspace --all-features`
+5. `cargo clippy --workspace --examples --all-targets -- -D warnings`
+6. `cargo check --workspace --no-default-features`
+7. `cargo check --workspace --no-default-features --examples`
+8. `cargo test -p tqsdk-session --no-default-features`
+9. `cargo check --workspace --all-features --examples`
+10. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
+11. `cargo deny check`
+12. `cargo package --workspace --no-verify`
+13. `git diff --check`
+
+`cargo package --workspace --no-verify` 是内部制品的 manifest/package metadata gate。
+如果切换到 crates.io 或要求完整 registry verify，必须按依赖顺序发布或验证：
+`tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` / `tqsdk-stream` ->
+`tqsdk-data` -> `tqsdk-task`。
+
 ## Feature / no-default build matrix
 以下命令用于固定 feature flags 与最小依赖构建基线，防止默认 feature 构建通过但 `--no-default-features` 或单独 feature 组合退化。
 
@@ -162,7 +187,7 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 9. `cargo test -p tqsdk-core`
 10. `cargo test -p tqsdk-session --no-default-features`
 
-可选的联机 smoke 入口：
+生产发布联机 smoke 入口：
 
 1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
 2. `cargo test -p tqsdk-session live_query_command_wait_smoke -- --ignored --nocapture`

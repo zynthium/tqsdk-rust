@@ -6,6 +6,8 @@ rust-version = "1.85"
 description = "Task and execution tooling built on tqsdk-wait"
 documentation = "https://docs.rs/tqsdk-task"
 readme = "README.md"
+license = "MIT"
+repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]
 default = ["live", "services"]
@@ -16,13 +18,13 @@ services = ["tqsdk-session/services", "tqsdk-wait/services"]
 chrono.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tqsdk-core = { path = "../tqsdk-core" }
-tqsdk-data = { path = "../tqsdk-data", default-features = false }
-tqsdk-session = { path = "../tqsdk-session", default-features = false }
-tqsdk-wait = { path = "../tqsdk-wait", default-features = false }
+tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
+tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = false }
+tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
+tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
 
 [dev-dependencies]
-tqsdk-stream = { path = "../tqsdk-stream", default-features = false }
+tqsdk-stream = { path = "../tqsdk-stream", version = "0.1.0", default-features = false }
 
 [[example]]
 name = "target_pos"
@@ -30,4 +32,16 @@ required-features = ["live"]
 
 [[example]]
 name = "target_pos_scheduler"
+required-features = ["live"]
+
+[[example]]
+name = "api_contract_s15_live_sim_replay_switch"
+required-features = ["live"]
+
+[[example]]
+name = "api_contract_s29_target_pos_ownership"
+required-features = ["live"]
+
+[[example]]
+name = "api_contract_s31_low_latency_trading_desk"
 required-features = ["live"]

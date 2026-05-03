@@ -34,6 +34,8 @@ mod instrument;
 mod metadata;
 mod order_intent;
 mod recovery;
+#[cfg(feature = "http-client")]
+mod response_body;
 #[cfg(feature = "services")]
 mod services;
 pub mod testing;

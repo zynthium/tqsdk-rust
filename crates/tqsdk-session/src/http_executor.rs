@@ -1,10 +1,12 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
-use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::response_body::{
+    HTTP_RESPONSE_BODY_LIMIT, read_limited_response_bytes, response_body_preview,
+};
 use tqsdk_core::internal::RouteRequestExecutor;
 use tqsdk_core::{
     ContractError, HttpMethod, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
@@ -87,7 +89,7 @@ impl ReqwestHttpExecutor {
             let status = response.status();
             let bytes = read_response_bytes(response).await?;
             if !status.is_success() {
-                let body = String::from_utf8_lossy(&bytes);
+                let body = response_body_preview(&bytes);
                 return Err(ContractError::http(format!(
                     "http request failed with status {status}: {body}"
                 )));
@@ -143,18 +145,13 @@ fn resolve_request_url(base_url: &str, path: Option<&str>) -> Result<String> {
 }
 
 async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
-    let capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or(0);
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::with_capacity(capacity);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|err| ContractError::http(format!("failed to read http response: {err}")))?;
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+    read_limited_response_bytes(
+        response,
+        HTTP_RESPONSE_BODY_LIMIT,
+        "http response",
+        ContractError::http,
+    )
+    .await
 }
 
 fn decode_response_payload(
@@ -191,9 +188,14 @@ fn wrap_query_response(query_id: &str, value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use tqsdk_core::ContractError;
+    use std::io::{Read, Write};
 
-    use super::resolve_request_url;
+    use tqsdk_core::{
+        CommandId, ContractError, HttpMethod, HttpRequest, OutboundDispatch, OutboundRequest,
+        ProtocolDomain, SessionRoute, SessionRouteEndpoint, SessionTarget,
+    };
+
+    use super::{ReqwestHttpExecutor, read_response_bytes, resolve_request_url};
 
     #[test]
     fn resolve_request_url_rejects_absolute_request_paths() {
@@ -212,5 +214,98 @@ mod tests {
             .expect("relative path should resolve against the route base");
 
         assert_eq!(url, "https://schema.example/base/instrument.json");
+    }
+
+    #[tokio::test]
+    async fn read_response_bytes_rejects_declared_body_larger_than_http_limit() {
+        let url = spawn_declared_response("200 OK", 64 * 1024 * 1024 + 1);
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("test response should be returned");
+
+        let err = read_response_bytes(response)
+            .await
+            .expect_err("oversized declared body should be rejected");
+
+        assert!(
+            matches!(err, ContractError::Http(ref message) if message.contains("exceeded")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_async_truncates_error_response_body() {
+        let body = "x".repeat(300) + "TAIL_MARKER";
+        let url = spawn_body_response("500 Internal Server Error", body.as_bytes());
+        let executor = ReqwestHttpExecutor::new().expect("executor should build");
+        let route = SessionRoute {
+            label: "test-http".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Query],
+            endpoint: SessionRouteEndpoint::Http { url },
+        };
+        let request = OutboundDispatch {
+            command_id: CommandId::new(1),
+            domain: ProtocolDomain::Query,
+            account_id: None,
+            request: OutboundRequest::Http(HttpRequest {
+                method: HttpMethod::Get,
+                path: None,
+                body: None,
+            }),
+        };
+
+        let err = executor
+            .execute_async(&route, vec![request])
+            .await
+            .expect_err("non-success response should fail");
+        let message = err.to_string();
+
+        assert!(message.contains("500 Internal Server Error"));
+        assert!(
+            !message.contains("TAIL_MARKER"),
+            "body was not truncated: {message}"
+        );
+    }
+
+    fn spawn_declared_response(status: &'static str, content_length: usize) -> String {
+        spawn_response(status, Some(content_length), Vec::new())
+    }
+
+    fn spawn_body_response(status: &'static str, body: &[u8]) -> String {
+        spawn_response(status, Some(body.len()), body.to_vec())
+    }
+
+    fn spawn_response(
+        status: &'static str,
+        content_length: Option<usize>,
+        body: Vec<u8>,
+    ) -> String {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test connection should arrive");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            )
+            .expect("headers should write");
+            if let Some(length) = content_length {
+                write!(stream, "Content-Length: {length}\r\n").expect("length should write");
+            }
+            stream
+                .write_all(b"\r\n")
+                .expect("header terminator should write");
+            stream.write_all(&body).expect("body should write");
+        });
+
+        format!("http://{addr}")
     }
 }

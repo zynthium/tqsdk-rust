@@ -2,9 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::response_body::{
+    AUTH_RESPONSE_BODY_LIMIT, read_limited_response_bytes, response_body_preview,
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
 
@@ -124,18 +126,16 @@ impl TqAuthProvider {
         context: &str,
     ) -> Result<Value> {
         let status = response.status();
-        let mut stream = response.bytes_stream();
-        let mut buffer = Vec::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|err| {
-                ContractError::auth(format!("{context}: failed to read response chunk: {err}"))
-            })?;
-            buffer.extend_from_slice(&chunk);
-        }
+        let buffer = read_limited_response_bytes(
+            response,
+            AUTH_RESPONSE_BODY_LIMIT,
+            context,
+            ContractError::auth,
+        )
+        .await?;
 
         if !status.is_success() {
-            let body = String::from_utf8_lossy(&buffer);
+            let body = response_body_preview(&buffer);
             return Err(ContractError::auth(format!(
                 "{context} failed with status {status}: {body}"
             )));
@@ -516,5 +516,101 @@ impl SessionTopologyResolver for TqAuthProvider {
 
             Ok(topology)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use super::{PasswordCredentials, TqAuthProvider};
+    use tqsdk_core::ContractError;
+
+    #[tokio::test]
+    async fn read_json_response_rejects_declared_body_larger_than_auth_limit() {
+        let url = spawn_declared_response("200 OK", 1024 * 1024 + 1);
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("test response should be returned");
+        let provider = test_provider();
+
+        let err = provider
+            .read_json_response(response, "token request")
+            .await
+            .expect_err("oversized declared auth body should be rejected");
+
+        assert!(
+            matches!(err, ContractError::Auth(ref message) if message.contains("exceeded")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_json_response_truncates_error_response_body() {
+        let body = "x".repeat(300) + "TAIL_MARKER";
+        let url = spawn_body_response("401 Unauthorized", body.as_bytes());
+        let response = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("test response should be returned");
+        let provider = test_provider();
+
+        let err = provider
+            .read_json_response(response, "token request")
+            .await
+            .expect_err("non-success auth response should fail");
+        let message = err.to_string();
+
+        assert!(message.contains("401 Unauthorized"));
+        assert!(
+            !message.contains("TAIL_MARKER"),
+            "body was not truncated: {message}"
+        );
+    }
+
+    fn test_provider() -> TqAuthProvider {
+        TqAuthProvider::new(PasswordCredentials::new("test-user", "test-pass"))
+    }
+
+    fn spawn_declared_response(status: &'static str, content_length: usize) -> String {
+        spawn_response(status, Some(content_length), Vec::new())
+    }
+
+    fn spawn_body_response(status: &'static str, body: &[u8]) -> String {
+        spawn_response(status, Some(body.len()), body.to_vec())
+    }
+
+    fn spawn_response(
+        status: &'static str,
+        content_length: Option<usize>,
+        body: Vec<u8>,
+    ) -> String {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test connection should arrive");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            )
+            .expect("headers should write");
+            if let Some(length) = content_length {
+                write!(stream, "Content-Length: {length}\r\n").expect("length should write");
+            }
+            stream
+                .write_all(b"\r\n")
+                .expect("header terminator should write");
+            stream.write_all(&body).expect("body should write");
+        });
+
+        format!("http://{addr}")
     }
 }
