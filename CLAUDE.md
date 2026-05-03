@@ -1,8 +1,9 @@
 # Claude Code 补充说明
 
-本仓库的跨工具 AI 工作流入口是 [`AGENTS.md`](AGENTS.md)。Claude Code 在开始代码
-改动前必须先遵循 `AGENTS.md` 的必读顺序和架构边界；本文件只保留 Claude Code
-环境下的补充约束。
+@AGENTS.md
+
+本仓库的跨工具 AI 工作流入口是 `AGENTS.md`，上面的 import 会让 Claude Code 在
+session 启动时加载同一份共享说明。本文件只保留 Claude Code 环境下的补充约束。
 
 ## 文档权威
 
@@ -10,6 +11,10 @@
 - `docs/reviews/`、`docs/archive/`、`docs/superpowers/` 只能作为上下文和计划证据。
 - 如果 `CLAUDE.md`、`AGENTS.md` 与架构文档冲突，以 `docs/architecture/*` 为准；
   如果只是 Claude Code 工具用法差异，以本文件的工具说明补充 `AGENTS.md`。
+- 本文件应保持简短、具体、结构化；只放每个 Claude Code session 都需要的项目级规则。
+- 个人偏好放入 gitignored 的 `CLAUDE.local.md` 或用户级记忆，不要提交到本文件。
+- 路径专属规则优先放入 `.claude/rules/`；多步骤流程或可复用工作流优先做成 skill。
+- 如果 Claude 没遵循本文件，先用 `/memory` 确认实际加载的记忆和规则，再检查冲突。
 
 ## code-review-graph MCP
 
