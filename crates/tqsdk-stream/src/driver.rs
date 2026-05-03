@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 const ROUTE_DRIVE_BUDGET: Duration = Duration::from_millis(1);
+const ROUTE_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DriverEvent {
@@ -145,7 +146,10 @@ async fn run_driver(
             continue;
         }
 
-        notified.await;
+        tokio::select! {
+            () = &mut notified => {}
+            () = tokio::time::sleep(ROUTE_IDLE_POLL_INTERVAL) => {}
+        }
     }
 
     emit_closed_once(&sender, closed.as_ref());
