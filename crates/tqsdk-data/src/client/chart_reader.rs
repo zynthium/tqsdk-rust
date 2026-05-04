@@ -1,14 +1,11 @@
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tqsdk_core::{Chart, Kline, MarketChartCommand, MarketCommand, RuntimeCommand, Tick};
 
 use crate::error::{DataError, Result};
 
-use super::{
-    KlineDataPage, MARKET_POLL_BUDGET, NEXT_HISTORY_CHART_ID, TickDataPage,
-    contract_error_into_data, sanitize_chart_token,
-};
+use super::chart_ids::{next_history_chart_sequence, sanitize_chart_token};
+use super::{KlineDataPage, MARKET_POLL_BUDGET, TickDataPage, contract_error_into_data};
 
 pub(super) async fn wait_for_ready_chart(
     session: &tqsdk_session::SessionClient,
@@ -254,7 +251,7 @@ pub(super) fn read_ready_tick_data_page(
 }
 
 pub(super) fn next_kline_page_chart_id(symbol: &str, duration_ns: i64) -> String {
-    let sequence = NEXT_HISTORY_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    let sequence = next_history_chart_sequence();
     format!(
         "data-kline-page-{}-{duration_ns}-{sequence}",
         sanitize_chart_token(symbol)
@@ -262,7 +259,7 @@ pub(super) fn next_kline_page_chart_id(symbol: &str, duration_ns: i64) -> String
 }
 
 pub(super) fn next_tick_page_chart_id(symbol: &str) -> String {
-    let sequence = NEXT_HISTORY_CHART_ID.fetch_add(1, Ordering::Relaxed);
+    let sequence = next_history_chart_sequence();
     format!("data-tick-page-{}-{sequence}", sanitize_chart_token(symbol))
 }
 
