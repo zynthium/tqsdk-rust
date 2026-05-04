@@ -126,6 +126,33 @@ public API 契约、feature flags 和 packaging 的覆盖。
 - 给已有 foundation 补最小缺失测试、文档或 typed diagnostic。
 - 修复 public API 退化、feature flag 退化或 no-default 构建退化。
 
+### 暂缓的结构优化 backlog
+
+以下项目来自 2026-05-04 的代码结构审查和 `docs/codeflow-report.md` 复核。它们只作为后续
+triage backlog，不在当前阶段立即执行；启动前需要重新确认影响面、误报比例和验收命令。
+
+- 大文件拆分候选：
+  - `crates/tqsdk-stream/src/event.rs`：继续按 market/trade/security event collector
+    或 stream family 归类拆分，保持现有 typed stream public API 不变。
+  - `crates/tqsdk-session/src/client.rs`：按 session driving、direct query、command wait、
+    auth/schema/service helper 等内部职责评估拆分，避免扩大 session public surface。
+  - `crates/tqsdk-core/src/commands.rs` 与 `crates/tqsdk-core/src/diff_protocol/outbound.rs`：
+    只在能保持 command/runtime contract 稳定时，评估按 command family 或 protocol message
+    family 拆分。
+- 测试 fixture 去重候选：
+  - 合并或集中 `runtime_with_default_adapters`、quote/chart seed helper、order/position fixture
+    helper 等跨测试重复代码。
+  - 优先在各 crate 的 `tests/support` 内收口，不用 public re-export 解决测试协作问题。
+- 报告告警处理原则：
+  - `unused function`、`duplicate function name`、`security hardcoded secret` 等自动化告警必须
+    先人工复核；serde helper、generic collector 和测试用假密码已知容易被误报。
+  - 不因报告分数单独删除函数、重命名测试 helper 或改写协议样例 payload。
+- 验收要求：
+  - 每个候选拆成独立小提交，保持 crate 边界和 public API 语义不变。
+  - 至少运行受影响 crate 的 focused tests、`cargo fmt --all --check`、
+    `cargo check --workspace --examples`；触及 core/session/stream 公共路径时补跑
+    `cargo test --workspace` 和 clippy。
+
 ### 明确不做
 
 - 因为“方便”把 task/data/session/wait/stream 能力互相下沉或复制。
