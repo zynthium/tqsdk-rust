@@ -1,9 +1,11 @@
-use tqsdk_core::{
-    AccountId, CommandId, CommandStatus, Order, OrderId, OrderLifecycle, StateReadView,
-};
+use tqsdk_core::{Order, OrderLifecycle, StateReadView};
 use tqsdk_wait::OrderTicketState;
 
-use crate::{Result, TaskError};
+use crate::Result;
+use crate::order_projection::{
+    fallback_volume_progress, order_volume_progress,
+    ticket_state_from_view as projected_ticket_state_from_view,
+};
 
 use super::report::{MultiAccountOrderOutcome, MultiAccountOrderReport, MultiAccountOrderState};
 use super::ticket::MultiAccountOrderLegTicket;
@@ -70,110 +72,27 @@ fn ticket_state_from_view(
     order: &MultiAccountOrderLegTicket,
 ) -> Result<OrderTicketState> {
     let order_ref = order.ticket.order();
-    let account_id = AccountId::new(order_ref.account_id().to_owned());
-    let order_id = OrderId::new(order_ref.order_id().to_owned());
-    let order_snapshot = view.trade_state().order(&account_id, &order_id)?;
-    let command_status = command_status_from_view(view, order.ticket.command_id())?;
-
-    match order_snapshot {
-        Some(order_snapshot) => Ok(ticket_state_from_order(
-            order.ticket.command_id(),
-            order_snapshot,
-        )),
-        None => Ok(ticket_state_from_command(
-            order.ticket.command_id(),
-            command_status,
-        )),
-    }
-}
-
-fn command_status_from_view(
-    view: StateReadView<'_>,
-    command_id: Option<CommandId>,
-) -> Result<Option<CommandStatus>> {
-    let Some(command_id) = command_id else {
-        return Ok(None);
-    };
-    let command_segment = command_id.get().to_string();
-    let Some(command) =
-        view.decode_path::<serde_json::Value>(&["runtime", "commands", command_segment.as_str()])?
-    else {
-        return Ok(None);
-    };
-    let Some(status) = command.get("status").and_then(serde_json::Value::as_str) else {
-        return Ok(None);
-    };
-
-    status
-        .parse()
-        .map(Some)
-        .map_err(|()| TaskError::InvalidState("unknown command status"))
-}
-
-fn ticket_state_from_order(command_id: Option<CommandId>, order: Order) -> OrderTicketState {
-    match order.lifecycle {
-        OrderLifecycle::Filled => OrderTicketState::Filled { command_id, order },
-        OrderLifecycle::Cancelled => OrderTicketState::Cancelled {
-            command_id,
-            order: Some(order),
-        },
-        OrderLifecycle::Rejected => OrderTicketState::Rejected {
-            command_id,
-            order: Some(order),
-        },
-        OrderLifecycle::Failed => OrderTicketState::Failed {
-            command_id,
-            order: Some(order),
-        },
-        OrderLifecycle::Unknown
-        | OrderLifecycle::Submitting
-        | OrderLifecycle::Sent
-        | OrderLifecycle::Accepted
-        | OrderLifecycle::PartiallyFilled
-        | OrderLifecycle::Cancelling => OrderTicketState::Live { command_id, order },
-    }
-}
-
-fn ticket_state_from_command(
-    command_id: Option<CommandId>,
-    command_status: Option<CommandStatus>,
-) -> OrderTicketState {
-    match (command_id, command_status) {
-        (Some(command_id), Some(CommandStatus::Rejected)) => OrderTicketState::Rejected {
-            command_id: Some(command_id),
-            order: None,
-        },
-        (Some(command_id), Some(CommandStatus::Cancelled)) => OrderTicketState::Cancelled {
-            command_id: Some(command_id),
-            order: None,
-        },
-        (Some(command_id), Some(CommandStatus::Failed)) => OrderTicketState::Failed {
-            command_id: Some(command_id),
-            order: None,
-        },
-        (Some(command_id), Some(CommandStatus::Completed)) => OrderTicketState::Unknown {
-            command_id: Some(command_id),
-        },
-        (Some(command_id), Some(status)) => OrderTicketState::CommandPending { command_id, status },
-        (None, Some(_)) => OrderTicketState::Unknown { command_id: None },
-        (command_id, None) => OrderTicketState::Unknown { command_id },
-    }
+    projected_ticket_state_from_view(
+        view,
+        order_ref.account_id(),
+        order_ref.order_id(),
+        order.ticket.command_id(),
+    )
 }
 
 fn live_account_order_state(order: &Order) -> (MultiAccountOrderState, i64, i64) {
-    let volume_left = order.volume_left;
-    let filled = (order.volume_origin - volume_left).max(0);
-    if filled > 0 {
+    let progress = order_volume_progress(order);
+    if progress.filled_volume > 0 {
         (
             MultiAccountOrderState::PartiallyFilled {
-                filled_volume: filled,
-                volume_left,
+                filled_volume: progress.filled_volume,
+                volume_left: progress.volume_left,
             },
-            filled,
-            volume_left,
+            progress.filled_volume,
+            progress.volume_left,
         )
     } else {
-        (MultiAccountOrderState::Live, 0, volume_left)
+        (MultiAccountOrderState::Live, 0, progress.volume_left)
     }
 }
 
@@ -183,19 +102,23 @@ fn terminal_optional_order_state(
     requested_volume: i64,
 ) -> (MultiAccountOrderState, i64, i64) {
     let Some(order) = order else {
-        return (fallback, 0, requested_volume);
+        let progress = fallback_volume_progress(requested_volume);
+        return (fallback, progress.filled_volume, progress.volume_left);
     };
-    let volume_left = order.volume_left;
-    let filled = (order.volume_origin - volume_left).max(0);
-    let state = match (order.lifecycle, filled > 0, volume_left == 0) {
+    let progress = order_volume_progress(order);
+    let state = match (
+        order.lifecycle,
+        progress.filled_volume > 0,
+        progress.volume_left == 0,
+    ) {
         (OrderLifecycle::Filled, _, _) => MultiAccountOrderState::Filled,
         (_, true, false) => MultiAccountOrderState::PartiallyFilled {
-            filled_volume: filled,
-            volume_left,
+            filled_volume: progress.filled_volume,
+            volume_left: progress.volume_left,
         },
         _ => fallback,
     };
-    (state, filled, volume_left)
+    (state, progress.filled_volume, progress.volume_left)
 }
 
 pub(super) fn outcome_from_reports(

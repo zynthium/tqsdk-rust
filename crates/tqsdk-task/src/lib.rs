@@ -21,6 +21,7 @@ mod error;
 mod execution_group;
 mod host;
 mod order;
+mod order_projection;
 mod plan;
 mod registry;
 mod replay;

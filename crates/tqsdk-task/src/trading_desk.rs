@@ -10,10 +10,15 @@ use tqsdk_core::{
     TradeVolumeCondition, UpdateCursor,
 };
 use tqsdk_session::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, SessionClient};
+use tqsdk_wait::OrderTicketState;
 
 use crate::{
     Result, RiskCheckReport, RiskDecision, RiskEngine, RiskProjectionReport, TaskError,
     TaskOrderIntent,
+    order_projection::{
+        order_from_ticket_state, order_volume_progress,
+        ticket_state_from_view as projected_ticket_state_from_view,
+    },
 };
 
 /// Thin session/reader profile for latency-sensitive trading-desk loops.
@@ -403,22 +408,18 @@ impl TradingDeskOrderTicket {
     }
 
     pub fn status(&self, desk: &TradingDeskProfile) -> Result<TradingDeskOrderStatusReport> {
-        let state = desk.read_market_trade_state();
-        let account_id = AccountId::new(self.account_id.clone());
-        let order_id = OrderId::new(self.order_id.clone());
-        let order = state.trade_state().order(&account_id, &order_id)?;
-        let command_status = self
-            .command_id
-            .map(|command_id| desk.session.command_status_typed(command_id))
-            .transpose()?
-            .flatten();
-        let order_state = match order.as_ref() {
-            Some(order) => trading_desk_state_from_order(order),
-            None => trading_desk_state_from_command(command_status),
-        };
+        let snapshot = desk.session.reader().read();
+        let ticket_state = projected_ticket_state_from_view(
+            snapshot.view(),
+            &self.account_id,
+            &self.order_id,
+            self.command_id,
+        )?;
+        let order_state = trading_desk_state_from_ticket_state(&ticket_state);
+        let order = order_from_ticket_state(&ticket_state).cloned();
 
         Ok(TradingDeskOrderStatusReport {
-            revision: state.revision(),
+            revision: snapshot.revision(),
             command_id: self.command_id,
             state: order_state,
             order,
@@ -601,8 +602,8 @@ fn trading_desk_state_from_order(order: &Order) -> TradingDeskOrderState {
     match order.lifecycle {
         OrderLifecycle::Filled => TradingDeskOrderState::Filled,
         OrderLifecycle::PartiallyFilled => TradingDeskOrderState::PartiallyFilled {
-            filled_volume: (order.volume_origin - order.volume_left).max(0),
-            volume_left: order.volume_left,
+            filled_volume: order_volume_progress(order).filled_volume,
+            volume_left: order_volume_progress(order).volume_left,
         },
         OrderLifecycle::Cancelled => TradingDeskOrderState::Cancelled,
         OrderLifecycle::Rejected => TradingDeskOrderState::Rejected,
@@ -615,13 +616,17 @@ fn trading_desk_state_from_order(order: &Order) -> TradingDeskOrderState {
     }
 }
 
-fn trading_desk_state_from_command(command_status: Option<CommandStatus>) -> TradingDeskOrderState {
-    match command_status {
-        Some(CommandStatus::Rejected) => TradingDeskOrderState::Rejected,
-        Some(CommandStatus::Cancelled) => TradingDeskOrderState::Cancelled,
-        Some(CommandStatus::Failed) => TradingDeskOrderState::Failed,
-        Some(CommandStatus::Completed) | None => TradingDeskOrderState::Unknown,
-        Some(status) => TradingDeskOrderState::CommandPending { status },
+fn trading_desk_state_from_ticket_state(state: &OrderTicketState) -> TradingDeskOrderState {
+    match state {
+        OrderTicketState::Unknown { .. } => TradingDeskOrderState::Unknown,
+        OrderTicketState::CommandPending { status, .. } => {
+            TradingDeskOrderState::CommandPending { status: *status }
+        }
+        OrderTicketState::Live { order, .. } => trading_desk_state_from_order(order),
+        OrderTicketState::Filled { .. } => TradingDeskOrderState::Filled,
+        OrderTicketState::Cancelled { .. } => TradingDeskOrderState::Cancelled,
+        OrderTicketState::Rejected { .. } => TradingDeskOrderState::Rejected,
+        OrderTicketState::Failed { .. } => TradingDeskOrderState::Failed,
     }
 }
 
