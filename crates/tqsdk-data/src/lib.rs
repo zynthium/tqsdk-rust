@@ -11,6 +11,7 @@
 //! - `DataClient::from_session(...).get_tick_data_page(...)`
 //! - `DataClient::from_session(...).get_kline_data_series(...)`
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
+//! - `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
 //! - `KlineDataDownload::collect_remaining()`
@@ -47,6 +48,7 @@ mod error;
 mod export;
 mod greeks;
 mod history_series_cache;
+mod integrity;
 mod live_quote;
 mod market_cache;
 #[cfg(feature = "stream")]
@@ -69,6 +71,11 @@ pub use history_series_cache::{
     HistorySeriesCacheFileKind, HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
     HistorySeriesCacheScanReport,
+};
+pub use integrity::{
+    DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,
+    HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
+    NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
 };
 pub use market_cache::{
     MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReader,

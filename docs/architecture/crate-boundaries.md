@@ -393,6 +393,7 @@ S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的�
 需求：
 
 - 批量历史数据拉取
+- 历史数据质量报告 / integrity report
 - 本地行情 cache record / reader-writer / ordered replay foundation
 - history series -> market cache replay adapter
 - DataFrame / polars

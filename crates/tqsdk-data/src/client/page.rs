@@ -4,6 +4,7 @@ use tqsdk_core::{Kline, Tick};
 
 use crate::error::{DataError, Result};
 use crate::history_series_cache::HistorySeriesCacheReport;
+use crate::integrity::{HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus};
 use crate::market_cache::{MarketCacheEvent, MarketCacheReplay};
 
 use super::{
@@ -554,6 +555,7 @@ pub struct KlineDataSeries {
     end_datetime_ns: i64,
     rows: Vec<Kline>,
     cache_report: Option<HistorySeriesCacheReport>,
+    permission_status: HistoryPermissionStatus,
 }
 
 impl KlineDataSeries {
@@ -571,11 +573,20 @@ impl KlineDataSeries {
             end_datetime_ns,
             rows,
             cache_report: None,
+            permission_status: HistoryPermissionStatus::Unknown,
         }
     }
 
     pub(crate) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
         self.cache_report = Some(cache_report);
+        self
+    }
+
+    pub(crate) fn with_permission_status(
+        mut self,
+        permission_status: HistoryPermissionStatus,
+    ) -> Self {
+        self.permission_status = permission_status;
         self
     }
 
@@ -636,6 +647,21 @@ impl KlineDataSeries {
     #[must_use]
     pub fn cache_report(&self) -> Option<&HistorySeriesCacheReport> {
         self.cache_report.as_ref()
+    }
+
+    #[must_use]
+    pub fn integrity_report(&self) -> HistoryIntegrityReport {
+        let mut check = HistoryIntegrityCheck::kline(
+            self.symbol(),
+            self.duration_ns,
+            self.start_datetime_ns,
+            self.end_datetime_ns,
+        )
+        .with_permission_status(self.permission_status);
+        if let Some(cache_report) = &self.cache_report {
+            check = check.with_cache_report(cache_report);
+        }
+        check.inspect_klines(&self.rows)
     }
 
     pub fn into_market_cache_events(
@@ -753,6 +779,7 @@ pub struct TickDataSeries {
     end_datetime_ns: i64,
     rows: Vec<Tick>,
     cache_report: Option<HistorySeriesCacheReport>,
+    permission_status: HistoryPermissionStatus,
 }
 
 impl TickDataSeries {
@@ -768,11 +795,20 @@ impl TickDataSeries {
             end_datetime_ns,
             rows,
             cache_report: None,
+            permission_status: HistoryPermissionStatus::Unknown,
         }
     }
 
     pub(crate) fn with_cache_report(mut self, cache_report: HistorySeriesCacheReport) -> Self {
         self.cache_report = Some(cache_report);
+        self
+    }
+
+    pub(crate) fn with_permission_status(
+        mut self,
+        permission_status: HistoryPermissionStatus,
+    ) -> Self {
+        self.permission_status = permission_status;
         self
     }
 
@@ -828,6 +864,20 @@ impl TickDataSeries {
     #[must_use]
     pub fn cache_report(&self) -> Option<&HistorySeriesCacheReport> {
         self.cache_report.as_ref()
+    }
+
+    #[must_use]
+    pub fn integrity_report(&self) -> HistoryIntegrityReport {
+        let mut check = HistoryIntegrityCheck::tick(
+            self.symbol(),
+            self.start_datetime_ns,
+            self.end_datetime_ns,
+        )
+        .with_permission_status(self.permission_status);
+        if let Some(cache_report) = &self.cache_report {
+            check = check.with_cache_report(cache_report);
+        }
+        check.inspect_ticks(&self.rows)
     }
 
     pub fn into_market_cache_events(

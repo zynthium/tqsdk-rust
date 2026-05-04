@@ -99,6 +99,8 @@
 - `get_tick_data_page(TickDataPageRequest)`
 - `get_kline_data_series(KlineDataSeriesRequest)`
 - `get_tick_data_series(TickDataSeriesRequest)`
+- `KlineDataSeries::integrity_report()`
+- `TickDataSeries::integrity_report()`
 - `DataClientBuilder::history_cache_enabled(true)`
 - `DataClientBuilder::history_cache_dir(...)`
 - `DataClientBuilder::history_cache_max_bytes(...)`
@@ -238,6 +240,10 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   回退；它们不属于 `tqsdk-data` 的稳定边界
 - `KlineDataSeries` / `TickDataSeries` 到 `MarketCacheReplay` 的 adapter
   已经落在 `tqsdk-data`
+- `HistoryIntegrityReport` 已经落在 `tqsdk-data`，作为 owned history series 的本地质量报告：
+  K 线按 duration 做 calendar-agnostic cadence 缺口检查，tick 不假设固定间隔；
+  报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
+  cache hit/miss/downloaded 和权限检查状态，不绑定外部数据库或 tabular 框架
 - 它不是新的 session facade
 - 它也不是 live ref / live stream
 - `data_page` 是对底层 chart/history contract 的显式单页封装

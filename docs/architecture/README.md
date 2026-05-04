@@ -146,6 +146,7 @@ V1 是：
   - `query_his_cont_quotes`
   - `HistoricalContQuotesRow`
   - history page/series/download and CSV export substrate
+  - history integrity report for owned kline/tick series
   - offline market cache record / JSONL reader-writer / ordered replay foundation
   - history series -> market cache replay adapter
 

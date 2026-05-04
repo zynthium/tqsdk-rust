@@ -9,6 +9,7 @@ use crate::error::Result;
 use crate::history_series_cache::{
     HistorySeriesCache, HistorySeriesCacheReport, rangeset_intersection,
 };
+use crate::integrity::HistoryPermissionStatus;
 
 use super::chart_ids::{next_history_chart_sequence, sanitize_chart_token};
 use super::{
@@ -105,13 +106,15 @@ impl DataClient {
             use_focus = false;
         }
 
-        Ok(KlineDataSeries::new(
+        let series = KlineDataSeries::new(
             request.symbol().to_string(),
             spec.duration_ns,
             spec.start_datetime_ns,
             spec.end_datetime_ns,
             dedup_sort_rows_by_id(rows),
-        ))
+        )
+        .with_permission_status(HistoryPermissionStatus::Checked);
+        Ok(series)
     }
 
     pub async fn get_tick_data_series(
@@ -171,12 +174,14 @@ impl DataClient {
             use_focus = false;
         }
 
-        Ok(TickDataSeries::new(
+        let series = TickDataSeries::new(
             request.symbol().to_string(),
             spec.start_datetime_ns,
             spec.end_datetime_ns,
             dedup_sort_rows_by_id(rows),
-        ))
+        )
+        .with_permission_status(HistoryPermissionStatus::Checked);
+        Ok(series)
     }
 
     async fn get_cached_kline_data_series(
@@ -248,7 +253,8 @@ impl DataClient {
             cache.root_dir().to_path_buf(),
             hit_rows,
             downloaded_datetime_ranges,
-        ));
+        ))
+        .with_permission_status(HistoryPermissionStatus::Checked);
         self.enforce_history_cache_limits(cache.as_ref())?;
         Ok(series)
     }
@@ -316,7 +322,8 @@ impl DataClient {
             cache.root_dir().to_path_buf(),
             hit_rows,
             downloaded_datetime_ranges,
-        ));
+        ))
+        .with_permission_status(HistoryPermissionStatus::Checked);
         self.enforce_history_cache_limits(cache.as_ref())?;
         Ok(series)
     }

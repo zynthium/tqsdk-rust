@@ -9,6 +9,8 @@
 - `DataClient::from_session(...).get_tick_data_page(...)`
 - `DataClient::from_session(...).get_kline_data_series(...)`
 - `DataClient::from_session(...).get_tick_data_series(...)`
+- `KlineDataSeries::integrity_report()`
+- `TickDataSeries::integrity_report()`
 - `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
@@ -23,6 +25,8 @@
 - `query_his_cont_quotes` 是纯 HTTP 的一次性 direct query，不需要 live session
 - `get_*_data_page` 是最底层的 chart/history page substrate，并显式暴露 chart 的 `more_data` 分页信号
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`，分页继续与否以 `more_data` 为准
+- `integrity_report()` 是对已返回 owned series 的本地质量报告；K 线按 duration 做
+  calendar-agnostic cadence 缺口检查，tick 不假设固定间隔
 - `DataClient::from_session(...)` 默认不启用历史序列缓存；通过
   `DataClientBuilder::history_cache_enabled(true)` 显式开启后，
   `get_*_data_series` 会隐式读写 Python 兼容 mmap 历史缓存
@@ -67,6 +71,10 @@
 - `KlineDataSeries`
 - `TickDataSeriesRequest`
 - `TickDataSeries`
+- `HistoryIntegrityCheck`
+- `HistoryIntegrityReport`
+- `HistoryCacheStatus`
+- `HistoryPermissionStatus`
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
@@ -113,6 +121,11 @@
 - stream / callback API
 
 这些仍然属于 `tqsdk-wait` / `tqsdk-stream`。
+
+`KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
+提供最薄的数据质量报告，包括 requested/returned range、缺口、重复行、时间倒退、
+越界行、cache hit/miss/downloaded 状态和权限检查状态。它只检查 SDK 已经拿到的
+owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Parquet 或 DataFrame。
 
 ## Market Cache Foundation
 

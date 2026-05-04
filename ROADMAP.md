@@ -62,6 +62,7 @@
 - `tqsdk-data`
   - `DataClient`
   - history page/series/download、CSV export
+  - `HistoryIntegrityReport` owned history series 数据质量报告
   - `query_his_cont_quotes`、`query_option_greeks`
   - local market cache record/replay、single-process live cache pipe
   - history series cache / mmap-compatible opt-in materialization
@@ -162,6 +163,60 @@ backlog，不在当前阶段立即执行；启动前需要重新确认影响面�
 ## P2：按需求评估的后续能力
 
 这些能力可以未来评估，但不应抢在 P0/P1 稳定化之前推进。
+
+### 通用 SDK 基础设施 backlog
+
+以下项目来自 2026-05-05 的 SDK 迭代建议审查。它们符合“补事实、状态、
+一致性、可靠性、审计、回放，不补观点、策略、模型、平台”的方向，但都需要单独
+立项、写清 crate 归属和验收命令后再做。
+
+- 审计型 event envelope：
+  - 先评估 `tqsdk-stream` / `tqsdk-data` 边界上的 `SdkEventEnvelope`，
+    承载 source/domain/symbol/account/order id、exchange/receive time、
+    revision、sequence 和 typed payload kind。
+  - 不把它做成 core 新事件总线，不复制第二棵状态树，也不定义策略事件。
+- TradingSessionCalendar：
+  - 先做 `tqsdk-session` metadata/service query 之上的 typed helper 或
+    task-local session template 消费层。
+  - `is_trading_time`、`next_open`、`next_close`、夜盘归属交易日等接口必须明确
+    数据源、缺失回退和品种覆盖范围。
+  - 不把“开盘更容易趋势”等策略判断写入 SDK。
+- InstrumentSpec 扩展：
+  - 继续增强 `tqsdk-session::InstrumentSpec` 周边能力，覆盖 min/max order volume、
+    delivery/expiry、trading session template 等合约事实。
+  - 注意现有 `InstrumentSpec` 是 public-field struct；新增字段或替换结构前必须
+    做 semver/API 形状设计。
+- RiskEngine 规则管线化：
+  - 可把现有 task 层 `RiskEngine` 内部规则拆成更清晰的 order-level /
+    session-level pre-trade gate。
+  - 优先内建 `TickSizeRule`、`TradingSessionRule`、`MaxOrderVolumeRule`、
+    `DuplicateIntentRule` 等薄规则；开放插件 trait 前必须先证明必要性。
+  - 不做组合保证金引擎、全局风控服务、资金分配器、自动减仓/补单/hedge。
+- 订单生命周期形式化 / model tests：
+  - 继续加强 Submitted / Accepted / PartiallyFilled / Filled / CancelRequested /
+    Canceled / Rejected / reconnect recovery 的状态机验证。
+  - 优先补 Rust model/property-style contract tests；TLA+ / PlusCal / TLC 可作为
+    `docs/specs/order-lifecycle` 级测试资产评估，不进入 runtime hot path。
+- TradingDeskHealth 和 typed metrics：
+  - 在 S31 thin profile 上补 last market/trade revision、market/sink lag、
+    decision/risk/submit/ack latency、reject/reconnect count 等 typed report。
+  - 只暴露报告和 hook；不内置 Prometheus HTTP server、GUI 或 daemon。
+- SdkDiagnostic 字段统一：
+  - 在已有 session/stream/task diagnostics 基础上统一 kind/severity/retryable/
+    user_action/provider_message/command_id/revision/source 等字段语义。
+  - 避免为了“大一统诊断”扩大 `tqsdk-core` public surface。
+- Replay / Live 语义一致性测试：
+  - 继续验证 live、TQKQ sim、fake sim、replay 复用同一 strategy context 时的
+    observable state、revision/cursor 和 fake broker lifecycle 一致性。
+  - 不借此启动完整回测平台。
+- Feature flags 与最小依赖：
+  - 继续维护 core 无网络/heavy deps、session live/services 拆分、data
+    cache/export/stream 拆分、task testing/replay/live 拆分、stream sink/journal
+    拆分的 no-default/all-features 矩阵。
+- 通用 `DataSink` trait：
+  - 可在 `tqsdk-data` 评估 `DataSink<T>::write_batch` 这类薄 sink trait。
+  - 不绑定 DolphinDB、Parquet、Arrow、Kafka、NATS、MinIO；具体 adapter 放上层项目或
+    optional adapter crate。
 
 ### DataFrame / polars 适配层
 
