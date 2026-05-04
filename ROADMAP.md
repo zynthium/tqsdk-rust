@@ -128,8 +128,8 @@ public API 契约、feature flags 和 packaging 的覆盖。
 
 ### 暂缓的结构优化 backlog
 
-以下项目来自 2026-05-04 的代码结构审查和 `docs/codeflow-report.md` 复核。它们只作为后续
-triage backlog，不在当前阶段立即执行；启动前需要重新确认影响面、误报比例和验收命令。
+以下项目来自 2026-05-04 的代码结构审查和自动化报告人工复核。它们只作为后续 triage
+backlog，不在当前阶段立即执行；启动前需要重新确认影响面、误报比例和验收命令。
 
 - 大文件拆分候选：
   - `crates/tqsdk-stream/src/event.rs`：继续按 market/trade/security event collector
