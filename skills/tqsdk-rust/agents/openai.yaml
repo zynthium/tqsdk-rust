@@ -1,0 +1,4 @@
+interface:
+  display_name: "TQSDK Rust"
+  short_description: "Route quant scenarios to TQSDK APIs"
+  default_prompt: "Use $tqsdk-rust to map my quant trading scenario to the right TQSDK Rust crate and calling pattern."

@@ -1,0 +1,8 @@
+[package]
+name = "tqsdk-wait-quote-loop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+{{TQSDK_WAIT_DEPENDENCY}}
+tokio = { version = "1", features = ["macros", "rt", "time"] }
