@@ -1,8 +1,8 @@
-# Code Patterns
+# 代码模式
 
-Check the target crate README and `crates/*/examples/api_contract_sXX_*.rs` when exact API names must match a specific SDK revision. Prefer examples from the repository over guessing from Python TqSdk names.
+如果精确 API 名必须匹配某个 SDK revision，先检查目标 crate README 和 `crates/*/examples/api_contract_sXX_*.rs`。优先使用仓库里的示例，不要根据 Python TqSdk 名字猜 Rust API。
 
-## Wait Quote Loop
+## Wait Quote Loop 行情循环
 
 ```rust
 use tqsdk_wait::TqApiBuilder;
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Session Metadata Query
 
-Use `tqsdk-session` directly for one-shot metadata, or `api.session()` / `stream.session()` from a facade.
+one-shot metadata 直接使用 `tqsdk-session`；如果已经在 facade 内，则使用 `api.session()` / `stream.session()`。
 
 ```rust
 use tqsdk_session::SessionClientBuilder;
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Historical Data Client
 
-Use `tqsdk-data` for owned historical materialization and exports. Prefer async writers for CSV export and keep live sessions separate from offline research flows.
+owned historical materialization 和导出使用 `tqsdk-data`。CSV export 优先使用 async writer，并把 live session 和离线研究流程分开。
 
 ```rust
 use std::time::Duration;
@@ -102,11 +102,11 @@ println!("rows={}", series.len());
 # }
 ```
 
-If a struct shape differs in the user's SDK revision, inspect the crate example before finalizing code.
+如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。
 
 ## Trading Task Pattern
 
-Use `tqsdk-task` when the user wants execution ownership, target position, risk gates, or test harnesses. Keep side effects explicit and prefer simulation defaults.
+用户需要 execution ownership、target position、risk gate 或 test harness 时使用 `tqsdk-task`。副作用必须显式说明，默认优先使用模拟路径。
 
 ```rust
 use tqsdk_task::TaskHost;
@@ -129,7 +129,7 @@ while !target.is_finished() {
 
 ## Direct Order Wrapper
 
-Use `tqsdk-wait` order wrappers only for thin order submission/cancelation without task ownership. For strategy-level ownership, retry safety, or risk gates, route to `tqsdk-task`.
+只有不需要 task ownership 的薄下单/撤单才使用 `tqsdk-wait` order wrapper。策略级 ownership、retry safety 或 risk gate 应路由到 `tqsdk-task`。
 
 ```rust
 use tqsdk_core::TradeAccountType;

@@ -1,45 +1,45 @@
-# Quant Workflows
+# 量化工作流
 
-For broad role or scenario coverage, read `scenario-contracts.md` and cite the matching formal examples.
+需要按角色或场景做宽覆盖时，读取 `scenario-contracts.md`，并引用对应正式 example。
 
 ## Live Monitoring
 
-Use `tqsdk-wait` for one strategy loop or notebook-like live monitoring. Subscribe through `get_quote`, `get_trading_status`, `get_kline_serial`, or `get_tick_serial`, then call `wait_update()` and load refs only when `is_changing()` indicates a relevant commit. Refs are live handles; load snapshots after commits.
+单策略循环或 notebook-like live monitoring 使用 `tqsdk-wait`。通过 `get_quote`、`get_trading_status`、`get_kline_serial` 或 `get_tick_serial` 订阅，然后调用 `wait_update()`；只有 `is_changing()` 表示相关 commit 后才加载 ref。Ref 是 live handle；snapshot 要在 commit 后加载。
 
-Contract anchors: S1, S3, S8-S10, S25-S26.
+契约锚点：S1、S3、S8-S10、S25-S26。
 
 ## Event Pipeline
 
-Use `tqsdk-stream` when multiple independent consumers need the same session state: logging, metrics, signal calculation, persistence, and order monitoring. Use commit filters or typed streams instead of cloning snapshots in each consumer.
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。
 
-Contract anchors: S2, S4, S20-S22.
+契约锚点：S2、S4、S20-S22。
 
 ## One-Shot Research Query
 
-Use `tqsdk-session` for metadata and service calls that return one result. Enable query support when needed, and reuse the session from wait/stream facades instead of creating a duplicate connection. Do not route symbol metadata through live `QuoteRef` objects just because Python exposes many helpers on one `TqApi`.
+返回单个结果的 metadata 和 service call 使用 `tqsdk-session`。需要时启用 query support；在 wait/stream facade 中复用 session，不要创建重复连接。不要因为 Python 在一个 `TqApi` 上暴露很多 helper，就把 symbol metadata 路由到 live `QuoteRef`。
 
-Contract anchors: S23, S27. Low-level live substrate: S5.
+契约锚点：S23、S27。低层 live substrate：S5。
 
 ## Historical Research
 
-Use `tqsdk-data` for history pages, time-range series, pull-based downloads, CSV export, and option Greeks. Keep historical materialization separate from live refs. Use history cache explicitly when large repeated reads matter.
+history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。
 
-Contract anchors: S17-S18, S28-S30. Replay integration: S16.
+契约锚点：S17-S18、S28-S30。Replay integration：S16。
 
 ## Strategy Execution
 
-Use `tqsdk-task` for target-position execution, order ownership, risk checks, schedulers, multi-account allocation, strategy context, replay, and fake broker tests. Prefer typed builders and typed tickets. Let `TaskHost` own the wait loop. For one-off order wrappers without ownership, `tqsdk-wait` is acceptable, but call out live-order side effects.
+target-position execution、order ownership、risk checks、schedulers、multi-account allocation、strategy context、replay 和 fake broker tests 使用 `tqsdk-task`。优先使用 typed builders 和 typed tickets。让 `TaskHost` 拥有 wait loop。没有 ownership 的一次性 order wrapper 可以用 `tqsdk-wait`，但必须说明 live-order 副作用。
 
-Contract anchors: S6-S13, S19, S29. Production lifecycle: S15, S20.
+契约锚点：S6-S13、S19、S29。Production lifecycle：S15、S20。
 
 ## Low-Latency Desk Loop
 
-Use `tqsdk-session + RuntimeReader` or `tqsdk-task` trading desk profile for hot paths. Read market and trade state with `read_market_trade_state()` when one decision needs both partitions at the same revision. Use streams as sidecars for slow logging or persistence.
+hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading desk profile。一个决策需要同 revision 的 market 和 trade partition 时，用 `read_market_trade_state()`。慢日志或持久化使用 stream sidecar。
 
-Contract anchors: S5, S31.
+契约锚点：S5、S31。
 
 ## Replay and Testing
 
-Use `tqsdk-data` market cache records for offline event sources and `tqsdk-task` replay/fake broker tools for deterministic strategy tests. Do not require live credentials for unit-level strategy tests unless the user explicitly requests an integration smoke test. Keep live smoke tests ignored or environment-gated.
+离线 event source 使用 `tqsdk-data` market cache records；确定性策略测试使用 `tqsdk-task` replay/fake broker tools。除非用户明确要求 integration smoke test，否则 unit-level strategy test 不应需要 live credentials。live smoke test 保持 ignored 或环境变量门控。
 
-Contract anchors: S15-S16, S18, S24, S30.
+契约锚点：S15-S16、S18、S24、S30。

@@ -1,36 +1,36 @@
-# Safety and Operations
+# 安全与运行
 
-## Credentials and Permissions
+## 凭证与权限
 
-- Use `TQ_AUTH_USER` and `TQ_AUTH_PASS` in examples unless the user provides another auth path.
-- Mention that live examples need market data permissions and, for trading, account permissions.
-- Use `has_feature(...)` or `check_md_grants(...)` when a workflow depends on specific market access.
-- Keep live smoke tests behind explicit environment variables. Do not make ordinary unit tests require official services.
+- 示例默认使用 `TQ_AUTH_USER` 和 `TQ_AUTH_PASS`，除非用户提供其他 auth path。
+- 说明 live 示例需要行情权限；交易示例还需要账户权限。
+- 工作流依赖特定行情权限时，使用 `has_feature(...)` 或 `check_md_grants(...)`。
+- live smoke test 必须放在显式环境变量后面；普通 unit test 不应依赖官方服务。
 
-## Simulation First
+## 优先模拟
 
-- Prefer `TqKq` / simulation examples for order placement.
-- Make real broker integration opt-in and explicit.
-- Never hide order submission inside setup helpers or examples that look read-only.
-- State whether an example only reads data, submits simulated orders, or can touch a real account.
+- 下单示例优先使用 `TqKq` / simulation。
+- real broker integration 必须显式 opt-in。
+- 不要把下单隐藏在 setup helper 或看起来只读的示例里。
+- 明确说明示例是只读、提交模拟订单，还是可能触达实盘账户。
 
-## Order Safety
+## 订单安全
 
-- Prefer typed order builders, `OrderPrice`, `OrderTicket`, task-layer builders, and stable client intent IDs.
-- Use session-scoped intent ledgers or task tickets to avoid duplicate submission on retry.
-- Do not parse command status or order status strings when typed helpers exist.
-- Do not maintain a private order overlay that can diverge from runtime state.
-- Do not bypass runtime command lifecycle validation with string matching or adapter-local terminal-state checks.
+- 优先使用 typed order builders、`OrderPrice`、`OrderTicket`、task-layer builders 和 stable client intent IDs。
+- 用 session-scoped intent ledger 或 task ticket 避免 retry 时重复提交。
+- typed helper 存在时，不要解析 command status 或 order status 字符串。
+- 不要维护会和 runtime state 分叉的私有 order overlay。
+- 不要用字符串匹配或 adapter-local terminal-state 判断绕过 runtime command lifecycle 校验。
 
-## Runtime Safety
+## Runtime 安全
 
-- One visible state path should flow through runtime commits and readers.
-- In hot paths, prefer partition reads such as `read_market_state()`, `read_trade_state()`, or `read_market_trade_state()`.
-- Use stream sinks or sidecars for slow logging and persistence instead of blocking trading decisions.
-- Domain state writes must go through the runtime mutation path and `MutationSource` root-path guard.
+- 对外可见状态路径应经过 runtime commits 和 readers。
+- hot path 优先使用 `read_market_state()`、`read_trade_state()` 或 `read_market_trade_state()` 这类 partition read。
+- 慢日志和持久化使用 stream sink 或 sidecar，不要阻塞交易决策。
+- domain state write 必须经过 runtime mutation path 和 `MutationSource` root-path guard。
 
-## Testing
+## 测试
 
-- For strategy logic, prefer `tqsdk-task::testing` fake market/fake broker tools.
-- Use live smoke tests only when credentials, permissions, endpoints, and side effects are explicitly accepted.
-- Keep integration tests gated by environment variables when they require real services.
+- 策略逻辑测试优先使用 `tqsdk-task::testing` fake market/fake broker tools。
+- 只有凭证、权限、endpoint 和副作用都被明确接受时，才使用 live smoke test。
+- 需要真实服务的 integration test 必须用环境变量门控。
