@@ -1,6 +1,6 @@
 # Crate Selection
 
-Use `scenario-router.md` first. This file explains crate boundaries once the scenario is known.
+Use `scenario-router.md` first. This file explains crate boundaries once the scenario is known. If a Python TqSdk API appears to span several concerns, split it by Rust crate ownership before writing code.
 
 ## Decision Table
 
@@ -12,6 +12,15 @@ Use `scenario-router.md` first. This file explains crate boundaries once the sce
 | Strategy execution helpers | `tqsdk-task` | `TaskHost`, `TargetPosTask`, scheduler, risk gate, typed order builders, fake broker tests |
 | Historical/offline research | `tqsdk-data` | Data pages, data series, downloads, CSV export, history cache, option Greeks, replay cache |
 | Runtime substrate or custom facade | `tqsdk-core` plus `tqsdk-session` | Commands, adapters, commit/revision/cursor, `RuntimeReader` hot path |
+
+## Boundary Rules
+
+- `tqsdk-session` owns one-shot request/response APIs: GraphQL, schema, metadata, calendar, settlement, ranking, EDB, auth refresh, replay control, and low-level command wait helpers.
+- `tqsdk-wait` owns Python-style single-owner live refs and `wait_update()` consumption. It can expose `session()` but must not copy direct-query APIs.
+- `tqsdk-stream` owns multi-consumer commit/event streams, filters, lag diagnostics, and stream sinks. It can expose `session()` but must not become the metadata/query layer.
+- `tqsdk-task` owns strategy execution, target position, schedulers, risk gates, ownership, multi-account order foundations, fake broker tests, replay strategy host, and the S31 trading desk profile.
+- `tqsdk-data` owns research/offline data, history pages/series/downloads, CSV export, Python-compatible history cache, option Greeks, and market-cache replay materialization.
+- `tqsdk-core` owns runtime substrate only. Do not re-export auth/http/TqKq implementation details or add facade convenience APIs there.
 
 ## Shortcut Questions
 
@@ -55,3 +64,5 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
 Replace `tqsdk-wait` with the selected crate. Some patterns need multiple crates, for example `tqsdk-task` plus `tqsdk-core` for typed trade enums.
+
+`SessionClientBuilder::build()` and `DataClientBuilder::build()` are synchronous constructors. `TqApiBuilder::build().await` and `TqStreamBuilder::build().await` are async because those facades wrap live session startup behavior.

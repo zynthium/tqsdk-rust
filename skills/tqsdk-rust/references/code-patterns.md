@@ -1,6 +1,6 @@
 # Code Patterns
 
-Check the target crate README and `crates/*/examples/api_contract_sXX_*.rs` when exact API names must match a specific SDK revision.
+Check the target crate README and `crates/*/examples/api_contract_sXX_*.rs` when exact API names must match a specific SDK revision. Prefer examples from the repository over guessing from Python TqSdk names.
 
 ## Wait Quote Loop
 
@@ -40,8 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = SessionClientBuilder::new(user, pass)
         .futures_market()
         .enable_query()
-        .build()
-        .await?;
+        .build()?;
 
     let specs = session.query_instrument_specs(["SHFE.au2602"]).await?;
     println!("{specs:#?}");
@@ -77,6 +76,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Use `tqsdk-data` for owned historical materialization and exports. Prefer async writers for CSV export and keep live sessions separate from offline research flows.
 
 ```rust
+use std::time::Duration;
+
 use tqsdk_data::{DataClient, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
 
@@ -85,19 +86,18 @@ let user = std::env::var("TQ_AUTH_USER")?;
 let pass = std::env::var("TQ_AUTH_PASS")?;
 let session = SessionClientBuilder::new(user, pass)
     .futures_market()
-    .build()
-    .await?;
+    .build()?;
 
 let client = DataClient::from_session(session);
 let series = client
-    .get_kline_data_series(KlineDataSeriesRequest {
-        symbol: "SHFE.au2602".into(),
-        duration_ns: 60_000_000_000,
-        start_datetime_ns: 0,
-        end_datetime_ns: 0,
-    })
+    .get_kline_data_series(KlineDataSeriesRequest::new(
+        "SHFE.au2602",
+        Duration::from_secs(60),
+        0,
+        0,
+    ))
     .await?;
-println!("rows={}", series.klines.len());
+println!("rows={}", series.len());
 # Ok(())
 # }
 ```
@@ -117,12 +117,51 @@ let user = std::env::var("TQ_AUTH_USER")?;
 let pass = std::env::var("TQ_AUTH_PASS")?;
 let api = TqApiBuilder::new(user, pass).build().await?;
 let mut host = TaskHost::new(api);
-let mut target = host.target_pos("sim", "SHFE.au2602")?;
+let target = host.target_pos("sim", "SHFE.au2602").build()?;
 
 target.set_target_volume(1)?;
 while !target.is_finished() {
     host.wait_update(None).await?;
 }
+# Ok(())
+# }
+```
+
+## Direct Order Wrapper
+
+Use `tqsdk-wait` order wrappers only for thin order submission/cancelation without task ownership. For strategy-level ownership, retry safety, or risk gates, route to `tqsdk-task`.
+
+```rust
+use tqsdk_core::TradeAccountType;
+use tqsdk_wait::TqApiBuilder;
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let user = std::env::var("TQ_AUTH_USER")?;
+let pass = std::env::var("TQ_AUTH_PASS")?;
+let broker_id = std::env::var("TQ_TRADE_BROKER")?;
+let account_id = std::env::var("TQ_TRADE_ACCOUNT")?;
+let account_pass = std::env::var("TQ_TRADE_PASS")?;
+
+let mut api = TqApiBuilder::new(user, pass).futures_market().build().await?;
+api.login_trade_account(
+    &broker_id,
+    &account_id,
+    &account_pass,
+    TradeAccountType::Future,
+    None,
+)
+.await?;
+
+let ticket = api
+    .limit_order(&account_id, "SHFE.au2602")
+    .client_intent("example-buy-open-001")
+    .buy_open(1)
+    .at(480.0)
+    .send_once()
+    .await?;
+
+let order = ticket.wait_terminal(&mut api).await?;
+println!("order_id={} lifecycle={}", order.order_id, order.lifecycle.as_str());
 # Ok(())
 # }
 ```

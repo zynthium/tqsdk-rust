@@ -5,12 +5,14 @@
 - Use `TQ_AUTH_USER` and `TQ_AUTH_PASS` in examples unless the user provides another auth path.
 - Mention that live examples need market data permissions and, for trading, account permissions.
 - Use `has_feature(...)` or `check_md_grants(...)` when a workflow depends on specific market access.
+- Keep live smoke tests behind explicit environment variables. Do not make ordinary unit tests require official services.
 
 ## Simulation First
 
 - Prefer `TqKq` / simulation examples for order placement.
 - Make real broker integration opt-in and explicit.
 - Never hide order submission inside setup helpers or examples that look read-only.
+- State whether an example only reads data, submits simulated orders, or can touch a real account.
 
 ## Order Safety
 
@@ -18,12 +20,14 @@
 - Use session-scoped intent ledgers or task tickets to avoid duplicate submission on retry.
 - Do not parse command status or order status strings when typed helpers exist.
 - Do not maintain a private order overlay that can diverge from runtime state.
+- Do not bypass runtime command lifecycle validation with string matching or adapter-local terminal-state checks.
 
 ## Runtime Safety
 
 - One visible state path should flow through runtime commits and readers.
 - In hot paths, prefer partition reads such as `read_market_state()`, `read_trade_state()`, or `read_market_trade_state()`.
 - Use stream sinks or sidecars for slow logging and persistence instead of blocking trading decisions.
+- Domain state writes must go through the runtime mutation path and `MutationSource` root-path guard.
 
 ## Testing
 
