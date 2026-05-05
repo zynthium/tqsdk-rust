@@ -1,6 +1,6 @@
 ---
 name: tqsdk-rust
-description: Use when 需要构建、解释、调试或脚手架化 Rust TQSDK 代码，涉及 tqsdk-core、tqsdk-session、tqsdk-wait、tqsdk-stream、tqsdk-task、tqsdk-data，或行情、wait_update、async streams、metadata/direct queries、下单、TargetPosTask、策略/回放、历史 K 线/tick、CSV/cache/export、权限、Python TqSdk 等价工作流。
+description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、历史数据下载/缓存/CSV/Greeks、metadata/direct query、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、stream/fan-out、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力时，即使未明确提到 TQSDK。
 ---
 
 # TQSDK Rust
