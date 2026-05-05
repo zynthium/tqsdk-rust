@@ -14,6 +14,8 @@ Use this file first. Classify by the object the user wants to hold or consume. P
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, cache/replay APIs |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
+When the request is about role coverage or public API evidence, read `references/scenario-contracts.md` next and anchor the answer to the matching `api_contract_sXX_*.rs` examples.
+
 ## Calling Pattern by Scenario
 
 ### 1. Monitor one symbol in a strategy loop

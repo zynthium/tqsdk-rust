@@ -14,9 +14,10 @@ Read only the references needed for the user's question.
 1. Read [references/scenario-router.md](references/scenario-router.md) first for every request. Classify by what the user wants to hold or consume, not by the first API name they mention.
 2. Read [references/crate-selection.md](references/crate-selection.md) for dependency form, crate boundaries, or when the user is unsure which crate to use.
 3. Read [references/code-patterns.md](references/code-patterns.md) before writing example code or fixing compile errors in examples.
-4. Read [references/quant-workflows.md](references/quant-workflows.md) for strategy loops, event buses, research, replay, testing, or low-latency desk workflows.
-5. Read [references/safety-and-operations.md](references/safety-and-operations.md) for credentials, permissions, live trading, simulation, order side effects, risk, or live smoke tests.
-6. Use [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) with [assets/templates/wait-quote-loop](assets/templates/wait-quote-loop) only when the user asks for a new standalone starter project.
+4. Read [references/scenario-contracts.md](references/scenario-contracts.md) when the user asks for examples by role, broad coverage, scenario contracts, public API evidence, or "how should each type of user do this?"
+5. Read [references/quant-workflows.md](references/quant-workflows.md) for strategy loops, event buses, research, replay, testing, or low-latency desk workflows.
+6. Read [references/safety-and-operations.md](references/safety-and-operations.md) for credentials, permissions, live trading, simulation, order side effects, risk, or live smoke tests.
+7. Use [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) with [assets/templates/wait-quote-loop](assets/templates/wait-quote-loop) only when the user asks for a new standalone starter project.
 
 ## Core Rules
 
@@ -45,6 +46,7 @@ Read only the references needed for the user's question.
 
 - Start by naming the crate and the reason: live ref, event stream, one-shot query, task execution, offline rows, or runtime substrate.
 - Prefer short Rust snippets that match current examples over broad pseudocode.
+- When covering a user role or a broad workflow, cite the matching `api_contract_sXX_*.rs` examples from `scenario-contracts.md`.
 - Name the exact API the user should call next.
 - State when the Rust answer intentionally differs from Python TqSdk because the Rust workspace splits `session`, `wait`, `stream`, `task`, and `data`.
 - Mention safety gates early when code can place orders, cancel orders, use real accounts, or depend on paid data permissions.
