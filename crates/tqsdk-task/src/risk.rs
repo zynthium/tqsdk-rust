@@ -5,8 +5,8 @@ use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
 use tqsdk_core::{
-    AccountId, MarketStateView, MarketTradeStateReadGuard, Revision, Symbol, TradeDirection,
-    TradeOffset, TradeStateView,
+    Account, AccountId, MarketStateView, MarketTradeStateReadGuard, Position, Quote, Revision,
+    Symbol, TradeDirection, TradeOffset, TradeStateView,
 };
 
 use crate::{Result, TaskError, TaskOrderIntent};
@@ -620,244 +620,272 @@ impl RiskEngine {
         let account_id = AccountId::new(intent.account_id.clone());
         let symbol = Symbol::new(intent.symbol.clone());
 
-        if let Some(max) = self.max_order_volume {
-            if intent.volume > max {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::MaxOrderVolumeExceeded {
-                        account_id: intent.account_id.clone(),
-                        symbol: intent.symbol.clone(),
-                        requested: intent.volume,
-                        max,
-                    }),
-                });
-            }
+        if let Some(rejection) = self.check_max_order_volume(intent) {
+            return Ok(rejected_report(revision, rejection));
         }
 
-        if !self.order_rate_limits.is_empty() {
-            self.validate_usage_limits()?;
-            let exchange_id = exchange_id_from_symbol(&intent.symbol).ok_or(
-                TaskError::InvalidState("risk order rate requires exchange-prefixed symbol"),
-            )?;
-            if let Some(rejection) =
-                self.order_rate_rejection(&intent.account_id, exchange_id, Instant::now())?
-            {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(rejection),
-                });
-            }
+        if let Some(rejection) = self.check_order_rate_limit(intent)? {
+            return Ok(rejected_report(revision, rejection));
         }
 
         if is_open_intent(intent) {
-            self.validate_usage_limits()?;
-            for rule in &self.daily_open_count_limits {
-                if !rule.applies_to(&intent.symbol) {
-                    continue;
-                }
-                let current = self
-                    .daily_usage
-                    .open_counts
-                    .get(&(intent.account_id.clone(), intent.symbol.clone()))
-                    .copied()
-                    .unwrap_or(0);
-                let requested = 1;
-                if current.saturating_add(requested) > rule.max {
-                    return Ok(RiskCheckReport {
-                        revision,
-                        decision: RiskDecision::Rejected(
-                            RiskRejection::DailyOpenCountLimitExceeded {
-                                account_id: intent.account_id.clone(),
-                                symbol: intent.symbol.clone(),
-                                current,
-                                requested,
-                                max: rule.max,
-                            },
-                        ),
-                    });
-                }
+            if let Some(rejection) = self.check_daily_open_count_limit(intent)? {
+                return Ok(rejected_report(revision, rejection));
             }
-
-            for rule in &self.daily_open_volume_limits {
-                if !rule.applies_to(&intent.symbol) {
-                    continue;
-                }
-                let current = self
-                    .daily_usage
-                    .open_volumes
-                    .get(&(intent.account_id.clone(), intent.symbol.clone()))
-                    .copied()
-                    .unwrap_or(0);
-                let requested = intent.volume;
-                if current.saturating_add(requested) > rule.max {
-                    return Ok(RiskCheckReport {
-                        revision,
-                        decision: RiskDecision::Rejected(
-                            RiskRejection::DailyOpenVolumeLimitExceeded {
-                                account_id: intent.account_id.clone(),
-                                symbol: intent.symbol.clone(),
-                                current,
-                                requested,
-                                max: rule.max,
-                            },
-                        ),
-                    });
-                }
+            if let Some(rejection) = self.check_daily_open_volume_limit(intent)? {
+                return Ok(rejected_report(revision, rejection));
             }
-
-            for (index, rule) in self.accumulated_open_volume_limits.iter().enumerate() {
-                if !rule.applies_to(&intent.symbol) {
-                    continue;
-                }
-                let current = self
-                    .daily_usage
-                    .accumulated_open_volumes
-                    .get(&(intent.account_id.clone(), index))
-                    .copied()
-                    .unwrap_or(0);
-                let requested = intent.volume;
-                if current.saturating_add(requested) > rule.max {
-                    return Ok(RiskCheckReport {
-                        revision,
-                        decision: RiskDecision::Rejected(
-                            RiskRejection::AccumulatedOpenVolumeLimitExceeded {
-                                account_id: intent.account_id.clone(),
-                                symbols: rule.values.clone(),
-                                current,
-                                requested,
-                                max: rule.max,
-                            },
-                        ),
-                    });
-                }
+            if let Some(rejection) = self.check_accumulated_open_volume_limit(intent)? {
+                return Ok(rejected_report(revision, rejection));
             }
         }
 
-        if let Some(min_available) = self.min_available {
-            if !min_available.is_finite() {
-                return Err(TaskError::InvalidState("risk min available must be finite"));
-            }
-            let account = trade.account(&account_id)?;
-            let Some(account) = account else {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::MissingAccount {
-                        account_id: intent.account_id.clone(),
-                    }),
-                });
-            };
-            if !account.available.is_finite() {
-                return Err(TaskError::InvalidState("account available must be finite"));
-            }
-            if account.available < min_available {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::AvailableBelowMinimum {
-                        account_id: intent.account_id.clone(),
-                        available: account.available,
-                        min_available,
-                    }),
-                });
-            }
+        let account = trade.account(&account_id)?;
+        if let Some(rejection) = self.check_available_funds(intent, account.as_ref())? {
+            return Ok(rejected_report(revision, rejection));
         }
 
-        if let Some(max_abs_net) = self.max_abs_net_position {
-            let position = trade.position(&account_id, &symbol)?;
-            let Some(position) = position else {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::MissingPosition {
-                        account_id: intent.account_id.clone(),
-                        symbol: intent.symbol.clone(),
-                    }),
-                });
-            };
-            let current_net = position.volume_long - position.volume_short;
-            let projected_net = project_net_position(current_net, intent);
-            let projected_abs = projected_net.checked_abs().unwrap_or(i64::MAX);
-            if projected_abs > max_abs_net {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::NetPositionLimitExceeded {
-                        account_id: intent.account_id.clone(),
-                        symbol: intent.symbol.clone(),
-                        current_net,
-                        projected_net,
-                        max_abs_net,
-                    }),
-                });
-            }
+        let position = trade.position(&account_id, &symbol)?;
+        if let Some(rejection) = self.check_projected_position(intent, position.as_ref()) {
+            return Ok(rejected_report(revision, rejection));
         }
 
-        if let Some(limit_price) = intent.limit_price {
-            if !limit_price.is_finite() {
-                return Err(TaskError::InvalidState("limit price must be finite"));
-            }
-            if let Some(rule) = self.instrument_rules.get(&intent.symbol) {
-                validate_instrument_rule(rule)?;
-                if !price_is_on_tick(limit_price, rule.price_tick) {
-                    return Ok(RiskCheckReport {
-                        revision,
-                        decision: RiskDecision::Rejected(RiskRejection::PriceNotOnTick {
-                            symbol: intent.symbol.clone(),
-                            limit_price,
-                            price_tick: rule.price_tick,
-                        }),
-                    });
-                }
-            }
+        if let Some(rejection) = self.check_tick_alignment(intent)? {
+            return Ok(rejected_report(revision, rejection));
         }
 
-        if let Some(max_abs_deviation) = self.max_abs_price_deviation {
-            if !max_abs_deviation.is_finite() || max_abs_deviation < 0.0 {
-                return Err(TaskError::InvalidState(
-                    "risk max price deviation must be a non-negative finite value",
-                ));
-            }
-            let Some(limit_price) = intent.limit_price else {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Accepted,
-                });
-            };
-            if !limit_price.is_finite() {
-                return Err(TaskError::InvalidState("limit price must be finite"));
-            }
-            let quote = market.quote(&symbol)?;
-            let Some(quote) = quote else {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::MissingQuote {
-                        symbol: intent.symbol.clone(),
-                    }),
-                });
-            };
-            if !quote.last_price.is_finite() {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::MissingQuote {
-                        symbol: intent.symbol.clone(),
-                    }),
-                });
-            }
-            let deviation = (limit_price - quote.last_price).abs();
-            if deviation > max_abs_deviation {
-                return Ok(RiskCheckReport {
-                    revision,
-                    decision: RiskDecision::Rejected(RiskRejection::PriceDeviationExceeded {
-                        symbol: intent.symbol.clone(),
-                        limit_price,
-                        reference_price: quote.last_price,
-                        max_abs_deviation,
-                    }),
-                });
-            }
+        let quote = market.quote(&symbol)?;
+        if let Some(rejection) = self.check_price_deviation(intent, quote.as_ref())? {
+            return Ok(rejected_report(revision, rejection));
         }
 
         Ok(RiskCheckReport {
             revision,
             decision: RiskDecision::Accepted,
         })
+    }
+
+    fn check_max_order_volume(&self, intent: &TaskOrderIntent) -> Option<RiskRejection> {
+        let max = self.max_order_volume?;
+        (intent.volume > max).then(|| RiskRejection::MaxOrderVolumeExceeded {
+            account_id: intent.account_id.clone(),
+            symbol: intent.symbol.clone(),
+            requested: intent.volume,
+            max,
+        })
+    }
+
+    fn check_order_rate_limit(&self, intent: &TaskOrderIntent) -> Result<Option<RiskRejection>> {
+        if self.order_rate_limits.is_empty() {
+            return Ok(None);
+        }
+        self.validate_usage_limits()?;
+        let exchange_id = exchange_id_from_symbol(&intent.symbol).ok_or(
+            TaskError::InvalidState("risk order rate requires exchange-prefixed symbol"),
+        )?;
+        self.order_rate_rejection(&intent.account_id, exchange_id, Instant::now())
+    }
+
+    fn check_daily_open_count_limit(
+        &self,
+        intent: &TaskOrderIntent,
+    ) -> Result<Option<RiskRejection>> {
+        self.validate_usage_limits()?;
+        for rule in &self.daily_open_count_limits {
+            if !rule.applies_to(&intent.symbol) {
+                continue;
+            }
+            let current = self
+                .daily_usage
+                .open_counts
+                .get(&(intent.account_id.clone(), intent.symbol.clone()))
+                .copied()
+                .unwrap_or(0);
+            let requested = 1;
+            if current.saturating_add(requested) > rule.max {
+                return Ok(Some(RiskRejection::DailyOpenCountLimitExceeded {
+                    account_id: intent.account_id.clone(),
+                    symbol: intent.symbol.clone(),
+                    current,
+                    requested,
+                    max: rule.max,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_daily_open_volume_limit(
+        &self,
+        intent: &TaskOrderIntent,
+    ) -> Result<Option<RiskRejection>> {
+        self.validate_usage_limits()?;
+        for rule in &self.daily_open_volume_limits {
+            if !rule.applies_to(&intent.symbol) {
+                continue;
+            }
+            let current = self
+                .daily_usage
+                .open_volumes
+                .get(&(intent.account_id.clone(), intent.symbol.clone()))
+                .copied()
+                .unwrap_or(0);
+            let requested = intent.volume;
+            if current.saturating_add(requested) > rule.max {
+                return Ok(Some(RiskRejection::DailyOpenVolumeLimitExceeded {
+                    account_id: intent.account_id.clone(),
+                    symbol: intent.symbol.clone(),
+                    current,
+                    requested,
+                    max: rule.max,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_accumulated_open_volume_limit(
+        &self,
+        intent: &TaskOrderIntent,
+    ) -> Result<Option<RiskRejection>> {
+        self.validate_usage_limits()?;
+        for (index, rule) in self.accumulated_open_volume_limits.iter().enumerate() {
+            if !rule.applies_to(&intent.symbol) {
+                continue;
+            }
+            let current = self
+                .daily_usage
+                .accumulated_open_volumes
+                .get(&(intent.account_id.clone(), index))
+                .copied()
+                .unwrap_or(0);
+            let requested = intent.volume;
+            if current.saturating_add(requested) > rule.max {
+                return Ok(Some(RiskRejection::AccumulatedOpenVolumeLimitExceeded {
+                    account_id: intent.account_id.clone(),
+                    symbols: rule.values.clone(),
+                    current,
+                    requested,
+                    max: rule.max,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_available_funds(
+        &self,
+        intent: &TaskOrderIntent,
+        account: Option<&Account>,
+    ) -> Result<Option<RiskRejection>> {
+        let Some(min_available) = self.min_available else {
+            return Ok(None);
+        };
+        if !min_available.is_finite() {
+            return Err(TaskError::InvalidState("risk min available must be finite"));
+        }
+        let Some(account) = account else {
+            return Ok(Some(RiskRejection::MissingAccount {
+                account_id: intent.account_id.clone(),
+            }));
+        };
+        if !account.available.is_finite() {
+            return Err(TaskError::InvalidState("account available must be finite"));
+        }
+        if account.available < min_available {
+            return Ok(Some(RiskRejection::AvailableBelowMinimum {
+                account_id: intent.account_id.clone(),
+                available: account.available,
+                min_available,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn check_projected_position(
+        &self,
+        intent: &TaskOrderIntent,
+        position: Option<&Position>,
+    ) -> Option<RiskRejection> {
+        let max_abs_net = self.max_abs_net_position?;
+        let Some(position) = position else {
+            return Some(RiskRejection::MissingPosition {
+                account_id: intent.account_id.clone(),
+                symbol: intent.symbol.clone(),
+            });
+        };
+        let current_net = position.volume_long - position.volume_short;
+        let projected_net = project_net_position(current_net, intent);
+        let projected_abs = projected_net.checked_abs().unwrap_or(i64::MAX);
+        (projected_abs > max_abs_net).then(|| RiskRejection::NetPositionLimitExceeded {
+            account_id: intent.account_id.clone(),
+            symbol: intent.symbol.clone(),
+            current_net,
+            projected_net,
+            max_abs_net,
+        })
+    }
+
+    fn check_tick_alignment(&self, intent: &TaskOrderIntent) -> Result<Option<RiskRejection>> {
+        let Some(limit_price) = intent.limit_price else {
+            return Ok(None);
+        };
+        if !limit_price.is_finite() {
+            return Err(TaskError::InvalidState("limit price must be finite"));
+        }
+        let Some(rule) = self.instrument_rules.get(&intent.symbol) else {
+            return Ok(None);
+        };
+        validate_instrument_rule(rule)?;
+        if price_is_on_tick(limit_price, rule.price_tick) {
+            return Ok(None);
+        }
+        Ok(Some(RiskRejection::PriceNotOnTick {
+            symbol: intent.symbol.clone(),
+            limit_price,
+            price_tick: rule.price_tick,
+        }))
+    }
+
+    fn check_price_deviation(
+        &self,
+        intent: &TaskOrderIntent,
+        quote: Option<&Quote>,
+    ) -> Result<Option<RiskRejection>> {
+        let Some(max_abs_deviation) = self.max_abs_price_deviation else {
+            return Ok(None);
+        };
+        if !max_abs_deviation.is_finite() || max_abs_deviation < 0.0 {
+            return Err(TaskError::InvalidState(
+                "risk max price deviation must be a non-negative finite value",
+            ));
+        }
+        let Some(limit_price) = intent.limit_price else {
+            return Ok(None);
+        };
+        if !limit_price.is_finite() {
+            return Err(TaskError::InvalidState("limit price must be finite"));
+        }
+        let Some(quote) = quote else {
+            return Ok(Some(RiskRejection::MissingQuote {
+                symbol: intent.symbol.clone(),
+            }));
+        };
+        if !quote.last_price.is_finite() {
+            return Ok(Some(RiskRejection::MissingQuote {
+                symbol: intent.symbol.clone(),
+            }));
+        }
+        let deviation = (limit_price - quote.last_price).abs();
+        if deviation <= max_abs_deviation {
+            return Ok(None);
+        }
+        Ok(Some(RiskRejection::PriceDeviationExceeded {
+            symbol: intent.symbol.clone(),
+            limit_price,
+            reference_price: quote.last_price,
+            max_abs_deviation,
+        }))
     }
 
     fn validate_usage_limits(&self) -> Result<()> {
@@ -962,6 +990,13 @@ impl RiskEngine {
             .retain(|timestamp| now.saturating_duration_since(*timestamp) < ORDER_RATE_WINDOW);
         timestamps.push(now);
         Ok(())
+    }
+}
+
+fn rejected_report(revision: Revision, rejection: RiskRejection) -> RiskCheckReport {
+    RiskCheckReport {
+        revision,
+        decision: RiskDecision::Rejected(rejection),
     }
 }
 
