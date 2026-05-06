@@ -636,6 +636,16 @@ impl HistorySeriesCache {
                 for (range, rows_to_copy) in &group {
                     let path = self.data_file_path(symbol, duration_ns, range.0, range.1);
                     let mapped = MappedSeriesFile::open(path, layout)?;
+                    let expected_rows = usize::try_from(range.1 - range.0).map_err(|_| {
+                        DataError::InvalidResponse(
+                            "history series cache range row count overflow".to_string(),
+                        )
+                    })?;
+                    if mapped.row_count() != expected_rows {
+                        return Err(DataError::InvalidResponse(
+                            "history series cache range does not match row count".to_string(),
+                        ));
+                    }
                     mapped.write_rows_to(*rows_to_copy, &mut writer)?;
                 }
                 writer.flush()?;

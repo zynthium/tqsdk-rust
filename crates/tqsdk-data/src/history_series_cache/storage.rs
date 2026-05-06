@@ -158,15 +158,25 @@ impl MappedSeriesFile {
         let rows_to_copy = usize::try_from(rows_to_copy.max(0)).map_err(|_| {
             DataError::InvalidResponse("history series merge row count overflow".to_string())
         })?;
+        if rows_to_copy > self.row_count {
+            return Err(DataError::InvalidResponse(
+                "history series merge requested more rows than segment contains".to_string(),
+            ));
+        }
         let bytes_to_copy = rows_to_copy
             .checked_mul(self.layout.row_size())
             .ok_or_else(|| {
                 DataError::InvalidResponse("history series merge byte count overflow".to_string())
             })?;
         if let Some(mmap) = &self.mmap {
-            writer.write_all(&mmap[..bytes_to_copy.min(mmap.len())])?;
+            writer.write_all(&mmap[..bytes_to_copy])?;
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub(super) fn row_count(&self) -> usize {
+        self.row_count
     }
 
     fn read_i64(&self, index: usize, field_offset: usize) -> Result<i64> {

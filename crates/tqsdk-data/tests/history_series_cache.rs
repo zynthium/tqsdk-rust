@@ -277,6 +277,69 @@ fn corrupted_cache_file_returns_typed_error() {
 }
 
 #[test]
+fn merge_adjacent_files_rejects_segment_shorter_than_filename_range() {
+    let dir = temp_dir("merge-short-segment");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+        )
+        .unwrap();
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(3, 120_000_000_000, 3.0)],
+        )
+        .unwrap();
+    std::fs::rename(
+        dir.join("SHFE.au2602.60000000000.1.3"),
+        dir.join("SHFE.au2602.60000000000.1.4"),
+    )
+    .unwrap();
+
+    let err = cache
+        .merge_adjacent_files("SHFE.au2602", 60_000_000_000)
+        .unwrap_err();
+
+    assert!(matches!(err, DataError::InvalidResponse(message)
+        if message.contains("history series cache range does not match row count")));
+    assert!(dir.join("SHFE.au2602.60000000000.1.4").exists());
+    assert!(dir.join("SHFE.au2602.60000000000.3.4").exists());
+}
+
+#[test]
+fn merge_adjacent_files_rejects_copy_count_larger_than_mapped_segment() {
+    let dir = temp_dir("merge-copy-overflow");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
+        .unwrap();
+    cache
+        .write_kline_segment(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(2, 60_000_000_000, 2.0)],
+        )
+        .unwrap();
+    std::fs::rename(
+        dir.join("SHFE.au2602.60000000000.1.2"),
+        dir.join("SHFE.au2602.60000000000.1.3"),
+    )
+    .unwrap();
+
+    let err = cache
+        .merge_adjacent_files("SHFE.au2602", 60_000_000_000)
+        .unwrap_err();
+
+    assert!(matches!(err, DataError::InvalidResponse(message)
+        if message.contains("history series cache range does not match row count")
+            || message.contains("history series merge requested more rows than segment contains")));
+}
+
+#[test]
 fn cache_only_kline_reader_returns_series_without_session() {
     let dir = temp_dir("cache-only-hit");
     let cache = HistorySeriesCache::open(&dir).unwrap();
