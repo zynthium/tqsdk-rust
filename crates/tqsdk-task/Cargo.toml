@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Task and execution tooling built on tqsdk-wait"
 documentation = "https://docs.rs/tqsdk-task"
 readme = "README.md"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]

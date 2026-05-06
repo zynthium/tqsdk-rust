@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Shared async session and direct-query layer for tqsdk-core"
 documentation = "https://docs.rs/tqsdk-session"
 readme = "README.md"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]

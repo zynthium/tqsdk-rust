@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Rust async stream facade built on tqsdk-core and tqsdk-session"
 documentation = "https://docs.rs/tqsdk-stream"
 readme = "README.md"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]

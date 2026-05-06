@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Python-style wait_update facade built on tqsdk-core and tqsdk-session"
 documentation = "https://docs.rs/tqsdk-wait"
 readme = "README.md"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]

@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Research and offline data tooling for tqsdk-rust"
 documentation = "https://docs.rs/tqsdk-data"
 readme = "README.md"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]

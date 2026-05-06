@@ -132,3 +132,7 @@ cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 
 - V1 交付的是 protocol-complete runtime contract。
 - V2 及以后所有 facade 都应建立在 `RuntimeReader` 和 `UpdateCursor` 之上，而不是反向改写 runtime core。
+
+## License
+
+本项目采用 [MIT License](LICENSE)。
