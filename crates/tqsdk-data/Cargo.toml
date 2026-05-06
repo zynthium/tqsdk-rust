@@ -32,6 +32,9 @@ tokio.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
 
+[lints]
+workspace = true
+
 [[example]]
 name = "kline_data_download"
 required-features = ["live"]

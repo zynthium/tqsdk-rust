@@ -15,6 +15,9 @@ pub use connected::{ConnectedTopology, DispatchReceipt};
 pub use connector::{
     DefaultRouteConnector, DynRouteConnectFuture, SessionRouteConnector, WebSocketRouteConnector,
 };
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use frame::__fuzz_parse_raw_frame_payload;
 pub use frame::RawFrame;
 pub use topology::{
     BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget,

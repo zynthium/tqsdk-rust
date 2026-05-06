@@ -55,3 +55,20 @@ jobs:
 
       - name: Package metadata
         run: cargo package --workspace --no-verify
+
+  fuzz-build:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build

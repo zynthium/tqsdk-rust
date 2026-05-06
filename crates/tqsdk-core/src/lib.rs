@@ -79,6 +79,9 @@ pub use state::{
     MarketTradeStateReadGuard, ObjectKey, PathSegment, SeriesKey, SharedCommitResult, StatePath,
     StateReadView, StateSnapshot, TradeStateReadGuard, TradeStateView, UpdateCursor,
 };
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use transport::__fuzz_parse_raw_frame_payload;
 pub use transport::{
     AuthDerivedTradeTarget, BootstrapResult, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
     RawFrame, ReconnectPolicy, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,

@@ -167,11 +167,23 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 11. `cargo deny check`
 12. `cargo package --workspace --no-verify`
 13. `git diff --check`
+14. `cargo +nightly fuzz build`
 
 `cargo package --workspace --no-verify` 是内部制品的 manifest/package metadata gate。
 如果切换到 crates.io 或要求完整 registry verify，必须按依赖顺序发布或验证：
 `tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` / `tqsdk-stream` ->
 `tqsdk-data` -> `tqsdk-task`。
+
+`cargo +nightly fuzz build` 只验证 fuzz targets 可编译，不执行长时间 fuzz campaign。
+`fuzz/` 是独立 crate，不属于 workspace members；它只通过 `cfg(fuzzing)` 访问窄 helper，
+不得扩大普通 public API 或改变 runtime contract。需要本地短跑时可执行：
+
+```bash
+cargo +nightly fuzz run core_frame_payload -- -runs=1000
+cargo +nightly fuzz run core_adapter_decode -- -runs=1000
+cargo +nightly fuzz run data_market_cache_event -- -runs=1000
+cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
+```
 
 ## Feature / no-default build matrix
 以下命令用于固定 feature flags 与最小依赖构建基线，防止默认 feature 构建通过但 `--no-default-features` 或单独 feature 组合退化。

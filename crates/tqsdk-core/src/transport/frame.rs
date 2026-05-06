@@ -67,6 +67,23 @@ fn parse_binary_payload(bytes: Vec<u8>) -> Result<InputPayload> {
     }
 }
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn __fuzz_parse_raw_frame_payload(
+    frame: RawFrame,
+    domain: ProtocolDomain,
+) -> Result<Option<RuntimeInput>> {
+    let route = SessionRoute {
+        label: "fuzz".to_string(),
+        target: super::topology::SessionTarget::Shared,
+        domains: vec![domain],
+        endpoint: super::topology::SessionRouteEndpoint::Internal {
+            label: "fuzz".to_string(),
+        },
+    };
+    map_raw_frame_to_input(&route, frame)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

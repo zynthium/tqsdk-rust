@@ -54,6 +54,26 @@ mod market_cache;
 #[cfg(feature = "stream")]
 mod stream_cache;
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
+    let mut name = raw
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '\0' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    if name.is_empty() || name == "." || name == ".." {
+        name = "fuzz.60.0.1".to_string();
+    }
+    if name.len() > 160 {
+        name.truncate(160);
+    }
+    name
+}
+
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest,
     KlineDataSeries, KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,

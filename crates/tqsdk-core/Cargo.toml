@@ -19,3 +19,6 @@ yawc.workspace = true
 
 [dev-dependencies]
 sha1.workspace = true
+
+[lints]
+workspace = true
