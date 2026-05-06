@@ -463,6 +463,50 @@ async fn task_host_records_daily_open_volume_after_submitted_order() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn task_order_retry_reuses_existing_intent_after_daily_open_volume_limit_is_consumed() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().daily_open_volume_limit(2, ["SHFE.rb2601"]));
+
+    let first = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 2)
+        .limit(3_660.0)
+        .send_once("risk-daily-volume-retry")
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    assert_eq!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let retry = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 2)
+        .limit(3_660.0)
+        .send_once("risk-daily-volume-retry")
+        .await
+        .unwrap();
+
+    assert_eq!(retry.client_order_id(), "risk-daily-volume-retry");
+    assert!(!retry.was_submitted());
+    assert_eq!(retry.command_id(), first.command_id());
+    assert!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn execution_group_checks_daily_open_count_limit_before_partial_submit() {
     let mut host =
         seeded_host().with_risk(RiskEngine::new().daily_open_count_limit(1, ["SHFE.rb2601"]));
@@ -540,6 +584,50 @@ async fn task_host_rejects_order_rate_limit_for_same_exchange() {
             requested: 1,
             max: 1,
         })
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_order_retry_reuses_existing_intent_after_order_rate_limit_is_consumed() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().order_rate_limit_per_second(1, ["SHFE"]));
+
+    let first = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_660.0)
+        .send_once("risk-rate-retry")
+        .await
+        .unwrap();
+    assert!(first.was_submitted());
+    assert_eq!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let retry = host
+        .orders("sim")
+        .buy_open("SHFE.rb2601", 1)
+        .limit(3_660.0)
+        .send_once("risk-rate-retry")
+        .await
+        .unwrap();
+
+    assert_eq!(retry.client_order_id(), "risk-rate-retry");
+    assert!(!retry.was_submitted());
+    assert_eq!(retry.command_id(), first.command_id());
+    assert!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
     );
 }
 

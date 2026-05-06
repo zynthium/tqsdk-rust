@@ -456,9 +456,9 @@ async fn submit_group(mut builder: ExecutionGroupBuilder<'_>) -> Result<Executio
 
     let intents = leg_intents
         .iter()
-        .map(|leg| leg.intent.clone())
+        .map(|leg| (&leg.intent, leg.client_order_id.as_str()))
         .collect::<Vec<_>>();
-    builder.host.preflight_task_orders(&intents)?;
+    builder.host.preflight_new_task_orders(intents)?;
 
     let mut submitted = Vec::with_capacity(leg_intents.len());
     let total_legs = leg_intents.len();

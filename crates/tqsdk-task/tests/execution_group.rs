@@ -412,6 +412,59 @@ async fn execution_group_send_once_reuses_existing_leg_intents_on_retry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn execution_group_retry_reuses_existing_leg_intents_after_daily_open_count_is_consumed() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().daily_open_count_limit(2, ["SHFE.au2602"]));
+
+    let first = host
+        .execution_group("sim")
+        .client_group_id("spread-risk-retry-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(481.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert!(first.legs().iter().all(|leg| leg.ticket().was_submitted()));
+    assert_eq!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let retry = host
+        .execution_group("sim")
+        .client_group_id("spread-risk-retry-001")
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(480.0)
+        .leg("SHFE.au2602")
+        .buy_open(1)
+        .limit(481.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert_eq!(retry.group_id(), "spread-risk-retry-001");
+    assert!(retry.legs().iter().all(|leg| !leg.ticket().was_submitted()));
+    assert!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn execution_group_retry_with_different_leg_spec_is_rejected_by_intent_ledger() {
     let mut host = seeded_host();
 

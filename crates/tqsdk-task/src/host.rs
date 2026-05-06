@@ -4,6 +4,7 @@
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_core::{Order, TradeDirection, TradeOffset, TradingCalendarDay};
+use tqsdk_session::OrderIntentRecord;
 use tqsdk_wait::{ClientOrderId, OrderPrice, OrderTicket};
 
 use crate::Result;
@@ -233,13 +234,29 @@ impl TaskHost {
         intent: TaskOrderIntent,
         client_order_id: ClientOrderId,
     ) -> Result<OrderTicket> {
-        self.preflight_task_order(&intent)?;
+        if !self.is_existing_task_order_intent(&intent, &client_order_id)? {
+            self.preflight_task_order(&intent)?;
+        }
         self.submit_prechecked_task_order_once(intent, client_order_id)
             .await
     }
 
     pub(crate) fn preflight_task_order(&self, intent: &TaskOrderIntent) -> Result<()> {
         self.preflight_task_orders(std::slice::from_ref(intent))
+    }
+
+    pub(crate) fn preflight_new_task_orders<'a>(
+        &self,
+        intents: impl IntoIterator<Item = (&'a TaskOrderIntent, &'a str)>,
+    ) -> Result<()> {
+        let mut new_intents = Vec::new();
+        for (intent, client_order_id) in intents {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            if !self.is_existing_task_order_intent(intent, &client_order_id)? {
+                new_intents.push(intent.clone());
+            }
+        }
+        self.preflight_task_orders(&new_intents)
     }
 
     pub(crate) fn preflight_task_orders(&self, intents: &[TaskOrderIntent]) -> Result<()> {
@@ -270,8 +287,20 @@ impl TaskHost {
         intent: TaskOrderIntent,
         client_order_id: impl Into<ClientOrderId>,
     ) -> Result<OrderTicket> {
+        let client_order_id = client_order_id.into();
+        if !self.is_existing_task_order_intent(&intent, &client_order_id)? {
+            self.check_risk(&intent)?;
+        }
+        self.submit_task_order_intent_once(intent, client_order_id)
+            .await
+    }
+
+    async fn submit_task_order_intent_once(
+        &mut self,
+        intent: TaskOrderIntent,
+        client_order_id: ClientOrderId,
+    ) -> Result<OrderTicket> {
         validate_task_order_intent(&intent)?;
-        self.check_risk(&intent)?;
         let offset = intent.offset.ok_or(TaskError::Unsupported(
             "task orders require explicit offset",
         ))?;
@@ -291,6 +320,25 @@ impl TaskHost {
             self.record_submitted_order(&intent)?;
         }
         Ok(ticket)
+    }
+
+    fn is_existing_task_order_intent(
+        &self,
+        intent: &TaskOrderIntent,
+        client_order_id: &ClientOrderId,
+    ) -> Result<bool> {
+        let Some(existing) = self
+            .api
+            .session()
+            .order_intent(&intent.account_id, client_order_id.as_str())?
+        else {
+            return Ok(false);
+        };
+
+        let Some(current) = task_order_intent_record(intent, client_order_id) else {
+            return Ok(false);
+        };
+        Ok(existing.request_matches(&current))
     }
 
     fn check_risk(&self, intent: &TaskOrderIntent) -> Result<()> {
@@ -363,6 +411,22 @@ impl TaskHost {
         };
         risk.record_order_operation(account_id, exchange_id)
     }
+}
+
+fn task_order_intent_record(
+    intent: &TaskOrderIntent,
+    client_order_id: &ClientOrderId,
+) -> Option<OrderIntentRecord> {
+    Some(OrderIntentRecord::new(tqsdk_session::OrderIntentSpec {
+        account_id: intent.account_id.clone(),
+        client_order_id: client_order_id.as_str().to_owned(),
+        order_id: client_order_id.as_str().to_owned(),
+        symbol: intent.symbol.clone(),
+        direction: intent.direction,
+        offset: intent.offset,
+        volume: intent.volume,
+        limit_price: intent.limit_price?,
+    }))
 }
 
 fn map_guarded_order_price(limit_price: Option<Value>) -> Result<OrderPrice> {

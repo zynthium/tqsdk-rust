@@ -47,7 +47,16 @@ pub(super) async fn submit_multi_account_order(
             limit_price: Some(limit_price),
         });
     }
-    host.preflight_task_orders(&intents)?;
+    let preflight_intents = intents
+        .iter()
+        .enumerate()
+        .map(|(index, intent)| (intent, format!("{group_id}:acct:{index}")))
+        .collect::<Vec<_>>();
+    host.preflight_new_task_orders(
+        preflight_intents
+            .iter()
+            .map(|(intent, client_order_id)| (*intent, client_order_id.as_str())),
+    )?;
 
     let mut orders = Vec::new();
     let total_accounts = intents.len();

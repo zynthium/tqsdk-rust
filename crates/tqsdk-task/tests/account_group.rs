@@ -454,6 +454,65 @@ async fn multi_account_order_retry_reuses_existing_account_intents() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn multi_account_retry_reuses_existing_account_intents_after_daily_open_count_is_consumed() {
+    let mut host =
+        seeded_host().with_risk(RiskEngine::new().daily_open_count_limit(1, ["SHFE.au2602"]));
+    let accounts = AccountGroup::builder()
+        .add("sim-a", Ratio::new(1, 2).unwrap())
+        .add("sim-b", Ratio::new(1, 2).unwrap())
+        .build()
+        .unwrap();
+
+    let first = host
+        .multi_account_order(accounts.clone())
+        .client_group_id("alloc-risk-retry-001")
+        .sell_open("SHFE.au2602", 4)
+        .limit(481.0)
+        .send_once()
+        .await
+        .unwrap();
+    assert!(
+        first
+            .orders()
+            .iter()
+            .all(|order| order.ticket().was_submitted())
+    );
+    assert_eq!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let retry = host
+        .multi_account_order(accounts)
+        .client_group_id("alloc-risk-retry-001")
+        .sell_open("SHFE.au2602", 4)
+        .limit(481.0)
+        .send_once()
+        .await
+        .unwrap();
+
+    assert!(
+        retry
+            .orders()
+            .iter()
+            .all(|order| !order.ticket().was_submitted())
+    );
+    assert!(
+        host.api()
+            .session()
+            .handle()
+            .drain_dispatches()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn multi_account_order_reports_all_accounts_filled() {
     let mut host = seeded_host();
     let accounts = AccountGroup::builder()
