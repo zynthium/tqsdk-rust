@@ -268,6 +268,37 @@ cargo check --workspace --all-features --examples
 
 每个 crate 也有自己的 README，说明该 crate 的职责边界、示例和 public surface。
 
+## AI 编程助手 Skill
+
+仓库提供了面向 AI 编程助手的 skill：[skills/tqsdk-rust](skills/tqsdk-rust)。
+它用于把用户的行情、合约查询、历史数据、交易执行、策略、回放和低延迟柜台需求，
+路由到正确的 TQSDK Rust crate、调用模式和示例代码。
+
+给 Codex、Claude Code、OpenAI agents 或其他支持本地 skill 的助手使用时，可以把
+`skills/tqsdk-rust/SKILL.md` 作为入口。该 skill 会要求助手：
+
+- 先读取 [scenario-router.md](skills/tqsdk-rust/references/scenario-router.md)，按用户想持有或消费的对象分类。
+- 不确定 crate 归属时读取 [crate-selection.md](skills/tqsdk-rust/references/crate-selection.md)。
+- 写 Rust 示例或修复编译错误前读取 [code-patterns.md](skills/tqsdk-rust/references/code-patterns.md)。
+- 涉及实盘、下单、权限或 live smoke test 时读取 [safety-and-operations.md](skills/tqsdk-rust/references/safety-and-operations.md)。
+- 保持仓库边界：one-shot query 属于 `tqsdk-session`，live refs 属于 `tqsdk-wait`，事件管线属于 `tqsdk-stream`，执行工具属于 `tqsdk-task`，历史和离线研究属于 `tqsdk-data`。
+
+OpenAI agents 的展示元数据位于 [skills/tqsdk-rust/agents/openai.yaml](skills/tqsdk-rust/agents/openai.yaml)。
+该 skill 的默认提示是：
+
+```text
+使用 $tqsdk-rust，把我的量化交易、行情或品种合约查询场景映射到正确的 TQSDK Rust crate 和调用模式。
+```
+
+如果需要让助手创建一个最小 quote loop 项目，可以使用内置脚手架：
+
+```bash
+python3 skills/tqsdk-rust/scripts/new-tqsdk-rust-project.py ./my-tqsdk-app \
+  --sdk-source git \
+  --sdk-value https://github.com/zynthium/tqsdk-rust \
+  --symbol SHFE.au2602
+```
+
 ## 贡献
 
 欢迎 issue 和 pull request。开始改动前，请先阅读架构总览和受影响 crate 的 README。
