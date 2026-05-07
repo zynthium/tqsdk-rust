@@ -1,138 +1,276 @@
-# `tqsdk-rust`
+# tqsdk-rust
 
-这是一个 Cargo workspace，用来承载 Rust 版 TQSDK 的核心层、共享 session 层，以及后续不同风格的 facade 层。
+Rust crates for building Tianqin/TQSDK market data, trading, strategy, and research
+workflows on a shared async runtime.
 
-仓库当前已经落地的成员如下：
+[![CI](https://github.com/zynthium/tqsdk-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/zynthium/tqsdk-rust/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-| Crate | 路径 | 角色 |
-| --- | --- | --- |
-| `tqsdk-core` | `crates/tqsdk-core` | 面向官方服务交互的低层 async substrate |
-| `tqsdk-session` | `crates/tqsdk-session` | mode-agnostic 的共享 session / direct-query thin layer |
-| `tqsdk-wait` | `crates/tqsdk-wait` | Python 风格 single-owner wait facade，基于 core/session |
-| `tqsdk-stream` | `crates/tqsdk-stream` | Rust async-native multi-consumer commit stream facade，基于 core/session |
-| `tqsdk-task` | `crates/tqsdk-task` | 执行工具层，含 wait-based task/scheduler 与 S31 session/reader 低延迟柜台 profile |
-| `tqsdk-data` | `crates/tqsdk-data` | 研究 / 离线数据与批量查询能力的独立落点 |
+## Overview
 
-后续计划继续在这个 workspace 下补充多种 V2 facade crate，例如：
+`tqsdk-rust` is a Cargo workspace for a Rust implementation of the TQSDK
+runtime model. It separates the low-level protocol substrate from user-facing
+facades, so the same session, state tree, commit log, and cursor semantics can
+support Python-style `wait_update()` loops, Rust-native streams, execution
+tools, and offline research code.
 
-- `tqsdk-callback`：面向 callback / event handler 风格的 facade。
+The project is designed for users who need stronger type boundaries and more
+control than a monolithic SDK usually provides:
 
-## 分层原则
+- strategy developers who want a familiar single-owner `wait_update()` API
+- async Rust services that need multiple consumers over the same live session
+- trading tools that need order tasks, risk gates, and deterministic test hooks
+- research pipelines that need history pages, downloads, exports, and replay
+- SDK contributors who need a protocol-complete runtime core
 
-- `tqsdk-core` 只负责协议、状态树、commit/revision、session/runtime orchestration。
-- facade crate 只消费 `tqsdk-core` 的 substrate，不反向侵入 core。
-- core 保持纯 async，不内建 runtime，不附带高层用户便利接口。
-- 仓库结构按“稳定底座 + 可替换 facade”组织，优先保证性能、稳定性和长期可维护性。
+## Workspace Crates
 
-## 仓库结构
+| Crate | Use it for |
+| --- | --- |
+| [`tqsdk-core`](crates/tqsdk-core) | Low-level async protocol substrate, state store, commit/revision model, runtime reader, cursors, adapters, and schema types |
+| [`tqsdk-session`](crates/tqsdk-session) | Shared session ownership, lazy connection, command progress, one-shot direct query, metadata, schema, and service queries |
+| [`tqsdk-wait`](crates/tqsdk-wait) | Python-style single-owner `TqApi`, `wait_update()`, `is_changing()`, live object refs, serial windows, and wait-style trade commands |
+| [`tqsdk-stream`](crates/tqsdk-stream) | Rust async-native multi-consumer commit streams, object streams, filters, lag diagnostics, health status, and slow-consumer isolation foundations |
+| [`tqsdk-task`](crates/tqsdk-task) | Execution tooling, `TargetPosTask`, schedulers, typed order builders, risk gates, strategy host, fake market/broker test harnesses, and low-latency trading desk profile |
+| [`tqsdk-data`](crates/tqsdk-data) | Research and offline data APIs, history page/series/download, CSV export, option greeks, continuous contract data, cache, and replay foundations |
 
-```text
-crates/
-  tqsdk-core/      # 当前 V1 核心基座
-  tqsdk-session/   # 共享 session / direct-query 层
-  tqsdk-wait/      # Python 风格 wait facade
-  tqsdk-stream/    # Rust 风格 stream facade
-  tqsdk-task/      # 执行工具层
-  tqsdk-data/      # 研究 / 离线数据层
-docs/
-  README.md        # 文档职责、权威层级和 AI 读取入口
-  architecture/    # 当前架构权威、分层设计与验证矩阵
-  scenarios/       # 场景契约草案与 API gap
-  reviews/         # 当前审查记录与 public API 决策矩阵
-  archive/         # 已闭环或已转化为计划的历史审查输入、spec 与 plan
-  superpowers/     # 当前仍在执行的 agentic specs / plans 记录
-```
+## Status
 
-## 文档入口
+This repository is under active development. The crates are versioned at
+`0.1.0` and are intended to be used from this workspace or by Git dependency
+until a crates.io release is cut. Public examples under `crates/*/examples` are
+treated as API contracts and are kept compilable as the surface evolves.
 
-- core crate 说明见 [crates/tqsdk-core/README.md](crates/tqsdk-core/README.md)
-- session crate 说明见 [crates/tqsdk-session/README.md](crates/tqsdk-session/README.md)
-- wait crate 说明见 [crates/tqsdk-wait/README.md](crates/tqsdk-wait/README.md)
-- stream crate 说明见 [crates/tqsdk-stream/README.md](crates/tqsdk-stream/README.md)
-- task crate 说明见 [crates/tqsdk-task/README.md](crates/tqsdk-task/README.md)
-- data crate 说明见 [crates/tqsdk-data/README.md](crates/tqsdk-data/README.md)
-- 仓库级路线图见 [ROADMAP.md](ROADMAP.md)
-- 文档总入口见 [docs/README.md](docs/README.md)
-- 架构总览见 [docs/architecture/README.md](docs/architecture/README.md)
-- AI 工作流与架构守则见 [docs/architecture/ai-workflow.md](docs/architecture/ai-workflow.md)
-- 验证矩阵见 [docs/architecture/validation.md](docs/architecture/validation.md)
-- 场景契约与 API gap 见 [docs/scenarios/README.md](docs/scenarios/README.md)
-- public API 审查记录见 [docs/reviews/README.md](docs/reviews/README.md)
+## Requirements
 
-## 常用命令
+- Rust 1.85 or newer
+- Tokio for async examples and live session code
+- Tianqin/TQSDK credentials for live market, trading, query, and history
+  examples
+
+Live examples read credentials from:
 
 ```bash
+export TQ_AUTH_USER="your-account"
+export TQ_AUTH_PASS="your-password"
+```
+
+## Installation
+
+Use the crates from the workspace while developing locally:
+
+```toml
+[dependencies]
+tqsdk-wait = { path = "crates/tqsdk-wait" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+For another project, depend on the Git repository:
+
+```toml
+[dependencies]
+tqsdk-wait = { git = "https://github.com/zynthium/tqsdk-rust" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+Swap `tqsdk-wait` for `tqsdk-session`, `tqsdk-stream`, `tqsdk-task`, or
+`tqsdk-data` depending on the API shape you need.
+
+## Quick Start
+
+Read live quote updates with the Python-style wait facade:
+
+```rust
+use tqsdk_wait::TqApiBuilder;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let mut api = TqApiBuilder::new(user, pass).build().await?;
+    let quote = api.get_quote("SHFE.au2602").await?;
+
+    loop {
+        if !api.wait_update(None).await? {
+            continue;
+        }
+
+        if api.is_changing(&quote)? {
+            let snapshot = quote.load(&api)?;
+            println!("{} {}", snapshot.datetime, snapshot.last_price);
+        }
+    }
+}
+```
+
+Run the matching example:
+
+```bash
+cargo run -p tqsdk-wait --example quote_wait
+```
+
+Run it once and exit after the first printed update:
+
+```bash
+TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait
+```
+
+## Choosing an API
+
+Use `tqsdk-wait` when you want a familiar single-owner loop:
+
+```rust
+let mut api = tqsdk_wait::TqApiBuilder::new(user, pass).build().await?;
+let quote = api.get_quote("SHFE.au2602").await?;
+api.wait_update(None).await?;
+let snapshot = quote.load(&api)?;
+```
+
+Use `tqsdk-stream` when multiple async consumers need to observe the same live
+session:
+
+```rust
+use futures::StreamExt;
+
+let stream = tqsdk_stream::TqStreamBuilder::new(user, pass).build().await?;
+stream.subscribe_quotes(["SHFE.au2602"]).await?;
+let mut quotes = stream.quote_stream("SHFE.au2602")?;
+let update = quotes.next().await.ok_or("quote stream closed")??;
+```
+
+Use `tqsdk-session` for one-shot metadata, schema, service, and low-level query
+work:
+
+```rust
+let session = tqsdk_session::SessionClientBuilder::new(user, pass)
+    .enable_query()
+    .build()?;
+let rows = session.query_symbol_info(&["SHFE.au2602"]).await?;
+```
+
+Use `tqsdk-data` for history and research workflows:
+
+```rust
+use std::time::Duration;
+
+let session = tqsdk_session::SessionClientBuilder::new(user, pass)
+    .futures_market()
+    .build()?;
+let client = tqsdk_data::DataClient::from_session(session);
+let request = tqsdk_data::KlineDataPageRequest::new(
+    "SHFE.au2602",
+    Duration::from_secs(60),
+    128,
+);
+let page = client.get_kline_data_page(request).await?;
+```
+
+## Examples
+
+Representative examples:
+
+| Scenario | Command |
+| --- | --- |
+| Quote updates with `wait_update()` | `cargo run -p tqsdk-wait --example quote_wait` |
+| Quote stream consumer | `cargo run -p tqsdk-stream --example quote_stream` |
+| Metadata query | `cargo run -p tqsdk-session --example query_symbol_info` |
+| Command wait helper | `cargo run -p tqsdk-session --example query_command_wait` |
+| Kline page query | `cargo run -p tqsdk-data --example kline_data_page` |
+| Kline CSV export | `cargo run -p tqsdk-data --example kline_export_csv` |
+| Target position task | `cargo run -p tqsdk-task --example target_pos` |
+| Low-latency trading desk profile | `cargo run -p tqsdk-task --example api_contract_s31_low_latency_trading_desk` |
+
+Additional API-contract examples live under each crate's `examples/` directory.
+
+## Architecture
+
+The workspace follows a "stable substrate, replaceable facades" design:
+
+```text
+tqsdk-core
+    ^
+    |
+tqsdk-session
+    ^
+    |
+tqsdk-wait / tqsdk-stream / tqsdk-data
+    ^
+    |
+tqsdk-task
+```
+
+All externally visible state changes flow through the runtime commit model:
+
+```text
+RuntimeCommand / RuntimeInput
+    -> ProtocolAdapter
+    -> NormalizedMutation
+    -> RuntimeHandle
+    -> StateStore
+    -> CommitResult
+    -> RuntimeReader / UpdateCursor
+```
+
+This keeps `wait_update()` loops, async streams, task tooling, and research
+pipelines on the same state tree and revision semantics. The lower crates stay
+small: direct query belongs to `tqsdk-session`, live diff consumption belongs to
+`tqsdk-wait` and `tqsdk-stream`, execution tooling belongs to `tqsdk-task`, and
+offline/research workflows belong to `tqsdk-data`.
+
+See [docs/architecture](docs/architecture) for the full design notes and
+[docs/architecture/validation.md](docs/architecture/validation.md) for the
+validation matrix.
+
+## Development
+
+Clone the repository and check the workspace:
+
+```bash
+git clone https://github.com/zynthium/tqsdk-rust.git
+cd tqsdk-rust
+cargo check --workspace --examples
+```
+
+Common verification commands:
+
+```bash
+cargo fmt --all --check
 cargo check --workspace --examples
 cargo test --workspace
 cargo clippy --workspace --examples --all-targets -- -D warnings
-cargo check --workspace --no-default-features
-cargo check --workspace --all-features --examples
-cargo test -p tqsdk-core -q
-cargo test -p tqsdk-core -q --test runtime_contract_v1_capability
 ```
 
-## 当前状态
+When changing feature flags or dependency propagation, also run:
 
-- V1 core 已独立为子 crate，可单独发布。
-- `tqsdk-session` 已承载共享 session shell、lazy establish、route/pending-route 驱动原语，以及 direct-query/schema 薄层入口。
-- `tqsdk-session` 现已提供 `progress_once()`、`wait_command_completed()` 与 `command_status_typed()` 这些最小 substrate/control-plane 原语，并用可编译示例覆盖行情订阅、raw query command 等待与 `TqKq` trade 登录路径。
-- `tqsdk-wait` 已具备 market/trade 对象引用、serial window、可工作的 `wait_update()` 驱动链路与 trade 命令包装。
-- `tqsdk-stream` 已落地最小 commit-stream facade，当前提供共享 session 驱动、raw commit fan-out、显式 lag/closed/error surface、path/scope/domain/object/field 级 commit 过滤、typed 单对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流与统一 `trade_object_event_stream`，并已用真实示例验证 `stream.session()` 复用同一底层 session 做 direct query 的边界；后续重点转向 notification/transport-error 级 trade session 事件流。
-- `tqsdk-task` 已落地 `TaskHost`、`TargetPosTask`、`TargetPosScheduler`、typed order builder、pre-trade risk gate、execution group foundation、account group foundation、`StrategyHost` / `StrategyContext` / `StrategyEnvironment` / `StrategyDeployment` / `StrategySupervisor`、S31 `TradingDeskProfile` 低延迟柜台 thin profile、public fake market / fake broker test harness、ownership / guarded order / execution report（原始事件流 + 聚合摘要）；生产观测以 typed health/metrics/shutdown report 为边界，不内置 GUI、web helper 或 HTTP health/metrics endpoint。
-- `tqsdk-data` 已落地独立 crate 骨架、`DataClient`、`query_his_cont_quotes`、history `data_page` / `data_series`、`HistoryIntegrityReport` 与 pull-based `data_download` substrate。
-- workspace 根 README 现在只承载仓库级说明。
-- crate 级使用说明和 API 契约已经分别下沉到各子 crate 的 `README.md`。
+```bash
+cargo check --workspace --no-default-features
+cargo check --workspace --no-default-features --examples
+cargo check --workspace --all-features --examples
+```
 
-当前 workspace 里的最小可编译示例：
+## Documentation
 
-- `crates/tqsdk-session/examples/query_symbol_info.rs`
-- `crates/tqsdk-session/examples/query_command_wait.rs`
-- `crates/tqsdk-session/examples/quote_progress.rs`
-- `crates/tqsdk-session/examples/trade_login_tqkq.rs`
-- `crates/tqsdk-wait/examples/quote_wait.rs`
-- `crates/tqsdk-wait/examples/quote_wait_with_session_query.rs`
-- `crates/tqsdk-stream/examples/quote_stream.rs`
-- `crates/tqsdk-stream/examples/quote_stream_with_session_query.rs`
-- `crates/tqsdk-stream/examples/kline_stream.rs`
-- `crates/tqsdk-stream/examples/trade_session_events.rs`
-- `crates/tqsdk-task/examples/target_pos.rs`
-- `crates/tqsdk-task/examples/target_pos_scheduler.rs`
-- `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs`
-- `crates/tqsdk-task/examples/api_contract_s12_spread_arbitrage.rs`
-- `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs`
-- `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`
-- `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`
-- `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`
-- `crates/tqsdk-wait/examples/api_contract_s26_trade_system_refs.rs`
-- `crates/tqsdk-wait/examples/api_contract_s26_security_trade_refs.rs`
-- `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs`
-- `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`
-- `crates/tqsdk-data/examples/api_contract_s18_live_market_cache_pipe.rs`
-- `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`
-- `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`
-- `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`
-- `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`
-- `crates/tqsdk-data/examples/his_cont_quotes.rs`
-- `crates/tqsdk-data/examples/kline_data_page.rs`
-- `crates/tqsdk-data/examples/kline_data_series.rs`
-- `crates/tqsdk-data/examples/kline_data_download.rs`
-- `crates/tqsdk-data/examples/kline_export_csv.rs`
-- `crates/tqsdk-data/examples/option_greeks.rs`
+- [Documentation index](docs/README.md)
+- [Architecture overview](docs/architecture/README.md)
+- [Runtime core overview](docs/architecture/runtime-core/overview.md)
+- [Crate boundary audit](docs/architecture/crate-boundaries.md)
+- [Validation matrix](docs/architecture/validation.md)
+- [Roadmap](ROADMAP.md)
 
-## 架构文档
+Each crate also has its own README with crate-specific design boundaries,
+examples, and public surface notes.
 
-仓库里的 [`docs/architecture`](docs/architecture) 目录给出了完整分层说明。文档目录职责和 AI 读取顺序见 [`docs/README.md`](docs/README.md)。
+## Contributing
 
-- [`docs/architecture/README.md`](docs/architecture/README.md)
-- [`docs/architecture/ai-workflow.md`](docs/architecture/ai-workflow.md)
-- [`docs/architecture/runtime-core/overview.md`](docs/architecture/runtime-core/overview.md)
-- [`docs/architecture/validation.md`](docs/architecture/validation.md)
+Issues and pull requests are welcome. Before making a change, read the
+architecture overview and the README for the crate you plan to touch. Keep
+changes scoped, preserve crate ownership boundaries, and update the relevant
+architecture or crate documentation when a public API, feature flag, runtime
+contract, or facade responsibility changes.
 
-一句话总结就是：
-
-- V1 交付的是 protocol-complete runtime contract。
-- V2 及以后所有 facade 都应建立在 `RuntimeReader` 和 `UpdateCursor` 之上，而不是反向改写 runtime core。
+For code changes, include focused tests or API-contract examples when the change
+affects public behavior.
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。
+This project is licensed under the [MIT License](LICENSE).
