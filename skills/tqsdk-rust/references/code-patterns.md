@@ -2,6 +2,16 @@
 
 如果精确 API 名必须匹配某个 SDK revision，先检查目标 crate README 和 `crates/*/examples/api_contract_sXX_*.rs`。优先使用仓库里的示例，不要根据 Python TqSdk 名字猜 Rust API。
 
+## 目录
+
+- Wait Quote Loop 行情循环
+- Session Metadata Query
+- 品种/合约查询
+- Stream Commit Consumer
+- Historical Data Client
+- Trading Task Pattern
+- Direct Order Wrapper
+
 ## Wait Quote Loop 行情循环
 
 ```rust
@@ -47,6 +57,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### 品种/合约查询
+
+按交易所和品种查询所有未过期合约代码，用 `query_quotes`。主连/连续合约用 `query_cont_quotes`。拿到代码后再用 `query_instrument_specs` 查 tick size、合约乘数等规格。
+
+```rust
+use tqsdk_session::{OptionQueryFilter, SessionClientBuilder};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = std::env::var("TQ_AUTH_USER")?;
+    let pass = std::env::var("TQ_AUTH_PASS")?;
+    let session = SessionClientBuilder::new(user, pass)
+        .futures_market()
+        .enable_query()
+        .build()?;
+
+    let symbols = session
+        .query_quotes(Some("FUTURE"), Some("SHFE"), Some("au"), Some(false), None)
+        .await?;
+    let cont_symbols = session
+        .query_cont_quotes(Some("SHFE"), Some("au"), None)
+        .await?;
+    let symbol_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let specs = session.query_instrument_specs(&symbol_refs).await?;
+    let options = session
+        .query_options("SHFE.au2602", &OptionQueryFilter::new())
+        .await?;
+
+    println!(
+        "contracts={} cont={} specs={} options={}",
+        symbols.len(),
+        cont_symbols.len(),
+        specs.len(),
+        options.len()
+    );
+    Ok(())
+}
+```
+
+多档期权查询使用 `query_all_level_options`；金融期权多档查询使用 `query_all_level_finance_options`。
 
 ## Stream Commit Consumer
 

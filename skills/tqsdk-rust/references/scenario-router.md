@@ -2,6 +2,12 @@
 
 先使用本文件。按用户想持有或消费的对象分类。Python TqSdk 是语义参考，但 Rust 会把 Python 单体 `TqApi` surface 拆到不同 crate。
 
+## 目录
+
+- 快速决策
+- 各场景调用模式
+- 仍不明确时
+
 ## 快速决策
 
 | 用户说 | 大概率需要 | Crate | 主要调用 |
@@ -9,7 +15,7 @@
 | "实时行情", "quote", "盘口", "价格变化", "像 Python TqApi", "wait_update", "is_changing" | Single-owner live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `get_quote`, `wait_update`, `is_changing`, `QuoteRef::load` |
 | "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `get_kline_serial`, `get_tick_serial`, `get_trading_status`, `wait_update`, window/ref load methods |
 | "多消费者", "事件流", "stream", "fan-out", "写 WAL", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_stream`, `market_events`, trade/session event streams, sink APIs |
-| "查合约", "主连", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
+| "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk-task` when ownership/risk/task semantics are needed; `tqsdk-wait` for thin direct order wrappers | `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, cache/replay APIs |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
@@ -30,7 +36,7 @@
 4. 使用 `is_changing(&quote)?`。
 5. 只有相关变化后才加载 quote snapshot。把 ref 当作 live handle，不要当作 owned snapshot。
 
-继续读：`references/code-patterns.md#wait-quote-loop`。
+继续读：`references/code-patterns.md` 的 Wait Quote Loop 示例。
 
 ### 2. 策略启动前查询合约 metadata
 
@@ -43,7 +49,14 @@
 3. 调用具体 one-shot helper。
 4. 如果已经在 wait/stream 中，复用 `api.session()` 或 `stream.session()`。
 
-典型 helper：`query_symbol_info`、`query_instrument_specs`、`query_quotes`、`query_cont_quotes`、`query_options`、`query_atm_options`、`get_trading_calendar`、`query_symbol_settlement`、`query_symbol_ranking`、`query_edb_data`。
+典型 helper：`query_symbol_info`、`query_instrument_specs`、`query_quotes`、`query_cont_quotes`、`query_options`、`query_atm_options`、`query_all_level_options`、`query_all_level_finance_options`、`get_trading_calendar`、`query_symbol_settlement`、`query_symbol_ranking`、`query_edb_data`。
+
+品种/合约查询映射：
+
+- 某交易所某品种的合约代码列表：`query_quotes(Some("FUTURE"), Some("SHFE"), Some("au"), Some(false), None)`。
+- 主连/连续合约：`query_cont_quotes(Some("SHFE"), Some("au"), None)`。
+- 已知合约的规格字段：`query_instrument_specs(&symbols)`；底层 metadata 表则用 `query_symbol_info(&symbols)`。
+- 期权链：`query_options(underlying, &OptionQueryFilter::new())`；按 ATM 或档位查询用 `query_atm_options`、`query_all_level_options`、`query_all_level_finance_options`。
 
 ### 3. 构建 live data bus
 

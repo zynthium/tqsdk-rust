@@ -2,6 +2,13 @@
 
 当请求要求按角色给示例、覆盖大范围场景、提供 scenario contract 或 public API 证据时，使用本文件。优先引用正式 `crates/*/examples/api_contract_sXX_*.rs` 示例，不要把 archived sketch 当成当前 API。S14 是唯一 active gap，并且不是近期核心 SDK 目标。
 
+## 目录
+
+- 用户角色
+- 角色回答模板
+- 契约地图
+- 覆盖规则
+
 ## 用户角色
 
 | 用户角色 | 首选 crate | 契约示例 | 说明 |
