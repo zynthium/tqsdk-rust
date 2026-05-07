@@ -268,36 +268,43 @@ cargo check --workspace --all-features --examples
 
 每个 crate 也有自己的 README，说明该 crate 的职责边界、示例和 public surface。
 
-## AI 编程助手 Skill
+## Agent Skill
 
-仓库提供了面向 AI 编程助手的 skill：[skills/tqsdk-rust](skills/tqsdk-rust)。
-它用于把用户的行情、合约查询、历史数据、交易执行、策略、回放和低延迟柜台需求，
-路由到正确的 TQSDK Rust crate、调用模式和示例代码。
+本仓库作为库项目，随源码提供了一个面向消费者项目的 Agent Skill：
+[skills/tqsdk-rust](skills/tqsdk-rust)。下游项目如果使用 AI 编程助手编写
+TQSDK Rust 代码，可以安装这个 skill，让助手在回答行情、合约查询、历史数据、
+交易执行、策略和回放问题时优先按本仓库的 crate 边界与示例代码路由。
 
-给 Codex、Claude Code、OpenAI agents 或其他支持本地 skill 的助手使用时，可以把
-`skills/tqsdk-rust/SKILL.md` 作为入口。该 skill 会要求助手：
+在消费者项目根目录添加 `agent-skills.json`：
 
-- 先读取 [scenario-router.md](skills/tqsdk-rust/references/scenario-router.md)，按用户想持有或消费的对象分类。
-- 不确定 crate 归属时读取 [crate-selection.md](skills/tqsdk-rust/references/crate-selection.md)。
-- 写 Rust 示例或修复编译错误前读取 [code-patterns.md](skills/tqsdk-rust/references/code-patterns.md)。
-- 涉及实盘、下单、权限或 live smoke test 时读取 [safety-and-operations.md](skills/tqsdk-rust/references/safety-and-operations.md)。
-- 保持仓库边界：one-shot query 属于 `tqsdk-session`，live refs 属于 `tqsdk-wait`，事件管线属于 `tqsdk-stream`，执行工具属于 `tqsdk-task`，历史和离线研究属于 `tqsdk-data`。
-
-OpenAI agents 的展示元数据位于 [skills/tqsdk-rust/agents/openai.yaml](skills/tqsdk-rust/agents/openai.yaml)。
-该 skill 的默认提示是：
-
-```text
-使用 $tqsdk-rust，把我的量化交易、行情或品种合约查询场景映射到正确的 TQSDK Rust crate 和调用模式。
+```json
+{
+  "repos": ["git@github.com:zynthium/tqsdk-rust.git"]
+}
 ```
 
-如果需要让助手创建一个最小 quote loop 项目，可以使用内置脚手架：
+如果希望锁定到某个发布版本、分支或 commit，可以在仓库地址后追加 `#ref`：
+
+```json
+{
+  "repos": ["git@github.com:zynthium/tqsdk-rust.git#v0.1.0"]
+}
+```
+
+然后在消费者项目中运行安装命令：
 
 ```bash
-python3 skills/tqsdk-rust/scripts/new-tqsdk-rust-project.py ./my-tqsdk-app \
-  --sdk-source git \
-  --sdk-value https://github.com/zynthium/tqsdk-rust \
-  --symbol SHFE.au2602
+npx @comet/cli install-agent-skills
 ```
+
+安装器会从本仓库 sparse-fetch `skills/` 或 `agentic-plugin/skills/`，不会下载整个
+仓库。安装后的 skill 会复制到消费者项目的 `.agents/skills/` 和 `.claude/skills/`，
+供支持 Agent Skills 的编程助手自动发现。消费者项目自己的本地 `skills/` 优先级更高，
+因此可以覆盖本库提供的同名 skill。
+
+不建议把 `.agents/skills/` 和 `.claude/skills/` 提交到消费者项目仓库；它们应由安装命令生成。
+如果未来本仓库添加只服务于仓库维护者、而不应分发给消费者的 skill，应在对应
+`SKILL.md` 的 YAML metadata 中设置 `metadata.internal: true`。
 
 ## 贡献
 
