@@ -268,43 +268,32 @@ cargo check --workspace --all-features --examples
 
 每个 crate 也有自己的 README，说明该 crate 的职责边界、示例和 public surface。
 
-## Agent Skill
+## 安装 Agent Skill
 
-本仓库作为库项目，随源码提供了一个面向消费者项目的 Agent Skill：
-[skills/tqsdk-rust](skills/tqsdk-rust)。下游项目如果使用 AI 编程助手编写
-TQSDK Rust 代码，可以安装这个 skill，让助手在回答行情、合约查询、历史数据、
-交易执行、策略和回放问题时优先按本仓库的 crate 边界与示例代码路由。
+本仓库提供了可复用的 Agent Skill：[skills/tqsdk-rust](skills/tqsdk-rust)。
+在你的项目中安装后，支持 Agent Skills 的编程助手可以在处理 TQSDK Rust
+行情、合约查询、历史数据和交易执行问题时自动加载相关上下文。
 
-在消费者项目根目录添加 `agent-skills.json`：
-
-```json
-{
-  "repos": ["git@github.com:zynthium/tqsdk-rust.git"]
-}
-```
-
-如果希望锁定到某个发布版本、分支或 commit，可以在仓库地址后追加 `#ref`：
-
-```json
-{
-  "repos": ["git@github.com:zynthium/tqsdk-rust.git#v0.1.0"]
-}
-```
-
-然后在消费者项目中运行安装命令：
+推荐直接安装仓库中的 `tqsdk-rust` skill：
 
 ```bash
-npx @comet/cli install-agent-skills
+npx skills add https://github.com/zynthium/tqsdk-rust
 ```
 
-安装器会从本仓库 sparse-fetch `skills/` 或 `agentic-plugin/skills/`，不会下载整个
-仓库。安装后的 skill 会复制到消费者项目的 `.agents/skills/` 和 `.claude/skills/`，
-供支持 Agent Skills 的编程助手自动发现。消费者项目自己的本地 `skills/` 优先级更高，
-因此可以覆盖本库提供的同名 skill。
+如果希望在所有项目中可用，使用全局安装：
 
-不建议把 `.agents/skills/` 和 `.claude/skills/` 提交到消费者项目仓库；它们应由安装命令生成。
-如果未来本仓库添加只服务于仓库维护者、而不应分发给消费者的 skill，应在对应
-`SKILL.md` 的 YAML metadata 中设置 `metadata.internal: true`。
+```bash
+npx skills add -g https://github.com/zynthium/tqsdk-rust
+```
+
+如果已经 clone 了本仓库，也可以从本地路径安装：
+
+```bash
+npx skills add ./skills/tqsdk-rust
+```
+
+安装前建议先阅读 [skills/tqsdk-rust/SKILL.md](skills/tqsdk-rust/SKILL.md)；
+该 skill 包含 `scripts/` 辅助脚本，更新或安装来自 Git 的 skill 时也应按代码依赖一样审查来源。
 
 ## 贡献
 
