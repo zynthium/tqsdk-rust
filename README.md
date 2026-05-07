@@ -85,41 +85,10 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ## 快速开始
 
-下面示例使用 `tqsdk-wait` 读取 live quote，并在行情变化时打印最新价：
-
-```rust
-use tqsdk_wait::TqApiBuilder;
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let user = std::env::var("TQ_AUTH_USER")?;
-    let pass = std::env::var("TQ_AUTH_PASS")?;
-    let mut api = TqApiBuilder::new(user, pass).build().await?;
-    let quote = api.get_quote("SHFE.au2602").await?;
-
-    loop {
-        if !api.wait_update(None).await? {
-            continue;
-        }
-
-        if api.is_changing(&quote)? {
-            let snapshot = quote.load(&api)?;
-            println!("{} {}", snapshot.datetime, snapshot.last_price);
-        }
-    }
-}
-```
-
-运行仓库内对应示例：
+让智能体在你的项目里使用 TQSDK Rust 上下文：
 
 ```bash
-cargo run -p tqsdk-wait --example quote_wait
-```
-
-只等待一次行情更新后退出：
-
-```bash
-TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait
+npx skills add https://github.com/zynthium/tqsdk-rust
 ```
 
 ## API 形态示例
@@ -267,33 +236,6 @@ cargo check --workspace --all-features --examples
 - [路线图](ROADMAP.md)
 
 每个 crate 也有自己的 README，说明该 crate 的职责边界、示例和 public surface。
-
-## 安装 Agent Skill
-
-本仓库提供了可复用的 Agent Skill：[skills/tqsdk-rust](skills/tqsdk-rust)。
-在你的项目中安装后，支持 Agent Skills 的编程助手可以在处理 TQSDK Rust
-行情、合约查询、历史数据和交易执行问题时自动加载相关上下文。
-
-推荐直接安装仓库中的 `tqsdk-rust` skill：
-
-```bash
-npx skills add https://github.com/zynthium/tqsdk-rust
-```
-
-如果希望在所有项目中可用，使用全局安装：
-
-```bash
-npx skills add -g https://github.com/zynthium/tqsdk-rust
-```
-
-如果已经 clone 了本仓库，也可以从本地路径安装：
-
-```bash
-npx skills add ./skills/tqsdk-rust
-```
-
-安装前建议先阅读 [skills/tqsdk-rust/SKILL.md](skills/tqsdk-rust/SKILL.md)；
-该 skill 包含 `scripts/` 辅助脚本，更新或安装来自 Git 的 skill 时也应按代码依赖一样审查来源。
 
 ## 贡献
 
