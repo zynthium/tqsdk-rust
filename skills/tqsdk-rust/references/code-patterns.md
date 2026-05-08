@@ -180,7 +180,7 @@ while !target.is_finished() {
 
 ## Direct Order Wrapper
 
-只有不需要 task ownership 的薄下单/撤单才使用 `tqsdk-wait` order wrapper。策略级 ownership、retry safety 或 risk gate 应路由到 `tqsdk-task`。
+这是 real-account opt-in 示例，只在用户明确要求实盘 broker integration、并接受下单副作用时使用。默认下单答案继续使用上面的 `Trading Task Pattern`、模拟/TqKq 路径或 `tqsdk-task` ownership。只有不需要 task ownership 的薄下单/撤单才使用 `tqsdk-wait` order wrapper；策略级 ownership、retry safety 或 risk gate 应路由到 `tqsdk-task`。
 
 ```rust
 use tqsdk_core::TradeAccountType;

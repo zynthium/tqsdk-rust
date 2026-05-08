@@ -52,6 +52,13 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 代码会下单、撤单、使用实盘账户或依赖付费行情权限时，先说明安全门槛。
 - 请求不明确时，只问一个形状问题：“你需要一个带 ref 的单 live loop、多个事件消费者、one-shot query、task/order 抽象、历史 rows，还是 runtime commits？”
 
+## 验证闭环
+
+- 只回答用法或短 snippet 时，说明已核对的 crate README、contract example 或 reference；没能核对时明确标注。
+- 修改本仓库 Rust API、examples 或 contract 后，至少运行 `cargo fmt --all --check` 和 `cargo check --workspace --examples`；涉及行为时再运行相关 `cargo test`。
+- 修改本 skill、脚本或模板后，运行 `git diff --check`；模板或脚本变更还要把 starter project 生成到临时目录，并在可行时运行 `cargo check --manifest-path <tmp>/Cargo.toml`。
+- live、交易或下单 smoke test 只有在用户显式提供凭证、权限和副作用许可后才运行；否则说明未跑 live 验证。
+
 ## 项目脚手架
 
 从内置 asset template 创建最小 quote loop 项目：
