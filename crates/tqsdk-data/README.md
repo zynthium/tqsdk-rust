@@ -58,6 +58,23 @@
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 
+## 依赖方式
+
+Cargo 包名是 `tqsdk-data`，代码里的 crate 路径是 `tqsdk_data`。
+
+正式发布到 crates.io 前，workspace 外项目可以先使用 Git dependency：
+
+```toml
+[dependencies]
+tqsdk-data = { git = "https://github.com/zynthium/tqsdk-rust" }
+tokio = { version = "1", features = ["fs", "macros", "rt", "time"] }
+```
+
+在本仓库内做 crate 间开发时使用 `path = "../tqsdk-data"`；正式发布后把 Git
+dependency 换成版本号即可。默认 feature 包含 live history/query 与 service query
+支持；需要把 `tqsdk-stream` 的 live market event 写入 cache 时，启用 `stream`
+feature。
+
 ## 当前已稳定的 surface
 
 - `DataClient`
@@ -130,23 +147,21 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 ## Market Cache Foundation
 
 `MarketCacheEvent` / `MarketCacheWriter` / `MarketCacheReader` /
-`MarketCacheReplay` define the offline cache record and replay foundation for
-standard `Quote` / `Kline` / `Tick` payloads.
+`MarketCacheReplay` 定义了标准 `Quote` / `Kline` / `Tick` payload 的离线
+cache record 与 replay foundation。
 
-With the `stream` feature enabled, `MarketCacheStreamWriter` is the only live
-bridge in this area. It pipes typed `tqsdk-stream::MarketEvent` values into a
-caller-owned cache writer inside the current process.
+启用 `stream` feature 后，`MarketCacheStreamWriter` 是这个区域唯一的 live
+bridge。它把 typed `tqsdk-stream::MarketEvent` 写入调用方拥有的进程内 cache
+writer。
 
 `KlineDataSeries::into_market_cache_events` /
-`KlineDataSeries::into_market_cache_replay` and the matching tick methods
-connect owned history series to that replay foundation without requiring users
-to hand-build cache events.
+`KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned
+history series 接到 replay foundation 上，用户不需要手写 cache events。
 
-This is not a live durable sink runtime or cache service: it does not expose
-queue files, lock leases, reader manifests, writer election, compaction
-ownership, daemon/supervisor orchestration, HTTP endpoints, GUI integration, or
-cross-process cache management. Those belong in user tooling or a separate
-service if they are needed.
+这不是 live durable sink runtime 或 cache service：它不暴露 queue files、lock
+leases、reader manifests、writer election、compaction ownership、daemon/supervisor
+orchestration、HTTP endpoints、GUI integration 或 cross-process cache management。
+如果这些能力确实需要，应由用户工具或独立服务承接。
 
 ## 后续仍应承接的能力
 

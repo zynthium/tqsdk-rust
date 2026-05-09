@@ -20,6 +20,21 @@
 
 用户真正会持有和传递的 `Ref` / `Window` 类型都直接从 crate 根导出，不需要再通过 `refs::*` / `views::*` 子模块路径访问。
 
+## 依赖方式
+
+Cargo 包名是 `tqsdk-wait`，代码里的 crate 路径是 `tqsdk_wait`。
+
+正式发布到 crates.io 前，workspace 外项目可以先使用 Git dependency：
+
+```toml
+[dependencies]
+tqsdk-wait = { git = "https://github.com/zynthium/tqsdk-rust" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+在本仓库内做 crate 间开发时使用 `path = "../tqsdk-wait"`；正式发布后把 Git
+dependency 换成版本号即可。默认 feature 包含 live session 与 service query 支持。
+
 ## 当前公开面
 
 当前 MVP 已包含：

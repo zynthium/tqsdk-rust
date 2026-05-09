@@ -12,6 +12,21 @@
 - 调用方必须自己提供 Tokio runtime
 - direct service helper（交易日历、结算价、排名、EDB）也要求当前已经处于 Tokio runtime 中
 
+## 依赖方式
+
+Cargo 包名是 `tqsdk-session`，代码里的 crate 路径是 `tqsdk_session`。
+
+正式发布到 crates.io 前，workspace 外项目可以先使用 Git dependency：
+
+```toml
+[dependencies]
+tqsdk-session = { git = "https://github.com/zynthium/tqsdk-rust" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+在本仓库内做 crate 间开发时使用 `path = "../tqsdk-session"`；正式发布后把 Git
+dependency 换成版本号即可。默认 feature 包含 live session 与 service query 支持。
+
 它当前已经提供：
 
 - `SessionClientBuilder`

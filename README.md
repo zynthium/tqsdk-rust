@@ -62,6 +62,10 @@ export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
 ```
 
+交易、调仓、导出和特定市场查询示例还会读取更细的 `TQ_*` 环境变量。下方
+“常用示例”表标明了默认是否有限运行、是否会写文件、以及是否可能下单；更完整的
+变量清单见对应 crate README 和 example 源码。
+
 ## 安装
 
 在本仓库内开发时，直接使用 workspace crate：
@@ -85,7 +89,21 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ## 快速开始
 
-让智能体在你的项目里使用 TQSDK Rust 上下文：
+如果只想先验证不依赖真实账号和网络的策略测试 harness，可以运行：
+
+```bash
+cargo run -p tqsdk-task --example api_contract_s24_testable_strategy
+```
+
+如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
+
+```bash
+export TQ_AUTH_USER="your-account"
+export TQ_AUTH_PASS="your-password"
+TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait
+```
+
+让 AI 助手在你的项目里使用 TQSDK Rust 上下文：
 
 ```bash
 npx skills add https://github.com/zynthium/tqsdk-rust
@@ -149,16 +167,17 @@ let page = client.get_kline_data_page(request).await?;
 
 ## 常用示例
 
-| 场景 | 命令 |
-| --- | --- |
-| `wait_update()` 行情更新 | `cargo run -p tqsdk-wait --example quote_wait` |
-| quote stream 消费 | `cargo run -p tqsdk-stream --example quote_stream` |
-| 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` |
-| command wait helper | `cargo run -p tqsdk-session --example query_command_wait` |
-| K 线分页查询 | `cargo run -p tqsdk-data --example kline_data_page` |
-| K 线 CSV 导出 | `cargo run -p tqsdk-data --example kline_export_csv` |
-| 目标持仓任务 | `cargo run -p tqsdk-task --example target_pos` |
-| 低延迟 trading desk profile | `cargo run -p tqsdk-task --example api_contract_s31_low_latency_trading_desk` |
+| 场景 | 命令 | 运行说明 |
+| --- | --- | --- |
+| 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
+| `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
+| quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
+| 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` | 需要账号；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |
+| command wait helper | `cargo run -p tqsdk-session --example query_command_wait` | 需要账号；默认查询 `SSE.000300`，可用 `TQ_QUERY_SYMBOL` 覆盖 |
+| K 线分页查询 | `cargo run -p tqsdk-data --example kline_data_page` | 需要账号和历史数据权限；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |
+| K 线 CSV 导出 | `cargo run -p tqsdk-data --example kline_export_csv` | 需要账号和历史数据权限；默认写入 `/tmp/tqsdk-kline-export.csv`，可用 `TQ_EXPORT_PATH` 覆盖 |
+| 目标持仓任务 | `cargo run -p tqsdk-task --example target_pos` | 需要账号；默认 TqKq dry-run，不会下单；只有设置 `TQ_TASK_ALLOW_ORDERS=1` 和 `TQ_TARGET_VOLUME` 才进入调仓循环 |
+| 低延迟 trading desk profile | `cargo run -p tqsdk-task --example api_contract_s31_low_latency_trading_desk` | 需要账号；默认不会下单；只有设置 `TQ_DESK_ALLOW_ORDER=1` 才提交示例订单 |
 
 更多场景契约示例见各 crate 的 `examples/` 目录。
 

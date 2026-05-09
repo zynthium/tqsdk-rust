@@ -21,6 +21,21 @@ host 以 `tqsdk-wait` 为 canonical substrate；S31 低延迟 trading desk profi
 - low-latency trading desk profile
 - public fake market / fake broker test harness
 
+## 依赖方式
+
+Cargo 包名是 `tqsdk-task`，代码里的 crate 路径是 `tqsdk_task`。
+
+正式发布到 crates.io 前，workspace 外项目可以先使用 Git dependency：
+
+```toml
+[dependencies]
+tqsdk-task = { git = "https://github.com/zynthium/tqsdk-rust" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+在本仓库内做 crate 间开发时使用 `path = "../tqsdk-task"`；正式发布后把 Git
+dependency 换成版本号即可。默认 feature 包含 live session 与 service query 支持。
+
 当前已落地的最小能力：
 
 - `TaskHost`
@@ -221,7 +236,7 @@ match ticket.outcome(host.api())? {
 
 ## 示例
 
-当前提供一个最小 task example：
+当前提供这些 task examples：
 
 - [examples/target_pos.rs](examples/target_pos.rs)
 - [examples/target_pos_scheduler.rs](examples/target_pos_scheduler.rs)

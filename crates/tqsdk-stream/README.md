@@ -17,6 +17,22 @@
 - downloader / `TargetPosTask` / callback
 - 第二棵状态树或本地对象 cache
 
+## 依赖方式
+
+Cargo 包名是 `tqsdk-stream`，代码里的 crate 路径是 `tqsdk_stream`。
+
+正式发布到 crates.io 前，workspace 外项目可以先使用 Git dependency：
+
+```toml
+[dependencies]
+tqsdk-stream = { git = "https://github.com/zynthium/tqsdk-rust" }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+在本仓库内做 crate 间开发时使用 `path = "../tqsdk-stream"`；正式发布后把 Git
+dependency 换成版本号即可。默认 feature 包含 live session 与 service query 支持。
+
 ## 当前公开面
 
 当前最小 surface 包含：
