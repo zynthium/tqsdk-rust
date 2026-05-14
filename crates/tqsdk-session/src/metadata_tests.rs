@@ -1,11 +1,14 @@
 use chrono::{Datelike, TimeZone, Utc};
 use serde_json::json;
 
-use super::helpers::{
-    BisectPriority, OptionNode, bisect_value_index, filter_option_nodes,
-    parse_query_cont_quotes_result, parse_query_options_result, parse_query_quotes_result,
-    parse_query_symbol_info_quotes, sort_options_and_get_atm_index, timestamp_nano_to_datetime,
-    validate_finance_nearbys, validate_finance_underlying, validate_price_levels,
+use super::{
+    build_query_cont_quotes_request, build_query_quotes_request,
+    helpers::{
+        BisectPriority, OptionNode, bisect_value_index, filter_option_nodes,
+        parse_query_cont_quotes_result, parse_query_options_result, parse_query_quotes_result,
+        parse_query_symbol_info_quotes, sort_options_and_get_atm_index, timestamp_nano_to_datetime,
+        validate_finance_nearbys, validate_finance_underlying, validate_price_levels,
+    },
 };
 
 fn make_option_for_test(
@@ -27,6 +30,38 @@ fn make_option_for_test(
         exercise_year: datetime.year(),
         exercise_month: datetime.month() as i32,
     }
+}
+
+#[test]
+fn query_quotes_request_omits_unset_optional_filters() {
+    let request =
+        build_query_quotes_request(Some("FUTURE"), Some("SHFE"), Some("au"), Some(false), None)
+            .unwrap();
+
+    assert!(request.query.contains("$class_:[Class]"));
+    assert!(request.query.contains("$exchange_id:[String]"));
+    assert!(request.query.contains("$product_id:[String]"));
+    assert!(request.query.contains("$expired:Boolean"));
+    assert!(!request.query.contains("has_night"));
+    assert_eq!(
+        request.variables,
+        json!({
+            "class_": ["FUTURE"],
+            "exchange_id": ["SHFE"],
+            "product_id": ["au"],
+            "expired": false,
+        })
+    );
+    assert_eq!(request.target_exchange, None);
+}
+
+#[test]
+fn query_cont_quotes_request_omits_has_night_when_unset() {
+    let request = build_query_cont_quotes_request(None).unwrap();
+
+    assert!(request.query.contains("$class_:[Class]"));
+    assert!(!request.query.contains("has_night"));
+    assert_eq!(request.variables, json!({ "class_": ["CONT"] }));
 }
 
 #[test]

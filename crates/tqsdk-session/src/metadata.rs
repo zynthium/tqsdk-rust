@@ -23,15 +23,9 @@ use self::helpers::{
 
 const FUTURE_EXCHANGES: &[&str] = &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
 
-const QUERY_QUOTES: &str = r#"query($class_:[Class], $exchange_id:[String], $product_id:[String], $expired:Boolean, $has_night:Boolean){
-  multi_symbol_info(class: $class_, exchange_id: $exchange_id, product_id: $product_id, expired: $expired, has_night: $has_night) {
-    ... on basic { instrument_id }
-  }
-}"#;
+const QUERY_QUOTES_SELECTION: &str = r#"    ... on basic { instrument_id }"#;
 
-const QUERY_CONT_QUOTES: &str = r#"query($class_:[Class], $has_night:Boolean){
-  multi_symbol_info(class: $class_, has_night: $has_night) {
-    ... on derivative {
+const QUERY_CONT_QUOTES_SELECTION: &str = r#"    ... on derivative {
       underlying {
         edges {
           node {
@@ -40,9 +34,7 @@ const QUERY_CONT_QUOTES: &str = r#"query($class_:[Class], $has_night:Boolean){
           }
         }
       }
-    }
-  }
-}"#;
+    }"#;
 
 const QUERY_OPTIONS: &str = r#"query($instrument_id:[String], $derivative_class:[Class]){
   multi_symbol_info(instrument_id: $instrument_id) {
@@ -199,6 +191,116 @@ const QUERY_SYMBOL_INFO: &str = r#"query($instrument_id:[String]){
   }
 }"#;
 
+#[derive(Debug, Clone, PartialEq)]
+struct MetadataQueryRequest {
+    query: String,
+    variables: Value,
+    target_exchange: Option<String>,
+}
+
+fn build_multi_symbol_info_query(
+    variable_defs: &[&str],
+    arguments: &[&str],
+    selection: &str,
+) -> String {
+    let variables = if variable_defs.is_empty() {
+        String::new()
+    } else {
+        format!("({})", variable_defs.join(", "))
+    };
+    let arguments = if arguments.is_empty() {
+        String::new()
+    } else {
+        format!("({})", arguments.join(", "))
+    };
+    format!("query{variables}{{\n  multi_symbol_info{arguments} {{\n{selection}\n  }}\n}}")
+}
+
+fn build_query_quotes_request(
+    ins_class: Option<&str>,
+    exchange_id: Option<&str>,
+    product_id: Option<&str>,
+    expired: Option<bool>,
+    has_night: Option<bool>,
+) -> Result<MetadataQueryRequest> {
+    let ins_class = non_empty_str(ins_class, "ins_class")?;
+    let exchange_id = non_empty_str(exchange_id, "exchange_id")?;
+    let product_id = non_empty_str(product_id, "product_id")?;
+
+    let mut variable_defs = Vec::new();
+    let mut arguments = Vec::new();
+    let mut variables = Map::new();
+
+    if let Some(ins_class) = ins_class {
+        variable_defs.push("$class_:[Class]");
+        arguments.push("class: $class_");
+        variables.insert("class_".to_string(), json!([ins_class]));
+    }
+    if let Some(exchange_id) = exchange_id {
+        let is_future_exchange = FUTURE_EXCHANGES.contains(&exchange_id);
+        let need_pass_exchange = match ins_class {
+            Some(class) => !matches!(class, "INDEX" | "CONT") || !is_future_exchange,
+            None => true,
+        };
+        if need_pass_exchange {
+            variable_defs.push("$exchange_id:[String]");
+            arguments.push("exchange_id: $exchange_id");
+            variables.insert("exchange_id".to_string(), json!([exchange_id]));
+        }
+    }
+    if let Some(product_id) = product_id {
+        variable_defs.push("$product_id:[String]");
+        arguments.push("product_id: $product_id");
+        variables.insert("product_id".to_string(), json!([product_id]));
+    }
+    if let Some(expired) = expired {
+        variable_defs.push("$expired:Boolean");
+        arguments.push("expired: $expired");
+        variables.insert("expired".to_string(), json!(expired));
+    }
+    if let Some(has_night) = has_night {
+        variable_defs.push("$has_night:Boolean");
+        arguments.push("has_night: $has_night");
+        variables.insert("has_night".to_string(), json!(has_night));
+    }
+
+    let target_exchange = if matches!(ins_class, Some("INDEX") | Some("CONT"))
+        && matches!(exchange_id, Some(exchange) if FUTURE_EXCHANGES.contains(&exchange))
+    {
+        exchange_id.map(str::to_string)
+    } else {
+        None
+    };
+
+    Ok(MetadataQueryRequest {
+        query: build_multi_symbol_info_query(&variable_defs, &arguments, QUERY_QUOTES_SELECTION),
+        variables: Value::Object(variables),
+        target_exchange,
+    })
+}
+
+fn build_query_cont_quotes_request(has_night: Option<bool>) -> Result<MetadataQueryRequest> {
+    let mut variable_defs = vec!["$class_:[Class]"];
+    let mut arguments = vec!["class: $class_"];
+    let mut variables = Map::from_iter([("class_".to_string(), json!(["CONT"]))]);
+
+    if let Some(has_night) = has_night {
+        variable_defs.push("$has_night:Boolean");
+        arguments.push("has_night: $has_night");
+        variables.insert("has_night".to_string(), json!(has_night));
+    }
+
+    Ok(MetadataQueryRequest {
+        query: build_multi_symbol_info_query(
+            &variable_defs,
+            &arguments,
+            QUERY_CONT_QUOTES_SELECTION,
+        ),
+        variables: Value::Object(variables),
+        target_exchange: None,
+    })
+}
+
 impl SessionClient {
     pub async fn query_symbol_info(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
         if symbols.is_empty() {
@@ -240,53 +342,16 @@ impl SessionClient {
         expired: Option<bool>,
         has_night: Option<bool>,
     ) -> Result<Vec<String>> {
-        let ins_class = non_empty_str(ins_class, "ins_class")?;
-        let exchange_id = non_empty_str(exchange_id, "exchange_id")?;
-        let product_id = non_empty_str(product_id, "product_id")?;
-
-        let mut variables = Map::from_iter([
-            ("class_".to_string(), Value::Null),
-            ("exchange_id".to_string(), Value::Null),
-            ("product_id".to_string(), Value::Null),
-            ("expired".to_string(), Value::Null),
-            ("has_night".to_string(), Value::Null),
-        ]);
-
-        if let Some(ins_class) = ins_class {
-            variables.insert("class_".to_string(), json!([ins_class]));
-        }
-        if let Some(exchange_id) = exchange_id {
-            let is_future_exchange = FUTURE_EXCHANGES.contains(&exchange_id);
-            let need_pass_exchange = match ins_class {
-                Some(class) => !matches!(class, "INDEX" | "CONT") || !is_future_exchange,
-                None => true,
-            };
-            if need_pass_exchange {
-                variables.insert("exchange_id".to_string(), json!([exchange_id]));
-            }
-        }
-        if let Some(product_id) = product_id {
-            variables.insert("product_id".to_string(), json!([product_id]));
-        }
-        if let Some(expired) = expired {
-            variables.insert("expired".to_string(), json!(expired));
-        }
-        if let Some(has_night) = has_night {
-            variables.insert("has_night".to_string(), json!(has_night));
-        }
-
+        let request =
+            build_query_quotes_request(ins_class, exchange_id, product_id, expired, has_night)?;
         let payload = self
-            .query_graphql_value(QUERY_QUOTES, Some(Value::Object(variables)))
+            .query_graphql_value(&request.query, Some(request.variables))
             .await?;
 
-        let target_exchange = if matches!(ins_class, Some("INDEX") | Some("CONT"))
-            && matches!(exchange_id, Some(exchange) if FUTURE_EXCHANGES.contains(&exchange))
-        {
-            exchange_id
-        } else {
-            None
-        };
-        Ok(parse_query_quotes_result(&payload, target_exchange))
+        Ok(parse_query_quotes_result(
+            &payload,
+            request.target_exchange.as_deref(),
+        ))
     }
 
     pub async fn query_cont_quotes(
@@ -297,14 +362,9 @@ impl SessionClient {
     ) -> Result<Vec<String>> {
         let exchange_id = non_empty_str(exchange_id, "exchange_id")?;
         let product_id = non_empty_str(product_id, "product_id")?;
+        let request = build_query_cont_quotes_request(has_night)?;
         let payload = self
-            .query_graphql_value(
-                QUERY_CONT_QUOTES,
-                Some(json!({
-                    "class_": ["CONT"],
-                    "has_night": has_night,
-                })),
-            )
+            .query_graphql_value(&request.query, Some(request.variables))
             .await?;
         Ok(parse_query_cont_quotes_result(
             &payload,
