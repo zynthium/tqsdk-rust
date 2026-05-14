@@ -252,7 +252,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn writes_header_and_rows_to_async_writer() {
         let mut writer = MemoryWriter::default();
         writer.write_all(KLINE_CSV_HEADER.as_bytes()).await.unwrap();

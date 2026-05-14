@@ -1130,7 +1130,7 @@ mod tests {
         assert!(config.risk_engine().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn strategy_supervisor_health_reflects_initial_deployment() {
         let deployment = test_deployment().await;
 
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(supervisor.metrics(), StrategySupervisorMetrics::default());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn strategy_supervisor_records_retry_then_retry_limit_report() {
         let deployment = test_deployment().await;
         let mut supervisor = StrategySupervisor::new(deployment)
@@ -1192,7 +1192,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn strategy_supervisor_report_marks_shutdown_reason() {
         let deployment = test_deployment().await;
         let events = Arc::new(Mutex::new(Vec::new()));

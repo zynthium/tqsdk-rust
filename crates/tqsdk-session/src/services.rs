@@ -561,5 +561,4 @@ fn collect_edb_data_rows(
 }
 
 #[cfg(test)]
-#[path = "services_tests.rs"]
 mod tests;

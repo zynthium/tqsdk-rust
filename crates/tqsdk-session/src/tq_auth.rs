@@ -526,7 +526,7 @@ mod tests {
     use super::{PasswordCredentials, TqAuthProvider};
     use tqsdk_core::ContractError;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn read_json_response_rejects_declared_body_larger_than_auth_limit() {
         let url = spawn_declared_response("200 OK", 1024 * 1024 + 1);
         let response = reqwest::Client::new()
@@ -547,7 +547,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn read_json_response_truncates_error_response_body() {
         let body = "x".repeat(300) + "TAIL_MARKER";
         let url = spawn_body_response("401 Unauthorized", body.as_bytes());

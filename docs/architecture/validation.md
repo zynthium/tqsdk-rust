@@ -246,3 +246,25 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 | contract 测试 | 验证不同协议域共享同一 revision / causality / cursor 模型 |
 | 重连专项 | 验证 session error、重连与 resync 仍走统一提交模型 |
 | adapter 验证 | 验证 wait / stream / callback 只消费 contract，不回改 contract |
+
+## Workspace 测试放置原则
+为保持多个 crate 的测试结构一致，新增或移动测试时遵守以下规则：
+
+1. 白盒单元测试放在被测模块旁边，并通过 `#[cfg(test)]` 只在测试构建中编译。
+   小模块优先使用同文件 `mod tests { ... }`；当测试体量会显著干扰实现阅读时，
+   使用旁置目录 `src/<module>/tests.rs`，再由 `src/<module>.rs` 以
+   `#[cfg(test)] mod tests;` 引入。
+2. `src/*_tests.rs` 这种平铺旁置测试文件不再新增。已有大模块测试应逐步迁移到
+   `src/<module>/tests.rs`，和 `client/tests.rs` 等模块目录形态保持一致。
+3. 只通过 public crate API 验证行为、跨模块协作、facade surface、runtime contract
+   或回归场景的测试放在 `crates/<crate>/tests/*.rs`。这些测试按能力面命名：
+   `runtime_contract_*`、`session_*`、`wait_api_*`、`stream_*`，或清晰的领域名
+   如 `target_pos`、`history_series_cache`。
+4. 集成测试共享 fixture 放在 `crates/<crate>/tests/support/`，由需要的测试文件
+   `mod support;` 引入；不要为了复用测试 helper 扩大生产 public API。
+5. 需要真实账号、网络、交易权限或会发单的 smoke 测试统一放在
+   `crates/<crate>/tests/live_smoke.rs`，必须 `#[ignore]`，并用显式环境变量门控。
+6. `crates/*/examples/api_contract_sXX_*.rs` 只放 public API 场景契约；不要把它们当作
+   普通 integration test 或 live smoke 的替代品。
+7. async 测试默认使用 `#[tokio::test(flavor = "current_thread")]`，除非测试明确需要
+   Tokio 多线程 runtime。需要多线程时，应在测试附近保留原因。

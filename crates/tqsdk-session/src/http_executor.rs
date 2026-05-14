@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(url, "https://schema.example/base/instrument.json");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn read_response_bytes_rejects_declared_body_larger_than_http_limit() {
         let url = spawn_declared_response("200 OK", 64 * 1024 * 1024 + 1);
         let response = reqwest::Client::new()
@@ -235,7 +235,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn execute_async_truncates_error_response_body() {
         let body = "x".repeat(300) + "TAIL_MARKER";
         let url = spawn_body_response("500 Internal Server Error", body.as_bytes());

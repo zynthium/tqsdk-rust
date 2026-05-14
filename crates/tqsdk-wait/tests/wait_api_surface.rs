@@ -5,7 +5,7 @@ use tqsdk_wait::{WaitFacadeError, testing::WaitTestDriver};
 
 mod support;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn wait_update_returns_deferred_commit_before_polling() {
     let mut api = support::seeded_api();
     support::seed_quote_commit(&mut api, "SHFE.au2602", 618.5);
@@ -36,7 +36,7 @@ fn wait_driver_keeps_single_runtime_reader_without_snapshot_cache() {
     assert!(!driver.contains("StateStore"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn wait_update_timeout_returns_false() {
     let mut api = support::seeded_api();
 
@@ -50,7 +50,7 @@ async fn wait_update_timeout_returns_false() {
     assert!(!ready);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn wait_api_exposes_underlying_session_for_direct_queries() {
     let api = support::seeded_api();
 

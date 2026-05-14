@@ -551,5 +551,4 @@ impl SessionClient {
 }
 
 #[cfg(test)]
-#[path = "metadata_tests.rs"]
 mod tests;

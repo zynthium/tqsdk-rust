@@ -293,7 +293,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn kline_data_download_skips_empty_leading_pages_and_reports_progress() {
         let source = TestKlineSource {
             pages: Arc::new(Mutex::new(VecDeque::from([
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(download.progress.emitted_rows(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn tick_data_download_marks_last_emitted_page_complete() {
         let source = TestTickSource {
             pages: Arc::new(Mutex::new(VecDeque::from([TickDataPage::new(
@@ -425,7 +425,7 @@ mod tests {
         assert!(download.next_page().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn kline_data_download_continues_when_short_page_has_more_data() {
         let source = TestKlineSource {
             pages: Arc::new(Mutex::new(VecDeque::from([
@@ -491,7 +491,7 @@ mod tests {
         assert!(second_page.progress().is_complete());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn tick_data_download_continues_when_short_page_has_more_data() {
         let source = TestTickSource {
             pages: Arc::new(Mutex::new(VecDeque::from([
@@ -552,7 +552,7 @@ mod tests {
         assert!(second_page.progress().is_complete());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn kline_data_download_collect_remaining_materializes_remaining_pages() {
         let source = TestKlineSource {
             pages: Arc::new(Mutex::new(VecDeque::from([
@@ -617,7 +617,7 @@ mod tests {
         assert!(download.next_page().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn tick_data_download_collect_remaining_materializes_after_partial_page_consumption() {
         let source = TestTickSource {
             pages: Arc::new(Mutex::new(VecDeque::from([
