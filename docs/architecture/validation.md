@@ -203,21 +203,27 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 
 1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
 2. `cargo test -p tqsdk-session live_query_command_wait_smoke -- --ignored --nocapture`
-3. `cargo test -p tqsdk-session live_quote_progress_smoke -- --ignored --nocapture`
-4. `cargo test -p tqsdk-session live_tqkq_trade_login_smoke -- --ignored --nocapture`
-5. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
-6. `cargo test -p tqsdk-wait live_quote_wait_with_session_query_smoke -- --ignored --nocapture`
-7. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
-8. `cargo test -p tqsdk-stream live_quote_stream_with_session_query_smoke -- --ignored --nocapture`
-9. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
-10. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
-11. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
-12. `cargo test -p tqsdk-task live_scheduler_pause_step_smoke -- --ignored --nocapture`
-13. `cargo test -p tqsdk-data live_option_greeks_smoke -- --ignored --nocapture`
-14. `cargo test -p tqsdk-data live_export_kline_csv_smoke -- --ignored --nocapture`
-15. `cargo test -p tqsdk-data live_export_tick_csv_smoke -- --ignored --nocapture`
+3. `cargo test -p tqsdk-session live_raw_and_control_plane_requests_smoke -- --ignored --nocapture`
+4. `cargo test -p tqsdk-session live_metadata_query_pack_smoke -- --ignored --nocapture`
+5. `cargo test -p tqsdk-session live_service_query_pack_smoke -- --ignored --nocapture`
+6. `cargo test -p tqsdk-session live_quote_progress_smoke -- --ignored --nocapture`
+7. `cargo test -p tqsdk-session live_tqkq_trade_login_smoke -- --ignored --nocapture`
+8. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
+9. `cargo test -p tqsdk-wait live_quote_wait_with_session_query_smoke -- --ignored --nocapture`
+10. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
+11. `cargo test -p tqsdk-stream live_quote_stream_with_session_query_smoke -- --ignored --nocapture`
+12. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
+13. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
+14. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
+15. `cargo test -p tqsdk-task live_scheduler_pause_step_smoke -- --ignored --nocapture`
+16. `cargo test -p tqsdk-data live_history_request_pack_smoke -- --ignored --nocapture`
+17. `cargo test -p tqsdk-data live_option_greeks_smoke -- --ignored --nocapture`
+18. `cargo test -p tqsdk-data live_export_kline_csv_smoke -- --ignored --nocapture`
+19. `cargo test -p tqsdk-data live_export_tick_csv_smoke -- --ignored --nocapture`
    默认走官方内置 `TqKq` 主模拟账户；可选用 `TQ_TRADE_ACCOUNT_NO=<1..99>` 切到辅模拟账户，或同时设置 `TQ_TRADE_BROKER_ID` / `TQ_TRADE_ACCOUNT_ID` / `TQ_TRADE_PASSWORD` 显式覆盖
-   只有显式设置 `TQ_SMOKE_ALLOW_ORDER=1` 且提供 `TQ_SMOKE_ORDER_SYMBOL` / `TQ_SMOKE_ORDER_LIMIT_PRICE` 时才会真正发单
+   只有显式设置 `TQ_SMOKE_ALLOW_ORDER=1` 且提供 `TQ_SMOKE_ORDER_SYMBOL` / `TQ_SMOKE_ORDER_LIMIT_PRICE` 时才会真正发单；
+   EDB service query 默认在账号无 EDB 权限时跳过 EDB 断言，设置
+   `TQ_REQUIRE_EDB=1` 可将该权限错误作为失败处理。
 
 ## V2+ adapter 验收基线
 ### wait adapter

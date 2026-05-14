@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tokio::io::AsyncWrite;
-use tqsdk_data::{DataClient, OptionGreeksRequest, TickDataSeriesRequest};
+use tqsdk_data::{
+    DataClient, KlineDataPageRequest, KlineDataSeriesRequest, OptionGreeksRequest,
+    TickDataPageRequest, TickDataSeriesRequest,
+};
 use tqsdk_session::{OptionQueryFilter, SessionClientBuilder};
 
 #[test]
@@ -69,6 +72,146 @@ fn live_option_greeks_smoke() {
         assert!(row.option_last_price.is_finite());
         assert!(row.underlying_last_price.is_finite());
         assert!(row.delta.is_finite(), "delta={}", row.delta);
+    });
+}
+
+#[test]
+#[ignore = "live network smoke; validates data service requests and requires TQ_AUTH_USER/TQ_AUTH_PASS plus tq_dl for history websocket requests"]
+fn live_history_request_pack_smoke() {
+    run_on_tokio(async {
+        let Some(auth_user) = read_env("TQ_AUTH_USER") else {
+            return;
+        };
+        let Some(auth_pass) = read_env("TQ_AUTH_PASS") else {
+            return;
+        };
+        let symbol = read_env("TQ_TEST_SYMBOL").unwrap_or_else(|| "SHFE.ao2609".to_string());
+        let cont_symbol = read_env("TQ_CONT_SYMBOL").unwrap_or_else(|| "KQ.m@SHFE.au".to_string());
+        let end_dt = Utc::now();
+        let kline_start_dt = end_dt - ChronoDuration::minutes(30);
+        let tick_start_dt = end_dt - ChronoDuration::minutes(10);
+
+        let cont_rows = DataClient::new()
+            .query_his_cont_quotes(&[cont_symbol.as_str()], 3, None)
+            .await
+            .expect("query_his_cont_quotes should succeed");
+        assert_eq!(cont_rows.len(), 3);
+        assert!(cont_rows.iter().all(|row| {
+            !row.date.is_empty() && row.underlyings.contains_key(cont_symbol.as_str())
+        }));
+
+        let session = SessionClientBuilder::new(auth_user, auth_pass)
+            .futures_market()
+            .build()
+            .expect("live session should build");
+        if !session
+            .has_feature("tq_dl")
+            .await
+            .expect("history grant check should succeed")
+        {
+            return;
+        }
+        let client = DataClient::from_session(session);
+        let kline_start_ns = kline_start_dt
+            .timestamp_nanos_opt()
+            .expect("kline start_dt should fit in i64");
+        let tick_start_ns = tick_start_dt
+            .timestamp_nanos_opt()
+            .expect("tick start_dt should fit in i64");
+        let end_ns = end_dt
+            .timestamp_nanos_opt()
+            .expect("end_dt should fit in i64");
+
+        let kline_page = client
+            .get_kline_data_page(
+                KlineDataPageRequest::new(symbol.as_str(), Duration::from_secs(60), 16)
+                    .with_focus_datetime_ns(end_ns)
+                    .with_focus_position(0)
+                    .with_timeout(Duration::from_secs(30)),
+            )
+            .await
+            .expect("get_kline_data_page should succeed");
+        assert_eq!(kline_page.symbol(), symbol);
+        assert_eq!(kline_page.duration_ns(), 60_000_000_000);
+        assert!(kline_page.view_width() <= 16);
+
+        let tick_page = client
+            .get_tick_data_page(
+                TickDataPageRequest::new(symbol.as_str(), 16)
+                    .with_focus_datetime_ns(end_ns)
+                    .with_focus_position(0)
+                    .with_timeout(Duration::from_secs(30)),
+            )
+            .await
+            .expect("get_tick_data_page should succeed");
+        assert_eq!(tick_page.symbol(), symbol);
+        assert!(tick_page.view_width() <= 16);
+
+        let kline_request = KlineDataSeriesRequest::new(
+            symbol.as_str(),
+            Duration::from_secs(60),
+            kline_start_ns,
+            end_ns,
+        )
+        .with_page_view_width(64)
+        .with_timeout(Duration::from_secs(30));
+        let kline_series = client
+            .get_kline_data_series(kline_request.clone())
+            .await
+            .expect("get_kline_data_series should succeed");
+        assert_eq!(kline_series.symbol(), symbol);
+        assert_eq!(kline_series.duration_ns(), 60_000_000_000);
+        assert!(kline_series.start_datetime_ns() >= kline_start_ns);
+        assert!(kline_series.end_datetime_ns() <= end_ns);
+
+        let tick_request = TickDataSeriesRequest::new(symbol.as_str(), tick_start_ns, end_ns)
+            .with_page_view_width(64)
+            .with_timeout(Duration::from_secs(30));
+        let tick_series = client
+            .get_tick_data_series(tick_request.clone())
+            .await
+            .expect("get_tick_data_series should succeed");
+        assert_eq!(tick_series.symbol(), symbol);
+        assert!(tick_series.start_datetime_ns() >= tick_start_ns);
+        assert!(tick_series.end_datetime_ns() <= end_ns);
+
+        let mut kline_download = client
+            .kline_data_download(kline_request.clone())
+            .expect("kline_data_download should construct");
+        let kline_rows = kline_download
+            .collect_remaining()
+            .await
+            .expect("KlineDataDownload::collect_remaining should succeed");
+        assert!(kline_download.is_finished());
+        assert_eq!(kline_download.progress().emitted_rows(), kline_rows.len());
+
+        let mut tick_download = client
+            .tick_data_download(tick_request.clone())
+            .expect("tick_data_download should construct");
+        let tick_rows = tick_download
+            .collect_remaining()
+            .await
+            .expect("TickDataDownload::collect_remaining should succeed");
+        assert!(tick_download.is_finished());
+        assert_eq!(tick_download.progress().emitted_rows(), tick_rows.len());
+
+        let mut kline_writer = MemoryWriter::default();
+        let kline_summary = client
+            .export_kline_data_csv(kline_request, &mut kline_writer)
+            .await
+            .expect("export_kline_data_csv should succeed");
+        assert_eq!(kline_summary.symbol, symbol);
+        assert!(kline_summary.rows_written >= kline_rows.len());
+        assert!(kline_summary.pages_written > 0);
+
+        let mut tick_writer = MemoryWriter::default();
+        let tick_summary = client
+            .export_tick_data_csv(tick_request, &mut tick_writer)
+            .await
+            .expect("export_tick_data_csv should succeed");
+        assert_eq!(tick_summary.symbol, symbol);
+        assert!(tick_summary.rows_written >= tick_rows.len());
+        assert!(tick_summary.pages_written > 0);
     });
 }
 
