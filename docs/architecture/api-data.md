@@ -114,6 +114,10 @@
 - `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
+- `HistorySeriesCache::append_kline_rows`
+- `HistorySeriesCache::append_tick_rows`
+- `HistorySeriesCache::read_latest_kline_rows`
+- `HistorySeriesCache::read_latest_tick_rows`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataDownload::collect_remaining()`
@@ -145,6 +149,9 @@
 - `OptionGreeksRow`
 - `KlineCsvExportSummary`
 - `TickCsvExportSummary`
+- `LiveHistoryCacheOptions`
+- `LiveHistoryCacheWriteReport`
+- `LiveHistoryCacheWriter`
 
 当前明确先不做：
 
@@ -183,8 +190,15 @@
    - 已有 cache-only history series reader、schema/version scan report、
      typed cache miss，以及最薄的容量/保留期清理策略；Python/Rust 文件格式
      互通但不承诺同目录同时写
+   - 已有显式 append / latest-read API，供外部接入把已完成的 K 线 / Tick rows
+     写入 Python 兼容 mmap 历史序列缓存；append 按 id 去重，支持重复、重叠、
+     相邻和断档 segment
    - 已有最薄的 offline market cache record / JSONL reader-writer / ordered replay foundation
    - 已有 `stream` feature 下的单进程 `MarketEvent` -> cache writer pipe foundation
+   - 已有 `stream` feature 下的 `LiveHistoryCacheWriter`，用于把
+     `tqsdk-stream` 的 K 线 / Tick window 显式写入 `HistorySeriesCache`；
+     K 线跳过窗口最高 id 的可变尾 bar，Tick 按 id 去重写入。它不拥有 live
+     session，也不改变 `DataClient::from_session(...)` 的默认无缓存写入行为
    - 后续再考虑路径管理型文件导出
    - 跨进程 daemon orchestration、跨进程 cache 管理服务、queue/lock/election/recovery/compaction ownership 等编排表面不属于当前 `tqsdk-data` public API
    - 可选 tabular adapters
@@ -229,12 +243,19 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
+- `HistorySeriesCache::append_kline_rows` / `append_tick_rows` 和
+  `read_latest_kline_rows` / `read_latest_tick_rows` 已经落在 `tqsdk-data`，
+  用于外部接入显式写入和读取最近缓存 rows；它们保持 Python mmap 文件布局，
+  不新增 manifest
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
 - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 也已经落在 `tqsdk-data`
 - `MarketCacheStreamWriter` 在 `stream` feature 下提供单进程 live
   `MarketEvent` -> cache writer pipe，也已经落在 `tqsdk-data`
+- `LiveHistoryCacheWriter` 在 `stream` feature 下提供单进程 live window ->
+  `HistorySeriesCache` pipe，也已经落在 `tqsdk-data`；它只消费调用方传入的
+  `tqsdk-stream::MarketEvent` / window，不驱动 stream、不拥有 session
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界
@@ -245,7 +266,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
   cache hit/miss/downloaded 和权限检查状态，不绑定外部数据库或 tabular 框架
 - 它不是新的 session facade
-- 它也不是 live ref / live stream
+- 它也不是 live ref / live stream；`LiveHistoryCacheWriter` 只是显式 opt-in
+  的 stream window 写缓存 bridge，不是新的 live 消费 facade
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
 - `data_download` 是建立在同一时间范围语义上的 pull-based 渐进式下载 substrate
@@ -261,6 +283,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   `stream` feature 下的单进程 live pipe；它不公开 queue/lock/election/recovery/
   compaction/service/daemon/supervisor 编排表面，不拥有 live session、不创建
   Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
+- `LiveHistoryCacheWriter` 是 history series cache 的单进程 live bridge：
+  K 线写入跳过可变尾 bar，Tick 写入依赖 append 去重；它不提供后台任务、
+  durable sink runtime、跨进程 writer 管理或自动 session 绑定
 - 历史序列 mmap cache 与 Python `DataSeries` 文件格式兼容，适合迁移和交替使用；
   同目录同时写仍是 non-goal，因为 Python 官方实现自身也没有承诺同一合约周期
   多进程/线程/协程并发写

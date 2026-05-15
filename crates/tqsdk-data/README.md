@@ -101,6 +101,10 @@ feature。
 - `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
+- `HistorySeriesCache::append_kline_rows`
+- `HistorySeriesCache::append_tick_rows`
+- `HistorySeriesCache::read_latest_kline_rows`
+- `HistorySeriesCache::read_latest_tick_rows`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -117,6 +121,9 @@ feature。
 - `MarketCacheWriter`
 - `MarketCacheReader`
 - `MarketCacheReplay`
+- `LiveHistoryCacheOptions`（`stream` feature）
+- `LiveHistoryCacheWriteReport`（`stream` feature）
+- `LiveHistoryCacheWriter`（`stream` feature）
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -154,6 +161,23 @@ cache record 与 replay foundation。
 bridge。它把 typed `tqsdk-stream::MarketEvent` 写入调用方拥有的进程内 cache
 writer。
 
+## History Series Cache Live Bridge
+
+`HistorySeriesCache::append_kline_rows` / `append_tick_rows` 允许外部接入把已经
+拿到的 K 线 / Tick rows 显式追加到 Python 兼容 mmap 历史序列缓存。append
+按 row `id` 去重，支持重复、重叠、相邻和断档 segment；断档会保留为独立
+segment，不伪造缺失 row。
+
+`HistorySeriesCache::read_latest_kline_rows` / `read_latest_tick_rows` 提供
+cache-only 最近 N 条读取，返回结果按 id 升序排列，不联网补齐缺口。
+
+启用 `stream` feature 后，`LiveHistoryCacheWriter` 可以把
+`tqsdk-stream::KlineWindow` / `TickWindow` 或 `MarketEvent` 显式写入
+`HistorySeriesCache`。K 线写入直接对齐官方 tqsdk-python 语义：不写窗口最高 id
+的可变尾 bar，只写已经完成的 bar；Tick window 则写入全部 tick，并由 append
+逻辑按 id 去重。`DataClient::from_session(...)` 默认行为不变，不会自动创建 live
+cache writer。
+
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned
 history series 接到 replay foundation 上，用户不需要手写 cache events。
@@ -178,8 +202,13 @@ orchestration、HTTP endpoints、GUI integration 或 cross-process cache managem
 - `HistorySeriesCache::open(...)`
 - `HistorySeriesCache::read_kline_data_series(...)`
 - `HistorySeriesCache::read_tick_data_series(...)`
+- `HistorySeriesCache::append_kline_rows(...)`
+- `HistorySeriesCache::append_tick_rows(...)`
+- `HistorySeriesCache::read_latest_kline_rows(...)`
+- `HistorySeriesCache::read_latest_tick_rows(...)`
 - `HistorySeriesCache::scan()`
 - `HistorySeriesCache::enforce_limits(...)`
+- `LiveHistoryCacheWriter::new(...)`（`stream` feature）
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；

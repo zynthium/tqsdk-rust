@@ -156,7 +156,8 @@ session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户
 实时交易状态、K 线 serial 和 tick serial 属于 wait continuous consumption：
 用户通过 `get_trading_status`、`get_kline_serial`、`get_tick_serial` 获取 live ref，
 再在 `wait_update()` 后用 `is_changing()` / `is_changing_fields()` 判断是否加载当前
-typed status 或窗口。这不是 `tqsdk-data` 的历史下载，也不是 `tqsdk-session` 的
+typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `right_id`
+投影 rows，不从全局缓存中截取最新 N 条。这不是 `tqsdk-data` 的历史下载，也不是 `tqsdk-session` 的
 metadata direct query。契约示例见
 [examples/api_contract_s25_wait_serial_trading_status.rs](examples/api_contract_s25_wait_serial_trading_status.rs)。
 
