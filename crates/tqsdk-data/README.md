@@ -166,17 +166,19 @@ writer。
 `HistorySeriesCache::append_kline_rows` / `append_tick_rows` 允许外部接入把已经
 拿到的 K 线 / Tick rows 显式追加到 Python 兼容 mmap 历史序列缓存。append
 按 row `id` 去重，支持重复、重叠、相邻和断档 segment；断档会保留为独立
-segment，不伪造缺失 row。
+segment，不伪造缺失 row。返回的写入行数只统计实际新增或更新的持久化 row；
+重复且持久化字段完全一致的 row 是 no-op。
 
 `HistorySeriesCache::read_latest_kline_rows` / `read_latest_tick_rows` 提供
-cache-only 最近 N 条读取，返回结果按 id 升序排列，不联网补齐缺口。
+cache-only 最近 N 条读取，内部从尾部 segment 限量读取，返回结果按 id 升序
+排列，不联网补齐缺口。
 
 启用 `stream` feature 后，`LiveHistoryCacheWriter` 可以把
 `tqsdk-stream::KlineWindow` / `TickWindow` 或 `MarketEvent` 显式写入
 `HistorySeriesCache`。K 线写入直接对齐官方 tqsdk-python 语义：不写窗口最高 id
 的可变尾 bar，只写已经完成的 bar；Tick window 则写入全部 tick，并由 append
-逻辑按 id 去重。`DataClient::from_session(...)` 默认行为不变，不会自动创建 live
-cache writer。
+逻辑按 id 去重。写入报告的 `rows_written` 同样只统计实际新增或更新的持久化
+row。`DataClient::from_session(...)` 默认行为不变，不会自动创建 live cache writer。
 
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned

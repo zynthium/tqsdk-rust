@@ -1,7 +1,8 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -159,7 +160,10 @@ pub struct HistorySeriesCache {
 
 struct HistorySeriesCacheInner {
     root_dir: PathBuf,
-    lock: Mutex<()>,
+    global_gate: RwLock<()>,
+    active_series: Mutex<HashSet<SeriesKey>>,
+    active_series_changed: Condvar,
+    range_index: Mutex<RangeIndex>,
 }
 
 struct CacheFileMeta {
@@ -168,14 +172,41 @@ struct CacheFileMeta {
     modified: SystemTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SeriesKey {
+    symbol: String,
+    duration_ns: i64,
+}
+
+impl SeriesKey {
+    fn new(symbol: &str, duration_ns: i64) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            duration_ns,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RangeIndex {
+    root_modified: Option<SystemTime>,
+    ranges: HashMap<SeriesKey, Vec<IdRange>>,
+}
+
 pub struct HistorySeriesCacheGuard<'a> {
-    _process_guard: MutexGuard<'a, ()>,
+    _global_guard: RwLockReadGuard<'a, ()>,
+    inner: &'a HistorySeriesCacheInner,
+    series_key: SeriesKey,
     lock_file: File,
 }
 
 impl Drop for HistorySeriesCacheGuard<'_> {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.lock_file);
+        if let Ok(mut active) = self.inner.active_series.lock() {
+            active.remove(&self.series_key);
+            self.inner.active_series_changed.notify_all();
+        }
     }
 }
 
@@ -215,24 +246,87 @@ fn split_contiguous_ticks(rows: Vec<Tick>) -> Vec<Vec<Tick>> {
     groups
 }
 
-fn take_latest_klines(rows: Vec<Kline>, limit: usize) -> Vec<Kline> {
-    rows.into_iter()
-        .rev()
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+fn persisted_f64_eq(left: f64, right: f64) -> bool {
+    left == right || (left.is_nan() && right.is_nan())
 }
 
-fn take_latest_ticks(rows: Vec<Tick>, limit: usize) -> Vec<Tick> {
-    rows.into_iter()
-        .rev()
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+fn persisted_kline_eq(left: &Kline, right: &Kline) -> bool {
+    left.id == right.id
+        && left.datetime == right.datetime
+        && persisted_f64_eq(left.open, right.open)
+        && persisted_f64_eq(left.high, right.high)
+        && persisted_f64_eq(left.low, right.low)
+        && persisted_f64_eq(left.close, right.close)
+        && left.volume == right.volume
+        && left.open_oi == right.open_oi
+        && left.close_oi == right.close_oi
+}
+
+fn persisted_tick_eq(left: &Tick, right: &Tick, five_level: bool) -> bool {
+    let common_fields_match = left.id == right.id
+        && left.datetime == right.datetime
+        && persisted_f64_eq(left.last_price, right.last_price)
+        && persisted_f64_eq(left.highest, right.highest)
+        && persisted_f64_eq(left.lowest, right.lowest)
+        && persisted_f64_eq(left.average, right.average)
+        && left.volume == right.volume
+        && persisted_f64_eq(left.amount, right.amount)
+        && left.open_interest == right.open_interest
+        && persisted_f64_eq(left.bid_price1, right.bid_price1)
+        && left.bid_volume1 == right.bid_volume1
+        && persisted_f64_eq(left.ask_price1, right.ask_price1)
+        && left.ask_volume1 == right.ask_volume1;
+
+    if !common_fields_match || !five_level {
+        return common_fields_match;
+    }
+
+    persisted_f64_eq(left.bid_price2, right.bid_price2)
+        && left.bid_volume2 == right.bid_volume2
+        && persisted_f64_eq(left.ask_price2, right.ask_price2)
+        && left.ask_volume2 == right.ask_volume2
+        && persisted_f64_eq(left.bid_price3, right.bid_price3)
+        && left.bid_volume3 == right.bid_volume3
+        && persisted_f64_eq(left.ask_price3, right.ask_price3)
+        && left.ask_volume3 == right.ask_volume3
+        && persisted_f64_eq(left.bid_price4, right.bid_price4)
+        && left.bid_volume4 == right.bid_volume4
+        && persisted_f64_eq(left.ask_price4, right.ask_price4)
+        && left.ask_volume4 == right.ask_volume4
+        && persisted_f64_eq(left.bid_price5, right.bid_price5)
+        && left.bid_volume5 == right.bid_volume5
+        && persisted_f64_eq(left.ask_price5, right.ask_price5)
+        && left.ask_volume5 == right.ask_volume5
+}
+
+fn changed_kline_count(existing: &[Kline], incoming: &[Kline]) -> usize {
+    let existing_by_id = existing
+        .iter()
+        .map(|row| (row.id, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    incoming
+        .iter()
+        .filter(|row| {
+            existing_by_id
+                .get(&row.id)
+                .is_none_or(|existing| !persisted_kline_eq(existing, row))
+        })
+        .count()
+}
+
+fn changed_tick_count(existing: &[Tick], incoming: &[Tick], five_level: bool) -> usize {
+    let existing_by_id = existing
+        .iter()
+        .map(|row| (row.id, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    incoming
+        .iter()
+        .filter(|row| {
+            existing_by_id
+                .get(&row.id)
+                .is_none_or(|existing| !persisted_tick_eq(existing, row, five_level))
+        })
+        .count()
 }
 
 impl HistorySeriesCache {
@@ -242,7 +336,10 @@ impl HistorySeriesCache {
         Ok(Self {
             inner: Arc::new(HistorySeriesCacheInner {
                 root_dir: canonical_or_original(&root_dir),
-                lock: Mutex::new(()),
+                global_gate: RwLock::new(()),
+                active_series: Mutex::new(HashSet::new()),
+                active_series_changed: Condvar::new(),
+                range_index: Mutex::new(RangeIndex::default()),
             }),
         })
     }
@@ -264,29 +361,102 @@ impl HistorySeriesCache {
         symbol: &str,
         duration_ns: i64,
     ) -> Result<HistorySeriesCacheGuard<'_>> {
-        let process_guard = self
+        let global_guard = self
             .inner
-            .lock
+            .global_gate
+            .read()
+            .map_err(|_| DataError::InvalidState("history series cache gate poisoned"))?;
+        let series_key = SeriesKey::new(symbol, duration_ns);
+        let mut active = self
+            .inner
+            .active_series
             .lock()
             .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+        while active.contains(&series_key) {
+            active = self
+                .inner
+                .active_series_changed
+                .wait(active)
+                .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+        }
+        active.insert(series_key.clone());
+        drop(active);
+
         fs::create_dir_all(&self.inner.root_dir)?;
-        let lock_file = OpenOptions::new()
+        let lock_file = match OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(self.lock_path(symbol, duration_ns))?;
-        lock_file.lock_exclusive()?;
+            .open(self.lock_path(symbol, duration_ns))
+        {
+            Ok(file) => file,
+            Err(err) => {
+                self.release_active_series(&series_key);
+                return Err(err.into());
+            }
+        };
+        if let Err(err) = lock_file.lock_exclusive() {
+            self.release_active_series(&series_key);
+            return Err(err.into());
+        }
         Ok(HistorySeriesCacheGuard {
-            _process_guard: process_guard,
+            _global_guard: global_guard,
+            inner: self.inner.as_ref(),
+            series_key,
             lock_file,
         })
     }
 
     pub fn cached_id_ranges(&self, symbol: &str, duration_ns: i64) -> Result<Vec<(i64, i64)>> {
-        let mut ranges = Vec::new();
+        let _guard = self
+            .inner
+            .global_gate
+            .read()
+            .map_err(|_| DataError::InvalidState("history series cache gate poisoned"))?;
+        self.cached_id_ranges_unlocked(symbol, duration_ns)
+    }
+
+    fn cached_id_ranges_unlocked(&self, symbol: &str, duration_ns: i64) -> Result<Vec<(i64, i64)>> {
+        let key = SeriesKey::new(symbol, duration_ns);
+        let root_modified = self.root_modified();
+        let mut index = self
+            .inner
+            .range_index
+            .lock()
+            .map_err(|_| DataError::InvalidState("history series cache index poisoned"))?;
+        if index.root_modified == root_modified {
+            return Ok(index.ranges.get(&key).cloned().unwrap_or_default());
+        }
+        index.ranges = self.scan_id_ranges_by_series()?;
+        index.root_modified = root_modified;
+        Ok(index.ranges.get(&key).cloned().unwrap_or_default())
+    }
+
+    fn release_active_series(&self, series_key: &SeriesKey) {
+        if let Ok(mut active) = self.inner.active_series.lock() {
+            active.remove(series_key);
+            self.inner.active_series_changed.notify_all();
+        }
+    }
+
+    fn invalidate_range_index(&self) {
+        if let Ok(mut index) = self.inner.range_index.lock() {
+            index.root_modified = None;
+            index.ranges.clear();
+        }
+    }
+
+    fn root_modified(&self) -> Option<SystemTime> {
+        fs::metadata(&self.inner.root_dir)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    }
+
+    fn scan_id_ranges_by_series(&self) -> Result<HashMap<SeriesKey, Vec<IdRange>>> {
+        let mut ranges_by_series: HashMap<SeriesKey, Vec<IdRange>> = HashMap::new();
         if !self.inner.root_dir.exists() {
-            return Ok(ranges);
+            return Ok(ranges_by_series);
         }
         for entry in fs::read_dir(&self.inner.root_dir)? {
             let entry = entry?;
@@ -295,19 +465,21 @@ impl HistorySeriesCache {
             }
             let filename = entry.file_name();
             let filename = filename.to_string_lossy();
-            let Some((file_symbol, file_duration_ns, range)) = parse_data_file_name(&filename)
-            else {
+            let Some((symbol, duration_ns, range)) = parse_data_file_name(&filename) else {
                 continue;
             };
-            if file_symbol == symbol && file_duration_ns == duration_ns {
-                if entry.metadata()?.len() == 0 {
-                    continue;
-                }
-                ranges.push(range);
+            if entry.metadata()?.len() == 0 {
+                continue;
             }
+            ranges_by_series
+                .entry(SeriesKey::new(&symbol, duration_ns))
+                .or_default()
+                .push(range);
         }
-        ranges.sort_unstable();
-        Ok(ranges)
+        for ranges in ranges_by_series.values_mut() {
+            ranges.sort_unstable();
+        }
+        Ok(ranges_by_series)
     }
 
     fn cached_segments(
@@ -361,7 +533,7 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<(i64, i64)>> {
-        let id_ranges = self.cached_id_ranges(symbol, duration_ns)?;
+        let id_ranges = self.cached_id_ranges_unlocked(symbol, duration_ns)?;
         let mut dt_ranges = self
             .cached_segments(symbol, duration_ns, &id_ranges)?
             .into_iter()
@@ -390,7 +562,7 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<(i64, i64)>> {
-        let id_ranges = self.cached_id_ranges(symbol, 0)?;
+        let id_ranges = self.cached_id_ranges_unlocked(symbol, 0)?;
         let mut dt_ranges = self
             .cached_segments(symbol, 0, &id_ranges)?
             .into_iter()
@@ -525,6 +697,7 @@ impl HistorySeriesCache {
         let range = range_from_ids(rows.iter().map(|row| row.id))?;
         let target = self.data_file_path(symbol, duration_ns, range.0, range.1);
         fs::rename(temp_path, target)?;
+        self.invalidate_range_index();
         Ok(Some(range))
     }
 
@@ -600,6 +773,7 @@ impl HistorySeriesCache {
         let range = range_from_ids(rows.iter().map(|row| row.id))?;
         let target = self.data_file_path(symbol, 0, range.0, range.1);
         fs::rename(temp_path, target)?;
+        self.invalidate_range_index();
         Ok(Some(range))
     }
 
@@ -610,14 +784,14 @@ impl HistorySeriesCache {
         rows: &[Kline],
     ) -> Result<usize> {
         let incoming = dedup_klines(rows.to_vec());
-        let rows_written = incoming.len();
         if incoming.is_empty() {
             return Ok(0);
         }
 
         let _guard = self.lock_series(symbol, duration_ns)?;
+        let mut rows_written = 0;
         for group in split_contiguous_klines(incoming) {
-            self.append_kline_group_unlocked(symbol, duration_ns, group)?;
+            rows_written += self.append_kline_group_unlocked(symbol, duration_ns, group)?;
         }
         Ok(rows_written)
     }
@@ -627,16 +801,20 @@ impl HistorySeriesCache {
         symbol: &str,
         duration_ns: i64,
         incoming: Vec<Kline>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let incoming_range = range_from_ids(incoming.iter().map(|row| row.id))?;
         let affected = self
-            .cached_id_ranges(symbol, duration_ns)?
+            .cached_id_ranges_unlocked(symbol, duration_ns)?
             .into_iter()
             .filter(|range| ranges_touch_or_overlap(*range, incoming_range))
             .collect::<Vec<_>>();
         let mut merged = self
             .read_rows_for_id_ranges(symbol, layout_for(symbol, duration_ns), &affected)?
             .into_klines();
+        let changed_count = changed_kline_count(&merged, &incoming);
+        if changed_count == 0 {
+            return Ok(0);
+        }
         merged.extend(incoming);
         let merged = dedup_klines(merged);
 
@@ -644,33 +822,37 @@ impl HistorySeriesCache {
         for group in split_contiguous_klines(merged) {
             self.write_kline_segment_unlocked(symbol, duration_ns, &group)?;
         }
-        Ok(())
+        Ok(changed_count)
     }
 
     pub fn append_tick_rows(&self, symbol: &str, rows: &[Tick]) -> Result<usize> {
         let incoming = dedup_ticks(rows.to_vec());
-        let rows_written = incoming.len();
         if incoming.is_empty() {
             return Ok(0);
         }
 
         let _guard = self.lock_series(symbol, 0)?;
+        let mut rows_written = 0;
         for group in split_contiguous_ticks(incoming) {
-            self.append_tick_group_unlocked(symbol, group)?;
+            rows_written += self.append_tick_group_unlocked(symbol, group)?;
         }
         Ok(rows_written)
     }
 
-    fn append_tick_group_unlocked(&self, symbol: &str, incoming: Vec<Tick>) -> Result<()> {
+    fn append_tick_group_unlocked(&self, symbol: &str, incoming: Vec<Tick>) -> Result<usize> {
         let incoming_range = range_from_ids(incoming.iter().map(|row| row.id))?;
         let affected = self
-            .cached_id_ranges(symbol, 0)?
+            .cached_id_ranges_unlocked(symbol, 0)?
             .into_iter()
             .filter(|range| ranges_touch_or_overlap(*range, incoming_range))
             .collect::<Vec<_>>();
         let mut merged = self
             .read_rows_for_id_ranges(symbol, layout_for(symbol, 0), &affected)?
             .into_ticks();
+        let changed_count = changed_tick_count(&merged, &incoming, tick_uses_five_levels(symbol));
+        if changed_count == 0 {
+            return Ok(0);
+        }
         merged.extend(incoming);
         let merged = dedup_ticks(merged);
 
@@ -678,7 +860,7 @@ impl HistorySeriesCache {
         for group in split_contiguous_ticks(merged) {
             self.write_tick_segment_unlocked(symbol, &group)?;
         }
-        Ok(())
+        Ok(changed_count)
     }
 
     pub fn read_kline_window(
@@ -699,7 +881,7 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<Kline>> {
-        let id_ranges = self.cached_id_ranges(symbol, duration_ns)?;
+        let id_ranges = self.cached_id_ranges_unlocked(symbol, duration_ns)?;
         let segments = self.cached_segments(symbol, duration_ns, &id_ranges)?;
         let rows = self.read_window(
             symbol,
@@ -727,7 +909,7 @@ impl HistorySeriesCache {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Vec<Tick>> {
-        let id_ranges = self.cached_id_ranges(symbol, 0)?;
+        let id_ranges = self.cached_id_ranges_unlocked(symbol, 0)?;
         let segments = self.cached_segments(symbol, 0, &id_ranges)?;
         let rows = self.read_window(
             symbol,
@@ -750,11 +932,8 @@ impl HistorySeriesCache {
         }
 
         let _guard = self.lock_series(symbol, duration_ns)?;
-        let ranges = self.cached_id_ranges(symbol, duration_ns)?;
-        let rows = self
-            .read_rows_for_id_ranges(symbol, layout_for(symbol, duration_ns), &ranges)?
-            .into_klines();
-        Ok(take_latest_klines(dedup_klines(rows), limit))
+        let ranges = self.cached_id_ranges_unlocked(symbol, duration_ns)?;
+        self.read_latest_klines_for_id_ranges(symbol, duration_ns, &ranges, limit)
     }
 
     pub fn read_latest_tick_rows(&self, symbol: &str, limit: usize) -> Result<Vec<Tick>> {
@@ -763,11 +942,8 @@ impl HistorySeriesCache {
         }
 
         let _guard = self.lock_series(symbol, 0)?;
-        let ranges = self.cached_id_ranges(symbol, 0)?;
-        let rows = self
-            .read_rows_for_id_ranges(symbol, layout_for(symbol, 0), &ranges)?
-            .into_ticks();
-        Ok(take_latest_ticks(dedup_ticks(rows), limit))
+        let ranges = self.cached_id_ranges_unlocked(symbol, 0)?;
+        self.read_latest_ticks_for_id_ranges(symbol, &ranges, limit)
     }
 
     pub fn merge_adjacent_files(&self, symbol: &str, duration_ns: i64) -> Result<()> {
@@ -780,7 +956,7 @@ impl HistorySeriesCache {
         symbol: &str,
         duration_ns: i64,
     ) -> Result<()> {
-        let ranges = self.cached_id_ranges(symbol, duration_ns)?;
+        let ranges = self.cached_id_ranges_unlocked(symbol, duration_ns)?;
         if ranges.len() <= 1 {
             return Ok(());
         }
@@ -823,6 +999,7 @@ impl HistorySeriesCache {
                 temp_path,
                 self.data_file_path(symbol, duration_ns, first_start, last_end),
             )?;
+            self.invalidate_range_index();
         }
         Ok(())
     }
@@ -830,9 +1007,9 @@ impl HistorySeriesCache {
     pub fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
         let _guard = self
             .inner
-            .lock
-            .lock()
-            .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+            .global_gate
+            .write()
+            .map_err(|_| DataError::InvalidState("history series cache gate poisoned"))?;
         let mut files = Vec::new();
         if self.inner.root_dir.exists() {
             for entry in fs::read_dir(&self.inner.root_dir)? {
@@ -858,9 +1035,9 @@ impl HistorySeriesCache {
     ) -> Result<HistorySeriesCacheMaintenanceReport> {
         let _guard = self
             .inner
-            .lock
-            .lock()
-            .map_err(|_| DataError::InvalidState("history series cache lock poisoned"))?;
+            .global_gate
+            .write()
+            .map_err(|_| DataError::InvalidState("history series cache gate poisoned"))?;
         let mut report = HistorySeriesCacheMaintenanceReport::default();
         self.evict_expired_files(retention_days, &mut report)?;
         self.evict_by_total_size(max_bytes, &mut report)?;
@@ -972,6 +1149,7 @@ impl HistorySeriesCache {
         for file in self.list_segment_files()? {
             if file.modified <= cutoff && fs::remove_file(&file.path).is_ok() {
                 report.record_removed(file.size_bytes);
+                self.invalidate_range_index();
             }
         }
         Ok(())
@@ -998,6 +1176,7 @@ impl HistorySeriesCache {
             if fs::remove_file(&file.path).is_ok() {
                 total = total.saturating_sub(file.size_bytes);
                 report.record_removed(file.size_bytes);
+                self.invalidate_range_index();
             }
         }
         Ok(())
@@ -1059,6 +1238,53 @@ impl HistorySeriesCache {
         Ok(rows)
     }
 
+    fn read_latest_klines_for_id_ranges(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+        ranges: &[IdRange],
+        limit: usize,
+    ) -> Result<Vec<Kline>> {
+        let layout = layout_for(symbol, duration_ns);
+        let mut by_id = std::collections::BTreeMap::new();
+        for &(start_id, end_id) in ranges.iter().rev() {
+            let path = self.data_file_path(symbol, duration_ns, start_id, end_id);
+            let mapped = MappedSeriesFile::open(path, layout)?;
+            for index in (0..mapped.row_count()).rev() {
+                if let storage::DecodedRow::Kline(row) = mapped.read_row(index)? {
+                    by_id.entry(row.id).or_insert(row);
+                    if by_id.len() == limit {
+                        return Ok(by_id.into_values().collect());
+                    }
+                }
+            }
+        }
+        Ok(by_id.into_values().collect())
+    }
+
+    fn read_latest_ticks_for_id_ranges(
+        &self,
+        symbol: &str,
+        ranges: &[IdRange],
+        limit: usize,
+    ) -> Result<Vec<Tick>> {
+        let layout = layout_for(symbol, 0);
+        let mut by_id = std::collections::BTreeMap::new();
+        for &(start_id, end_id) in ranges.iter().rev() {
+            let path = self.data_file_path(symbol, 0, start_id, end_id);
+            let mapped = MappedSeriesFile::open(path, layout)?;
+            for index in (0..mapped.row_count()).rev() {
+                if let storage::DecodedRow::Tick(row) = mapped.read_row(index)? {
+                    by_id.entry(row.id).or_insert(row);
+                    if by_id.len() == limit {
+                        return Ok(by_id.into_values().collect());
+                    }
+                }
+            }
+        }
+        Ok(by_id.into_values().collect())
+    }
+
     fn remove_segment_files(
         &self,
         symbol: &str,
@@ -1069,6 +1295,7 @@ impl HistorySeriesCache {
             let path = self.data_file_path(symbol, duration_ns, start_id, end_id);
             if path.exists() {
                 fs::remove_file(path)?;
+                self.invalidate_range_index();
             }
         }
         Ok(())
@@ -1106,5 +1333,51 @@ impl HistorySeriesCache {
         self.inner
             .root_dir
             .join(format!(".{symbol}.{duration_ns}.lock"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use super::HistorySeriesCache;
+
+    #[test]
+    fn in_process_locks_do_not_block_independent_series() {
+        let cache = HistorySeriesCache::open(temp_dir("independent-series-locks")).unwrap();
+        let _guard = cache.lock_series("SHFE.au2602", 60_000_000_000).unwrap();
+        let other_cache = cache.clone();
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let _other_guard = other_cache
+                .lock_series("DCE.m2601", 60_000_000_000)
+                .unwrap();
+            tx.send(()).unwrap();
+        });
+
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(()) => {}
+            Err(err) => {
+                drop(_guard);
+                let _ = handle.join();
+                panic!("independent series lock was blocked: {err}");
+            }
+        }
+        handle.join().unwrap();
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "tqsdk-data-history-series-cache-unit-{name}-{nanos}"
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap_or(dir)
     }
 }

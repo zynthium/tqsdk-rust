@@ -246,7 +246,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `HistorySeriesCache::append_kline_rows` / `append_tick_rows` 和
   `read_latest_kline_rows` / `read_latest_tick_rows` 已经落在 `tqsdk-data`，
   用于外部接入显式写入和读取最近缓存 rows；它们保持 Python mmap 文件布局，
-  不新增 manifest
+  不新增 manifest；append 只统计实际新增或更新的持久化 row，latest read
+  从尾部 segment 限量读取
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
@@ -284,7 +285,8 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   compaction/service/daemon/supervisor 编排表面，不拥有 live session、不创建
   Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
 - `LiveHistoryCacheWriter` 是 history series cache 的单进程 live bridge：
-  K 线写入跳过可变尾 bar，Tick 写入依赖 append 去重；它不提供后台任务、
+  K 线写入跳过可变尾 bar，Tick 写入依赖 append 去重，写入报告只统计实际
+  新增或更新的持久化 row；它不提供后台任务、
   durable sink runtime、跨进程 writer 管理或自动 session 绑定
 - 历史序列 mmap cache 与 Python `DataSeries` 文件格式兼容，适合迁移和交替使用；
   同目录同时写仍是 non-goal，因为 Python 官方实现自身也没有承诺同一合约周期

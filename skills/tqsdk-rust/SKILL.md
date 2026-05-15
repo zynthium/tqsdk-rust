@@ -26,6 +26,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - one-shot query 放在 `tqsdk-session`，live ref 放在 `tqsdk-wait`，事件管线放在 `tqsdk-stream`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。
 - history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)`、`DataClient::with_history_cache(...)` 或显式创建 `LiveHistoryCacheWriter` 时才生效。
 - live stream 写入 Python-compatible mmap history cache 只能通过 `tqsdk-data` 的 `stream` feature 显式 opt-in；`tqsdk-stream` 本身不读写 mmap/cache，不为未接入 cache writer 的热路径增加持久化语义。
+- `HistorySeriesCache` append 返回实际新增/更新的持久化 row 数；重复相同 row 是 no-op。latest-read API 应从尾部 segment 限量读取，而不是全量扫描所有缓存 row。
 - 官方 Python serial 的 `id` 列来自序列路径 key / 行序号，不要求 raw Kline/Tick payload 自带 `id`；Rust 解码应保持 path-key id 兼容。
 - 只有低层 runtime、自定义 facade、adapter、command 状态机、commit/cursor、hot-path `RuntimeReader` 才使用 `tqsdk-core`。
 - 所有可见状态变化都必须经过 runtime commit 和 `RuntimeReader` / `UpdateCursor`；不要发明私有状态树、本地订单 overlay 或旁路通知。

@@ -288,7 +288,7 @@ fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
     let dir = temp_dir("append-kline-idempotent");
     let cache = HistorySeriesCache::open(&dir).unwrap();
 
-    cache
+    let first_written = cache
         .append_kline_rows(
             "SHFE.au2602",
             60_000_000_000,
@@ -299,7 +299,9 @@ fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
             ],
         )
         .unwrap();
-    cache
+    assert_eq!(first_written, 2);
+
+    let second_written = cache
         .append_kline_rows(
             "SHFE.au2602",
             60_000_000_000,
@@ -309,14 +311,18 @@ fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
             ],
         )
         .unwrap();
-    cache
+    assert_eq!(second_written, 2);
+
+    let third_written = cache
         .append_kline_rows(
             "SHFE.au2602",
             60_000_000_000,
             &[kline(5, 240_000_000_000, 5.0)],
         )
         .unwrap();
-    cache
+    assert_eq!(third_written, 1);
+
+    let duplicate_written = cache
         .append_kline_rows(
             "SHFE.au2602",
             60_000_000_000,
@@ -326,6 +332,7 @@ fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
             ],
         )
         .unwrap();
+    assert_eq!(duplicate_written, 0);
 
     assert_eq!(
         cache
@@ -341,6 +348,57 @@ fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
         vec![1, 2, 3, 5]
     );
     assert_eq!(rows[1].close, 222.0);
+}
+
+#[test]
+fn append_tick_rows_counts_only_new_or_changed_persisted_rows() {
+    let dir = temp_dir("append-tick-written-count");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    assert_eq!(
+        cache
+            .append_tick_rows("SHFE.au2602", &[tick(10, 100, 10.0), tick(11, 110, 11.0)])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        cache
+            .append_tick_rows("SHFE.au2602", &[tick(10, 100, 10.0), tick(11, 110, 11.0)])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        cache
+            .append_tick_rows("SHFE.au2602", &[tick(11, 110, 111.0), tick(12, 120, 12.0)])
+            .unwrap(),
+        2
+    );
+
+    let rows = cache.read_latest_tick_rows("SHFE.au2602", 10).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert_eq!(rows[1].last_price, 111.0);
+}
+
+#[test]
+fn append_one_level_tick_rows_ignores_non_persisted_depth_fields() {
+    let dir = temp_dir("append-one-level-tick-persisted-fields");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    let mut updated = tick(10, 100, 10.0);
+    updated.bid_price2 = 999.0;
+    updated.bid_volume2 = 999;
+    updated.ask_price5 = 999.0;
+    updated.ask_volume5 = 999;
+
+    assert_eq!(
+        cache
+            .append_tick_rows("DCE.m2601", &[tick(10, 100, 10.0)])
+            .unwrap(),
+        1
+    );
+    assert_eq!(cache.append_tick_rows("DCE.m2601", &[updated]).unwrap(), 0);
 }
 
 #[test]
@@ -361,6 +419,26 @@ fn read_latest_tick_rows_returns_recent_rows_in_ascending_id_order() {
         vec![11, 12]
     );
     assert_eq!(rows[1].last_price, 120.0);
+}
+
+#[test]
+fn read_latest_kline_rows_reads_only_tail_segments_needed_for_limit() {
+    let dir = temp_dir("latest-kline-tail-only");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    std::fs::write(dir.join("SHFE.au2602.60000000000.1.2"), [1_u8, 2, 3]).unwrap();
+    cache
+        .append_kline_rows(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(100, 1000, 100.0), kline(101, 1060, 101.0)],
+        )
+        .unwrap();
+
+    let rows = cache
+        .read_latest_kline_rows("SHFE.au2602", 60_000_000_000, 1)
+        .unwrap();
+
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![101]);
 }
 
 #[test]

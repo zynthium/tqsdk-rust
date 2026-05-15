@@ -63,7 +63,7 @@ fn tick_live_writer_dedups_repeated_windows() {
     assert_eq!(first.rows_written, 2);
     assert!(!first.skipped_mutable_tail);
     assert_eq!(second.rows_seen, 2);
-    assert_eq!(second.rows_written, 2);
+    assert_eq!(second.rows_written, 0);
     assert!(!second.skipped_mutable_tail);
     let rows = cache.read_latest_tick_rows("SHFE.au2602", 10).unwrap();
     assert_eq!(
