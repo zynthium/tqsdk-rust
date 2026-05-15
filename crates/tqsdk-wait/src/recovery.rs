@@ -65,7 +65,7 @@ async fn wait_startup_recovery(
     deadline: Option<tokio::time::Instant>,
 ) -> crate::error::Result<StartupRecoveryStatus> {
     for symbol in spec.quote_symbols() {
-        api.get_quote(symbol).await?;
+        api.quote(symbol).await?;
     }
 
     loop {

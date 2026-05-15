@@ -107,7 +107,12 @@ async fn kline_handle_reads_bounded_window_without_api_argument_after_step() {
     assert_eq!(window.symbol(), "SHFE.au2602");
     assert_eq!(window.view_width(), 64);
     assert_eq!(window.len(), 2);
-    assert!(window.rows().iter().all(|row| row.id >= 100 && row.id <= 101));
+    assert!(
+        window
+            .rows()
+            .iter()
+            .all(|row| row.id >= 100 && row.id <= 101)
+    );
     assert_eq!(window.last().unwrap().close, 620.0);
 }
 
@@ -181,7 +186,12 @@ async fn tick_handle_reads_bounded_window_without_api_argument_after_step() {
     assert_eq!(window.symbol(), "SHFE.au2602");
     assert_eq!(window.view_width(), 32);
     assert_eq!(window.len(), 2);
-    assert!(window.rows().iter().all(|row| row.id >= 200 && row.id <= 201));
+    assert!(
+        window
+            .rows()
+            .iter()
+            .all(|row| row.id >= 200 && row.id <= 201)
+    );
     assert_eq!(window.last().unwrap().last_price, 618.5);
 }
 

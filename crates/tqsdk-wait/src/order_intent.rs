@@ -150,8 +150,8 @@ impl<'a> LimitOrderIntent<'a> {
         let limit_price = OrderPrice::limit(price)?;
 
         let order_id = client_order_id.as_str().to_owned();
-        let order = self.api.get_order(&self.account_id, &order_id);
-        if order.snapshot(self.api)?.is_some() {
+        let order = self.api.order(&self.account_id, &order_id);
+        if order.snapshot()?.is_some() {
             return Ok(OrderTicket::new(client_order_id, order, None, false));
         }
 
@@ -342,7 +342,7 @@ impl OrderTicket {
     }
 
     pub fn status(&self, api: &TqApi) -> crate::error::Result<OrderTicketState> {
-        let order = self.order.snapshot(api)?;
+        let order = self.order.snapshot()?;
         let command_status = self.command_status(api)?;
 
         match order {

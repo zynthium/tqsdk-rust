@@ -65,8 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert!(recovered.is_ready());
 
-    let quote = api.quote_ref("SHFE.au2602").load(&api)?;
-    let account = account.load(&api)?;
+    let quote = api.quote("SHFE.au2602").await?.load()?;
+    let account = account.load()?;
     println!(
         "ready revision={} quote={} last_price={} account={} available={}",
         recovered.revision.get(),

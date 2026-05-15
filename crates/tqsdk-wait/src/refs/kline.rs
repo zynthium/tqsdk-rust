@@ -1,23 +1,48 @@
 use tqsdk_core::{ChartId, Kline, MarketStateReadGuard, ObjectKey, StatePath};
 
-use crate::{
-    api::TqApi,
-    change::{ChangeTrackedRef, SerialReadyRef},
-    views::KlineWindow,
-};
+use crate::{change::ChangeTrackedRef, step::WaitReadHandle, views::KlineWindow};
 
 /// Handle to a subscribed kline chart plus its current materialized window.
-#[derive(Debug, Clone)]
-pub struct KlineSerialRef {
+#[derive(Clone)]
+pub struct KlineHandle {
+    reader: WaitReadHandle,
     pub(crate) symbol: String,
     pub(crate) duration_ns: i64,
     pub(crate) view_width: usize,
     pub(crate) chart_id: String,
 }
 
-impl KlineSerialRef {
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        let guard = api.driver.reader.read_market_state();
+impl std::fmt::Debug for KlineHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KlineHandle")
+            .field("symbol", &self.symbol)
+            .field("duration_ns", &self.duration_ns)
+            .field("view_width", &self.view_width)
+            .field("chart_id", &self.chart_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KlineHandle {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        symbol: String,
+        duration_ns: i64,
+        view_width: usize,
+        chart_id: String,
+    ) -> Self {
+        Self {
+            reader,
+            symbol,
+            duration_ns,
+            view_width,
+            chart_id,
+        }
+    }
+
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        let guard = self.reader.reader().read_market_state();
         let ready = guard
             .get_path(&["charts", self.chart_id.as_str(), "ready"])
             .and_then(|value| value.as_bool())
@@ -27,11 +52,11 @@ impl KlineSerialRef {
             .and_then(|value| value.as_bool())
             .unwrap_or(true);
 
-        Ok(ready && !more_data && !self.load(api)?.is_empty())
+        Ok(ready && !more_data && !self.window()?.is_empty())
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<KlineWindow> {
-        let guard = api.driver.reader.read_market_state();
+    pub fn window(&self) -> crate::error::Result<KlineWindow> {
+        let guard = self.reader.reader().read_market_state();
         let mut rows = Vec::new();
         let duration_key = self.duration_ns.to_string();
 
@@ -58,6 +83,14 @@ impl KlineSerialRef {
             rows,
         ))
     }
+
+    pub fn rows(&self) -> crate::error::Result<Vec<Kline>> {
+        Ok(self.window()?.into_rows())
+    }
+
+    pub fn completed_rows(&self) -> crate::error::Result<Vec<Kline>> {
+        Ok(self.window()?.completed_rows().to_vec())
+    }
 }
 
 fn chart_bounds(guard: &MarketStateReadGuard<'_>, chart_id: &str) -> Option<(i64, i64)> {
@@ -71,7 +104,7 @@ fn chart_bounds(guard: &MarketStateReadGuard<'_>, chart_id: &str) -> Option<(i64
     (left_id <= right_id).then_some((left_id, right_id))
 }
 
-impl ChangeTrackedRef for KlineSerialRef {
+impl ChangeTrackedRef for KlineHandle {
     fn object_key(&self) -> Option<ObjectKey> {
         Some(ObjectKey::Chart {
             chart_id: ChartId::new(self.chart_id.clone()),
@@ -94,11 +127,5 @@ impl ChangeTrackedRef for KlineSerialRef {
 
     fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
         self.visit_extra_state_paths(visit);
-    }
-}
-
-impl SerialReadyRef for KlineSerialRef {
-    fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        KlineSerialRef::is_ready(self, api)
     }
 }

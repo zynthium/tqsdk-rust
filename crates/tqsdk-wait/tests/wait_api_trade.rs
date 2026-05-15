@@ -46,7 +46,7 @@ async fn insert_order_returns_order_ref_without_local_overlay() {
         .await
         .unwrap();
 
-    assert!(!order.is_ready(&api).unwrap());
+    assert!(!order.is_ready().unwrap());
 
     let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
@@ -76,7 +76,7 @@ async fn login_trade_account_submits_typed_login_and_waits_for_account_ready() {
         .await
         .unwrap();
 
-    assert_eq!(account.load(&api).unwrap().currency, "CNY");
+    assert_eq!(account.load().unwrap().currency, "CNY");
 
     let dispatches = api.session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);
@@ -319,7 +319,7 @@ async fn send_once_returns_existing_order_without_resubmit() {
     assert!(!ticket.was_submitted());
     assert!(ticket.command_id().is_none());
     assert_eq!(
-        ticket.order().snapshot(&api).unwrap().unwrap().order_id,
+        ticket.order().snapshot().unwrap().unwrap().order_id,
         "strategy-a-open-001"
     );
     assert!(
@@ -545,22 +545,19 @@ async fn account_position_order_and_trade_refs_decode_from_state_tree() {
     let mut api = support::seeded_api();
     support::seed_trade_snapshot(&mut api, "sim", "SHFE.ao2602");
 
-    assert_eq!(api.get_account("sim").load(&api).unwrap().currency, "CNY");
+    assert_eq!(api.account("sim").load().unwrap().currency, "CNY");
     assert_eq!(
-        api.get_position("sim", "SHFE.ao2602")
-            .load(&api)
+        api.position("sim", "SHFE.ao2602")
+            .load()
             .unwrap()
             .instrument_id,
         "ao2602"
     );
     assert_eq!(
-        api.get_order("sim", "order-1").load(&api).unwrap().status,
+        api.order("sim", "order-1").load().unwrap().status,
         "FINISHED"
     );
-    assert_eq!(
-        api.get_trade("sim", "trade-1").load(&api).unwrap().volume,
-        1
-    );
+    assert_eq!(api.trade("sim", "trade-1").load().unwrap().volume, 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -569,29 +566,29 @@ async fn extended_trade_refs_decode_from_state_tree() {
     support::seed_trade_extended_snapshot(&mut api, "sim", "SHFE.ao2602");
 
     assert_eq!(
-        api.get_pre_insert_order("sim", "pre-1")
-            .load(&api)
+        api.pre_insert_order("sim", "pre-1")
+            .load()
             .unwrap()
             .pre_margin,
         1234.5
     );
     assert!(
-        api.get_risk_management_rule("sim", "SSE")
-            .load(&api)
+        api.risk_management_rule("sim", "SSE")
+            .load()
             .unwrap()
             .enable
     );
     assert_eq!(
-        api.get_risk_management_data("sim", "SHFE.ao2602")
-            .load(&api)
+        api.risk_management_data("sim", "SHFE.ao2602")
+            .load()
             .unwrap()
             .trade_position_ratio
             .trade_units,
         12
     );
     assert_eq!(
-        api.get_settlement_info("sim", "20260420")
-            .load(&api)
+        api.settlement_info("sim", "20260420")
+            .load()
             .unwrap()
             .content,
         "line-1\nline-2"
@@ -604,7 +601,7 @@ async fn notification_ref_decodes_from_state_tree() {
     support::seed_notification_commit(&mut api, "notify-1");
 
     assert_eq!(
-        api.get_notification("notify-1").load(&api).unwrap().content,
+        api.notification("notify-1").load().unwrap().content,
         "connected"
     );
 }
@@ -615,29 +612,29 @@ async fn security_trade_refs_decode_from_state_tree() {
     support::seed_security_trade_snapshot(&mut api, "stock-sim", "SSE.600000");
 
     assert_eq!(
-        api.get_security_account("stock-sim")
-            .load(&api)
+        api.security_account("stock-sim")
+            .load()
             .unwrap()
             .market_value,
         12345.0
     );
     assert_eq!(
-        api.get_security_position("stock-sim", "SSE.600000")
-            .load(&api)
+        api.security_position("stock-sim", "SSE.600000")
+            .load()
             .unwrap()
             .volume,
         100
     );
     assert_eq!(
-        api.get_security_order("stock-sim", "stock-order-1")
-            .load(&api)
+        api.security_order("stock-sim", "stock-order-1")
+            .load()
             .unwrap()
             .limit_price,
         123.45
     );
     assert_eq!(
-        api.get_security_trade("stock-sim", "stock-trade-1")
-            .load(&api)
+        api.security_trade("stock-sim", "stock-trade-1")
+            .load()
             .unwrap()
             .balance,
         12345.0
@@ -731,7 +728,7 @@ async fn cancel_order_and_confirm_settlement_submit_trade_commands() {
 #[tokio::test(flavor = "current_thread")]
 async fn order_ref_helpers_wait_cancel_remaining_and_terminal_state() {
     let mut api = support::seeded_api();
-    let order = api.get_order("sim", "order-1");
+    let order = api.order("sim", "order-1");
 
     support::seed_order_update(
         &mut api,

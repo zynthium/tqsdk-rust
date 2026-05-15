@@ -30,7 +30,7 @@
 
 use std::time::Duration;
 
-use tqsdk_wait::TqApiBuilder;
+use tqsdk_wait::{QuoteRef, TqApi, TqApiBuilder};
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())
@@ -46,8 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .futures_market()
         .build()
         .await?;
+    let quote = api.quote(&symbol).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let quote = api.quote_snapshot(&symbol, Some(deadline)).await?;
+    let quote = wait_quote_ready(&mut api, &quote, deadline).await?;
 
     println!(
         "symbol={} datetime={} last_price={}",
@@ -55,4 +56,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
+}
+
+async fn wait_quote_ready(
+    api: &mut TqApi,
+    quote: &QuoteRef,
+    deadline: tokio::time::Instant,
+) -> Result<tqsdk_core::Quote, Box<dyn std::error::Error>> {
+    while let Some(step) = api.step_until(Some(deadline)).await? {
+        if step.is_changing(quote)
+            && let Ok(snapshot) = quote.load()
+            && !snapshot.datetime.is_empty()
+        {
+            return Ok(snapshot);
+        }
+    }
+
+    Err("quote snapshot not ready".into())
 }

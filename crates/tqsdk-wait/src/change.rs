@@ -12,10 +12,6 @@ pub trait ChangeTrackedRef {
     fn visit_field_state_paths(&self, _visit: &mut dyn FnMut(StatePath)) {}
 }
 
-pub trait SerialReadyRef {
-    fn is_ready(&self, api: &crate::api::TqApi) -> crate::error::Result<bool>;
-}
-
 pub(crate) fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool {
     if let Some(key) = target.object_key()
         && changes.object_hits.contains(&key)

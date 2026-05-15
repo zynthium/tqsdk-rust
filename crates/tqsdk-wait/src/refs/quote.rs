@@ -1,36 +1,42 @@
 use tqsdk_core::{ObjectKey, Quote, StatePath, Symbol};
 
-use crate::api::TqApi;
 use crate::change::ChangeTrackedRef;
+use crate::step::WaitReadHandle;
 
 /// Lightweight handle to `quotes/{symbol}` in the runtime state tree.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuoteRef {
+    reader: WaitReadHandle,
     symbol: Symbol,
 }
 
 impl QuoteRef {
-    #[must_use]
-    pub fn new(symbol: impl Into<String>) -> Self {
+    pub(crate) fn new(reader: WaitReadHandle, symbol: impl Into<String>) -> Self {
         Self {
+            reader,
             symbol: Symbol::new(symbol.into()),
         }
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        self.symbol.as_str()
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Quote>> {
-        api.driver
-            .reader
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
+    }
+
+    pub fn snapshot(&self) -> crate::error::Result<Option<Quote>> {
+        self.reader
+            .reader()
             .read_market_state()
             .quote(&self.symbol)
             .map_err(Into::into)
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<Quote> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<Quote> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "quote not ready",
             ))

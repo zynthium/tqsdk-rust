@@ -21,23 +21,23 @@ async fn live_quote_wait_smoke() {
         .await
         .expect("live wait api should build");
     let quote = api
-        .get_quote(symbol.as_str())
+        .quote(symbol.as_str())
         .await
-        .expect("get_quote should subscribe successfully");
+        .expect("quote should subscribe successfully");
 
     for _ in 0..12 {
-        let ready = api
-            .wait_update(Some(tokio::time::Instant::now() + Duration::from_secs(5)))
+        let Some(step) = api
+            .step_until(Some(tokio::time::Instant::now() + Duration::from_secs(5)))
             .await
-            .expect("wait_update should not fail");
-        if !ready {
+            .expect("step should not fail")
+        else {
             continue;
-        }
-        if !api.is_changing(&quote).expect("is_changing should succeed") {
+        };
+        if !step.is_changing(&quote) {
             continue;
         }
 
-        let snapshot = quote.load(&api).expect("quote snapshot should decode");
+        let snapshot = quote.load().expect("quote snapshot should decode");
         assert!(!snapshot.instrument_id.is_empty());
         assert!(!snapshot.datetime.is_empty());
         return;
@@ -80,23 +80,23 @@ async fn live_quote_wait_with_session_query_smoke() {
     assert!(!instrument.instrument_id.is_empty());
 
     let quote = api
-        .get_quote(symbol.as_str())
+        .quote(symbol.as_str())
         .await
-        .expect("get_quote should subscribe successfully");
+        .expect("quote should subscribe successfully");
 
     for _ in 0..12 {
-        let ready = api
-            .wait_update(Some(tokio::time::Instant::now() + Duration::from_secs(5)))
+        let Some(step) = api
+            .step_until(Some(tokio::time::Instant::now() + Duration::from_secs(5)))
             .await
-            .expect("wait_update should not fail");
-        if !ready {
+            .expect("step should not fail")
+        else {
             continue;
-        }
-        if !api.is_changing(&quote).expect("is_changing should succeed") {
+        };
+        if !step.is_changing(&quote) {
             continue;
         }
 
-        let snapshot = quote.load(&api).expect("quote snapshot should decode");
+        let snapshot = quote.load().expect("quote snapshot should decode");
         assert!(!snapshot.instrument_id.is_empty());
         assert!(!snapshot.datetime.is_empty());
         return;

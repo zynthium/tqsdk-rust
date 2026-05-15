@@ -56,21 +56,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(tokio::time::Instant::now() + Duration::from_secs(30)),
         )
         .await?;
-    let position = api.get_position(account_id.as_str(), symbol.as_str());
+    let position = api.position(account_id.as_str(), symbol.as_str());
 
-    println!("account balance={}", account.load(&api)?.balance);
+    println!("account balance={}", account.load()?.balance);
 
     loop {
-        if !api.wait_update(None).await? {
+        let Some(step) = api.step().await? else {
             continue;
+        };
+
+        if step.is_changing(&account) {
+            println!("available={}", account.load()?.available);
         }
 
-        if api.is_changing(&account)? {
-            println!("available={}", account.load(&api)?.available);
-        }
-
-        if api.is_changing(&position)? {
-            let snapshot = position.load(&api)?;
+        if step.is_changing(&position) {
+            let snapshot = position.load()?;
             println!("{} pos={}", symbol, snapshot.pos);
         }
     }

@@ -11,13 +11,12 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 
-use crate::change::{ChangeTrackedRef, SerialReadyRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
-    AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
-    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
-    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
+    AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
+    RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
     TradingStatusRef,
 };
 use crate::step::{WaitReadHandle, WaitStep};
@@ -151,84 +150,75 @@ impl TqApi {
     }
 
     #[must_use]
-    pub fn quote_ref(&self, symbol: &str) -> QuoteRef {
-        QuoteRef::new(symbol)
+    pub fn account(&self, account_id: &str) -> AccountRef {
+        AccountRef::new(self.read_handle(), account_id)
     }
 
     #[must_use]
-    pub fn get_account(&self, account_id: &str) -> AccountRef {
-        AccountRef::new(account_id)
+    pub fn position(&self, account_id: &str, symbol: &str) -> PositionRef {
+        PositionRef::new(self.read_handle(), account_id, symbol)
     }
 
     #[must_use]
-    pub fn get_position(&self, account_id: &str, symbol: &str) -> PositionRef {
-        PositionRef::new(account_id, symbol)
+    pub fn order(&self, account_id: &str, order_id: &str) -> OrderRef {
+        OrderRef::new(self.read_handle(), account_id, order_id)
     }
 
     #[must_use]
-    pub fn get_order(&self, account_id: &str, order_id: &str) -> OrderRef {
-        OrderRef::new(account_id, order_id)
+    pub fn pre_insert_order(&self, account_id: &str, order_id: &str) -> PreInsertOrderRef {
+        PreInsertOrderRef::new(self.read_handle(), account_id, order_id)
     }
 
     #[must_use]
-    pub fn get_pre_insert_order(&self, account_id: &str, order_id: &str) -> PreInsertOrderRef {
-        PreInsertOrderRef::new(account_id, order_id)
+    pub fn trade(&self, account_id: &str, trade_id: &str) -> TradeRef {
+        TradeRef::new(self.read_handle(), account_id, trade_id)
     }
 
     #[must_use]
-    pub fn get_trade(&self, account_id: &str, trade_id: &str) -> TradeRef {
-        TradeRef::new(account_id, trade_id)
-    }
-
-    #[must_use]
-    pub fn get_risk_management_rule(
+    pub fn risk_management_rule(
         &self,
         account_id: &str,
         exchange_id: &str,
     ) -> RiskManagementRuleRef {
-        RiskManagementRuleRef::new(account_id, exchange_id)
+        RiskManagementRuleRef::new(self.read_handle(), account_id, exchange_id)
     }
 
     #[must_use]
-    pub fn get_risk_management_data(
-        &self,
-        account_id: &str,
-        symbol: &str,
-    ) -> RiskManagementDataRef {
-        RiskManagementDataRef::new(account_id, symbol)
+    pub fn risk_management_data(&self, account_id: &str, symbol: &str) -> RiskManagementDataRef {
+        RiskManagementDataRef::new(self.read_handle(), account_id, symbol)
     }
 
     #[must_use]
-    pub fn get_settlement_info(&self, account_id: &str, trading_day: &str) -> SettlementInfoRef {
-        SettlementInfoRef::new(account_id, trading_day)
+    pub fn settlement_info(&self, account_id: &str, trading_day: &str) -> SettlementInfoRef {
+        SettlementInfoRef::new(self.read_handle(), account_id, trading_day)
     }
 
     #[must_use]
-    pub fn get_notification(&self, notification_id: &str) -> NotificationRef {
-        NotificationRef::new(notification_id)
+    pub fn notification(&self, notification_id: &str) -> NotificationRef {
+        NotificationRef::new(self.read_handle(), notification_id)
     }
 
     #[must_use]
-    pub fn get_security_account(&self, account_id: &str) -> SecurityAccountRef {
-        SecurityAccountRef::new(account_id)
+    pub fn security_account(&self, account_id: &str) -> SecurityAccountRef {
+        SecurityAccountRef::new(self.read_handle(), account_id)
     }
 
     #[must_use]
-    pub fn get_security_position(&self, account_id: &str, symbol: &str) -> SecurityPositionRef {
-        SecurityPositionRef::new(account_id, symbol)
+    pub fn security_position(&self, account_id: &str, symbol: &str) -> SecurityPositionRef {
+        SecurityPositionRef::new(self.read_handle(), account_id, symbol)
     }
 
     #[must_use]
-    pub fn get_security_order(&self, account_id: &str, order_id: &str) -> SecurityOrderRef {
-        SecurityOrderRef::new(account_id, order_id)
+    pub fn security_order(&self, account_id: &str, order_id: &str) -> SecurityOrderRef {
+        SecurityOrderRef::new(self.read_handle(), account_id, order_id)
     }
 
     #[must_use]
-    pub fn get_security_trade(&self, account_id: &str, trade_id: &str) -> SecurityTradeRef {
-        SecurityTradeRef::new(account_id, trade_id)
+    pub fn security_trade(&self, account_id: &str, trade_id: &str) -> SecurityTradeRef {
+        SecurityTradeRef::new(self.read_handle(), account_id, trade_id)
     }
 
-    pub async fn get_quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {
+    pub async fn quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {
         self.driver
             .session
             .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
@@ -237,37 +227,14 @@ impl TqApi {
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
-        Ok(self.quote_ref(symbol))
-    }
-
-    pub async fn quote_snapshot(
-        &mut self,
-        symbol: &str,
-        deadline: Option<tokio::time::Instant>,
-    ) -> crate::error::Result<tqsdk_core::Quote> {
-        let quote = self.get_quote(symbol).await?;
-        self.wait_until_ready_until_for_test(
-            |api| {
-                Ok(quote
-                    .snapshot(api)?
-                    .is_some_and(|quote| !quote.datetime.is_empty()))
-            },
-            deadline,
-            "quote snapshot not ready",
-        )
-        .await?;
-
-        quote.load(self)
+        Ok(QuoteRef::new(self.read_handle(), symbol))
     }
 
     pub fn startup_recovery(&mut self) -> crate::recovery::WaitStartupRecovery<'_> {
         crate::recovery::WaitStartupRecovery::new(self)
     }
 
-    pub async fn get_trading_status(
-        &mut self,
-        symbol: &str,
-    ) -> crate::error::Result<TradingStatusRef> {
+    pub async fn trading_status(&mut self, symbol: &str) -> crate::error::Result<TradingStatusRef> {
         self.driver
             .session
             .submit(RuntimeCommand::Market(
@@ -278,15 +245,15 @@ impl TqApi {
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
-        Ok(TradingStatusRef::new(symbol))
+        Ok(TradingStatusRef::new(self.read_handle(), symbol))
     }
 
-    pub async fn get_kline_serial(
+    pub async fn kline(
         &mut self,
         symbol: &str,
         duration: Duration,
         data_length: usize,
-    ) -> crate::error::Result<KlineSerialRef> {
+    ) -> crate::error::Result<KlineHandle> {
         let data_length = normalize_serial_data_length(data_length)?;
         let duration_ns = duration_to_ns(duration)?;
         let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{data_length}");
@@ -310,23 +277,23 @@ impl TqApi {
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
-        let serial = KlineSerialRef {
-            symbol: symbol.to_string(),
+        let serial = KlineHandle::new(
+            self.read_handle(),
+            symbol.to_string(),
             duration_ns,
-            view_width: data_length,
+            data_length,
             chart_id,
-        };
-        self.wait_until_ready_for_test(|api| serial.is_ready(api))
-            .await?;
+        );
+        self.wait_until_ready(|| serial.is_ready()).await?;
 
         Ok(serial)
     }
 
-    pub async fn get_tick_serial(
+    pub async fn tick(
         &mut self,
         symbol: &str,
         data_length: usize,
-    ) -> crate::error::Result<TickSerialRef> {
+    ) -> crate::error::Result<TickHandle> {
         let data_length = normalize_serial_data_length(data_length)?;
         let chart_id = format!("wait-tick-{symbol}-{data_length}");
 
@@ -349,13 +316,13 @@ impl TqApi {
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
-        let serial = TickSerialRef {
-            symbol: symbol.to_string(),
-            view_width: data_length,
+        let serial = TickHandle::new(
+            self.read_handle(),
+            symbol.to_string(),
+            data_length,
             chart_id,
-        };
-        self.wait_until_ready_for_test(|api| serial.is_ready(api))
-            .await?;
+        );
+        self.wait_until_ready(|| serial.is_ready()).await?;
 
         Ok(serial)
     }
@@ -385,13 +352,9 @@ impl TqApi {
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
-        let account = self.get_account(account_id);
-        self.wait_until_ready_until_for_test(
-            |api| account.is_ready(api),
-            deadline,
-            "trade account not ready",
-        )
-        .await?;
+        let account = self.account(account_id);
+        self.wait_until_ready_until(|| account.is_ready(), deadline, "trade account not ready")
+            .await?;
 
         Ok(account)
     }
@@ -418,7 +381,7 @@ impl TqApi {
         })
         .await?;
 
-        Ok(self.get_order(account_id, order_id.as_str()))
+        Ok(self.order(account_id, order_id.as_str()))
     }
 
     pub fn limit_order(
@@ -507,55 +470,31 @@ impl TqApi {
         Ok(())
     }
 
-    pub fn is_changing(&self, target: &impl ChangeTrackedRef) -> crate::error::Result<bool> {
-        Ok(self
-            .driver
-            .last_commit
-            .as_ref()
-            .is_some_and(|commit| matches_any(&commit.changes, target)))
-    }
-
-    pub fn is_changing_fields(
-        &self,
-        target: &impl ChangeTrackedRef,
-        fields: &[&str],
-    ) -> crate::error::Result<bool> {
-        Ok(self
-            .driver
-            .last_commit
-            .as_ref()
-            .is_some_and(|commit| matches_fields(&commit.changes, target, fields)))
-    }
-
-    pub fn is_serial_ready(&self, serial: &impl SerialReadyRef) -> crate::error::Result<bool> {
-        serial.is_ready(self)
-    }
-
-    async fn wait_until_ready_for_test<F>(&mut self, mut ready: F) -> crate::error::Result<()>
+    async fn wait_until_ready<F>(&mut self, mut ready: F) -> crate::error::Result<()>
     where
-        F: FnMut(&Self) -> crate::error::Result<bool>,
+        F: FnMut() -> crate::error::Result<bool>,
     {
-        self.wait_until_ready_until_for_test(&mut ready, None, "object not ready")
+        self.wait_until_ready_until(&mut ready, None, "object not ready")
             .await
     }
 
-    async fn wait_until_ready_until_for_test<F>(
+    async fn wait_until_ready_until<F>(
         &mut self,
         mut ready: F,
         deadline: Option<tokio::time::Instant>,
         not_ready_message: &'static str,
     ) -> crate::error::Result<()>
     where
-        F: FnMut(&Self) -> crate::error::Result<bool>,
+        F: FnMut() -> crate::error::Result<bool>,
     {
-        if ready(self)? {
+        if ready()? {
             return Ok(());
         }
 
         let previous_last_commit = self.driver.last_commit.clone();
         let mut replay = Vec::new();
 
-        while !ready(self)? {
+        while !ready()? {
             if !self.wait_update(deadline).await? {
                 for commit in replay.into_iter().rev() {
                     self.driver.deferred_commits.push_front(commit);

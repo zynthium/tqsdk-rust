@@ -71,33 +71,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .futures_market()
         .build()
         .await?;
-    let trading_status = api.get_trading_status(&symbol).await?;
+    let trading_status = api.trading_status(&symbol).await?;
     let kline_serial = api
-        .get_kline_serial(&symbol, Duration::from_secs(kline_seconds), serial_length)
+        .kline(&symbol, Duration::from_secs(kline_seconds), serial_length)
         .await?;
-    let tick_serial = api.get_tick_serial(&symbol, serial_length).await?;
+    let tick_serial = api.tick(&symbol, serial_length).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
     while tokio::time::Instant::now() < deadline {
-        if !api.wait_update(Some(deadline)).await? {
+        let Some(step) = api.step_until(Some(deadline)).await? else {
             continue;
-        }
+        };
 
-        if api.is_changing(&trading_status)?
-            || api.is_changing_fields(&trading_status, &["trade_status"])?
+        if step.is_changing(&trading_status)
+            || step.is_changing_fields(&trading_status, &["trade_status"])
         {
-            let status = trading_status.load(&api)?;
+            let status = trading_status.load()?;
             println!(
                 "trading_status symbol={} epoch={:?} trade_status={}",
                 status.symbol, status.epoch, status.trade_status
             );
         }
 
-        if api.is_serial_ready(&kline_serial)?
-            && (api.is_changing(&kline_serial)?
-                || api.is_changing_fields(&kline_serial, &["close"])?)
+        if kline_serial.is_ready()?
+            && (step.is_changing(&kline_serial)
+                || step.is_changing_fields(&kline_serial, &["close"]))
         {
-            let window = kline_serial.load(&api)?;
+            let window = kline_serial.window()?;
             let mutable_tail = window.last();
             let last_completed = window.last_completed();
             println!(
@@ -112,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if api.is_serial_ready(&tick_serial)?
-            && (api.is_changing(&tick_serial)?
-                || api.is_changing_fields(&tick_serial, &["last_price"])?)
+        if tick_serial.is_ready()?
+            && (step.is_changing(&tick_serial)
+                || step.is_changing_fields(&tick_serial, &["last_price"]))
         {
-            let window = tick_serial.load(&api)?;
+            let window = tick_serial.window()?;
             let last = window.last();
             println!(
                 "tick_window symbol={} len={} last_id={:?} last_price={:?}",

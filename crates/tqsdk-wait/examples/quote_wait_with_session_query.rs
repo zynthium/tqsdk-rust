@@ -26,15 +26,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instrument.instrument_id, instrument.ins_class, instrument.price_tick
     );
 
-    let quote = api.get_quote(&symbol).await?;
+    let quote = api.quote(&symbol).await?;
 
     loop {
-        if !api.wait_update(None).await? {
+        let Some(step) = api.step().await? else {
             continue;
-        }
+        };
 
-        if api.is_changing(&quote)? {
-            let snapshot = quote.load(&api)?;
+        if step.is_changing(&quote) {
+            let snapshot = quote.load()?;
             println!("{} {}", snapshot.datetime, snapshot.last_price);
             if wait_once {
                 break;

@@ -71,10 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    let notification = api.get_notification(notification_id.as_str());
-    let settlement = api.get_settlement_info(account_id.as_str(), trading_day.as_str());
-    let risk_rule = api.get_risk_management_rule(account_id.as_str(), exchange_id.as_str());
-    let risk_data = api.get_risk_management_data(account_id.as_str(), symbol.as_str());
+    let notification = api.notification(notification_id.as_str());
+    let settlement = api.settlement_info(account_id.as_str(), trading_day.as_str());
+    let risk_rule = api.risk_management_rule(account_id.as_str(), exchange_id.as_str());
+    let risk_data = api.risk_management_data(account_id.as_str(), symbol.as_str());
 
     println!(
         "watching trade/system refs account={} trading_day={} exchange={} symbol={} notification={}",
@@ -84,24 +84,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline {
-        if !api
-            .wait_update(Some(tokio::time::Instant::now() + Duration::from_secs(1)))
+        let Some(step) = api
+            .step_until(Some(tokio::time::Instant::now() + Duration::from_secs(1)))
             .await?
-        {
+        else {
             continue;
-        }
+        };
 
-        if api.is_changing(&notification)? {
-            println!("notification={:?}", notification.snapshot(&api)?);
+        if step.is_changing(&notification) {
+            println!("notification={:?}", notification.snapshot()?);
         }
-        if api.is_changing(&settlement)? {
-            println!("settlement_ready={}", settlement.is_ready(&api)?);
+        if step.is_changing(&settlement) {
+            println!("settlement_ready={}", settlement.is_ready()?);
         }
-        if api.is_changing(&risk_rule)? {
-            println!("risk_rule_ready={}", risk_rule.is_ready(&api)?);
+        if step.is_changing(&risk_rule) {
+            println!("risk_rule_ready={}", risk_rule.is_ready()?);
         }
-        if api.is_changing(&risk_data)? {
-            println!("risk_data_snapshot={:?}", risk_data.snapshot(&api)?);
+        if step.is_changing(&risk_data) {
+            println!("risk_data_snapshot={:?}", risk_data.snapshot()?);
         }
     }
 

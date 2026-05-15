@@ -4,46 +4,47 @@ use tqsdk_core::{
     RiskManagementData, RiskManagementRule, SettlementInfo, StatePath, Symbol, Trade, TradeId,
 };
 
-use crate::{api::TqApi, change::ChangeTrackedRef};
+use crate::{api::TqApi, change::ChangeTrackedRef, step::WaitReadHandle};
 
 fn decode_optional<T: DeserializeOwned>(
-    api: &TqApi,
+    reader: &WaitReadHandle,
     path: &[&str],
 ) -> crate::error::Result<Option<T>> {
-    api.driver
-        .reader
+    reader
+        .reader()
         .read_trade_state()
         .decode_path::<T>(path)
         .map_err(Into::into)
 }
 
 /// Lightweight handle to `trade/{account_id}/accounts/CNY`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AccountRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
 }
 
 impl AccountRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>) -> Self {
+    pub(crate) fn new(reader: WaitReadHandle, account_id: impl Into<String>) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<Account> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<Account> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "account not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Account>> {
-        decode_optional(api, &[self.account_id.as_str(), "accounts", "CNY"])
+    pub fn snapshot(&self) -> crate::error::Result<Option<Account>> {
+        decode_optional(&self.reader, &[self.account_id.as_str(), "accounts", "CNY"])
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -60,37 +61,42 @@ impl ChangeTrackedRef for AccountRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/positions/{symbol}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PositionRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     symbol: Symbol,
 }
 
 impl PositionRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, symbol: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        symbol: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             symbol: Symbol::new(symbol.into()),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<Position> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<Position> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "position not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Position>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<Position>> {
         decode_optional(
-            api,
+            &self.reader,
             &[self.account_id.as_str(), "positions", self.symbol.as_str()],
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -113,31 +119,36 @@ impl ChangeTrackedRef for PositionRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/pre_insert_orders/{order_id}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreInsertOrderRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     order_id: OrderId,
 }
 
 impl PreInsertOrderRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, order_id: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        order_id: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             order_id: OrderId::new(order_id.into()),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<PreInsertOrder> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<PreInsertOrder> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "pre-insert order not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<PreInsertOrder>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<PreInsertOrder>> {
         decode_optional(
-            api,
+            &self.reader,
             &[
                 self.account_id.as_str(),
                 "pre_insert_orders",
@@ -146,8 +157,8 @@ impl PreInsertOrderRef {
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -170,16 +181,31 @@ impl ChangeTrackedRef for PreInsertOrderRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/orders/{order_id}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OrderRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     order_id: OrderId,
 }
 
+impl std::fmt::Debug for OrderRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OrderRef")
+            .field("account_id", &self.account_id)
+            .field("order_id", &self.order_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl OrderRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, order_id: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        order_id: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             order_id: OrderId::new(order_id.into()),
         }
@@ -195,19 +221,19 @@ impl OrderRef {
         self.order_id.as_str()
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Order>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<Order>> {
         decode_optional(
-            api,
+            &self.reader,
             &[self.account_id.as_str(), "orders", self.order_id.as_str()],
         )
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<Order> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<Order> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "order not ready",
             ))
@@ -219,7 +245,7 @@ impl OrderRef {
     }
 
     pub async fn cancel_remaining(&self, api: &mut TqApi) -> crate::error::Result<()> {
-        if let Some(order) = self.snapshot(api)?
+        if let Some(order) = self.snapshot()?
             && (order.volume_left <= 0 || order.lifecycle.is_terminal())
         {
             return Ok(());
@@ -259,7 +285,7 @@ impl OrderRef {
         deadline: Option<tokio::time::Instant>,
     ) -> crate::error::Result<Order> {
         loop {
-            if let Some(order) = self.snapshot(api)? {
+            if let Some(order) = self.snapshot()? {
                 if is_partially_filled(&order) {
                     return Ok(order);
                 }
@@ -284,7 +310,7 @@ impl OrderRef {
         deadline: Option<tokio::time::Instant>,
     ) -> crate::error::Result<Order> {
         loop {
-            if let Some(order) = self.snapshot(api)?
+            if let Some(order) = self.snapshot()?
                 && order.lifecycle.is_terminal()
             {
                 return Ok(order);
@@ -325,37 +351,42 @@ impl ChangeTrackedRef for OrderRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/trades/{trade_id}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TradeRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     trade_id: TradeId,
 }
 
 impl TradeRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, trade_id: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        trade_id: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             trade_id: TradeId::new(trade_id.into()),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<Trade> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<Trade> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "trade not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<Trade>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<Trade>> {
         decode_optional(
-            api,
+            &self.reader,
             &[self.account_id.as_str(), "trades", self.trade_id.as_str()],
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -378,31 +409,36 @@ impl ChangeTrackedRef for TradeRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/risk_management_rule/{exchange_id}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RiskManagementRuleRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     exchange_id: String,
 }
 
 impl RiskManagementRuleRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, exchange_id: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        exchange_id: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             exchange_id: exchange_id.into(),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<RiskManagementRule> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<RiskManagementRule> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "risk management rule not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<RiskManagementRule>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<RiskManagementRule>> {
         decode_optional(
-            api,
+            &self.reader,
             &[
                 self.account_id.as_str(),
                 "risk_management_rule",
@@ -411,8 +447,8 @@ impl RiskManagementRuleRef {
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -435,31 +471,36 @@ impl ChangeTrackedRef for RiskManagementRuleRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/risk_management_data/{symbol}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RiskManagementDataRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     symbol: Symbol,
 }
 
 impl RiskManagementDataRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, symbol: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        symbol: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             symbol: Symbol::new(symbol.into()),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<RiskManagementData> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<RiskManagementData> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "risk management data not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<RiskManagementData>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<RiskManagementData>> {
         decode_optional(
-            api,
+            &self.reader,
             &[
                 self.account_id.as_str(),
                 "risk_management_data",
@@ -468,8 +509,8 @@ impl RiskManagementDataRef {
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 
@@ -492,31 +533,36 @@ impl ChangeTrackedRef for RiskManagementDataRef {
 }
 
 /// Lightweight handle to `trade/{account_id}/his_settlements/{trading_day}`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SettlementInfoRef {
+    reader: WaitReadHandle,
     account_id: AccountId,
     trading_day: String,
 }
 
 impl SettlementInfoRef {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>, trading_day: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        account_id: impl Into<String>,
+        trading_day: impl Into<String>,
+    ) -> Self {
         Self {
+            reader,
             account_id: AccountId::new(account_id.into()),
             trading_day: trading_day.into(),
         }
     }
 
-    pub fn load(&self, api: &TqApi) -> crate::error::Result<SettlementInfo> {
-        self.snapshot(api)?
+    pub fn load(&self) -> crate::error::Result<SettlementInfo> {
+        self.snapshot()?
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "settlement info not ready",
             ))
     }
 
-    pub fn snapshot(&self, api: &TqApi) -> crate::error::Result<Option<SettlementInfo>> {
+    pub fn snapshot(&self) -> crate::error::Result<Option<SettlementInfo>> {
         decode_optional(
-            api,
+            &self.reader,
             &[
                 self.account_id.as_str(),
                 "his_settlements",
@@ -525,8 +571,8 @@ impl SettlementInfoRef {
         )
     }
 
-    pub fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
-        Ok(self.snapshot(api)?.is_some())
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        Ok(self.snapshot()?.is_some())
     }
 }
 

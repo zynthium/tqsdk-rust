@@ -70,10 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    let account = api.get_security_account(account_id.as_str());
-    let position = api.get_security_position(account_id.as_str(), symbol.as_str());
-    let order = api.get_security_order(account_id.as_str(), order_id.as_str());
-    let trade = api.get_security_trade(account_id.as_str(), trade_id.as_str());
+    let account = api.security_account(account_id.as_str());
+    let position = api.security_position(account_id.as_str(), symbol.as_str());
+    let order = api.security_order(account_id.as_str(), order_id.as_str());
+    let trade = api.security_trade(account_id.as_str(), trade_id.as_str());
 
     println!(
         "watching security refs account={} symbol={} order={} trade={}",
@@ -83,24 +83,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline {
-        if !api
-            .wait_update(Some(tokio::time::Instant::now() + Duration::from_secs(1)))
+        let Some(step) = api
+            .step_until(Some(tokio::time::Instant::now() + Duration::from_secs(1)))
             .await?
-        {
+        else {
             continue;
-        }
+        };
 
-        if api.is_changing(&account)? {
-            println!("security_account_ready={}", account.is_ready(&api)?);
+        if step.is_changing(&account) {
+            println!("security_account_ready={}", account.is_ready()?);
         }
-        if api.is_changing(&position)? {
-            println!("security_position_snapshot={:?}", position.snapshot(&api)?);
+        if step.is_changing(&position) {
+            println!("security_position_snapshot={:?}", position.snapshot()?);
         }
-        if api.is_changing(&order)? {
-            println!("security_order_ready={}", order.is_ready(&api)?);
+        if step.is_changing(&order) {
+            println!("security_order_ready={}", order.is_ready()?);
         }
-        if api.is_changing(&trade)? {
-            println!("security_trade_snapshot={:?}", trade.snapshot(&api)?);
+        if step.is_changing(&trade) {
+            println!("security_trade_snapshot={:?}", trade.snapshot()?);
         }
     }
 

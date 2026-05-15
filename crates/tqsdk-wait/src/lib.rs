@@ -47,9 +47,9 @@ pub use order_intent::{ClientOrderId, LimitOrderIntent, OrderTicket, OrderTicket
 pub use price::OrderPrice;
 pub use recovery::WaitStartupRecovery;
 pub use refs::{
-    AccountRef, KlineSerialRef, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef,
-    QuoteRef, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
-    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
+    AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
+    RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
     TradingStatusRef,
 };
 pub use step::WaitStep;

@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(deadline),
         )
         .await?;
-    let balance = account.load(&api)?.balance;
+    let balance = account.load()?.balance;
     println!("account={} balance={}", account_id, balance);
 
     let ticket = api
