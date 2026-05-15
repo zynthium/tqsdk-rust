@@ -35,6 +35,7 @@ mod order_intent;
 mod price;
 mod recovery;
 mod refs;
+mod step;
 pub mod testing;
 mod views;
 
@@ -51,4 +52,5 @@ pub use refs::{
     SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
     TradingStatusRef,
 };
+pub use step::WaitStep;
 pub use views::{KlineWindow, TickWindow};

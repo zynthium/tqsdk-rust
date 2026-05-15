@@ -20,6 +20,7 @@ use crate::refs::{
     SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickSerialRef, TradeRef,
     TradingStatusRef,
 };
+use crate::step::{WaitReadHandle, WaitStep};
 
 /// Single-owner wait facade over a shared [`tqsdk_session::SessionClient`].
 ///
@@ -91,6 +92,45 @@ impl TqApi {
                 .map_err(crate::error::WaitFacadeError::Session)?;
             if !progress.is_progress() {
                 return Ok(false);
+            }
+        }
+    }
+
+    pub async fn step(&mut self) -> crate::error::Result<Option<WaitStep>> {
+        self.step_until(None).await
+    }
+
+    pub async fn step_until(
+        &mut self,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<Option<WaitStep>> {
+        let _guard = WaitGuard::new(&self.driver.waiting)?;
+
+        if let Some(commit) = self.driver.deferred_commits.pop_front() {
+            self.driver.last_commit = Some(commit.clone());
+            return Ok(Some(WaitStep::new(
+                commit,
+                current_dt_from_reader(&self.driver.reader),
+            )));
+        }
+
+        loop {
+            if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
+                self.driver.last_commit = Some(commit.clone());
+                return Ok(Some(WaitStep::new(
+                    commit,
+                    current_dt_from_reader(&self.driver.reader),
+                )));
+            }
+
+            let progress = self
+                .driver
+                .session
+                .progress_once(deadline)
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            if !progress.is_progress() {
+                return Ok(None);
             }
         }
     }
@@ -546,6 +586,31 @@ impl TqApi {
     pub(crate) fn push_fixture_deferred_commit(&mut self, commit: tqsdk_core::SharedCommitResult) {
         self.driver.deferred_commits.push_back(commit);
     }
+
+    pub(crate) fn read_handle(&self) -> WaitReadHandle {
+        WaitReadHandle::new(self.driver.reader.clone())
+    }
+}
+
+fn current_dt_from_reader(reader: &tqsdk_core::RuntimeReader) -> Option<i64> {
+    let guard = reader.read();
+
+    guard
+        .get_path(&["_tqsdk_backtest", "current_dt"])
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            let replay = guard.get_path(&["replay"])?;
+            replay
+                .pointer("/cursor/dt")
+                .and_then(serde_json::Value::as_i64)
+                .or_else(|| {
+                    replay.as_object()?.values().find_map(|session| {
+                        session
+                            .pointer("/cursor/dt")
+                            .and_then(serde_json::Value::as_i64)
+                    })
+                })
+        })
 }
 
 fn normalize_serial_data_length(data_length: usize) -> crate::error::Result<usize> {
