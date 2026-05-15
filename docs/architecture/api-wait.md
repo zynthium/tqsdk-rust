@@ -1,12 +1,12 @@
 # `tqsdk-api-wait` 专题设计
 
 ## 文档定位
-本文档描述的是建立在 V1 runtime contract 之上的 `wait_update` consumption adapter。
+本文档描述的是建立在 V1 runtime contract 之上的 wait consumption adapter。
 
 它不是 V1 的基础契约，而是 V2+ 的用户态适配层，目标是：
 
-- 用同一个 `RuntimeReader` / `UpdateCursor` 构建 Python 风格的 `wait_update()` 语义
-- 提供 `TqApi`、typed views、`snapshot()`、`is_changing()` 等 facade
+- 用同一个 `RuntimeReader` / `UpdateCursor` 构建 Python 风格的单 owner 推进语义
+- 提供 `TqApi`、typed handles、`snapshot()`、`WaitStep::is_changing()` 等 facade
 - 不回改 runtime core 的提交模型
 
 相关文档：
@@ -36,8 +36,8 @@
 
 ## 核心目标
 - 兼容 Python TqSdk 最重要的策略语义
-- 保住两次 `wait_update()` 之间的稳定状态截面
-- 让 `is_changing()` 成为对最近一次已消费 commit 的查询
+- 保住两次 `step()` 之间的稳定状态截面
+- 让 `WaitStep::is_changing()` 成为对当前已消费 commit 的查询
 
 ## 非目标
 - 不定义 runtime 的提交边界
@@ -50,7 +50,7 @@ wait adapter 层未来可以提供：
 - `TqApi`
 - `QuoteView` / `QuoteSnapshot`
 - `AccountView` / `OrderView` / `PositionView`
-- `wait_update()`
+- `step()` / `step_until(...)`
 - `WaitStep::is_changing()`
 
 但这些都只是对 runtime contract 的消费包装，不属于 V1。

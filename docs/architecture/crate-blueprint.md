@@ -107,10 +107,10 @@ tqsdk-wait  tqsdk-stream
 
 继续只负责：
 
-- 单 owner `wait_update()` facade
+- single-owner wait facade
 - diff-backed live object refs
 - wait 风格命令包装
-- commit-bound `is_changing()` 解释
+- commit-bound `WaitStep::is_changing()` 解释
 
 后续适合继续进入：
 

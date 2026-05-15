@@ -171,8 +171,8 @@
 它当前承担下面这些职责是合理的：
 
 - 单 owner `TqApi`
-- `wait_update()` 主推进点
-- `is_changing()` / `is_changing_fields()`
+- `step()` / `step_until(...)` 主推进点
+- `WaitStep::is_changing()` / `WaitStep::is_changing_fields()`
 - diff-backed live object `Ref`
 - serial/window 视图
 - trade command 的 wait 风格薄包装
@@ -321,9 +321,9 @@ S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的�
 
 需求：
 
-- `wait_update()` 循环
+- `step()` 循环
 - 稳定状态截面
-- `is_changing()` 解释最近一轮 commit
+- `WaitStep::is_changing()` 解释最近一轮 commit
 
 合理路径：
 

@@ -54,8 +54,8 @@ V1 不交付任何用户态 facade。
 - `ChangeSet`
 
 目标：
-- 构建 Python 风格的 `wait_update()` 语义
-- 提供 `TqApi`、views、snapshots、`is_changing()` 等 facade
+- 构建 Python 风格的单 owner 推进语义
+- 提供 `TqApi`、typed handles、snapshots、`WaitStep::is_changing()` 等 facade
 
 约束：
 - 不得回改 commit 生成逻辑

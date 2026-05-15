@@ -102,8 +102,8 @@ tqsdk-task
 职责：
 
 - Python 风格单 owner `TqApi`
-- `wait_update()` 主推进点
-- `is_changing()` / field-level changing checks
+- `step()` / `step_until(...)` 主推进点
+- `WaitStep::is_changing()` / field-level changing checks
 - diff-backed market/trade live refs
 - serial/window 视图
 - trade command 的 wait 风格薄包装

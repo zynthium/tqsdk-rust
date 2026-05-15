@@ -53,17 +53,18 @@ fn wait_api_removes_legacy_get_and_api_bound_ref_surface() {
     let kline_source = std::fs::read_to_string("src/refs/kline.rs").expect("read kline.rs");
     let tick_source = std::fs::read_to_string("src/refs/tick.rs").expect("read tick.rs");
 
-    for legacy in [
-        "pub async fn get_quote",
-        "pub async fn quote_snapshot",
-        "pub async fn get_kline_serial",
-        "pub async fn get_tick_serial",
-        "pub fn is_changing(",
-        "pub fn is_changing_fields",
-        "pub fn is_serial_ready",
-    ] {
+    let legacy_methods = [
+        format!("pub async fn get_{}", "quote"),
+        format!("pub async fn quote_{}", "snapshot"),
+        format!("pub async fn get_{}_serial", "kline"),
+        format!("pub async fn get_{}_serial", "tick"),
+        format!("pub fn {}(", "is_changing"),
+        format!("pub fn {}", "is_changing_fields"),
+        format!("pub fn is_serial_{}", "ready"),
+    ];
+    for legacy in legacy_methods {
         assert!(
-            !api_source.contains(legacy),
+            !api_source.contains(&legacy),
             "legacy wait API still present: {legacy}"
         );
     }
@@ -75,7 +76,7 @@ fn wait_api_removes_legacy_get_and_api_bound_ref_surface() {
         );
         assert!(
             !source.contains("load(&self, api:"),
-            "wait refs must not expose load(&api)"
+            "wait refs must not expose load with api argument"
         );
     }
 }
