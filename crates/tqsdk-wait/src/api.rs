@@ -11,7 +11,7 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 
-use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
+use crate::change::{ChangeTrackedRef, SerialReadyRef, matches_any, matches_fields};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
@@ -61,6 +61,7 @@ impl TqApi {
                 last_commit: None,
                 waiting: AtomicBool::new(false),
                 next_order_seq: AtomicU64::new(1),
+                serial_charts: Default::default(),
             },
         }
     }
@@ -246,25 +247,28 @@ impl TqApi {
         duration: Duration,
         data_length: usize,
     ) -> crate::error::Result<KlineSerialRef> {
-        let duration_ns =
-            (duration.as_secs() as i64) * 1_000_000_000 + i64::from(duration.subsec_nanos());
+        let data_length = normalize_serial_data_length(data_length)?;
+        let duration_ns = duration_to_ns(duration)?;
         let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{data_length}");
 
-        self.driver
-            .session
-            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol)],
-                    duration_ns,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                },
-            )))
-            .await
-            .map_err(crate::error::WaitFacadeError::Session)?;
+        if !self.driver.serial_charts.contains(&chart_id) {
+            self.driver
+                .session
+                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                    MarketChartCommand {
+                        chart_id: chart_id.clone(),
+                        symbols: vec![Symbol::new(symbol)],
+                        duration_ns,
+                        view_width: data_length,
+                        left_kline_id: None,
+                        focus_datetime_ns: None,
+                        focus_position: None,
+                    },
+                )))
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            self.driver.serial_charts.insert(chart_id.clone());
+        }
 
         let serial = KlineSerialRef {
             symbol: symbol.to_string(),
@@ -283,23 +287,27 @@ impl TqApi {
         symbol: &str,
         data_length: usize,
     ) -> crate::error::Result<TickSerialRef> {
+        let data_length = normalize_serial_data_length(data_length)?;
         let chart_id = format!("wait-tick-{symbol}-{data_length}");
 
-        self.driver
-            .session
-            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol)],
-                    duration_ns: 0,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                },
-            )))
-            .await
-            .map_err(crate::error::WaitFacadeError::Session)?;
+        if !self.driver.serial_charts.contains(&chart_id) {
+            self.driver
+                .session
+                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
+                    MarketChartCommand {
+                        chart_id: chart_id.clone(),
+                        symbols: vec![Symbol::new(symbol)],
+                        duration_ns: 0,
+                        view_width: data_length,
+                        left_kline_id: None,
+                        focus_datetime_ns: None,
+                        focus_position: None,
+                    },
+                )))
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            self.driver.serial_charts.insert(chart_id.clone());
+        }
 
         let serial = TickSerialRef {
             symbol: symbol.to_string(),
@@ -479,6 +487,10 @@ impl TqApi {
             .is_some_and(|commit| matches_fields(&commit.changes, target, fields)))
     }
 
+    pub fn is_serial_ready(&self, serial: &impl SerialReadyRef) -> crate::error::Result<bool> {
+        serial.is_ready(self)
+    }
+
     async fn wait_until_ready_for_test<F>(&mut self, mut ready: F) -> crate::error::Result<()>
     where
         F: FnMut(&Self) -> crate::error::Result<bool>,
@@ -534,4 +546,30 @@ impl TqApi {
     pub(crate) fn push_fixture_deferred_commit(&mut self, commit: tqsdk_core::SharedCommitResult) {
         self.driver.deferred_commits.push_back(commit);
     }
+}
+
+fn normalize_serial_data_length(data_length: usize) -> crate::error::Result<usize> {
+    if data_length == 0 {
+        return Err(crate::error::WaitFacadeError::InvalidState(
+            "serial data_length must be greater than zero",
+        ));
+    }
+
+    Ok(data_length.min(10_000))
+}
+
+fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
+    if duration.is_zero() {
+        return Err(crate::error::WaitFacadeError::InvalidState(
+            "kline duration must be positive",
+        ));
+    }
+
+    let secs = i64::try_from(duration.as_secs())
+        .map_err(|_| crate::error::WaitFacadeError::InvalidState("kline duration is too large"))?;
+    secs.checked_mul(1_000_000_000)
+        .and_then(|ns| ns.checked_add(i64::from(duration.subsec_nanos())))
+        .ok_or(crate::error::WaitFacadeError::InvalidState(
+            "kline duration is too large",
+        ))
 }

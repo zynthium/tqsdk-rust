@@ -69,12 +69,15 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `wait_update(deadline).await`
 - `is_changing(...)`
 - `is_changing_fields(...)`
+- `is_serial_ready(...)`
 - `get_quote(...).await`
 - `quote_snapshot(...).await`
 - `startup_recovery()`
 - `get_trading_status(...).await`
 - `get_kline_serial(...).await`
 - `get_tick_serial(...).await`
+- `KlineWindow::{rows, into_rows, first, last, last_completed, completed_rows}`
+- `TickWindow::{rows, into_rows, first, last}`
 - `get_account(...)`
 - `get_position(...)`
 - `get_pre_insert_order(...)`
@@ -114,6 +117,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
+- `get_kline_serial` / `get_tick_serial` 对齐 Python live serial 心智：创建并持有滚动窗口引用，数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
@@ -157,8 +161,11 @@ session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户
 用户通过 `get_trading_status`、`get_kline_serial`、`get_tick_serial` 获取 live ref，
 再在 `wait_update()` 后用 `is_changing()` / `is_changing_fields()` 判断是否加载当前
 typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `right_id`
-投影 rows，不从全局缓存中截取最新 N 条。这不是 `tqsdk-data` 的历史下载，也不是 `tqsdk-session` 的
-metadata direct query。契约示例见
+投影 rows，不从全局缓存中截取最新 N 条；row-only diff 也会让对应 serial ref
+报告变化。`is_serial_ready()` 可用于确认窗口初始化状态，K 线窗口的
+`completed_rows()` / `last_completed()` 用于跳过最新可变尾 bar。这不是
+`tqsdk-data` 的历史下载或 mmap 缓存，也不是 `tqsdk-session` 的 metadata direct
+query。契约示例见
 [examples/api_contract_s25_wait_serial_trading_status.rs](examples/api_contract_s25_wait_serial_trading_status.rs)。
 
 较少见的 trade/system live refs 也属于 wait facade：`NotificationRef`、

@@ -44,6 +44,32 @@ impl KlineWindow {
     }
 
     #[must_use]
+    pub fn first(&self) -> Option<&Kline> {
+        self.rows.first()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Kline] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Kline> {
+        self.rows
+    }
+
+    #[must_use]
+    pub fn completed_rows(&self) -> &[Kline] {
+        let completed_len = self.rows.len().saturating_sub(1);
+        &self.rows[..completed_len]
+    }
+
+    #[must_use]
+    pub fn last_completed(&self) -> Option<&Kline> {
+        self.completed_rows().last()
+    }
+
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Kline> {
         self.rows.get(index)
     }
@@ -107,8 +133,34 @@ mod tests {
         assert!(!window.is_empty());
         assert_eq!(window.get(0).expect("first row should exist").id, 1);
         assert_eq!(window.last().expect("last row should exist").close, 611.0);
+        assert_eq!(window.first().expect("first row should exist").id, 1);
+        assert_eq!(
+            window
+                .last_completed()
+                .expect("completed row should exist")
+                .id,
+            1
+        );
+        assert_eq!(window.rows().len(), 2);
+        assert_eq!(
+            window
+                .completed_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
         assert_eq!(
             window.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            window
+                .clone()
+                .into_rows()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
             vec![1, 2]
         );
     }
@@ -120,7 +172,11 @@ mod tests {
         assert_eq!(window.len(), 0);
         assert!(window.is_empty());
         assert!(window.last().is_none());
+        assert!(window.first().is_none());
+        assert!(window.last_completed().is_none());
         assert!(window.get(0).is_none());
+        assert!(window.rows().is_empty());
+        assert!(window.completed_rows().is_empty());
         assert_eq!(window.iter().count(), 0);
     }
 }

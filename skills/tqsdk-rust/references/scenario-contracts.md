@@ -64,7 +64,7 @@ owned historical rows、downloads、CSV、Greeks、cache/replay materialization 
 
 - 首选示例：S17 research K-line batch、S28 download/export and Greeks。
 - Cache/replay 示例：S18 local market cache、S30 history series cache、S16 replay integration。
-- live cache bridge：`LiveHistoryCacheWriter` 位于 `tqsdk-data` 的 `stream` feature；它接收 `tqsdk-stream` windows/events，但不改变 `tqsdk-stream` 热路径或依赖图。
+- live mmap bridge：当前 SDK 不提供 `tqsdk-stream` windows/events 写入 `HistorySeriesCache` 的 public API；需要 live 持久化时使用 stream sink/WAL 或调用方 sidecar。
 - Metadata 示例：S23、S27。
 - 避免：把 history 建模成 live refs、把 DataFrame/polars 语义塞进 session/wait、确定性测试依赖 live credentials。
 
@@ -110,7 +110,7 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 | S15 Live / sim / replay switch | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs` | 同一策略在 live、sim、replay 间切换 | `StrategyEnvironment`、`StrategyDeployment`、`StrategySupervisor`；multi-provider environment 仍是 out of scope。 |
 | S16 History replay strategy | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs` | 用历史/cache events 跑策略 | `StrategyReplay`、`StrategyReplaySourceBuilder`、checkpoint/speed controls；production daemon reconnect 是 out of scope。 |
 | S17 Research kline batch | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs` | 批量历史 K 线研究 | `DataClient::get_kline_data_series`；owned rows，不是 live refs。 |
-| S18 Local market cache | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `crates/tqsdk-data/examples/api_contract_s18_live_market_cache_pipe.rs` | JSONL cache record/replay 或单进程 live pipe | `MarketCacheWriter`、`MarketCacheReader`、`MarketCacheReplay`、`MarketCacheStreamWriter`；cross-process cache daemon 是用户层能力。 |
+| S18 Local market cache | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs` | JSONL cache record/replay | `MarketCacheWriter`、`MarketCacheReader`、`MarketCacheReplay`；live pipe 和 cross-process cache daemon 是用户层能力。 |
 | S19 Pre-trade risk | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs` | 下单前本地 risk gates | `RiskEngine`、`RiskCheckReport`、`RiskProjectionReport`、`RiskDecision`；portfolio margin engine 和 durable audit 是 out of scope。 |
 | S20 Production primitives | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs` | Health、reconnect monitor、graceful shutdown、strategy supervisor | 只提供 typed health/telemetry/shutdown primitives；不内置 GUI、HTTP endpoint 或 process manager。 |
 | S21 Slow consumer isolation | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs` | bounded fan-out、lag diagnostics、WAL/sink foundation | `spawn_commit_sink`、`StreamSinkOptions`、retry/WAL/recovery/journal types；distributed queue 是 out of scope。 |
@@ -122,7 +122,7 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 | S27 Metadata/service query pack | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs` | quotes list、main contracts、options、calendar、settlement、ranking、EDB | `SessionClient` typed one-shot metadata/service APIs；不要复制到 wait/stream。 |
 | S28 Download/export/Greeks | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs` | history downloads、CSV export、option Greeks | `DataClient` research/download APIs；不是 live session refs。 |
 | S29 TargetPos ownership | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs` | 同 account+symbol task ownership 和 scheduler ownership | `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed}`；cross-account target-pos orchestration 是用户层能力。 |
-| S30 History series cache | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs` | opt-in Python-compatible mmap history cache；外部或 live sidecar 写入最近 rows | `DataClientBuilder::history_cache_enabled`、`HistorySeriesCache::append_*_rows`、`read_latest_*_rows`、`LiveHistoryCacheWriter`、cache reports、cache-only readers；Python/Rust 同时写是 non-goal。 |
+| S30 History series cache | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs` | opt-in Python-compatible mmap history cache for data_series | `DataClientBuilder::history_cache_enabled`、cache reports、`HistorySeriesCache::read_*_data_series`、scan/maintenance；Python/Rust 同时写是 non-goal，live serial cache 是 out of scope。 |
 | S31 Low-latency desk | `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs` | same-revision market/trade hot path 和 prechecked orders | `TradingDeskProfile`、`RuntimeReader::read_market_trade_state`、typed latency/order reports；不是 OMS 或 auto-hedger。 |
 
 ## 覆盖规则

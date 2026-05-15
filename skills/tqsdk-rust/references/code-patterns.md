@@ -153,23 +153,12 @@ println!("rows={}", series.len());
 # }
 ```
 
-## Live History Cache Bridge
+## Live Persistence Boundary
 
-把 live `tqsdk-stream` window 写进 Python-compatible mmap history cache 时，使用 `tqsdk-data` 的 `stream` feature。调用方显式创建 writer；`DataClient::from_session(...)` 和 `tqsdk-stream` 默认行为不变。Kline writer 默认跳过窗口最高 id 的可变尾 bar，Tick writer 写最新 tick 并依赖 cache append 按 id 去重。
-
-```rust
-use tqsdk_data::{HistorySeriesCache, LiveHistoryCacheOptions, LiveHistoryCacheWriter};
-
-# fn run(window: &tqsdk_stream::KlineWindow) -> tqsdk_data::Result<()> {
-let cache = HistorySeriesCache::open("./.tqsdk-cache")?;
-let mut writer = LiveHistoryCacheWriter::new(cache.clone(), LiveHistoryCacheOptions::default());
-let report = writer.write_kline_window(window)?;
-
-let rows = cache.read_latest_kline_rows(window.symbol(), window.duration_ns(), 200)?;
-println!("rows_written={} latest_rows={}", report.rows_written, rows.len());
-# Ok(())
-# }
-```
+当前 SDK 不提供 live `tqsdk-stream` window 写入 Python-compatible mmap
+`HistorySeriesCache` 的 public bridge。实时行情持久化使用 `tqsdk-stream`
+commit sink/WAL 或调用方自有 sidecar；`HistorySeriesCache` 保持 offline
+`get_*_data_series` 缓存和 cache-only reader。
 
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。
 

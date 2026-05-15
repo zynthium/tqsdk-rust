@@ -72,8 +72,8 @@ tokio = { version = "1", features = ["fs", "macros", "rt", "time"] }
 
 在本仓库内做 crate 间开发时使用 `path = "../tqsdk-data"`；正式发布后把 Git
 dependency 换成版本号即可。默认 feature 包含 live history/query 与 service query
-支持；需要把 `tqsdk-stream` 的 live market event 写入 cache 时，启用 `stream`
-feature。
+支持；本 crate 不提供 `tqsdk-stream` live bridge，也不为实时行情热路径引入
+Python-compatible mmap 缓存。
 
 ## 当前已稳定的 surface
 
@@ -101,10 +101,6 @@ feature。
 - `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
-- `HistorySeriesCache::append_kline_rows`
-- `HistorySeriesCache::append_tick_rows`
-- `HistorySeriesCache::read_latest_kline_rows`
-- `HistorySeriesCache::read_latest_tick_rows`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -121,9 +117,6 @@ feature。
 - `MarketCacheWriter`
 - `MarketCacheReader`
 - `MarketCacheReplay`
-- `LiveHistoryCacheOptions`（`stream` feature）
-- `LiveHistoryCacheWriteReport`（`stream` feature）
-- `LiveHistoryCacheWriter`（`stream` feature）
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -157,37 +150,14 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 `MarketCacheReplay` 定义了标准 `Quote` / `Kline` / `Tick` payload 的离线
 cache record 与 replay foundation。
 
-启用 `stream` feature 后，`MarketCacheStreamWriter` 是这个区域唯一的 live
-bridge。它把 typed `tqsdk-stream::MarketEvent` 写入调用方拥有的进程内 cache
-writer。
-
-## History Series Cache Live Bridge
-
-`HistorySeriesCache::append_kline_rows` / `append_tick_rows` 允许外部接入把已经
-拿到的 K 线 / Tick rows 显式追加到 Python 兼容 mmap 历史序列缓存。append
-按 row `id` 去重，支持重复、重叠、相邻和断档 segment；断档会保留为独立
-segment，不伪造缺失 row。返回的写入行数只统计实际新增或更新的持久化 row；
-重复且持久化字段完全一致的 row 是 no-op。
-
-`HistorySeriesCache::read_latest_kline_rows` / `read_latest_tick_rows` 提供
-cache-only 最近 N 条读取，内部从尾部 segment 限量读取，返回结果按 id 升序
-排列，不联网补齐缺口。
-
-启用 `stream` feature 后，`LiveHistoryCacheWriter` 可以把
-`tqsdk-stream::KlineWindow` / `TickWindow` 或 `MarketEvent` 显式写入
-`HistorySeriesCache`。K 线写入直接对齐官方 tqsdk-python 语义：不写窗口最高 id
-的可变尾 bar，只写已经完成的 bar；Tick window 则写入全部 tick，并由 append
-逻辑按 id 去重。写入报告的 `rows_written` 同样只统计实际新增或更新的持久化
-row。`DataClient::from_session(...)` 默认行为不变，不会自动创建 live cache writer。
-
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned
 history series 接到 replay foundation 上，用户不需要手写 cache events。
 
-这不是 live durable sink runtime 或 cache service：它不暴露 queue files、lock
-leases、reader manifests、writer election、compaction ownership、daemon/supervisor
-orchestration、HTTP endpoints、GUI integration 或 cross-process cache management。
-如果这些能力确实需要，应由用户工具或独立服务承接。
+这不是 live durable sink runtime 或 cache service：它不暴露 live stream pipe、
+queue files、lock leases、reader manifests、writer election、compaction
+ownership、daemon/supervisor orchestration、HTTP endpoints、GUI integration 或
+cross-process cache management。如果这些能力确实需要，应由用户工具或独立服务承接。
 
 ## 后续仍应承接的能力
 
@@ -204,18 +174,13 @@ orchestration、HTTP endpoints、GUI integration 或 cross-process cache managem
 - `HistorySeriesCache::open(...)`
 - `HistorySeriesCache::read_kline_data_series(...)`
 - `HistorySeriesCache::read_tick_data_series(...)`
-- `HistorySeriesCache::append_kline_rows(...)`
-- `HistorySeriesCache::append_tick_rows(...)`
-- `HistorySeriesCache::read_latest_kline_rows(...)`
-- `HistorySeriesCache::read_latest_tick_rows(...)`
 - `HistorySeriesCache::scan()`
 - `HistorySeriesCache::enforce_limits(...)`
-- `LiveHistoryCacheWriter::new(...)`（`stream` feature）
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；
-不负责后台 downloader、GUI viewport 状态、Python/Rust 同目录同时写、跨进程
-cache service 或高频交易 hot path。
+不负责 live serial 缓存、后台 downloader、GUI viewport 状态、Python/Rust 同目录
+同时写、跨进程 cache service 或高频交易 hot path。
 
 ## 当前明确不做
 
@@ -261,7 +226,6 @@ cache service 或高频交易 hot path。
 - [examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
 - [examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
 - [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
-- [examples/api_contract_s18_live_market_cache_pipe.rs](examples/api_contract_s18_live_market_cache_pipe.rs)
 - [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。

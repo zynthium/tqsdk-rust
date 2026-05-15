@@ -6,6 +6,14 @@ use tqsdk_core::{ChangeSet, ObjectKey, StatePath};
 pub trait ChangeTrackedRef {
     fn object_key(&self) -> Option<ObjectKey>;
     fn state_path(&self) -> StatePath;
+
+    fn visit_extra_state_paths(&self, _visit: &mut dyn FnMut(StatePath)) {}
+
+    fn visit_field_state_paths(&self, _visit: &mut dyn FnMut(StatePath)) {}
+}
+
+pub trait SerialReadyRef {
+    fn is_ready(&self, api: &crate::api::TqApi) -> crate::error::Result<bool>;
 }
 
 pub(crate) fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -> bool {
@@ -15,10 +23,27 @@ pub(crate) fn matches_any(changes: &ChangeSet, target: &impl ChangeTrackedRef) -
         return true;
     }
 
-    changes
+    let state_path = target.state_path();
+    if changes
         .path_hits
         .iter()
-        .any(|path| path_matches(&target.state_path(), path))
+        .any(|path| path_matches(&state_path, path))
+    {
+        return true;
+    }
+
+    let mut matched = false;
+    target.visit_extra_state_paths(&mut |target_path| {
+        if !matched
+            && changes
+                .path_hits
+                .iter()
+                .any(|path| path_matches(&target_path, path))
+        {
+            matched = true;
+        }
+    });
+    matched
 }
 
 pub(crate) fn matches_fields(
@@ -26,14 +51,24 @@ pub(crate) fn matches_fields(
     target: &impl ChangeTrackedRef,
     fields: &[&str],
 ) -> bool {
-    let Some(key) = target.object_key() else {
-        return false;
-    };
+    let key = target.object_key();
 
-    changes
-        .field_hits
-        .iter()
-        .any(|hit| hit.object == key && fields.iter().any(|field| *field == hit.field))
+    changes.field_hits.iter().any(|hit| {
+        if !fields.iter().any(|field| *field == hit.field) {
+            return false;
+        }
+        if key.as_ref().is_some_and(|key| hit.object == *key) {
+            return true;
+        }
+
+        let mut matched = false;
+        target.visit_field_state_paths(&mut |target_path| {
+            if !matched && path_matches(&target_path, &hit.path) {
+                matched = true;
+            }
+        });
+        matched
+    })
 }
 
 fn path_matches(target: &StatePath, changed: &StatePath) -> bool {
@@ -70,6 +105,8 @@ mod tests {
         let target = Tracked {
             object: None,
             path: StatePath::new(["quotes", "SHFE.au2606"]),
+            extra_paths: Vec::new(),
+            field_paths: Vec::new(),
         };
         let changes = ChangeSet {
             path_hits: vec![StatePath::new(["quotes", "SHFE.au2606", "last_price"])],
@@ -85,6 +122,8 @@ mod tests {
         let target = Tracked {
             object: None,
             path: StatePath::new(["quotes", "SHFE.au2606"]),
+            extra_paths: Vec::new(),
+            field_paths: Vec::new(),
         };
         let parent_change = ChangeSet {
             path_hits: vec![StatePath::new(["quotes"])],
@@ -106,6 +145,8 @@ mod tests {
         let target = Tracked {
             object: None,
             path: StatePath::new(["quotes", "SHFE.au2606"]),
+            extra_paths: Vec::new(),
+            field_paths: Vec::new(),
         };
         let changes = ChangeSet {
             path_hits: Vec::new(),
@@ -118,6 +159,48 @@ mod tests {
         };
 
         assert!(!matches_fields(&changes, &target, &["last_price"]));
+    }
+
+    #[test]
+    fn matches_fields_accepts_tracked_field_path_without_object_key() {
+        let target = Tracked {
+            object: None,
+            path: StatePath::new(["charts", "chart-1"]),
+            extra_paths: vec![StatePath::new([
+                "klines",
+                "SHFE.au2606",
+                "60000000000",
+                "data",
+            ])],
+            field_paths: vec![StatePath::new([
+                "klines",
+                "SHFE.au2606",
+                "60000000000",
+                "data",
+            ])],
+        };
+        let changes = ChangeSet {
+            path_hits: Vec::new(),
+            object_hits: Vec::new(),
+            field_hits: vec![ChangeHit::field(
+                StatePath::new(["klines", "SHFE.au2606", "60000000000", "data", "101"]),
+                ObjectKey::Kline {
+                    series: tqsdk_core::SeriesKey {
+                        primary: Symbol::new("SHFE.au2606"),
+                        secondary: vec![],
+                        duration_ns: 60_000_000_000,
+                        view_width: 0,
+                        right_id: None,
+                    },
+                    bar_id: 101,
+                },
+                "close",
+            )],
+        };
+
+        assert!(!matches_any(&changes, &target));
+        assert!(matches_fields(&changes, &target, &["close"]));
+        assert!(!matches_fields(&changes, &target, &["open"]));
     }
 
     #[test]
@@ -148,6 +231,8 @@ mod tests {
         Tracked {
             object: Some(quote_key()),
             path: StatePath::new(["quotes", "SHFE.au2606"]),
+            extra_paths: Vec::new(),
+            field_paths: Vec::new(),
         }
     }
 
@@ -160,6 +245,8 @@ mod tests {
     struct Tracked {
         object: Option<ObjectKey>,
         path: StatePath,
+        extra_paths: Vec<StatePath>,
+        field_paths: Vec<StatePath>,
     }
 
     impl ChangeTrackedRef for Tracked {
@@ -169,6 +256,18 @@ mod tests {
 
         fn state_path(&self) -> StatePath {
             self.path.clone()
+        }
+
+        fn visit_extra_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+            for path in &self.extra_paths {
+                visit(path.clone());
+            }
+        }
+
+        fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+            for path in &self.field_paths {
+                visit(path.clone());
+            }
         }
     }
 }

@@ -61,6 +61,34 @@ async fn kline_and_tick_serial_changes_are_visible_after_wait_update() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn serial_refs_report_data_row_field_changes() {
+    let mut api = support::seeded_api();
+
+    support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 32);
+    let klines = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 32)
+        .await
+        .unwrap();
+    assert!(api.wait_update(None).await.unwrap());
+
+    support::seed_kline_row_update(&mut api, "SHFE.au2602", 60_000_000_000, 101, 621.5);
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&klines).unwrap());
+    assert!(api.is_changing_fields(&klines, &["close"]).unwrap());
+    assert!(!api.is_changing_fields(&klines, &["open"]).unwrap());
+
+    support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 32);
+    let ticks = api.get_tick_serial("SHFE.au2602", 32).await.unwrap();
+    assert!(api.wait_update(None).await.unwrap());
+
+    support::seed_tick_row_update(&mut api, "SHFE.au2602", 201, 619.5);
+    assert!(api.wait_update(None).await.unwrap());
+    assert!(api.is_changing(&ticks).unwrap());
+    assert!(api.is_changing_fields(&ticks, &["last_price"]).unwrap());
+    assert!(!api.is_changing_fields(&ticks, &["volume"]).unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn trade_risk_and_notification_refs_report_changes_after_wait_update() {
     let mut api = support::seeded_api();
 

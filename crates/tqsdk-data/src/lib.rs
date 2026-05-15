@@ -11,10 +11,6 @@
 //! - `DataClient::from_session(...).get_tick_data_page(...)`
 //! - `DataClient::from_session(...).get_kline_data_series(...)`
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
-//! - `HistorySeriesCache::append_kline_rows(...)`
-//! - `HistorySeriesCache::append_tick_rows(...)`
-//! - `HistorySeriesCache::read_latest_kline_rows(...)`
-//! - `HistorySeriesCache::read_latest_tick_rows(...)`
 //! - `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
@@ -24,7 +20,6 @@
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
 //! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
-//! - `LiveHistoryCacheWriter` / `LiveHistoryCacheOptions`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -54,12 +49,8 @@ mod export;
 mod greeks;
 mod history_series_cache;
 mod integrity;
-#[cfg(feature = "stream")]
-mod live_history_cache;
 mod live_quote;
 mod market_cache;
-#[cfg(feature = "stream")]
-mod stream_cache;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
@@ -104,13 +95,7 @@ pub use integrity::{
     HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
 };
-#[cfg(feature = "stream")]
-pub use live_history_cache::{
-    LiveHistoryCacheOptions, LiveHistoryCacheWriteReport, LiveHistoryCacheWriter,
-};
 pub use market_cache::{
     MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReader,
     MarketCacheReplay, MarketCacheWriter,
 };
-#[cfg(feature = "stream")]
-pub use stream_cache::MarketCacheStreamWriter;

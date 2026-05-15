@@ -36,6 +36,16 @@ fn wait_driver_keeps_single_runtime_reader_without_snapshot_cache() {
     assert!(!driver.contains("StateStore"));
 }
 
+#[test]
+fn change_tracked_ref_extra_paths_use_visitor_instead_of_vec_allocation() {
+    let change = include_str!("../src/change.rs");
+
+    assert!(change.contains("visit_extra_state_paths"));
+    assert!(change.contains("visit_field_state_paths"));
+    assert!(!change.contains("fn extra_state_paths(&self) -> Vec<StatePath>"));
+    assert!(!change.contains("fn field_state_paths(&self) -> Vec<StatePath>"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn wait_update_timeout_returns_false() {
     let mut api = support::seeded_api();

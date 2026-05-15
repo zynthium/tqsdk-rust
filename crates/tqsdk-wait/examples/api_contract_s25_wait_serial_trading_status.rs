@@ -16,6 +16,8 @@
 //! - `TqApi::wait_update` 是用户可见状态推进点
 //! - `TqApi::is_changing` 判断对象是否在最近一次 commit 中变化
 //! - `TqApi::is_changing_fields` 判断对象字段是否在最近一次 commit 中变化
+//! - `TqApi::is_serial_ready` 判断 serial window 是否已经初始化
+//! - `KlineWindow::completed_rows` / `last_completed` 用于跳过最新可变尾 bar
 //!
 //! Forbidden:
 //! - GraphQL / metadata direct query
@@ -91,20 +93,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if api.is_changing(&kline_serial)? {
+        if api.is_serial_ready(&kline_serial)?
+            && (api.is_changing(&kline_serial)?
+                || api.is_changing_fields(&kline_serial, &["close"])?)
+        {
             let window = kline_serial.load(&api)?;
-            let last = window.last();
+            let mutable_tail = window.last();
+            let last_completed = window.last_completed();
             println!(
-                "kline_window symbol={} duration_ns={} len={} last_id={:?} last_close={:?}",
+                "kline_window symbol={} duration_ns={} len={} completed={} last_completed_id={:?} last_completed_close={:?} mutable_tail_id={:?}",
                 window.symbol(),
                 window.duration_ns(),
                 window.len(),
-                last.map(|row| row.id),
-                last.map(|row| row.close)
+                window.completed_rows().len(),
+                last_completed.map(|row| row.id),
+                last_completed.map(|row| row.close),
+                mutable_tail.map(|row| row.id)
             );
         }
 
-        if api.is_changing(&tick_serial)? {
+        if api.is_serial_ready(&tick_serial)?
+            && (api.is_changing(&tick_serial)?
+                || api.is_changing_fields(&tick_serial, &["last_price"])?)
+        {
             let window = tick_serial.load(&api)?;
             let last = window.last();
             println!(

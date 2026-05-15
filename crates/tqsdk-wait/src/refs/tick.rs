@@ -1,6 +1,10 @@
 use tqsdk_core::{ChartId, MarketStateReadGuard, ObjectKey, StatePath, Tick};
 
-use crate::{api::TqApi, change::ChangeTrackedRef, views::TickWindow};
+use crate::{
+    api::TqApi,
+    change::{ChangeTrackedRef, SerialReadyRef},
+    views::TickWindow,
+};
 
 /// Handle to a subscribed tick chart plus its current materialized window.
 #[derive(Debug, Clone)]
@@ -72,5 +76,19 @@ impl ChangeTrackedRef for TickSerialRef {
 
     fn state_path(&self) -> StatePath {
         StatePath::new(["charts", self.chart_id.as_str()])
+    }
+
+    fn visit_extra_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        visit(StatePath::new(["ticks", self.symbol.as_str(), "data"]));
+    }
+
+    fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        self.visit_extra_state_paths(visit);
+    }
+}
+
+impl SerialReadyRef for TickSerialRef {
+    fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        TickSerialRef::is_ready(self, api)
     }
 }

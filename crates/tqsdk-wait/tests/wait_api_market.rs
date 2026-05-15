@@ -149,6 +149,59 @@ async fn get_kline_serial_waits_for_initial_ready_and_preserves_commit_for_user(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn get_kline_serial_validates_length_and_clamps_large_length() {
+    let mut api = support::seeded_api();
+
+    let zero_duration = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::ZERO, 32)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        zero_duration,
+        tqsdk_wait::WaitFacadeError::InvalidState("kline duration must be positive")
+    );
+
+    let zero_length = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 0)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        zero_length,
+        tqsdk_wait::WaitFacadeError::InvalidState("serial data_length must be greater than zero")
+    );
+
+    support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 10_000);
+    let serial = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 20_000)
+        .await
+        .unwrap();
+
+    assert!(api.is_serial_ready(&serial).unwrap());
+    assert_eq!(serial.load(&api).unwrap().view_width(), 10_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_kline_serial_reuses_existing_chart_without_resubmitting_set_chart() {
+    let mut api = support::seeded_api();
+
+    support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 64);
+    let _first = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    let first_dispatch_count = api.session().handle().drain_dispatches().unwrap().len();
+
+    let _second = api
+        .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    let second_dispatch_count = api.session().handle().drain_dispatches().unwrap().len();
+
+    assert!(first_dispatch_count > 0);
+    assert_eq!(second_dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_user() {
     let mut api = support::seeded_api();
     let quote = api.get_quote("SHFE.au2602").await.unwrap();
@@ -181,4 +234,36 @@ async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_use
         api.last_commit().map(|commit| commit.revision),
         Some(previous_revision)
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_tick_serial_validates_length_and_clamps_large_length() {
+    let mut api = support::seeded_api();
+
+    let zero_length = api.get_tick_serial("SHFE.au2602", 0).await.unwrap_err();
+    assert_eq!(
+        zero_length,
+        tqsdk_wait::WaitFacadeError::InvalidState("serial data_length must be greater than zero")
+    );
+
+    support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 10_000);
+    let serial = api.get_tick_serial("SHFE.au2602", 20_000).await.unwrap();
+
+    assert!(api.is_serial_ready(&serial).unwrap());
+    assert_eq!(serial.load(&api).unwrap().view_width(), 10_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_tick_serial_reuses_existing_chart_without_resubmitting_set_chart() {
+    let mut api = support::seeded_api();
+
+    support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 64);
+    let _first = api.get_tick_serial("SHFE.au2602", 64).await.unwrap();
+    let first_dispatch_count = api.session().handle().drain_dispatches().unwrap().len();
+
+    let _second = api.get_tick_serial("SHFE.au2602", 64).await.unwrap();
+    let second_dispatch_count = api.session().handle().drain_dispatches().unwrap().len();
+
+    assert!(first_dispatch_count > 0);
+    assert_eq!(second_dispatch_count, 0);
 }

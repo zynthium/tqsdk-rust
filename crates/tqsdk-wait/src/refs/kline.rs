@@ -1,6 +1,10 @@
 use tqsdk_core::{ChartId, Kline, MarketStateReadGuard, ObjectKey, StatePath};
 
-use crate::{api::TqApi, change::ChangeTrackedRef, views::KlineWindow};
+use crate::{
+    api::TqApi,
+    change::{ChangeTrackedRef, SerialReadyRef},
+    views::KlineWindow,
+};
 
 /// Handle to a subscribed kline chart plus its current materialized window.
 #[derive(Debug, Clone)]
@@ -76,5 +80,25 @@ impl ChangeTrackedRef for KlineSerialRef {
 
     fn state_path(&self) -> StatePath {
         StatePath::new(["charts", self.chart_id.as_str()])
+    }
+
+    fn visit_extra_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        let duration_key = self.duration_ns.to_string();
+        visit(StatePath::new([
+            "klines",
+            self.symbol.as_str(),
+            duration_key.as_str(),
+            "data",
+        ]));
+    }
+
+    fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        self.visit_extra_state_paths(visit);
+    }
+}
+
+impl SerialReadyRef for KlineSerialRef {
+    fn is_ready(&self, api: &TqApi) -> crate::error::Result<bool> {
+        KlineSerialRef::is_ready(self, api)
     }
 }

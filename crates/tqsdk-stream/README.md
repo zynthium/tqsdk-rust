@@ -15,7 +15,7 @@
 - GraphQL / HTTP direct query
 - schema / metadata direct facade
 - downloader / `TargetPosTask` / callback
-- 第二棵状态树或本地对象 cache
+- 第二棵状态树、本地对象 cache 或 Python-compatible mmap 历史序列缓存
 
 ## 依赖方式
 
@@ -179,6 +179,8 @@ closed event，或关闭 stream driver 来刻画消费者行为。普通用户�
 - `kline/tick` 的远端 chart 生命周期当前采用显式 `close()`，不做隐式 async drop
 - ready K 线 / Tick window 按对应 chart 的 `left_id` / `right_id` 投影 rows，
   不从全局缓存中截取最新 N 条
+- `tqsdk-stream` 不依赖 `tqsdk-data`，也不提供 live window 写历史 mmap cache 的
+  bridge；需要持久化时使用 stream 自己的 commit sink/WAL 或调用方自有 sidecar
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`

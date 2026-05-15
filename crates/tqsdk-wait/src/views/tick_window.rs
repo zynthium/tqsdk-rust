@@ -36,6 +36,21 @@ impl TickWindow {
     }
 
     #[must_use]
+    pub fn first(&self) -> Option<&Tick> {
+        self.rows.first()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Tick] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Tick> {
+        self.rows
+    }
+
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Tick> {
         self.rows.get(index)
     }
@@ -95,8 +110,19 @@ mod tests {
             window.last().expect("last row should exist").last_price,
             611.0
         );
+        assert_eq!(window.first().expect("first row should exist").id, 10);
+        assert_eq!(window.rows().len(), 2);
         assert_eq!(
             window.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            window
+                .clone()
+                .into_rows()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
             vec![10, 11]
         );
     }
@@ -108,7 +134,9 @@ mod tests {
         assert_eq!(window.len(), 0);
         assert!(window.is_empty());
         assert!(window.last().is_none());
+        assert!(window.first().is_none());
         assert!(window.get(0).is_none());
+        assert!(window.rows().is_empty());
         assert_eq!(window.iter().count(), 0);
     }
 }

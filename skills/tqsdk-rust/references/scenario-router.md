@@ -17,7 +17,7 @@
 | "多消费者", "事件流", "stream", "fan-out", "写 WAL", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_stream`, `market_events`, trade/session event streams, sink APIs |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk-task` when ownership/risk/task semantics are needed; `tqsdk-wait` for thin direct order wrappers | `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
-| "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series", "把 live K线/tick 写入历史缓存" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, `LiveHistoryCacheWriter`, cache/replay APIs |
+| "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, cache/replay APIs |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
 请求涉及角色覆盖或 public API 证据时，继续读 `references/scenario-contracts.md`，并把回答锚定到对应 `api_contract_sXX_*.rs` 示例。
@@ -70,8 +70,7 @@
 4. 慢持久化放在 stream sink 或 sidecar。
 5. metadata 使用 `stream.session()`，不要另开 query client。
 6. 显式处理 lag/closed/error report；fan-out 是 bounded。
-
-如果用户要把 typed `KlineWindow` / `TickWindow` 自动写入 Python-compatible history mmap cache，组合 `tqsdk-data` 的 `LiveHistoryCacheWriter`。该桥接是调用方显式创建的 sidecar；`tqsdk-stream` 不会因为 cache 未启用而读写 mmap 或引入 `tqsdk-data` 依赖。
+7. 需要持久化 live events 时，使用 stream sink/WAL 或调用方自有 sidecar；不要把 Python-compatible history mmap cache 接入 live 热路径。
 
 ### 4. 实现 target-position 策略
 
@@ -98,8 +97,7 @@
 3. 选择 page、series、download、CSV export、cache 或 replay API。
 4. 输出保持 owned/materialized；不要建模成 live refs。
 5. 确定性策略测试尽量用 cache/replay API，而不是 live credentials。
-
-live window 到 history cache 的桥接使用 `LiveHistoryCacheWriter::write_kline_window`、`write_tick_window` 或 `write_market_event`。Kline 默认跳过窗口最高 id 的可变尾 bar，Tick 写最新 tick 但由 cache append 按 id 去重。
+6. `HistorySeriesCache` 只用于 offline data_series mmap cache；如果用户要求 live window 写入该缓存，说明当前 SDK 不提供这个 public API。
 
 ### 6. 编写低延迟自定义循环
 

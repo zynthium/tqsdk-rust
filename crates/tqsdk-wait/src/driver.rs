@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{Result, WaitFacadeError};
@@ -13,6 +13,7 @@ pub(crate) struct WaitDriver {
     pub(crate) last_commit: Option<tqsdk_core::SharedCommitResult>,
     pub(crate) waiting: AtomicBool,
     pub(crate) next_order_seq: AtomicU64,
+    pub(crate) serial_charts: HashSet<String>,
 }
 
 impl WaitDriver {

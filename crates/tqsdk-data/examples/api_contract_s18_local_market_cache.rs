@@ -31,8 +31,7 @@
 //! Current API note:
 //! 本示例只验证离线 cache record、JSONL reader/writer 和 deterministic replay。
 //! `tqsdk-data` 不再公开 queue / lock / index / compaction /
-//! service / daemon / supervisor 这类跨进程或准跨进程编排表面；live stream
-//! pipe 见 `api_contract_s18_live_market_cache_pipe.rs`。
+//! service / daemon / supervisor 这类跨进程或准跨进程编排表面。
 
 use tqsdk_core::Quote;
 use tqsdk_data::{MarketCacheEvent, MarketCacheReader, MarketCacheReplay, MarketCacheWriter};
