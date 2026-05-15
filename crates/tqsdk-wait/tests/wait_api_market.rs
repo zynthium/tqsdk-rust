@@ -228,6 +228,19 @@ async fn tick_handle_reuses_existing_chart_without_resubmitting_set_chart() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn backtest_step_returns_none_after_end_datetime() {
+    let mut api = support::backtest_api_for_test(1_000, 2_000);
+    support::seed_replay_cursor_commit(&mut api, 2_000);
+
+    let first = api.step().await.unwrap();
+    assert!(first.is_some());
+    assert_eq!(first.unwrap().current_dt(), Some(2_000));
+
+    let second = api.step().await.unwrap();
+    assert!(second.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_recovery_waits_for_quote_and_trade_sync_without_manual_flags() {
     let mut api = support::seeded_api();
     support::seed_quote_commit_with_datetime(

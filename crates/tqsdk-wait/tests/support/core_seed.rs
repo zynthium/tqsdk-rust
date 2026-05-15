@@ -1,10 +1,10 @@
 use serde_json::json;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
-    RuntimeInput,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, ReplayEvent,
+    RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::testing::ManualSession;
-use tqsdk_wait::{TqApi, testing::WaitTestDriver};
+use tqsdk_wait::{TqApi, TqBacktest, testing::WaitTestDriver};
 
 #[allow(dead_code)]
 pub struct TestTqApi {
@@ -41,6 +41,42 @@ impl TestTqApi {
 #[allow(dead_code)]
 pub fn seeded_api() -> TqApi {
     TestTqApi::new().into_api()
+}
+
+#[allow(dead_code)]
+pub fn backtest_api_for_test(start_datetime_ns: i64, end_datetime_ns: i64) -> TqApi {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+
+    let handle = RuntimeHandle::with_adapters(adapters);
+    let session = ManualSession::from_runtime(handle).into_client();
+    let backtest = TqBacktest::futures(start_datetime_ns, end_datetime_ns)
+        .expect("backtest test range should be valid");
+    WaitTestDriver::from_session_with_backtest(session, backtest)
+}
+
+#[allow(dead_code)]
+pub fn seed_replay_cursor_commit(api: &mut TqApi, dt: i64) {
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Replay(ReplayEvent {
+                label: "step",
+                session_id: None,
+                payload: Some(json!({
+                    "cursor": {
+                        "dt": dt,
+                    }
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed replay cursor commit should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
 }
 
 #[allow(dead_code)]

@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use crate::TqApi;
+use crate::TqBacktest;
 use crate::driver::WaitGuard;
 
 /// Explicit wait-facade fixture driver for deterministic tests.
@@ -23,6 +24,13 @@ impl WaitTestDriver {
         commit: impl Into<tqsdk_core::SharedCommitResult>,
     ) {
         api.push_fixture_deferred_commit(commit.into());
+    }
+
+    pub fn from_session_with_backtest(
+        session: tqsdk_session::SessionClient,
+        backtest: TqBacktest,
+    ) -> TqApi {
+        TqApi::new_with_backtest(session, Some(backtest))
     }
 }
 

@@ -11,6 +11,7 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 
+use crate::backtest::TqBacktest;
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
@@ -43,12 +44,21 @@ pub(crate) struct WaitInsertOrderRequest {
 impl TqApi {
     #[must_use]
     pub fn new(session: SessionClient) -> Self {
-        let handle = session.handle().clone();
-        Self::from_runtime_parts(handle, session)
+        Self::new_with_backtest(session, None)
     }
 
     #[must_use]
-    fn from_runtime_parts(handle: tqsdk_core::RuntimeHandle, session: SessionClient) -> Self {
+    pub(crate) fn new_with_backtest(session: SessionClient, backtest: Option<TqBacktest>) -> Self {
+        let handle = session.handle().clone();
+        Self::from_runtime_parts(handle, session, backtest)
+    }
+
+    #[must_use]
+    fn from_runtime_parts(
+        handle: tqsdk_core::RuntimeHandle,
+        session: SessionClient,
+        backtest: Option<TqBacktest>,
+    ) -> Self {
         let reader = handle.reader();
         let cursor = reader.cursor();
 
@@ -64,6 +74,8 @@ impl TqApi {
                 quote_subscriptions: Default::default(),
                 trading_status_subscriptions: Default::default(),
                 serial_charts: Default::default(),
+                backtest,
+                backtest_finished: false,
             },
         }
     }
@@ -105,23 +117,29 @@ impl TqApi {
         &mut self,
         deadline: Option<tokio::time::Instant>,
     ) -> crate::error::Result<Option<WaitStep>> {
+        if self.driver.backtest_finished {
+            return Ok(None);
+        }
+
         let _guard = WaitGuard::new(&self.driver.waiting)?;
 
         if let Some(commit) = self.driver.deferred_commits.pop_front() {
             self.driver.last_commit = Some(commit.clone());
-            return Ok(Some(WaitStep::new(
-                commit,
-                current_dt_from_reader(&self.driver.reader),
-            )));
+            let step = WaitStep::new(commit, current_dt_from_reader(&self.driver.reader));
+            if backtest_reached_end(self.driver.backtest.as_ref(), &step) {
+                self.driver.backtest_finished = true;
+            }
+            return Ok(Some(step));
         }
 
         loop {
             if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
                 self.driver.last_commit = Some(commit.clone());
-                return Ok(Some(WaitStep::new(
-                    commit,
-                    current_dt_from_reader(&self.driver.reader),
-                )));
+                let step = WaitStep::new(commit, current_dt_from_reader(&self.driver.reader));
+                if backtest_reached_end(self.driver.backtest.as_ref(), &step) {
+                    self.driver.backtest_finished = true;
+                }
+                return Ok(Some(step));
             }
 
             let progress = self
@@ -544,6 +562,15 @@ impl TqApi {
     pub(crate) fn read_handle(&self) -> WaitReadHandle {
         WaitReadHandle::new(self.driver.reader.clone())
     }
+}
+
+fn backtest_reached_end(backtest: Option<&TqBacktest>, step: &WaitStep) -> bool {
+    if let Some(backtest) = backtest
+        && let Some(current_dt) = step.current_dt()
+    {
+        return current_dt >= backtest.end_datetime_ns();
+    }
+    false
 }
 
 fn current_dt_from_reader(reader: &tqsdk_core::RuntimeReader) -> Option<i64> {

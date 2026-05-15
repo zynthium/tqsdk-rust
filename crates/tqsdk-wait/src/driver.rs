@@ -3,6 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::TqBacktest;
 use crate::error::{Result, WaitFacadeError};
 
 pub(crate) struct WaitDriver {
@@ -16,6 +17,8 @@ pub(crate) struct WaitDriver {
     pub(crate) quote_subscriptions: HashSet<String>,
     pub(crate) trading_status_subscriptions: HashSet<String>,
     pub(crate) serial_charts: HashSet<String>,
+    pub(crate) backtest: Option<TqBacktest>,
+    pub(crate) backtest_finished: bool,
 }
 
 impl WaitDriver {

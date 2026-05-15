@@ -27,6 +27,7 @@
 //! ```
 
 mod api;
+mod backtest;
 mod builder;
 mod change;
 mod driver;
@@ -40,6 +41,7 @@ pub mod testing;
 mod views;
 
 pub use api::TqApi;
+pub use backtest::{BacktestMarketKind, TqBacktest};
 pub use builder::TqApiBuilder;
 pub use change::ChangeTrackedRef;
 pub use error::{Result, WaitFacadeError};
