@@ -1255,6 +1255,10 @@ fn default_protocol_adapters_decode_live_serial_data_shapes_into_typed_mutations
                         value: json!(618.5),
                     },
                     FieldMutation {
+                        field: "id".to_string(),
+                        value: json!(42),
+                    },
+                    FieldMutation {
                         field: "open".to_string(),
                         value: json!(610.0),
                     },
@@ -1277,6 +1281,10 @@ fn default_protocol_adapters_decode_live_serial_data_shapes_into_typed_mutations
                     tick_id: 17,
                 }),
                 fields: vec![
+                    FieldMutation {
+                        field: "id".to_string(),
+                        value: json!(17),
+                    },
                     FieldMutation {
                         field: "last_price".to_string(),
                         value: json!(618.5),

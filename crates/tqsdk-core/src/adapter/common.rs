@@ -503,6 +503,7 @@ fn flatten_object(
         })
         .collect::<Vec<_>>();
     fields.sort_by(|left, right| left.field.cmp(&right.field));
+    inject_market_data_row_id(&path, &mut fields);
 
     if !path.is_empty() && !fields.is_empty() {
         out.push(NormalizedMutation {
@@ -530,6 +531,34 @@ fn flatten_object(
                 source,
             });
         }
+    }
+}
+
+fn inject_market_data_row_id(path: &[String], fields: &mut Vec<FieldMutation>) {
+    if fields.iter().any(|field| field.field == "id") {
+        return;
+    }
+
+    let Some(id) = market_data_row_id(path) else {
+        return;
+    };
+
+    fields.push(FieldMutation {
+        field: "id".to_string(),
+        value: Value::from(id),
+    });
+    fields.sort_by(|left, right| left.field.cmp(&right.field));
+}
+
+fn market_data_row_id(path: &[String]) -> Option<i64> {
+    match path {
+        [root, _symbol, _duration, branch, row_id] if root == "klines" && branch == "data" => {
+            row_id.parse().ok()
+        }
+        [root, _symbol, branch, row_id] if root == "ticks" && branch == "data" => {
+            row_id.parse().ok()
+        }
+        _ => None,
     }
 }
 
