@@ -1,4 +1,4 @@
-use tqsdk_core::{ChartId, Kline, ObjectKey, StatePath};
+use tqsdk_core::{ChartId, Kline, MarketStateReadGuard, ObjectKey, StatePath};
 
 use crate::{api::TqApi, change::ChangeTrackedRef, views::KlineWindow};
 
@@ -30,24 +30,9 @@ impl KlineSerialRef {
         let guard = api.driver.reader.read_market_state();
         let mut rows = Vec::new();
         let duration_key = self.duration_ns.to_string();
-        let data_path = [
-            "klines",
-            self.symbol.as_str(),
-            duration_key.as_str(),
-            "data",
-        ];
 
-        if let Some(data) = guard
-            .get_path(&data_path)
-            .and_then(|value| value.as_object())
-        {
-            let mut ids = data
-                .keys()
-                .filter_map(|key| key.parse::<i64>().ok())
-                .collect::<Vec<_>>();
-            ids.sort_unstable();
-
-            for id in ids.into_iter().rev().take(self.view_width).rev() {
+        if let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) {
+            for id in left_id..=right_id {
                 let id_key = id.to_string();
                 if let Some(row) = guard.decode_path::<Kline>(&[
                     "klines",
@@ -69,6 +54,17 @@ impl KlineSerialRef {
             rows,
         ))
     }
+}
+
+fn chart_bounds(guard: &MarketStateReadGuard<'_>, chart_id: &str) -> Option<(i64, i64)> {
+    let left_id = guard
+        .get_path(&["charts", chart_id, "left_id"])
+        .and_then(|value| value.as_i64())?;
+    let right_id = guard
+        .get_path(&["charts", chart_id, "right_id"])
+        .and_then(|value| value.as_i64())?;
+
+    (left_id <= right_id).then_some((left_id, right_id))
 }
 
 impl ChangeTrackedRef for KlineSerialRef {

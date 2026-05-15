@@ -130,7 +130,11 @@ async fn get_kline_serial_waits_for_initial_ready_and_preserves_commit_for_user(
         .get_kline_serial("SHFE.au2602", std::time::Duration::from_secs(60), 64)
         .await
         .unwrap();
+    let window = serial.load(&api).unwrap();
     assert!(serial.is_ready(&api).unwrap());
+    assert_eq!(window.symbol(), "SHFE.au2602");
+    assert_eq!(window.len(), 2);
+    assert_eq!(window.last().unwrap().close, 620.0);
 
     assert_eq!(
         api.last_commit().map(|commit| commit.revision),
@@ -164,6 +168,7 @@ async fn get_tick_serial_uses_chart_ready_semantics_and_preserves_commit_for_use
     assert!(serial.is_ready(&api).unwrap());
     assert_eq!(window.symbol(), "SHFE.au2602");
     assert_eq!(window.view_width(), 32);
+    assert_eq!(window.len(), 2);
     assert_eq!(window.last().unwrap().last_price, 618.5);
 
     assert_eq!(
