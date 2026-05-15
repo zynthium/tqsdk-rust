@@ -49,6 +49,8 @@ mod export;
 mod greeks;
 mod history_series_cache;
 mod integrity;
+#[cfg(feature = "stream")]
+mod live_history_cache;
 mod live_quote;
 mod market_cache;
 #[cfg(feature = "stream")]
@@ -96,6 +98,10 @@ pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,
     HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
+};
+#[cfg(feature = "stream")]
+pub use live_history_cache::{
+    LiveHistoryCacheOptions, LiveHistoryCacheWriteReport, LiveHistoryCacheWriter,
 };
 pub use market_cache::{
     MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReader,
