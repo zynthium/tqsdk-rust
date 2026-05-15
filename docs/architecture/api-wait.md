@@ -51,7 +51,7 @@ wait adapter 层未来可以提供：
 - `QuoteView` / `QuoteSnapshot`
 - `AccountView` / `OrderView` / `PositionView`
 - `wait_update()`
-- `is_changing()`
+- `WaitStep::is_changing()`
 
 但这些都只是对 runtime contract 的消费包装，不属于 V1。
 
@@ -59,12 +59,12 @@ wait adapter 层未来可以提供：
 - `wait_update()` 只消费 `RuntimeReader::next()` / `UpdateCursor`，不生成 commit
 - facade 如提供 `snapshot()`，默认应建立在某个已提交 revision 的借用读视图之上
 - 只有明确需要 detached ownership 时，才应退回 `StateSnapshot` clone 路径
-- `is_changing()` 只解释最近一次成功消费到的 commit
+- `WaitStep::is_changing()` 只解释当前 `step()` / `step_until(...)` 成功消费到的 commit
 - 所有 timeout / 初始 ready / 重连行为都必须建立在同一 commit 模型上
-- 一次性 `quote_snapshot(symbol, deadline)` 这类 helper 可以作为 wait facade
-  的薄便利层存在，但必须仍通过同一个 session 提交订阅、通过同一个
-  `RuntimeReader` 等待 ready snapshot，并且不得偷改用户随后看到的
-  `last_commit()` / `is_changing()` 语义。
+- 一次性行情快照 helper 如果存在于示例或用户代码中，应只是薄封装：
+  通过同一个 session 创建 `quote` handle，通过同一个 `RuntimeReader` 和
+  `step_until(...)` 等待 ready snapshot，并且不得绕过 `WaitStep`
+  的 commit 边界。
 - `insert_order(..., OrderPrice)` / `insert_limit_order(...)` 这类 typed trade
   helper 可以作为 wait facade 的薄便利层存在，用来从用户路径移除
   `serde_json::Value` 价格参数和 `"BEST"` / `"FIVELEVEL"` 这类魔法字符串；

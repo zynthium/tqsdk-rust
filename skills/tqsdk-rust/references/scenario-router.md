@@ -12,8 +12,8 @@
 
 | 用户说 | 大概率需要 | Crate | 主要调用 |
 | --- | --- | --- | --- |
-| "实时行情", "quote", "盘口", "价格变化", "像 Python TqApi", "wait_update", "is_changing" | Single-owner live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `get_quote`, `wait_update`, `is_changing`, `QuoteRef::load` |
-| "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `get_kline_serial`, `get_tick_serial`, `get_trading_status`, `wait_update`, window/ref load methods |
+| "实时行情", "quote", "盘口", "价格变化", "像 Python TqApi", "wait_update", "is_changing" | Single-owner live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `step`, `WaitStep::is_changing`, `QuoteRef::load` |
+| "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `kline`, `tick`, `trading_status`, `step_until`, window/ref load methods |
 | "多消费者", "事件流", "stream", "fan-out", "写 WAL", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_stream`, `market_events`, trade/session event streams, sink APIs |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk-task` when ownership/risk/task semantics are needed; `tqsdk-wait` for thin direct order wrappers | `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
@@ -31,9 +31,9 @@
 调用顺序：
 
 1. 用凭证构造 `TqApi`。
-2. 调用 `get_quote(symbol).await`。
-3. 循环调用 `wait_update(None).await?`。
-4. 使用 `is_changing(&quote)?`。
+2. 调用 `quote(symbol).await`。
+3. 循环调用 `step().await?`。
+4. 使用 `step.is_changing(&quote)`。
 5. 只有相关变化后才加载 quote snapshot。把 ref 当作 live handle，不要当作 owned snapshot。
 
 继续读：`references/code-patterns.md` 的 Wait Quote Loop 示例。

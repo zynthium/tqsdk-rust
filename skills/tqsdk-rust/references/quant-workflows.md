@@ -4,7 +4,7 @@
 
 ## Live Monitoring
 
-单策略循环或 notebook-like live monitoring 使用 `tqsdk-wait`。通过 `get_quote`、`get_trading_status`、`get_kline_serial` 或 `get_tick_serial` 订阅，然后调用 `wait_update()`；只有 `is_changing()` 表示相关 commit 后才加载 ref。Ref 是 live handle；snapshot 要在 commit 后加载。
+单策略循环或 notebook-like live monitoring 使用 `tqsdk-wait`。通过 `quote`、`trading_status`、`kline` 或 `tick` 创建 handle，然后调用 `step()` / `step_until(...)`；只有 `WaitStep::is_changing()` 表示相关 commit 后才加载 ref。Ref 是 live handle；snapshot 要在 commit 后加载。
 
 契约锚点：S1、S3、S8-S10、S25-S26。
 

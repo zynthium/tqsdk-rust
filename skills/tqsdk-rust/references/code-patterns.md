@@ -22,14 +22,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = std::env::var("TQ_AUTH_USER")?;
     let pass = std::env::var("TQ_AUTH_PASS")?;
     let mut api = TqApiBuilder::new(user, pass).build().await?;
-    let quote = api.get_quote("SHFE.au2602").await?;
+    let quote = api.quote("SHFE.au2602").await?;
 
     loop {
-        if !api.wait_update(None).await? {
-            continue;
-        }
-        if api.is_changing(&quote)? {
-            let snapshot = quote.load(&api)?;
+        let Some(step) = api.step().await? else { continue };
+        if step.is_changing(&quote) {
+            let snapshot = quote.load()?;
             println!("{} {}", snapshot.datetime, snapshot.last_price);
         }
     }

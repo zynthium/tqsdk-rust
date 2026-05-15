@@ -135,12 +135,10 @@
 
 `tqsdk-session` 不应继续吸收：
 
-- `get_quote`
-- `get_trading_status`
-- `get_kline_serial`
-- `get_tick_serial`
+- wait facade 的 `quote` / `trading_status` live handles
+- wait facade 的 `kline` / `tick` live serial handles
 - live trade refs
-- `wait_update()`
+- `step()` / `step_until(...)`
 - object stream / callback
 - downloader
 - `TargetPosTask`

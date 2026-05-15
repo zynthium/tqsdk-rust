@@ -94,7 +94,7 @@ tqsdk-task
 
 禁止回退：
 
-- 不要把 `get_quote`、`get_kline_serial`、live trade refs、`wait_update()`、object stream、task、downloader、research workflow 塞进 session。
+- 不要把 wait facade 的 `quote` / `kline` live handles、live trade refs、`step()` / `step_until(...)`、object stream、task、downloader、research workflow 塞进 session。
 - 不要把 wait/stream 共用的消费层配置塞回 session；消费形态配置应留在消费层。
 
 ### `tqsdk-wait`

@@ -13,7 +13,7 @@
 //! - Greeks 能力留在 data，不回流到 session/wait/stream
 //!
 //! Forbidden:
-//! - `TqApi::get_quote` as pre-step
+//! - `TqApi::quote` as pre-step
 //! - direct `RuntimeCommand`
 //! - provider internal quote snapshot helper
 //! - `Arc<Mutex<_>>` for temporary subscriptions

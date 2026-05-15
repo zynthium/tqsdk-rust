@@ -6,7 +6,7 @@
 
 | 用户目标 | 使用 | 原因 |
 | --- | --- | --- |
-| Python-style live market/trade loop | `tqsdk-wait` | single owner、`wait_update()`、`is_changing()`、live refs、serial windows |
+| Python-style live market/trade loop | `tqsdk-wait` | single owner、`step()` / `step_until(...)`、`WaitStep::is_changing()`、live refs、serial windows |
 | Multi-consumer async events or fan-out | `tqsdk-stream` | commit stream、filters、event streams、lag diagnostics、managed sinks |
 | One-shot metadata/query/service calls | `tqsdk-session` | GraphQL/query、schema、symbol info、quotes metadata、calendar、settlement、ranking、EDB |
 | Strategy execution helpers | `tqsdk-task` | `TaskHost`、`TargetPosTask`、scheduler、risk gate、typed order builders、fake broker tests |
@@ -16,7 +16,7 @@
 ## 边界规则
 
 - `tqsdk-session` 负责 one-shot request/response API：GraphQL、schema、metadata、calendar、settlement、ranking、EDB、auth refresh、replay control 和 low-level command wait helpers。
-- `tqsdk-wait` 负责 Python-style single-owner live refs 和 `wait_update()` 消费。它可以暴露 `session()`，但不能复制 direct-query API。
+- `tqsdk-wait` 负责 Python-style single-owner live refs 和 `step()` 消费。它可以暴露 `session()`，但不能复制 direct-query API。
 - `tqsdk-stream` 负责 multi-consumer commit/event streams、filters、lag diagnostics 和 stream sinks。它可以暴露 `session()`，但不能变成 metadata/query 层，也不能直接依赖 mmap history cache。
 - `tqsdk-task` 负责 strategy execution、target position、schedulers、risk gates、ownership、multi-account order foundations、fake broker tests、replay strategy host 和 S31 trading desk profile。
 - `tqsdk-data` 负责 research/offline data、history pages/series/downloads、CSV export、Python-compatible history cache、option Greeks 和 market-cache replay materialization；它不提供 live stream 写 mmap history cache 的 bridge。

@@ -66,31 +66,31 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `OrderTicket`
 - `OrderTicketState`
 - `testing::WaitTestDriver`
-- `wait_update(deadline).await`
-- `is_changing(...)`
-- `is_changing_fields(...)`
-- `is_serial_ready(...)`
-- `get_quote(...).await`
-- `quote_snapshot(...).await`
+- `step().await`
+- `step_until(deadline).await`
+- `WaitStep::{revision, current_dt, is_changing, is_changing_fields}`
+- `quote(...).await`
+- `trading_status(...).await`
+- `kline(...).await`
+- `tick(...).await`
 - `startup_recovery()`
-- `get_trading_status(...).await`
-- `get_kline_serial(...).await`
-- `get_tick_serial(...).await`
+- `TqBacktest::{new, futures, stock}`
+- `TqApiBuilder::{backtest, futures_backtest, stock_backtest}`
 - `KlineWindow::{rows, into_rows, first, last, last_completed, completed_rows}`
 - `TickWindow::{rows, into_rows, first, last}`
-- `get_account(...)`
-- `get_position(...)`
-- `get_pre_insert_order(...)`
-- `get_order(...)`
-- `get_trade(...)`
-- `get_risk_management_rule(...)`
-- `get_risk_management_data(...)`
-- `get_settlement_info(...)`
-- `get_notification(...)`
-- `get_security_account(...)`
-- `get_security_position(...)`
-- `get_security_order(...)`
-- `get_security_trade(...)`
+- `account(...)`
+- `position(...)`
+- `pre_insert_order(...)`
+- `order(...)`
+- `trade(...)`
+- `risk_management_rule(...)`
+- `risk_management_data(...)`
+- `settlement_info(...)`
+- `notification(...)`
+- `security_account(...)`
+- `security_position(...)`
+- `security_order(...)`
+- `security_trade(...)`
 - `login_trade_account(...).await`
 - `insert_order(..., OrderPrice).await`
 - `insert_limit_order(...).await`
@@ -117,7 +117,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
-- `get_kline_serial` / `get_tick_serial` 对齐 Python live serial 心智：创建并持有滚动窗口引用，数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
+- `kline` / `tick` 对齐 Python live serial 心智：创建并持有滚动窗口 handle，数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
@@ -134,15 +134,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = std::env::var("TQ_AUTH_USER")?;
     let pass = std::env::var("TQ_AUTH_PASS")?;
     let mut api = TqApiBuilder::new(user, pass).build().await?;
-    let quote = api.get_quote("SHFE.au2602").await?;
+    let quote = api.quote("SHFE.au2602").await?;
 
     loop {
-        if !api.wait_update(None).await? {
-            continue;
-        }
+        let Some(step) = api.step().await? else { continue };
 
-        if api.is_changing(&quote)? {
-            let snapshot = quote.load(&api)?;
+        if step.is_changing(&quote) {
+            let snapshot = quote.load()?;
             println!("{} {}", snapshot.datetime, snapshot.last_price);
         }
     }
@@ -151,18 +149,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 完整可编译示例见 [examples/quote_wait.rs](examples/quote_wait.rs)。
 
-如果只需要一次 typed 行情快照，而不想手写 `wait_update()` 循环，可以使用
-`TqApi::quote_snapshot(symbol, deadline).await`。该 helper 会复用同一个底层
-session 订阅 quote、等待带 `datetime` 的 ready snapshot，并保留用户可见的
-`last_commit()` / `is_changing()` 截面解释不被内部等待破坏。契约示例见
+如果只需要一次 typed 行情快照，可以在示例本地封装一个很薄的 helper：先通过
+`TqApi::quote(symbol).await` 创建 handle，再用 `step_until(deadline).await` 等待
+`WaitStep::is_changing(&quote)` 并读取 `quote.load()`。该模式仍复用同一个底层
+session 和 `RuntimeReader`，不会绕过 commit 边界。契约示例见
 [examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
 
 实时交易状态、K 线 serial 和 tick serial 属于 wait continuous consumption：
-用户通过 `get_trading_status`、`get_kline_serial`、`get_tick_serial` 获取 live ref，
-再在 `wait_update()` 后用 `is_changing()` / `is_changing_fields()` 判断是否加载当前
+用户通过 `trading_status`、`kline`、`tick` 获取 live handle，
+再在 `step()` / `step_until(...)` 后用 `WaitStep::is_changing()` /
+`WaitStep::is_changing_fields()` 判断是否加载当前
 typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `right_id`
 投影 rows，不从全局缓存中截取最新 N 条；row-only diff 也会让对应 serial ref
-报告变化。`is_serial_ready()` 可用于确认窗口初始化状态，K 线窗口的
+报告变化。`KlineHandle::is_ready()` / `TickHandle::is_ready()` 可用于确认窗口初始化状态，K 线窗口的
 `completed_rows()` / `last_completed()` 用于跳过最新可变尾 bar。这不是
 `tqsdk-data` 的历史下载或 mmap 缓存，也不是 `tqsdk-session` 的 metadata direct
 query。契约示例见
@@ -170,7 +169,7 @@ query。契约示例见
 
 较少见的 trade/system live refs 也属于 wait facade：`NotificationRef`、
 `SettlementInfoRef`、`RiskManagementRuleRef`、`RiskManagementDataRef` 都通过同一
-runtime state tree 和 `is_changing()` 观察。`confirm_settlement` 是 wait 风格
+runtime state tree 和 `WaitStep::is_changing()` 观察。`confirm_settlement` 是 wait 风格
 trade command wrapper，默认示例运行不会提交确认命令。契约示例见
 [examples/api_contract_s26_trade_system_refs.rs](examples/api_contract_s26_trade_system_refs.rs)。
 

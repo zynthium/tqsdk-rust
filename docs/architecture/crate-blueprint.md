@@ -291,15 +291,15 @@ tqsdk-wait  tqsdk-stream
 
 能力：
 
-- `get_quote`
-- `get_quote_list` 的 live quote 语义
-- `get_trading_status`
-- `get_kline_serial`
-- `get_tick_serial`
-- `get_account`
-- `get_position`
-- `get_order`
-- `get_trade`
+- `quote`
+- live quote list / basket 语义
+- `trading_status`
+- `kline`
+- `tick`
+- `account`
+- `position`
+- `order`
+- `trade`
 - `get_risk_management_rule`
 - `get_risk_management_data`
 - `insert_order`

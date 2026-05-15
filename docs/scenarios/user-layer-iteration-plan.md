@@ -28,9 +28,9 @@ public API。
 - `~/Projects/GitHub/tqsdk-python/tqsdk/api.py`
   - `TqApi.__init__` 的初始快照等待语义
   - `wait_update()` 的单推进点与稳定截面语义
-  - `get_quote` / `get_kline_serial` / `get_tick_serial`
+  - live quote / K 线 serial / tick serial
   - `insert_order` / `cancel_order`
-  - `get_account` / `get_position` / `get_order` / `get_trade`
+  - live account / position / order / trade refs
 - `~/Projects/GitHub/tqsdk-python/tqsdk/connect.py`
   - 重连后记录请求、重发订阅、暂停向上输出、等待完整快照后恢复
 - `~/Projects/GitHub/tqsdk-python/tqsdk/lib/target_pos_task.py`

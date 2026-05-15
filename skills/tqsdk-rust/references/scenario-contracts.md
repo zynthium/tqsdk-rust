@@ -93,14 +93,14 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 
 | 场景 | 正式示例或 gap | 用户问什么时使用 | 主要 API / 边界 |
 | --- | --- | --- | --- |
-| S1 Zero-barrier quote | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs` | 基础 live quote loop、Python-like `wait_update` | `TqApi::get_quote`、`wait_update`、`is_changing`；live refs 属于 wait。 |
+| S1 Zero-barrier quote | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs` | 基础 live quote loop、Python-like step loop | `TqApi::quote`、`step`、`WaitStep::is_changing`；live refs 属于 wait。 |
 | S2 Dynamic subscriptions | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs` | async stream 中动态增删多个 symbol | `TqStream::quotes`、`QuoteSubscription::{add, remove, symbols}`；reconnect 会重排 subscription intent。 |
-| S3 Quote snapshot | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs` | 不手写循环，只取一次 ready quote snapshot | `TqApi::quote_snapshot`；仍是 wait facade，不是 session metadata。 |
+| S3 Quote snapshot | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs` | 用局部 helper 只取一次 ready quote snapshot | `TqApi::quote`、`step_until`、`QuoteRef::load`；仍是 wait facade，不是 session metadata。 |
 | S4 Mixed market streams | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs` | Quote/tick/kline event bus | `TqStream::market_events`、`MarketEventStream`、typed market events。 |
 | S5 Bare market fast path | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs` | 低层行情订阅和 hot reads | `SessionClient::{subscribe_quotes, progress_once}`、`RuntimeReader::read_market_state`；避免高层 facade 开销。 |
 | S6 Limit order | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs` | 普通下单 | `login_trade_account`、`limit_order`、`LimitOrderIntent::send_once`、`OrderTicket::wait_terminal`；副作用必须显式。 |
 | S7 Cancel / partial fill | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs` | 等待部分成交、撤剩余、等待终态 | `OrderTicket` / `OrderRef` helpers；不要解析 raw status 字符串。 |
-| S8 Account / position | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs` | 资金、账户、持仓 live refs | `get_account`、`get_position`；wait live state，不是 direct query。 |
+| S8 Account / position | `crates/tqsdk-wait/examples/api_contract_s08_account_position_updates.rs` | 资金、账户、持仓 live refs | `account`、`position`；wait live state，不是 direct query。 |
 | S9 Startup recovery | `crates/tqsdk-wait/examples/api_contract_s09_startup_state_recovery.rs` | 启动或重连后的 ready barrier | `StartupRecoverySpec`、`TqApi::startup_recovery`、`TqStream::recover_state`。 |
 | S10 Reconnect order consistency | `crates/tqsdk-wait/examples/api_contract_s10_reconnect_order_consistency.rs` | 单 session 内幂等 order intent | `OrderIntentRecord`、`OrderTicketState`、stable client intent；cross-process persistence 是 out of scope。 |
 | S11 Simple strategy | `crates/tqsdk-task/examples/api_contract_s11_simple_strategy.rs` | 策略内读取 quote/account/position 并下单 | `StrategyHost`、`StrategyContext`、`TaskHost::orders`、`RiskEngine`、`TargetPosTask`。 |
@@ -117,7 +117,7 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 | S22 Error diagnosis / retry | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs` | retryable errors、backoff、typed diagnostics | `StreamFacadeError::diagnostic`、`StreamRetryPolicy`、retry decisions；business retry audit 属于用户执行系统。 |
 | S23 Contract metadata | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs` | instrument specs、contract class、normalized metadata | `SessionClient::query_instrument_specs`、`InstrumentSpec`、`InstrumentClass`；one-shot session query。 |
 | S24 Testable strategy | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs` | 不依赖 live services 的策略单测 | `StrategyTestHarness`、`FakeMarket`、`FakeBroker`、`StrategyTestClock`；完整 exchange simulator 是 out of scope。 |
-| S25 Wait serial/status | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs` | trading status、K-line serial、tick serial | `get_trading_status`、`get_kline_serial`、`get_tick_serial`、`is_changing_fields`；不属于 session/data。 |
+| S25 Wait serial/status | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs` | trading status、K-line serial、tick serial | `trading_status`、`kline`、`tick`、`WaitStep::is_changing_fields`；不属于 session/data。 |
 | S26 Wait trade/system refs | `crates/tqsdk-wait/examples/api_contract_s26_trade_system_refs.rs`; `crates/tqsdk-wait/examples/api_contract_s26_security_trade_refs.rs` | notifications、settlement、risk refs、security trade refs | Wait live refs 和 `confirm_settlement` 这类 command wrapper；不是 direct query。 |
 | S27 Metadata/service query pack | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs` | quotes list、main contracts、options、calendar、settlement、ranking、EDB | `SessionClient` typed one-shot metadata/service APIs；不要复制到 wait/stream。 |
 | S28 Download/export/Greeks | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs` | history downloads、CSV export、option Greeks | `DataClient` research/download APIs；不是 live session refs。 |

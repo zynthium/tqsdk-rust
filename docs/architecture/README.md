@@ -179,9 +179,9 @@ V1 是：
 | session 内订单 intent ledger | `tqsdk-session` | 是 shared session substrate，帮助 wait/stream/task 复用同一 client order id 去重语义，但不拥有 live order object |
 | 低层行情命令 helper | `tqsdk-session` | 是一次性 runtime command submission，不拥有 live quote object 或消费循环 |
 | stream fan-out capacity / lag diagnostics / health status | `tqsdk-stream` | 属于 continuous consumption 的 consumer/channel 状态，不应下沉到 core/session |
-| `get_quote` / `get_trading_status` | `tqsdk-wait` / `tqsdk-stream` | 返回持续变化对象，依赖 commit 持续推进 |
-| `get_kline_serial` / `get_tick_serial` | `tqsdk-wait` / `tqsdk-stream` | 返回持续更新窗口，依赖后续 diff |
-| `get_account` / `get_position` / `get_order` / `get_trade` | `tqsdk-wait` / `tqsdk-stream` | 读取的是同一棵状态树中的 live 对象 |
+| `quote` / `trading_status` | `tqsdk-wait` / `tqsdk-stream` | 返回持续变化对象，依赖 commit 持续推进 |
+| `kline` / `tick` | `tqsdk-wait` / `tqsdk-stream` | 返回持续更新窗口，依赖后续 diff |
+| `account` / `position` / `order` / `trade` | `tqsdk-wait` / `tqsdk-stream` | 读取的是同一棵状态树中的 live 对象 |
 | `insert_order` / `cancel_order` / `confirm_settlement` | `tqsdk-wait` / `tqsdk-stream` | 属于 trade diff-backed 消费语义的一部分 |
 
 对用户形态的含义也应明确：

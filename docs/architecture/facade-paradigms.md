@@ -94,8 +94,8 @@
 
 - `TqApi` 自己持有 event loop，见 `tqsdk/baseApi.py`
 - task 的调度依赖 `wait_update()`，如果不调用，task 也不会继续跑
-- `get_quote()`、`get_kline_serial()` 返回的是会被原地更新的对象 / DataFrame
-- `is_changing()` 根据“最近一次 wait_update 消费到的 diff 集合”解释变化
+- `quote()`、`kline()` 返回的是随 runtime commit 更新的 handle / window
+- `WaitStep::is_changing()` 根据“当前 step 消费到的 diff 集合”解释变化
 - `register_update_notify()` 是对同一套更新语义的协程化观察接口，不是另一个并列 runtime
 
 ### 优点
@@ -143,7 +143,7 @@
   - 负责初始化 live context
   - 提供 `wait_update()` 和 `wait_update_and_drain()`
 - `QuoteRef` / `KlineRef` / `TickRef`
-  - 各自有 `wait_update()` / `try_load()` / `is_changing()`
+  - 各自有独立等待、加载和变化判断方法
 - `SeriesSubscription`
   - 自己启动 watch task
   - 自己提供 `wait_update()` / `snapshot()` / `load()`
