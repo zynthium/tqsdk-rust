@@ -13,6 +13,8 @@ pub(crate) struct WaitDriver {
     pub(crate) last_commit: Option<tqsdk_core::SharedCommitResult>,
     pub(crate) waiting: AtomicBool,
     pub(crate) next_order_seq: AtomicU64,
+    pub(crate) quote_subscriptions: HashSet<String>,
+    pub(crate) trading_status_subscriptions: HashSet<String>,
     pub(crate) serial_charts: HashSet<String>,
 }
 

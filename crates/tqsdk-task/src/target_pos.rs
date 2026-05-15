@@ -395,7 +395,7 @@ mod tests {
         .build_internal()
         .expect("internal task should build");
         let mut api = market_only_api();
-        task.inner.track_order(api.get_order("sim", "unit-order-1"));
+        task.inner.track_order(api.order("sim", "unit-order-1"));
         task.inner.cancel_requested.store(true, Ordering::SeqCst);
 
         task.inner.process_wait_update(&mut api).await;

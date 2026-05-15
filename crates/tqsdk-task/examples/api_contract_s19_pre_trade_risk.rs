@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(tokio::time::Instant::now() + Duration::from_secs(30)),
     )
     .await?;
-    api.get_quote(symbol.as_str()).await?;
+    api.quote(symbol.as_str()).await?;
     let instrument_specs = api
         .session()
         .query_instrument_specs(&[symbol.as_str()])

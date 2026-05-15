@@ -63,14 +63,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(tokio::time::Instant::now() + Duration::from_secs(30)),
     )
     .await?;
-    api.quote_snapshot(
+    wait_quote_ready(
+        &mut api,
         leg_a.as_str(),
-        Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+        tokio::time::Instant::now() + Duration::from_secs(30),
     )
     .await?;
-    api.quote_snapshot(
+    wait_quote_ready(
+        &mut api,
         leg_b.as_str(),
-        Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+        tokio::time::Instant::now() + Duration::from_secs(30),
     )
     .await?;
 
@@ -126,4 +128,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn wait_quote_ready(
+    api: &mut tqsdk_wait::TqApi,
+    symbol: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let quote = api.quote(symbol).await?;
+    while let Some(step) = api.step_until(Some(deadline)).await? {
+        if step.is_changing(&quote) && quote.snapshot()?.is_some() {
+            return Ok(());
+        }
+    }
+    Err(format!("quote not ready: {symbol}").into())
 }

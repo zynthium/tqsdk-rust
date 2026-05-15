@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use tqsdk_core::{Account, Position, Quote};
-use tqsdk_wait::{KlineSerialRef, KlineWindow, TickSerialRef, TickWindow};
+use tqsdk_wait::{KlineHandle, KlineWindow, QuoteRef, TickHandle, TickWindow};
 
 use crate::order::TaskOrderBuilder;
 use crate::risk::RiskEngine;
@@ -25,6 +25,7 @@ pub struct StrategyHost {
     host: TaskHost,
     accounts: Vec<String>,
     quotes: Vec<String>,
+    quote_handles: Vec<StrategyQuoteHandle>,
     klines: Vec<StrategyKlineHandle>,
     ticks: Vec<StrategyTickHandle>,
 }
@@ -39,6 +40,7 @@ pub struct StrategyUpdate {
 pub struct StrategyContext<'a> {
     host: &'a mut TaskHost,
     update: StrategyUpdate,
+    quotes: &'a [StrategyQuoteHandle],
     klines: &'a [StrategyKlineHandle],
     ticks: &'a [StrategyTickHandle],
 }
@@ -56,14 +58,19 @@ struct StrategyTickSpec {
     view_width: usize,
 }
 
+struct StrategyQuoteHandle {
+    symbol: String,
+    quote: QuoteRef,
+}
+
 struct StrategyKlineHandle {
     spec: StrategyKlineSpec,
-    serial: KlineSerialRef,
+    serial: KlineHandle,
 }
 
 struct StrategyTickHandle {
     spec: StrategyTickSpec,
-    serial: TickSerialRef,
+    serial: TickHandle,
 }
 
 impl StrategyHost {
@@ -80,6 +87,7 @@ impl StrategyHost {
         Ok(Some(StrategyContext {
             host: &mut self.host,
             update: StrategyUpdate { updated },
+            quotes: &self.quote_handles,
             klines: &self.klines,
             ticks: &self.ticks,
         }))
@@ -167,8 +175,13 @@ impl StrategyHostBuilder {
     }
 
     pub async fn build(mut self) -> Result<StrategyHost> {
+        let mut quote_handles = Vec::new();
         for symbol in &self.quotes {
-            self.host.api_mut().get_quote(symbol).await?;
+            let quote = self.host.api_mut().quote(symbol).await?;
+            quote_handles.push(StrategyQuoteHandle {
+                symbol: symbol.clone(),
+                quote,
+            });
         }
 
         let mut kline_handles = Vec::new();
@@ -176,7 +189,7 @@ impl StrategyHostBuilder {
             let serial = self
                 .host
                 .api_mut()
-                .get_kline_serial(
+                .kline(
                     &spec.symbol,
                     Duration::from_nanos(spec.duration_ns as u64),
                     spec.view_width,
@@ -193,7 +206,7 @@ impl StrategyHostBuilder {
             let serial = self
                 .host
                 .api_mut()
-                .get_tick_serial(&spec.symbol, spec.view_width)
+                .tick(&spec.symbol, spec.view_width)
                 .await?;
             tick_handles.push(StrategyTickHandle {
                 spec: spec.clone(),
@@ -205,6 +218,7 @@ impl StrategyHostBuilder {
             host: self.host,
             accounts: self.accounts,
             quotes: self.quotes,
+            quote_handles,
             klines: kline_handles,
             ticks: tick_handles,
         })
@@ -225,11 +239,11 @@ impl StrategyContext<'_> {
     }
 
     pub fn quote(&self, symbol: impl AsRef<str>) -> Result<Quote> {
-        self.host
-            .api()
-            .quote_ref(symbol.as_ref())
-            .load(self.host.api())
-            .map_err(Into::into)
+        let symbol = symbol.as_ref();
+        let Some(handle) = self.quotes.iter().find(|handle| handle.symbol == symbol) else {
+            return Err(TaskError::InvalidState("strategy quote is not configured"));
+        };
+        handle.quote.load().map_err(Into::into)
     }
 
     pub fn kline(&self, symbol: impl AsRef<str>, duration: Duration) -> Result<KlineWindow> {
@@ -244,7 +258,7 @@ impl StrategyContext<'_> {
                 "strategy kline serial is not configured",
             ));
         };
-        handle.serial.load(self.host.api()).map_err(Into::into)
+        handle.serial.window().map_err(Into::into)
     }
 
     pub fn tick(&self, symbol: impl AsRef<str>) -> Result<TickWindow> {
@@ -258,14 +272,14 @@ impl StrategyContext<'_> {
                 "strategy tick serial is not configured",
             ));
         };
-        handle.serial.load(self.host.api()).map_err(Into::into)
+        handle.serial.window().map_err(Into::into)
     }
 
     pub fn account(&self, account_id: impl AsRef<str>) -> Result<Account> {
         self.host
             .api()
-            .get_account(account_id.as_ref())
-            .load(self.host.api())
+            .account(account_id.as_ref())
+            .load()
             .map_err(Into::into)
     }
 
@@ -276,8 +290,8 @@ impl StrategyContext<'_> {
     ) -> Result<Position> {
         self.host
             .api()
-            .get_position(account_id.as_ref(), symbol.as_ref())
-            .load(self.host.api())
+            .position(account_id.as_ref(), symbol.as_ref())
+            .load()
             .map_err(Into::into)
     }
 

@@ -3,6 +3,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
+use tqsdk_wait::QuoteRef;
 
 use crate::registry::TaskId;
 use crate::target_pos::{TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskTradeFill};
@@ -33,6 +34,7 @@ pub(super) struct TargetPosSchedulerState {
     pub(super) next_step_index: usize,
     pub(super) current_step_clock: Option<ActiveStepClock>,
     pub(super) current_step_phase: ActiveStepPhase,
+    pub(super) quote: Option<QuoteRef>,
     pub(super) active_task: Option<TargetPosTask>,
     pub(super) active_task_report_len: usize,
     pub(super) report: TargetPosExecutionReport,
@@ -46,6 +48,7 @@ impl Default for TargetPosSchedulerState {
             next_step_index: 0,
             current_step_clock: None,
             current_step_phase: ActiveStepPhase::Running,
+            quote: None,
             active_task: None,
             active_task_report_len: 0,
             report: TargetPosExecutionReport::default(),

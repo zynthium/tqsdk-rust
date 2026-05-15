@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use tqsdk_core::{TradeDirection, TradeOffset};
-use tqsdk_wait::OrderRef;
+use tqsdk_wait::{OrderRef, QuoteRef};
 
 use crate::TaskError;
 use crate::registry::TaskId;
@@ -46,6 +46,7 @@ pub(super) struct TargetPosTaskState {
     pub(super) applied_target_volume: Option<i64>,
     pub(super) last_error: Option<TaskError>,
     pub(super) submitted_net_position: Option<i64>,
+    pub(super) quote: Option<QuoteRef>,
     pub(super) tracked_orders: Vec<OrderRef>,
     pub(super) known_order_ids: HashSet<String>,
     pub(super) cancel_requested_order_ids: HashSet<String>,

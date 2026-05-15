@@ -67,8 +67,14 @@ impl TargetPosSchedulerInner {
                 return;
             }
 
-            if matches!(phase, ActiveStepPhase::Running)
-                && !self.step_deadline_elapsed(api, step_index)
+            if matches!(phase, ActiveStepPhase::Running) {
+                if let Err(error) = self.ensure_quote_ref(api).await {
+                    self.finish_with_error(error);
+                    return;
+                }
+            }
+
+            if matches!(phase, ActiveStepPhase::Running) && !self.step_deadline_elapsed(step_index)
             {
                 if let Some(task) = self.active_task() {
                     task.process_wait_update(api).await;
@@ -172,8 +178,28 @@ impl TargetPosSchedulerInner {
         self.with_state(|state| state.active_task.clone())
     }
 
-    fn step_deadline_elapsed(&self, api: &tqsdk_wait::TqApi, step_index: usize) -> bool {
-        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
+    async fn ensure_quote_ref(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
+        if self.with_state(|state| state.quote.is_some()) {
+            return Ok(());
+        }
+
+        let quote = api
+            .quote(&self.symbol)
+            .await
+            .map_err(crate::TaskError::from)?;
+        self.with_state_mut(|state| {
+            state.quote = Some(quote);
+        });
+        if !self.quote_subscriptions.contains(&self.symbol) {
+            self.quote_subscriptions.insert(self.symbol.clone());
+        }
+        Ok(())
+    }
+
+    fn step_deadline_elapsed(&self, step_index: usize) -> bool {
+        let quote = self
+            .with_state(|state| state.quote.clone())
+            .and_then(|quote| quote.snapshot().ok().flatten());
         let now = shanghai_now();
         let trading_calendar = self.trading_calendar.snapshot();
         self.with_state_mut(|state| {

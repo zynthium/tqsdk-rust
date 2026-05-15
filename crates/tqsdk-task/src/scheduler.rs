@@ -362,7 +362,7 @@ mod tests {
         .build_internal()
         .expect("internal target task should build");
         let mut api = market_only_api();
-        task.track_order_for_test(api.get_order("sim", "unit-order-1"));
+        task.track_order_for_test(api.order("sim", "unit-order-1"));
         scheduler.inner.with_state_mut(|state| {
             state.active_task = Some(task);
         });

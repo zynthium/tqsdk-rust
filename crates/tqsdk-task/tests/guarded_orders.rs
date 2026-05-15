@@ -125,7 +125,7 @@ async fn insert_order_guarded_allows_unowned_symbol_and_delegates_to_wait_api() 
         .await
         .unwrap();
 
-    assert!(!order.is_ready(host.api()).unwrap());
+    assert!(!order.is_ready().unwrap());
 
     let dispatches = host.api().session().handle().drain_dispatches().unwrap();
     assert_eq!(dispatches.len(), 1);

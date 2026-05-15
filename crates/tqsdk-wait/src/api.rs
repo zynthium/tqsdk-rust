@@ -61,6 +61,8 @@ impl TqApi {
                 last_commit: None,
                 waiting: AtomicBool::new(false),
                 next_order_seq: AtomicU64::new(1),
+                quote_subscriptions: Default::default(),
+                trading_status_subscriptions: Default::default(),
                 serial_charts: Default::default(),
             },
         }
@@ -219,15 +221,19 @@ impl TqApi {
     }
 
     pub async fn quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {
-        self.driver
-            .session
-            .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-                symbols: vec![Symbol::new(symbol)],
-            }))
-            .await
-            .map_err(crate::error::WaitFacadeError::Session)?;
+        let quote = QuoteRef::new(self.read_handle(), symbol);
 
-        Ok(QuoteRef::new(self.read_handle(), symbol))
+        if self.driver.quote_subscriptions.insert(symbol.to_owned()) && !quote.is_ready()? {
+            self.driver
+                .session
+                .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+                    symbols: vec![Symbol::new(symbol)],
+                }))
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+        }
+
+        Ok(quote)
     }
 
     pub fn startup_recovery(&mut self) -> crate::recovery::WaitStartupRecovery<'_> {
@@ -235,17 +241,26 @@ impl TqApi {
     }
 
     pub async fn trading_status(&mut self, symbol: &str) -> crate::error::Result<TradingStatusRef> {
-        self.driver
-            .session
-            .submit(RuntimeCommand::Market(
-                MarketCommand::SubscribeTradingStatus {
-                    symbols: vec![Symbol::new(symbol)],
-                },
-            ))
-            .await
-            .map_err(crate::error::WaitFacadeError::Session)?;
+        let trading_status = TradingStatusRef::new(self.read_handle(), symbol);
 
-        Ok(TradingStatusRef::new(self.read_handle(), symbol))
+        if self
+            .driver
+            .trading_status_subscriptions
+            .insert(symbol.to_owned())
+            && !trading_status.is_ready()?
+        {
+            self.driver
+                .session
+                .submit(RuntimeCommand::Market(
+                    MarketCommand::SubscribeTradingStatus {
+                        symbols: vec![Symbol::new(symbol)],
+                    },
+                ))
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+        }
+
+        Ok(trading_status)
     }
 
     pub async fn kline(

@@ -110,7 +110,7 @@ async fn wait_for_trade_account_ready(
     timeout_secs: u64,
 ) -> Result<(), Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
-    let account = host.api().get_account(account_id);
+    let account = host.api().account(account_id);
 
     loop {
         let now = tokio::time::Instant::now();
@@ -119,7 +119,7 @@ async fn wait_for_trade_account_ready(
         }
 
         let _updated = host.wait_update(Some(now + Duration::from_secs(5))).await?;
-        if let Some(snapshot) = account.snapshot(host.api())? {
+        if let Some(snapshot) = account.snapshot()? {
             println!(
                 "trade account ready user_id={} currency={} available={}",
                 snapshot.user_id, snapshot.currency, snapshot.available

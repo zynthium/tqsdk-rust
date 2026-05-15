@@ -367,8 +367,8 @@ impl TaskHost {
         let order_id = order_id.as_ref().to_owned();
         let order = self
             .api
-            .get_order(&account_id, &order_id)
-            .snapshot(&self.api)?
+            .order(&account_id, &order_id)
+            .snapshot()?
             .ok_or_else(|| TaskError::OrderNotReady {
                 account_id: account_id.clone(),
                 order_id: order_id.clone(),

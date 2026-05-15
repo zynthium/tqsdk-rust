@@ -72,7 +72,7 @@ async fn live_task_host_trade_account_ready_smoke() {
         .await
         .expect("TradeLoginCommand should submit successfully");
 
-    let account = host.api().get_account(account_id.as_str());
+    let account = host.api().account(account_id.as_str());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let now = tokio::time::Instant::now();
@@ -87,7 +87,7 @@ async fn live_task_host_trade_account_ready_smoke() {
             .expect("TaskHost::wait_update should succeed");
 
         let Some(snapshot) = account
-            .snapshot(host.api())
+            .snapshot()
             .expect("account snapshot decode should succeed")
         else {
             continue;
@@ -470,7 +470,7 @@ async fn wait_for_trade_account_ready(
     account_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let account = host.api().get_account(account_id);
+    let account = host.api().account(account_id);
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let now = tokio::time::Instant::now();
@@ -482,9 +482,7 @@ async fn wait_for_trade_account_ready(
             .await
             .map_err(|error| error.to_string())?;
 
-        let snapshot = account
-            .snapshot(host.api())
-            .map_err(|error| error.to_string())?;
+        let snapshot = account.snapshot().map_err(|error| error.to_string())?;
         if snapshot.is_some() {
             return Ok(());
         }
@@ -506,7 +504,7 @@ async fn wait_for_order_snapshot(
             .expect("TaskHost::wait_update should succeed");
 
         let Some(snapshot) = order
-            .snapshot(host.api())
+            .snapshot()
             .expect("order snapshot decode should succeed")
         else {
             continue;
@@ -605,8 +603,8 @@ async fn wait_for_scheduler_finished(
 fn current_net_position(host: &TaskHost, account_id: &str, symbol: &str) -> Result<i64, String> {
     let snapshot = host
         .api()
-        .get_position(account_id, symbol)
-        .snapshot(host.api())
+        .position(account_id, symbol)
+        .snapshot()
         .map_err(|error| error.to_string())?;
     Ok(snapshot.map_or(0, |position| position.pos))
 }

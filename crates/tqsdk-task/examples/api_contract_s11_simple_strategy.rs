@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(deadline),
     )
     .await?;
-    api.quote_snapshot(symbol.as_str(), Some(deadline)).await?;
+    wait_quote_ready(&mut api, symbol.as_str(), deadline).await?;
 
     let risk = RiskEngine::new()
         .max_order_volume(1)
@@ -111,4 +111,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn wait_quote_ready(
+    api: &mut tqsdk_wait::TqApi,
+    symbol: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let quote = api.quote(symbol).await?;
+    while let Some(step) = api.step_until(Some(deadline)).await? {
+        if step.is_changing(&quote) && quote.snapshot()?.is_some() {
+            return Ok(());
+        }
+    }
+    Err(format!("quote not ready: {symbol}").into())
 }

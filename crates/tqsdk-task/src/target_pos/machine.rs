@@ -122,7 +122,9 @@ impl TargetPosTaskInner {
 
         let current_position = current_position_snapshot(api, &self.account_id, &self.symbol);
         let current_net_position = net_position(&current_position);
-        let quote = api.quote_ref(&self.symbol).snapshot(api).ok().flatten();
+        let quote = self
+            .with_state(|state| state.quote.clone())
+            .and_then(|quote| quote.snapshot().ok().flatten());
         let desired_batch = quote.as_ref().and_then(|quote| {
             planner::desired_batch_for_target(
                 &self.symbol,
@@ -282,8 +284,8 @@ impl TargetPosTaskInner {
 
         for trade_id in trade_ids {
             let Some(trade) = api
-                .get_trade(&self.account_id, &trade_id)
-                .snapshot(api)
+                .trade(&self.account_id, &trade_id)
+                .snapshot()
                 .ok()
                 .flatten()
             else {
@@ -302,23 +304,26 @@ impl TargetPosTaskInner {
     }
 
     async fn ensure_quote_subscription(&self, api: &mut tqsdk_wait::TqApi) -> Result<()> {
-        if api
-            .quote_ref(&self.symbol)
-            .snapshot(api)
-            .ok()
-            .flatten()
+        if self
+            .with_state(|state| state.quote.clone())
+            .and_then(|quote| quote.snapshot().ok().flatten())
             .as_ref()
             .is_some_and(planner::quote_supports_pricing)
         {
             return Ok(());
         }
 
-        if self.quote_subscriptions.contains(&self.symbol) {
+        if self.with_state(|state| state.quote.is_some()) {
             return Ok(());
         }
 
-        api.get_quote(&self.symbol).await.map_err(TaskError::from)?;
-        self.quote_subscriptions.insert(self.symbol.clone());
+        let quote = api.quote(&self.symbol).await.map_err(TaskError::from)?;
+        self.with_state_mut(|state| {
+            state.quote = Some(quote);
+        });
+        if !self.quote_subscriptions.contains(&self.symbol) {
+            self.quote_subscriptions.insert(self.symbol.clone());
+        }
         Ok(())
     }
 
@@ -425,13 +430,13 @@ impl TargetPosTaskInner {
         Ok(())
     }
 
-    fn prune_terminal_orders(&self, api: &tqsdk_wait::TqApi) {
+    fn prune_terminal_orders(&self, _api: &tqsdk_wait::TqApi) {
         let tracked_orders = self.with_state(|state| state.tracked_orders.clone());
         let finished_orders = tracked_orders
             .iter()
             .filter_map(|order_ref| {
                 order_ref
-                    .snapshot(api)
+                    .snapshot()
                     .ok()
                     .flatten()
                     .filter(order_is_terminal)
@@ -469,7 +474,7 @@ impl TargetPosTaskInner {
         self.prune_terminal_orders(api);
         self.with_state(|state| state.tracked_orders.clone())
             .into_iter()
-            .filter_map(|order_ref| order_ref.snapshot(api).ok().flatten())
+            .filter_map(|order_ref| order_ref.snapshot().ok().flatten())
             .filter(|order| !order_is_terminal(order))
             .collect()
     }
@@ -478,7 +483,7 @@ impl TargetPosTaskInner {
         self.prune_terminal_orders(api);
         self.with_state(|state| state.tracked_orders.clone())
             .into_iter()
-            .filter(|order_ref| order_ref.snapshot(api).ok().flatten().is_none())
+            .filter(|order_ref| order_ref.snapshot().ok().flatten().is_none())
             .map(|order_ref| order_ref.order_id().to_string())
             .collect()
     }
@@ -497,8 +502,8 @@ impl TargetPosTaskInner {
 }
 
 fn current_position_snapshot(api: &tqsdk_wait::TqApi, account_id: &str, symbol: &str) -> Position {
-    api.get_position(account_id, symbol)
-        .snapshot(api)
+    api.position(account_id, symbol)
+        .snapshot()
         .ok()
         .flatten()
         .unwrap_or_default()
