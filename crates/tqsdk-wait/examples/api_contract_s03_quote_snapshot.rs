@@ -6,8 +6,8 @@
 //! - 用 typed `Quote` 结果继续业务逻辑
 //!
 //! API contract:
-//! - 一次调用返回 typed quote snapshot
-//! - SDK 内部处理订阅、等待 ready、超时和清理
+//! - 先用 `TqApi::quote` 创建 quote handle
+//! - 再用 `TqApi::step_until` 等待 quote 变更并读取 typed snapshot
 //! - 不要求用户理解 chart / diff / commit path
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -16,16 +16,15 @@
 //! - `serde_json::Value`
 //! - `RuntimeCommand`
 //! - `StatePath`
-//! - 手写 `wait_update()` 循环只为取一次快照
+//! - 依赖隐藏的 one-shot quote helper
 //!
 //! Regression signal:
-//! - 用户必须先创建 live ref 再自己循环等待
-//! - 用户必须手动判断 quote 是否 ready
+//! - 用户必须访问底层 commit 或 state path 才能判断 quote ready
 //! - 快照读取需要访问底层 state tree
 //!
 //! Review questions:
-//! - 当前 API 是否自然表达一次性 quote snapshot？
-//! - 是否暴露内部提交模型？
+//! - 当前 API 是否自然表达一次性 quote snapshot helper？
+//! - commit 边界是否通过 `WaitStep` 暴露，而不是通过底层状态路径？
 //! - 是否存在订阅泄漏或快照不一致风险？
 
 use std::time::Duration;
