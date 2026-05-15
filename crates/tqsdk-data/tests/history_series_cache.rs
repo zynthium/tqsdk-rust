@@ -263,6 +263,86 @@ fn merge_handles_adjacent_segments_and_duplicate_tail_row() {
 }
 
 #[test]
+fn append_kline_rows_is_idempotent_for_duplicates_overlaps_adjacent_and_gaps() {
+    let dir = temp_dir("append-kline-idempotent");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    cache
+        .append_kline_rows(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[
+                kline(1, 0, 1.0),
+                kline(2, 60_000_000_000, 2.0),
+                kline(2, 60_000_000_000, 22.0),
+            ],
+        )
+        .unwrap();
+    cache
+        .append_kline_rows(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[
+                kline(2, 60_000_000_000, 222.0),
+                kline(3, 120_000_000_000, 3.0),
+            ],
+        )
+        .unwrap();
+    cache
+        .append_kline_rows(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[kline(5, 240_000_000_000, 5.0)],
+        )
+        .unwrap();
+    cache
+        .append_kline_rows(
+            "SHFE.au2602",
+            60_000_000_000,
+            &[
+                kline(3, 120_000_000_000, 3.0),
+                kline(5, 240_000_000_000, 5.0),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        cache
+            .cached_id_ranges("SHFE.au2602", 60_000_000_000)
+            .unwrap(),
+        vec![(1, 4), (5, 6)]
+    );
+    let rows = cache
+        .read_latest_kline_rows("SHFE.au2602", 60_000_000_000, 10)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 5]
+    );
+    assert_eq!(rows[1].close, 222.0);
+}
+
+#[test]
+fn read_latest_tick_rows_returns_recent_rows_in_ascending_id_order() {
+    let dir = temp_dir("latest-tick-ascending");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    cache
+        .append_tick_rows("SHFE.au2602", &[tick(10, 100, 10.0), tick(12, 120, 12.0)])
+        .unwrap();
+    cache
+        .append_tick_rows("SHFE.au2602", &[tick(11, 110, 11.0), tick(12, 120, 120.0)])
+        .unwrap();
+
+    let rows = cache.read_latest_tick_rows("SHFE.au2602", 2).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![11, 12]
+    );
+    assert_eq!(rows[1].last_price, 120.0);
+}
+
+#[test]
 fn corrupted_cache_file_returns_typed_error() {
     let dir = temp_dir("corrupt");
     std::fs::create_dir_all(&dir).unwrap();
