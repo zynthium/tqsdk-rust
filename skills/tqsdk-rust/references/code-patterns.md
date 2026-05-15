@@ -153,6 +153,24 @@ println!("rows={}", series.len());
 # }
 ```
 
+## Live History Cache Bridge
+
+把 live `tqsdk-stream` window 写进 Python-compatible mmap history cache 时，使用 `tqsdk-data` 的 `stream` feature。调用方显式创建 writer；`DataClient::from_session(...)` 和 `tqsdk-stream` 默认行为不变。Kline writer 默认跳过窗口最高 id 的可变尾 bar，Tick writer 写最新 tick 并依赖 cache append 按 id 去重。
+
+```rust
+use tqsdk_data::{HistorySeriesCache, LiveHistoryCacheOptions, LiveHistoryCacheWriter};
+
+# fn run(window: &tqsdk_stream::KlineWindow) -> tqsdk_data::Result<()> {
+let cache = HistorySeriesCache::open("./.tqsdk-cache")?;
+let mut writer = LiveHistoryCacheWriter::new(cache.clone(), LiveHistoryCacheOptions::default());
+let report = writer.write_kline_window(window)?;
+
+let rows = cache.read_latest_kline_rows(window.symbol(), window.duration_ns(), 200)?;
+println!("rows_written={} latest_rows={}", report.rows_written, rows.len());
+# Ok(())
+# }
+```
+
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。
 
 ## Trading Task Pattern

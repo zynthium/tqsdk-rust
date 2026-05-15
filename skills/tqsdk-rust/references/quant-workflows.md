@@ -10,7 +10,7 @@
 
 ## Event Pipeline
 
-多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。`tqsdk-stream` 不直接依赖 Python-compatible mmap history cache；需要写 cache 时在 `tqsdk-data` 中显式创建 sidecar writer。
 
 契约锚点：S2、S4、S20-S22。
 
@@ -22,7 +22,7 @@
 
 ## Historical Research
 
-history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。
+history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。外部接入或 live sidecar 可以用 `HistorySeriesCache::append_*_rows` / `read_latest_*_rows`，以及 `LiveHistoryCacheWriter` 把 `tqsdk-stream` windows 写入 cache；Kline 写入默认跳过最高 id 的可变尾 bar。
 
 契约锚点：S17-S18、S28-S30。Replay integration：S16。
 

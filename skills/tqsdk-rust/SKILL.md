@@ -24,6 +24,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 写代码前先选择能覆盖场景的最高层 crate。
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
 - one-shot query 放在 `tqsdk-session`，live ref 放在 `tqsdk-wait`，事件管线放在 `tqsdk-stream`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。
+- live stream 写入 Python-compatible mmap history cache 只能通过 `tqsdk-data` 的 `stream` feature 显式 opt-in；`tqsdk-stream` 本身不读写 mmap/cache，不为未接入 cache writer 的热路径增加持久化语义。
+- 官方 Python serial 的 `id` 列来自序列路径 key / 行序号，不要求 raw Kline/Tick payload 自带 `id`；Rust 解码应保持 path-key id 兼容。
 - 只有低层 runtime、自定义 facade、adapter、command 状态机、commit/cursor、hot-path `RuntimeReader` 才使用 `tqsdk-core`。
 - 所有可见状态变化都必须经过 runtime commit 和 `RuntimeReader` / `UpdateCursor`；不要发明私有状态树、本地订单 overlay 或旁路通知。
 - live/network 示例默认需要 Tokio、凭证、行情权限，以及明确的交易权限。
@@ -35,7 +37,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - wait/stream app 里不要为了 metadata 再建第二个 client；复用 shared session。
-- 不要把历史下载当作 live ref；使用 `tqsdk-data`。
+- 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要把 live `KlineWindow` / `TickWindow` 喂进 history mmap cache，使用 `LiveHistoryCacheWriter`，不要把 cache 逻辑塞回 `tqsdk-stream`。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
 - typed ticket、ref 或 status helper 已存在时，不要发明本地订单 overlay，也不要解析 status 字符串。
 - 不要用字符串或 adapter-local 判断绕过 `record_command_status()` 和 runtime command lifecycle。
