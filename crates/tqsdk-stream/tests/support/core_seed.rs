@@ -90,6 +90,16 @@ pub fn seed_ready_kline_chart(
                                             "volume": 15,
                                             "open_oi": 101,
                                             "close_oi": 103
+                                        },
+                                        "102": {
+                                            "datetime": 1_713_660_120_000_000_000_i64,
+                                            "open": 620.0,
+                                            "high": 622.0,
+                                            "low": 619.0,
+                                            "close": 621.0,
+                                            "volume": 16,
+                                            "open_oi": 103,
+                                            "close_oi": 104
                                         }
                                     }
                                 }
@@ -160,6 +170,20 @@ pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize)
                                         "volume": 15,
                                         "amount": 9277.5,
                                         "open_interest": 102
+                                    },
+                                    "202": {
+                                        "datetime": 1_713_660_001_000_000_000_i64,
+                                        "last_price": 619.0,
+                                        "average": 618.4,
+                                        "highest": 619.4,
+                                        "lowest": 617.5,
+                                        "ask_price1": 619.1,
+                                        "ask_volume1": 2,
+                                        "bid_price1": 618.9,
+                                        "bid_volume1": 7,
+                                        "volume": 18,
+                                        "amount": 11_142.0,
+                                        "open_interest": 103
                                     }
                                 }
                             }
