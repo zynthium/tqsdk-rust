@@ -15,6 +15,27 @@ use tqsdk_data::{
 use tqsdk_session::testing::ManualSession;
 
 #[test]
+fn builder_does_not_enable_history_cache_by_default() {
+    let client = DataClientBuilder::new().build().unwrap();
+
+    assert!(client.history_cache().is_none());
+}
+
+#[test]
+fn builder_history_cache_dir_is_inert_without_enable_flag() {
+    let dir = temp_dir("builder-dir-without-enable");
+    let file_path = dir.join("not-a-directory");
+    std::fs::write(&file_path, b"occupied").unwrap();
+
+    let client = DataClientBuilder::new()
+        .history_cache_dir(&file_path)
+        .build()
+        .unwrap();
+
+    assert!(client.history_cache().is_none());
+}
+
+#[test]
 fn builder_enables_python_compatible_cache_with_custom_dir() {
     let dir = temp_dir("builder-custom-dir");
     let client = DataClientBuilder::new()
