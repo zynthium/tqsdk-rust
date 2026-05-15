@@ -46,6 +46,40 @@ fn change_tracked_ref_extra_paths_use_visitor_instead_of_vec_allocation() {
     assert!(!change.contains("fn field_state_paths(&self) -> Vec<StatePath>"));
 }
 
+#[test]
+fn wait_api_removes_legacy_get_and_api_bound_ref_surface() {
+    let api_source = std::fs::read_to_string("src/api.rs").expect("read api.rs");
+    let quote_source = std::fs::read_to_string("src/refs/quote.rs").expect("read quote.rs");
+    let kline_source = std::fs::read_to_string("src/refs/kline.rs").expect("read kline.rs");
+    let tick_source = std::fs::read_to_string("src/refs/tick.rs").expect("read tick.rs");
+
+    for legacy in [
+        "pub async fn get_quote",
+        "pub async fn quote_snapshot",
+        "pub async fn get_kline_serial",
+        "pub async fn get_tick_serial",
+        "pub fn is_changing(",
+        "pub fn is_changing_fields",
+        "pub fn is_serial_ready",
+    ] {
+        assert!(
+            !api_source.contains(legacy),
+            "legacy wait API still present: {legacy}"
+        );
+    }
+
+    for source in [quote_source, kline_source, tick_source] {
+        assert!(
+            !source.contains("&TqApi"),
+            "wait refs must not require &TqApi for snapshot/load"
+        );
+        assert!(
+            !source.contains("load(&self, api:"),
+            "wait refs must not expose load(&api)"
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn wait_update_timeout_returns_false() {
     let mut api = support::seeded_api();
