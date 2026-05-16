@@ -289,7 +289,10 @@ impl TqApi {
     ) -> crate::error::Result<KlineHandle> {
         let data_length = normalize_serial_data_length(data_length)?;
         let duration_ns = duration_to_ns(duration)?;
-        let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{data_length}");
+        let chart_id = format!(
+            "wait-kline-{}-{duration_ns}-{data_length}",
+            sanitize_chart_token(symbol)
+        );
 
         if !self.driver.serial_charts.contains(&chart_id) {
             self.driver
@@ -338,7 +341,7 @@ impl TqApi {
         data_length: usize,
     ) -> crate::error::Result<TickHandle> {
         let data_length = normalize_serial_data_length(data_length)?;
-        let chart_id = format!("wait-tick-{symbol}-{data_length}");
+        let chart_id = format!("wait-tick-{}-{data_length}", sanitize_chart_token(symbol));
 
         if !self.driver.serial_charts.contains(&chart_id) {
             self.driver
@@ -613,6 +616,12 @@ fn normalize_serial_data_length(data_length: usize) -> crate::error::Result<usiz
     }
 
     Ok(data_length.min(10_000))
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {

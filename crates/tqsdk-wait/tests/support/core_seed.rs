@@ -122,7 +122,10 @@ pub fn seed_quote_commit_with_datetime(
 
 #[allow(dead_code)]
 pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, view_width: usize) {
-    let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{view_width}");
+    let chart_id = format!(
+        "wait-kline-{}-{duration_ns}-{view_width}",
+        sanitize_chart_token(symbol)
+    );
     let commit = api
         .session()
         .handle()
@@ -202,7 +205,10 @@ pub fn seed_ready_empty_kline_chart(
     duration_ns: i64,
     view_width: usize,
 ) {
-    let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{view_width}");
+    let chart_id = format!(
+        "wait-kline-{}-{duration_ns}-{view_width}",
+        sanitize_chart_token(symbol)
+    );
     let commit = api
         .session()
         .handle()
@@ -239,7 +245,7 @@ pub fn seed_ready_empty_kline_chart(
 
 #[allow(dead_code)]
 pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
-    let chart_id = format!("wait-tick-{symbol}-{view_width}");
+    let chart_id = format!("wait-tick-{}-{view_width}", sanitize_chart_token(symbol));
     let commit = api
         .session()
         .handle()
@@ -324,7 +330,7 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
 
 #[allow(dead_code)]
 pub fn seed_ready_empty_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
-    let chart_id = format!("wait-tick-{symbol}-{view_width}");
+    let chart_id = format!("wait-tick-{}-{view_width}", sanitize_chart_token(symbol));
     let commit = api
         .session()
         .handle()
@@ -870,4 +876,10 @@ pub fn seed_security_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &
         .expect("seed security trade snapshot should produce a commit");
 
     WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }

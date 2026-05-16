@@ -1,9 +1,22 @@
 use std::time::Duration;
 
+use tqsdk_core::{OutboundFrame, OutboundRequest};
+
 mod support;
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
+}
+
+fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
+            serde_json::from_str(text).expect("transport frame should contain valid json payload")
+        }
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
+            .expect("transport frame should contain valid json payload"),
+        other => panic!("expected transport request, got {other:?}"),
+    }
 }
 
 #[test]
@@ -158,6 +171,27 @@ async fn kline_returns_handle_without_waiting_for_chart_ready() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn kline_set_chart_uses_protocol_safe_chart_id() {
+    let mut api = support::seeded_api();
+
+    let _bars = api
+        .kline("SHFE.au2602", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    let set_chart = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("kline should submit set_chart");
+
+    assert_eq!(
+        set_chart["chart_id"],
+        "wait-kline-SHFE_au2602-60000000000-64"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn kline_handle_reads_bounded_window_without_api_argument_after_step() {
     let mut api = support::seeded_api();
     support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 64);
@@ -305,6 +339,21 @@ async fn tick_returns_handle_without_waiting_for_chart_ready() {
 
     assert!(!ticks.is_ready().unwrap());
     assert!(!ticks.has_rows().unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tick_set_chart_uses_protocol_safe_chart_id() {
+    let mut api = support::seeded_api();
+
+    let _ticks = api.tick("SHFE.au2602", 32).await.unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    let set_chart = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("tick should submit set_chart");
+
+    assert_eq!(set_chart["chart_id"], "wait-tick-SHFE_au2602-32");
 }
 
 #[tokio::test(flavor = "current_thread")]
