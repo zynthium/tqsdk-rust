@@ -6,3 +6,9 @@ Cargo.lock
 .claude/
 .agents/
 .code-review-graph/
+.cursor/
+.kiro/
+.trae/
+.mcp.json
+.opencode.json
+skills-lock.json
