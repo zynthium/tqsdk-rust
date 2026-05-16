@@ -664,6 +664,10 @@ impl futures::Stream for TradeSessionEventStream {
 }
 ```
 
+`SessionReconnectEvent::max_attempts = None` 对应底层默认无限重试策略；在
+runtime snapshot 中该字段来自 `system.session.reconnect.max_attempts = null`。
+stream 只把它 typed 化为 `Option<u32>`，不另行解释或执行 reconnect。
+
 设计意图：
 
 - 统一账户级 trade session 消费入口，同时覆盖 trade object、system notification、session reconnect 与底层 session error

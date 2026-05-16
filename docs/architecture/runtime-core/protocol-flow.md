@@ -55,15 +55,18 @@
 
 ## 重连恢复顺序
 1. session 进入 `Reconnecting`
-2. transport / client 重建
-3. 重新认证或恢复凭证
-4. 重新装配 adapter 所需 bootstrap 状态
-5. 进入 `Resyncing`
-6. 接收恢复期输入并归一化为 mutation
-7. 达到内部一致后形成 `ResyncRecovery` commit
-8. 从 adapter 保留的协议意图生成 recovery commands，例如行情订阅与 chart
+2. 记录 `system.session.reconnect` 尝试状态，包括 attempt、backoff、
+   `max_attempts` 与 exhausted；默认 `max_attempts = None` 表示无限重试，
+   在状态树中显式表现为 JSON `null`
+3. transport / client 重建
+4. 重新认证或恢复凭证
+5. 重新装配 adapter 所需 bootstrap 状态
+6. 进入 `Resyncing`
+7. 接收恢复期输入并归一化为 mutation
+8. 达到内部一致后形成 `ResyncRecovery` commit
+9. 从 adapter 保留的协议意图生成 recovery commands，例如行情订阅与 chart
    请求，并重新进入 runtime outbound 队列
-9. 回到 `Running`
+10. 回到 `Running`
 
 adapter 可以暴露 recovery commands，但仍然没有提交权：这些命令必须回到
 `RuntimeHandle::submit()` / outbound / dispatch 链路，继续使用统一 command ledger

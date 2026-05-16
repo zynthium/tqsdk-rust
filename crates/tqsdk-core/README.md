@@ -181,6 +181,10 @@ live 示例另外会用到：
 - adapter 可以编解码，但没有自行发布 commit 的权限。
 - adapter 可以提供重连后的 recovery commands，用于恢复行情订阅或 chart 请求；
   这些命令必须重新进入 `RuntimeHandle::submit()` / outbound dispatch 链路。
+- `ReconnectPolicy::max_attempts = None` 是默认无限重试策略；有限次数用
+  `Some(n)` 表达。当前尝试状态会写入 `system.session.reconnect`，其中无限重试的
+  `max_attempts` 在 snapshot 中表现为 JSON `null`，供上层 facade 按
+  `Option<u32>` 解读。
 - hot path 应优先使用 `read_market_state()` / `read_trade_state()`；同一决策需要同时
   读取行情与交易状态时使用 `read_market_trade_state()`，不要退回 full snapshot clone。
 - 未来 `wait_update`、stream、callback facade 都应该只消费这个 substrate，而不是重定义内核。

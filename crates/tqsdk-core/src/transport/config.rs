@@ -103,8 +103,13 @@ impl Default for HeartbeatPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconnectPolicy {
+    /// Backoff delay before the first reconnect attempt.
     pub initial_backoff: Duration,
+    /// Upper bound for exponential reconnect backoff delays.
     pub max_backoff: Duration,
+    /// Maximum reconnect attempts before closing the session.
+    ///
+    /// `None` means the runtime keeps retrying until reconnect succeeds.
     pub max_attempts: Option<u32>,
 }
 

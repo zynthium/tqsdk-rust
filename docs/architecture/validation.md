@@ -244,7 +244,7 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 | 单元测试 | 验证命令归一化、mutation 生成、state apply、change 归并 |
 | 集成测试 | 验证 command-to-commit 全链路与 snapshot 一致性 |
 | contract 测试 | 验证不同协议域共享同一 revision / causality / cursor 模型 |
-| 重连专项 | 验证 session error、重连与 resync 仍走统一提交模型 |
+| 重连专项 | 验证 session error、重连与 resync 仍走统一提交模型；覆盖有限重试耗尽和默认无限重试直到成功 |
 | adapter 验证 | 验证 wait / stream / callback 只消费 contract，不回改 contract |
 
 ## Workspace 测试放置原则

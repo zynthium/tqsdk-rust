@@ -117,6 +117,11 @@ pub struct ReconnectPolicy {
 }
 ```
 
+`max_attempts = Some(n)` 表示连续重连失败达到 `n` 次后进入 `Closed`；
+`max_attempts = None` 是默认策略，表示持续按 backoff 重试直到重连成功。
+该值会进入统一状态树的 `system.session.reconnect.max_attempts`：有限次数写入数字，
+无限重试写入 JSON `null`，由上层 facade 直接按 `Option<u32>` 解读。
+
 ## 关键判断
 - auth、session、reconnect 不只是基础设施问题，它们本身也是状态与提交语义的一部分
 - future facade 不应该自己维护另一套连接状态模型
