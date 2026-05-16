@@ -33,6 +33,41 @@ fn trade_event_streams_read_trade_partition_instead_of_full_snapshot() {
 }
 
 #[test]
+fn trade_session_event_stream_reads_full_snapshot_only_for_system_events() {
+    let source = include_str!("../src/event.rs");
+    let trade_session_impl = source
+        .split("impl Stream for TradeSessionEventStream")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("macro_rules! define_account_event_stream")
+                .next()
+        })
+        .expect("TradeSessionEventStream implementation should remain in event.rs");
+    let collect_session_events = source
+        .split("fn collect_trade_session_commit_events(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn push_trade_session_event(").next())
+        .expect("trade session event collector should remain in event.rs");
+
+    assert!(
+        trade_session_impl.contains("read_trade_state()"),
+        "trade session stream should always read the trade partition directly"
+    );
+    assert!(
+        !trade_session_impl.contains("reader.read()"),
+        "trade session stream should not eagerly materialize a full snapshot per commit"
+    );
+    assert!(
+        collect_session_events.contains("commit_requires_session_snapshot(commit)"),
+        "trade session collector should gate full snapshot reads behind system object hits"
+    );
+    assert!(
+        collect_session_events.contains("read_session_snapshot"),
+        "trade session collector should lazily request a snapshot only when system events need it"
+    );
+}
+
+#[test]
 fn market_window_streams_read_market_partitions_instead_of_full_snapshot() {
     let source = include_str!("../src/window.rs");
     let projected_stream_impl = source

@@ -83,10 +83,10 @@ async fn wait_for_ready_quotes(
 }
 
 fn missing_quote_symbols(reader: &RuntimeReader, symbols: &[String]) -> Result<Vec<String>> {
-    let snapshot = reader.read();
+    let market = reader.read_market_state();
     let mut missing = Vec::new();
     for symbol in symbols {
-        let quote = snapshot
+        let quote = market
             .decode_path::<Quote>(&["quotes", symbol.as_str()])
             .map_err(contract_error_into_data)?;
         if quote.is_none() {
@@ -100,11 +100,11 @@ fn read_ready_quote_snapshots(
     reader: &RuntimeReader,
     symbols: &[String],
 ) -> Result<Option<BTreeMap<String, Quote>>> {
-    let snapshot = reader.read();
+    let market = reader.read_market_state();
     let mut quotes = BTreeMap::new();
 
     for symbol in symbols {
-        let Some(quote) = snapshot
+        let Some(quote) = market
             .decode_path::<Quote>(&["quotes", symbol.as_str()])
             .map_err(contract_error_into_data)?
         else {

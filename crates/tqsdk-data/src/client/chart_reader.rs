@@ -89,8 +89,8 @@ fn chart_is_ready(
     chart_id: &str,
     expected: &ExpectedChartState,
 ) -> Result<bool> {
-    let snapshot = reader.read();
-    let Some(chart) = snapshot
+    let market = reader.read_market_state();
+    let Some(chart) = market
         .decode_path::<Chart>(&["charts", chart_id])
         .map_err(contract_error_into_data)?
     else {
@@ -141,8 +141,8 @@ pub(super) fn read_ready_kline_data_page(
     view_width: usize,
     chart_id: &str,
 ) -> Result<Option<KlineDataPage>> {
-    let snapshot = reader.read();
-    let Some(chart) = snapshot
+    let market = reader.read_market_state();
+    let Some(chart) = market
         .decode_path::<Chart>(&["charts", chart_id])
         .map_err(contract_error_into_data)?
     else {
@@ -154,7 +154,7 @@ pub(super) fn read_ready_kline_data_page(
 
     let duration_key = duration_ns.to_string();
     let data_path = ["klines", symbol, duration_key.as_str(), "data"];
-    let mut ids = snapshot
+    let mut ids = market
         .get_path(&data_path)
         .and_then(|value| value.as_object())
         .map(|data| {
@@ -172,7 +172,7 @@ pub(super) fn read_ready_kline_data_page(
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
         let id_key = id.to_string();
-        if let Some(row) = snapshot
+        if let Some(row) = market
             .decode_path::<Kline>(&[
                 "klines",
                 symbol,
@@ -203,8 +203,8 @@ pub(super) fn read_ready_tick_data_page(
     view_width: usize,
     chart_id: &str,
 ) -> Result<Option<TickDataPage>> {
-    let snapshot = reader.read();
-    let Some(chart) = snapshot
+    let market = reader.read_market_state();
+    let Some(chart) = market
         .decode_path::<Chart>(&["charts", chart_id])
         .map_err(contract_error_into_data)?
     else {
@@ -214,7 +214,7 @@ pub(super) fn read_ready_tick_data_page(
         return Ok(None);
     }
 
-    let mut ids = snapshot
+    let mut ids = market
         .get_path(&["ticks", symbol, "data"])
         .and_then(|value| value.as_object())
         .map(|data| {
@@ -232,7 +232,7 @@ pub(super) fn read_ready_tick_data_page(
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
         let id_key = id.to_string();
-        if let Some(row) = snapshot
+        if let Some(row) = market
             .decode_path::<Tick>(&["ticks", symbol, "data", id_key.as_str()])
             .map_err(contract_error_into_data)?
         {

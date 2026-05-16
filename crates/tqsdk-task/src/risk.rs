@@ -514,13 +514,8 @@ impl RiskEngine {
         api: &tqsdk_wait::TqApi,
         intent: &TaskOrderIntent,
     ) -> Result<RiskProjectionReport> {
-        let snapshot = api.session().reader().read();
-        let revision = snapshot.revision();
-        let view = snapshot.view();
-        let market = view.market_state();
-        let trade = view.trade_state();
-
-        self.project_order_from_views(revision, market, trade, intent)
+        let state = api.session().reader().read_market_trade_state();
+        self.project_order_on_state(&state, intent)
     }
 
     pub fn project_order_on_state(
@@ -601,13 +596,8 @@ impl RiskEngine {
         api: &tqsdk_wait::TqApi,
         intent: &TaskOrderIntent,
     ) -> Result<RiskCheckReport> {
-        let snapshot = api.session().reader().read();
-        let revision = snapshot.revision();
-        let view = snapshot.view();
-        let market = view.market_state();
-        let trade = view.trade_state();
-
-        self.check_report_from_views(revision, market, trade, intent)
+        let state = api.session().reader().read_market_trade_state();
+        self.check_report_on_state(&state, intent)
     }
 
     fn check_report_from_views(

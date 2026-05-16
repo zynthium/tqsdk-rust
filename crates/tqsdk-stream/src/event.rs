@@ -13,8 +13,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
     Account, CommitResult, Notification, ObjectKey, Order, Position, PreInsertOrder,
-    RiskManagementData, RiskManagementRule, SecurityAccount, SecurityOrder, SecurityPosition,
-    SecurityTrade, SettlementInfo, SharedCommitResult, SnapshotReadGuard, Trade,
+    RiskManagementData, RiskManagementRule, RuntimeReader, SecurityAccount, SecurityOrder,
+    SecurityPosition, SecurityTrade, SettlementInfo, SharedCommitResult, Trade,
     TradeStateReadGuard,
 };
 
@@ -206,12 +206,11 @@ impl Stream for TradeSessionEventStream {
 
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(DriverEvent::Commit(commit)))) => {
-                    let snapshot = this.reader.read();
                     let trade = this.reader.read_trade_state();
                     if let Err(error) = collect_trade_session_commit_events(
                         &commit,
                         &trade,
-                        &snapshot,
+                        &this.reader,
                         &this.spec,
                         &mut this.pending,
                     ) {
@@ -521,7 +520,7 @@ fn collect_trade_object_events(
 fn collect_trade_session_commit_events(
     commit: &SharedCommitResult,
     trade: &TradeStateReadGuard<'_>,
-    snapshot: &SnapshotReadGuard<'_>,
+    reader: &RuntimeReader,
     spec: &AccountScopedSpec,
     pending: &mut VecDeque<TradeSessionEventUpdate>,
 ) -> Result<()> {
@@ -533,9 +532,15 @@ fn collect_trade_session_commit_events(
         );
     })?;
 
+    let read_session_snapshot = || commit_requires_session_snapshot(commit).then(|| reader.read());
+    let snapshot = read_session_snapshot();
+
     for object in &commit.changes.object_hits {
         match object {
             ObjectKey::Notification { notification_id } => {
+                let Some(snapshot) = snapshot.as_ref() else {
+                    continue;
+                };
                 let path = ["system", "notify", notification_id.as_str()];
                 if let Some(notification) = snapshot.decode_path::<Notification>(&path)?
                     && (notification.user_id.is_empty() || notification.user_id == spec.account_id)
@@ -548,6 +553,9 @@ fn collect_trade_session_commit_events(
                 }
             }
             ObjectKey::SessionReconnect => {
+                let Some(snapshot) = snapshot.as_ref() else {
+                    continue;
+                };
                 if let Some(reconnect) = snapshot.decode_path::<SessionReconnectEvent>(&[
                     "system",
                     "session",
@@ -565,6 +573,15 @@ fn collect_trade_session_commit_events(
     }
 
     Ok(())
+}
+
+fn commit_requires_session_snapshot(commit: &SharedCommitResult) -> bool {
+    commit.changes.object_hits.iter().any(|object| {
+        matches!(
+            object,
+            ObjectKey::Notification { .. } | ObjectKey::SessionReconnect
+        )
+    })
 }
 
 fn collect_position_events<T>(

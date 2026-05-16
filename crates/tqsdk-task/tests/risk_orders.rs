@@ -15,6 +15,32 @@ fn seeded_host() -> TaskHost {
     TaskHost::new(TqApi::new(session))
 }
 
+#[test]
+fn risk_engine_wrappers_read_market_trade_partitions_instead_of_full_snapshot() {
+    let source = include_str!("../src/risk.rs");
+    let project_order = source
+        .split("    pub fn project_order(")
+        .nth(1)
+        .and_then(|rest| rest.split("    pub fn project_order_on_state(").next())
+        .expect("project_order source block should be present");
+    let check_report = source
+        .split("    pub fn check_report(")
+        .nth(1)
+        .and_then(|rest| rest.split("    fn check_report_from_views(").next())
+        .expect("check_report source block should be present");
+
+    for block in [project_order, check_report] {
+        assert!(
+            block.contains("read_market_trade_state()"),
+            "risk wrappers should read market/trade partitions directly"
+        );
+        assert!(
+            !block.contains("reader().read()"),
+            "risk wrappers should not materialize full snapshots"
+        );
+    }
+}
+
 fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
     match request {
         OutboundRequest::Transport(OutboundFrame::Text(text)) => {
