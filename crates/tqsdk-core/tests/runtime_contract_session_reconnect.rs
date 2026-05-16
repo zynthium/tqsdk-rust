@@ -513,6 +513,91 @@ fn session_runtime_retries_recovery_with_reconnect_policy_until_connect_succeeds
 }
 
 #[test]
+fn session_runtime_default_reconnect_policy_keeps_retrying_until_connect_succeeds() {
+    run_on_tokio(async {
+        let handle = runtime_with_default_adapters();
+        let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+        let connector = ControlledConnector::with_outcomes(vec![
+            ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Close)),
+            ConnectOutcome::Error(ContractError::transport(
+                "websocket reconnect failed: attempt 1",
+            )),
+            ConnectOutcome::Error(ContractError::transport(
+                "websocket reconnect failed: attempt 2",
+            )),
+            ConnectOutcome::Connected(RecvBehavior::Frame(RawFrame::Pong)),
+        ]);
+        let adapters = adapter_registry();
+        let config = session_config().with_reconnect(ReconnectPolicy::default());
+
+        let mut run = runtime
+            .establish(
+                &TestAuthProvider,
+                &MarketTopologyResolver,
+                &connector,
+                &config,
+                &adapters,
+            )
+            .await
+            .unwrap();
+
+        let outcome = runtime
+            .drive_route_once(
+                &mut run,
+                "market",
+                vec![],
+                CommitScope::RealtimeUpdate,
+                SessionRuntimeDeps::new(
+                    &TestAuthProvider,
+                    &MarketTopologyResolver,
+                    &connector,
+                    &config,
+                    &adapters,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.recovered);
+        assert_eq!(run.bootstrap.phase, SessionPhase::Running);
+        assert_eq!(connector.connected_labels().len(), 4);
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "attempt"]),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "max_attempts"]),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "reconnect", "exhausted"]),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            handle.latest_snapshot().get([
+                "system",
+                "internal",
+                "session-recovery-error",
+                "attempt"
+            ]),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "lifecycle", "phase"]),
+            Some(&json!("running"))
+        );
+    });
+}
+
+#[test]
 fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
     run_on_tokio(async {
         let handle = runtime_with_default_adapters();

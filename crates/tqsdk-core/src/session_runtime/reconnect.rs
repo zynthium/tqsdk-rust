@@ -27,10 +27,14 @@ impl SessionRuntime {
         deps: SessionRuntimeDeps<'_>,
     ) -> Result<RecoveryOutcome> {
         let mut commits = Vec::new();
-        let max_attempts = deps.config.reconnect.max_attempts.unwrap_or(1).max(1);
-        let mut last_error = None;
+        let max_attempts = deps
+            .config
+            .reconnect
+            .max_attempts
+            .map(|attempts| attempts.max(1));
+        let mut attempt = 1_u32;
 
-        for attempt in 1..=max_attempts {
+        loop {
             let scheduled_backoff_ms = reconnect_backoff_ms(deps.config, attempt);
             if let Some(commit) = self.handle.record_session_reconnect(
                 attempt,
@@ -71,46 +75,43 @@ impl SessionRuntime {
                     )? {
                         commits.push(commit);
                     }
-                    last_error = Some((attempt, scheduled_backoff_ms, err));
+
+                    if max_attempts.is_some_and(|max_attempts| attempt >= max_attempts) {
+                        if let Some(commit) = self.handle.record_session_reconnect(
+                            attempt,
+                            scheduled_backoff_ms,
+                            deps.config.reconnect.max_attempts,
+                            true,
+                            Some(json!({
+                                "route": route_label,
+                                "reason": reason,
+                                "message": err.to_string(),
+                            })),
+                            caused_by.clone(),
+                        )? {
+                            commits.push(commit);
+                        }
+
+                        if let Some(commit) = self.handle.record_session_phase(
+                            SessionPhase::Closed,
+                            Some(json!({
+                                "route": route_label,
+                                "reason": "reconnect-exhausted",
+                                "attempt": attempt,
+                                "message": err.to_string(),
+                            })),
+                            caused_by,
+                        )? {
+                            commits.push(commit);
+                        }
+
+                        return Err(err);
+                    }
                 }
             }
+
+            attempt = attempt.saturating_add(1);
         }
-
-        let Some((attempt, scheduled_backoff_ms, err)) = last_error else {
-            return Err(crate::ContractError::validation(
-                "reconnect policy exhausted without any recovery attempts",
-            ));
-        };
-
-        if let Some(commit) = self.handle.record_session_reconnect(
-            attempt,
-            scheduled_backoff_ms,
-            deps.config.reconnect.max_attempts,
-            true,
-            Some(json!({
-                "route": route_label,
-                "reason": reason,
-                "message": err.to_string(),
-            })),
-            caused_by.clone(),
-        )? {
-            commits.push(commit);
-        }
-
-        if let Some(commit) = self.handle.record_session_phase(
-            SessionPhase::Closed,
-            Some(json!({
-                "route": route_label,
-                "reason": "reconnect-exhausted",
-                "attempt": attempt,
-                "message": err.to_string(),
-            })),
-            caused_by,
-        )? {
-            commits.push(commit);
-        }
-
-        Err(err)
     }
 
     pub(super) async fn recover_internal(

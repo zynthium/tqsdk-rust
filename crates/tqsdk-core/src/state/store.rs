@@ -11,8 +11,8 @@ use serde_json::{Map, Value};
 use crate::{Result, events::NormalizedMutation, ids::Revision};
 
 use super::{
-    MarketStateReadGuard, MarketStateView, MarketTradeStateReadGuard, PathSegment, StateReadView,
-    TradeStateReadGuard, TradeStateView, read::get_at_path,
+    MarketStateReadGuard, MarketStateView, MarketTradeStateReadGuard, ObjectKey, PathSegment,
+    StateReadView, TradeStateReadGuard, TradeStateView, read::get_at_path,
 };
 
 /// Owned snapshot clone of the runtime state tree.
@@ -288,7 +288,13 @@ fn apply_mutation_at_partition(
     mutation: &NormalizedMutation,
 ) -> Option<NormalizedMutation> {
     let mut changed_fields = Vec::new();
-    apply_mutation_at_path(root, path, &mutation.fields, &mut changed_fields);
+    apply_mutation_at_path(
+        root,
+        path,
+        mutation.object.as_ref(),
+        &mutation.fields,
+        &mut changed_fields,
+    );
 
     if changed_fields.is_empty() {
         None
@@ -443,22 +449,24 @@ fn merge_fallback_roots(root: &mut Map<String, Value>, fallback: &Value) {
 fn apply_mutation_at_path(
     cursor: &mut Value,
     path: &[PathSegment],
+    object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
     changed_fields: &mut Vec<crate::events::FieldMutation>,
 ) {
     if path.is_empty() {
-        apply_fields(cursor, fields, changed_fields);
+        apply_fields(cursor, object, fields, changed_fields);
         return;
     }
 
     let segment = &path[0];
     let child = ensure_child_object(cursor, segment);
-    apply_mutation_at_path(child, &path[1..], fields, changed_fields);
+    apply_mutation_at_path(child, &path[1..], object, fields, changed_fields);
     prune_empty_child(cursor, segment);
 }
 
 fn apply_fields(
     cursor: &mut Value,
+    object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
     changed_fields: &mut Vec<crate::events::FieldMutation>,
 ) {
@@ -471,7 +479,8 @@ fn apply_fields(
     };
 
     for field in fields {
-        let has_changed = if field.value.is_null() {
+        let preserve_null = preserves_null_field(object, &field.field);
+        let has_changed = if field.value.is_null() && !preserve_null {
             map.contains_key(&field.field)
         } else {
             map.get(&field.field) != Some(&field.value)
@@ -481,7 +490,7 @@ fn apply_fields(
             continue;
         }
 
-        if field.value.is_null() {
+        if field.value.is_null() && !preserve_null {
             map.remove(&field.field);
         } else {
             map.insert(field.field.clone(), field.value.clone());
@@ -489,6 +498,10 @@ fn apply_fields(
 
         changed_fields.push(field.clone());
     }
+}
+
+fn preserves_null_field(object: Option<&ObjectKey>, field: &str) -> bool {
+    matches!(object, Some(ObjectKey::SessionReconnect)) && field == "max_attempts"
 }
 
 fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mut Value {
@@ -593,5 +606,63 @@ mod tests {
         assert!(panic.is_err());
 
         assert_eq!(store.snapshot().revision(), Revision::new(0));
+    }
+
+    #[test]
+    fn state_store_preserves_unbounded_session_reconnect_attempts_as_null() {
+        let store = StateStore::new(Revision::new(0));
+        let mutation = NormalizedMutation {
+            path: StatePath::new(["system", "session", "reconnect"]),
+            object: Some(ObjectKey::SessionReconnect),
+            fields: vec![FieldMutation {
+                field: "max_attempts".to_string(),
+                value: Value::Null,
+            }],
+            source: MutationSource::SessionControl,
+        };
+
+        assert_eq!(
+            store.apply(Revision::new(1), &[mutation]).len(),
+            1,
+            "session reconnect max_attempts=null is a visible unbounded policy"
+        );
+        assert_eq!(
+            store
+                .snapshot()
+                .get(["system", "session", "reconnect", "max_attempts"]),
+            Some(&Value::Null)
+        );
+    }
+
+    #[test]
+    fn state_store_still_treats_other_null_fields_as_deletes() {
+        let store = StateStore::new(Revision::new(0));
+        let insert = NormalizedMutation {
+            path: StatePath::new(["system", "session", "reconnect"]),
+            object: Some(ObjectKey::SessionReconnect),
+            fields: vec![FieldMutation {
+                field: "detail".to_string(),
+                value: json!({ "reason": "test" }),
+            }],
+            source: MutationSource::SessionControl,
+        };
+        let delete = NormalizedMutation {
+            path: StatePath::new(["system", "session", "reconnect"]),
+            object: Some(ObjectKey::SessionReconnect),
+            fields: vec![FieldMutation {
+                field: "detail".to_string(),
+                value: Value::Null,
+            }],
+            source: MutationSource::SessionControl,
+        };
+
+        assert_eq!(store.apply(Revision::new(1), &[insert]).len(), 1);
+        assert_eq!(store.apply(Revision::new(2), &[delete]).len(), 1);
+        assert_eq!(
+            store
+                .snapshot()
+                .get(["system", "session", "reconnect", "detail"]),
+            None
+        );
     }
 }
