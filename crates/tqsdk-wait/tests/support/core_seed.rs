@@ -196,6 +196,48 @@ pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, v
 }
 
 #[allow(dead_code)]
+pub fn seed_ready_empty_kline_chart(
+    api: &mut TqApi,
+    symbol: &str,
+    duration_ns: i64,
+    view_width: usize,
+) {
+    let chart_id = format!("wait-kline-{symbol}-{duration_ns}-{view_width}");
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": duration_ns,
+                                },
+                                "left_id": 100,
+                                "right_id": 99,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready empty kline chart should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+#[allow(dead_code)]
 pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
     let chart_id = format!("wait-tick-{symbol}-{view_width}");
     let commit = api
@@ -276,6 +318,43 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
         )
         .unwrap()
         .expect("seed ready tick chart should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+#[allow(dead_code)]
+pub fn seed_ready_empty_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
+    let chart_id = format!("wait-tick-{symbol}-{view_width}");
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                },
+                                "left_id": 200,
+                                "right_id": 199,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready empty tick chart should produce a commit");
 
     WaitTestDriver::push_deferred_commit(api, commit);
 }

@@ -117,10 +117,12 @@ npx skills add https://github.com/zynthium/tqsdk-rust
 
 ```rust
 let mut api = tqsdk_wait::TqApiBuilder::new(user, pass).build().await?;
-let quote = api.get_quote("SHFE.au2602").await?;
+let quote = api.quote("SHFE.au2602").await?;
 api.wait_update(None).await?;
-let snapshot = quote.load(&api)?;
+let snapshot = quote.load()?;
 ```
+
+`tqsdk-wait` 的 `kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。
 
 ### Rust async stream facade
 

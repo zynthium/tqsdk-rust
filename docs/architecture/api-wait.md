@@ -63,7 +63,12 @@ wait adapter 层未来可以提供：
 - serial handle 可以提供 `last()`、`rows_since(last_seen_id)` 和
   `changed_rows(&WaitStep)` 这类便利方法，但它们只能读取同一棵 runtime state
   tree 的当前窗口，并且 `changed_rows` 只能解释传入的 `WaitStep` 所代表的单个
-  commit，不得维护 facade 私有 row revision 或第二套缓存。
+  commit，不得维护 facade 私有 row revision 或第二套缓存。`changed_rows` 在
+  commit 中能定位 row id 时应只解码对应 row；无法定位 row id 的 chart-level
+  变化才回退到当前窗口读取。
+- `TqApi::kline` / `TqApi::tick` 返回 non-blocking live handle，只提交或复用
+  `SetChart`。严格等待 chart 初始化的路径应通过 `kline_ready` / `tick_ready`
+  表达；ready 表示 `ready && !more_data`，不代表当前窗口已有 rows。
 - quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
   `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
   quote 的 ready / load 语义。

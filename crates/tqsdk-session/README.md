@@ -105,6 +105,10 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - EDB：`https://edb.shinnytech.com/data/index_data`
 
 `query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
+`query_graphql_value()` 会在 `SessionClient` 内部串行化完整 query lifecycle，
+因此通过它构建的 metadata helpers（例如 `query_symbol_info()`）可以在同一个
+session facade 上并发调用。raw `query_graphql()` 只提交 command id；调用方如果手动
+组合 `query_graphql()` / `wait_command_completed()`，仍需自行保证推进顺序。
 如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
 
 `SessionClientBuilder` 还提供了命名明确的 market-target 快捷方法：
@@ -214,6 +218,8 @@ client order id 与 runtime order id 的对应关系。这个 ledger 会随
 - `refresh_schema_value(...).await`
 
 这一层的目标是保证所有一次性 query/schema 都已经有可用底座。
+其中 value-style GraphQL helper 内部串行化 query route；command-style raw
+helper 仍是底层 escape hatch。
 
 ### 第二层：`SessionMetadataQuery`
 

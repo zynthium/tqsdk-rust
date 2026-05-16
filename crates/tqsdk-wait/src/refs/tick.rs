@@ -45,16 +45,22 @@ impl TickHandle {
 
     pub fn is_ready(&self) -> crate::error::Result<bool> {
         let guard = self.reader.reader().read_market_state();
-        let ready = guard
-            .get_path(&["charts", self.chart_id.as_str(), "ready"])
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let more_data = guard
-            .get_path(&["charts", self.chart_id.as_str(), "more_data"])
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+        Ok(chart_is_ready(&guard, self.chart_id.as_str()))
+    }
 
-        Ok(ready && !more_data && !self.window()?.is_empty())
+    pub fn has_rows(&self) -> crate::error::Result<bool> {
+        let guard = self.reader.reader().read_market_state();
+        let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
+            return Ok(false);
+        };
+
+        for id in left_id..=right_id {
+            if self.decode_row_from_guard(&guard, id)?.is_some() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     pub fn window(&self) -> crate::error::Result<TickWindow> {
@@ -83,21 +89,44 @@ impl TickHandle {
         ))
     }
 
+    pub fn row(&self, id: i64) -> crate::error::Result<Option<Tick>> {
+        let guard = self.reader.reader().read_market_state();
+        let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
+            return Ok(None);
+        };
+        if id < left_id || id > right_id {
+            return Ok(None);
+        }
+
+        self.decode_row_from_guard(&guard, id)
+    }
+
     pub fn rows(&self) -> crate::error::Result<Vec<Tick>> {
         Ok(self.window()?.into_rows())
     }
 
     pub fn last(&self) -> crate::error::Result<Option<Tick>> {
-        Ok(self.window()?.last().cloned())
+        let guard = self.reader.reader().read_market_state();
+        let Some((_, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
+            return Ok(None);
+        };
+
+        self.decode_row_from_guard(&guard, right_id)
     }
 
     pub fn rows_since(&self, last_seen_id: i64) -> crate::error::Result<Vec<Tick>> {
-        Ok(self
-            .window()?
-            .into_rows()
-            .into_iter()
-            .filter(|row| row.id > last_seen_id)
-            .collect())
+        let guard = self.reader.reader().read_market_state();
+        let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
+            return Ok(Vec::new());
+        };
+        let start_id = left_id.max(last_seen_id.saturating_add(1));
+        let mut rows = Vec::new();
+        for id in start_id..=right_id {
+            if let Some(row) = self.decode_row_from_guard(&guard, id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn changed_rows(&self, step: &WaitStep) -> crate::error::Result<Vec<Tick>> {
@@ -105,17 +134,22 @@ impl TickHandle {
             return Ok(Vec::new());
         }
 
-        let window = self.window()?;
         let changed_ids = self.changed_row_ids(step);
         if changed_ids.is_empty() {
-            return Ok(window.into_rows());
+            return self.rows();
         }
 
-        Ok(window
-            .into_rows()
-            .into_iter()
-            .filter(|row| changed_ids.contains(&row.id))
-            .collect())
+        let guard = self.reader.reader().read_market_state();
+        let mut rows = Vec::new();
+        for id in changed_ids {
+            if !id_in_chart_bounds(&guard, self.chart_id.as_str(), id) {
+                continue;
+            }
+            if let Some(row) = self.decode_row_from_guard(&guard, id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     fn changed_row_ids(&self, step: &WaitStep) -> BTreeSet<i64> {
@@ -145,6 +179,17 @@ impl TickHandle {
 
         ids
     }
+
+    fn decode_row_from_guard(
+        &self,
+        guard: &MarketStateReadGuard<'_>,
+        id: i64,
+    ) -> crate::error::Result<Option<Tick>> {
+        let id_key = id.to_string();
+        guard
+            .decode_path::<Tick>(&["ticks", self.symbol.as_str(), "data", id_key.as_str()])
+            .map_err(Into::into)
+    }
 }
 
 fn tick_row_id_from_path(path: &StatePath, symbol: &str) -> Option<i64> {
@@ -170,6 +215,23 @@ fn chart_bounds(guard: &MarketStateReadGuard<'_>, chart_id: &str) -> Option<(i64
         .and_then(|value| value.as_i64())?;
 
     (left_id <= right_id).then_some((left_id, right_id))
+}
+
+fn chart_is_ready(guard: &MarketStateReadGuard<'_>, chart_id: &str) -> bool {
+    let ready = guard
+        .get_path(&["charts", chart_id, "ready"])
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let more_data = guard
+        .get_path(&["charts", chart_id, "more_data"])
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    ready && !more_data
+}
+
+fn id_in_chart_bounds(guard: &MarketStateReadGuard<'_>, chart_id: &str, id: i64) -> bool {
+    chart_bounds(guard, chart_id).is_some_and(|(left_id, right_id)| id >= left_id && id <= right_id)
 }
 
 impl ChangeTrackedRef for TickHandle {

@@ -101,6 +101,8 @@ V1 是：
   - `wait_command_completed()` 这个最小 control-plane 等待原语
   - `command_status_typed()` 这个 additive typed 命令状态读取 helper
   - direct query / schema refresh 薄层入口
+  - value-style GraphQL direct query 内部串行化完整 query lifecycle；raw
+    command-style query 仍由调用方负责推进顺序
   - direct query surface 再细分为 `SessionRawQuery` / `SessionMetadataQuery` / `SessionServiceQuery`
   - `InstrumentSpec` / `InstrumentClass` 这类一次性 metadata 标准化对象
   - session-level error diagnostic / retry hint wrapper
@@ -112,6 +114,8 @@ V1 是：
   - `TqApi` 单推进点 facade
   - market/trade 对象引用
   - serial window 视图
+  - `kline` / `tick` non-blocking handle 与 `kline_ready` / `tick_ready` chart
+    初始化等待路径
   - 基于 shared session 的 live `wait_update()` 驱动链路
   - trade 命令的 wait 风格薄包装
   - 允许通过 `session()` 落回同一个底层 `SessionClient`，但不复制 direct query API

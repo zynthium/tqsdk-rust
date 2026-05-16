@@ -232,6 +232,7 @@ pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,
     runtime: SessionRuntime,
+    query_lock: Arc<Mutex<()>>,
     order_intents: Arc<StdMutex<HashMap<(String, String), OrderIntentRecord>>>,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
@@ -279,6 +280,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            query_lock: Arc::new(Mutex::new(())),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
@@ -321,6 +323,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            query_lock: Arc::new(Mutex::new(())),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),

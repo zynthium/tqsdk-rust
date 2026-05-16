@@ -23,6 +23,17 @@ fn market_refs_read_market_partitions_instead_of_full_snapshot() {
     assert!(!compact_source(tick_ref).contains("reader.read()"));
 }
 
+#[test]
+fn changed_rows_uses_row_decoding_instead_of_materializing_window_first() {
+    let kline_ref = include_str!("../src/refs/kline.rs");
+    let tick_ref = include_str!("../src/refs/tick.rs");
+
+    assert!(kline_ref.contains("pub fn row(&self, id: i64)"));
+    assert!(tick_ref.contains("pub fn row(&self, id: i64)"));
+    assert!(!compact_source(kline_ref).contains("letwindow=self.window()?;letchanged_ids"));
+    assert!(!compact_source(tick_ref).contains("letwindow=self.window()?;letchanged_ids"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn quote_handle_returns_ref_without_waiting_for_first_tick() {
     let mut api = support::seeded_api();
@@ -110,6 +121,40 @@ async fn trading_status_handle_returns_ref_without_blocking() {
         status.load().unwrap_err(),
         tqsdk_wait::WaitFacadeError::InvalidState("trading status not ready")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kline_handle_reports_ready_even_when_window_is_empty() {
+    let mut api = support::seeded_api();
+    support::seed_ready_empty_kline_chart(&mut api, "CZCE.PF607", 60_000_000_000, 64);
+
+    let bars = api
+        .kline_ready("CZCE.PF607", Duration::from_secs(60), 64, None)
+        .await
+        .unwrap();
+    let step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("chart commit should be replayed to caller");
+
+    assert!(step.is_changing(&bars));
+    assert!(bars.is_ready().unwrap());
+    assert!(!bars.has_rows().unwrap());
+    assert!(bars.window().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kline_returns_handle_without_waiting_for_chart_ready() {
+    let mut api = support::seeded_api();
+
+    let bars = api
+        .kline("CZCE.PF607", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+
+    assert!(!bars.is_ready().unwrap());
+    assert!(!bars.has_rows().unwrap());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -232,6 +277,34 @@ async fn kline_handle_reuses_existing_chart_without_resubmitting_set_chart() {
 
     assert!(first_dispatch_count > 0);
     assert_eq!(second_dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tick_handle_reports_ready_even_when_window_is_empty() {
+    let mut api = support::seeded_api();
+    support::seed_ready_empty_tick_chart(&mut api, "CZCE.PF607", 32);
+
+    let ticks = api.tick_ready("CZCE.PF607", 32, None).await.unwrap();
+    let step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("chart commit should be replayed to caller");
+
+    assert!(step.is_changing(&ticks));
+    assert!(ticks.is_ready().unwrap());
+    assert!(!ticks.has_rows().unwrap());
+    assert!(ticks.window().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tick_returns_handle_without_waiting_for_chart_ready() {
+    let mut api = support::seeded_api();
+
+    let ticks = api.tick("CZCE.PF607", 32).await.unwrap();
+
+    assert!(!ticks.is_ready().unwrap());
+    assert!(!ticks.has_rows().unwrap());
 }
 
 #[tokio::test(flavor = "current_thread")]

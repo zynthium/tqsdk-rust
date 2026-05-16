@@ -72,10 +72,12 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `quote(...).await`
 - `trading_status(...).await`
 - `kline(...).await`
+- `kline_ready(...).await`
 - `tick(...).await`
+- `tick_ready(...).await`
 - `QuoteRef::{snapshot, load, changed_snapshot}`
-- `KlineHandle::{window, rows, completed_rows, last, last_completed, rows_since, changed_rows}`
-- `TickHandle::{window, rows, last, rows_since, changed_rows}`
+- `KlineHandle::{is_ready, has_rows, row, window, rows, completed_rows, last, last_completed, rows_since, changed_rows}`
+- `TickHandle::{is_ready, has_rows, row, window, rows, last, rows_since, changed_rows}`
 - `startup_recovery()`
 - `TqBacktest::{new, futures, stock}`
 - `TqApiBuilder::{backtest, futures_backtest, stock_backtest}`
@@ -120,7 +122,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
-- `kline` / `tick` 对齐 Python live serial 心智：创建并持有滚动窗口 handle，数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
+- `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
@@ -159,15 +161,18 @@ session 和 `RuntimeReader`，不会绕过 commit 边界。契约示例见
 [examples/api_contract_s03_quote_snapshot.rs](examples/api_contract_s03_quote_snapshot.rs)。
 
 实时交易状态、K 线 serial 和 tick serial 属于 wait continuous consumption：
-用户通过 `trading_status`、`kline`、`tick` 获取 live handle，
+用户通过 `trading_status`、`kline`、`tick` 获取 live handle；`kline` / `tick`
+不阻塞等待 chart ready，严格等待路径使用 `kline_ready` / `tick_ready`。
 再在 `step()` / `step_until(...)` 后用 `WaitStep::is_changing()` /
 `WaitStep::is_changing_fields()` 判断是否加载当前
 typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `right_id`
 投影 rows，不从全局缓存中截取最新 N 条；row-only diff 也会让对应 serial ref
 报告变化。`KlineHandle::last()` / `TickHandle::last()` 是对当前窗口尾部的 owned
 快照便利方法，`rows_since(last_seen_id)` 适合用户自己维护 row id 游标；
-`changed_rows(&WaitStep)` 只解释当前已消费 commit 并返回本轮变化涉及的当前窗口
-rows。`KlineHandle::is_ready()` / `TickHandle::is_ready()` 可用于确认窗口初始化状态，
+`row(id)` 和 `changed_rows(&WaitStep)` 只解码目标 row id，后者只解释当前已消费
+commit 并返回本轮变化涉及的当前窗口 rows。`KlineHandle::is_ready()` /
+`TickHandle::is_ready()` 可用于确认窗口初始化状态，窗口是否已有 rows 由
+`has_rows()` 或 `window()?.is_empty()` 判断。
 K 线窗口或 handle 的 `completed_rows()` / `last_completed()` 用于跳过最新可变尾 bar。这不是
 `tqsdk-data` 的历史下载或 mmap 缓存，也不是 `tqsdk-session` 的 metadata direct
 query。契约示例见

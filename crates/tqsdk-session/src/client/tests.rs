@@ -659,6 +659,46 @@ async fn query_graphql_value_drives_query_route_and_returns_state_value() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn query_graphql_value_serializes_concurrent_value_queries() {
+    let handle = runtime_with_default_adapters();
+    let executor: SharedRouteExecutor = Arc::new(
+        RecordingExecutor::default()
+            .with_query_value("query", json!({ "quotes": ["SHFE.au2602"] })),
+    );
+    let client = test_live_client(
+        handle,
+        SessionTopology::default().with_route(SessionRoute {
+            label: "query".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Query],
+            endpoint: SessionRouteEndpoint::Http {
+                url: "https://query.example".to_string(),
+            },
+        }),
+        QueueTransport::default(),
+        executor,
+    );
+
+    let left = client.clone();
+    let right = client.clone();
+    let (left_value, right_value) = tokio::join!(
+        left.query_graphql_value("query { left }", None),
+        right.query_graphql_value("query { right }", None)
+    );
+
+    assert_eq!(left_value.unwrap(), json!({ "quotes": ["SHFE.au2602"] }));
+    assert_eq!(right_value.unwrap(), json!({ "quotes": ["SHFE.au2602"] }));
+}
+
+#[test]
+fn cloned_session_clients_share_direct_query_lock() {
+    let client = ManualSession::from_runtime(runtime_with_default_adapters()).into_client();
+    let cloned = client.clone();
+
+    assert!(Arc::ptr_eq(&client.query_lock, &cloned.query_lock));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn query_graphql_value_works_over_market_websocket_when_query_is_cohosted() {
     let handle = runtime_with_default_adapters();
     let client = test_live_client_with_components(
@@ -1192,6 +1232,7 @@ fn test_live_client_with_components(
         handle: handle.clone(),
         reader: handle.reader(),
         runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
+        query_lock: Arc::new(TokioMutex::new(())),
         order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "services")]
         service_http: reqwest::Client::new(),

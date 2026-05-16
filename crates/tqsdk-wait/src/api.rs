@@ -310,15 +310,25 @@ impl TqApi {
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
-        let serial = KlineHandle::new(
+        Ok(KlineHandle::new(
             self.read_handle(),
             symbol.to_string(),
             duration_ns,
             data_length,
             chart_id,
-        );
-        self.wait_until_ready(|| serial.is_ready()).await?;
+        ))
+    }
 
+    pub async fn kline_ready(
+        &mut self,
+        symbol: &str,
+        duration: Duration,
+        data_length: usize,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<KlineHandle> {
+        let serial = self.kline(symbol, duration, data_length).await?;
+        self.wait_until_ready_until(|| serial.is_ready(), deadline, "serial chart not ready")
+            .await?;
         Ok(serial)
     }
 
@@ -349,14 +359,23 @@ impl TqApi {
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
-        let serial = TickHandle::new(
+        Ok(TickHandle::new(
             self.read_handle(),
             symbol.to_string(),
             data_length,
             chart_id,
-        );
-        self.wait_until_ready(|| serial.is_ready()).await?;
+        ))
+    }
 
+    pub async fn tick_ready(
+        &mut self,
+        symbol: &str,
+        data_length: usize,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<TickHandle> {
+        let serial = self.tick(symbol, data_length).await?;
+        self.wait_until_ready_until(|| serial.is_ready(), deadline, "serial chart not ready")
+            .await?;
         Ok(serial)
     }
 
@@ -501,14 +520,6 @@ impl TqApi {
             .map_err(crate::error::WaitFacadeError::Session)?;
 
         Ok(())
-    }
-
-    async fn wait_until_ready<F>(&mut self, mut ready: F) -> crate::error::Result<()>
-    where
-        F: FnMut() -> crate::error::Result<bool>,
-    {
-        self.wait_until_ready_until(&mut ready, None, "object not ready")
-            .await
     }
 
     async fn wait_until_ready_until<F>(

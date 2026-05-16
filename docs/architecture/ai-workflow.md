@@ -83,6 +83,8 @@ tqsdk-task
 - low-level market command helpers that remain one-shot command submission
 - typed instrument metadata normalization
 - GraphQL / HTTP query、schema refresh、metadata、calendar、settlement、ranking、EDB
+- value-style GraphQL direct query 内部串行化完整 query lifecycle；raw command-style
+  query 仍由调用方负责推进顺序
 - auth refresh、replay step/reset 这类 one-shot control-plane helper
 - session-level error diagnostics / retry hints
 - 天勤特定 auth/http/TqKq 实现的内部落点
@@ -105,7 +107,8 @@ tqsdk-task
 - `step()` / `step_until(...)` 主推进点
 - `WaitStep::is_changing()` / field-level changing checks
 - diff-backed market/trade live refs
-- serial/window 视图
+- serial/window 视图；`kline` / `tick` 返回 non-blocking handle，严格 chart
+  初始化等待使用 `kline_ready` / `tick_ready`
 - trade command 的 wait 风格薄包装
 
 设计原因：

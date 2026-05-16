@@ -300,6 +300,7 @@ impl SessionClient {
         query: &str,
         variables: Option<Value>,
     ) -> crate::error::Result<Value> {
+        let _query_guard = self.query_lock.lock().await;
         self.require_query_value_route().await?;
         let query_id = Self::next_query_id();
         let command_id = self

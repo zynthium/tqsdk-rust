@@ -11,12 +11,13 @@
 //!
 //! API contract:
 //! - `TqApi::trading_status` 返回 diff-backed live trading status ref
-//! - `TqApi::kline` 返回 diff-backed realtime K 线窗口 handle
-//! - `TqApi::tick` 返回 diff-backed realtime tick 窗口 handle
+//! - `TqApi::kline` 返回 non-blocking diff-backed realtime K 线窗口 handle
+//! - `TqApi::tick` 返回 non-blocking diff-backed realtime tick 窗口 handle
 //! - `TqApi::step_until` 是用户可见状态推进点
 //! - `WaitStep::is_changing` 判断对象是否在当前 commit 中变化
 //! - `WaitStep::is_changing_fields` 判断对象字段是否在当前 commit 中变化
-//! - `KlineHandle::is_ready` / `TickHandle::is_ready` 判断 serial window 是否已经初始化
+//! - `KlineHandle::is_ready` / `TickHandle::is_ready` 判断 serial chart 是否已经初始化
+//! - `KlineHandle::has_rows` / `TickHandle::has_rows` 判断当前窗口是否已有 rows
 //! - `KlineWindow::completed_rows` / `last_completed` 用于跳过最新可变尾 bar
 //!
 //! Forbidden:
