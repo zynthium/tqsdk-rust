@@ -2,6 +2,7 @@ target/
 Cargo.lock
 .worktrees/
 .DS_Store
-# Added by code-review-graph
+# Development tool configurations
+.claude/
+.agents/
 .code-review-graph/
-.claude/settings.local.json
