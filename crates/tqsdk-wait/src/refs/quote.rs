@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use tqsdk_core::{ObjectKey, Quote, StatePath, Symbol};
 
 use crate::change::ChangeTrackedRef;
@@ -8,6 +10,29 @@ use crate::step::{WaitReadHandle, WaitStep};
 pub struct QuoteRef {
     reader: WaitReadHandle,
     symbol: Symbol,
+}
+
+/// Symbol-indexed collection returned by [`crate::TqApi::quotes`].
+pub struct QuoteSet {
+    quotes: BTreeMap<String, QuoteRef>,
+}
+
+impl QuoteSet {
+    pub(crate) fn new(quotes: BTreeMap<String, QuoteRef>) -> Self {
+        Self { quotes }
+    }
+
+    pub fn get(&self, symbol: &str) -> Option<&QuoteRef> {
+        self.quotes.get(symbol)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &QuoteRef> {
+        self.quotes.values()
+    }
+
+    pub fn symbols(&self) -> impl Iterator<Item = &str> {
+        self.quotes.keys().map(String::as_str)
+    }
 }
 
 impl QuoteRef {

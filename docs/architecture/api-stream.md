@@ -366,8 +366,9 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
   用来避免普通 stream 用户直接构造 `RuntimeCommand::Market`；它们不是
   subscription handle，也不改变订阅恢复语义。
 - `quotes()` 返回用户级 `QuoteSubscription` handle，用来表达动态 add/remove/current
-  symbols，并作为 typed quote stream 消费；它仍然只复用底层 market adapter 的订阅集合、
-  `RuntimeCommand::Market` 和同一条 commit fan-out。
+  symbols，并作为 typed quote stream 消费；它通过 `tqsdk-session` 的
+  session-scoped market interest registry 表达 quote interest，避免同一 session
+  内多个 stream/facade 对重叠 symbol 重复提交或互相取消。
   session reconnect/resync 后，runtime 会从底层 market adapter 当前订阅意图生成
   recovery commands 并重新排队发送，用户不需要在业务代码中维护第二份 symbol 集合。
 - `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；

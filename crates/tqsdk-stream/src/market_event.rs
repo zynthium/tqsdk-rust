@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use futures::Stream;
 use tqsdk_core::{
-    CommitResult, MarketChartCommand, MarketCommand, Quote, RuntimeCommand, RuntimeReader,
-    SharedCommitResult, StatePath, Symbol,
+    CommitResult, MarketChartCommand, Quote, RuntimeReader, SharedCommitResult, StatePath, Symbol,
 };
 
 use crate::api::{TqStream, duration_to_ns};
@@ -171,17 +170,23 @@ impl<'a> MarketEventBuilder<'a> {
 
         let inner = self.stream.commit_stream()?.filter_paths(paths);
 
-        if !quote_specs.is_empty() {
-            self.stream
-                .subscribe_quotes(quote_specs.iter().map(|spec| spec.symbol.as_str()))
-                .await?;
-        }
+        let quote_lease = if quote_specs.is_empty() {
+            None
+        } else {
+            Some(
+                self.stream
+                    .session()
+                    .ensure_quotes(quote_specs.iter().map(|spec| spec.symbol.as_str()))
+                    .await?,
+            )
+        };
 
+        let mut chart_leases = Vec::new();
         for spec in &tick_specs {
-            self.stream
-                .session()
-                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                    MarketChartCommand {
+            chart_leases.push(
+                self.stream
+                    .session()
+                    .ensure_chart(MarketChartCommand {
                         chart_id: spec.window.chart_id.clone(),
                         symbols: vec![Symbol::new(spec.window.symbol.clone())],
                         duration_ns: 0,
@@ -189,16 +194,16 @@ impl<'a> MarketEventBuilder<'a> {
                         left_kline_id: None,
                         focus_datetime_ns: None,
                         focus_position: None,
-                    },
-                )))
-                .await?;
+                    })
+                    .await?,
+            );
         }
 
         for spec in &kline_specs {
-            self.stream
-                .session()
-                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                    MarketChartCommand {
+            chart_leases.push(
+                self.stream
+                    .session()
+                    .ensure_chart(MarketChartCommand {
                         chart_id: spec.window.chart_id.clone(),
                         symbols: vec![Symbol::new(spec.window.symbol.clone())],
                         duration_ns: spec.window.duration_ns,
@@ -206,15 +211,16 @@ impl<'a> MarketEventBuilder<'a> {
                         left_kline_id: None,
                         focus_datetime_ns: None,
                         focus_position: None,
-                    },
-                )))
-                .await?;
+                    })
+                    .await?,
+            );
         }
 
         Ok(MarketEventStream {
             inner,
             reader: self.stream.reader().clone(),
-            session: self.stream.session().clone(),
+            quote_lease,
+            chart_leases,
             quote_specs,
             tick_specs,
             kline_specs,
@@ -227,7 +233,8 @@ impl<'a> MarketEventBuilder<'a> {
 pub struct MarketEventStream {
     inner: PathCommitStream,
     reader: RuntimeReader,
-    session: tqsdk_session::SessionClient,
+    quote_lease: Option<tqsdk_session::MarketQuoteLease>,
+    chart_leases: Vec<tqsdk_session::MarketChartLease>,
     quote_specs: Vec<QuoteEventSpec>,
     tick_specs: Vec<TickEventSpec>,
     kline_specs: Vec<KlineEventSpec>,
@@ -236,33 +243,12 @@ pub struct MarketEventStream {
 
 impl MarketEventStream {
     pub async fn close(self) -> Result<()> {
-        if !self.quote_specs.is_empty() {
-            self.session
-                .submit(RuntimeCommand::Market(MarketCommand::UnsubscribeQuotes {
-                    symbols: self
-                        .quote_specs
-                        .iter()
-                        .map(|spec| spec.symbol.clone())
-                        .collect(),
-                }))
-                .await?;
+        if let Some(lease) = self.quote_lease {
+            lease.close().await?;
         }
 
-        for chart_id in self
-            .tick_specs
-            .iter()
-            .map(|spec| spec.window.chart_id.as_str())
-            .chain(
-                self.kline_specs
-                    .iter()
-                    .map(|spec| spec.window.chart_id.as_str()),
-            )
-        {
-            self.session
-                .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
-                    chart_id: chart_id.to_owned(),
-                }))
-                .await?;
+        for lease in self.chart_leases {
+            lease.close().await?;
         }
 
         Ok(())

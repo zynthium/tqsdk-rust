@@ -154,6 +154,34 @@ async fn quote_subscription_close_unsubscribes_current_symbols() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn overlapping_quote_subscriptions_do_not_unsubscribe_other_owner() {
+    let stream = support::core_seed::seeded_stream();
+    let first = stream.quotes(["SHFE.au2602"]).await.unwrap();
+    drain_dispatches(&stream);
+
+    let second = stream.quotes(["SHFE.au2602"]).await.unwrap();
+    assert!(
+        drain_dispatches(&stream).is_empty(),
+        "second overlapping quote subscription should not resubmit"
+    );
+
+    second.close().await.unwrap();
+    assert!(
+        drain_dispatches(&stream).is_empty(),
+        "closing second overlapping subscription must keep first owner subscribed"
+    );
+
+    first.close().await.unwrap();
+    let dispatches = drain_dispatches(&stream);
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("last quote owner should unsubscribe");
+    assert_eq!(payload["ins_list"], "");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn path_stream_decodes_typed_value_for_selected_path() {
     let stream = support::core_seed::seeded_stream();
     let mut quotes = stream
@@ -385,6 +413,44 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
     assert_eq!(update.value.len(), 2);
     assert_eq!(update.value.last().unwrap().close, 620.0);
     let _: KlineWindow = update.value;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn overlapping_kline_streams_do_not_cancel_other_owner() {
+    let stream = support::core_seed::seeded_stream();
+    let first = stream
+        .kline_stream("SHFE.au2602", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    drain_dispatches(&stream);
+
+    let second = stream
+        .kline_stream("SHFE.au2602", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    assert!(
+        drain_dispatches(&stream).is_empty(),
+        "second overlapping kline stream should not resubmit set_chart"
+    );
+
+    second.close().await.unwrap();
+    assert!(
+        drain_dispatches(&stream).is_empty(),
+        "closing second overlapping kline stream must keep first owner subscribed"
+    );
+
+    first.close().await.unwrap();
+    let dispatches = drain_dispatches(&stream);
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("last kline owner should cancel chart");
+    assert_eq!(
+        payload["chart_id"],
+        "stream-kline-SHFE_au2602-60000000000-64"
+    );
+    assert_eq!(payload["ins_list"], "");
 }
 
 #[tokio::test(flavor = "current_thread")]

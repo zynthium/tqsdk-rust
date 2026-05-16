@@ -189,6 +189,13 @@ service direct-query pack：
 - 用 `RuntimeReader::cursor()` / `RuntimeReader::next()` 自己消费 commit 边界
 - 用 `RuntimeReader::read_market_state()` 走热路径 market partition 读取最新 quote
 
+当上层 facade 或多个消费者需要表达“我正在使用这批行情/窗口”而不是裸提交命令时，
+使用 session-scoped interest API：`ensure_quotes(...)`、`ensure_trading_status(...)`
+和 `ensure_chart(...)`。它们返回 lease，在同一个 `SessionClient` 内做去重和引用计数；
+只有第一个 owner 会提交订阅 / `SetChart`，最后一个 owner 显式 `close().await` 时才会
+提交 unsubscribe / `CancelChart`。`subscribe_quotes(...)` / `unsubscribe_quotes(...)`
+仍保留为低层命令 helper。
+
 而 `trade_login_tqkq.rs` 展示的是同一层 substrate 的另一条典型路径：
 
 - 用 `SessionClientBuilder::trade_target_tqkq*()` 预声明 trade route

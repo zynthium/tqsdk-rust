@@ -43,6 +43,9 @@ use crate::tq_auth::{PasswordCredentials, TqAuthProvider};
 mod auth;
 mod commands;
 mod io;
+mod market_interest;
+
+pub use market_interest::{MarketChartLease, MarketQuoteLease, MarketTradingStatusLease};
 
 static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 const PEEK_MESSAGE: &str = r#"{"aid":"peek_message"}"#;
@@ -233,6 +236,7 @@ pub struct SessionClient {
     reader: RuntimeReader,
     runtime: SessionRuntime,
     query_lock: Arc<Mutex<()>>,
+    market_interests: Arc<Mutex<market_interest::MarketInterestRegistry>>,
     order_intents: Arc<StdMutex<HashMap<(String, String), OrderIntentRecord>>>,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
@@ -281,6 +285,9 @@ impl SessionClient {
             reader,
             runtime,
             query_lock: Arc::new(Mutex::new(())),
+            market_interests: Arc::new(Mutex::new(
+                market_interest::MarketInterestRegistry::default(),
+            )),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
@@ -324,6 +331,9 @@ impl SessionClient {
             reader,
             runtime,
             query_lock: Arc::new(Mutex::new(())),
+            market_interests: Arc::new(Mutex::new(
+                market_interest::MarketInterestRegistry::default(),
+            )),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),

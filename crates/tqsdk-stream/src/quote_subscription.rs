@@ -17,6 +17,7 @@ pub struct QuoteSubscription {
     session: tqsdk_session::SessionClient,
     reader: RuntimeReader,
     symbols: BTreeSet<Symbol>,
+    leases: Vec<tqsdk_session::MarketQuoteLease>,
     pending: VecDeque<Result<ValueUpdate<Quote>>>,
 }
 
@@ -26,12 +27,14 @@ impl QuoteSubscription {
         session: tqsdk_session::SessionClient,
         reader: RuntimeReader,
         symbols: impl IntoIterator<Item = Symbol>,
+        lease: tqsdk_session::MarketQuoteLease,
     ) -> Self {
         Self {
             inner,
             session,
             reader,
             symbols: symbols.into_iter().collect(),
+            leases: vec![lease],
             pending: VecDeque::new(),
         }
     }
@@ -51,7 +54,9 @@ impl QuoteSubscription {
             return Ok(());
         }
 
-        submit_subscribe(&self.session, [symbol]).await
+        let lease = self.session.ensure_quotes([symbol.as_str()]).await?;
+        self.leases.push(lease);
+        Ok(())
     }
 
     pub async fn remove(&mut self, symbol: impl AsRef<str>) -> Result<()> {
@@ -60,15 +65,17 @@ impl QuoteSubscription {
             return Ok(());
         }
 
-        submit_unsubscribe(&self.session, [symbol]).await
+        for lease in &mut self.leases {
+            lease.release_symbols([symbol.as_str()]).await?;
+        }
+        Ok(())
     }
 
     pub async fn close(self) -> Result<()> {
-        if self.symbols.is_empty() {
-            return Ok(());
+        for lease in self.leases {
+            lease.close().await?;
         }
-
-        submit_unsubscribe(&self.session, self.symbols).await
+        Ok(())
     }
 
     fn collect_quotes(&mut self, commit: SharedCommitResult) -> Result<()> {

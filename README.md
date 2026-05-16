@@ -117,12 +117,12 @@ npx skills add https://github.com/zynthium/tqsdk-rust
 
 ```rust
 let mut api = tqsdk_wait::TqApiBuilder::new(user, pass).build().await?;
-let quote = api.quote("SHFE.au2602").await?;
+let quotes = api.quotes(["SHFE.au2602", "DCE.m2609"]).await?;
 api.wait_update(None).await?;
-let snapshot = quote.load()?;
+let snapshot = quotes.get("SHFE.au2602").unwrap().load()?;
 ```
 
-`tqsdk-wait` 的 `kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。
+`tqsdk-wait` 的 `quotes(...)` 会一次表达批量 quote interest；`quote(...)` 仍是单合约便利入口。`kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。
 
 ### Rust async stream facade
 

@@ -70,6 +70,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `step_until(deadline).await`
 - `WaitStep::{revision, current_dt, is_changing, is_changing_fields}`
 - `quote(...).await`
+- `quotes(...).await`
 - `trading_status(...).await`
 - `kline(...).await`
 - `kline_ready(...).await`
@@ -121,6 +122,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 ## 设计边界
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
+- 常见多合约实时行情入口使用 `quotes(...).await`，一次提交批量 quote 订阅并返回
+  symbol-indexed `QuoteSet`；单合约 `quote(...)` 仍保留为便利入口。订阅意图由底层
+  `SessionClient` 去重，避免 wait / stream 在同一 session 内重复提交或互相取消。
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
@@ -139,20 +143,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = std::env::var("TQ_AUTH_USER")?;
     let pass = std::env::var("TQ_AUTH_PASS")?;
     let mut api = TqApiBuilder::new(user, pass).build().await?;
-    let quote = api.quote("SHFE.au2602").await?;
+    let quotes = api.quotes(["SHFE.au2602", "DCE.m2609"]).await?;
 
     loop {
         let Some(step) = api.step().await? else { continue };
-
-        if step.is_changing(&quote) {
-            let snapshot = quote.load()?;
-            println!("{} {}", snapshot.datetime, snapshot.last_price);
+        for quote in quotes.iter() {
+            if let Some(snapshot) = quote.changed_snapshot(&step)? {
+                println!("{} {}", snapshot.instrument_id, snapshot.last_price);
+            }
         }
+
     }
 }
 ```
 
-完整可编译示例见 [examples/quote_wait.rs](examples/quote_wait.rs)。
+完整可编译示例见
+[examples/api_contract_s33_batch_quote_subscription.rs](examples/api_contract_s33_batch_quote_subscription.rs)。
 
 如果只需要一次 typed 行情快照，可以在示例本地封装一个很薄的 helper：先通过
 `TqApi::quote(symbol).await` 创建 handle，再用 `step_until(deadline).await` 等待

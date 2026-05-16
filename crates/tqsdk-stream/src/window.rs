@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{Kline, MarketCommand, MarketStateReadGuard, RuntimeCommand, Tick};
+use tqsdk_core::{Kline, MarketStateReadGuard, Tick};
 
 use crate::{PathCommitStream, Result, ValueUpdate};
 
@@ -214,14 +214,14 @@ where
 /// Commit-driven stream of ready kline windows.
 pub struct KlineWindowStream {
     inner: ProjectedValueStream<KlineWindow, KlineWindowSpec>,
-    session: tqsdk_session::SessionClient,
+    lease: tqsdk_session::MarketChartLease,
     chart_id: String,
 }
 
 impl KlineWindowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
-        session: tqsdk_session::SessionClient,
+        lease: tqsdk_session::MarketChartLease,
         reader: tqsdk_core::RuntimeReader,
         symbol: String,
         duration_ns: i64,
@@ -240,7 +240,7 @@ impl KlineWindowStream {
                 },
                 project_kline_window,
             ),
-            session,
+            lease,
             chart_id,
         }
     }
@@ -251,12 +251,7 @@ impl KlineWindowStream {
     }
 
     pub async fn close(self) -> Result<()> {
-        self.session
-            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
-                chart_id: self.chart_id,
-            }))
-            .await?;
-        Ok(())
+        self.lease.close().await.map_err(Into::into)
     }
 }
 
@@ -272,14 +267,14 @@ impl Stream for KlineWindowStream {
 /// Commit-driven stream of ready tick windows.
 pub struct TickWindowStream {
     inner: ProjectedValueStream<TickWindow, TickWindowSpec>,
-    session: tqsdk_session::SessionClient,
+    lease: tqsdk_session::MarketChartLease,
     chart_id: String,
 }
 
 impl TickWindowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
-        session: tqsdk_session::SessionClient,
+        lease: tqsdk_session::MarketChartLease,
         reader: tqsdk_core::RuntimeReader,
         symbol: String,
         view_width: usize,
@@ -296,7 +291,7 @@ impl TickWindowStream {
                 },
                 project_tick_window,
             ),
-            session,
+            lease,
             chart_id,
         }
     }
@@ -307,12 +302,7 @@ impl TickWindowStream {
     }
 
     pub async fn close(self) -> Result<()> {
-        self.session
-            .submit(RuntimeCommand::Market(MarketCommand::CancelChart {
-                chart_id: self.chart_id,
-            }))
-            .await?;
-        Ok(())
+        self.lease.close().await.map_err(Into::into)
     }
 }
 

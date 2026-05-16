@@ -254,14 +254,17 @@ quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 多合约动态 quote 订阅优先使用 `quotes(...).await` 返回的
 `QuoteSubscription`。它持有当前 symbol 集合，提供 `add(...)` /
 `remove(...)` / `symbols()` / `close()`，并作为 typed quote stream 使用。
-底层仍复用 market adapter 的全量订阅集合和同一条 commit fan-out；session
-reconnect/resync 后，runtime 会根据 adapter 保留的订阅意图重新排队发送恢复命令，
-用户不需要手写重连后的重订阅逻辑。
+底层通过 `SessionClient` 的 session-scoped interest registry 去重并引用计数；
+同一 session 内多个 `QuoteSubscription` 或 market event stream 订阅重叠 symbol 时，
+关闭其中一个 owner 不会取消另一个 owner 仍在使用的行情。runtime 仍会在
+reconnect/resync 后根据 adapter 保留的订阅意图重新排队发送恢复命令，用户不需要手写
+重连后的重订阅逻辑。
 
 如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：
 内部提交 quote/chart 命令，并从同一条 commit fan-out 中投影 typed event；不维护
-第二棵状态树，也不复制 direct-query 能力。
+第二棵状态树，也不复制 direct-query 能力。quote 和 chart 生命周期同样通过
+session-scoped lease 管理，避免重叠 stream 互相取消订阅或 chart。
 
 如果 async 系统在启动阶段需要等待行情订阅和交易初始同步完成，可以使用
 `TqStream::recover_state()`。它从同一条 commit fan-out 等待 readiness，并复用

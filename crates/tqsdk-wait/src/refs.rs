@@ -9,7 +9,7 @@ mod trade;
 mod trading_status;
 
 pub use kline::KlineHandle;
-pub use quote::QuoteRef;
+pub use quote::{QuoteRef, QuoteSet};
 pub use security::{SecurityAccountRef, SecurityOrderRef, SecurityPositionRef, SecurityTradeRef};
 pub use system::NotificationRef;
 pub use tick::TickHandle;

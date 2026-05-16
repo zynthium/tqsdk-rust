@@ -50,7 +50,7 @@ pub use price::OrderPrice;
 pub use recovery::WaitStartupRecovery;
 pub use refs::{
     AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
-    RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    QuoteSet, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
     SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
     TradingStatusRef,
 };

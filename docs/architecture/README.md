@@ -98,6 +98,8 @@ V1 是：
   - lazy establish + route / pending-route 驱动原语
   - `progress_once()` 这个最小 substrate 推进原语
   - `subscribe_quotes()` / `unsubscribe_quotes()` 这类低层命令 helper
+  - session-scoped market interest registry，用于 quote、trading status 和 chart
+    lease 的去重、引用计数与最后 owner 释放
   - `wait_command_completed()` 这个最小 control-plane 等待原语
   - `command_status_typed()` 这个 additive typed 命令状态读取 helper
   - direct query / schema refresh 薄层入口
@@ -113,6 +115,8 @@ V1 是：
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
   - market/trade 对象引用
+  - 批量 quote 入口 `quotes(...)`，返回 symbol-indexed refs，并复用 session
+    interest registry 管理订阅意图
   - serial window 视图
   - `kline` / `tick` non-blocking handle 与 `kline_ready` / `tick_ready` chart
     初始化等待路径

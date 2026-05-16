@@ -69,6 +69,10 @@ wait adapter 层未来可以提供：
 - `TqApi::kline` / `TqApi::tick` 返回 non-blocking live handle，只提交或复用
   `SetChart`。严格等待 chart 初始化的路径应通过 `kline_ready` / `tick_ready`
   表达；ready 表示 `ready && !more_data`，不代表当前窗口已有 rows。
+- 批量实时行情是 wait facade 的一等入口：`TqApi::quotes([...]).await`
+  应一次表达一批 quote interest，并返回 symbol-indexed refs。它必须复用
+  `tqsdk-session` 的 session-scoped market interest registry，不能在 wait
+  facade 私下维护会与 stream 冲突的订阅真相。
 - quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
   `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
   quote 的 ready / load 语义。

@@ -55,6 +55,33 @@ async fn quote_handle_returns_ref_without_waiting_for_first_tick() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn quotes_submits_one_batch_and_returns_symbol_indexed_refs() {
+    let mut api = support::seeded_api();
+
+    let quotes = api.quotes(["SHFE.au2602", "DCE.m2609"]).await.unwrap();
+
+    assert!(quotes.get("SHFE.au2602").is_some());
+    assert!(quotes.get("DCE.m2609").is_some());
+    assert!(quotes.get("CZCE.MA607").is_none());
+    assert_eq!(
+        quotes
+            .iter()
+            .map(|quote| quote.symbol().to_string())
+            .collect::<Vec<_>>(),
+        vec!["DCE.m2609", "SHFE.au2602"]
+    );
+
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    let payloads = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .filter(|payload| payload["aid"] == "subscribe_quote")
+        .collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["ins_list"], "DCE.m2609,SHFE.au2602");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn quote_handle_reads_snapshot_without_api_argument_after_step() {
     let mut api = support::seeded_api();
     support::seed_quote_commit_with_datetime(

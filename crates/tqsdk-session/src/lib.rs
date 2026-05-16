@@ -45,7 +45,9 @@ mod tq_auth;
 mod tqkq;
 
 pub use builder::SessionClientBuilder;
-pub use client::{SessionClient, SessionProgress};
+pub use client::{
+    MarketChartLease, MarketQuoteLease, MarketTradingStatusLease, SessionClient, SessionProgress,
+};
 pub use direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
     OptionLevelQuotes, OptionQueryFilter, SessionDirectQuery, SessionMetadataQuery,

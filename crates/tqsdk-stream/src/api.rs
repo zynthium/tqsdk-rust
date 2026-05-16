@@ -9,10 +9,10 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tqsdk_core::{
-    Account, CommitScope, MarketChartCommand, MarketCommand, Notification, ObjectKey, Order,
-    Position, PreInsertOrder, ProtocolDomain, Quote, RiskManagementData, RiskManagementRule,
-    RuntimeCommand, SecurityAccount, SecurityOrder, SecurityPosition, SecurityTrade,
-    SettlementInfo, StatePath, Symbol, Trade, TradingStatus,
+    Account, CommitScope, MarketChartCommand, Notification, ObjectKey, Order, Position,
+    PreInsertOrder, ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount,
+    SecurityOrder, SecurityPosition, SecurityTrade, SettlementInfo, StatePath, Symbol, Trade,
+    TradingStatus,
 };
 
 use crate::driver::{DriverEvent, StreamDriver};
@@ -136,12 +136,16 @@ impl TqStream {
             .collect::<Vec<_>>();
         validate_quote_symbols(&symbols)?;
         let commits = self.commit_stream()?;
-        submit_subscribe(self.session(), symbols.iter().cloned()).await?;
+        let lease = self
+            .session()
+            .ensure_quotes(symbols.iter().map(Symbol::as_str))
+            .await?;
         Ok(QuoteSubscription::new(
             commits,
             self.session().clone(),
             self.reader.clone(),
             symbols,
+            lease,
         ))
     }
 
@@ -201,23 +205,22 @@ impl TqStream {
             StatePath::new(["klines", symbol.as_str(), duration_key.as_str(), "data"]),
         ]);
 
-        self.session()
-            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol.clone())],
-                    duration_ns,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                },
-            )))
+        let lease = self
+            .session()
+            .ensure_chart(MarketChartCommand {
+                chart_id: chart_id.clone(),
+                symbols: vec![Symbol::new(symbol.clone())],
+                duration_ns,
+                view_width: data_length,
+                left_kline_id: None,
+                focus_datetime_ns: None,
+                focus_position: None,
+            })
             .await?;
 
         Ok(KlineWindowStream::new(
             commits,
-            self.session().clone(),
+            lease,
             self.reader.clone(),
             symbol,
             duration_ns,
@@ -238,23 +241,22 @@ impl TqStream {
             StatePath::new(["ticks", symbol.as_str(), "data"]),
         ]);
 
-        self.session()
-            .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol.clone())],
-                    duration_ns: 0,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                },
-            )))
+        let lease = self
+            .session()
+            .ensure_chart(MarketChartCommand {
+                chart_id: chart_id.clone(),
+                symbols: vec![Symbol::new(symbol.clone())],
+                duration_ns: 0,
+                view_width: data_length,
+                left_kline_id: None,
+                focus_datetime_ns: None,
+                focus_position: None,
+            })
             .await?;
 
         Ok(TickWindowStream::new(
             commits,
-            self.session().clone(),
+            lease,
             self.reader.clone(),
             symbol,
             data_length,

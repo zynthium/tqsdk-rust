@@ -1,13 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tqsdk_core::{
-    AccountId, MarketChartCommand, MarketCommand, OrderId, RuntimeCommand, Symbol,
-    TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
-    TradeOffset, TradeVolumeCondition,
+    AccountId, MarketChartCommand, OrderId, RuntimeCommand, Symbol, TradeAccountType, TradeCommand,
+    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradeVolumeCondition,
 };
 use tqsdk_session::SessionClient;
 
@@ -16,7 +15,7 @@ use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
     AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
-    RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
+    QuoteSet, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
     SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
     TradingStatusRef,
 };
@@ -241,17 +240,40 @@ impl TqApi {
     pub async fn quote(&mut self, symbol: &str) -> crate::error::Result<QuoteRef> {
         let quote = QuoteRef::new(self.read_handle(), symbol);
 
-        if self.driver.quote_subscriptions.insert(symbol.to_owned()) && !quote.is_ready()? {
-            self.driver
-                .session
-                .submit(RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
-                    symbols: vec![Symbol::new(symbol)],
-                }))
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
+        if self.driver.quote_subscriptions.insert(symbol.to_owned()) {
+            self.driver.session.ensure_quotes([symbol]).await?;
         }
 
         Ok(quote)
+    }
+
+    pub async fn quotes<I, S>(&mut self, symbols: I) -> crate::error::Result<QuoteSet>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut refs = BTreeMap::new();
+        let mut new_symbols = Vec::new();
+
+        for symbol in symbols {
+            let symbol = symbol.as_ref();
+            refs.insert(
+                symbol.to_string(),
+                QuoteRef::new(self.read_handle(), symbol),
+            );
+            if self.driver.quote_subscriptions.insert(symbol.to_owned()) {
+                new_symbols.push(symbol.to_string());
+            }
+        }
+
+        if !new_symbols.is_empty() {
+            self.driver
+                .session
+                .ensure_quotes(new_symbols.iter().map(String::as_str))
+                .await?;
+        }
+
+        Ok(QuoteSet::new(refs))
     }
 
     pub fn startup_recovery(&mut self) -> crate::recovery::WaitStartupRecovery<'_> {
@@ -265,17 +287,8 @@ impl TqApi {
             .driver
             .trading_status_subscriptions
             .insert(symbol.to_owned())
-            && !trading_status.is_ready()?
         {
-            self.driver
-                .session
-                .submit(RuntimeCommand::Market(
-                    MarketCommand::SubscribeTradingStatus {
-                        symbols: vec![Symbol::new(symbol)],
-                    },
-                ))
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
+            self.driver.session.ensure_trading_status([symbol]).await?;
         }
 
         Ok(trading_status)
@@ -297,17 +310,15 @@ impl TqApi {
         if !self.driver.serial_charts.contains(&chart_id) {
             self.driver
                 .session
-                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                    MarketChartCommand {
-                        chart_id: chart_id.clone(),
-                        symbols: vec![Symbol::new(symbol)],
-                        duration_ns,
-                        view_width: data_length,
-                        left_kline_id: None,
-                        focus_datetime_ns: None,
-                        focus_position: None,
-                    },
-                )))
+                .ensure_chart(MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: vec![Symbol::new(symbol)],
+                    duration_ns,
+                    view_width: data_length,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                })
                 .await
                 .map_err(crate::error::WaitFacadeError::Session)?;
             self.driver.serial_charts.insert(chart_id.clone());
@@ -346,17 +357,15 @@ impl TqApi {
         if !self.driver.serial_charts.contains(&chart_id) {
             self.driver
                 .session
-                .submit(RuntimeCommand::Market(MarketCommand::SetChart(
-                    MarketChartCommand {
-                        chart_id: chart_id.clone(),
-                        symbols: vec![Symbol::new(symbol)],
-                        duration_ns: 0,
-                        view_width: data_length,
-                        left_kline_id: None,
-                        focus_datetime_ns: None,
-                        focus_position: None,
-                    },
-                )))
+                .ensure_chart(MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: vec![Symbol::new(symbol)],
+                    duration_ns: 0,
+                    view_width: data_length,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                })
                 .await
                 .map_err(crate::error::WaitFacadeError::Session)?;
             self.driver.serial_charts.insert(chart_id.clone());

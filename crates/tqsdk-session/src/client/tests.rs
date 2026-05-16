@@ -25,7 +25,7 @@ use super::SessionClientContext;
 use super::{
     SessionClient, SessionInternalExecutor, SessionIoComponents, SessionIoState, SessionProgress,
     SessionReplayExecutor, SharedAuthProvider, SharedRouteConnector, SharedRouteExecutor,
-    SharedTopologyResolver,
+    SharedTopologyResolver, market_interest::MarketInterestRegistry,
 };
 use crate::testing::ManualSession;
 #[derive(Clone, Default)]
@@ -1233,6 +1233,7 @@ fn test_live_client_with_components(
         reader: handle.reader(),
         runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
         query_lock: Arc::new(TokioMutex::new(())),
+        market_interests: Arc::new(TokioMutex::new(MarketInterestRegistry::default())),
         order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "services")]
         service_http: reqwest::Client::new(),
