@@ -1,6 +1,12 @@
+use std::collections::BTreeSet;
+
 use tqsdk_core::{ChartId, MarketStateReadGuard, ObjectKey, StatePath, Tick};
 
-use crate::{change::ChangeTrackedRef, step::WaitReadHandle, views::TickWindow};
+use crate::{
+    change::ChangeTrackedRef,
+    step::{WaitReadHandle, WaitStep},
+    views::TickWindow,
+};
 
 /// Handle to a subscribed tick chart plus its current materialized window.
 #[derive(Clone)]
@@ -79,6 +85,79 @@ impl TickHandle {
 
     pub fn rows(&self) -> crate::error::Result<Vec<Tick>> {
         Ok(self.window()?.into_rows())
+    }
+
+    pub fn last(&self) -> crate::error::Result<Option<Tick>> {
+        Ok(self.window()?.last().cloned())
+    }
+
+    pub fn rows_since(&self, last_seen_id: i64) -> crate::error::Result<Vec<Tick>> {
+        Ok(self
+            .window()?
+            .into_rows()
+            .into_iter()
+            .filter(|row| row.id > last_seen_id)
+            .collect())
+    }
+
+    pub fn changed_rows(&self, step: &WaitStep) -> crate::error::Result<Vec<Tick>> {
+        if !step.is_changing(self) {
+            return Ok(Vec::new());
+        }
+
+        let window = self.window()?;
+        let changed_ids = self.changed_row_ids(step);
+        if changed_ids.is_empty() {
+            return Ok(window.into_rows());
+        }
+
+        Ok(window
+            .into_rows()
+            .into_iter()
+            .filter(|row| changed_ids.contains(&row.id))
+            .collect())
+    }
+
+    fn changed_row_ids(&self, step: &WaitStep) -> BTreeSet<i64> {
+        let mut ids = BTreeSet::new();
+
+        for key in &step.changes().object_hits {
+            if let ObjectKey::Tick { symbol, tick_id } = key
+                && symbol.as_str() == self.symbol
+            {
+                ids.insert(*tick_id);
+            }
+        }
+
+        for hit in &step.changes().field_hits {
+            if let ObjectKey::Tick { symbol, tick_id } = &hit.object
+                && symbol.as_str() == self.symbol
+            {
+                ids.insert(*tick_id);
+            }
+        }
+
+        for path in &step.changes().path_hits {
+            if let Some(row_id) = tick_row_id_from_path(path, &self.symbol) {
+                ids.insert(row_id);
+            }
+        }
+
+        ids
+    }
+}
+
+fn tick_row_id_from_path(path: &StatePath, symbol: &str) -> Option<i64> {
+    match path.segments() {
+        [root, path_symbol, row_id] if root == "ticks" && path_symbol == symbol => {
+            row_id.parse().ok()
+        }
+        [root, path_symbol, data, row_id]
+            if root == "ticks" && path_symbol == symbol && data == "data" =>
+        {
+            row_id.parse().ok()
+        }
+        _ => None,
     }
 }
 

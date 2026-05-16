@@ -1,7 +1,7 @@
 use tqsdk_core::{ObjectKey, Quote, StatePath, Symbol};
 
 use crate::change::ChangeTrackedRef;
-use crate::step::WaitReadHandle;
+use crate::step::{WaitReadHandle, WaitStep};
 
 /// Lightweight handle to `quotes/{symbol}` in the runtime state tree.
 #[derive(Clone)]
@@ -40,6 +40,14 @@ impl QuoteRef {
             .ok_or(crate::error::WaitFacadeError::InvalidState(
                 "quote not ready",
             ))
+    }
+
+    pub fn changed_snapshot(&self, step: &WaitStep) -> crate::error::Result<Option<Quote>> {
+        if step.is_changing(self) {
+            self.snapshot()
+        } else {
+            Ok(None)
+        }
     }
 }
 

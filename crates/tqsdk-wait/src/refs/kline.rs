@@ -1,6 +1,12 @@
+use std::collections::BTreeSet;
+
 use tqsdk_core::{ChartId, Kline, MarketStateReadGuard, ObjectKey, StatePath};
 
-use crate::{change::ChangeTrackedRef, step::WaitReadHandle, views::KlineWindow};
+use crate::{
+    change::ChangeTrackedRef,
+    step::{WaitReadHandle, WaitStep},
+    views::KlineWindow,
+};
 
 /// Handle to a subscribed kline chart plus its current materialized window.
 #[derive(Clone)]
@@ -90,6 +96,92 @@ impl KlineHandle {
 
     pub fn completed_rows(&self) -> crate::error::Result<Vec<Kline>> {
         Ok(self.window()?.completed_rows().to_vec())
+    }
+
+    pub fn last(&self) -> crate::error::Result<Option<Kline>> {
+        Ok(self.window()?.last().cloned())
+    }
+
+    pub fn last_completed(&self) -> crate::error::Result<Option<Kline>> {
+        Ok(self.window()?.last_completed().cloned())
+    }
+
+    pub fn rows_since(&self, last_seen_id: i64) -> crate::error::Result<Vec<Kline>> {
+        Ok(self
+            .window()?
+            .into_rows()
+            .into_iter()
+            .filter(|row| row.id > last_seen_id)
+            .collect())
+    }
+
+    pub fn changed_rows(&self, step: &WaitStep) -> crate::error::Result<Vec<Kline>> {
+        if !step.is_changing(self) {
+            return Ok(Vec::new());
+        }
+
+        let window = self.window()?;
+        let changed_ids = self.changed_row_ids(step);
+        if changed_ids.is_empty() {
+            return Ok(window.into_rows());
+        }
+
+        Ok(window
+            .into_rows()
+            .into_iter()
+            .filter(|row| changed_ids.contains(&row.id))
+            .collect())
+    }
+
+    fn changed_row_ids(&self, step: &WaitStep) -> BTreeSet<i64> {
+        let mut ids = BTreeSet::new();
+
+        for key in &step.changes().object_hits {
+            if let ObjectKey::Kline { series, bar_id } = key
+                && series.primary.as_str() == self.symbol
+                && series.duration_ns == self.duration_ns
+            {
+                ids.insert(*bar_id);
+            }
+        }
+
+        for hit in &step.changes().field_hits {
+            if let ObjectKey::Kline { series, bar_id } = &hit.object
+                && series.primary.as_str() == self.symbol
+                && series.duration_ns == self.duration_ns
+            {
+                ids.insert(*bar_id);
+            }
+        }
+
+        for path in &step.changes().path_hits {
+            if let Some(row_id) = kline_row_id_from_path(path, &self.symbol, self.duration_ns) {
+                ids.insert(row_id);
+            }
+        }
+
+        ids
+    }
+}
+
+fn kline_row_id_from_path(path: &StatePath, symbol: &str, duration_ns: i64) -> Option<i64> {
+    match path.segments() {
+        [root, path_symbol, duration, row_id]
+            if root == "klines"
+                && path_symbol == symbol
+                && duration.parse::<i64>().ok()? == duration_ns =>
+        {
+            row_id.parse().ok()
+        }
+        [root, path_symbol, duration, data, row_id]
+            if root == "klines"
+                && path_symbol == symbol
+                && duration.parse::<i64>().ok()? == duration_ns
+                && data == "data" =>
+        {
+            row_id.parse().ok()
+        }
+        _ => None,
     }
 }
 

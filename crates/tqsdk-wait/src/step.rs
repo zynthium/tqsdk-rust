@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tqsdk_core::{CommitResult, Revision, RuntimeReader};
+use tqsdk_core::{ChangeSet, CommitResult, Revision, RuntimeReader};
 
 use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
 
@@ -50,5 +50,9 @@ impl WaitStep {
     #[must_use]
     pub fn is_changing_fields(&self, target: &impl ChangeTrackedRef, fields: &[&str]) -> bool {
         matches_fields(&self.commit.changes, target, fields)
+    }
+
+    pub(crate) fn changes(&self) -> &ChangeSet {
+        &self.commit.changes
     }
 }

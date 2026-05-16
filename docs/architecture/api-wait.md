@@ -60,6 +60,13 @@ wait adapter 层未来可以提供：
 - facade 如提供 `snapshot()`，默认应建立在某个已提交 revision 的借用读视图之上
 - 只有明确需要 detached ownership 时，才应退回 `StateSnapshot` clone 路径
 - `WaitStep::is_changing()` 只解释当前 `step()` / `step_until(...)` 成功消费到的 commit
+- serial handle 可以提供 `last()`、`rows_since(last_seen_id)` 和
+  `changed_rows(&WaitStep)` 这类便利方法，但它们只能读取同一棵 runtime state
+  tree 的当前窗口，并且 `changed_rows` 只能解释传入的 `WaitStep` 所代表的单个
+  commit，不得维护 facade 私有 row revision 或第二套缓存。
+- quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
+  `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
+  quote 的 ready / load 语义。
 - 所有 timeout / 初始 ready / 重连行为都必须建立在同一 commit 模型上
 - 一次性行情快照 helper 如果存在于示例或用户代码中，应只是薄封装：
   通过同一个 session 创建 `quote` handle，通过同一个 `RuntimeReader` 和
