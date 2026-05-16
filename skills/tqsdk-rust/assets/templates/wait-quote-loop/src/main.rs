@@ -16,4 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{} {}", snapshot.datetime, snapshot.last_price);
         }
     }
+
+    Ok(())
 }

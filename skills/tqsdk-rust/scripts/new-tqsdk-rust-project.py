@@ -36,6 +36,11 @@ def replace_tokens(root: Path, tokens: dict[str, str]) -> None:
         path.write_text(text, encoding="utf-8")
 
 
+def materialize_template_filenames(root: Path) -> None:
+    for path in sorted(root.rglob("*.template")):
+        path.rename(path.with_suffix(""))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", help="Directory to create")
@@ -55,11 +60,12 @@ def main() -> int:
     if not template_dir.exists():
         raise SystemExit(f"template not found: {template_dir}")
 
-    shutil.copytree(template_dir, dest, dirs_exist_ok=True)
     tokens = {
         "{{TQSDK_WAIT_DEPENDENCY}}": dependency_line("tqsdk-wait", args.sdk_source, args.sdk_value),
         "{{SYMBOL}}": args.symbol,
     }
+    shutil.copytree(template_dir, dest, dirs_exist_ok=True)
+    materialize_template_filenames(dest)
     replace_tokens(dest, tokens)
     print(f"created {args.template} project at {dest}")
     return 0
