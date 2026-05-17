@@ -158,6 +158,7 @@ tqsdk-task
 - strategy supervisor 的 typed health/metrics/shutdown report 和 telemetry/export hook；
   生产观测导出保持 transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
 - strategy cache replay driver
+- Python-compatible local backtest sim foundation
 - S31 低延迟 trading desk thin profile，hot path 使用
   `tqsdk-session + RuntimeReader`，并复用 task 层 `RiskEngine` / `TaskOrderIntent`
   / typed latency report
@@ -172,6 +173,8 @@ tqsdk-task
 - 它可以在 strategy replay driver 中消费 `tqsdk-data` 的 cache/history event。
   这是上层集成路径；不得把 cache storage 下沉进 task，也不得把 strategy
   execution 下沉进 data。
+- 它可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供 Python-compatible
+  本地回测模拟账户能力；这不允许反向改变 core/session/wait/stream 的职责边界。
 
 演进方向：
 

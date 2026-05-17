@@ -37,7 +37,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-stream`](crates/tqsdk-stream) | Rust async-native 多消费者 commit stream、object stream、过滤器、lag diagnostics、health status 和慢消费者隔离基础 |
-| [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、低延迟 trading desk profile |
+| [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、Python-compatible local backtest sim、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、离线 cache 和 replay foundation |
 
 一般使用建议：
@@ -93,6 +93,12 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ```bash
 cargo run -p tqsdk-task --example api_contract_s24_testable_strategy
+```
+
+如果要验证不依赖真实账号和网络的 Python-compatible 本地回测模拟账户闭环，可以运行：
+
+```bash
+cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 ```
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
@@ -177,6 +183,7 @@ let page = client.get_kline_data_page(request).await?;
 | 场景 | 命令 | 运行说明 |
 | --- | --- | --- |
 | 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
+| Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote replay + `TqSim`，不连接真实服务 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
 | quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
 | 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` | 需要账号；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |

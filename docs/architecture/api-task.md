@@ -48,6 +48,7 @@
   - strategy host / strategy context
   - strategy environment adapter
   - strategy cache replay driver
+  - Python-compatible local backtest sim foundation
   - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
   - S31 低延迟 trading desk thin profile
@@ -95,6 +96,13 @@
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
     strategy execution 搬入 data
+- `StrategyBacktest` / `TqSim`
+  - 消费 `tqsdk-data::MarketCacheReplay` 的本地 quote event，作为 Python-compatible 回测模拟账户 foundation
+  - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission
+  - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote 触发成交、市价无对手盘撤单、资金不足拒单
+  - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
+  - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
+  - tick/kline 自动 quote 合成、主连合约表、股票/期权账户语义和回测报告不在当前最小闭环内
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略

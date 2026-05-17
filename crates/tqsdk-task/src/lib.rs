@@ -13,6 +13,7 @@
 //! ```
 
 mod account_group;
+mod backtest;
 mod calendar;
 mod config;
 mod deployment;
@@ -28,6 +29,7 @@ mod replay;
 mod risk;
 mod scheduler;
 mod shared;
+mod sim;
 mod strategy;
 mod target_pos;
 pub mod testing;
@@ -39,6 +41,9 @@ pub use account_group::{
     MultiAccountOrderGroupReport, MultiAccountOrderLegTicket, MultiAccountOrderOutcome,
     MultiAccountOrderReport, MultiAccountOrderState, MultiAccountOrderStatus,
     MultiAccountOrderTicket, Ratio,
+};
+pub use backtest::{
+    StrategyBacktest, StrategyBacktestBuilder, StrategyBacktestContext, StrategyBacktestEvent,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{
@@ -76,6 +81,7 @@ pub use scheduler::{
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,
     TargetPosStepOutcomeReport,
 };
+pub use sim::{TqSim, TqSimOrderRequest, TqSimStepReport};
 pub use strategy::{StrategyContext, StrategyHost, StrategyHostBuilder, StrategyUpdate};
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,

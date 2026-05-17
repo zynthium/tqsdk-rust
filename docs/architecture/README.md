@@ -144,6 +144,7 @@ V1 是：
   - supervisor typed health/metrics/shutdown report 和 telemetry/export hook；生产观测导出保持
     transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
   - strategy cache replay foundation
+  - Python-compatible local backtest sim foundation
   - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
     `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
     latency/order status report；慢 sink 仍由 `tqsdk-stream` sidecar 承担，不进入
@@ -168,6 +169,9 @@ V1 是：
 - `tqsdk-task` 可以消费 `tqsdk-data` cache/history event 构建 strategy replay
   driver；这是上层集成路径，不代表 cache storage 进入 task，也不代表 strategy
   execution 进入 data
+- `tqsdk-task` 可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供
+  Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait/stream
+  的 runtime contract 和 facade 边界
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 stream sink 变成
   task profile 的 public dependency。

@@ -18,6 +18,7 @@ host 以 `tqsdk-wait` 为 canonical substrate；S31 低延迟 trading desk profi
 - strategy host / strategy context
 - strategy environment adapter
 - strategy cache replay driver
+- Python-compatible local backtest sim foundation
 - low-latency trading desk profile
 - public fake market / fake broker test harness
 
@@ -101,10 +102,17 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
   - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/cache event series 合并
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
+- `StrategyBacktest` / `TqSim`
+  - 使用 `tqsdk-data::MarketCacheReplay` 作为本地回测行情输入
+  - `TqSim` 提供 Python-compatible 本地模拟账户 foundation，默认账户为 `TQSIM`，默认资金为 `10_000_000.0`
+  - 当前最小闭环覆盖 quote event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、市价无对手盘撤单、资金不足拒单、手续费/保证金 per-symbol 配置
+  - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
+  - 回测报告、tick/kline 自动行情合成、主连合约表、股票/期权完整账户语义仍是后续迭代范围
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`
   - 当前支持 fake quote/account/position seed、全成、拒单、单步/跨 step 部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
+  - fake broker 是策略测试工具，不提供 Python `TqSim` 的资金、保证金、手续费或交易所规则语义
 - `TargetPosTask`
   - 注册 `account_id + symbol` ownership
   - `set_target_volume()` 与 `wait_target_reached()`
