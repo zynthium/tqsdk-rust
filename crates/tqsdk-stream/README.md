@@ -50,6 +50,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `TickWindow`
 - `KlineWindowStream`
 - `TickWindowStream`
+- `QuoteBatch`
+- `QuoteUpdate`
+- `QuoteBatchSubscription`
 - `QuoteSubscription`
 - `MarketEvent`
 - `MarketEventBuilder`
@@ -115,6 +118,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `path_stream::<T>(...)`
 - `subscribe_quotes(...)`
 - `unsubscribe_quotes(...)`
+- `quote_batches(...).await`
 - `quotes(...).await`
 - `market_events()`
 - `health()`
@@ -165,6 +169,10 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 `testing::StreamTestDriver` 只用于 deterministic fixture：注入合成 session error、
 closed event，或关闭 stream driver 来刻画消费者行为。普通用户代码不应把它当成运行时
 控制 API。
+
+`quote_batches(...).await` 是多品种实时 quote 的推荐高性能入口。它按 runtime
+commit 输出 `QuoteBatch`，内部根据 changed object/path 只 decode 本轮实际变化的合约；
+`quotes(...).await` 保留为兼容的逐 quote item stream。
 
 `CommitStream` 和 managed `CommitSink` 传递的是
 `tqsdk_core::SharedCommitResult = Arc<CommitResult>`。这保持 commit payload
@@ -251,14 +259,16 @@ quote stream 的订阅意图可以通过 `subscribe_quotes(...)` /
 `unsubscribe_quotes(...)` 表达，普通用户不需要直接提交
 `RuntimeCommand::Market(MarketCommand::SubscribeQuotes { .. })`。
 
-多合约动态 quote 订阅优先使用 `quotes(...).await` 返回的
-`QuoteSubscription`。它持有当前 symbol 集合，提供 `add(...)` /
-`remove(...)` / `symbols()` / `close()`，并作为 typed quote stream 使用。
+多合约动态 quote 订阅优先使用 `quote_batches(...).await` 返回的
+`QuoteBatchSubscription`。它持有当前 symbol 集合，提供 `add(...)` /
+`remove(...)` / `symbols()` / `close()`，并按 commit 输出一批 changed quotes。
+需要逐 quote item 的兼容接口时使用 `quotes(...).await` 返回的
+`QuoteSubscription`。
 底层通过 `SessionClient` 的 session-scoped interest registry 去重并引用计数；
-同一 session 内多个 `QuoteSubscription` 或 market event stream 订阅重叠 symbol 时，
-关闭其中一个 owner 不会取消另一个 owner 仍在使用的行情。runtime 仍会在
-reconnect/resync 后根据 adapter 保留的订阅意图重新排队发送恢复命令，用户不需要手写
-重连后的重订阅逻辑。
+同一 session 内多个 `QuoteBatchSubscription` / `QuoteSubscription` 或 market event
+stream 订阅重叠 symbol 时，关闭其中一个 owner 不会取消另一个 owner 仍在使用的行情。
+runtime 仍会在 reconnect/resync 后根据 adapter 保留的订阅意图重新排队发送恢复命令，
+用户不需要手写重连后的重订阅逻辑。
 
 如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：

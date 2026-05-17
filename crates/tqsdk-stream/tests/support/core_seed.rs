@@ -35,6 +35,40 @@ pub fn seed_quote_commit(stream: &TqStream, symbol: &str, last_price: f64) {
 }
 
 #[allow(dead_code)]
+pub fn seed_quote_batch_commit(stream: &TqStream, quotes: &[(&str, f64)]) {
+    let mut quote_values = serde_json::Map::new();
+    for (symbol, last_price) in quotes {
+        quote_values.insert(
+            (*symbol).to_string(),
+            json!({
+                "instrument_id": symbol,
+                "last_price": last_price
+            }),
+        );
+    }
+
+    stream
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": Value::Object(quote_values)
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed quote batch commit should produce a commit");
+}
+
+#[allow(dead_code)]
 pub fn seed_ready_kline_chart(
     stream: &TqStream,
     symbol: &str,

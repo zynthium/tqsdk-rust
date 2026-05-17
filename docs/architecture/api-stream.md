@@ -228,6 +228,13 @@ impl TqStream {
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>;
+    pub async fn quote_batches<I, S>(
+        &self,
+        symbols: I,
+    ) -> tqsdk_stream::Result<QuoteBatchSubscription>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
     pub fn market_events(&self) -> MarketEventBuilder<'_>;
     pub fn recover_state(&self) -> StreamStartupRecovery<'_>;
     pub async fn kline_stream(
@@ -365,10 +372,12 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - `subscribe_quotes()` / `unsubscribe_quotes()` 是 quote 订阅命令的薄包装，
   用来避免普通 stream 用户直接构造 `RuntimeCommand::Market`；它们不是
   subscription handle，也不改变订阅恢复语义。
-- `quotes()` 返回用户级 `QuoteSubscription` handle，用来表达动态 add/remove/current
-  symbols，并作为 typed quote stream 消费；它通过 `tqsdk-session` 的
-  session-scoped market interest registry 表达 quote interest，避免同一 session
-  内多个 stream/facade 对重叠 symbol 重复提交或互相取消。
+- `quote_batches()` 返回用户级 `QuoteBatchSubscription` handle，用来表达动态
+  add/remove/current symbols，并按 commit 产出 changed quote batch；它通过
+  `tqsdk-session` 的 session-scoped market interest registry 表达 quote interest，
+  避免同一 session 内多个 stream/facade 对重叠 symbol 重复提交或互相取消。
+- `quotes()` 保留为兼容的逐 quote item stream，内部可复用 batch collector flatten
+  成 `ValueUpdate<Quote>`。
   session reconnect/resync 后，runtime 会从底层 market adapter 当前订阅意图生成
   recovery commands 并重新排队发送，用户不需要在业务代码中维护第二份 symbol 集合。
 - `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；

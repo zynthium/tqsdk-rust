@@ -137,6 +137,133 @@ async fn quote_subscription_adds_removes_and_streams_current_symbols() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn quote_batches_yield_one_item_per_commit_with_only_subscribed_changes() {
+    let stream = support::core_seed::seeded_stream();
+    let mut batches = stream
+        .quote_batches(["SHFE.au2602", "SHFE.ag2606"])
+        .await
+        .unwrap();
+
+    drain_dispatches(&stream);
+    support::core_seed::seed_quote_batch_commit(
+        &stream,
+        &[
+            ("SHFE.au2602", 625.0),
+            ("DCE.i2609", 712.0),
+            ("SHFE.ag2606", 5103.0),
+        ],
+    );
+
+    let batch = batches
+        .next()
+        .await
+        .expect("quote batch subscription should yield changed quotes")
+        .expect("quote batch subscription should decode changed quotes");
+
+    assert_eq!(batch.commit.revision, stream.reader().read().revision());
+    let mut updates = batch
+        .quotes
+        .iter()
+        .map(|update| (update.symbol.as_str(), update.value.last_price))
+        .collect::<Vec<_>>();
+    updates.sort_by(|left, right| left.0.cmp(right.0));
+    assert_eq!(
+        updates,
+        vec![("SHFE.ag2606", 5103.0), ("SHFE.au2602", 625.0)]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_batches_add_remove_and_close_manage_current_symbols() {
+    let stream = support::core_seed::seeded_stream();
+    let mut batches = stream.quote_batches(["SHFE.au2602"]).await.unwrap();
+
+    assert_eq!(batches.symbols().collect::<Vec<_>>(), vec!["SHFE.au2602"]);
+    drain_dispatches(&stream);
+
+    batches.add("SHFE.ag2606").await.unwrap();
+    assert_eq!(
+        batches.symbols().collect::<Vec<_>>(),
+        vec!["SHFE.ag2606", "SHFE.au2602"]
+    );
+    let dispatches = drain_dispatches(&stream);
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote batch add should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606,SHFE.au2602");
+
+    batches.remove("SHFE.au2602").await.unwrap();
+    assert_eq!(batches.symbols().collect::<Vec<_>>(), vec!["SHFE.ag2606"]);
+    let dispatches = drain_dispatches(&stream);
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote batch remove should submit subscribe_quote");
+    assert_eq!(payload["ins_list"], "SHFE.ag2606");
+
+    support::core_seed::seed_quote_batch_commit(
+        &stream,
+        &[("SHFE.au2602", 626.0), ("SHFE.ag2606", 5103.0)],
+    );
+    let batch = batches
+        .next()
+        .await
+        .expect("quote batch subscription should yield remaining symbol updates")
+        .expect("quote batch subscription should decode remaining quote");
+    assert_eq!(batch.quotes.len(), 1);
+    assert_eq!(batch.quotes[0].symbol.as_str(), "SHFE.ag2606");
+    assert_eq!(batch.quotes[0].value.last_price, 5103.0);
+
+    batches.close().await.unwrap();
+    let dispatches = drain_dispatches(&stream);
+    let payload = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "subscribe_quote")
+        .expect("quote batch close should submit unsubscribe");
+    assert_eq!(payload["ins_list"], "");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_subscription_flattens_quote_batches_for_compatibility() {
+    let stream = support::core_seed::seeded_stream();
+    let mut quotes = stream.quotes(["SHFE.au2602", "SHFE.ag2606"]).await.unwrap();
+
+    drain_dispatches(&stream);
+    support::core_seed::seed_quote_batch_commit(
+        &stream,
+        &[("SHFE.au2602", 625.0), ("SHFE.ag2606", 5103.0)],
+    );
+
+    let first = quotes
+        .next()
+        .await
+        .expect("quote subscription should yield first batch item")
+        .expect("quote subscription should decode first batch item");
+    let second = quotes
+        .next()
+        .await
+        .expect("quote subscription should yield second batch item")
+        .expect("quote subscription should decode second batch item");
+
+    let mut updates = vec![
+        (first.value.instrument_id, first.value.last_price),
+        (second.value.instrument_id, second.value.last_price),
+    ];
+    updates.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        updates,
+        vec![
+            ("SHFE.ag2606".to_string(), 5103.0),
+            ("SHFE.au2602".to_string(), 625.0),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn quote_subscription_close_unsubscribes_current_symbols() {
     let stream = support::core_seed::seeded_stream();
     let quotes = stream.quotes(["SHFE.au2602", "SHFE.ag2606"]).await.unwrap();

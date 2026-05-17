@@ -26,7 +26,8 @@ use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
 use crate::quote_subscription::{
-    QuoteSubscription, submit_subscribe, submit_unsubscribe, validate_quote_symbols,
+    QuoteBatchSubscription, QuoteSubscription, submit_subscribe, submit_unsubscribe,
+    validate_quote_symbols,
 };
 use crate::typed::PathValueStream;
 use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_chart_id};
@@ -130,6 +131,17 @@ impl TqStream {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Ok(QuoteSubscription::new(self.quote_batches(symbols).await?))
+    }
+
+    pub async fn quote_batches<I, S>(
+        &self,
+        symbols: I,
+    ) -> crate::error::Result<QuoteBatchSubscription>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let symbols = symbols
             .into_iter()
             .map(|symbol| Symbol::new(symbol.as_ref()))
@@ -140,7 +152,7 @@ impl TqStream {
             .session()
             .ensure_quotes(symbols.iter().map(Symbol::as_str))
             .await?;
-        Ok(QuoteSubscription::new(
+        Ok(QuoteBatchSubscription::new(
             commits,
             self.session().clone(),
             self.reader.clone(),

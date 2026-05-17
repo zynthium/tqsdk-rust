@@ -127,6 +127,8 @@ V1 是：
   - shared-session multi-consumer commit stream facade
   - root fan-out capacity 配置与 typed lag diagnostics
   - commit/path/scope/domain/object/field filters
+  - 批量 quote stream 入口 `quote_batches(...)`，按 commit 只 decode 本轮
+    changed quote symbols，作为多品种实时行情的高性能 async 入口
   - typed path stream / ready kline-tick window / trade session events
   - managed commit sink foundation for slow consumer isolation, finite retry, local JSONL WAL, and graceful shutdown
   - health status / restart hint

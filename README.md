@@ -132,10 +132,15 @@ let snapshot = quotes.get("SHFE.au2602").unwrap().load()?;
 use futures::StreamExt;
 
 let stream = tqsdk_stream::TqStreamBuilder::new(user, pass).build().await?;
-stream.subscribe_quotes(["SHFE.au2602"]).await?;
-let mut quotes = stream.quote_stream("SHFE.au2602")?;
-let update = quotes.next().await.ok_or("quote stream closed")??;
+let mut batches = stream
+    .quote_batches(["SHFE.au2602", "DCE.m2609"])
+    .await?;
+let batch = batches.next().await.ok_or("quote stream closed")??;
 ```
+
+`quote_batches(...)` 是多品种实时 quote 的推荐高性能入口：每个 runtime commit
+最多产出一个 batch，内部只 decode 本轮实际变化的合约。`quotes(...)` 仍保留为
+兼容的逐 quote item stream。
 
 ### Direct query / metadata
 

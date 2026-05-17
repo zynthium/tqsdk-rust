@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -12,18 +12,13 @@ use tqsdk_core::{
 
 use crate::api::{TqStream, duration_to_ns};
 use crate::filter::PathCommitStream;
+use crate::quote_subscription::changed_quote_symbols;
 use crate::typed::ValueUpdate;
 use crate::window::{
     KlineWindow, KlineWindowSpec, TickWindow, TickWindowSpec, kline_chart_id,
     project_kline_window_from_market, project_tick_window_from_market, tick_chart_id,
 };
 use crate::{Result, StreamFacadeError};
-
-#[derive(Debug, Clone)]
-struct QuoteEventSpec {
-    symbol: Symbol,
-    path: StatePath,
-}
 
 #[derive(Debug, Clone)]
 struct TickEventSpec {
@@ -99,17 +94,11 @@ impl<'a> MarketEventBuilder<'a> {
             ));
         }
 
-        let quote_specs = self
+        let quote_symbols = self
             .quotes
             .into_iter()
-            .map(|symbol| {
-                let path = StatePath::new(["quotes", symbol.as_str()]);
-                QuoteEventSpec {
-                    symbol: Symbol::new(symbol),
-                    path,
-                }
-            })
-            .collect::<Vec<_>>();
+            .map(Symbol::new)
+            .collect::<BTreeSet<_>>();
 
         let tick_specs = self
             .ticks
@@ -153,9 +142,9 @@ impl<'a> MarketEventBuilder<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let paths = quote_specs
+        let paths = quote_symbols
             .iter()
-            .map(|spec| spec.path.clone())
+            .map(|symbol| StatePath::new(["quotes", symbol.as_str()]))
             .chain(
                 tick_specs
                     .iter()
@@ -170,13 +159,13 @@ impl<'a> MarketEventBuilder<'a> {
 
         let inner = self.stream.commit_stream()?.filter_paths(paths);
 
-        let quote_lease = if quote_specs.is_empty() {
+        let quote_lease = if quote_symbols.is_empty() {
             None
         } else {
             Some(
                 self.stream
                     .session()
-                    .ensure_quotes(quote_specs.iter().map(|spec| spec.symbol.as_str()))
+                    .ensure_quotes(quote_symbols.iter().map(Symbol::as_str))
                     .await?,
             )
         };
@@ -221,7 +210,7 @@ impl<'a> MarketEventBuilder<'a> {
             reader: self.stream.reader().clone(),
             quote_lease,
             chart_leases,
-            quote_specs,
+            quote_symbols,
             tick_specs,
             kline_specs,
             pending: VecDeque::new(),
@@ -235,7 +224,7 @@ pub struct MarketEventStream {
     reader: RuntimeReader,
     quote_lease: Option<tqsdk_session::MarketQuoteLease>,
     chart_leases: Vec<tqsdk_session::MarketChartLease>,
-    quote_specs: Vec<QuoteEventSpec>,
+    quote_symbols: BTreeSet<Symbol>,
     tick_specs: Vec<TickEventSpec>,
     kline_specs: Vec<KlineEventSpec>,
     pending: VecDeque<Result<MarketEvent>>,
@@ -255,15 +244,14 @@ impl MarketEventStream {
     }
 
     fn collect_events(&mut self, commit: SharedCommitResult) -> Result<()> {
-        let quote_hits = self
-            .quote_specs
-            .iter()
-            .filter(|spec| commit_touches_path(&commit, &spec.path))
+        let quote_hits = changed_quote_symbols(&commit)
+            .into_iter()
+            .filter(|symbol| self.quote_symbols.contains(symbol))
             .collect::<Vec<_>>();
         if !quote_hits.is_empty() {
             let market = self.reader.read_market_state();
-            for spec in quote_hits {
-                if let Some(value) = market.quote(&spec.symbol)? {
+            for symbol in quote_hits {
+                if let Some(value) = market.quote(&symbol)? {
                     self.pending.push_back(Ok(MarketEvent::Quote(ValueUpdate {
                         commit: commit.clone(),
                         value,
