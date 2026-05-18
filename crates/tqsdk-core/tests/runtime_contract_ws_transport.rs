@@ -85,6 +85,41 @@ fn websocket_transport_sends_custom_handshake_headers() {
 }
 
 #[test]
+fn websocket_transport_offers_deflate_without_client_no_context_takeover_request() {
+    run_on_tokio(async {
+        let server = TestWebSocketServer::spawn(|mut socket| {
+            let extensions = socket
+                .request()
+                .header("sec-websocket-extensions")
+                .expect("websocket client should offer permessage-deflate");
+            assert!(
+                extensions.contains("permessage-deflate"),
+                "expected permessage-deflate offer, got {extensions}",
+            );
+            assert!(
+                !extensions.contains("client_no_context_takeover"),
+                "client should not request client_no_context_takeover: {extensions}",
+            );
+            assert!(
+                extensions.contains("server_no_context_takeover"),
+                "server_no_context_takeover keeps current Tianqin websocket negotiation compatible: {extensions}",
+            );
+
+            match socket.recv().unwrap() {
+                ClientFrame::Close => {}
+                other => panic!("expected close frame, got {other:?}"),
+            }
+        })
+        .unwrap();
+
+        let mut transport = WebSocketTransport::new(server.url(""));
+        transport.connect().await.unwrap();
+        transport.close().await.unwrap();
+        server.join();
+    });
+}
+
+#[test]
 fn websocket_transport_requires_tokio_runtime() {
     let mut transport = WebSocketTransport::new("ws://127.0.0.1:9");
     let err = block_on(transport.connect()).expect_err("transport should require tokio");

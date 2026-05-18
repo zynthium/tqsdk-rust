@@ -4,7 +4,7 @@ use std::pin::Pin;
 use futures::SinkExt;
 use url::Url;
 use yawc::frame::{Frame, OpCode};
-use yawc::{HttpRequestBuilder, Options, TcpWebSocket, WebSocket};
+use yawc::{CompressionLevel, HttpRequestBuilder, Options, TcpWebSocket, WebSocket};
 
 use crate::commands::OutboundFrame;
 use crate::{ContractError, Result};
@@ -123,8 +123,10 @@ impl WebSocketTransport {
         url: Url,
         request: HttpRequestBuilder,
     ) -> std::result::Result<TcpWebSocket, yawc::WebSocketError> {
+        // Tianqin replies to a bare deflate offer with a quoted window-bits parameter
+        // that yawc 0.3.3 does not parse, so keep server no-context negotiation.
         let options = Options::default()
-            .client_no_context_takeover()
+            .with_compression_level(CompressionLevel::default())
             .server_no_context_takeover();
         WebSocket::connect(url)
             .with_options(options)
