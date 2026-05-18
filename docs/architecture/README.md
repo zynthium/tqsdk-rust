@@ -59,6 +59,8 @@ V1 是：
   - 提供 cursor 创建、commit 消费、zero-copy 状态读取
   - 提供 market/trade 分区读面，以及同 revision 的
     `read_market_trade_state()` 组合读面
+- `TradingSessionSchedule`
+  - 纯交易时段状态 helper，用于本地日内时段的 open / pre-close / closed 判断与倒计时计算
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
   - 为 `wait_update`、stream/callback facade 提供共同读面

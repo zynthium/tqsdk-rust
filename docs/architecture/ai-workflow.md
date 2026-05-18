@@ -50,6 +50,7 @@ tqsdk-task
 - 统一 runtime state、domain partitions、commit/revision、causality、cursor/log
 - protocol adapters、transport contracts、session runtime orchestration
 - 官方对象的纯 schema/type contract
+- 纯交易时段状态 helper，例如 `TradingSessionSchedule`
 - `RuntimeHandle` / `RuntimeReader` / `UpdateCursor` / `CommitResult`
 
 非职责：

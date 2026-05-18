@@ -18,6 +18,7 @@
 - 以 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`UpdateCursor` 为核心的 reader-first 消费模型。
 - 以 `SharedCommitResult = Arc<CommitResult>` 共享提交所有权，避免 commit log、写侧返回和上层 fan-out 深拷贝提交元数据。
 - 官方对象与相关 metadata/query 结果的 typed schema contract。
+- 纯交易时段状态 helper，例如 `TradingSessionSchedule`，用于在无网络和无 runtime side effect 的前提下判断 open / pre-close / closed 与下一边界倒计时。
 - transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语。
 
 ## 依赖方式
@@ -76,6 +77,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
 | `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
 | `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
+| `TradingSessionSchedule` / `TradingSessionSegment` | 纯交易时段状态 helper，按本地日内时段计算 open / pre-close / closed 与倒计时 |
 
 raw outbox envelope（例如 `OutboundEnvelope`）和 multi-source aggregation helper 不属于稳定 public contract。外部 route 消费者应依赖 `OutboundDispatch`，而不是 runtime 内部队列结构。
 

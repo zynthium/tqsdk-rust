@@ -30,6 +30,7 @@ pub mod order_lifecycle;
 pub mod runtime;
 mod session_runtime;
 pub mod state;
+mod trading_session;
 mod transport;
 pub mod types;
 
@@ -78,6 +79,9 @@ pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, MarketStateReadGuard, MarketStateView,
     MarketTradeStateReadGuard, ObjectKey, PathSegment, SeriesKey, SharedCommitResult, StatePath,
     StateReadView, StateSnapshot, TradeStateReadGuard, TradeStateView, UpdateCursor,
+};
+pub use trading_session::{
+    TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingSessionStatus,
 };
 #[cfg(fuzzing)]
 #[doc(hidden)]
