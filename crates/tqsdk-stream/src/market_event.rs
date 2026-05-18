@@ -179,25 +179,17 @@ impl<'a> MarketEventBuilder<'a> {
                     map
                 },
             );
-        let kline_specs_by_series = kline_specs
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| {
-                (
-                    (
-                        spec.projection.spec.symbol.clone(),
-                        spec.projection.spec.duration_ns,
-                    ),
-                    index,
-                )
-            })
-            .fold(
-                BTreeMap::<(String, i64), Vec<usize>>::new(),
-                |mut map, (key, index)| {
-                    map.entry(key).or_default().push(index);
-                    map
-                },
-            );
+        let kline_specs_by_series = kline_specs.iter().enumerate().fold(
+            BTreeMap::<String, BTreeMap<i64, Vec<usize>>>::new(),
+            |mut map, (index, spec)| {
+                map.entry(spec.projection.spec.symbol.clone())
+                    .or_default()
+                    .entry(spec.projection.spec.duration_ns)
+                    .or_default()
+                    .push(index);
+                map
+            },
+        );
 
         let paths = quote_symbols
             .iter()
@@ -291,7 +283,7 @@ pub struct MarketEventStream {
     tick_specs_by_chart: BTreeMap<String, Vec<usize>>,
     tick_specs_by_symbol: BTreeMap<String, Vec<usize>>,
     kline_specs_by_chart: BTreeMap<String, Vec<usize>>,
-    kline_specs_by_series: BTreeMap<(String, i64), Vec<usize>>,
+    kline_specs_by_series: BTreeMap<String, BTreeMap<i64, Vec<usize>>>,
     pending: VecDeque<Result<MarketEvent>>,
 }
 
@@ -316,7 +308,7 @@ impl MarketEventStream {
             .cloned()
             .collect::<Vec<_>>();
 
-        let mut tick_hits = BTreeSet::new();
+        let mut tick_hits = Vec::new();
         for chart_id in touches.chart_ids() {
             if let Some(indices) = self.tick_specs_by_chart.get(chart_id) {
                 tick_hits.extend(indices.iter().copied());
@@ -327,21 +319,24 @@ impl MarketEventStream {
                 tick_hits.extend(indices.iter().copied());
             }
         }
+        tick_hits.sort_unstable();
+        tick_hits.dedup();
 
-        let mut kline_hits = BTreeSet::new();
+        let mut kline_hits = Vec::new();
         for chart_id in touches.chart_ids() {
             if let Some(indices) = self.kline_specs_by_chart.get(chart_id) {
                 kline_hits.extend(indices.iter().copied());
             }
         }
         for (symbol, duration_ns) in touches.kline_series() {
-            if let Some(indices) = self
-                .kline_specs_by_series
-                .get(&(symbol.to_string(), duration_ns))
+            if let Some(durations) = self.kline_specs_by_series.get(symbol)
+                && let Some(indices) = durations.get(&duration_ns)
             {
                 kline_hits.extend(indices.iter().copied());
             }
         }
+        kline_hits.sort_unstable();
+        kline_hits.dedup();
 
         if !quote_hits.is_empty() || !tick_hits.is_empty() || !kline_hits.is_empty() {
             let market = self.reader.read_market_state();

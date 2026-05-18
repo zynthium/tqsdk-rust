@@ -84,6 +84,18 @@ impl<'a> StateReadView<'a> {
 
         decode_value_at_path(value, path).map(Some)
     }
+
+    pub(crate) fn decode_segments<T, S>(&self, path: &[S]) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+        S: AsRef<str>,
+    {
+        let Some(value) = self.get(path) else {
+            return Ok(None);
+        };
+
+        decode_value_at_path(value, path).map(Some)
+    }
 }
 
 pub(crate) fn get_at_path<I, S>(data: &Value, path: I) -> Option<&Value>

@@ -1,4 +1,4 @@
-use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 
 use crate::{
     Result,
@@ -121,9 +121,10 @@ pub fn collect_domain_events(
     snapshot: StateReadView<'_>,
 ) -> Result<Vec<DomainEvent>> {
     let mut events = Vec::new();
+    let paths_by_object = paths_by_object(commit);
 
     for object in &commit.changes.object_hits {
-        let Some(path) = path_for_object(commit, object) else {
+        let Some(path) = paths_by_object.get(object).copied() else {
             continue;
         };
 
@@ -317,25 +318,19 @@ fn decode_trade_event(
     }
 }
 
-fn path_for_object<'a>(commit: &'a CommitResult, object: &ObjectKey) -> Option<&'a StatePath> {
-    commit
-        .changes
-        .field_hits
-        .iter()
-        .find(|hit| &hit.object == object)
-        .map(|hit| &hit.path)
+fn paths_by_object(commit: &CommitResult) -> HashMap<&ObjectKey, &StatePath> {
+    let mut paths = HashMap::with_capacity(commit.changes.object_hits.len());
+    for hit in &commit.changes.field_hits {
+        paths.entry(&hit.object).or_insert(&hit.path);
+    }
+    paths
 }
 
 fn decode_at_path<T>(snapshot: StateReadView<'_>, path: &StatePath) -> Result<Option<T>>
 where
-    T: DeserializeOwned,
+    T: serde::de::DeserializeOwned,
 {
-    let segments = path
-        .segments()
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    snapshot.decode_path(&segments)
+    snapshot.decode_segments(path.segments())
 }
 
 fn path_object_has_field(snapshot: StateReadView<'_>, path: &StatePath, field: &str) -> bool {

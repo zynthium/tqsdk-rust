@@ -36,30 +36,30 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
-        let mut path_seen = HashSet::with_capacity(mutations.len());
-        let mut object_seen = HashSet::with_capacity(mutations.len());
-        let mut field_seen = HashSet::with_capacity(mutations.len());
+        let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(mutations.len());
+        let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(mutations.len());
+        let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
+            HashSet::with_capacity(mutations.len());
 
         let mut changes = Self::default();
 
         for mutation in mutations {
-            if path_seen.insert(mutation.path.clone()) {
+            if path_seen.insert(&mutation.path) {
                 changes.path_hits.push(mutation.path.clone());
             }
 
             if let Some(object) = &mutation.object {
-                if object_seen.insert(object.clone()) {
+                if object_seen.insert(object) {
                     changes.object_hits.push(object.clone());
                 }
 
                 for field in &mutation.fields {
-                    let hit = ChangeHit::field(
-                        mutation.path.clone(),
-                        object.clone(),
-                        field.field.clone(),
-                    );
-                    if field_seen.insert(hit.clone()) {
-                        changes.field_hits.push(hit);
+                    if field_seen.insert((&mutation.path, object, field.field.as_str())) {
+                        changes.field_hits.push(ChangeHit::field(
+                            mutation.path.clone(),
+                            object.clone(),
+                            field.field.clone(),
+                        ));
                     }
                 }
             }

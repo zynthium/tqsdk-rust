@@ -721,14 +721,15 @@ fn read_kline_rows_by_id(
     let mut rows = Vec::new();
 
     for id in ids {
-        let id_key = id.to_string();
-        if let Some(row) = market.decode_path::<Kline>(&[
-            "klines",
-            spec.symbol.as_str(),
-            duration_key.as_str(),
-            "data",
-            id_key.as_str(),
-        ])? {
+        if let Some(row) = with_i64_path_segment(id, |id_key| {
+            market.decode_path::<Kline>(&[
+                "klines",
+                spec.symbol.as_str(),
+                duration_key.as_str(),
+                "data",
+                id_key,
+            ])
+        })? {
             rows.push(row);
         }
     }
@@ -752,13 +753,38 @@ fn read_tick_rows_by_id(
     let mut rows = Vec::new();
 
     for id in ids {
-        let id_key = id.to_string();
-        if let Some(row) =
-            market.decode_path::<Tick>(&["ticks", spec.symbol.as_str(), "data", id_key.as_str()])?
-        {
+        if let Some(row) = with_i64_path_segment(id, |id_key| {
+            market.decode_path::<Tick>(&["ticks", spec.symbol.as_str(), "data", id_key])
+        })? {
             rows.push(row);
         }
     }
 
     Ok(rows)
+}
+
+fn with_i64_path_segment<T>(value: i64, f: impl FnOnce(&str) -> T) -> T {
+    let mut buffer = [0_u8; 20];
+    let mut cursor = buffer.len();
+    let mut remaining = value.unsigned_abs();
+
+    if remaining == 0 {
+        cursor -= 1;
+        buffer[cursor] = b'0';
+    } else {
+        while remaining > 0 {
+            cursor -= 1;
+            buffer[cursor] = b'0' + (remaining % 10) as u8;
+            remaining /= 10;
+        }
+    }
+
+    if value < 0 {
+        cursor -= 1;
+        buffer[cursor] = b'-';
+    }
+
+    let segment = std::str::from_utf8(&buffer[cursor..])
+        .expect("integer path segment should always be valid UTF-8");
+    f(segment)
 }
