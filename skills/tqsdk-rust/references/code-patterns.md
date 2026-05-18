@@ -153,9 +153,9 @@ println!("rows={}", series.len());
 
 ## Live Persistence Boundary
 
-当前 SDK 不提供 live `tqsdk-stream` window 写入 Python-compatible mmap
-`HistorySeriesCache` 的 public bridge。实时行情持久化使用 `tqsdk-stream`
-commit sink/WAL 或调用方自有 sidecar；`HistorySeriesCache` 保持 offline
+当前 SDK 不提供 live `tqsdk-stream` row batch 写入 Python-compatible mmap
+`HistorySeriesCache` 的 public bridge。实时行情持久化使用调用方自有 sidecar；
+`HistorySeriesCache` 保持 offline
 `get_*_data_series` 缓存和 cache-only reader。
 
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。

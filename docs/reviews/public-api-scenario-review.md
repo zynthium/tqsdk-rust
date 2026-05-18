@@ -49,7 +49,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 约定的使用者分层复核场景，而不是按 Python SDK 方法名逐项扩张 Rust API：
 
 - `tqsdk-wait` 覆盖单策略作者的 `wait_update()`、稳定截面、live ref 和交易一致性。
-- `tqsdk-stream` 覆盖 async 系统集成方的多消费者、背压、错误诊断、健康状态和 sink isolation。
+- `tqsdk-stream` 覆盖 async 系统集成方的多消费者、背压、错误诊断、健康状态和 row-batch market stream。
 - `tqsdk-session` 覆盖低层 / 高频用户和 direct-query 用户的一次性 request/response、metadata、calendar、settlement、ranking、EDB、auth 和 replay control-plane。
 - `tqsdk-task` 覆盖执行工具用户的目标持仓、订单 intent、ownership、基础风控、多账户隔离、策略运行时和测试支持。
 - `tqsdk-data` 覆盖研究 / 数据用户的历史数据、批处理、下载、CSV、Greeks、本地 cache 和 replay 数据源。
@@ -148,7 +148,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 - S18 本地行情缓存 foundation 已进入核心自然表达范围：`MarketCacheWriter` /
   `MarketCacheReader` / `MarketCacheReplay` 已覆盖离线 cache record、JSONL
   reader/writer 和 ordered replay；live `MarketEvent` -> cache writer pipe 已从
-  `tqsdk-data` public contract 回退到调用方 sidecar / stream sink 组合。queue、
+  `tqsdk-data` public contract 回退到调用方 sidecar。queue、
   lock、index、compaction、reader manifest、recovery scan、writer election、
   service、daemon 和 supervisor 等跨进程或准跨进程编排表面也继续归属用户层工具
   或独立 service，不作为 S18 核心目标推进。
@@ -169,20 +169,15 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   closed outcome；`tqsdk-task` 新增
   `StrategySupervisor` foundation，提供 typed health/metrics snapshot、显式
   retry policy、ctrl-c shutdown signal、typed shutdown report 和稳定 typed
-  telemetry/export hook；`tqsdk-stream` 已提供 managed commit sink、有限重试和
-  JSONL WAL foundation，并提供 `TqStream::graceful_shutdown()` 做 stream driver
-  关闭与 managed sink flush 的 typed report。
+  telemetry/export hook；`tqsdk-stream` 提供 `TqStream::graceful_shutdown()` 做
+  outbound flush 与 stream driver 关闭的 typed report。
   S20 完成标准不包含 Rust GUI、web helper、内置 HTTP health/metrics endpoint、
   跨进程 daemon orchestration 或跨进程 daemon 管理；后两者已降级为用户层运维
   系统职责。
-- S21 慢消费者隔离的 bounded fan-out / lag 诊断 / sink policy 子集已经自然表达：`TqStreamBuilder`
+- S21 慢消费者隔离的 bounded fan-out / lag 诊断子集已经自然表达：`TqStreamBuilder`
   可配置 root fan-out capacity，`StreamFacadeError::diagnostic()` 暴露 typed
-  lag 诊断；`TqStream::spawn_commit_sink(...)` / `spawn_commit_sink_with_options(...)`
-  已提供 managed commit sink、有限重试、JSONL WAL、typed stats 和 shutdown
-  flush report、WAL fsync policy、本地 JSONL compaction、WAL recovery report
-  和 commit metadata journal replay；`StreamSinkProfile` 提供常见 sink 配置
-  profile，减少用户手拼 WAL/retry/journal options；完整 durable daemon queue
-  与 runtime state snapshot 恢复已降级为用户运维系统职责。
+  lag 诊断；写库、日志、有限重试、WAL、journal、compaction 和完整 durable daemon
+  queue 与 runtime state snapshot 恢复均为用户或上层运维系统职责。
 - S22 错误诊断与重试的 error diagnostic / retry hint / stream retry policy 子集已经自然表达：core/session/stream
   均有 typed error kind 和 retry hint；`StreamRetryPolicy` 提供 stream-facing
   retry decision / backoff runner；业务拒单仍应通过订单/风控 public API 判断，
@@ -211,7 +206,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   `TradingDeskProfile` 使用 shared `SessionClient + RuntimeReader` hot path，
   `read_market_trade_state()` 绑定同 revision market/trade 分区读，risk precheck
   复用 `RiskEngine` / `TaskOrderIntent`，订单 ticket/status 和 latency report 均为
-  typed API；慢 sink 通过 `tqsdk-stream` sidecar 组合，不进入 profile public API，
+  typed API；慢日志、落盘和 audit sidecar 保持在 SDK 外，不进入 profile public API，
   hot path 不依赖 `tqsdk-data` 或历史序列缓存。
 
 | 场景 | 当前 API 表达能力 | 样板代码量 | 内部细节泄漏 | 手动异步管理 | 状态一致性风险 | 热路径性能风险 | 建议处理方式 | 证据位置 |
@@ -236,7 +231,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 18. 本地行情缓存读写 | 自然（核心 record/replay foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs`; `docs/archive/scenarios/2026-05-03/api_contract_s18_cross_process_cache_service.rs`; `MarketCacheWriter`; `MarketCacheReader`; `MarketCacheReplay`; 本地 cache record/replay 保持 offline foundation；live pipe、跨进程 cache service、queue/lock/election/recovery/compaction/service/daemon/supervisor 编排表面已回退到用户层工具或独立 service 边界 |
 | 19. 风控前置 | 自然（基础风控） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s19_pre_trade_risk.rs`; `RiskEngine`; `RiskCheckReport`; `RiskProjectionReport`; `RiskDecision`; `RiskRejection`; `TaskHost::orders`; `InstrumentSpec`; guarded insert/cancel risk integration; daily open count / symbol open volume / accumulated open volume / order rate limit; tick-size validation; lightweight single-order projection; portfolio margin what-if / durable audit 不进入核心 SDK，历史 sketch 仅作为非核心风控系统上下文 |
 | 20. 生产守护进程 | 自然（SDK runtime primitives） | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::reconnect_monitor`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamReconnectMonitor`; `StreamReconnectOutcome`; `StreamReconnectReport`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; S20 完成标准止于 typed health / telemetry / graceful shutdown primitives；Rust GUI、HTTP endpoint 和跨进程 daemon 管理均 out of scope |
-| 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s21_slow_consumer_isolation.rs`; `TqStream::spawn_commit_sink`; `TqStream::spawn_commit_sink_with_options`; `CommitSink`; `StreamSinkOptions`; `StreamSinkProfile`; `StreamSinkRetryPolicy`; `StreamSinkHandle`; `StreamSinkStats`; `StreamSinkShutdownReport`; `StreamSinkWalRecord`; `StreamSinkWalFsyncPolicy`; `StreamSinkWalCompaction`; `StreamSinkWalRecovery`; `StreamCommitJournal`; bounded fan-out / typed lag diagnostic / managed commit sink / finite retry / JSONL WAL / reusable sink profile / fsync policy / local compaction / recovery report / commit metadata journal replay 自然；durable distributed queue 和 runtime state snapshot recovery 不进入核心 SDK |
+| 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s21_slow_consumer_isolation.rs`; `TqStreamBuilder::commit_channel_capacity`; `TqStream::with_commit_channel_capacity`; `TqStream::commit_stream`; `StreamFacadeError::Lagged`; bounded fan-out / typed lag diagnostic 自然；durable distributed queue、managed sink、WAL/journal 和 runtime state snapshot recovery 不进入核心 SDK |
 | 22. 错误诊断与重试 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s22_error_diagnosis_retry.rs`; `StreamFacadeError::diagnostic`; `StreamRetryPolicy`; `StreamRetryDecision`; error kind / retry hint / stream-facing retry decision / backoff runner 自然；order/business retry audit 由用户层执行审计系统实现 |
 | 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
 | 24. 最小可测试策略 | 自然（核心 test foundation） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `OrderLifecycle`; `FakeBroker::partial_fills`; `FakeBroker::latency_steps`; `FakeBroker::disconnect_for_steps`; `FakeBrokerConnectionStatus`; durable fixtures and richer broker behavior remain non-core testing-tooling scope |
@@ -246,7 +241,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 28. Data 下载 / 导出 / Greeks | 自然 | 低 | 无 | 无 | 无 | 低 | API 微调 | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs`; `DataClient::{query_his_cont_quotes,kline_data_download,tick_data_download,export_kline_data_csv,export_tick_data_csv,query_option_greeks}`; research/download/Greeks 继续归属 data |
 | 29. TargetPosTask ownership | 自然 | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs`; `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed,wait_update}`; `TargetPosTask`; `TargetPosScheduler`; 同账户同合约 ownership 属于 task，跨账户 TargetPos 编排和 durable audit 不进入核心 SDK |
 | 30. 看盘软件历史序列缓存 | 自然（opt-in mmap cache foundation） | 低 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s30_history_series_cache.rs`; `DataClientBuilder::{history_cache_enabled,history_cache_dir,history_cache_max_bytes,history_cache_retention_days,build}`; `HistorySeriesCache`; `HistorySeriesCacheReport`; `HistorySeriesCacheMiss`; `HistorySeriesCacheScanReport`; `HistorySeriesCacheMaintenanceReport`; `KlineDataSeries::cache_report`; `TickDataSeries::cache_report`; 默认 `DataClient::from_session` 无缓存，builder opt-in 后读写 Python 兼容 `~/.tqsdk/data_series_1` / 自定义目录，cache miss 下载对齐官方 `DataSeries`；cache-only reader、scan/schema report、容量/保留策略已落地；Python/Rust 同目录同时写是 non-goal |
-| 31. 高频交易柜台低延迟 profile | 自然（薄 trading desk profile） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s31_low_latency_trading_desk.rs`; `TradingDeskProfile`; `RuntimeReader::read_market_trade_state`; `RiskEngine::{check_report_on_state,project_order_on_state}`; `TradingDeskOrderTicket::status`; `TradingLatencyProbe`; `tqsdk-stream` managed sink sidecar；hot path 不进入 `tqsdk-data` / history cache，profile 不承诺 OMS、自动 hedge / flatten 或补单引擎 |
+| 31. 高频交易柜台低延迟 profile | 自然（薄 trading desk profile） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s31_low_latency_trading_desk.rs`; `TradingDeskProfile`; `RuntimeReader::read_market_trade_state`; `RiskEngine::{check_report_on_state,project_order_on_state}`; `TradingDeskOrderTicket::status`; `TradingLatencyProbe`; audit sidecar 留在 SDK 外；hot path 不进入 `tqsdk-data` / history cache，profile 不承诺 OMS、自动 hedge / flatten 或补单引擎 |
 
 ## 主要结论
 
@@ -265,11 +260,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
    execution group foundation、account group foundation、TargetPosTask 和最小
    strategy context；自动对冲、组合级保证金 what-if 风控、多账户高级执行策略、
    跨进程持久恢复不再作为核心 SDK 近期目标。
-4. `tqsdk-stream` 的核心底座已经覆盖 quote 订阅、动态 quote handle、混合 market
-   event、health snapshot、health status、typed reconnect monitor、graceful
-   shutdown、fan-out capacity、typed lag/error diagnostics、managed commit sink、
-   有限重试、JSONL WAL、WAL fsync policy、本地 compaction、WAL recovery report
-   和 commit metadata journal replay；`tqsdk-task::StrategySupervisor` 已提供
+4. `tqsdk-stream` 的核心底座已经覆盖 quote 订阅、动态 quote handle、row-batch
+   kline/tick、混合 market event、health snapshot、health status、typed reconnect
+   monitor、graceful shutdown、fan-out capacity 和 typed lag/error diagnostics；
+   `tqsdk-task::StrategySupervisor` 已提供
    transport-neutral typed telemetry/export hook；durable daemon queue、runtime
    state snapshot recovery 和跨进程 daemon orchestration 属于用户运维系统。
 5. 多 provider 聚合、完整 production daemon 和 durable cross-process cache daemon

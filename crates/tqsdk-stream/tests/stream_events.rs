@@ -68,110 +68,24 @@ fn trade_session_event_stream_reads_full_snapshot_only_for_system_events() {
 }
 
 #[test]
-fn market_window_streams_read_market_partitions_instead_of_full_snapshot() {
+fn market_row_streams_read_market_partitions_instead_of_full_snapshot() {
     let source = include_str!("../src/window.rs");
     let projected_stream_impl = source
         .split("impl<T, C> Stream for ProjectedValueStream")
         .nth(1)
         .and_then(|rest| {
-            rest.split("/// Commit-driven stream of ready kline windows.")
+            rest.split("/// Commit-driven stream of ready kline row batches.")
                 .next()
         })
         .expect("ProjectedValueStream implementation should remain in window.rs");
 
     assert!(
         projected_stream_impl.contains("read_market_state()"),
-        "market window streams should read market partitions directly"
+        "market row streams should read market partitions directly"
     );
     assert!(
         !projected_stream_impl.contains("reader.read()"),
-        "market window streams should not materialize a full snapshot"
-    );
-}
-
-#[test]
-fn stream_sink_state_is_accessed_through_shared_state_wrapper() {
-    let state_source = include_str!("../src/sink/state.rs");
-    let runtime_source = include_str!("../src/sink/runtime.rs");
-
-    assert!(
-        state_source.contains("struct SharedStreamSinkState"),
-        "managed sink state should be hidden behind a wrapper"
-    );
-    assert!(
-        !runtime_source.contains("shared: Arc<Mutex<StreamSinkState>>"),
-        "runtime structs should not expose raw Arc<Mutex<StreamSinkState>> fields"
-    );
-    assert!(
-        !runtime_source.contains("&Arc<Mutex<StreamSinkState>>"),
-        "sink helpers should not pass raw Arc<Mutex<StreamSinkState>> handles around"
-    );
-}
-
-#[test]
-fn stream_sink_jsonl_writers_share_the_same_low_level_writer() {
-    let source = include_str!("../src/sink/writer.rs");
-
-    assert!(
-        source.contains("struct JsonlRecordWriter"),
-        "WAL and commit journal should share one JSONL writer implementation"
-    );
-    assert!(
-        !source.contains("struct StreamSinkWalWriter {\n    writer: std::io::BufWriter"),
-        "WAL writer should not duplicate BufWriter/fsync plumbing"
-    );
-    assert!(
-        !source.contains("struct StreamCommitJournalWriter {\n    writer: std::io::BufWriter"),
-        "commit journal writer should not duplicate BufWriter/fsync plumbing"
-    );
-}
-
-#[test]
-fn stream_sink_is_split_into_focused_modules() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sink_root = root.join("src/sink.rs");
-    let sink_dir = root.join("src/sink");
-
-    for module in [
-        "options.rs",
-        "state.rs",
-        "writer.rs",
-        "wal.rs",
-        "journal.rs",
-        "runtime.rs",
-    ] {
-        assert!(
-            sink_dir.join(module).exists(),
-            "sink module {module} should exist under src/sink/"
-        );
-    }
-
-    let source = std::fs::read_to_string(&sink_root).expect("sink root should be readable");
-    for module_decl in [
-        "mod options;",
-        "mod state;",
-        "mod writer;",
-        "mod wal;",
-        "mod journal;",
-        "mod runtime;",
-    ] {
-        assert!(
-            source.contains(module_decl),
-            "sink root should declare {module_decl}"
-        );
-    }
-
-    assert!(
-        !source.contains("async fn run_sink"),
-        "sink runtime loop should live in src/sink/runtime.rs"
-    );
-    assert!(
-        !source.contains("fn compact_jsonl_wal"),
-        "WAL compaction should live in src/sink/wal.rs"
-    );
-    assert!(
-        !source.contains("fn read_jsonl_commit_journal"),
-        "commit journal IO should live in src/sink/journal.rs"
+        "market row streams should not materialize a full snapshot"
     );
 }
 

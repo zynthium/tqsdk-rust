@@ -1,31 +1,45 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tqsdk_core::{Kline, MarketStateReadGuard, Tick};
+use tqsdk_core::{
+    CommitResult, CommitScope, Kline, MarketStateReadGuard, ObjectKey, StatePath, Symbol, Tick,
+};
 
 use crate::{PathCommitStream, Result, ValueUpdate};
 
-/// Owned snapshot of the current kline serial window.
+/// Kind of row batch emitted by kline/tick streams.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RowBatchKind {
+    InitialSnapshot,
+    #[default]
+    Delta,
+    ResyncSnapshot,
+}
+
+/// Owned kline rows made visible by one stream commit.
 #[derive(Debug, Clone, Default)]
-pub struct KlineWindow {
+pub struct KlineRowBatch {
     symbol: String,
     duration_ns: i64,
     view_width: usize,
     chart_id: String,
+    kind: RowBatchKind,
     rows: Vec<Kline>,
 }
 
-impl KlineWindow {
+impl KlineRowBatch {
     #[must_use]
     pub fn new(
         symbol: String,
         duration_ns: i64,
         view_width: usize,
         chart_id: String,
+        kind: RowBatchKind,
         rows: Vec<Kline>,
     ) -> Self {
         Self {
@@ -33,8 +47,19 @@ impl KlineWindow {
             duration_ns,
             view_width,
             chart_id,
+            kind,
             rows,
         }
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Kline] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Kline> {
+        self.rows
     }
 
     #[must_use]
@@ -45,20 +70,6 @@ impl KlineWindow {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
-    }
-
-    #[must_use]
-    pub fn last(&self) -> Option<&Kline> {
-        self.rows.last()
-    }
-
-    #[must_use]
-    pub fn get(&self, index: usize) -> Option<&Kline> {
-        self.rows.get(index)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Kline> {
-        self.rows.iter()
     }
 
     #[must_use]
@@ -80,26 +91,49 @@ impl KlineWindow {
     pub fn chart_id(&self) -> &str {
         &self.chart_id
     }
+
+    #[must_use]
+    pub fn kind(&self) -> RowBatchKind {
+        self.kind
+    }
 }
 
-/// Owned snapshot of the current tick serial window.
+/// Owned tick rows made visible by one stream commit.
 #[derive(Debug, Clone, Default)]
-pub struct TickWindow {
+pub struct TickRowBatch {
     symbol: String,
     view_width: usize,
     chart_id: String,
+    kind: RowBatchKind,
     rows: Vec<Tick>,
 }
 
-impl TickWindow {
+impl TickRowBatch {
     #[must_use]
-    pub fn new(symbol: String, view_width: usize, chart_id: String, rows: Vec<Tick>) -> Self {
+    pub fn new(
+        symbol: String,
+        view_width: usize,
+        chart_id: String,
+        kind: RowBatchKind,
+        rows: Vec<Tick>,
+    ) -> Self {
         Self {
             symbol,
             view_width,
             chart_id,
+            kind,
             rows,
         }
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[Tick] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<Tick> {
+        self.rows
     }
 
     #[must_use]
@@ -110,20 +144,6 @@ impl TickWindow {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
-    }
-
-    #[must_use]
-    pub fn last(&self) -> Option<&Tick> {
-        self.rows.last()
-    }
-
-    #[must_use]
-    pub fn get(&self, index: usize) -> Option<&Tick> {
-        self.rows.get(index)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Tick> {
-        self.rows.iter()
     }
 
     #[must_use]
@@ -140,10 +160,15 @@ impl TickWindow {
     pub fn chart_id(&self) -> &str {
         &self.chart_id
     }
+
+    #[must_use]
+    pub fn kind(&self) -> RowBatchKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct KlineWindowSpec {
+pub(crate) struct KlineRowSpec {
     pub(crate) symbol: String,
     pub(crate) duration_ns: i64,
     pub(crate) view_width: usize,
@@ -151,17 +176,202 @@ pub(crate) struct KlineWindowSpec {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TickWindowSpec {
+pub(crate) struct TickRowSpec {
     pub(crate) symbol: String,
     pub(crate) view_width: usize,
     pub(crate) chart_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowProjectionCursor {
+    emitted_snapshot: bool,
+    bounds: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct KlineProjection {
+    pub(crate) spec: KlineRowSpec,
+    pub(crate) cursor: RowProjectionCursor,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TickProjection {
+    pub(crate) spec: TickRowSpec,
+    pub(crate) cursor: RowProjectionCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct KlineSeriesTouch {
+    symbol: String,
+    duration_ns: i64,
+}
+
+/// Parsed market-object touches for one commit.
+#[derive(Debug, Clone)]
+pub(crate) struct CommitTouchSet {
+    scope: CommitScope,
+    quote_symbols: BTreeSet<Symbol>,
+    chart_ids: BTreeSet<String>,
+    tick_rows: BTreeMap<String, BTreeSet<i64>>,
+    kline_rows: BTreeMap<KlineSeriesTouch, BTreeSet<i64>>,
+}
+
+impl Default for CommitTouchSet {
+    fn default() -> Self {
+        Self {
+            scope: CommitScope::RealtimeUpdate,
+            quote_symbols: BTreeSet::new(),
+            chart_ids: BTreeSet::new(),
+            tick_rows: BTreeMap::new(),
+            kline_rows: BTreeMap::new(),
+        }
+    }
+}
+
+impl CommitTouchSet {
+    #[must_use]
+    pub(crate) fn from_commit(commit: &CommitResult) -> Self {
+        let mut touches = Self {
+            scope: commit.scope,
+            ..Self::default()
+        };
+
+        for object in &commit.changes.object_hits {
+            touches.record_object(object);
+        }
+        for path in &commit.changes.path_hits {
+            touches.record_path(path);
+        }
+        for hit in &commit.changes.field_hits {
+            touches.record_object(&hit.object);
+            touches.record_path(&hit.path);
+        }
+
+        touches
+    }
+
+    pub(crate) fn quote_symbols(&self) -> impl Iterator<Item = &Symbol> {
+        self.quote_symbols.iter()
+    }
+
+    pub(crate) fn chart_ids(&self) -> impl Iterator<Item = &str> {
+        self.chart_ids.iter().map(String::as_str)
+    }
+
+    pub(crate) fn tick_symbols(&self) -> impl Iterator<Item = &str> {
+        self.tick_rows.keys().map(String::as_str)
+    }
+
+    pub(crate) fn kline_series(&self) -> impl Iterator<Item = (&str, i64)> {
+        self.kline_rows
+            .keys()
+            .map(|series| (series.symbol.as_str(), series.duration_ns))
+    }
+
+    fn tick_row_ids(&self, spec: &TickRowSpec) -> Option<&BTreeSet<i64>> {
+        self.tick_rows.get(spec.symbol.as_str())
+    }
+
+    fn kline_row_ids(&self, spec: &KlineRowSpec) -> Option<&BTreeSet<i64>> {
+        self.kline_rows.get(&KlineSeriesTouch::new(
+            spec.symbol.as_str(),
+            spec.duration_ns,
+        ))
+    }
+
+    fn record_object(&mut self, object: &ObjectKey) {
+        match object {
+            ObjectKey::Quote { symbol } => {
+                self.quote_symbols.insert(symbol.clone());
+            }
+            ObjectKey::Chart { chart_id } => {
+                self.chart_ids.insert(chart_id.as_str().to_string());
+            }
+            ObjectKey::Tick { symbol, tick_id } => {
+                self.tick_rows
+                    .entry(symbol.as_str().to_string())
+                    .or_default()
+                    .insert(*tick_id);
+            }
+            ObjectKey::Kline { series, bar_id } => {
+                self.kline_rows
+                    .entry(KlineSeriesTouch::new(
+                        series.primary.as_str(),
+                        series.duration_ns,
+                    ))
+                    .or_default()
+                    .insert(*bar_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_path(&mut self, path: &StatePath) {
+        let segments = path.segments();
+        match segments {
+            [root, symbol, ..] if root == "quotes" => {
+                self.quote_symbols.insert(Symbol::new(symbol.clone()));
+            }
+            [root, chart_id, ..] if root == "charts" => {
+                self.chart_ids.insert(chart_id.clone());
+            }
+            [root, symbol, branch, row_id, ..] if root == "ticks" && branch == "data" => {
+                if let Ok(row_id) = row_id.parse::<i64>() {
+                    self.tick_rows
+                        .entry(symbol.clone())
+                        .or_default()
+                        .insert(row_id);
+                }
+            }
+            [root, symbol, row_id, ..] if root == "ticks" => {
+                if let Ok(row_id) = row_id.parse::<i64>() {
+                    self.tick_rows
+                        .entry(symbol.clone())
+                        .or_default()
+                        .insert(row_id);
+                }
+            }
+            [root, symbol, duration, branch, row_id, ..]
+                if root == "klines" && branch == "data" =>
+            {
+                if let (Ok(duration_ns), Ok(row_id)) =
+                    (duration.parse::<i64>(), row_id.parse::<i64>())
+                {
+                    self.kline_rows
+                        .entry(KlineSeriesTouch::new(symbol, duration_ns))
+                        .or_default()
+                        .insert(row_id);
+                }
+            }
+            [root, symbol, duration, row_id, ..] if root == "klines" => {
+                if let (Ok(duration_ns), Ok(row_id)) =
+                    (duration.parse::<i64>(), row_id.parse::<i64>())
+                {
+                    self.kline_rows
+                        .entry(KlineSeriesTouch::new(symbol, duration_ns))
+                        .or_default()
+                        .insert(row_id);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl KlineSeriesTouch {
+    fn new(symbol: impl AsRef<str>, duration_ns: i64) -> Self {
+        Self {
+            symbol: symbol.as_ref().to_string(),
+            duration_ns,
+        }
+    }
 }
 
 struct ProjectedValueStream<T, C> {
     inner: PathCommitStream,
     reader: tqsdk_core::RuntimeReader,
     context: C,
-    projector: for<'a> fn(MarketStateReadGuard<'a>, &C) -> Result<Option<T>>,
+    projector: for<'a> fn(&MarketStateReadGuard<'a>, &CommitTouchSet, &mut C) -> Result<Option<T>>,
     marker: PhantomData<fn() -> T>,
 }
 
@@ -170,7 +380,11 @@ impl<T, C> ProjectedValueStream<T, C> {
         inner: PathCommitStream,
         reader: tqsdk_core::RuntimeReader,
         context: C,
-        projector: for<'a> fn(MarketStateReadGuard<'a>, &C) -> Result<Option<T>>,
+        projector: for<'a> fn(
+            &MarketStateReadGuard<'a>,
+            &CommitTouchSet,
+            &mut C,
+        ) -> Result<Option<T>>,
     ) -> Self {
         Self {
             inner,
@@ -194,8 +408,9 @@ where
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(commit))) => {
+                    let touches = CommitTouchSet::from_commit(&commit);
                     let market = this.reader.read_market_state();
-                    match (this.projector)(market, &this.context) {
+                    match (this.projector)(&market, &touches, &mut this.context) {
                         Ok(Some(value)) => {
                             return Poll::Ready(Some(Ok(ValueUpdate { commit, value })));
                         }
@@ -211,14 +426,14 @@ where
     }
 }
 
-/// Commit-driven stream of ready kline windows.
-pub struct KlineWindowStream {
-    inner: ProjectedValueStream<KlineWindow, KlineWindowSpec>,
+/// Commit-driven stream of ready kline row batches.
+pub struct KlineRowStream {
+    inner: ProjectedValueStream<KlineRowBatch, KlineProjection>,
     lease: tqsdk_session::MarketChartLease,
     chart_id: String,
 }
 
-impl KlineWindowStream {
+impl KlineRowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
         lease: tqsdk_session::MarketChartLease,
@@ -232,13 +447,16 @@ impl KlineWindowStream {
             inner: ProjectedValueStream::new(
                 inner,
                 reader,
-                KlineWindowSpec {
-                    symbol,
-                    duration_ns,
-                    view_width,
-                    chart_id: chart_id.clone(),
+                KlineProjection {
+                    spec: KlineRowSpec {
+                        symbol,
+                        duration_ns,
+                        view_width,
+                        chart_id: chart_id.clone(),
+                    },
+                    cursor: RowProjectionCursor::default(),
                 },
-                project_kline_window,
+                project_kline_rows,
             ),
             lease,
             chart_id,
@@ -255,8 +473,8 @@ impl KlineWindowStream {
     }
 }
 
-impl Stream for KlineWindowStream {
-    type Item = Result<ValueUpdate<KlineWindow>>;
+impl Stream for KlineRowStream {
+    type Item = Result<ValueUpdate<KlineRowBatch>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -264,14 +482,14 @@ impl Stream for KlineWindowStream {
     }
 }
 
-/// Commit-driven stream of ready tick windows.
-pub struct TickWindowStream {
-    inner: ProjectedValueStream<TickWindow, TickWindowSpec>,
+/// Commit-driven stream of ready tick row batches.
+pub struct TickRowStream {
+    inner: ProjectedValueStream<TickRowBatch, TickProjection>,
     lease: tqsdk_session::MarketChartLease,
     chart_id: String,
 }
 
-impl TickWindowStream {
+impl TickRowStream {
     pub(crate) fn new(
         inner: PathCommitStream,
         lease: tqsdk_session::MarketChartLease,
@@ -284,12 +502,15 @@ impl TickWindowStream {
             inner: ProjectedValueStream::new(
                 inner,
                 reader,
-                TickWindowSpec {
-                    symbol,
-                    view_width,
-                    chart_id: chart_id.clone(),
+                TickProjection {
+                    spec: TickRowSpec {
+                        symbol,
+                        view_width,
+                        chart_id: chart_id.clone(),
+                    },
+                    cursor: RowProjectionCursor::default(),
                 },
-                project_tick_window,
+                project_tick_rows,
             ),
             lease,
             chart_id,
@@ -306,8 +527,8 @@ impl TickWindowStream {
     }
 }
 
-impl Stream for TickWindowStream {
-    type Item = Result<ValueUpdate<TickWindow>>;
+impl Stream for TickRowStream {
+    type Item = Result<ValueUpdate<TickRowBatch>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -332,50 +553,131 @@ fn sanitize_chart_token(raw: &str) -> String {
         .collect()
 }
 
-pub(crate) fn project_kline_window(
-    market: MarketStateReadGuard<'_>,
-    spec: &KlineWindowSpec,
-) -> Result<Option<KlineWindow>> {
-    project_kline_window_from_market(&market, spec)
+fn project_kline_rows(
+    market: &MarketStateReadGuard<'_>,
+    touches: &CommitTouchSet,
+    projection: &mut KlineProjection,
+) -> Result<Option<KlineRowBatch>> {
+    project_kline_rows_from_market(market, &projection.spec, &mut projection.cursor, touches)
 }
 
-pub(crate) fn project_kline_window_from_market(
+fn project_tick_rows(
     market: &MarketStateReadGuard<'_>,
-    spec: &KlineWindowSpec,
-) -> Result<Option<KlineWindow>> {
+    touches: &CommitTouchSet,
+    projection: &mut TickProjection,
+) -> Result<Option<TickRowBatch>> {
+    project_tick_rows_from_market(market, &projection.spec, &mut projection.cursor, touches)
+}
+
+pub(crate) fn project_kline_rows_from_market(
+    market: &MarketStateReadGuard<'_>,
+    spec: &KlineRowSpec,
+    cursor: &mut RowProjectionCursor,
+    touches: &CommitTouchSet,
+) -> Result<Option<KlineRowBatch>> {
     if !chart_is_ready(market, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_kline_window(market, spec)?;
-    if window.is_empty() {
+    let Some(bounds) = chart_bounds(market, spec.chart_id.as_str()) else {
+        return Ok(None);
+    };
+
+    let kind = batch_kind(cursor, bounds, touches.scope);
+    let rows = match kind {
+        RowBatchKind::InitialSnapshot | RowBatchKind::ResyncSnapshot => {
+            read_kline_rows_in_range(market, spec, bounds)?
+        }
+        RowBatchKind::Delta => {
+            let rows = touches
+                .kline_row_ids(spec)
+                .into_iter()
+                .flat_map(|ids| ids.iter().copied())
+                .filter(|id| bounds.0 <= *id && *id <= bounds.1);
+            read_kline_rows_by_id(market, spec, rows)?
+        }
+    };
+
+    cursor.emitted_snapshot = true;
+    cursor.bounds = Some(bounds);
+
+    if rows.is_empty() && kind == RowBatchKind::Delta {
         return Ok(None);
     }
 
-    Ok(Some(window))
+    Ok(Some(KlineRowBatch::new(
+        spec.symbol.clone(),
+        spec.duration_ns,
+        spec.view_width,
+        spec.chart_id.clone(),
+        kind,
+        rows,
+    )))
 }
 
-pub(crate) fn project_tick_window(
-    market: MarketStateReadGuard<'_>,
-    spec: &TickWindowSpec,
-) -> Result<Option<TickWindow>> {
-    project_tick_window_from_market(&market, spec)
-}
-
-pub(crate) fn project_tick_window_from_market(
+pub(crate) fn project_tick_rows_from_market(
     market: &MarketStateReadGuard<'_>,
-    spec: &TickWindowSpec,
-) -> Result<Option<TickWindow>> {
+    spec: &TickRowSpec,
+    cursor: &mut RowProjectionCursor,
+    touches: &CommitTouchSet,
+) -> Result<Option<TickRowBatch>> {
     if !chart_is_ready(market, spec.chart_id.as_str()) {
         return Ok(None);
     }
 
-    let window = read_tick_window(market, spec)?;
-    if window.is_empty() {
+    let Some(bounds) = chart_bounds(market, spec.chart_id.as_str()) else {
+        return Ok(None);
+    };
+
+    let kind = batch_kind(cursor, bounds, touches.scope);
+    let rows = match kind {
+        RowBatchKind::InitialSnapshot | RowBatchKind::ResyncSnapshot => {
+            read_tick_rows_in_range(market, spec, bounds)?
+        }
+        RowBatchKind::Delta => {
+            let rows = touches
+                .tick_row_ids(spec)
+                .into_iter()
+                .flat_map(|ids| ids.iter().copied())
+                .filter(|id| bounds.0 <= *id && *id <= bounds.1);
+            read_tick_rows_by_id(market, spec, rows)?
+        }
+    };
+
+    cursor.emitted_snapshot = true;
+    cursor.bounds = Some(bounds);
+
+    if rows.is_empty() && kind == RowBatchKind::Delta {
         return Ok(None);
     }
 
-    Ok(Some(window))
+    Ok(Some(TickRowBatch::new(
+        spec.symbol.clone(),
+        spec.view_width,
+        spec.chart_id.clone(),
+        kind,
+        rows,
+    )))
+}
+
+fn batch_kind(
+    cursor: &RowProjectionCursor,
+    bounds: (i64, i64),
+    scope: CommitScope,
+) -> RowBatchKind {
+    if !cursor.emitted_snapshot {
+        return RowBatchKind::InitialSnapshot;
+    }
+
+    if scope == CommitScope::ResyncRecovery
+        || cursor
+            .bounds
+            .is_some_and(|previous| bounds.0 < previous.0 || bounds.1 < previous.1)
+    {
+        RowBatchKind::ResyncSnapshot
+    } else {
+        RowBatchKind::Delta
+    }
 }
 
 fn chart_is_ready(market: &MarketStateReadGuard<'_>, chart_id: &str) -> bool {
@@ -402,61 +704,61 @@ fn chart_bounds(market: &MarketStateReadGuard<'_>, chart_id: &str) -> Option<(i6
     (left_id <= right_id).then_some((left_id, right_id))
 }
 
-fn read_kline_window(
+fn read_kline_rows_in_range(
     market: &MarketStateReadGuard<'_>,
-    spec: &KlineWindowSpec,
-) -> Result<KlineWindow> {
+    spec: &KlineRowSpec,
+    bounds: (i64, i64),
+) -> Result<Vec<Kline>> {
+    read_kline_rows_by_id(market, spec, bounds.0..=bounds.1)
+}
+
+fn read_kline_rows_by_id(
+    market: &MarketStateReadGuard<'_>,
+    spec: &KlineRowSpec,
+    ids: impl IntoIterator<Item = i64>,
+) -> Result<Vec<Kline>> {
     let duration_key = spec.duration_ns.to_string();
     let mut rows = Vec::new();
 
-    if let Some((left_id, right_id)) = chart_bounds(market, spec.chart_id.as_str()) {
-        for id in left_id..=right_id {
-            let id_key = id.to_string();
-            if let Some(row) = market.decode_path::<Kline>(&[
-                "klines",
-                spec.symbol.as_str(),
-                duration_key.as_str(),
-                "data",
-                id_key.as_str(),
-            ])? {
-                rows.push(row);
-            }
+    for id in ids {
+        let id_key = id.to_string();
+        if let Some(row) = market.decode_path::<Kline>(&[
+            "klines",
+            spec.symbol.as_str(),
+            duration_key.as_str(),
+            "data",
+            id_key.as_str(),
+        ])? {
+            rows.push(row);
         }
     }
 
-    Ok(KlineWindow::new(
-        spec.symbol.clone(),
-        spec.duration_ns,
-        spec.view_width,
-        spec.chart_id.clone(),
-        rows,
-    ))
+    Ok(rows)
 }
 
-fn read_tick_window(
+fn read_tick_rows_in_range(
     market: &MarketStateReadGuard<'_>,
-    spec: &TickWindowSpec,
-) -> Result<TickWindow> {
+    spec: &TickRowSpec,
+    bounds: (i64, i64),
+) -> Result<Vec<Tick>> {
+    read_tick_rows_by_id(market, spec, bounds.0..=bounds.1)
+}
+
+fn read_tick_rows_by_id(
+    market: &MarketStateReadGuard<'_>,
+    spec: &TickRowSpec,
+    ids: impl IntoIterator<Item = i64>,
+) -> Result<Vec<Tick>> {
     let mut rows = Vec::new();
 
-    if let Some((left_id, right_id)) = chart_bounds(market, spec.chart_id.as_str()) {
-        for id in left_id..=right_id {
-            let id_key = id.to_string();
-            if let Some(row) = market.decode_path::<Tick>(&[
-                "ticks",
-                spec.symbol.as_str(),
-                "data",
-                id_key.as_str(),
-            ])? {
-                rows.push(row);
-            }
+    for id in ids {
+        let id_key = id.to_string();
+        if let Some(row) =
+            market.decode_path::<Tick>(&["ticks", spec.symbol.as_str(), "data", id_key.as_str()])?
+        {
+            rows.push(row);
         }
     }
 
-    Ok(TickWindow::new(
-        spec.symbol.clone(),
-        spec.view_width,
-        spec.chart_id.clone(),
-        rows,
-    ))
+    Ok(rows)
 }

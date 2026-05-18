@@ -15,15 +15,16 @@ It is the gate for public API narrowing work.
 | `internalize` | Candidate to remove from public re-exports. |
 | `needs-arch-change` | Requires architecture/docs/examples update before code changes. |
 | `split-plan` | Too broad for a symbol-level decision; create a narrower plan. |
+| `removed` | Removed from public API after architecture/docs/examples were rewritten. |
 
 ## Summary
 
-| Crate | `keep` | `deprecate` | `internalize` | `needs-arch-change` | `split-plan` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `tqsdk-core` | 8 | 1 | 2 | 1 | 1 |
-| `tqsdk-data` | 1 | 0 | 0 | 6 | 0 |
-| `tqsdk-stream` | 0 | 0 | 0 | 3 | 0 |
-| `tqsdk-task` | 0 | 0 | 0 | 5 | 1 |
+| Crate | `keep` | `deprecate` | `internalize` | `needs-arch-change` | `split-plan` | `removed` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `tqsdk-core` | 8 | 1 | 2 | 1 | 1 | 0 |
+| `tqsdk-data` | 1 | 0 | 0 | 6 | 0 | 0 |
+| `tqsdk-stream` | 0 | 0 | 0 | 0 | 0 | 1 |
+| `tqsdk-task` | 0 | 0 | 0 | 5 | 1 | 0 |
 
 ## Matrix
 
@@ -45,9 +46,7 @@ It is the gate for public API narrowing work.
 | `tqsdk-data` | Cache record entry surface: `MarketCacheEvent`, `MarketCachePayload`, `MarketCachePayloadKind`, `MarketCacheWriter`, `MarketCacheReader`, `MarketCacheReplay` | `crates/tqsdk-data/src/lib.rs` | Documented in `docs/architecture/api-data.md`, `crates/tqsdk-data/README.md`, `docs/reviews/public-api-scenario-review.md`, and S18 examples. | `keep` | Keep as the minimal offline cache/replay public surface. |
 | `tqsdk-data` | History series mmap cache surface: `DataClientBuilder`, `HistorySeriesCache`, `HistorySeriesCacheBackend`, `HistorySeriesCacheReport`, `HistorySeriesCacheMiss`, `HistorySeriesCacheScanReport`, `HistorySeriesCacheMaintenanceReport` | `crates/tqsdk-data/src/lib.rs` | Documented in `docs/architecture/api-data.md`, `crates/tqsdk-data/README.md`, `docs/reviews/public-api-scenario-review.md`, `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs`, and archived S30 sketch. | `keep` | Keep as the explicit opt-in Python-compatible history series cache foundation; do not move it into core/session/wait/stream. Python/Rust same-directory simultaneous writes remain non-goal. |
 | `tqsdk-data` | S18 cache orchestration surfaces and live stream pipe: reader manifest, recovery scan/action, writer election/lease, local queue/lock/index, compaction ownership, service/daemon/supervisor, `MarketCacheStreamWriter` | Removed from `crates/tqsdk-data/src/lib.rs` | S18 is narrowed to offline `MarketCacheEvent` / writer / reader / replay. Former live-pipe/orchestration examples and cross-process sketch are archived or removed from active examples. | `rollback` | Keep out of current public API. Reintroduce only via a new user-tooling or independent service design. |
-| `tqsdk-stream` | WAL record and fsync surface: `StreamSinkWalFsyncPolicy`, `StreamSinkWalRecord`, `StreamSinkWalRecordKind` | `crates/tqsdk-stream/src/lib.rs` | Documented in `docs/architecture/api-stream.md`, `crates/tqsdk-stream/README.md`, `docs/reviews/public-api-scenario-review.md`, and `api_contract_s21_slow_consumer_isolation.rs`. | `needs-arch-change` | Rewrite S21 docs/examples before hiding these details. |
-| `tqsdk-stream` | WAL maintenance surface: `StreamSinkWalCompaction`, `StreamSinkWalCompactionReport`, `StreamSinkWalRecovery`, `StreamSinkWalRecoveryReport` | `crates/tqsdk-stream/src/lib.rs` | Documented in `docs/architecture/api-stream.md`, `crates/tqsdk-stream/README.md`, `docs/reviews/public-api-scenario-review.md`, and S21 example. | `needs-arch-change` | Requires a stream sink durability API narrowing plan. |
-| `tqsdk-stream` | Commit journal surface: `StreamCommitJournal`, `StreamCommitJournalDomain`, `StreamCommitJournalRecord`, `StreamCommitJournalReplayReport`, `StreamCommitJournalScope` | `crates/tqsdk-stream/src/lib.rs` | Documented in `docs/architecture/api-stream.md`, `crates/tqsdk-stream/README.md`, `docs/reviews/public-api-scenario-review.md`, and S21 example. | `needs-arch-change` | Requires S21 example rewrite or a replacement high-level replay API first. |
+| `tqsdk-stream` | Managed sink / WAL / commit journal surface: `CommitSink`, `StreamSink*`, `StreamCommitJournal*`, `spawn_commit_sink*` | Removed from `crates/tqsdk-stream/src/lib.rs` and `TqStream` | S20/S21/S31 docs and examples were rewritten around health/shutdown, bounded fan-out lag diagnostics, and user-owned sidecars. | `removed` | Keep durable sinks, WAL, journal, compaction, recovery, and cross-process queues out of `tqsdk-stream` unless a new architecture plan explicitly reintroduces them. |
 | `tqsdk-task` | `StrategySupervisorHealth` + `StrategySupervisorHealthStatus` | `crates/tqsdk-task/src/lib.rs` | `StrategySupervisorHealth` is documented in `docs/reviews/public-api-scenario-review.md` and scenario gap docs; supervisor health is part of S20 public contract. | `needs-arch-change` | Any merge of status into health must update S20 docs/examples first. |
 | `tqsdk-task` | `StrategyRunReport` + `StrategyRunStopReason` | `crates/tqsdk-task/src/lib.rs` | Public report/status pair; audit concern is type-shape design rather than accidental export. | `split-plan` | Create a task API report-shape plan before changing public report types. |
 | `tqsdk-task` | `StrategyShutdownReport` + `StrategyShutdownSignal` | `crates/tqsdk-task/src/lib.rs` | `StrategyShutdownSignal` is used in `api_contract_s15_live_sim_replay_switch.rs`, `api_contract_s20_strategy_supervisor.rs`, `docs/architecture/api-task.md`, and `docs/reviews/public-api-scenario-review.md`. | `needs-arch-change` | Keep until S15/S20 shutdown contract is redesigned. |
@@ -58,7 +57,7 @@ It is the gate for public API narrowing work.
 ## Immediate Conclusions
 
 - The audit suggestion to shrink `tqsdk-core` cannot be applied mechanically. Several disputed low-level types are explicitly documented runtime contracts.
-- Remaining `tqsdk-data` offline cache types and `tqsdk-stream` WAL/journal types are documented and scenario-backed. Further narrowing them is a public API redesign.
+- Remaining `tqsdk-data` offline cache types are documented and scenario-backed. The former `tqsdk-stream` sink/WAL/journal surface has been removed after the S20/S21/S31 contract rewrite.
 - The clear `tqsdk-core` immediate internalization candidates from this pass, the aggregation surface and `OutboundEnvelope`, have been closed.
 - `AuthContext` field privatization was handled as a focused source-breaking change separate from broad public API surface reduction.
 

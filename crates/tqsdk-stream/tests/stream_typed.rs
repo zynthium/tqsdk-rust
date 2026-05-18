@@ -7,7 +7,7 @@ use tqsdk_core::{
     PreInsertOrder, ProtocolDomain, Quote, RiskManagementData, RiskManagementRule, SecurityAccount,
     SecurityOrder, SecurityPosition, SecurityTrade, SettlementInfo, Trade, TradingStatus,
 };
-use tqsdk_stream::{KlineWindow, MarketEvent, TickWindow, TqStream};
+use tqsdk_stream::{KlineRowBatch, MarketEvent, RowBatchKind, TickRowBatch, TqStream};
 
 mod support;
 
@@ -493,9 +493,9 @@ async fn security_wrappers_decode_security_trade_objects() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
+async fn kline_stream_submits_chart_request_and_emits_initial_and_delta_rows() {
     let stream = support::core_seed::seeded_stream();
-    let mut windows = stream
+    let mut batches = stream
         .kline_stream("SHFE.au2602", Duration::from_secs(60), 64)
         .await
         .unwrap();
@@ -524,11 +524,11 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
 
     support::core_seed::seed_ready_kline_chart(&stream, "SHFE.au2602", 60_000_000_000_i64, 64);
 
-    let update = windows
+    let update = batches
         .next()
         .await
-        .expect("kline window stream should yield an update")
-        .expect("kline window stream should decode the ready chart");
+        .expect("kline row stream should yield an initial batch")
+        .expect("kline row stream should decode the ready chart");
 
     assert_eq!(update.value.symbol(), "SHFE.au2602");
     assert_eq!(update.value.duration_ns(), 60_000_000_000_i64);
@@ -537,9 +537,51 @@ async fn kline_stream_submits_chart_request_and_decodes_ready_window() {
         update.value.chart_id(),
         "stream-kline-SHFE_au2602-60000000000-64"
     );
+    assert_eq!(update.value.kind(), RowBatchKind::InitialSnapshot);
     assert_eq!(update.value.len(), 2);
-    assert_eq!(update.value.last().unwrap().close, 620.0);
-    let _: KlineWindow = update.value;
+    assert_eq!(update.value.rows().last().unwrap().close, 620.0);
+    let _: KlineRowBatch = update.value;
+
+    support::core_seed::seed_kline_row_update(
+        &stream,
+        "SHFE.au2602",
+        60_000_000_000_i64,
+        101,
+        622.0,
+    );
+
+    let update = batches
+        .next()
+        .await
+        .expect("kline row stream should yield a delta batch")
+        .expect("kline row stream should decode the changed row");
+    assert_eq!(update.value.kind(), RowBatchKind::Delta);
+    assert_eq!(update.value.len(), 1);
+    assert_eq!(update.value.rows()[0].id, 101);
+    assert_eq!(update.value.rows()[0].close, 622.0);
+
+    support::core_seed::seed_kline_chart_bounds_regression(
+        &stream,
+        "SHFE.au2602",
+        60_000_000_000_i64,
+        64,
+    );
+
+    let update = batches
+        .next()
+        .await
+        .expect("kline row stream should yield a resync batch")
+        .expect("kline row stream should decode the resync chart");
+    assert_eq!(update.value.kind(), RowBatchKind::ResyncSnapshot);
+    assert_eq!(
+        update
+            .value
+            .rows()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![99, 100]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -581,9 +623,9 @@ async fn overlapping_kline_streams_do_not_cancel_other_owner() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
+async fn tick_stream_submits_chart_request_and_emits_initial_and_delta_rows() {
     let stream = support::core_seed::seeded_stream();
-    let mut windows = stream.tick_stream("SHFE.au2602", 32).await.unwrap();
+    let mut batches = stream.tick_stream("SHFE.au2602", 32).await.unwrap();
 
     let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
@@ -606,20 +648,33 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
 
     support::core_seed::seed_ready_tick_chart(&stream, "SHFE.au2602", 32);
 
-    let update = windows
+    let update = batches
         .next()
         .await
-        .expect("tick window stream should yield an update")
-        .expect("tick window stream should decode the ready chart");
+        .expect("tick row stream should yield an initial batch")
+        .expect("tick row stream should decode the ready chart");
 
     assert_eq!(update.value.symbol(), "SHFE.au2602");
     assert_eq!(update.value.view_width(), 32);
     assert_eq!(update.value.chart_id(), "stream-tick-SHFE_au2602-32");
+    assert_eq!(update.value.kind(), RowBatchKind::InitialSnapshot);
     assert_eq!(update.value.len(), 2);
-    assert_eq!(update.value.last().unwrap().last_price, 618.5);
-    let _: TickWindow = update.value;
+    assert_eq!(update.value.rows().last().unwrap().last_price, 618.5);
+    let _: TickRowBatch = update.value;
 
-    windows.close().await.unwrap();
+    support::core_seed::seed_tick_row_update(&stream, "SHFE.au2602", 201, 619.5);
+
+    let update = batches
+        .next()
+        .await
+        .expect("tick row stream should yield a delta batch")
+        .expect("tick row stream should decode the changed row");
+    assert_eq!(update.value.kind(), RowBatchKind::Delta);
+    assert_eq!(update.value.len(), 1);
+    assert_eq!(update.value.rows()[0].id, 201);
+    assert_eq!(update.value.rows()[0].last_price, 619.5);
+
+    batches.close().await.unwrap();
 
     let dispatches = drain_dispatches(&stream);
     assert_eq!(dispatches.len(), 2);
@@ -628,7 +683,7 @@ async fn tick_stream_submits_chart_request_and_decodes_ready_window() {
         .iter()
         .map(|dispatch| transport_payload(&dispatch.request))
         .find(|payload| payload["aid"] == "set_chart")
-        .expect("tick window close should submit a cancel_chart request");
+        .expect("tick row stream close should submit a cancel_chart request");
     assert_eq!(payload["chart_id"], "stream-tick-SHFE_au2602-32");
     assert_eq!(payload["ins_list"], "");
     assert_eq!(payload["duration"], 0);
@@ -692,12 +747,13 @@ async fn market_event_stream_subscribes_mixed_market_data_and_yields_typed_event
         .expect("market event stream should yield a tick event")
         .expect("market event stream should decode tick window");
     match tick {
-        MarketEvent::TickWindow(update) => {
+        MarketEvent::TickRows(update) => {
             assert_eq!(update.value.symbol(), "SHFE.au2602");
+            assert_eq!(update.value.kind(), RowBatchKind::InitialSnapshot);
             assert_eq!(update.value.len(), 2);
-            assert_eq!(update.value.last().unwrap().last_price, 618.5);
+            assert_eq!(update.value.rows().last().unwrap().last_price, 618.5);
         }
-        other => panic!("expected tick window event, got {other:?}"),
+        other => panic!("expected tick rows event, got {other:?}"),
     }
 
     support::core_seed::seed_ready_kline_chart(&stream, "SHFE.au2602", 60_000_000_000_i64, 64);
@@ -707,13 +763,71 @@ async fn market_event_stream_subscribes_mixed_market_data_and_yields_typed_event
         .expect("market event stream should yield a kline event")
         .expect("market event stream should decode kline window");
     match kline {
-        MarketEvent::KlineWindow(update) => {
+        MarketEvent::KlineRows(update) => {
             assert_eq!(update.value.symbol(), "SHFE.au2602");
+            assert_eq!(update.value.kind(), RowBatchKind::InitialSnapshot);
             assert_eq!(update.value.len(), 2);
-            assert_eq!(update.value.last().unwrap().close, 620.0);
+            assert_eq!(update.value.rows().last().unwrap().close, 620.0);
         }
-        other => panic!("expected kline window event, got {other:?}"),
+        other => panic!("expected kline rows event, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn market_event_stream_emits_only_matching_row_batch_for_touched_series() {
+    let stream = support::core_seed::seeded_stream();
+    let mut events = stream
+        .market_events()
+        .tick("SHFE.au2602", 32)
+        .tick("DCE.m2609", 16)
+        .kline("SHFE.au2602", Duration::from_secs(60), 64)
+        .kline("DCE.m2609", Duration::from_secs(300), 32)
+        .build()
+        .await
+        .unwrap();
+
+    drain_dispatches(&stream);
+
+    support::core_seed::seed_ready_tick_chart(&stream, "SHFE.au2602", 32);
+    support::core_seed::seed_ready_tick_chart(&stream, "DCE.m2609", 16);
+    support::core_seed::seed_ready_kline_chart(&stream, "SHFE.au2602", 60_000_000_000_i64, 64);
+    support::core_seed::seed_ready_kline_chart(&stream, "DCE.m2609", 300_000_000_000_i64, 32);
+
+    for _ in 0..4 {
+        events
+            .next()
+            .await
+            .expect("market event stream should yield initial row batches")
+            .expect("initial row batch should decode");
+    }
+
+    support::core_seed::seed_kline_row_update(
+        &stream,
+        "SHFE.au2602",
+        60_000_000_000_i64,
+        101,
+        624.0,
+    );
+
+    let event = events
+        .next()
+        .await
+        .expect("market event stream should yield a matching delta batch")
+        .expect("matching delta batch should decode");
+    match event {
+        MarketEvent::KlineRows(update) => {
+            assert_eq!(update.value.symbol(), "SHFE.au2602");
+            assert_eq!(update.value.duration_ns(), 60_000_000_000_i64);
+            assert_eq!(update.value.kind(), RowBatchKind::Delta);
+            assert_eq!(update.value.len(), 1);
+            assert_eq!(update.value.rows()[0].id, 101);
+            assert_eq!(update.value.rows()[0].close, 624.0);
+        }
+        other => panic!("expected matching kline row batch, got {other:?}"),
+    }
+
+    let idle = tokio::time::timeout(Duration::from_millis(10), events.next()).await;
+    assert!(idle.is_err(), "unmatched tick/kline specs should stay idle");
 }
 
 #[tokio::test(flavor = "current_thread")]

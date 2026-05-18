@@ -1,7 +1,7 @@
 //! Scenario: Tick / Quote / K线混合订阅
 //!
 //! User goal:
-//! - 同时订阅 quote、tick window、kline window
+//! - 同时订阅 quote、tick row batch、kline row batch
 //! - 在同一个事件循环处理不同 market data 类型
 //! - 不为每种数据手动维护独立任务和共享状态
 //!
@@ -58,18 +58,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     update.value.instrument_id, update.value.last_price
                 );
             }
-            MarketEvent::TickWindow(update) => {
+            MarketEvent::TickRows(update) => {
                 println!(
-                    "tick window {} rows={} revision={}",
+                    "tick rows {} kind={:?} rows={} revision={}",
                     update.value.symbol(),
+                    update.value.kind(),
                     update.value.len(),
                     update.commit.revision.get()
                 );
             }
-            MarketEvent::KlineWindow(update) => {
+            MarketEvent::KlineRows(update) => {
                 println!(
-                    "kline window {} rows={} revision={}",
+                    "kline rows {} kind={:?} rows={} revision={}",
                     update.value.symbol(),
+                    update.value.kind(),
                     update.value.len(),
                     update.commit.revision.get()
                 );

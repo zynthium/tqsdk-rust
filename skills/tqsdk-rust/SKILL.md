@@ -39,7 +39,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - wait/stream app 里不要为了 metadata 再建第二个 client；复用 shared session。
-- 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要把 live `KlineWindow` / `TickWindow` 持久化，使用调用方自己的 sidecar 或 `tqsdk-stream` commit sink，不要把 Python-compatible mmap history cache 接进 live 热路径。
+- 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要持久化 live `KlineRowBatch` / `TickRowBatch` 或 commit stream，使用调用方自己的 sidecar，不要把 Python-compatible mmap history cache 接进 live 热路径。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
 - typed ticket、ref 或 status helper 已存在时，不要发明本地订单 overlay，也不要解析 status 字符串。
 - 不要用字符串或 adapter-local 判断绕过 `record_command_status()` 和 runtime command lifecycle。

@@ -128,9 +128,9 @@ tqsdk-task
 - shared-session multi-consumer commit fan-out
 - fan-out capacity configuration、lag diagnostics、health status
 - commit/path/scope/domain/object/field filters
-- typed path stream、ready kline/tick window stream
+- typed path stream、ready kline/tick row batch stream
 - trade object/session event stream
-- managed commit sink foundation for slow consumer isolation, finite retry, local JSONL WAL, and graceful shutdown
+- bounded fan-out lag diagnostics、health status 和 sink-free graceful shutdown
 
 设计原因：
 

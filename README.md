@@ -36,7 +36,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-core`](crates/tqsdk-core) | 底层 async protocol substrate、状态树、commit/revision、runtime reader、cursor、adapter 和 schema types |
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
-| [`tqsdk-stream`](crates/tqsdk-stream) | Rust async-native 多消费者 commit stream、object stream、过滤器、lag diagnostics、health status 和慢消费者隔离基础 |
+| [`tqsdk-stream`](crates/tqsdk-stream) | Rust async-native 多消费者 commit stream、object stream、row-batch kline/tick stream、过滤器、lag diagnostics 和 health status |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、Python-compatible local backtest sim、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、离线 cache 和 replay foundation |
 

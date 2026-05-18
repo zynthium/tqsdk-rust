@@ -4,7 +4,7 @@
 //! - 在一个可审计的低延迟循环里消费行情、同 revision 读取 market/trade 状态、
 //!   运行 typed risk gate 并提交订单。
 //! - hot path 使用 `tqsdk-session + RuntimeReader` 分区读面，不进入 data/history cache。
-//! - 慢日志和落盘通过 stream sidecar managed sink 隔离，不阻塞行情/下单循环。
+//! - 慢日志、落盘和外部审计 sidecar 由用户在 SDK 外拥有，不阻塞行情/下单循环。
 //!
 //! API contract:
 //! - `TradingDeskProfile` 是 task 层薄 profile，构建于 shared `SessionClient`。
@@ -16,35 +16,29 @@
 //!   client order id，并提交 runtime trade command。
 //! - `TradingDeskOrderTicket::status(&desk)` 返回 typed order state，不要求解析字符串。
 //! - `TradingLatencyProbe` / cycle / report 是 typed API，缺 marker 返回 `None`。
-//! - `tqsdk-stream` sidecar 可以用 managed sink + WAL/journal 承载慢消费者隔离，
-//!   但 stream sink 不进入 trading desk public profile。
+//! - durable audit sidecar 不进入 trading desk public profile。
 //!
 //! Forbidden:
 //! - hot path import 或调用 `tqsdk-data` / history mmap cache。
 //! - hot loop 每 tick 做 full snapshot clone。
 //! - 字符串判断 command/order/trade status。
 //! - 慢日志/落盘 future await 在行情/下单主循环。
-//! - 用户手写 channel、unbounded queue 或 `Arc<Mutex<_>>` 隔离慢消费者。
 //!
 //! Regression signal:
 //! - 低延迟用户必须回到 `TqApi::wait_update()` 或手写 provider 私有 order packet。
 //! - 风控和下单读取不同 revision。
-//! - 慢 sink 导致 hot loop lag 或丢失风险不可见。
+//! - 外部 sidecar 反向进入 hot path。
 //! - 延迟只能靠日志字符串定位。
 //!
 //! Review questions:
 //! - profile 是否仍是 session/reader hot-path 薄层，而不是策略平台或 OMS？
-//! - stream sidecar 是否只作为 slow-consumer isolation，而不进入 task profile public API？
+//! - 外部 sidecar 是否仍留在 SDK public profile 外？
 //! - 订单状态和 latency report 是否保持 typed contract？
 
 use std::time::Duration;
 
-use tqsdk_core::{RuntimeCommand, SharedCommitResult, TradeCommand, TradeDirection, TradeOffset};
+use tqsdk_core::{RuntimeCommand, TradeCommand, TradeDirection, TradeOffset};
 use tqsdk_session::SessionClientBuilder;
-use tqsdk_stream::{
-    StreamCommitJournal, StreamSinkFuture, StreamSinkProfile, StreamSinkRetryPolicy,
-    StreamSinkWalFsyncPolicy, TqStream,
-};
 use tqsdk_task::{RiskEngine, TaskOrderIntent, TradingDeskProfile, TradingLatencyProbe};
 
 #[tokio::main(flavor = "current_thread")]
@@ -68,19 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .submit(RuntimeCommand::Trade(TradeCommand::Login(login.clone())))
         .await?;
     session.wait_command_completed(login_command).await?;
-
-    let stream_sidecar = TqStream::with_commit_channel_capacity(session.clone(), 16_384)?;
-    let wal_path = std::env::temp_dir().join("tqsdk-s31-desk-sink.jsonl");
-    let journal_path = std::env::temp_dir().join("tqsdk-s31-desk-journal.jsonl");
-    let sink_options = StreamSinkProfile::reliable_jsonl(wal_path.clone(), journal_path.clone())
-        .retry_policy(StreamSinkRetryPolicy::limited(3)?)
-        .fsync_policy(StreamSinkWalFsyncPolicy::EveryRecord)
-        .into_options();
-    let audit_sink = stream_sidecar.spawn_commit_sink_with_options(
-        "desk-audit",
-        write_audit_commit,
-        sink_options,
-    )?;
 
     let risk = RiskEngine::new()
         .max_order_volume(1)
@@ -154,22 +135,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let sink_report = audit_sink.shutdown().await?;
-    println!(
-        "desk audit sink={} processed={} flushed={}",
-        sink_report.name(),
-        sink_report.stats().processed_commits(),
-        sink_report.flushed()
-    );
-    let journal_records = StreamCommitJournal::new().read_jsonl(&journal_path)?;
-    println!("desk audit journal records={}", journal_records.len());
-
     Ok(())
-}
-
-fn write_audit_commit(commit: SharedCommitResult) -> StreamSinkFuture {
-    Box::pin(async move {
-        println!("audit revision={}", commit.revision.get());
-        Ok(())
-    })
 }

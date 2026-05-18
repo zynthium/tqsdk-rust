@@ -14,7 +14,7 @@
 | --- | --- | --- | --- |
 | "实时行情", "quote", "盘口", "价格变化", "像 Python TqApi", "wait_update", "is_changing" | Single-owner live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `step`, `WaitStep::is_changing`, `QuoteRef::load` |
 | "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `kline`, `tick`, `trading_status`, `step_until`, window/ref load methods |
-| "多消费者", "事件流", "stream", "fan-out", "写 WAL", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_stream`, `market_events`, trade/session event streams, sink APIs |
+| "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_stream`, `market_events`, row-batch kline/tick streams, trade/session event streams |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk-task` when ownership/risk/task semantics are needed; `tqsdk-wait` for thin direct order wrappers | `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, cache/replay APIs |
@@ -67,10 +67,10 @@
 1. 构造 `TqStream`。
 2. 订阅或选择 typed stream/event API。
 3. 能过滤时使用 commit/path/scope/domain/object/field filters。
-4. 慢持久化放在 stream sink 或 sidecar。
+4. 慢持久化放在调用方自有 sidecar。
 5. metadata 使用 `stream.session()`，不要另开 query client。
 6. 显式处理 lag/closed/error report；fan-out 是 bounded。
-7. 需要持久化 live events 时，使用 stream sink/WAL 或调用方自有 sidecar；不要把 Python-compatible history mmap cache 接入 live 热路径。
+7. 需要持久化 live events 时，使用调用方自有 sidecar；不要把 Python-compatible history mmap cache 接入 live 热路径。
 
 ### 4. 实现 target-position 策略
 

@@ -226,10 +226,9 @@
 - shared-session 多消费者 commit fan-out
 - path / scope / domain / object / field 过滤
 - typed path stream
-- kline / tick window stream
+- kline / tick row batch stream
 - trade 相关事件流
-- managed commit sink foundation，用于慢消费者隔离、有限重试、本地 JSONL WAL 和
-  graceful shutdown，但不改变 runtime 提交模型
+- bounded fan-out、typed lag diagnostics、health status 和 sink-free graceful shutdown
 
 它的价值不在于“再造一套 runtime”，而在于让高性能、多消费者、异步系统集成方可以直接消费同一套 commit 语义。
 
@@ -275,8 +274,8 @@
 上层集成路径，不代表 cache storage 进入 task，也不代表 strategy execution
 进入 data。
 S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
-但不复用 `TaskHost::wait_update()` hot path，也不把 `tqsdk-stream` slow sink
-塞进 profile public API。
+但不复用 `TaskHost::wait_update()` hot path，也不把 durable sidecar 塞进 profile
+public API。
 
 ### 不应吸收的能力
 

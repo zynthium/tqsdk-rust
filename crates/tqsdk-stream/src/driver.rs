@@ -91,8 +91,8 @@ impl StreamDriver {
 
     pub(crate) fn abort(&self) {
         let mut slot = self.task.lock().expect("stream driver task mutex poisoned");
+        emit_closed_once(&self.sender, self.closed.as_ref());
         if let Some(task) = slot.take() {
-            emit_closed_once(&self.sender, self.closed.as_ref());
             task.abort();
         }
     }

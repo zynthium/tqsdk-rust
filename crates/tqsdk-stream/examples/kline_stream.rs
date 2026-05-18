@@ -31,12 +31,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let timeout_secs = read_u64_env("TQ_STREAM_TIMEOUT_SECS", 30)?;
 
     let stream = TqStreamBuilder::new(user, pass).build().await?;
-    let mut windows = stream
+    let mut batches = stream
         .kline_stream(&symbol, Duration::from_secs(60), view_width)
         .await?;
-    let chart_id = windows.chart_id().to_string();
+    let chart_id = batches.chart_id().to_string();
 
-    let update = match tokio::time::timeout(Duration::from_secs(timeout_secs), windows.next()).await
+    let update = match tokio::time::timeout(Duration::from_secs(timeout_secs), batches.next()).await
     {
         Ok(Some(update)) => update?,
         Ok(None) => return Err("kline stream closed".into()),
@@ -49,19 +49,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
-    let last = update.value.last().ok_or("kline window is empty")?;
+    let last = update.value.rows().last().ok_or("kline batch is empty")?;
 
     println!(
-        "revision={:?} chart_id={} symbol={} width={} last_datetime={} last_close={}",
+        "revision={:?} chart_id={} symbol={} width={} kind={:?} rows={} last_datetime={} last_close={}",
         update.commit.revision,
         update.value.chart_id(),
         update.value.symbol(),
         update.value.view_width(),
+        update.value.kind(),
+        update.value.len(),
         last.datetime,
         last.close
     );
 
-    windows.close().await?;
+    batches.close().await?;
 
     Ok(())
 }

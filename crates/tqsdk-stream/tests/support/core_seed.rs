@@ -150,6 +150,123 @@ pub fn seed_ready_kline_chart(
 }
 
 #[allow(dead_code)]
+pub fn seed_kline_row_update(
+    stream: &TqStream,
+    symbol: &str,
+    duration_ns: i64,
+    row_id: i64,
+    close: f64,
+) {
+    stream
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "klines": {
+                            symbol: {
+                                duration_ns.to_string(): {
+                                    "data": {
+                                        row_id.to_string(): {
+                                            "datetime": 1_713_660_060_000_000_000_i64,
+                                            "open": 619.0,
+                                            "high": 623.0,
+                                            "low": 618.0,
+                                            "close": close,
+                                            "volume": 18,
+                                            "open_oi": 101,
+                                            "close_oi": 105
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed kline row update should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_kline_chart_bounds_regression(
+    stream: &TqStream,
+    symbol: &str,
+    duration_ns: i64,
+    view_width: usize,
+) {
+    let chart_id = format!(
+        "stream-kline-{}-{duration_ns}-{view_width}",
+        sanitize_chart_token(symbol)
+    );
+    stream
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": duration_ns,
+                                },
+                                "left_id": 99,
+                                "right_id": 100,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "klines": {
+                            symbol: {
+                                duration_ns.to_string(): {
+                                    "data": {
+                                        "99": {
+                                            "datetime": 1_713_659_940_000_000_000_i64,
+                                            "open": 616.0,
+                                            "high": 618.0,
+                                            "low": 615.5,
+                                            "close": 617.5,
+                                            "volume": 9,
+                                            "open_oi": 98,
+                                            "close_oi": 100
+                                        },
+                                        "100": {
+                                            "datetime": 1_713_660_000_000_000_000_i64,
+                                            "open": 618.0,
+                                            "high": 620.0,
+                                            "low": 617.0,
+                                            "close": 619.0,
+                                            "volume": 12,
+                                            "open_oi": 100,
+                                            "close_oi": 101
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed kline chart bounds regression should produce a commit");
+}
+
+#[allow(dead_code)]
 pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize) {
     let chart_id = format!("stream-tick-{}-{view_width}", sanitize_chart_token(symbol));
     stream
@@ -230,6 +347,48 @@ pub fn seed_ready_tick_chart(stream: &TqStream, symbol: &str, view_width: usize)
         )
         .unwrap()
         .expect("seed ready tick chart should produce a commit");
+}
+
+#[allow(dead_code)]
+pub fn seed_tick_row_update(stream: &TqStream, symbol: &str, row_id: i64, last_price: f64) {
+    stream
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "ticks": {
+                            symbol: {
+                                "data": {
+                                    row_id.to_string(): {
+                                        "datetime": 1_713_660_000_500_000_000_i64,
+                                        "last_price": last_price,
+                                        "average": 618.4,
+                                        "highest": 620.0,
+                                        "lowest": 617.5,
+                                        "ask_price1": last_price + 0.1,
+                                        "ask_volume1": 3,
+                                        "bid_price1": last_price - 0.1,
+                                        "bid_volume1": 6,
+                                        "volume": 21,
+                                        "amount": 13_000.0,
+                                        "open_interest": 108
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed tick row update should produce a commit");
 }
 
 #[allow(dead_code)]

@@ -129,8 +129,8 @@ V1 是：
   - commit/path/scope/domain/object/field filters
   - 批量 quote stream 入口 `quote_batches(...)`，按 commit 只 decode 本轮
     changed quote symbols，作为多品种实时行情的高性能 async 入口
-  - typed path stream / ready kline-tick window / trade session events
-  - managed commit sink foundation for slow consumer isolation, finite retry, local JSONL WAL, and graceful shutdown
+  - typed path stream / ready kline-tick row batch / trade session events
+  - bounded fan-out lag diagnostics、health status 和 sink-free graceful shutdown
   - health status / restart hint
   - `stream.session()` 仍然是一次性 direct query 的逃生舱，但不改变 direct query 的 crate 归属
 - `tqsdk-task`
@@ -147,7 +147,7 @@ V1 是：
   - Python-compatible local backtest sim foundation
   - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
     `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
-    latency/order status report；慢 sink 仍由 `tqsdk-stream` sidecar 承担，不进入
+    latency/order status report；慢日志、落盘和 audit sidecar 保持在 SDK 外，不进入
     profile public API
   - public fake market / fake broker test harness
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
@@ -173,8 +173,8 @@ V1 是：
   Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait/stream
   的 runtime contract 和 facade 边界
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
-  `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 stream sink 变成
-  task profile 的 public dependency。
+  `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
+  变成 task profile 的 public dependency。
 
 ## API 归属总表
 

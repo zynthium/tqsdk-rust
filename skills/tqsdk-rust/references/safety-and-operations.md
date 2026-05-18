@@ -26,7 +26,7 @@
 
 - 对外可见状态路径应经过 runtime commits 和 readers。
 - hot path 优先使用 `read_market_state()`、`read_trade_state()` 或 `read_market_trade_state()` 这类 partition read。
-- 慢日志和持久化使用 stream sink 或 sidecar，不要阻塞交易决策。
+- 慢日志和持久化使用调用方自有 sidecar，不要阻塞交易决策。
 - domain state write 必须经过 runtime mutation path 和 `MutationSource` root-path guard。
 
 ## 测试

@@ -126,6 +126,11 @@ facade 或 runtime 消费方式重构后，都必须确认这些 examples 仍能
 2. `cargo test --workspace`
 3. `cargo clippy --workspace --examples --all-targets -- -D warnings`
 
+stream facade public API 或 row-batch 投影改动后，还应至少运行：
+
+1. `cargo test -p tqsdk-stream`
+2. `cargo check -p tqsdk-stream --examples`
+
 如果 feature flags、workspace 依赖或 crate feature 传播被修改，还必须运行：
 
 1. `cargo check --workspace --no-default-features`

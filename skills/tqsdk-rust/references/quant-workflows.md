@@ -10,7 +10,7 @@
 
 ## Event Pipeline
 
-多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。`tqsdk-stream` 不直接依赖 Python-compatible mmap history cache；需要 live 持久化时使用 stream sink/WAL 或调用方自有 sidecar。
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。`tqsdk-stream` 不直接依赖 Python-compatible mmap history cache；需要 live 持久化时使用调用方自有 sidecar。
 
 契约锚点：S2、S4、S20-S22。
 

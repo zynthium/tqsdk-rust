@@ -166,12 +166,10 @@ public API。
 - `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
   reconnect diagnostics、driver closed 和 revision；`TqStream::reconnect_monitor()`
   可以等待并报告 existing session reconnect 的恢复、耗尽、超时或关闭结果；
-  strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；managed commit sink foundation 已落在
-  `tqsdk-stream`，有限重试和本地 JSONL WAL foundation 也已落在 `tqsdk-stream`；
-  stream driver 关闭与 managed sink flush 的 graceful shutdown foundation 也已落在
-  `tqsdk-stream`；WAL fsync policy 和本地 compaction 已落在 `tqsdk-stream`；
-  WAL recovery report 和 commit metadata journal replay 已落在 `tqsdk-stream`；
-  durable daemon queue / runtime state snapshot recovery 仍在后续 daemon/tooling 层。
+  strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；
+  `tqsdk-stream` 的 graceful shutdown 现在只负责 outbound flush 与 stream driver
+  关闭；managed sink、WAL、journal、compaction、recovery 和 durable daemon queue /
+  runtime state snapshot recovery 均归属用户 sidecar 或后续 daemon/tooling 层。
 
 ### P0：Session direct-query / metadata pack
 
@@ -474,25 +472,8 @@ public API。
 - `TqStream::reconnect_monitor()` 提供 typed reconnect wait/report foundation，
   返回 recovered / exhausted / timed out / closed 等结果，不要求用户自己轮询
   session phase。
-- `TqStream::spawn_commit_sink(...)` 提供 managed commit sink foundation，写库/日志
-  sink 可以由 SDK 托管在独立 consumer task 中，并通过 `StreamSinkStats` /
-  `StreamSinkShutdownReport` 观察 processed / lagged / errors / retry_attempts /
-  wal_records 与 flush 结果。
-- `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` /
-  `StreamSinkRetryPolicy` 提供 per-sink 有限重试和本地 JSONL WAL foundation。
-- `StreamSinkProfile` 提供 reusable sink profile，常见 JSONL WAL + commit
-  journal + retry 配置不再要求用户手拼全部 options。
-- `StreamSinkWalFsyncPolicy` 提供本地 WAL 每条记录 `sync_data` 策略；
-  `StreamSinkWalCompaction` 提供按 revision 裁剪 JSONL WAL 的本地维护入口和
-  typed report。
-- `StreamSinkWalRecovery` 提供旧 WAL 的 delivered / pending / failed revision、
-  lagged records 和 flush failures 扫描报告；该 report 不提供 commit payload
-  重放。
-- `StreamSinkOptions::jsonl_commit_journal(...)` 和 `StreamCommitJournal` 提供
-  commit metadata journal 写入、读取和按 revision checkpoint 重放到 `CommitSink`
-  的底层能力；该能力不恢复 runtime state snapshot。
-- `TqStream::graceful_shutdown()` 提供 stream driver close + managed sink flush
-  orchestration，返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
+- `TqStream::graceful_shutdown()` 提供 outbound flush + stream driver close，
+  返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
   transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
   指标系统，不需要 SDK 内置 HTTP endpoint。
@@ -506,7 +487,7 @@ public API。
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag、managed commit sink、有限重试、JSONL WAL、fsync policy、本地 compaction、recovery report 和 commit metadata journal replay 已提升为正式 stream example）
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag diagnostics 已提升为正式 stream example；durable sink/WAL/journal 归属用户 sidecar）
 - `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 和 stream-facing retry policy 子集已提升为正式 stream example）
 
 已落地：
@@ -612,13 +593,13 @@ public API。
 - 在同一低延迟循环里消费行情、读取交易状态、运行基础风控并提交订单。
 - hot path 使用 `RuntimeReader` 与 market/trade partition read surface。
 - 决策链路可以记录 market receive、commit、decision、risk、order submit 和 ack 时间点。
-- 慢日志、指标、落盘和 replay journal 通过 stream sink 隔离，不阻塞主循环。
+- 慢日志、指标、落盘和 replay journal 通过用户自有 sidecar 隔离，不阻塞主循环。
 
 建议落点：
 
 - `tqsdk-core` / `tqsdk-session`：hot path runtime reader、cursor、session progress 与底层命令提交。
 - `tqsdk-task`：typed order intent、pre-trade risk gate 与 revision-bound report。
-- `tqsdk-stream`：慢消费者隔离、managed sink、WAL、journal 和 telemetry export。
+- `tqsdk-stream`：bounded fan-out、lag diagnostics 和 health/reconnect observation。
 - 不进入 `tqsdk-data`；历史序列缓存和 memmap cache 不是柜台 hot path 能力。
 
 已提升的场景：

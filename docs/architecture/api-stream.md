@@ -242,12 +242,12 @@ impl TqStream {
         symbol: impl AsRef<str>,
         duration: Duration,
         data_length: usize,
-    ) -> tqsdk_stream::Result<KlineWindowStream>;
+    ) -> tqsdk_stream::Result<KlineRowStream>;
     pub async fn tick_stream(
         &self,
         symbol: impl AsRef<str>,
         data_length: usize,
-    ) -> tqsdk_stream::Result<TickWindowStream>;
+    ) -> tqsdk_stream::Result<TickRowStream>;
     pub fn quote_stream(&self, symbol: impl AsRef<str>)
         -> tqsdk_stream::Result<PathValueStream<Quote>>;
     pub fn trading_status_stream(&self, symbol: impl AsRef<str>)
@@ -380,12 +380,15 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
   成 `ValueUpdate<Quote>`。
   session reconnect/resync 后，runtime 会从底层 market adapter 当前订阅意图生成
   recovery commands 并重新排队发送，用户不需要在业务代码中维护第二份 symbol 集合。
-- `market_events()` 是 quote / tick window / kline window 的统一事件循环包装；
+- `market_events()` 是 quote / tick rows / kline rows 的统一事件循环包装；
   它内部仍然只提交 quote/chart 命令并消费同一条 commit fan-out，不维护第二棵状态树。
-  quote 事件读 `read_market_state()` 分区；tick/kline ready window 沿用 chart/window
-  投影逻辑。
-- `kline_stream()/tick_stream()` 是最薄的 ready-window stream 包装：内部仍然只是提交 `set_chart`，然后基于同一条 commit fan-out 读取共享状态树
-- 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护 event journal
+  quote 事件读 `read_market_state()` 分区；tick/kline row batch 沿用 chart bounds
+  与 commit touch 投影逻辑。
+- `kline_stream()/tick_stream()` 是最薄的 row-batch stream 包装：内部仍然只是提交
+  `set_chart`，然后基于同一条 commit fan-out 读取共享状态树。初次 ready
+  产出 `InitialSnapshot`，后续 commit 只产出显式变化 row id 的 `Delta`；
+  chart reset 或 bounds regression 产出 `ResyncSnapshot`。
+- 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护事件日志
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面
 - `health()` 是生产部署的 typed snapshot 读面，只从 runtime `system/session`
@@ -493,20 +496,26 @@ where
 - typed stream 只是“收到匹配 commit 后，用同一个 `RuntimeReader` 立即 decode”
 - 若调用方需要更低开销或更细粒度控制，仍然可以直接使用 `CommitStream + reader()`
 
-### ready-window stream
+### ready row-batch stream
 
 ```rust
-pub struct KlineWindow { /* owned rows */ }
-pub struct TickWindow { /* owned rows */ }
-pub struct KlineWindowStream { /* private */ }
-pub struct TickWindowStream { /* private */ }
-
-impl futures::Stream for KlineWindowStream {
-    type Item = tqsdk_stream::Result<ValueUpdate<KlineWindow>>;
+pub enum RowBatchKind {
+    InitialSnapshot,
+    Delta,
+    ResyncSnapshot,
 }
 
-impl futures::Stream for TickWindowStream {
-    type Item = tqsdk_stream::Result<ValueUpdate<TickWindow>>;
+pub struct KlineRowBatch { /* metadata + owned rows */ }
+pub struct TickRowBatch { /* metadata + owned rows */ }
+pub struct KlineRowStream { /* private */ }
+pub struct TickRowStream { /* private */ }
+
+impl futures::Stream for KlineRowStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<KlineRowBatch>>;
+}
+
+impl futures::Stream for TickRowStream {
+    type Item = tqsdk_stream::Result<ValueUpdate<TickRowBatch>>;
 }
 ```
 
@@ -514,8 +523,10 @@ impl futures::Stream for TickWindowStream {
 
 - 不复刻 `tqsdk-wait` 的同步 `wait_until_ready`
 - stream 侧的 `kline/tick` 仍然通过 `MarketCommand::SetChart` 建立远端订阅
-- 只有当 `charts/{chart_id}` 进入 ready 且 `more_data == false` 时才产出 window
-- window 本身是基于共享状态树现读现投影的 owned snapshot，不额外维护本地 serial cache
+- 只有当 `charts/{chart_id}` 进入 ready 且 `more_data == false` 时才产出 row batch
+- row batch 本身是基于共享状态树现读现投影的 owned rows，不额外维护本地 serial cache
+- 每个 stream/spec 只保留轻量 cursor：是否已经发过初始 ready snapshot，以及上一轮
+  chart bounds；不维护第二棵状态树或 row cache
 - 当前 chart 生命周期采用显式 `close()` 提交 `cancel_chart`，不在 `Drop` 中做隐式 async 清理
 
 ### account-scoped trade event streams
@@ -711,7 +722,7 @@ stream 只把它 typed 化为 `Option<u32>`，不另行解释或执行 reconnect
 其中：
 
 - path / scope / domain / object / field 过滤已经作为 commit stream 的薄组合层落地
-- typed path、基础对象 stream、ready-window `kline/tick` stream、账户级 trade object 事件流、统一 `trade_object_event_stream` 与统一 `trade_session_event_stream` 已落地
+- typed path、基础对象 stream、row-batch `kline/tick` stream、账户级 trade object 事件流、统一 `trade_object_event_stream` 与统一 `trade_session_event_stream` 已落地
 
 ## 内部驱动模型
 
@@ -749,35 +760,17 @@ stream 只把它 typed 化为 `Option<u32>`，不另行解释或执行 reconnect
 - 慢消费者落后时，返回 `Lagged`
 - root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)`
   或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)` 显式配置
-- 写库 / 日志这类 sink 可通过 `TqStream::spawn_commit_sink(...)` 由 SDK 托管，
-  并通过 `StreamSinkStats` / `StreamSinkShutdownReport` 观察 processed、lagged、
-  errors、retry_attempts、wal_records 和 flush 结果
-- per-sink 有限重试与本地 JSONL WAL 可通过
-  `TqStream::spawn_commit_sink_with_options(...)` + `StreamSinkOptions` 配置
-- WAL fsync policy 可通过 `StreamSinkWalFsyncPolicy` 配置；本地 JSONL WAL
-  compaction 可通过 `StreamSinkWalCompaction` 按 revision 裁剪并返回 typed report
-- 旧 WAL 可通过 `StreamSinkWalRecovery` 扫描出 delivered / pending / failed
-  revisions、lagged records 和 flush failures；它只提供审计/恢复报告，不提供
-  commit payload 重放
-- sink 可通过 `StreamSinkOptions::jsonl_commit_journal(...)` 额外写入本地
-  commit metadata journal；后续进程可通过 `StreamCommitJournal::replay_jsonl(...)`
-  按 revision checkpoint 重放到 `CommitSink`
 - 生产进程关闭时可通过 `TqStream::graceful_shutdown()` 显式 flush outbound、
-  关闭 stream driver 并汇总 managed sink shutdown report
+  关闭 stream driver，并返回 outbound/driver typed report
 - 生产进程可通过 `TqStream::reconnect_monitor()` 等待并报告既有 session
   reconnect 的恢复、耗尽、超时或关闭结果；它是 typed supervision helper，不是
   新的 reconnect executor
 - 不为慢消费者阻塞整个 session 驱动
 - 不为每个订阅者维护独立 cursor + 独立 route 驱动
 
-这个配置只控制 stream facade 内部 bounded broadcast ring。managed commit sink 是
-stream 层的消费工具，不改变 commit 生成逻辑、state tree 或 revision 语义。
-JSONL WAL 是本地审计/恢复基础，不是 durable queue；fsync policy 与本地 JSONL
-compaction 是 stream sink 的本地文件维护能力；WAL recovery report 只解释审计
-元数据。commit journal 只重放 `CommitResult` 级元数据并在投递时包装为
-`SharedCommitResult`，不恢复 runtime state
-snapshot，也不提供跨进程锁、调度或 daemon queue；这些仍属于后续 daemon/tooling
-层。
+这个配置只控制 stream facade 内部 bounded broadcast ring。写库、日志、重试、WAL、
+journal、compaction、跨进程锁、调度或 daemon queue 都属于调用方 sidecar 或后续
+daemon/tooling 层；stream crate 不再托管 durable sink。
 `graceful_shutdown()` 是
 stream facade 的显式关闭工具；`reconnect_monitor()` 只做 typed wait/report。
 两者都不接管底层 reconnect 执行，也不应下沉到 `tqsdk-core` 或
@@ -855,7 +848,7 @@ crates/tqsdk-stream/
 - `event.rs`
   - commit-backed trade object event 投影
 - `window.rs`
-  - ready-window `kline/tick` 投影
+  - ready row-batch `kline/tick` 投影
 - `tests/*`
   - surface / driver / lag 语义
 
@@ -880,8 +873,8 @@ crates/tqsdk-stream/
 
 ### 第三批
 
-- `path_stream<T>()`、基础对象 stream、`notification`、security trade object、ready-window `kline/tick`、账户级 trade object 事件流、统一 `trade_object_event_stream` 与统一 `trade_session_event_stream` 已落地
-- futures / securities 对象级投影仍保持“固定 path 或固定 window”的薄包装原则
+- `path_stream<T>()`、基础对象 stream、`notification`、security trade object、row-batch `kline/tick`、账户级 trade object 事件流、统一 `trade_object_event_stream` 与统一 `trade_session_event_stream` 已落地
+- futures / securities 对象级投影仍保持“固定 path 或固定 chart row batch”的薄包装原则
 
 ### 第四批
 

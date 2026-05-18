@@ -14,12 +14,12 @@
 | 用户角色 | 首选 crate | 契约示例 | 说明 |
 | --- | --- | --- | --- |
 | 单策略作者 | `tqsdk-wait`, `tqsdk-task` | S1, S3, S6-S11, S25-S26, S29 | Python-style 稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership。 |
-| Async 系统集成方 | `tqsdk-stream`, `tqsdk-session` | S2, S4, S20-S22 | Multi-consumer streams、dynamic subscriptions、market events、health、retry diagnostics、slow-consumer isolation、managed sinks。 |
+| Async 系统集成方 | `tqsdk-stream`, `tqsdk-session` | S2, S4, S20-S22 | Multi-consumer streams、dynamic subscriptions、row-batch market events、health、retry diagnostics、slow-consumer isolation。 |
 | 低层 / 低延迟用户 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S23, S27, S31 | Thin session substrate、direct metadata query、hot-path `RuntimeReader`、same-revision market/trade reads、low-latency desk profile。 |
 | 执行工具用户 | `tqsdk-task`, `tqsdk-wait` | S6-S13, S19, S29, S31 | Typed order tickets、cancel/partial-fill helpers、risk gates、execution groups、account groups、target-pos ownership。 |
 | 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task` | S16-S18, S23, S27-S30 | Historical series、downloads、CSV export、option Greeks、本地 cache/replay、Python-compatible history cache、live history cache bridge。 |
 | 测试 / 回放用户 | `tqsdk-task`, `tqsdk-data` | S15-S16, S18, S24, S30 | Live/sim/replay environment、deterministic fake market/broker、replay sources、history/cache-backed tests。 |
-| 生产 runtime 构建者 | `tqsdk-stream`, `tqsdk-task` | S20-S22 | Typed health/telemetry、graceful shutdown、retry policy、bounded fan-out、WAL/sink foundation。不内置 HTTP endpoint、GUI 或 daemon manager。 |
+| 生产 runtime 构建者 | `tqsdk-stream`, `tqsdk-task` | S20-S22 | Typed health/telemetry、graceful shutdown、retry policy、bounded fan-out、lag diagnostics。不内置 HTTP endpoint、GUI、daemon manager 或 managed sink/WAL。 |
 | Multi-provider 基础设施用户 | 用户层 facade / 未来独立项目 | S14 gap only | Multi-provider aggregation 不是当前 core SDK API。不要把它推入 core/session。 |
 
 ## 角色回答模板
@@ -40,7 +40,7 @@ live loop 从 `tqsdk-wait` 起步。只有用户需要 target-position ownership
 
 - 首选示例：S2 dynamic subscriptions、S4 mixed market events、S21 slow consumer isolation。
 - 生产示例：S20 stream health/graceful shutdown、S22 retry diagnostics。
-- 避免：每个 consumer clone full snapshot、无界 channel、重复 metadata session、把 stream sink durability 挪进 `tqsdk-data`。
+- 避免：每个 consumer clone full snapshot、无界 channel、重复 metadata session、把 durable sink/WAL 挪进 SDK facade。
 
 ### 低层 / 低延迟用户
 
@@ -64,7 +64,7 @@ owned historical rows、downloads、CSV、Greeks、cache/replay materialization 
 
 - 首选示例：S17 research K-line batch、S28 download/export and Greeks。
 - Cache/replay 示例：S18 local market cache、S30 history series cache、S16 replay integration。
-- live mmap bridge：当前 SDK 不提供 `tqsdk-stream` windows/events 写入 `HistorySeriesCache` 的 public API；需要 live 持久化时使用 stream sink/WAL 或调用方 sidecar。
+- live mmap bridge：当前 SDK 不提供 `tqsdk-stream` row batches/events 写入 `HistorySeriesCache` 的 public API；需要 live 持久化时使用调用方 sidecar。
 - Metadata 示例：S23、S27。
 - 避免：把 history 建模成 live refs、把 DataFrame/polars 语义塞进 session/wait、确定性测试依赖 live credentials。
 
@@ -77,7 +77,7 @@ owned historical rows、downloads、CSV、Greeks、cache/replay materialization 
 
 ### 生产 runtime 构建者
 
-stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-stream` 起步。策略生命周期再加 `tqsdk-task` supervisor。
+stream health、reconnect monitoring、bounded fan-out 和 lag diagnostics 从 `tqsdk-stream` 起步。策略生命周期再加 `tqsdk-task` supervisor。
 
 - 首选示例：S20 stream health 和 strategy supervisor、S21 slow consumer isolation、S22 retry diagnostics。
 - 避免：声称内置 HTTP health endpoint、GUI、process manager、distributed queue、runtime state snapshot recovery 或 cross-process daemon orchestration。
@@ -96,7 +96,7 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 | S1 Zero-barrier quote | `crates/tqsdk-wait/examples/api_contract_s01_zero_barrier_quote.rs` | 基础 live quote loop、Python-like step loop | `TqApi::quote`、`step`、`WaitStep::is_changing`；live refs 属于 wait。 |
 | S2 Dynamic subscriptions | `crates/tqsdk-stream/examples/api_contract_s02_dynamic_subscriptions.rs` | async stream 中动态增删多个 symbol | `TqStream::quotes`、`QuoteSubscription::{add, remove, symbols}`；reconnect 会重排 subscription intent。 |
 | S3 Quote snapshot | `crates/tqsdk-wait/examples/api_contract_s03_quote_snapshot.rs` | 用局部 helper 只取一次 ready quote snapshot | `TqApi::quote`、`step_until`、`QuoteRef::load`；仍是 wait facade，不是 session metadata。 |
-| S4 Mixed market streams | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs` | Quote/tick/kline event bus | `TqStream::market_events`、`MarketEventStream`、typed market events。 |
+| S4 Mixed market streams | `crates/tqsdk-stream/examples/api_contract_s04_mixed_market_streams.rs` | Quote/tick/kline event bus | `TqStream::market_events`、`MarketEventStream`、`MarketEvent::{Quote, TickRows, KlineRows}`。 |
 | S5 Bare market fast path | `crates/tqsdk-session/examples/api_contract_s05_bare_market_fast_path.rs` | 低层行情订阅和 hot reads | `SessionClient::{subscribe_quotes, progress_once}`、`RuntimeReader::read_market_state`；避免高层 facade 开销。 |
 | S6 Limit order | `crates/tqsdk-wait/examples/api_contract_s06_limit_order.rs` | 普通下单 | `login_trade_account`、`limit_order`、`LimitOrderIntent::send_once`、`OrderTicket::wait_terminal`；副作用必须显式。 |
 | S7 Cancel / partial fill | `crates/tqsdk-wait/examples/api_contract_s07_cancel_partial_fill.rs` | 等待部分成交、撤剩余、等待终态 | `OrderTicket` / `OrderRef` helpers；不要解析 raw status 字符串。 |
@@ -113,7 +113,7 @@ stream health、reconnect monitoring、bounded fan-out 和 sink 从 `tqsdk-strea
 | S18 Local market cache | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs` | JSONL cache record/replay | `MarketCacheWriter`、`MarketCacheReader`、`MarketCacheReplay`；live pipe 和 cross-process cache daemon 是用户层能力。 |
 | S19 Pre-trade risk | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs` | 下单前本地 risk gates | `RiskEngine`、`RiskCheckReport`、`RiskProjectionReport`、`RiskDecision`；portfolio margin engine 和 durable audit 是 out of scope。 |
 | S20 Production primitives | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs` | Health、reconnect monitor、graceful shutdown、strategy supervisor | 只提供 typed health/telemetry/shutdown primitives；不内置 GUI、HTTP endpoint 或 process manager。 |
-| S21 Slow consumer isolation | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs` | bounded fan-out、lag diagnostics、WAL/sink foundation | `spawn_commit_sink`、`StreamSinkOptions`、retry/WAL/recovery/journal types；distributed queue 是 out of scope。 |
+| S21 Slow consumer isolation | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs` | bounded fan-out、lag diagnostics | `TqStreamBuilder::commit_channel_capacity`、`TqStream::with_commit_channel_capacity`、`commit_stream`、`StreamFacadeError::Lagged`；managed sink/WAL/journal 和 distributed queue 是 out of scope。 |
 | S22 Error diagnosis / retry | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs` | retryable errors、backoff、typed diagnostics | `StreamFacadeError::diagnostic`、`StreamRetryPolicy`、retry decisions；business retry audit 属于用户执行系统。 |
 | S23 Contract metadata | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs` | instrument specs、contract class、normalized metadata | `SessionClient::query_instrument_specs`、`InstrumentSpec`、`InstrumentClass`；one-shot session query。 |
 | S24 Testable strategy | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs` | 不依赖 live services 的策略单测 | `StrategyTestHarness`、`FakeMarket`、`FakeBroker`、`StrategyTestClock`；完整 exchange simulator 是 out of scope。 |

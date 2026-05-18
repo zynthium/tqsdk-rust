@@ -1,35 +1,33 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::Stream;
-use tqsdk_core::{
-    CommitResult, MarketChartCommand, Quote, RuntimeReader, SharedCommitResult, StatePath, Symbol,
-};
+use tqsdk_core::{MarketChartCommand, Quote, RuntimeReader, SharedCommitResult, StatePath, Symbol};
 
 use crate::api::{TqStream, duration_to_ns};
 use crate::filter::PathCommitStream;
-use crate::quote_subscription::changed_quote_symbols;
 use crate::typed::ValueUpdate;
 use crate::window::{
-    KlineWindow, KlineWindowSpec, TickWindow, TickWindowSpec, kline_chart_id,
-    project_kline_window_from_market, project_tick_window_from_market, tick_chart_id,
+    CommitTouchSet, KlineProjection, KlineRowBatch, KlineRowSpec, RowProjectionCursor,
+    TickProjection, TickRowBatch, TickRowSpec, kline_chart_id, project_kline_rows_from_market,
+    project_tick_rows_from_market, tick_chart_id,
 };
 use crate::{Result, StreamFacadeError};
 
 #[derive(Debug, Clone)]
 struct TickEventSpec {
-    window: TickWindowSpec,
+    projection: TickProjection,
     chart_path: StatePath,
     data_path: StatePath,
 }
 
 #[derive(Debug, Clone)]
 struct KlineEventSpec {
-    window: KlineWindowSpec,
+    projection: KlineProjection,
     chart_path: StatePath,
     data_path: StatePath,
 }
@@ -42,8 +40,8 @@ struct KlineEventSpec {
 )]
 pub enum MarketEvent {
     Quote(ValueUpdate<Quote>),
-    TickWindow(ValueUpdate<TickWindow>),
-    KlineWindow(ValueUpdate<KlineWindow>),
+    TickRows(ValueUpdate<TickRowBatch>),
+    KlineRows(ValueUpdate<KlineRowBatch>),
 }
 
 /// Builder for a unified mixed market data stream.
@@ -108,10 +106,13 @@ impl<'a> MarketEventBuilder<'a> {
                 TickEventSpec {
                     chart_path: StatePath::new(["charts", chart_id.as_str()]),
                     data_path: StatePath::new(["ticks", symbol.as_str(), "data"]),
-                    window: TickWindowSpec {
-                        symbol,
-                        view_width,
-                        chart_id,
+                    projection: TickProjection {
+                        spec: TickRowSpec {
+                            symbol,
+                            view_width,
+                            chart_id,
+                        },
+                        cursor: RowProjectionCursor::default(),
                     },
                 }
             })
@@ -132,15 +133,71 @@ impl<'a> MarketEventBuilder<'a> {
                         duration_key.as_str(),
                         "data",
                     ]),
-                    window: KlineWindowSpec {
-                        symbol,
-                        duration_ns,
-                        view_width,
-                        chart_id,
+                    projection: KlineProjection {
+                        spec: KlineRowSpec {
+                            symbol,
+                            duration_ns,
+                            view_width,
+                            chart_id,
+                        },
+                        cursor: RowProjectionCursor::default(),
                     },
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+
+        let tick_specs_by_chart = tick_specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.projection.spec.chart_id.clone(), index))
+            .fold(
+                BTreeMap::<String, Vec<usize>>::new(),
+                |mut map, (key, index)| {
+                    map.entry(key).or_default().push(index);
+                    map
+                },
+            );
+        let tick_specs_by_symbol = tick_specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.projection.spec.symbol.clone(), index))
+            .fold(
+                BTreeMap::<String, Vec<usize>>::new(),
+                |mut map, (key, index)| {
+                    map.entry(key).or_default().push(index);
+                    map
+                },
+            );
+        let kline_specs_by_chart = kline_specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.projection.spec.chart_id.clone(), index))
+            .fold(
+                BTreeMap::<String, Vec<usize>>::new(),
+                |mut map, (key, index)| {
+                    map.entry(key).or_default().push(index);
+                    map
+                },
+            );
+        let kline_specs_by_series = kline_specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                (
+                    (
+                        spec.projection.spec.symbol.clone(),
+                        spec.projection.spec.duration_ns,
+                    ),
+                    index,
+                )
+            })
+            .fold(
+                BTreeMap::<(String, i64), Vec<usize>>::new(),
+                |mut map, (key, index)| {
+                    map.entry(key).or_default().push(index);
+                    map
+                },
+            );
 
         let paths = quote_symbols
             .iter()
@@ -176,10 +233,10 @@ impl<'a> MarketEventBuilder<'a> {
                 self.stream
                     .session()
                     .ensure_chart(MarketChartCommand {
-                        chart_id: spec.window.chart_id.clone(),
-                        symbols: vec![Symbol::new(spec.window.symbol.clone())],
+                        chart_id: spec.projection.spec.chart_id.clone(),
+                        symbols: vec![Symbol::new(spec.projection.spec.symbol.clone())],
                         duration_ns: 0,
-                        view_width: spec.window.view_width,
+                        view_width: spec.projection.spec.view_width,
                         left_kline_id: None,
                         focus_datetime_ns: None,
                         focus_position: None,
@@ -193,10 +250,10 @@ impl<'a> MarketEventBuilder<'a> {
                 self.stream
                     .session()
                     .ensure_chart(MarketChartCommand {
-                        chart_id: spec.window.chart_id.clone(),
-                        symbols: vec![Symbol::new(spec.window.symbol.clone())],
-                        duration_ns: spec.window.duration_ns,
-                        view_width: spec.window.view_width,
+                        chart_id: spec.projection.spec.chart_id.clone(),
+                        symbols: vec![Symbol::new(spec.projection.spec.symbol.clone())],
+                        duration_ns: spec.projection.spec.duration_ns,
+                        view_width: spec.projection.spec.view_width,
                         left_kline_id: None,
                         focus_datetime_ns: None,
                         focus_position: None,
@@ -213,12 +270,16 @@ impl<'a> MarketEventBuilder<'a> {
             quote_symbols,
             tick_specs,
             kline_specs,
+            tick_specs_by_chart,
+            tick_specs_by_symbol,
+            kline_specs_by_chart,
+            kline_specs_by_series,
             pending: VecDeque::new(),
         })
     }
 }
 
-/// Unified stream of typed quote, tick-window, and kline-window updates.
+/// Unified stream of typed quote, tick-row, and kline-row updates.
 pub struct MarketEventStream {
     inner: PathCommitStream,
     reader: RuntimeReader,
@@ -227,6 +288,10 @@ pub struct MarketEventStream {
     quote_symbols: BTreeSet<Symbol>,
     tick_specs: Vec<TickEventSpec>,
     kline_specs: Vec<KlineEventSpec>,
+    tick_specs_by_chart: BTreeMap<String, Vec<usize>>,
+    tick_specs_by_symbol: BTreeMap<String, Vec<usize>>,
+    kline_specs_by_chart: BTreeMap<String, Vec<usize>>,
+    kline_specs_by_series: BTreeMap<(String, i64), Vec<usize>>,
     pending: VecDeque<Result<MarketEvent>>,
 }
 
@@ -244,11 +309,41 @@ impl MarketEventStream {
     }
 
     fn collect_events(&mut self, commit: SharedCommitResult) -> Result<()> {
-        let quote_hits = changed_quote_symbols(&commit)
-            .into_iter()
+        let touches = CommitTouchSet::from_commit(&commit);
+        let quote_hits = touches
+            .quote_symbols()
             .filter(|symbol| self.quote_symbols.contains(symbol))
+            .cloned()
             .collect::<Vec<_>>();
-        if !quote_hits.is_empty() {
+
+        let mut tick_hits = BTreeSet::new();
+        for chart_id in touches.chart_ids() {
+            if let Some(indices) = self.tick_specs_by_chart.get(chart_id) {
+                tick_hits.extend(indices.iter().copied());
+            }
+        }
+        for symbol in touches.tick_symbols() {
+            if let Some(indices) = self.tick_specs_by_symbol.get(symbol) {
+                tick_hits.extend(indices.iter().copied());
+            }
+        }
+
+        let mut kline_hits = BTreeSet::new();
+        for chart_id in touches.chart_ids() {
+            if let Some(indices) = self.kline_specs_by_chart.get(chart_id) {
+                kline_hits.extend(indices.iter().copied());
+            }
+        }
+        for (symbol, duration_ns) in touches.kline_series() {
+            if let Some(indices) = self
+                .kline_specs_by_series
+                .get(&(symbol.to_string(), duration_ns))
+            {
+                kline_hits.extend(indices.iter().copied());
+            }
+        }
+
+        if !quote_hits.is_empty() || !tick_hits.is_empty() || !kline_hits.is_empty() {
             let market = self.reader.read_market_state();
             for symbol in quote_hits {
                 if let Some(value) = market.quote(&symbol)? {
@@ -258,40 +353,26 @@ impl MarketEventStream {
                     })));
                 }
             }
-        }
 
-        let tick_hits = self
-            .tick_specs
-            .iter()
-            .filter(|spec| {
-                commit_touches_path(&commit, &spec.chart_path)
-                    || commit_touches_path(&commit, &spec.data_path)
-            })
-            .collect::<Vec<_>>();
-        let kline_hits = self
-            .kline_specs
-            .iter()
-            .filter(|spec| {
-                commit_touches_path(&commit, &spec.chart_path)
-                    || commit_touches_path(&commit, &spec.data_path)
-            })
-            .collect::<Vec<_>>();
-
-        if !tick_hits.is_empty() || !kline_hits.is_empty() {
-            let market = self.reader.read_market_state();
-            for spec in tick_hits {
-                if let Some(value) = project_tick_window_from_market(&market, &spec.window)? {
+            for index in tick_hits {
+                let spec = &mut self.tick_specs[index].projection;
+                if let Some(value) =
+                    project_tick_rows_from_market(&market, &spec.spec, &mut spec.cursor, &touches)?
+                {
                     self.pending
-                        .push_back(Ok(MarketEvent::TickWindow(ValueUpdate {
+                        .push_back(Ok(MarketEvent::TickRows(ValueUpdate {
                             commit: commit.clone(),
                             value,
                         })));
                 }
             }
-            for spec in kline_hits {
-                if let Some(value) = project_kline_window_from_market(&market, &spec.window)? {
+            for index in kline_hits {
+                let spec = &mut self.kline_specs[index].projection;
+                if let Some(value) =
+                    project_kline_rows_from_market(&market, &spec.spec, &mut spec.cursor, &touches)?
+                {
                     self.pending
-                        .push_back(Ok(MarketEvent::KlineWindow(ValueUpdate {
+                        .push_back(Ok(MarketEvent::KlineRows(ValueUpdate {
                             commit: commit.clone(),
                             value,
                         })));
@@ -329,23 +410,4 @@ impl Stream for MarketEventStream {
             }
         }
     }
-}
-
-fn commit_touches_path(commit: &CommitResult, target: &StatePath) -> bool {
-    commit
-        .changes
-        .path_hits
-        .iter()
-        .any(|changed| path_matches(target, changed))
-}
-
-fn path_matches(target: &StatePath, changed: &StatePath) -> bool {
-    let target_segments = target.segments();
-    let changed_segments = changed.segments();
-
-    target_segments.len() <= changed_segments.len()
-        && target_segments
-            .iter()
-            .zip(changed_segments.iter())
-            .all(|(left, right)| left == right)
 }

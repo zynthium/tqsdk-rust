@@ -7,7 +7,7 @@
 - 提供共享 session 驱动的 `TqStream`
 - 提供多消费者 raw commit fan-out
 - 提供基于 path / scope / domain / object / field 的轻量 commit 过滤
-- 提供建立在 commit 过滤之上的 typed path、ready-window、账户级 trade object / trade session 事件流，以及 market / system / trade / security 对象 stream 薄包装
+- 提供建立在 commit 过滤之上的 typed path、kline/tick row batch、账户级 trade object / trade session 事件流，以及 market / system / trade / security 对象 stream 薄包装
 - 保留 `RuntimeReader` 与 `SessionClient` 作为高性能读面和 direct-query 逃生舱
 
 它明确不负责：
@@ -15,6 +15,7 @@
 - GraphQL / HTTP direct query
 - schema / metadata direct facade
 - downloader / `TargetPosTask` / callback
+- managed sink、JSONL WAL、commit journal 或 durable queue
 - 第二棵状态树、本地对象 cache 或 Python-compatible mmap 历史序列缓存
 
 ## 依赖方式
@@ -46,10 +47,11 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `ObjectCommitStream`
 - `FieldCommitStream`
 - `PathValueStream<T>`
-- `KlineWindow`
-- `TickWindow`
-- `KlineWindowStream`
-- `TickWindowStream`
+- `KlineRowBatch`
+- `TickRowBatch`
+- `RowBatchKind`
+- `KlineRowStream`
+- `TickRowStream`
 - `QuoteBatch`
 - `QuoteUpdate`
 - `QuoteBatchSubscription`
@@ -69,28 +71,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `StreamRetryDecision`
 - `StreamRetryGiveUpReason`
 - `StreamRetryReport`
-- `CommitSink`
-- `StreamCommitJournal`
-- `StreamCommitJournalRecord`
-- `StreamCommitJournalReplayReport`
-- `StreamCommitJournalScope`
-- `StreamCommitJournalDomain`
-- `StreamSinkHandle`
-- `StreamSinkStats`
-- `StreamSinkShutdownReport`
-- `StreamSinkOptions`
-- `StreamSinkRetryPolicy`
-- `StreamSinkStatus`
-- `StreamSinkWalCompaction`
-- `StreamSinkWalCompactionReport`
-- `StreamSinkWalFsyncPolicy`
-- `StreamSinkWalRecord`
-- `StreamSinkWalRecordKind`
-- `StreamSinkWalRecovery`
-- `StreamSinkWalRecoveryReport`
 - `StreamGracefulShutdown`
 - `StreamGracefulShutdownReport`
-- `StreamShutdownError`
 - `testing::StreamTestDriver`
 - `SessionReconnectEvent`
 - `TradeObjectEvent`
@@ -127,16 +109,14 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `reconnect_monitor()`
 - `StreamFacadeError::diagnostic()`
 - `StreamFacadeError::is_retryable()`
-- `spawn_commit_sink(...)`
-- `spawn_commit_sink_with_options(...)`
 - `graceful_shutdown()`
 - `recover_state()`
 - `quote_stream(...)`
 - `trading_status_stream(...)`
 - `kline_stream(...)`
 - `tick_stream(...)`
-- `KlineWindowStream::close()`
-- `TickWindowStream::close()`
+- `KlineRowStream::close()`
+- `TickRowStream::close()`
 - `notification_stream(...)`
 - `account_stream(...)`
 - `position_stream(...)`
@@ -174,21 +154,21 @@ closed event，或关闭 stream driver 来刻画消费者行为。普通用户�
 commit 输出 `QuoteBatch`，内部根据 changed object/path 只 decode 本轮实际变化的合约；
 `quotes(...).await` 保留为兼容的逐 quote item stream。
 
-`CommitStream` 和 managed `CommitSink` 传递的是
-`tqsdk_core::SharedCommitResult = Arc<CommitResult>`。这保持 commit payload
-不可变，同时让 fan-out、过滤和 retry 复用同一份提交元数据，而不是深拷贝
-`ChangeSet`。
+`CommitStream` 传递的是 `tqsdk_core::SharedCommitResult = Arc<CommitResult>`。
+这保持 commit payload 不可变，同时让 fan-out、过滤和 typed projection 复用同一份
+提交元数据，而不是深拷贝 `ChangeSet`。
 
 ## 设计边界
 
 - 第一版只提供 raw commit stream，不预先冻结对象级 stream 形状
 - 第二版增量先补 commit 级 path / scope / domain / object / field 过滤，不直接跳到对象级 stream
-- 当前第三步已经补到 typed path、ready-window、统一 market event、账户级 trade object / trade session 事件流，以及 market/system/trade/security 单对象 stream；更高层 family API 仍未冻结
+- 当前第三步已经补到 typed path、kline/tick row batch、统一 market event、账户级 trade object / trade session 事件流，以及 market/system/trade/security 单对象 stream；更高层 family API 仍未冻结
 - `kline/tick` 的远端 chart 生命周期当前采用显式 `close()`，不做隐式 async drop
-- ready K 线 / Tick window 按对应 chart 的 `left_id` / `right_id` 投影 rows，
-  不从全局缓存中截取最新 N 条
+- K 线 / Tick stream 初次 ready 时按 chart 的 `left_id` / `right_id` 投影
+  `InitialSnapshot`；后续 commit 只投影本轮显式变化的 row id；chart reset 或
+  bounds regression 时投影 `ResyncSnapshot`
 - `tqsdk-stream` 不依赖 `tqsdk-data`，也不提供 live window 写历史 mmap cache 的
-  bridge；需要持久化时使用 stream 自己的 commit sink/WAL 或调用方自有 sidecar
+  bridge；需要持久化时使用调用方自有 sidecar
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`
@@ -270,7 +250,7 @@ stream 订阅重叠 symbol 时，关闭其中一个 owner 不会取消另一个 
 runtime 仍会在 reconnect/resync 后根据 adapter 保留的订阅意图重新排队发送恢复命令，
 用户不需要手写重连后的重订阅逻辑。
 
-如果同一个用户循环需要同时处理 quote、tick window 和 kline window，优先使用
+如果同一个用户循环需要同时处理 quote、tick rows 和 kline rows，优先使用
 `market_events()` 构造统一 `MarketEventStream`。它仍然只是一层 facade：
 内部提交 quote/chart 命令，并从同一条 commit fan-out 中投影 typed event；不维护
 第二棵状态树，也不复制 direct-query 能力。quote 和 chart 生命周期同样通过
@@ -288,9 +268,9 @@ reconnect diagnostics 和 stream driver closed 状态，并提供
 进程中等待现有 session 重连恢复结果时，可以使用 `TqStream::reconnect_monitor()`
 得到 `StreamReconnectReport`，区分 already healthy、recovered、exhausted、
 timed out 和 closed；它只消费同一条 commit fan-out 与 health snapshot，不接管
-底层 reconnect 执行。需要显式关闭 stream driver 并 flush managed sink 时，可以使用
-`TqStream::graceful_shutdown()`，把 `StreamSinkHandle` 交给 shutdown coordinator 后得到
-`StreamGracefulShutdownReport`。daemon-level ctrl-c signal 位于 `tqsdk-task`
+底层 reconnect 执行。需要显式 flush outbound 并关闭 stream driver 时，可以使用
+`TqStream::graceful_shutdown()` 得到 `StreamGracefulShutdownReport`。
+daemon-level ctrl-c signal 位于 `tqsdk-task`
 的 strategy supervisor；跨进程 daemon 管理仍属于后续 daemon/tooling 能力。Rust
 SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 
@@ -298,20 +278,8 @@ SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)`
 表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过
 `StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
-信息。写库 / 日志这类非核心消费者可以通过 `TqStream::spawn_commit_sink(...)`
-交给 SDK 托管，sink 在独立 consumer task 中消费 commit，并通过
-`StreamSinkStats` / `StreamSinkShutdownReport` 暴露 processed / lagged / errors /
-retry_attempts / wal_records / journal_records 和 flush 结果。需要有限重试或本地 JSONL WAL 时，
-使用 `TqStream::spawn_commit_sink_with_options(...)` 传入 `StreamSinkOptions`、
-`StreamSinkRetryPolicy` 和 `jsonl_wal(...)`。如果本地 WAL 需要更强落盘语义，可配置
-`StreamSinkWalFsyncPolicy::EveryRecord`；如果需要裁剪本地 JSONL WAL，可使用
-`StreamSinkWalCompaction` 按 revision 保留记录并返回 typed compaction report。
-如果新进程需要审计旧 WAL，可使用 `StreamSinkWalRecovery` 扫描 delivered /
-pending / failed revisions、lagged records 和 flush failures；它只基于 WAL
-元数据生成 report。需要让后续进程按 revision checkpoint 重放 sink commit
-元数据时，可用 `StreamSinkOptions::jsonl_commit_journal(...)` 写入本地 commit
-journal，并用 `StreamCommitJournal::replay_jsonl(...)` 重放到 `CommitSink`。这个
-foundation 不是完整 durable daemon queue，也不恢复 runtime state snapshot。
+信息。写库、日志、有限重试、落盘格式、WAL、journal、compaction 和跨进程恢复都归
+调用方 sidecar 或更上层服务拥有；stream facade 不再托管 durable sink。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与
 `tqsdk-session` / `tqsdk-core` 的 `RetryHint` 贯通。`StreamRetryPolicy` 可以把

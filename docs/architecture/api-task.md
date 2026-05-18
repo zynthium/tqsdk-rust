@@ -120,7 +120,7 @@
     返回 `TradingDeskOrderStatusReport`
   - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 是 typed
     本进程 latency marker API，缺 marker 时返回 `None`
-  - 慢日志、WAL 和 journal 通过 `tqsdk-stream` managed sink sidecar 组合，不进入
+  - 慢日志、WAL、journal 和 audit sidecar 由用户或上层服务在 SDK 外拥有，不进入
     trading desk profile 的 public API
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
@@ -174,7 +174,7 @@
 - 自动 hedge / flatten、timed cancel / replace、group/account resume / audit
 - 跨账户 TargetPos 编排、自动补单 / 跨账户对冲
 - 合约 metadata 规则、组合级 what-if 保证金试算、多账户联合风控
-- 完整 reconnect orchestration、跨进程 daemon 管理 / 多 provider environment、durable sink queue / WAL compaction
+- 完整 reconnect orchestration、跨进程 daemon 管理 / 多 provider environment、durable sidecar queue / WAL compaction
 - 更完整 broker 行为 / 持久化测试 fixture 恢复
 
 ## 为什么它必须独立成 crate
@@ -322,8 +322,8 @@ while let Some(event) = desk.next_market_event(deadline).await? {
   command 关联，不创建 task 私有订单状态树。
 - typed latency report 只记录 SDK 本进程 `Instant` 与 runtime revision，不承诺
   交易所或服务器时钟同步延迟。
-- 慢消费者隔离属于 `tqsdk-stream` sidecar 组合能力；profile public API 不持有
-  sink、WAL 或 journal。
+- 慢消费者隔离和 durable audit sidecar 属于用户或上层服务边界；profile public API
+  不持有 sink、WAL 或 journal。
 
 ### root host
 
@@ -818,7 +818,7 @@ impl TargetPosScheduler {
 
 1. 增加真实联机 smoke 与 replay/模拟场景回归。
 2. 在 `StrategySupervisor` 已有 transport-neutral telemetry/export hook 之上继续设计
-   完整 reconnect orchestration、durable sink queue / WAL compaction 和跨进程
+   完整 reconnect orchestration、durable sidecar queue / WAL compaction 和跨进程
    daemon 管理；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、

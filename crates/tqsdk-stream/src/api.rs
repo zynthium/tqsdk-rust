@@ -30,7 +30,7 @@ use crate::quote_subscription::{
     validate_quote_symbols,
 };
 use crate::typed::PathValueStream;
-use crate::window::{KlineWindowStream, TickWindowStream, kline_chart_id, tick_chart_id};
+use crate::window::{KlineRowStream, TickRowStream, kline_chart_id, tick_chart_id};
 
 pub(crate) const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -207,7 +207,7 @@ impl TqStream {
         symbol: impl AsRef<str>,
         duration: Duration,
         data_length: usize,
-    ) -> crate::error::Result<KlineWindowStream> {
+    ) -> crate::error::Result<KlineRowStream> {
         let symbol = symbol.as_ref().to_owned();
         let duration_ns = duration_to_ns(duration)?;
         let duration_key = duration_ns.to_string();
@@ -230,7 +230,7 @@ impl TqStream {
             })
             .await?;
 
-        Ok(KlineWindowStream::new(
+        Ok(KlineRowStream::new(
             commits,
             lease,
             self.reader.clone(),
@@ -245,7 +245,7 @@ impl TqStream {
         &self,
         symbol: impl AsRef<str>,
         data_length: usize,
-    ) -> crate::error::Result<TickWindowStream> {
+    ) -> crate::error::Result<TickRowStream> {
         let symbol = symbol.as_ref().to_owned();
         let chart_id = tick_chart_id(symbol.as_str(), data_length);
         let commits = self.commit_stream()?.filter_paths([
@@ -266,7 +266,7 @@ impl TqStream {
             })
             .await?;
 
-        Ok(TickWindowStream::new(
+        Ok(TickRowStream::new(
             commits,
             lease,
             self.reader.clone(),
@@ -543,30 +543,6 @@ impl TqStream {
         let receiver = self.driver.subscribe();
         self.driver.ensure_started()?;
         Ok(CommitStream::new(receiver))
-    }
-
-    pub fn spawn_commit_sink<S>(
-        &self,
-        name: impl Into<String>,
-        sink: S,
-    ) -> crate::error::Result<crate::sink::StreamSinkHandle>
-    where
-        S: crate::sink::CommitSink,
-    {
-        self.spawn_commit_sink_with_options(name, sink, crate::sink::StreamSinkOptions::default())
-    }
-
-    pub fn spawn_commit_sink_with_options<S>(
-        &self,
-        name: impl Into<String>,
-        sink: S,
-        options: crate::sink::StreamSinkOptions,
-    ) -> crate::error::Result<crate::sink::StreamSinkHandle>
-    where
-        S: crate::sink::CommitSink,
-    {
-        let commits = self.commit_stream()?;
-        crate::sink::StreamSinkHandle::spawn(name.into(), commits, sink, options)
     }
 
     pub(crate) fn emit_driver_session_error(&self, error: tqsdk_session::SessionFacadeError) {

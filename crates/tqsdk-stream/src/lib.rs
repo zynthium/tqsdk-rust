@@ -5,17 +5,15 @@
 //! This crate owns diff-backed continuous consumption in multi-consumer stream
 //! form. The current minimal surface exposes a shared-session [`TqStream`],
 //! raw commit fan-out via [`CommitStream`], typed path decoding via
-//! [`PathValueStream`], ready-window market streams via
-//! [`KlineWindowStream`] / [`TickWindowStream`], dynamic
+//! [`PathValueStream`], ready row-batch market streams via
+//! [`KlineRowStream`] / [`TickRowStream`], dynamic
 //! [`QuoteBatchSubscription`] / [`QuoteSubscription`] handles, a unified
 //! [`MarketEventStream`] for mixed quote/tick/kline loops, minimal
 //! commit-backed trade event streams via
 //! [`OrderEventStream`] / [`TradeEventStream`] and related account-scoped
 //! wrappers, unified [`TradeObjectEventStream`] / [`TradeSessionEventStream`]
-//! layers, managed [`CommitSink`] consumers for slow sink isolation with finite
-//! retry / JSONL WAL options, [`StreamReconnectMonitor`] for typed reconnect
-//! recovery reporting, [`StreamGracefulShutdown`] for explicit driver close and
-//! sink flush orchestration, and direct access to the shared
+//! layers, [`StreamReconnectMonitor`] for typed reconnect recovery reporting,
+//! [`StreamGracefulShutdown`] for explicit driver close, and direct access to the shared
 //! [`tqsdk_core::RuntimeReader`].
 //!
 //! One-shot direct query, schema refresh, metadata, and other non-streaming
@@ -51,7 +49,6 @@ mod quote_subscription;
 mod reconnect;
 mod recovery;
 mod shutdown;
-mod sink;
 pub mod testing;
 mod typed;
 mod window;
@@ -77,17 +74,6 @@ pub use market_event::{MarketEvent, MarketEventBuilder, MarketEventStream};
 pub use quote_subscription::{QuoteBatch, QuoteBatchSubscription, QuoteSubscription, QuoteUpdate};
 pub use reconnect::{StreamReconnectMonitor, StreamReconnectOutcome, StreamReconnectReport};
 pub use recovery::StreamStartupRecovery;
-pub use shutdown::{
-    StreamGracefulShutdown, StreamGracefulShutdownReport, StreamShutdownError,
-    StreamSinkShutdownError,
-};
-pub use sink::{
-    CommitSink, StreamCommitJournal, StreamCommitJournalDomain, StreamCommitJournalRecord,
-    StreamCommitJournalReplayReport, StreamCommitJournalScope, StreamSinkFuture, StreamSinkHandle,
-    StreamSinkOptions, StreamSinkProfile, StreamSinkRetryPolicy, StreamSinkShutdownReport,
-    StreamSinkStats, StreamSinkStatus, StreamSinkWalCompaction, StreamSinkWalCompactionReport,
-    StreamSinkWalFsyncPolicy, StreamSinkWalRecord, StreamSinkWalRecordKind, StreamSinkWalRecovery,
-    StreamSinkWalRecoveryReport,
-};
+pub use shutdown::{StreamGracefulShutdown, StreamGracefulShutdownReport};
 pub use typed::{PathValueStream, ValueUpdate};
-pub use window::{KlineWindow, KlineWindowStream, TickWindow, TickWindowStream};
+pub use window::{KlineRowBatch, KlineRowStream, RowBatchKind, TickRowBatch, TickRowStream};
