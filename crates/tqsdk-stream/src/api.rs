@@ -33,6 +33,25 @@ use crate::typed::PathValueStream;
 use crate::window::{KlineRowStream, TickRowStream, kline_chart_id, tick_chart_id};
 
 pub(crate) const DEFAULT_COMMIT_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const COMMIT_CHANNEL_CAPACITY_PER_CONSUMER: usize = 8;
+
+pub(crate) fn commit_channel_capacity_for_consumers(
+    expected_consumers: usize,
+) -> crate::error::Result<usize> {
+    if expected_consumers == 0 {
+        return Err(crate::error::StreamFacadeError::InvalidState(
+            "expected commit consumers must be greater than zero",
+        ));
+    }
+
+    let scaled = expected_consumers
+        .checked_mul(COMMIT_CHANNEL_CAPACITY_PER_CONSUMER)
+        .ok_or(crate::error::StreamFacadeError::InvalidState(
+            "expected commit consumers exceeds supported commit channel capacity",
+        ))?;
+
+    Ok(scaled.max(DEFAULT_COMMIT_CHANNEL_CAPACITY))
+}
 
 pub(crate) fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
     i64::try_from(duration.as_nanos()).map_err(|_| {
@@ -66,6 +85,20 @@ impl TqStream {
                 "commit channel capacity must be greater than zero",
             ));
         }
+        Ok(Self::new_with_capacity(session, capacity))
+    }
+
+    /// Builds a stream facade with a root fan-out capacity sized from the
+    /// expected number of independent commit consumers.
+    ///
+    /// The capacity is `max(1024, expected_consumers * 8)`. Use
+    /// [`Self::with_commit_channel_capacity`] when a workload needs an explicit
+    /// ring size instead of the built-in heuristic.
+    pub fn with_expected_commit_consumers(
+        session: tqsdk_session::SessionClient,
+        expected_consumers: usize,
+    ) -> crate::error::Result<Self> {
+        let capacity = commit_channel_capacity_for_consumers(expected_consumers)?;
         Ok(Self::new_with_capacity(session, capacity))
     }
 

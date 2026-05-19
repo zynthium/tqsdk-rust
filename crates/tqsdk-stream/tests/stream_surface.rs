@@ -20,6 +20,19 @@ fn stream_rejects_zero_commit_channel_capacity() {
     );
 }
 
+#[test]
+fn stream_rejects_zero_expected_commit_consumers() {
+    let err =
+        match TqStream::with_expected_commit_consumers(support::core_seed::seeded_session(), 0) {
+            Ok(_) => panic!("zero expected commit consumers should be rejected"),
+            Err(err) => err,
+        };
+    assert_eq!(
+        err,
+        StreamFacadeError::InvalidState("expected commit consumers must be greater than zero")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stream_exposes_underlying_session_for_direct_queries() {
     let stream = support::core_seed::seeded_stream();

@@ -33,6 +33,21 @@ impl TqStreamBuilder {
         Ok(self)
     }
 
+    /// Sizes the root commit fan-out ring from the expected number of
+    /// independent commit consumers.
+    ///
+    /// The capacity is `max(1024, expected_consumers * 8)`. Use
+    /// [`Self::commit_channel_capacity`] when the workload already has a known
+    /// ring-size target.
+    pub fn expected_commit_consumers(
+        mut self,
+        expected_consumers: usize,
+    ) -> crate::error::Result<Self> {
+        self.commit_channel_capacity =
+            crate::api::commit_channel_capacity_for_consumers(expected_consumers)?;
+        Ok(self)
+    }
+
     pub async fn build(self) -> crate::error::Result<TqStream> {
         let session = self.inner.build()?;
         Ok(TqStream::new_with_capacity(
@@ -187,6 +202,36 @@ mod tests {
     fn commit_channel_capacity_rejects_zero_capacity() {
         let err = TqStreamBuilder::new("demo-user", "demo-pass")
             .commit_channel_capacity(0)
+            .unwrap_err();
+
+        assert_eq!(err.diagnostic().kind, crate::StreamErrorKind::InvalidState);
+    }
+
+    #[test]
+    fn expected_commit_consumers_keeps_default_floor_for_small_counts() {
+        let builder = TqStreamBuilder::new("demo-user", "demo-pass")
+            .expected_commit_consumers(16)
+            .unwrap();
+
+        assert_eq!(
+            builder.commit_channel_capacity,
+            crate::api::DEFAULT_COMMIT_CHANNEL_CAPACITY
+        );
+    }
+
+    #[test]
+    fn expected_commit_consumers_scales_capacity_for_many_consumers() {
+        let builder = TqStreamBuilder::new("demo-user", "demo-pass")
+            .expected_commit_consumers(512)
+            .unwrap();
+
+        assert_eq!(builder.commit_channel_capacity, 4096);
+    }
+
+    #[test]
+    fn expected_commit_consumers_rejects_zero_consumers() {
+        let err = TqStreamBuilder::new("demo-user", "demo-pass")
+            .expected_commit_consumers(0)
             .unwrap_err();
 
         assert_eq!(err.diagnostic().kind, crate::StreamErrorKind::InvalidState);

@@ -97,6 +97,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `CommitStream::filter_domain(s)`
 - `CommitStream::filter_object(s)`
 - `CommitStream::filter_fields(...)`
+- `TqStreamBuilder::expected_commit_consumers(...)`
+- `TqStream::with_expected_commit_consumers(...)`
 - `path_stream::<T>(...)`
 - `subscribe_quotes(...)`
 - `unsubscribe_quotes(...)`
@@ -224,14 +226,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `trade_target_with_url(...)`
 - `replay_url(...)`
 - `commit_channel_capacity(...)`
+- `expected_commit_consumers(...)`
 
 优先使用这些命名方法，而不是直接写 `market_target(bool, bool)` 这种裸布尔组合。
 `market_target(...)` 仅保留兼容用途，不应作为新的推荐入口。
+`expected_commit_consumers(...)` 用 `max(1024, expected_consumers * 8)` 从预期独立
+consumer 数量估算 root fan-out 容量；已经知道目标 ring size 的场景继续使用
+`commit_channel_capacity(...)`。
 
 如果需要更细的 session 级配置，例如 direct query、schema 或其他未来扩展项，应先配置 `tqsdk_session::SessionClientBuilder`，再通过 `TqStreamBuilder::from_session_builder(...)` 包装成 stream facade。
 如果调用方已经持有 `SessionClient`，可以直接使用 `TqStream::new(session)`；
 需要显式设置 root fan-out 容量时使用
-`TqStream::with_commit_channel_capacity(session, capacity)`。
+`TqStream::with_commit_channel_capacity(session, capacity)`；只知道预计 consumer 数量时使用
+`TqStream::with_expected_commit_consumers(session, expected_consumers)`。
 
 如果要证明 stream facade 可以复用同一个底层 session 做一次性 metadata/direct query，而不需要额外建第二个 client，可参考 `examples/quote_stream_with_session_query.rs`。
 
@@ -274,9 +281,11 @@ daemon-level ctrl-c signal 位于 `tqsdk-task`
 的 strategy supervisor；跨进程 daemon 管理仍属于后续 daemon/tooling 能力。Rust
 SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 
-慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`
-或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)`
-表达。每个 `commit_stream()` consumer 仍持有独立 receiver；落后时通过
+慢消费者隔离的底层配置通过 `TqStreamBuilder::commit_channel_capacity(...)`、
+`TqStreamBuilder::expected_commit_consumers(...)`，或已有 session 场景下的
+`TqStream::with_commit_channel_capacity(...)` /
+`TqStream::with_expected_commit_consumers(...)` 表达。每个 `commit_stream()`
+consumer 仍持有独立 receiver；落后时通过
 `StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
 信息。写库、日志、有限重试、落盘格式、WAL、journal、compaction 和跨进程恢复都归
 调用方 sidecar 或更上层服务拥有；stream facade 不再托管 durable sink。

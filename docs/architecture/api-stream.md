@@ -178,6 +178,10 @@ impl TqStreamBuilder {
     ) -> Self;
     pub fn replay_url(self, replay_url: impl Into<String>) -> Self;
     pub fn commit_channel_capacity(self, capacity: usize) -> tqsdk_stream::Result<Self>;
+    pub fn expected_commit_consumers(
+        self,
+        expected_consumers: usize,
+    ) -> tqsdk_stream::Result<Self>;
 
     pub async fn build(self) -> tqsdk_stream::Result<TqStream>;
 }
@@ -190,6 +194,9 @@ impl TqStreamBuilder {
 - 优先暴露命名清楚的 market-target shortcut，避免 façade 层继续传播裸布尔 market 选择
 - `market_target(bool, bool)` 只作为兼容入口存在，不是推荐 surface
 - 只暴露 stream 自身的连续消费配置，例如 root fan-out capacity
+- 高频多 consumer 场景可以用 `expected_commit_consumers(...)` 按
+  `max(1024, expected_consumers * 8)` 估算 root fan-out capacity；需要精确控制时仍使用
+  `commit_channel_capacity(...)`
 - 不在 stream builder 重新定义 direct query 选项
 
 ### root facade
@@ -202,6 +209,10 @@ impl TqStream {
     pub fn with_commit_channel_capacity(
         session: SessionClient,
         capacity: usize,
+    ) -> tqsdk_stream::Result<Self>;
+    pub fn with_expected_commit_consumers(
+        session: SessionClient,
+        expected_consumers: usize,
     ) -> tqsdk_stream::Result<Self>;
 
     pub fn session(&self) -> &SessionClient;
