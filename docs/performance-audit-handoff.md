@@ -28,8 +28,10 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
   `BTreeMap` 替换为 Vec-backed ordered-unique 小集合。小 commit 惰性分配，
   hit 数较大时预留有界容量；tick/kline row id 保持有序去重，避免热路径
   per-commit tree allocation。
-- 剩余 P2/P3：`RuntimeReader.next()` 慢消费者内存累积、`PathCommitStream`
-  path 匹配效率。
+- P2 `RuntimeReader.next()` 慢消费者内存累积：已复核当前 core contract。
+  `CommitLog` 已有有界 retention 和 contract tests；但当前架构明确保护活动 cursor
+  需要的提交，不在本轮改成强制截断 active cursor。
+- 剩余 P3：`PathCommitStream` path 匹配效率。
 
 ---
 
@@ -147,13 +149,28 @@ impl CommitTouchSet {
 
 **位置**: `crates/tqsdk-core/src/runtime/`
 
-**问题**: `CommitLog` 内部保留所有历史 commit。慢消费者落后时会累积内存。
-数百合约高频 tick 时，commit 频率可能达到每秒数十次。
+**复核结论**: 当前 core 已经不是“保留所有历史 commit”的实现。
+`CommitLog` 默认 `DEFAULT_MAX_ENTRIES = 8192`，并提供
+`RuntimeHandle::with_adapters_and_commit_log_retention(...)` 配置入口。
+`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs` 已覆盖：
+- 没有活动 cursor 需要时，超过 retention 的旧 commit 会被裁剪
+- 活动 cursor 仍需要旧 commit 时，retention 不会截断它
+
+后一条是当前架构约束：`docs/architecture/validation.md` 要求
+`CommitLog` “不能截断仍被活动 cursor 需要的提交”。因此不能在本轮按原建议把
+慢消费者直接强制丢弃，否则会改变 `RuntimeReader::next()` / `UpdateCursor`
+的核心语义。
+
+**仍存在的风险**: 如果某个活动 cursor 长时间不推进，core 会为了保持
+exact sequential commit contract 而保留该 cursor 之后的 commit。这是有意的
+正确性优先取舍，不是当前交接文档可直接覆盖的局部优化。
 
 **建议方案**:
-1. 引入 commit retention 上限（例如保留最近 N 个 commit 或 M 秒内的 commit）
-2. 当最慢消费者落后超过 retention 时，发送 `CursorLagged` 错误并自动重置到最新 revision
-3. 在文档中明确标注 retention 策略
+1. 已有：commit retention 上限和测试契约
+2. 后续如要支持丢慢消费者，应作为显式架构变更设计 lossy cursor / checked next API，
+   例如只让 stream driver 使用不保护 retention 的 cursor，并通过 `CursorLagged`
+   向上游报告，而不是改变默认 `RuntimeReader::cursor()` 语义
+3. 保持文档明确：默认 cursor 是 exact sequential contract，会保护仍需要的 commit
 
 **影响范围**: `CommitLog`、`UpdateCursor`、`RuntimeReader`
 
