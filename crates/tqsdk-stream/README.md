@@ -176,6 +176,8 @@ commit 输出 `QuoteBatch`，内部根据 changed object/path 只 decode 本轮�
 - `kline_stream`、`tick_stream`、typed path stream 和 `market_events()` 这类
   path-backed consumers 通过内部 path dispatcher 共用一个 root receiver，并且只接收
   path 命中的 commit；raw `commit_stream()` 仍为每个调用者提供独立 receiver
+- path filters 构造时会编译成按 root segment 索引的 matcher；raw path stream 和
+  path dispatcher subscriber 都复用 matcher，不在 commit 热路径重新扫描原始 path 列表
 - row-batch / market-event 投影会把 commit touches 解析为 Vec-backed ordered-unique
   小集合，避免每个 commit 热路径创建 tree map/set，同时保持确定性的 symbol/row 顺序
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`

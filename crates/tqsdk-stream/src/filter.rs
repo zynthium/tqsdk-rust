@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -13,12 +14,15 @@ use crate::{CommitStream, Result};
 /// Commit stream filtered by state-path prefixes.
 pub struct PathCommitStream {
     inner: CommitStream,
-    paths: Vec<StatePath>,
+    matcher: PathMatcher,
 }
 
 impl PathCommitStream {
     pub(crate) fn new(inner: CommitStream, paths: Vec<StatePath>) -> Self {
-        Self { inner, paths }
+        Self {
+            inner,
+            matcher: PathMatcher::new(paths),
+        }
     }
 }
 
@@ -27,9 +31,58 @@ impl Stream for PathCommitStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        poll_next_filtered(&mut this.inner, cx, |commit| {
-            matches_path_filters(&this.paths, commit)
-        })
+        poll_next_filtered(&mut this.inner, cx, |commit| this.matcher.is_match(commit))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PathMatcher {
+    match_all: bool,
+    paths_by_root: HashMap<String, Vec<StatePath>>,
+}
+
+impl PathMatcher {
+    pub(crate) fn new(paths: Vec<StatePath>) -> Self {
+        let mut match_all = paths.is_empty();
+        let mut paths_by_root = HashMap::new();
+
+        for path in paths {
+            let Some(root) = path.segments().first() else {
+                match_all = true;
+                continue;
+            };
+            paths_by_root
+                .entry(root.clone())
+                .or_insert_with(Vec::new)
+                .push(path);
+        }
+
+        if match_all {
+            paths_by_root.clear();
+        }
+
+        Self {
+            match_all,
+            paths_by_root,
+        }
+    }
+
+    pub(crate) fn is_match(&self, commit: &CommitResult) -> bool {
+        self.match_all
+            || commit
+                .changes
+                .path_hits
+                .iter()
+                .any(|changed| self.matches_changed_path(changed))
+    }
+
+    fn matches_changed_path(&self, changed: &StatePath) -> bool {
+        let Some(root) = changed.segments().first() else {
+            return false;
+        };
+        self.paths_by_root
+            .get(root.as_str())
+            .is_some_and(|paths| paths.iter().any(|target| path_matches(target, changed)))
     }
 }
 
@@ -128,15 +181,6 @@ impl Stream for FieldCommitStream {
             matches_field_filters(&this.object, &this.fields, commit)
         })
     }
-}
-
-pub(crate) fn matches_path_filters(paths: &[StatePath], commit: &CommitResult) -> bool {
-    paths.is_empty()
-        || commit
-            .changes
-            .path_hits
-            .iter()
-            .any(|changed| paths.iter().any(|target| path_matches(target, changed)))
 }
 
 pub(crate) fn matches_scope_filters(scopes: &[CommitScope], commit: &CommitResult) -> bool {

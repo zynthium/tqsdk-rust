@@ -31,7 +31,9 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
 - P2 `RuntimeReader.next()` 慢消费者内存累积：已复核当前 core contract。
   `CommitLog` 已有有界 retention 和 contract tests；但当前架构明确保护活动 cursor
   需要的提交，不在本轮改成强制截断 active cursor。
-- 剩余 P3：`PathCommitStream` path 匹配效率。
+- P3 `PathCommitStream` path 匹配效率：已引入构造期 `PathMatcher`，按 root
+  segment 建索引，raw path stream 和内部 `PathDispatcher` subscriber 都复用预编译
+  matcher，避免每个 commit 重新扫描原始 path filter 列表。
 
 ---
 
@@ -180,15 +182,25 @@ exact sequential commit contract 而保留该 cursor 之后的 commit。这是�
 
 **位置**: `crates/tqsdk-stream/src/filter.rs`
 
-**问题**: `PathCommitStream` 对每个 commit 遍历所有注册的 path，
+**问题**: 旧实现中 `PathCommitStream` 对每个 commit 遍历所有注册的 path，
 用 `commit.changes.path_hits` 做字符串匹配。当注册了数百个 path 时，
 每次 commit 都要做数百次字符串比较。
 
-**建议方案**:
-1. 使用 `Aho-Corasick` 或前缀树做批量 path 匹配
-2. 或将 path 编译为 `StatePath` 的哈希集合，用 O(1) 查找替代线性扫描
+**当前处理**:
+- `PathCommitStream` 构造时把 path filters 编译为 `PathMatcher`
+- `PathMatcher` 按 root segment 建 `paths_by_root` 索引；commit 热路径先用
+  changed path 的 root 缩小候选，再做原有 prefix 匹配
+- 内部 `PathDispatcher` 的每个 subscriber 也保存 `PathMatcher`，不再保存原始
+  `Vec<StatePath>` 并在 dispatch 时重新扫描
+- `tests/performance_surface.rs` 增加源码契约，防止 raw path stream 或 dispatcher
+  回退到 per-commit raw path filter scan
 
-**影响范围**: `PathCommitStream`、`ScopeCommitStream`
+**建议方案**:
+1. 已采用：构造期编译 path matcher，并按 root segment 缩小候选
+2. 后续可选：如果单 root 下仍有数百 path，可再升级为 prefix trie 或更细粒度
+   hash index
+
+**影响范围**: `PathCommitStream`、`PathDispatcher`
 
 ---
 

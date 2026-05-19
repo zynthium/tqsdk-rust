@@ -401,6 +401,9 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
   产出 `InitialSnapshot`，后续 commit 只产出显式变化 row id 的 `Delta`；
   chart reset 或 bounds regression 产出 `ResyncSnapshot`。row id touch 集合保持有序
   去重，避免 tree collection 热路径分配但不改变批次投影顺序。
+- path filters 在构造时编译为 `PathMatcher`，按 root segment 缩小每个 commit
+  的候选 path；内部 path dispatcher 的 subscriber 也复用同一类 matcher，不在
+  dispatch 热路径重新扫描原始 path filter 列表。
 - 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护事件日志
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面

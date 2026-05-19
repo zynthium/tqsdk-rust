@@ -77,3 +77,46 @@ fn path_backed_row_streams_do_not_allocate_root_commit_receiver_per_stream() {
         );
     }
 }
+
+#[test]
+fn path_commit_stream_precompiles_path_filters_by_root() {
+    let source = include_str!("../src/filter.rs");
+    let stream_block = function_block(source, "pub struct PathCommitStream {", "\n}");
+
+    assert!(
+        stream_block.contains("matcher: PathMatcher"),
+        "PathCommitStream should store a precompiled path matcher"
+    );
+    assert!(
+        !stream_block.contains("paths: Vec<StatePath>"),
+        "PathCommitStream should not retain raw path filters for per-commit scans"
+    );
+    assert!(
+        source.contains("paths_by_root"),
+        "path matcher should narrow candidates by root path segment before prefix checks"
+    );
+}
+
+#[test]
+fn path_dispatcher_reuses_precompiled_path_matchers_per_subscriber() {
+    let source = include_str!("../src/path_dispatcher.rs");
+    let subscriber_block = function_block(
+        source,
+        "struct PathSubscriber",
+        "\npub(crate) struct PathDispatcher",
+    );
+    let notify_matching_block = function_block(source, "fn notify_matching", "\nfn notify_all");
+
+    assert!(
+        subscriber_block.contains("matcher: PathMatcher"),
+        "path dispatcher subscribers should store precompiled path matchers"
+    );
+    assert!(
+        !subscriber_block.contains("paths: Vec<StatePath>"),
+        "path dispatcher should not retain raw paths for per-commit scans"
+    );
+    assert!(
+        !notify_matching_block.contains("matches_path_filters"),
+        "path dispatcher should not rebuild or rescan raw path filters while dispatching commits"
+    );
+}

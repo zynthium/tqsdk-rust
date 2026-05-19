@@ -8,11 +8,11 @@ use tqsdk_core::{SharedCommitResult, StatePath};
 
 use crate::api::CommitStream;
 use crate::driver::{DriverEvent, StreamDriver};
-use crate::filter::{PathCommitStream, matches_path_filters};
+use crate::filter::{PathCommitStream, PathMatcher};
 
 #[derive(Debug)]
 struct PathSubscriber {
-    paths: Vec<StatePath>,
+    matcher: PathMatcher,
     sender: broadcast::Sender<DriverEvent>,
 }
 
@@ -47,7 +47,10 @@ impl PathDispatcher {
             .subscribers
             .lock()
             .expect("path dispatcher subscribers mutex poisoned");
-        subscribers.push(PathSubscriber { paths, sender });
+        subscribers.push(PathSubscriber {
+            matcher: PathMatcher::new(paths),
+            sender,
+        });
 
         Ok(PathCommitStream::new(
             CommitStream::new(receiver),
@@ -151,7 +154,7 @@ async fn run_path_dispatcher(
 fn notify_matching(subscribers: &Arc<Mutex<Vec<PathSubscriber>>>, commit: SharedCommitResult) {
     notify(
         subscribers,
-        |paths| matches_path_filters(paths, &commit),
+        |matcher| matcher.is_match(&commit),
         || DriverEvent::Commit(commit.clone()),
     );
 }
@@ -162,7 +165,7 @@ fn notify_all(subscribers: &Arc<Mutex<Vec<PathSubscriber>>>, event: DriverEvent)
 
 fn notify(
     subscribers: &Arc<Mutex<Vec<PathSubscriber>>>,
-    predicate: impl Fn(&[StatePath]) -> bool,
+    predicate: impl Fn(&PathMatcher) -> bool,
     event: impl Fn() -> DriverEvent,
 ) {
     let mut subscribers = subscribers
@@ -171,7 +174,7 @@ fn notify(
     subscribers.retain(|subscriber| subscriber.sender.receiver_count() > 0);
 
     for subscriber in subscribers.iter() {
-        if predicate(&subscriber.paths) {
+        if predicate(&subscriber.matcher) {
             let _ = subscriber.sender.send(event());
         }
     }
