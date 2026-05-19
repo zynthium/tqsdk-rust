@@ -25,6 +25,7 @@ use crate::event::{
 use crate::filter::{
     DomainCommitStream, FieldCommitStream, ObjectCommitStream, PathCommitStream, ScopeCommitStream,
 };
+use crate::path_dispatcher::PathDispatcher;
 use crate::quote_subscription::{
     QuoteBatchSubscription, QuoteSubscription, submit_subscribe, submit_unsubscribe,
     validate_quote_symbols,
@@ -68,6 +69,7 @@ pub struct TqStream {
     session: Option<tqsdk_session::SessionClient>,
     reader: tqsdk_core::RuntimeReader,
     driver: StreamDriver,
+    path_dispatcher: PathDispatcher,
 }
 
 impl TqStream {
@@ -112,6 +114,7 @@ impl TqStream {
             session: Some(session),
             reader,
             driver,
+            path_dispatcher: PathDispatcher::new(capacity),
         }
     }
 
@@ -148,7 +151,7 @@ impl TqStream {
         S: Into<String>,
     {
         let path = StatePath::new(path);
-        let commits = self.commit_stream()?.filter_paths([path.clone()]);
+        let commits = self.path_commit_stream([path.clone()])?;
         Ok(PathValueStream::new(commits, self.reader.clone(), path))
     }
 
@@ -245,10 +248,10 @@ impl TqStream {
         let duration_ns = duration_to_ns(duration)?;
         let duration_key = duration_ns.to_string();
         let chart_id = kline_chart_id(symbol.as_str(), duration_ns, data_length);
-        let commits = self.commit_stream()?.filter_paths([
+        let commits = self.path_commit_stream([
             StatePath::new(["charts", chart_id.as_str()]),
             StatePath::new(["klines", symbol.as_str(), duration_key.as_str(), "data"]),
-        ]);
+        ])?;
 
         let lease = self
             .session()
@@ -281,10 +284,10 @@ impl TqStream {
     ) -> crate::error::Result<TickRowStream> {
         let symbol = symbol.as_ref().to_owned();
         let chart_id = tick_chart_id(symbol.as_str(), data_length);
-        let commits = self.commit_stream()?.filter_paths([
+        let commits = self.path_commit_stream([
             StatePath::new(["charts", chart_id.as_str()]),
             StatePath::new(["ticks", symbol.as_str(), "data"]),
-        ]);
+        ])?;
 
         let lease = self
             .session()
@@ -566,6 +569,7 @@ impl TqStream {
 
     #[must_use]
     pub fn into_session(mut self) -> tqsdk_session::SessionClient {
+        self.path_dispatcher.abort();
         self.driver.abort();
         self.session
             .take()
@@ -578,6 +582,14 @@ impl TqStream {
         Ok(CommitStream::new(receiver))
     }
 
+    pub(crate) fn path_commit_stream(
+        &self,
+        paths: impl IntoIterator<Item = StatePath>,
+    ) -> crate::error::Result<PathCommitStream> {
+        self.path_dispatcher
+            .subscribe(&self.driver, paths.into_iter().collect())
+    }
+
     pub(crate) fn emit_driver_session_error(&self, error: tqsdk_session::SessionFacadeError) {
         let _ = self.driver.sender.send(DriverEvent::Error(error));
     }
@@ -587,6 +599,7 @@ impl TqStream {
     }
 
     pub(crate) fn close_driver_for_testing(&self) {
+        self.path_dispatcher.abort();
         self.driver.abort();
     }
 
@@ -595,6 +608,7 @@ impl TqStream {
     }
 
     pub(crate) fn abort_driver_for_shutdown(&self) {
+        self.path_dispatcher.abort();
         self.driver.abort();
     }
 
@@ -605,6 +619,7 @@ impl TqStream {
 
 impl Drop for TqStream {
     fn drop(&mut self) {
+        self.path_dispatcher.abort();
         self.driver.abort();
     }
 }
@@ -615,7 +630,7 @@ pub struct CommitStream {
 }
 
 impl CommitStream {
-    fn new(receiver: broadcast::Receiver<DriverEvent>) -> Self {
+    pub(crate) fn new(receiver: broadcast::Receiver<DriverEvent>) -> Self {
         Self {
             inner: BroadcastStream::new(receiver),
         }
@@ -691,6 +706,11 @@ impl Stream for CommitStream {
             Poll::Ready(Some(Ok(DriverEvent::Error(error)))) => {
                 Poll::Ready(Some(Err(crate::error::StreamFacadeError::Session(error))))
             }
+            Poll::Ready(Some(Ok(DriverEvent::Lagged(skipped)))) => {
+                Poll::Ready(Some(Err(crate::error::StreamFacadeError::Lagged {
+                    skipped,
+                })))
+            }
             Poll::Ready(Some(Ok(DriverEvent::Closed))) => {
                 Poll::Ready(Some(Err(crate::error::StreamFacadeError::Closed)))
             }
@@ -702,5 +722,40 @@ impl Stream for CommitStream {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tqsdk_core::{AdapterRegistry, RuntimeHandle, StatePath};
+    use tqsdk_session::testing::ManualSession;
+
+    use super::TqStream;
+
+    fn seeded_stream() -> TqStream {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let session = ManualSession::from_runtime(handle).into_client();
+        TqStream::with_commit_channel_capacity(session, 16)
+            .expect("test stream capacity should be valid")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_commit_streams_share_one_root_driver_receiver() {
+        let stream = seeded_stream();
+
+        let _first = stream
+            .path_commit_stream([StatePath::new(["charts", "stream-kline-a"])])
+            .expect("first path stream should open");
+        let _second = stream
+            .path_commit_stream([StatePath::new(["charts", "stream-kline-b"])])
+            .expect("second path stream should open");
+
+        assert_eq!(
+            stream.driver.sender.receiver_count(),
+            1,
+            "path dispatcher should hold one root receiver for multiple path streams"
+        );
     }
 }

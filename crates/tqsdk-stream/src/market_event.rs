@@ -206,7 +206,7 @@ impl<'a> MarketEventBuilder<'a> {
             )
             .collect::<Vec<_>>();
 
-        let inner = self.stream.commit_stream()?.filter_paths(paths);
+        let inner = self.stream.path_commit_stream(paths)?;
 
         let quote_lease = if quote_symbols.is_empty() {
             None

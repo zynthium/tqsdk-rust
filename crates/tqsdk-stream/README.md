@@ -173,6 +173,9 @@ commit 输出 `QuoteBatch`，内部根据 changed object/path 只 decode 本轮�
   bridge；需要持久化时使用调用方自有 sidecar
 - commit fan-out 的语义必须直接来自 `RuntimeReader::next()`
 - 背压通过 bounded broadcast ring 显式暴露为 `Lagged`
+- `kline_stream`、`tick_stream`、typed path stream 和 `market_events()` 这类
+  path-backed consumers 通过内部 path dispatcher 共用一个 root receiver，并且只接收
+  path 命中的 commit；raw `commit_stream()` 仍为每个调用者提供独立 receiver
 - one-shot query / schema / metadata 始终留在 `tqsdk-session`
 
 ## 示例
@@ -287,7 +290,9 @@ SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 `TqStream::with_expected_commit_consumers(...)` 表达。每个 `commit_stream()`
 consumer 仍持有独立 receiver；落后时通过
 `StreamFacadeError::Lagged` 和 `StreamFacadeError::diagnostic()` 暴露 typed lag
-信息。写库、日志、有限重试、落盘格式、WAL、journal、compaction 和跨进程恢复都归
+信息。path-backed stream 通过内部 dispatcher 共享一个 root receiver，避免每个
+kline/tick/path consumer 都复制无关 commit；每个 path-backed consumer 仍有自己的
+bounded downstream ring，落后时同样返回 `Lagged`。写库、日志、有限重试、落盘格式、WAL、journal、compaction 和跨进程恢复都归
 调用方 sidecar 或更上层服务拥有；stream facade 不再托管 durable sink。
 
 错误诊断的低层 contract 通过 `StreamFacadeError::diagnostic()` 与

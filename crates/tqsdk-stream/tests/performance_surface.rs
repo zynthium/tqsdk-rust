@@ -38,3 +38,25 @@ fn market_event_collect_events_avoids_tree_sets_and_owned_lookup_keys_per_commit
         "mixed market event collection should not allocate owned String lookup keys per commit"
     );
 }
+
+#[test]
+fn path_backed_row_streams_do_not_allocate_root_commit_receiver_per_stream() {
+    let source = include_str!("../src/api.rs");
+    let kline_block = function_block(
+        source,
+        "pub async fn kline_stream(",
+        "\n    pub async fn tick_stream(",
+    );
+    let tick_block = function_block(
+        source,
+        "pub async fn tick_stream(",
+        "\n    pub fn account_stream(",
+    );
+
+    for block in [kline_block, tick_block] {
+        assert!(
+            !block.contains("self.commit_stream()?.filter_paths"),
+            "path-backed row streams should use the shared path dispatcher instead of creating one root broadcast receiver per stream"
+        );
+    }
+}

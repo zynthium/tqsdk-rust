@@ -45,6 +45,7 @@ mod event;
 mod filter;
 mod health;
 mod market_event;
+mod path_dispatcher;
 mod quote_subscription;
 mod reconnect;
 mod recovery;

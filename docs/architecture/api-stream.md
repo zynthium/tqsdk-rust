@@ -765,12 +765,16 @@ stream 只把它 typed 化为 `Option<u32>`，不另行解释或执行 reconnect
 - 单个 driver task
 - 单个 bounded broadcast ring
 - 每个 `commit_stream()` 调用者持有自己的 receiver
+- path-backed stream 由内部 path dispatcher 共用一个 root receiver，并只向下游发送
+  path 命中的 commit；raw `commit_stream()` 保持独立 receiver 语义
 
 最小语义应当是：
 
 - 慢消费者落后时，返回 `Lagged`
 - root fan-out buffer 可通过 `TqStreamBuilder::commit_channel_capacity(...)`
   或已有 session 场景下的 `TqStream::with_commit_channel_capacity(...)` 显式配置
+- `kline_stream` / `tick_stream` / typed path stream / `market_events()` 不应为每个
+  path-backed consumer 创建独立 root broadcast receiver
 - 生产进程关闭时可通过 `TqStream::graceful_shutdown()` 显式 flush outbound、
   关闭 stream driver，并返回 outbound/driver typed report
 - 生产进程可通过 `TqStream::reconnect_monitor()` 等待并报告既有 session
@@ -787,7 +791,7 @@ stream facade 的显式关闭工具；`reconnect_monitor()` 只做 typed wait/re
 两者都不接管底层 reconnect 执行，也不应下沉到 `tqsdk-core` 或
 `tqsdk-session`。
 
-为什么第一版不做更复杂的 path/object fan-out：
+为什么第一版不做更复杂的 object/domain fan-out：
 
 - 因为对象级过滤在第一版还不是稳定边界
 - 先用 commit-level fan-out 锁住主数据流，再决定更细粒度投影

@@ -20,8 +20,10 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
   便利 API，按 `max(1024, expected_consumers * 8)` 从预计独立 consumer 数量估算
   root fan-out 容量；原 `commit_channel_capacity(...)` / `with_commit_channel_capacity(...)`
   仍保留用于精确配置。
-- P1 `每个 kline/tick stream 独立消费 broadcast（复制风暴）`：尚未处理。仍需单独设计
-  CommitDispatcher 或 shared path-filter receiver 方案。
+- P1 `每个 kline/tick stream 独立消费 broadcast（复制风暴）`：已补内部
+  `PathDispatcher`。`kline_stream`、`tick_stream`、typed path stream 和
+  `market_events()` 共享一个 root receiver，并只向下游发送 path 命中的 commit；
+  raw `commit_stream()` 仍保留每个调用者独立 receiver 的语义。
 - P2/P3 项仍待后续迭代。
 
 ---

@@ -224,6 +224,9 @@ impl Stream for TradeSessionEventStream {
                         event: TradeSessionEvent::SessionError(error),
                     })));
                 }
+                Poll::Ready(Some(Ok(DriverEvent::Lagged(skipped)))) => {
+                    return Poll::Ready(Some(Err(StreamFacadeError::Lagged { skipped })));
+                }
                 Poll::Ready(Some(Ok(DriverEvent::Closed))) => {
                     return Poll::Ready(Some(Err(StreamFacadeError::Closed)));
                 }

@@ -13,6 +13,7 @@ const ROUTE_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) enum DriverEvent {
     Commit(tqsdk_core::SharedCommitResult),
     Error(tqsdk_session::SessionFacadeError),
+    Lagged(u64),
     Closed,
 }
 
