@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -206,35 +206,41 @@ pub(crate) struct KlineSeriesTouch {
     duration_ns: i64,
 }
 
+#[derive(Debug, Clone)]
+struct TickRowTouch {
+    symbol: String,
+    row_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct KlineRowTouch {
+    series: KlineSeriesTouch,
+    row_ids: Vec<i64>,
+}
+
 /// Parsed market-object touches for one commit.
 #[derive(Debug, Clone)]
 pub(crate) struct CommitTouchSet {
     scope: CommitScope,
-    quote_symbols: BTreeSet<Symbol>,
-    chart_ids: BTreeSet<String>,
-    tick_rows: BTreeMap<String, BTreeSet<i64>>,
-    kline_rows: BTreeMap<KlineSeriesTouch, BTreeSet<i64>>,
+    quote_symbols: Vec<Symbol>,
+    chart_ids: Vec<String>,
+    tick_rows: Vec<TickRowTouch>,
+    kline_rows: Vec<KlineRowTouch>,
 }
 
 impl Default for CommitTouchSet {
     fn default() -> Self {
-        Self {
-            scope: CommitScope::RealtimeUpdate,
-            quote_symbols: BTreeSet::new(),
-            chart_ids: BTreeSet::new(),
-            tick_rows: BTreeMap::new(),
-            kline_rows: BTreeMap::new(),
-        }
+        Self::with_capacity(CommitScope::RealtimeUpdate, 0)
     }
 }
 
 impl CommitTouchSet {
     #[must_use]
     pub(crate) fn from_commit(commit: &CommitResult) -> Self {
-        let mut touches = Self {
-            scope: commit.scope,
-            ..Self::default()
-        };
+        let hit_count = commit.changes.object_hits.len()
+            + commit.changes.path_hits.len()
+            + commit.changes.field_hits.len();
+        let mut touches = Self::with_capacity(commit.scope, hit_count);
 
         for object in &commit.changes.object_hits {
             touches.record_object(object);
@@ -250,6 +256,16 @@ impl CommitTouchSet {
         touches
     }
 
+    fn with_capacity(scope: CommitScope, hit_count: usize) -> Self {
+        Self {
+            scope,
+            quote_symbols: touch_vec(hit_count),
+            chart_ids: touch_vec(hit_count),
+            tick_rows: touch_vec(hit_count),
+            kline_rows: touch_vec(hit_count),
+        }
+    }
+
     pub(crate) fn quote_symbols(&self) -> impl Iterator<Item = &Symbol> {
         self.quote_symbols.iter()
     }
@@ -259,48 +275,42 @@ impl CommitTouchSet {
     }
 
     pub(crate) fn tick_symbols(&self) -> impl Iterator<Item = &str> {
-        self.tick_rows.keys().map(String::as_str)
+        self.tick_rows.iter().map(|touch| touch.symbol.as_str())
     }
 
     pub(crate) fn kline_series(&self) -> impl Iterator<Item = (&str, i64)> {
         self.kline_rows
-            .keys()
-            .map(|series| (series.symbol.as_str(), series.duration_ns))
+            .iter()
+            .map(|touch| (touch.series.symbol.as_str(), touch.series.duration_ns))
     }
 
-    fn tick_row_ids(&self, spec: &TickRowSpec) -> Option<&BTreeSet<i64>> {
-        self.tick_rows.get(spec.symbol.as_str())
+    fn tick_row_ids(&self, spec: &TickRowSpec) -> Option<&[i64]> {
+        self.tick_rows
+            .binary_search_by(|touch| touch.symbol.as_str().cmp(spec.symbol.as_str()))
+            .ok()
+            .map(|index| self.tick_rows[index].row_ids.as_slice())
     }
 
-    fn kline_row_ids(&self, spec: &KlineRowSpec) -> Option<&BTreeSet<i64>> {
-        self.kline_rows.get(&KlineSeriesTouch::new(
-            spec.symbol.as_str(),
-            spec.duration_ns,
-        ))
+    fn kline_row_ids(&self, spec: &KlineRowSpec) -> Option<&[i64]> {
+        self.kline_rows
+            .binary_search_by(|touch| touch.series.cmp_key(spec.symbol.as_str(), spec.duration_ns))
+            .ok()
+            .map(|index| self.kline_rows[index].row_ids.as_slice())
     }
 
     fn record_object(&mut self, object: &ObjectKey) {
         match object {
             ObjectKey::Quote { symbol } => {
-                self.quote_symbols.insert(symbol.clone());
+                insert_sorted_unique(&mut self.quote_symbols, symbol.clone());
             }
             ObjectKey::Chart { chart_id } => {
-                self.chart_ids.insert(chart_id.as_str().to_string());
+                insert_sorted_unique(&mut self.chart_ids, chart_id.as_str().to_string());
             }
             ObjectKey::Tick { symbol, tick_id } => {
-                self.tick_rows
-                    .entry(symbol.as_str().to_string())
-                    .or_default()
-                    .insert(*tick_id);
+                self.record_tick_row(symbol.as_str(), *tick_id);
             }
             ObjectKey::Kline { series, bar_id } => {
-                self.kline_rows
-                    .entry(KlineSeriesTouch::new(
-                        series.primary.as_str(),
-                        series.duration_ns,
-                    ))
-                    .or_default()
-                    .insert(*bar_id);
+                self.record_kline_row(series.primary.as_str(), series.duration_ns, *bar_id);
             }
             _ => {}
         }
@@ -310,25 +320,19 @@ impl CommitTouchSet {
         let segments = path.segments();
         match segments {
             [root, symbol, ..] if root == "quotes" => {
-                self.quote_symbols.insert(Symbol::new(symbol.clone()));
+                insert_sorted_unique(&mut self.quote_symbols, Symbol::new(symbol.clone()));
             }
             [root, chart_id, ..] if root == "charts" => {
-                self.chart_ids.insert(chart_id.clone());
+                insert_sorted_unique(&mut self.chart_ids, chart_id.clone());
             }
             [root, symbol, branch, row_id, ..] if root == "ticks" && branch == "data" => {
                 if let Ok(row_id) = row_id.parse::<i64>() {
-                    self.tick_rows
-                        .entry(symbol.clone())
-                        .or_default()
-                        .insert(row_id);
+                    self.record_tick_row(symbol, row_id);
                 }
             }
             [root, symbol, row_id, ..] if root == "ticks" => {
                 if let Ok(row_id) = row_id.parse::<i64>() {
-                    self.tick_rows
-                        .entry(symbol.clone())
-                        .or_default()
-                        .insert(row_id);
+                    self.record_tick_row(symbol, row_id);
                 }
             }
             [root, symbol, duration, branch, row_id, ..]
@@ -337,23 +341,60 @@ impl CommitTouchSet {
                 if let (Ok(duration_ns), Ok(row_id)) =
                     (duration.parse::<i64>(), row_id.parse::<i64>())
                 {
-                    self.kline_rows
-                        .entry(KlineSeriesTouch::new(symbol, duration_ns))
-                        .or_default()
-                        .insert(row_id);
+                    self.record_kline_row(symbol, duration_ns, row_id);
                 }
             }
             [root, symbol, duration, row_id, ..] if root == "klines" => {
                 if let (Ok(duration_ns), Ok(row_id)) =
                     (duration.parse::<i64>(), row_id.parse::<i64>())
                 {
-                    self.kline_rows
-                        .entry(KlineSeriesTouch::new(symbol, duration_ns))
-                        .or_default()
-                        .insert(row_id);
+                    self.record_kline_row(symbol, duration_ns, row_id);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn record_tick_row(&mut self, symbol: &str, row_id: i64) {
+        match self
+            .tick_rows
+            .binary_search_by(|touch| touch.symbol.as_str().cmp(symbol))
+        {
+            Ok(index) => insert_sorted_unique(&mut self.tick_rows[index].row_ids, row_id),
+            Err(index) => self
+                .tick_rows
+                .insert(index, TickRowTouch::new(symbol, row_id)),
+        }
+    }
+
+    fn record_kline_row(&mut self, symbol: &str, duration_ns: i64, row_id: i64) {
+        match self
+            .kline_rows
+            .binary_search_by(|touch| touch.series.cmp_key(symbol, duration_ns))
+        {
+            Ok(index) => insert_sorted_unique(&mut self.kline_rows[index].row_ids, row_id),
+            Err(index) => {
+                self.kline_rows
+                    .insert(index, KlineRowTouch::new(symbol, duration_ns, row_id));
+            }
+        }
+    }
+}
+
+impl TickRowTouch {
+    fn new(symbol: &str, row_id: i64) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            row_ids: vec![row_id],
+        }
+    }
+}
+
+impl KlineRowTouch {
+    fn new(symbol: &str, duration_ns: i64, row_id: i64) -> Self {
+        Self {
+            series: KlineSeriesTouch::new(symbol, duration_ns),
+            row_ids: vec![row_id],
         }
     }
 }
@@ -364,6 +405,27 @@ impl KlineSeriesTouch {
             symbol: symbol.as_ref().to_string(),
             duration_ns,
         }
+    }
+
+    fn cmp_key(&self, symbol: &str, duration_ns: i64) -> Ordering {
+        self.symbol
+            .as_str()
+            .cmp(symbol)
+            .then_with(|| self.duration_ns.cmp(&duration_ns))
+    }
+}
+
+fn insert_sorted_unique<T: Ord>(items: &mut Vec<T>, item: T) {
+    if let Err(index) = items.binary_search(&item) {
+        items.insert(index, item);
+    }
+}
+
+fn touch_vec<T>(hit_count: usize) -> Vec<T> {
+    if hit_count > 4 {
+        Vec::with_capacity(hit_count.min(16))
+    } else {
+        Vec::new()
     }
 }
 

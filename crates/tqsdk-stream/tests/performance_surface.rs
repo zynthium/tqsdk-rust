@@ -40,6 +40,23 @@ fn market_event_collect_events_avoids_tree_sets_and_owned_lookup_keys_per_commit
 }
 
 #[test]
+fn commit_touch_set_avoids_tree_collections_on_per_commit_path() {
+    let source = include_str!("../src/window.rs");
+    let block = function_block(
+        source,
+        "pub(crate) struct CommitTouchSet",
+        "\nstruct ProjectedValueStream",
+    );
+
+    for tree_collection in ["BTreeMap", "BTreeSet"] {
+        assert!(
+            !block.contains(tree_collection),
+            "CommitTouchSet should avoid {tree_collection} in the per-commit path"
+        );
+    }
+}
+
+#[test]
 fn path_backed_row_streams_do_not_allocate_root_commit_receiver_per_stream() {
     let source = include_str!("../src/api.rs");
     let kline_block = function_block(

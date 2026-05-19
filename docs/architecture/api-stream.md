@@ -394,11 +394,13 @@ ready。它不维护第二棵状态树，也不暴露 provider 私有 reconnect/
 - `market_events()` 是 quote / tick rows / kline rows 的统一事件循环包装；
   它内部仍然只提交 quote/chart 命令并消费同一条 commit fan-out，不维护第二棵状态树。
   quote 事件读 `read_market_state()` 分区；tick/kline row batch 沿用 chart bounds
-  与 commit touch 投影逻辑。
+  与 commit touch 投影逻辑。commit touch 解析内部使用 Vec-backed ordered-unique
+  小集合，避免在每个 commit 热路径上创建 tree map/set。
 - `kline_stream()/tick_stream()` 是最薄的 row-batch stream 包装：内部仍然只是提交
   `set_chart`，然后基于同一条 commit fan-out 读取共享状态树。初次 ready
   产出 `InitialSnapshot`，后续 commit 只产出显式变化 row id 的 `Delta`；
-  chart reset 或 bounds regression 产出 `ResyncSnapshot`。
+  chart reset 或 bounds regression 产出 `ResyncSnapshot`。row id touch 集合保持有序
+  去重，避免 tree collection 热路径分配但不改变批次投影顺序。
 - 账户级 trade object 事件流包装也都只是按 commit 的 `object_hits` 解释匹配对象更新，不额外维护事件日志
 - `trade_object_event_stream()` 是这些账户级 object 事件流的统一枚举包装，不增加新的底层语义
 - `trade_session_event_stream()` 继续坚持薄包装，但它直接消费 raw driver 事件，把 trade object、notification、reconnect 与 session error 聚合为一个账户级统一事件面

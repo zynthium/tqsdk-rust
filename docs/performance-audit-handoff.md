@@ -24,7 +24,12 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
   `PathDispatcher`。`kline_stream`、`tick_stream`、typed path stream 和
   `market_events()` 共享一个 root receiver，并只向下游发送 path 命中的 commit；
   raw `commit_stream()` 仍保留每个调用者独立 receiver 的语义。
-- P2/P3 项仍待后续迭代。
+- P2 `CommitTouchSet 每次 commit 都创建新实例`：已将内部 `BTreeSet` /
+  `BTreeMap` 替换为 Vec-backed ordered-unique 小集合。小 commit 惰性分配，
+  hit 数较大时预留有界容量；tick/kline row id 保持有序去重，避免热路径
+  per-commit tree allocation。
+- 剩余 P2/P3：`RuntimeReader.next()` 慢消费者内存累积、`PathCommitStream`
+  path 匹配效率。
 
 ---
 
@@ -118,14 +123,21 @@ impl CommitTouchSet {
 }
 ```
 
-**问题**: `CommitTouchSet` 内部使用 `BTreeSet` / `BTreeMap`，每次 commit 都要插入所有 object/path hits。
+**问题**: 旧实现中 `CommitTouchSet` 内部使用 `BTreeSet` / `BTreeMap`，每次 commit 都要插入所有 object/path hits。
 在高频 tick 场景下（每秒数百个合约更新），这个分配+排序开销会累积。
 
+**当前处理**: 已改为 Vec-backed ordered-unique 小集合：
+- `quote_symbols` / `chart_ids` 使用排序 Vec 去重，保持原先确定性迭代顺序
+- tick/kline touch 按 symbol/series 排序分组，row id 使用排序 Vec 去重
+- `from_commit()` 对小 commit 惰性分配，hit 数较大时按 hit 数预留有界容量
+- `tests/performance_surface.rs` 增加源码契约，防止 `CommitTouchSet` 热路径重新引入
+  `BTreeSet` / `BTreeMap`
+
 **建议方案**:
-1. 预分配容量：从 `commit.changes.object_hits.len()` 推断初始容量
-2. 小集合使用 `SmallVec` 或 `IndexSet`（`indexmap` crate）替代 `BTreeSet`
-3. 复用对象池：`CommitTouchSet` 可回收复用，避免每次分配
-4. `KlineSeriesTouch` 的 `symbol.to_string()` 可考虑使用 `&str` + arena 分配
+1. 已采用：预分配容量，从 commit hit 数推断初始容量
+2. 已采用：小集合用 std Vec-backed ordered-unique 结构替代 `BTreeSet` / `BTreeMap`
+3. 后续可选：复用对象池，让 `CommitTouchSet` 可回收复用，进一步减少分配
+4. 后续可选：`KlineSeriesTouch` 的 `symbol.to_string()` 可考虑使用 `&str` + arena 分配
 
 **影响范围**: `CommitTouchSet`、`KlineSeriesTouch`、`ProjectedValueStream`
 
