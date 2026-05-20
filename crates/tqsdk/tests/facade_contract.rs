@@ -131,3 +131,21 @@ fn strip_alias(export: &str) -> &str {
         .split_once("as")
         .map_or(export, |(symbol, _alias)| symbol)
 }
+
+#[test]
+fn facade_does_not_expose_premature_stock_or_hardcoded_trade_login() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read facade source");
+
+    for removed_surface in [
+        "pub fn stock(",
+        "pub async fn login_trade_account(",
+        "MarketKind::Stock",
+        "TradeAccountType::Future,",
+    ] {
+        assert!(
+            !source.contains(removed_surface),
+            "premature or futures-only facade surface remains: {removed_surface}"
+        );
+    }
+}

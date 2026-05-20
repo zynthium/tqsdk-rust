@@ -134,11 +134,6 @@ impl Tq {
     }
 
     #[must_use]
-    pub fn stock() -> TqBuilder {
-        TqBuilder::stock()
-    }
-
-    #[must_use]
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
             host: tqsdk_task::TaskHost::new(api),
@@ -205,24 +200,6 @@ impl Tq {
         self.api().position(account_id, symbol)
     }
 
-    pub async fn login_trade_account(
-        &mut self,
-        broker_id: &str,
-        account_id: &str,
-        password: &str,
-    ) -> Result<tqsdk_wait::AccountRef> {
-        self.api_mut()
-            .login_trade_account(
-                broker_id,
-                account_id,
-                password,
-                tqsdk_core::TradeAccountType::Future,
-                None,
-            )
-            .await
-            .map_err(Error::from)
-    }
-
     pub fn target_pos(&mut self, account_id: &str, symbol: &str) -> Result<TargetPos> {
         let task = self.host.target_pos(account_id, symbol).build()?;
         Ok(TargetPos::new(task))
@@ -232,7 +209,6 @@ impl Tq {
 /// Builder for [`Tq`].
 #[derive(Debug, Clone)]
 pub struct TqBuilder {
-    market: MarketKind,
     auth: Option<Auth>,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
@@ -242,17 +218,6 @@ impl TqBuilder {
     #[must_use]
     pub fn futures() -> Self {
         Self {
-            market: MarketKind::Futures,
-            auth: None,
-            query_enabled: false,
-            trade_targets: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn stock() -> Self {
-        Self {
-            market: MarketKind::Stock,
             auth: None,
             query_enabled: false,
             trade_targets: Vec::new(),
@@ -323,11 +288,8 @@ impl TqBuilder {
 
     pub async fn connect(self) -> Result<Tq> {
         let auth = self.auth.ok_or(Error::MissingAuth)?;
-        let mut builder = tqsdk_session::SessionClientBuilder::new(auth.user, auth.pass);
-        builder = match self.market {
-            MarketKind::Futures => builder.futures_market(),
-            MarketKind::Stock => builder.stock_market(),
-        };
+        let mut builder =
+            tqsdk_session::SessionClientBuilder::new(auth.user, auth.pass).futures_market();
         if self.query_enabled {
             builder = builder.enable_query();
         }
@@ -374,12 +336,6 @@ impl TargetPos {
     pub async fn wait_target_reached(&self) -> Result<()> {
         self.inner.wait_target_reached().await.map_err(Error::from)
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum MarketKind {
-    Futures,
-    Stock,
 }
 
 #[derive(Debug, Clone)]
