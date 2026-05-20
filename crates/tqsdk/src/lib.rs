@@ -67,6 +67,10 @@ pub enum Error {
         name: &'static str,
         source: env::VarError,
     },
+    EmptyAuthEnv {
+        name: &'static str,
+    },
+    Session(Box<tqsdk_session::SessionFacadeError>),
     Wait(Box<tqsdk_wait::WaitFacadeError>),
     Task(Box<tqsdk_task::TaskError>),
     Data(Box<tqsdk_data::DataError>),
@@ -82,6 +86,10 @@ impl fmt::Display for Error {
             Self::MissingAuthEnv { name, .. } => {
                 write!(f, "missing required environment variable {name}")
             }
+            Self::EmptyAuthEnv { name } => {
+                write!(f, "environment variable {name} must not be empty")
+            }
+            Self::Session(error) => write!(f, "{error}"),
             Self::Wait(error) => write!(f, "{error}"),
             Self::Task(error) => write!(f, "{error}"),
             Self::Data(error) => write!(f, "{error}"),
@@ -94,10 +102,18 @@ impl std::error::Error for Error {
         match self {
             Self::MissingAuth => None,
             Self::MissingAuthEnv { source, .. } => Some(source),
+            Self::EmptyAuthEnv { .. } => None,
+            Self::Session(error) => Some(&**error),
             Self::Wait(error) => Some(&**error),
             Self::Task(error) => Some(&**error),
             Self::Data(error) => Some(&**error),
         }
+    }
+}
+
+impl From<tqsdk_session::SessionFacadeError> for Error {
+    fn from(error: tqsdk_session::SessionFacadeError) -> Self {
+        Self::Session(Box::new(error))
     }
 }
 
@@ -168,6 +184,34 @@ impl Tq {
     #[must_use]
     pub fn history(&self) -> tqsdk_data::DataClient {
         tqsdk_data::DataClient::from_session(self.session().clone())
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn tqkq_account_id(&self) -> Result<String> {
+        let login = self.session().tqkq_login_command().await?;
+        Ok(login.account_id.as_str().to_owned())
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn tqkq_account_id_numbered(&self, number: u8) -> Result<String> {
+        let login = self.session().tqkq_login_command_numbered(number).await?;
+        Ok(login.account_id.as_str().to_owned())
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn target_pos_tqkq(&mut self, symbol: &str) -> Result<TargetPos> {
+        let account_id = self.tqkq_account_id().await?;
+        self.target_pos(&account_id, symbol)
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn target_pos_tqkq_numbered(
+        &mut self,
+        number: u8,
+        symbol: &str,
+    ) -> Result<TargetPos> {
+        let account_id = self.tqkq_account_id_numbered(number).await?;
+        self.target_pos(&account_id, symbol)
     }
 
     pub async fn next(&mut self) -> Result<bool> {

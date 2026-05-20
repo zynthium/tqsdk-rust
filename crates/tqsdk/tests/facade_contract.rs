@@ -149,3 +149,28 @@ fn facade_does_not_expose_premature_stock_or_hardcoded_trade_login() {
         );
     }
 }
+
+#[test]
+fn facade_result_accepts_session_errors() {
+    let error = tqsdk_session::SessionFacadeError::InvalidState("facade contract");
+    let _: tqsdk::Error = error.into();
+}
+
+#[test]
+fn facade_exposes_tqkq_target_helpers_instead_of_literal_account_ids() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read facade source");
+
+    for required_surface in [
+        "pub async fn tqkq_account_id(&self) -> Result<String>",
+        "pub async fn target_pos_tqkq(&mut self, symbol: &str) -> Result<TargetPos>",
+        "pub async fn target_pos_tqkq_numbered(",
+        "tqkq_login_command()",
+        "tqkq_login_command_numbered(number)",
+    ] {
+        assert!(
+            source.contains(required_surface),
+            "missing resolved TQKQ facade helper: {required_surface}"
+        );
+    }
+}
