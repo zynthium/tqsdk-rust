@@ -107,6 +107,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs`、`crates/tqsdk-core/tests/runtime_contract_domain_state.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`CursorLagged`、共享 commit identity 与兼容 surface |
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
+| 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、resolved TQKQ target-position helper、`TargetPos` intent API 和 curated `advanced::*` 下钻命名空间 |
 
 推荐的 V1 回归入口：
 
@@ -178,7 +179,7 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 `cargo package --workspace --no-verify` 是内部制品的 manifest/package metadata gate。
 如果切换到 crates.io 或要求完整 registry verify，必须按依赖顺序发布或验证：
 `tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` / `tqsdk-stream` ->
-`tqsdk-data` -> `tqsdk-task`。
+`tqsdk-data` -> `tqsdk-task` -> `tqsdk`。
 
 `cargo +nightly fuzz build` 只验证 fuzz targets 可编译，不执行长时间 fuzz campaign。
 `fuzz/` 是独立 crate，不属于 workspace members；它只通过 `cfg(fuzzing)` 访问窄 helper，
@@ -202,8 +203,13 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 6. `cargo build -p tqsdk-stream --no-default-features`
 7. `cargo build -p tqsdk-task --no-default-features`
 8. `cargo build -p tqsdk-data --no-default-features`
-9. `cargo test -p tqsdk-core`
-10. `cargo test -p tqsdk-session --no-default-features`
+9. `cargo build -p tqsdk --no-default-features`
+10. `cargo build -p tqsdk --no-default-features --features live`
+11. `cargo build -p tqsdk --no-default-features --features services`
+12. `cargo build -p tqsdk --all-features`
+13. `cargo test -p tqsdk`
+14. `cargo test -p tqsdk-core`
+15. `cargo test -p tqsdk-session --no-default-features`
 
 生产发布联机 smoke 入口：
 

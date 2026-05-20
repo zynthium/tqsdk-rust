@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/tqsdk",
     "crates/tqsdk-core",
     "crates/tqsdk-data",
     "crates/tqsdk-session",
@@ -9,6 +10,7 @@ members = [
 ]
 exclude = ["fuzz"]
 default-members = [
+    "crates/tqsdk",
     "crates/tqsdk-core",
     "crates/tqsdk-data",
     "crates/tqsdk-session",

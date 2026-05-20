@@ -27,6 +27,7 @@ MSRV 为 1.85。当前 workspace 成员：
 
 | Crate | 角色 |
 | --- | --- |
+| `tqsdk` | 面向普通用户的默认 facade / prelude，总入口 |
 | `tqsdk-core` | protocol-complete runtime substrate |
 | `tqsdk-session` | shared session + one-shot request/response/direct-query 层 |
 | `tqsdk-wait` | Python 风格 single-owner `wait_update()` facade |
@@ -42,6 +43,9 @@ MSRV 为 1.85。当前 workspace 成员：
 - `tqsdk-core` 只负责命令、状态、commit/revision、cursor、adapter、
   schema types 与底层 session/runtime contract。不要把 high-level facade、
   direct query convenience、task/data/downloader 语义塞回 core。
+- `tqsdk` 只做对外默认入口、prelude、轻量 ergonomic wrapper 和 curated
+  re-export；不得拥有第二棵状态树、第二套 runtime、第二套 direct query /
+  task / data 实现。
 - `tqsdk-session` 负责 shared session 和 one-shot request/response/direct-query。
   GraphQL、schema、metadata、calendar、ranking、EDB、auth refresh、
   replay one-shot helper 属于这里。

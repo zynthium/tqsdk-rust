@@ -13,6 +13,10 @@
 不同风格的用户 API：Python 风格的 `wait_update()`、Rust async stream、多账户执行工具、
 历史数据下载与离线研究能力。
 
+普通用户优先使用顶层 `tqsdk` crate 和 `tqsdk::prelude::*`。内部
+`tqsdk-core` / `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` /
+`tqsdk-task` / `tqsdk-data` 仍保持独立边界，供高级用户下钻。
+
 这个项目适合下面几类使用者：
 
 - 已熟悉 TQSDK / 天勤生态，希望在 Rust 中编写交易或研究程序的用户
@@ -29,10 +33,11 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 仓库中的 `crates/*/examples` 不只是示例代码，也承担 public API contract 的作用。涉及
 用户可见 API 的改动应保持这些示例清晰、可编译。
 
-## Crate 选择
+## 默认入口与内部 crate
 
 | Crate | 适合场景 |
 | --- | --- |
+| [`tqsdk`](crates/tqsdk) | 默认用户入口：`prelude`、`Tq` 主循环、常用 live refs、target position、history helper，以及 `advanced::*` 下钻入口 |
 | [`tqsdk-core`](crates/tqsdk-core) | 底层 async protocol substrate、状态树、commit/revision、runtime reader、cursor、adapter 和 schema types |
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
@@ -42,7 +47,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 
 一般使用建议：
 
-- 想快速写策略或迁移 Python TQSDK 心智：从 `tqsdk-wait` 开始。
+- 想快速写策略、查询、目标持仓或历史数据：从 `tqsdk` 开始。
+- 已经明确需要单 owner `TqApi` / `wait_update()` 底层控制，或正在迁移现有 wait facade 代码：直接使用 `tqsdk-wait`。
 - 想写 Rust async 服务或多消费者事件处理：从 `tqsdk-stream` 开始。
 - 只做合约、日历、metadata、schema 等一次性查询：使用 `tqsdk-session`。
 - 做历史数据、批量导出、离线研究和 replay：使用 `tqsdk-data`。
@@ -72,7 +78,7 @@ export TQ_AUTH_PASS="your-password"
 
 ```toml
 [dependencies]
-tqsdk-wait = { path = "crates/tqsdk-wait" }
+tqsdk = { path = "crates/tqsdk" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
@@ -80,12 +86,12 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ```toml
 [dependencies]
-tqsdk-wait = { git = "https://github.com/zynthium/tqsdk-rust" }
+tqsdk = { git = "https://github.com/zynthium/tqsdk-rust" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
-根据你的使用场景，把 `tqsdk-wait` 替换为 `tqsdk-session`、`tqsdk-stream`、
-`tqsdk-task` 或 `tqsdk-data`。
+高级用户仍可直接依赖 `tqsdk-session`、`tqsdk-stream`、`tqsdk-wait`、
+`tqsdk-task` 或 `tqsdk-data`，但普通策略和研究入口应先尝试 `tqsdk`。
 
 ## 快速开始
 
@@ -116,6 +122,29 @@ npx skills add https://github.com/zynthium/tqsdk-rust
 ```
 
 ## API 形态示例
+
+### 默认 facade
+
+适合普通策略作者先写出一条低样板主循环：
+
+```rust
+use tqsdk::prelude::*;
+
+let mut tq = Tq::futures()
+    .auth_env()?
+    .trade_target_tqkq()
+    .connect()
+    .await?;
+
+let quote = tq.quote("SHFE.au2602").await?;
+let target = tq.target_pos_tqkq("SHFE.au2602").await?;
+
+while tq.next().await? {
+    if quote.load()?.last_price > 3600.0 {
+        target.set(1)?;
+    }
+}
+```
 
 ### Python 风格 wait facade
 
@@ -197,7 +226,7 @@ let page = client.get_kline_data_page(request).await?;
 
 ## 架构概览
 
-仓库采用“稳定底座 + 可替换 facade”的分层：
+仓库采用“稳定底座 + 可替换 facade”的分层。下图表示用户能力层级，不是 Cargo 依赖图：
 
 ```text
 tqsdk-core
@@ -210,7 +239,14 @@ tqsdk-wait / tqsdk-stream / tqsdk-data
     ^
     |
 tqsdk-task
+    ^
+    |
+tqsdk
 ```
+
+实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
+`tqsdk-wait`、`tqsdk-stream`、`tqsdk-task` 和 `tqsdk-data`；内部能力归属仍由这些
+crate 自己维护。
 
 所有对外可见的状态变化都经过同一套 runtime commit model：
 

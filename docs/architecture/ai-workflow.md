@@ -18,7 +18,7 @@
 
 ## 当前总体架构
 
-当前 workspace 采用“稳定底座 + 可替换 facade”的分层：
+当前 workspace 采用“稳定底座 + 可替换 facade”的分层。下图表示用户能力层级，不是 Cargo 依赖图：
 
 ```text
 tqsdk-core
@@ -31,16 +31,46 @@ tqsdk-wait / tqsdk-stream / tqsdk-data
     ^
     |
 tqsdk-task
+    ^
+    |
+tqsdk
 ```
+
+实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
+`tqsdk-wait`、`tqsdk-stream`、`tqsdk-task` 和 `tqsdk-data`；内部能力归属仍由这些
+crate 自己维护。
 
 设计意图：
 
 - 保留一个 protocol-complete runtime contract，先保证所有远端协议域共享同一套状态、revision、commit、causality 和 cursor 语义。
 - 把用户使用形态放在上层 crate 中演进，避免 core 为某一种 facade 心智提前定型。
+- `tqsdk` 是面向普通用户的默认 facade / prelude；它降低入口复杂度，但不拥有
+  第二套 runtime、状态树、direct query、stream、task 或 data 实现。
 - 让高性能用户可以停留在 `tqsdk-core + tqsdk-session`，让 Python 心智用户使用 `tqsdk-wait`，让多消费者异步系统使用 `tqsdk-stream`，让执行和研究能力分别进入 `tqsdk-task` 与 `tqsdk-data`。
 - 避免回退成单体 `TqApi` crate，也避免把 direct query、task、downloader、research helpers 塞回底层。
 
 ## Crate 职责边界
+
+### `tqsdk`
+
+职责：
+
+- 默认用户入口和 `prelude`
+- `Tq` / `TqBuilder` 这类轻量 ergonomic wrapper
+- curated re-export 和 `advanced::*` 下钻命名空间
+- 组合现有 wait/task/data/session 能力，降低普通策略样板
+
+非职责：
+
+- runtime contract、状态树、commit/revision/cursor
+- direct query / metadata 的真实实现
+- stream fan-out 的真实实现
+- task/data 能力下沉或重新实现
+
+设计原因：
+
+- 普通用户应该先看到一个 crate 和一个主循环，而不是先学习六个内部 crate。
+- 内部 crate 边界仍然是架构防线；`tqsdk` 只是对外入口，不是物理单体化。
 
 ### `tqsdk-core`
 

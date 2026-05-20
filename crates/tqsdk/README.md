@@ -8,7 +8,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `Tq::next()` 主循环
 - 常用 wait-style live refs
 - `TargetPos` 轻量 wrapper
-- `DataClient` history helper
+- `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 
 ## 示例
@@ -18,23 +18,30 @@ use tqsdk::prelude::*;
 
 # async fn run() -> tqsdk::Result<()> {
 let mut tq = Tq::futures()
-    .auth("demo-user", "demo-pass")
+    .auth_env()?
     .trade_target_tqkq()
     .connect()
     .await?;
 
 let quote = tq.quote("SHFE.au2602").await?;
-let mut target = tq.target_pos("TQKQ", "SHFE.au2602")?;
+let target = tq.target_pos_tqkq("SHFE.au2602").await?;
 
 while tq.next().await? {
     let q = quote.load()?;
     if q.last_price > 3600.0 {
-        target.set(1).await?;
+        target.set(1)?;
     }
 }
 # Ok(())
 # }
 ```
+
+## Features
+
+- `default = ["live", "services"]`：默认用户入口，包含 live 连接与服务查询能力。
+- `live`：向内部 `session` / `wait` / `stream` / `task` / `data` crate 传播 live feature，并启用 TQ auth 派生的 TQKQ helper。
+- `services`：向内部 crate 传播服务查询相关 HTTP 能力。
+- `default-features = false`：保留 facade 类型和不依赖 live auth 的组合入口；live-only helper 不参与编译。
 
 高级用户可以继续使用：
 

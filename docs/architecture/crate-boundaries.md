@@ -1,18 +1,18 @@
 # 当前 Crate 边界审计
 
 ## 文档定位
-本文档用于审计当前 workspace 五个已落地子 crate 的职责边界是否合理，以及它们是否足以承载后续继续对齐 `tqsdk-python` 与现有 `tqsdk-rs` 的能力。
+本文档用于审计当前 workspace 已落地 crate 的职责边界是否合理，以及它们是否足以承载后续继续对齐 `tqsdk-python` 与现有 `tqsdk-rs` 的能力。
 
 讨论的不是“现在还能加什么功能”，而是下面几个更关键的问题：
 
 - 当前边界是否符合高性能底座的目标
 - 常见用户场景会不会把能力推向错误的 crate
-- 哪些能力应继续留在当前五层
+- 哪些能力应继续留在当前内部语义层
 - 哪些能力应明确后移到未来新 crate
 
 ## 当前结论
 
-当前五层边界整体判断为：
+当前边界整体判断为：
 
 - 方向正确
 - 可以继续稳定演进
@@ -21,13 +21,15 @@
 
 一句话总结：
 
+- `tqsdk` 是对外默认 facade / prelude，不是内部物理合并
 - `tqsdk-core` 是 protocol-complete runtime substrate
 - `tqsdk-session` 是 shared session + one-shot request/response
 - `tqsdk-wait` 是 Python 风格单推进点的 continuous-consumption facade
 - `tqsdk-stream` 是 shared-session multi-consumer stream facade
 - `tqsdk-task` 是高层执行工具与任务编排层
+- `tqsdk-data` 是 research/offline data、history、cache、export 能力层
 
-这五层依然是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。
+内部层依然是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。`tqsdk` 只把这些能力组织成默认用户入口。
 
 ## 审计标准
 
@@ -38,6 +40,31 @@
 - 是否让 Python 风格用户可以获得稳定的 `wait_update()` 心智
 - 是否避免把研究工具、执行任务系统和 protocol substrate 混在一起
 - 是否为 `tqsdk-stream`、`tqsdk-task`、downloader 等能力留出清晰落点
+
+## `tqsdk`
+
+### 正确职责
+
+`tqsdk` 应继续承担：
+
+- 默认安装入口
+- `prelude`
+- `Tq` 主循环和常用 live refs 的轻量包装
+- `TargetPos` / history helper 这类低样板组合入口
+- `advanced::*` 下钻到底层 crate
+
+### 不应承担的职责
+
+`tqsdk` 不应继续吸收：
+
+- runtime contract 或状态树实现
+- direct query / metadata 的真实实现
+- stream fan-out 的真实实现
+- task/data 内部状态机或存储能力
+
+### 判断
+
+这一层解决的是用户入口复杂度，不是重新划分内部架构。它可以存在，但必须保持薄。
 
 ## `tqsdk-core`
 
@@ -447,12 +474,14 @@ Python 的问题是：
 
 ## 当前总判断
 
-保持当前三层边界，不建议回退或重划：
+保持当前边界，不建议回退或重划：
 
+- `tqsdk` 继续做默认 facade / prelude
 - `tqsdk-core` 继续只做底层统一 contract
 - `tqsdk-session` 继续做 shared session + one-shot control/query
 - `tqsdk-wait` 继续做 Python 风格单推进点 continuous-consumption facade
 - `tqsdk-stream` 继续做多消费者 continuous-consumption facade
 - `tqsdk-task` 继续做执行工具层
+- `tqsdk-data` 继续做 research/offline data、history、cache、export 能力层
 
-接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固 `stream/task`，并在合适时新增 `data/research` 等更上层 crate。
+接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `stream/task/data` 能力边界。

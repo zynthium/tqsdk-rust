@@ -95,6 +95,11 @@ V1 是：
 
 在 core 之上的第二层分拆也已经开始落地：
 
+- `tqsdk`
+  - 默认用户入口 crate
+  - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
+  - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/stream/task/data
+  - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
 - `tqsdk-session`
   - shared session shell
   - lazy establish + route / pending-route 驱动原语
@@ -281,6 +286,7 @@ V1 是：
    - callback
    - 都只是消费 `RuntimeReader` / `UpdateCursor` 的后续适配层
 6. `user facades`
+   - `tqsdk::Tq`
    - `TqApi`
    - typed views
    - task/tooling
