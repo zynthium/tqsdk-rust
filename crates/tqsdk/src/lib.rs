@@ -438,5 +438,37 @@ impl TradeTarget {
 }
 
 fn read_env(name: &'static str) -> Result<String> {
-    env::var(name).map_err(|source| Error::MissingAuthEnv { name, source })
+    let value = env::var(name).map_err(|source| Error::MissingAuthEnv { name, source })?;
+    parse_env_value(name, value)
+}
+
+fn parse_env_value(name: &'static str, value: String) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::EmptyAuthEnv { name });
+    }
+    Ok(trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Error, parse_env_value};
+
+    #[test]
+    fn parse_env_value_trims_non_empty_credentials() {
+        assert_eq!(
+            parse_env_value("TQ_AUTH_USER", "  demo-user  ".to_string()).unwrap(),
+            "demo-user"
+        );
+    }
+
+    #[test]
+    fn parse_env_value_rejects_empty_credentials() {
+        assert!(matches!(
+            parse_env_value("TQ_AUTH_PASS", "   ".to_string()),
+            Err(Error::EmptyAuthEnv {
+                name: "TQ_AUTH_PASS"
+            })
+        ));
+    }
 }
