@@ -174,3 +174,33 @@ fn facade_exposes_tqkq_target_helpers_instead_of_literal_account_ids() {
         );
     }
 }
+
+#[test]
+fn target_pos_wrapper_uses_sync_intent_api_and_no_direct_wait() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read facade source");
+
+    for expected_surface in [
+        "pub fn set(&self, volume: i64) -> Result<()>",
+        "pub fn close(&self) -> Result<()>",
+        "pub fn is_finished(&self) -> bool",
+        "pub fn last_error(&self) -> Option<tqsdk_task::TaskError>",
+        "pub fn execution_report(&self) -> tqsdk_task::TargetPosTaskExecutionReport",
+    ] {
+        assert!(
+            source.contains(expected_surface),
+            "missing explicit target-position wrapper surface: {expected_surface}"
+        );
+    }
+
+    for removed_surface in [
+        "pub async fn set(&mut self",
+        "pub async fn close(&mut self",
+        "pub async fn wait_target_reached",
+    ] {
+        assert!(
+            !source.contains(removed_surface),
+            "misleading async target-position surface remains: {removed_surface}"
+        );
+    }
+}

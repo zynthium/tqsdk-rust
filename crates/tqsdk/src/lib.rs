@@ -369,16 +369,32 @@ impl TargetPos {
         self.inner
     }
 
-    pub async fn set(&mut self, volume: i64) -> Result<()> {
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    #[must_use]
+    pub fn current_target_volume(&self) -> Option<i64> {
+        self.inner.current_target_volume()
+    }
+
+    #[must_use]
+    pub fn last_error(&self) -> Option<tqsdk_task::TaskError> {
+        self.inner.last_error()
+    }
+
+    #[must_use]
+    pub fn execution_report(&self) -> tqsdk_task::TargetPosTaskExecutionReport {
+        self.inner.execution_report()
+    }
+
+    pub fn set(&self, volume: i64) -> Result<()> {
         self.inner.set_target_volume(volume).map_err(Error::from)
     }
 
-    pub async fn close(&mut self) -> Result<()> {
-        self.set(0).await
-    }
-
-    pub async fn wait_target_reached(&self) -> Result<()> {
-        self.inner.wait_target_reached().await.map_err(Error::from)
+    pub fn close(&self) -> Result<()> {
+        self.set(0)
     }
 }
 
