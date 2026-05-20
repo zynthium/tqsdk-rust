@@ -1,0 +1,43 @@
+[package]
+name = "tqsdk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "User-facing facade crate for tqsdk-rust"
+documentation = "https://docs.rs/tqsdk"
+readme = "README.md"
+license.workspace = true
+repository = "https://github.com/zynthium/tqsdk-rust"
+
+[features]
+default = ["live", "services"]
+live = [
+    "tqsdk-data/live",
+    "tqsdk-session/live",
+    "tqsdk-stream/live",
+    "tqsdk-task/live",
+    "tqsdk-wait/live",
+]
+services = [
+    "tqsdk-data/services",
+    "tqsdk-session/services",
+    "tqsdk-stream/services",
+    "tqsdk-task/services",
+    "tqsdk-wait/services",
+]
+
+[dependencies]
+tokio.workspace = true
+tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
+tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = false }
+tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
+tqsdk-stream = { path = "../tqsdk-stream", version = "0.1.0", default-features = false }
+tqsdk-task = { path = "../tqsdk-task", version = "0.1.0", default-features = false }
+tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
+
+[[example]]
+name = "api_contract_s33_default_facade"
+required-features = ["live"]
+
+[lints]
+workspace = true

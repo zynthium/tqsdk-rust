@@ -204,3 +204,27 @@ fn target_pos_wrapper_uses_sync_intent_api_and_no_direct_wait() {
         );
     }
 }
+
+#[test]
+fn default_facade_contract_example_exists() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/api_contract_s33_default_facade.rs"
+    );
+    let source = std::fs::read_to_string(path).expect("read default facade example");
+
+    for required in [
+        "use tqsdk::prelude::*;",
+        "Tq::futures()",
+        ".auth_env()?",
+        ".trade_target_tqkq()",
+        "target_pos_tqkq(\"SHFE.au2602\").await?",
+        "while tq.next().await?",
+        "target.set(1)?",
+    ] {
+        assert!(
+            source.contains(required),
+            "default facade example missing required flow fragment: {required}"
+        );
+    }
+}
