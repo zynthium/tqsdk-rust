@@ -12,9 +12,12 @@ It is the gate for public API narrowing work.
 | --- | --- |
 | `keep` | Keep public; current architecture/docs/examples depend on it. |
 | `deprecate` | Keep public now; design a migration/deprecation path first. |
+| `keep-advanced` | Keep public but document outside the ordinary `tqsdk`/prelude path. |
 | `internalize` | Candidate to remove from public re-exports. |
 | `needs-arch-change` | Requires architecture/docs/examples update before code changes. |
+| `defer` | Valid concept that should remain a plan, archived sketch, or future crate/tooling scope until evidence justifies a stable contract. |
 | `split-plan` | Too broad for a symbol-level decision; create a narrower plan. |
+| `remove-from-active-docs` | Remove or rewrite active docs that present this as a current SDK promise. |
 | `removed` | Removed from public API after architecture/docs/examples were rewritten. |
 
 ## Summary
@@ -73,3 +76,19 @@ Result:
 
 - Status: pass
 - Notes: Workspace examples compiled successfully on 2026-04-29.
+
+## 2026-05-22 SDK Overdesign Audit Pass
+
+| Crate | Symbol or Group | Current Export | Evidence | Disposition | Required Follow-up |
+| --- | --- | --- | --- | --- | --- |
+| `tqsdk` | `Tq`, `TqBuilder`, `TargetPos`, `prelude` | Root facade | Ordinary users need one obvious entrypoint. | `keep` | Keep thin and scenario-backed by default facade examples. |
+| `tqsdk` | `advanced::*` curated aliases | Root module | Useful escape hatch, but not a full replacement for sibling crate dependencies. | `keep-advanced` | Document that full-power users should depend on sibling crates directly. |
+| `tqsdk-session` | Direct query, metadata, schema, service query helpers | Crate root / traits | One-shot request/response belongs here, not in wait or stream. | `keep` | Keep out of wait/stream docs except through `session()` escape hatch. |
+| `tqsdk-wait` | `TqApi`, `wait_update`, `quote(s)`, live refs, order helpers | Crate root | Canonical single-owner strategy and Python-style stable snapshot path. | `keep` | Add wait-side changed quote iteration plan for full-universe single-consumer workloads. |
+| `tqsdk-stream` | `quote_batches`, commit stream, filters, lag diagnostics, health/shutdown | Crate root | Genuinely different async multi-consumer consumption model. | `keep-advanced` | Present as advanced integration, not default quote-performance path. |
+| `tqsdk-stream` | Broad object/event stream families | Crate root | Potentially useful but broad for 0.1 stabilization. | `keep-advanced` | Keep outside first-read docs and review before semver stabilization. |
+| `tqsdk-task` | `TargetPosTask`, ownership guard, basic risk, typed task order builder, test harness, TqSim | Crate root | Mature trading workflow support and Python benchmark parity. | `keep-advanced` | Expose ordinary thin wrappers through `tqsdk` only for common strategy tasks. |
+| `tqsdk-task` | Supervisor/deployment/desk/telemetry/platform-like surfaces | Crate root | Useful foundations but risk reading as a production platform. | `keep-advanced` | Remove wording that implies OMS, daemon, HTTP, GUI, durable audit, or managed sink ownership. |
+| `tqsdk-data` | History page/series/download, CSV export, Greeks, cache/replay | Crate root | Research/offline workflow support and Python benchmark parity. | `keep-advanced` | Keep opt-in; do not make live facades depend on history cache in hot paths. |
+| Active docs | `MarketCacheStreamWriter`, live cache pipe, managed sink/WAL/journal claims | Removed or stale | These contradict current stream/data/task boundaries. | `remove-from-active-docs` | Rewrite active docs; archived historical sketches may keep them as historical context. |
+| Architecture docs | `tqsdk-api-wait`, `tqsdk-api-stream`, historical V1 facade wording | Active docs | Names drifted after actual crate names and facade work landed. | `remove-from-active-docs` | Rename to `tqsdk-wait` / `tqsdk-stream` and clarify historical context. |
