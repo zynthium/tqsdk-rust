@@ -85,3 +85,45 @@ Architecture docs and current code are authoritative. Existing review docs, scen
 | README quickly shows market, history, trade, builder, callback, channel, and stream usage | Improve `tqsdk-rust` first-read examples, but avoid presenting all paradigms as equal defaults. |
 | Broad root re-exports expose auth, WebSocket, logger, data manager, subscription, and transport-like concerns | Do not copy this; keep implementation details out of the default facade. |
 | Callback/channel/stream options appear together in the ordinary path | Use as a cautionary example; `tqsdk-rust` should name one canonical path per workflow. |
+
+## Canonical High-Performance API Paths
+
+| Workflow | Canonical public path | Advanced escape hatch | Paths to de-emphasize in first-read docs |
+| --- | --- | --- | --- |
+| Ordinary strategy setup | `tqsdk::prelude::*`, `Tq::futures().auth_env().connect().await?` | `tqsdk-wait::TqApiBuilder` for users who want direct wait facade ownership | Starting with `tqsdk-core`, raw session builders, or stream builders. |
+| Single-owner quote subscription | `Tq::quote` / `Tq::quotes` through the default facade when available, otherwise `tqsdk-wait::TqApi::quote(s)` | `SessionClient::subscribe_quotes` plus `RuntimeReader` for low-level hot-path users | `tqsdk-stream` examples that imply stream is required for quote throughput. |
+| Full-universe single-consumer quote workload | `tqsdk-wait::TqApi::quotes` plus step-bound changed quote iteration | `SessionClient + RuntimeReader::read_market_state()` for custom cursor loops | Per-commit full symbol scans, duplicate raw-session loops in ordinary docs, and stream-only performance framing. |
+| Multi-consumer quote/event pipelines | `tqsdk-stream::TqStream::quote_batches` | `commit_stream` plus filters and `RuntimeReader` | `tqsdk-wait` loops with user-managed fan-out channels. |
+| Direct metadata/query | `tqsdk-session::SessionClient` query helpers | Raw GraphQL value query in `tqsdk-session` | Duplicating direct query helpers into wait or stream. |
+| Kline/tick live serials | `tqsdk-wait::TqApi::kline` / `tick` for single-owner strategies | `tqsdk-stream` row-batch streams for async integration | `tqsdk-data` history/cache docs as live serial source. |
+| Order insert/cancel in a strategy loop | `tqsdk::Tq` thin wrappers where present, otherwise `tqsdk-wait` typed order helpers | `tqsdk-task::TaskHost::orders` when task ownership/risk is needed; raw session command only for low-level users | Multiple equivalent root/wait/task examples with no semantic distinction. |
+| Target position | `tqsdk::TargetPos` thin wrapper for ordinary TQKQ flow; `tqsdk-task::TargetPosTask` for explicit task users | `TaskHost` for advanced ownership and scheduling | Raw order loops in beginner docs as the recommended target-position path. |
+| History download and research data | `tqsdk::Tq::history()` thin helper for ordinary users; `tqsdk-data::DataClient` for explicit data workflows | Session-backed `DataClient::from_session` for shared auth/session | Direct query helpers used as substitutes for data download/cache APIs. |
+| Backtest/replay/local sim | `tqsdk-task` and `tqsdk-data` examples for explicit offline workflows | Custom replay into `tqsdk-core`/`tqsdk-session` only for SDK developers | Presenting replay/deployment/supervisor as default first-run SDK usage. |
+
+## Wait / Stream Boundary Decision
+
+`tqsdk-stream` should not be justified by claiming it is the faster way to subscribe to all quotes. If `tqsdk-wait` can expose changed quote batches or step-bound changed snapshots without scanning all symbols, then full-universe quote subscription for one strategy loop belongs in the wait/default path.
+
+`tqsdk-stream` remains necessary for workloads with different semantics:
+
+- independent consumers that must advance at their own pace;
+- bounded fan-out with explicit lag diagnostics;
+- path/domain/object/field filters;
+- commit/event pipelines;
+- async service composition with `futures::Stream`;
+- health, reconnect monitoring, retry policy, and graceful shutdown primitives for service integration.
+
+The rule is consumption model first, throughput second. Single-owner stable snapshot consumers should start with `tqsdk`/`tqsdk-wait`; multi-consumer async systems should use `tqsdk-stream`.
+
+## Accepted Wait-Side Performance Follow-Up
+
+The audit should create a follow-up source plan for wait quote iteration only after this docs batch lands. Candidate public shapes to evaluate:
+
+| Candidate | Purpose | Constraint |
+| --- | --- | --- |
+| `QuoteSet::changed(&WaitStep)` | Iterate changed quote refs for the current step. | Must use the step commit/change set and avoid scanning every subscribed symbol. |
+| `QuoteSet::changed_snapshots(&WaitStep)` | Return owned snapshots for changed symbols in the current step. | Must decode only touched symbols and preserve deterministic symbol order. |
+| `WaitStep::changed_quote_symbols()` | Expose symbols touched by the current step. | Must not expose raw internal state paths as the ordinary API. |
+
+These APIs should be additive and measured against the current `tqsdk-stream::QuoteBatchSubscription` performance shape before stabilization.
