@@ -65,8 +65,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
     `TradingDeskOrderStatusReport` / `TradingDeskOrderState`，不要求用户解析字符串
   - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 提供 typed
     本进程 cycle marker；marker 不完整时 `report()` 返回 `None`
-  - 慢日志、WAL 和 journal 使用 `tqsdk-stream` sidecar managed sink 组合，sink
-    不进入 profile public API
+  - 慢日志、WAL、journal 和 audit sidecar 由调用方或上层服务拥有，不进入
+    profile public API，也不由 `tqsdk-stream` 托管
 - `ExecutionGroup`
   - 通过 typed group id 管理两腿订单 intent
   - 所有腿在提交前统一经过 ownership guard、risk gate 和本地参数校验
@@ -267,8 +267,8 @@ owner 冲突、手动下单 guard 和 scheduler 通过 `TaskHost::wait_update()`
 
 `api_contract_s31_low_latency_trading_desk.rs` 单独覆盖低延迟柜台 thin profile：
 session 自驱动 quote hot path、同 revision market/trade 分区读、risk precheck、
-typed order ticket/status、typed latency cycle，以及 `tqsdk-stream` sidecar managed
-sink / WAL / journal 的慢消费者隔离。它默认不会发单；只有显式设置
+typed order ticket/status 和 typed latency cycle。慢日志、WAL、journal、落盘重试、
+audit sidecar 和跨进程恢复由调用方或上层服务拥有，不由 profile 托管。它默认不会发单；只有显式设置
 `TQ_DESK_ALLOW_ORDER=1` 才会尝试提交示例订单。
 
 `target_pos.rs`、`target_pos_scheduler.rs` 和 live API contract examples 运行时需要：

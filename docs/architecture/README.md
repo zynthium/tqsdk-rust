@@ -154,8 +154,9 @@ V1 是：
   - Python-compatible local backtest sim foundation
   - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
     `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
-    latency/order status report；慢日志、落盘和 audit sidecar 保持在 SDK 外，不进入
-    profile public API
+    latency/order status report；慢日志、WAL、journal、落盘重试、audit sidecar
+    和跨进程恢复由调用方或上层服务拥有，`TradingDeskProfile` 不持有 sink、WAL、
+    journal 或 cache writer
   - public fake market / fake broker test harness
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
 - `tqsdk-data`

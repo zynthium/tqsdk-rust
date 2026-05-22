@@ -233,10 +233,10 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
 - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 也已经落在 `tqsdk-data`
-- `tqsdk-data` 不再提供 `stream` feature、`MarketCacheStreamWriter` 或
-  `LiveHistoryCacheWriter`；live diff consumption 与 hot-path persistence 留在
-  `tqsdk-stream` / 调用方 sidecar，Python-compatible mmap history cache 只服务
-  `get_*_data_series` 的离线时间范围读取
+- `MarketCacheStreamWriter`、live stream pipe、stream feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
+- `tqsdk-data` 不再提供 `LiveHistoryCacheWriter`；live diff consumption 留在
+  `tqsdk-stream`，hot-path persistence 由调用方或独立上层服务拥有，Python-compatible
+  mmap history cache 只服务 `get_*_data_series` 的离线时间范围读取
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界
@@ -295,5 +295,5 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
 2. 在此基础上继续保持 `DataClient + data_page + data_series + data_download` 也只是底层 substrate
-3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter、offline market cache record/replay 和单进程 live stream pipe 已完成，后续重点是路径管理型 materialization，跨进程 cache 管理服务不作为当前核心 public API 推进
+3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter 和 offline market cache record/replay 已完成，后续重点是路径管理型 materialization，跨进程 cache 管理服务不作为当前核心 public API 推进
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface

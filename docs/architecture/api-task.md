@@ -120,8 +120,7 @@
     返回 `TradingDeskOrderStatusReport`
   - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 是 typed
     本进程 latency marker API，缺 marker 时返回 `None`
-  - 慢日志、WAL、journal 和 audit sidecar 由用户或上层服务在 SDK 外拥有，不进入
-    trading desk profile 的 public API
+  - 慢日志、WAL、journal、落盘重试、audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有 sink、WAL、journal 或 cache writer。
 - `TaskHost::wait_update()` 现在把“用户显式调用了一次推进点”和“底层本轮是否收到新 diff”区分开：
   - 即使内层 `api.wait_update()` 返回 `false`，task/scheduler 也会在当前快照上推进一次
 - `TargetPosScheduler` 已能驱动内部 `TargetPosTask`
@@ -322,8 +321,7 @@ while let Some(event) = desk.next_market_event(deadline).await? {
   command 关联，不创建 task 私有订单状态树。
 - typed latency report 只记录 SDK 本进程 `Instant` 与 runtime revision，不承诺
   交易所或服务器时钟同步延迟。
-- 慢消费者隔离和 durable audit sidecar 属于用户或上层服务边界；profile public API
-  不持有 sink、WAL 或 journal。
+- 慢日志、WAL、journal、落盘重试、audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有 sink、WAL、journal 或 cache writer。
 
 ### root host
 

@@ -301,8 +301,9 @@
 上层集成路径，不代表 cache storage 进入 task，也不代表 strategy execution
 进入 data。
 S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
-但不复用 `TaskHost::wait_update()` hot path，也不把 durable sidecar 塞进 profile
-public API。
+但不复用 `TaskHost::wait_update()` hot path。慢日志、WAL、journal、落盘重试、
+audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有
+sink、WAL、journal 或 cache writer。
 
 ### 不应吸收的能力
 
@@ -485,3 +486,5 @@ Python 的问题是：
 - `tqsdk-data` 继续做 research/offline data、history、cache、export 能力层
 
 接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `stream/task/data` 能力边界。
+
+2026-05-22 overdesign audit conclusion: the crate split remains justified, but the first-read product surface must be smaller than the internal workspace. `tqsdk` / `tqsdk-wait` carry the ordinary strategy path; `tqsdk-stream` / `tqsdk-task` / `tqsdk-data` should be documented as advanced or opt-in unless a scenario clearly belongs in the default SDK path.

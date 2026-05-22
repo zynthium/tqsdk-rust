@@ -150,6 +150,8 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 `MarketCacheReplay` 定义了标准 `Quote` / `Kline` / `Tick` payload 的离线
 cache record 与 replay foundation。
 
+当前 active public API 不包含 `MarketCacheStreamWriter`、live stream pipe、跨进程 cache service、daemon/supervisor orchestration 或 hot-path live cache dependency。
+
 `KlineDataSeries::into_market_cache_events` /
 `KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned
 history series 接到 replay foundation 上，用户不需要手写 cache events。
