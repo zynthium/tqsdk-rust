@@ -8,22 +8,11 @@
 
 ## 项目定位
 
-`tqsdk-rust` 是 Rust 版 TQSDK 的 Cargo workspace。它把底层协议、session、
-状态树、commit/revision 和 cursor 语义收敛到同一套 runtime contract，再在上层提供
-不同风格的用户 API：Python 风格的 `wait_update()`、Rust async stream、多账户执行工具、
-历史数据下载与离线研究能力。
+普通用户优先从顶层 `tqsdk` crate 开始：连接账号、订阅行情、等待更新、读取账户/持仓、下单或设置目标持仓、按需访问历史数据。内部 crate 仍保持独立边界，但第一次阅读不需要先理解整个 workspace taxonomy。
 
-普通用户优先使用顶层 `tqsdk` crate 和 `tqsdk::prelude::*`。内部
-`tqsdk-core` / `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` /
-`tqsdk-task` / `tqsdk-data` 仍保持独立边界，供高级用户下钻。
+`tqsdk-rust` 的核心约束是所有可见状态变化都经过同一套 runtime state tree、commit/revision 和 cursor 语义。`tqsdk` 只是默认 facade；它不会复制 direct query、stream、task 或 data 实现。
 
-这个项目适合下面几类使用者：
-
-- 已熟悉 TQSDK / 天勤生态，希望在 Rust 中编写交易或研究程序的用户
-- 需要 `wait_update()` 心智，但希望获得 Rust 类型系统和 async 能力的策略开发者
-- 需要多个异步消费者共享同一 live session 的服务端程序
-- 需要订单任务、风控检查、策略 host、可测试 fake market / fake broker 的交易工具开发者
-- 希望直接使用底层 runtime、状态树和 commit/cursor 模型搭建自定义 facade 的 SDK 开发者
+高级用户可以按需要下钻：
 
 ## 当前状态
 
@@ -33,7 +22,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 仓库中的 `crates/*/examples` 不只是示例代码，也承担 public API contract 的作用。涉及
 用户可见 API 的改动应保持这些示例清晰、可编译。
 
-## 默认入口与内部 crate
+## 默认入口与高级 crate
 
 | Crate | 适合场景 |
 | --- | --- |
@@ -47,13 +36,13 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 
 一般使用建议：
 
-- 想快速写策略、查询、目标持仓或历史数据：从 `tqsdk` 开始。
-- 已经明确需要单 owner `TqApi` / `wait_update()` 底层控制，或正在迁移现有 wait facade 代码：直接使用 `tqsdk-wait`。
-- 想写 Rust async 服务或多消费者事件处理：从 `tqsdk-stream` 开始。
-- 只做合约、日历、metadata、schema 等一次性查询：使用 `tqsdk-session`。
-- 做历史数据、批量导出、离线研究和 replay：使用 `tqsdk-data`。
-- 做订单任务、仓位目标、策略调度、风控和测试 harness：使用 `tqsdk-task`。
-- 需要自己搭 facade 或极低层控制：使用 `tqsdk-core + tqsdk-session`。
+- 普通策略、目标持仓和轻量历史访问：先用 `tqsdk`。
+- 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
+- 需要多个异步消费者、fan-out、lag diagnostics 或事件管道：用 `tqsdk-stream`。
+- 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
+- 做历史数据、批量导出、离线 cache 和 replay：用 `tqsdk-data`。
+- 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
+- 自建 facade 或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 
 ## 环境要求
 
@@ -95,6 +84,27 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ## 快速开始
 
+最小普通策略入口：
+
+```rust
+use tqsdk::prelude::*;
+
+let mut tq = Tq::futures()
+    .auth_env()?
+    .trade_target_tqkq()
+    .connect()
+    .await?;
+
+let quote = tq.quote("SHFE.au2602").await?;
+let target = tq.target_pos_tqkq("SHFE.au2602").await?;
+
+while tq.next().await? {
+    if quote.load()?.last_price > 3600.0 {
+        target.set(1)?;
+    }
+}
+```
+
 如果只想先验证不依赖真实账号和网络的策略测试 harness，可以运行：
 
 ```bash
@@ -122,29 +132,6 @@ npx skills add https://github.com/zynthium/tqsdk-rust
 ```
 
 ## API 形态示例
-
-### 默认 facade
-
-适合普通策略作者先写出一条低样板主循环：
-
-```rust
-use tqsdk::prelude::*;
-
-let mut tq = Tq::futures()
-    .auth_env()?
-    .trade_target_tqkq()
-    .connect()
-    .await?;
-
-let quote = tq.quote("SHFE.au2602").await?;
-let target = tq.target_pos_tqkq("SHFE.au2602").await?;
-
-while tq.next().await? {
-    if quote.load()?.last_price > 3600.0 {
-        target.set(1)?;
-    }
-}
-```
 
 ### Python 风格 wait facade
 
