@@ -21,7 +21,7 @@
 
 ## 设计目标
 
-`tqsdk-stream` 的存在理由是异步多消费者消费模型，不是普通单消费者 quote 订阅更快。单 owner 策略即使订阅全市场，也应优先使用 `tqsdk` / `tqsdk-wait` 的高性能 changed quote path；只有当调用方需要独立 consumer 进度、bounded fan-out、lag diagnostics、过滤器、事件管道或 `futures::Stream` 组合时，才应把 `tqsdk-stream` 作为主要入口。
+`tqsdk-stream` 的存在理由是异步多消费者消费模型，不是普通单消费者 quote 订阅更快。单 owner 策略即使订阅全市场，也应优先使用 `tqsdk` / `tqsdk-wait` 的 `quotes(...)` 路径；no-scan changed quote batch 是 wait facade 的已接受后续能力，而不是使用 stream 的理由。只有当调用方需要独立 consumer 进度、bounded fan-out、lag diagnostics、过滤器、事件管道或 `futures::Stream` 组合时，才应把 `tqsdk-stream` 作为主要入口。
 
 - 提供 Rust async-native 的连续 commit 消费形状
 - 保持和 `tqsdk-wait` 相同的底层语义来源：`RuntimeReader + UpdateCursor + SessionClient`
