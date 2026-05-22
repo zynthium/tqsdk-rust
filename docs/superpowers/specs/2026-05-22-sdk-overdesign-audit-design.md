@@ -1,0 +1,323 @@
+# TQSDK Rust SDK Overdesign Audit Design
+
+## Context
+
+This branch is evaluating whether the current `tqsdk-rust` SDK public API is on
+the right maturity path or has drifted into overdesign.
+
+The user asked for an overall judgment, not only a crate-by-crate code audit.
+The audit must balance:
+
+- Rust SDK quality norms.
+- Trading SDK domain requirements.
+- Evidence from the current code, architecture docs, scenario contracts, and
+  examples.
+- External calibration from mature or adjacent libraries, including the user
+  supplied public API reference:
+  <https://github.com/pseudocodes/tqsdk-rs/tree/main/tqsdk-rs>.
+
+This is a design for the audit and iteration plan. It does not authorize broad
+code changes yet.
+
+## Goal
+
+Produce a decision-grade review that answers four questions:
+
+1. Is the current SDK genuinely overdesigned, or is some complexity justified by
+   the trading SDK domain?
+2. Which public APIs and docs should be kept, hidden as advanced, deferred, or
+   removed from active documentation?
+3. What should the default user path of an excellent Rust TQSDK look like?
+4. What iteration plan should this branch follow before attempting more public
+   API changes?
+
+## User Decisions Already Captured
+
+- Output should start with an overall SDK judgment.
+- The review lens should balance Rust SDK best practices with trading SDK
+  domain fit.
+- The result should identify complexity to cut/defer and define how to mature
+  the SDK into an excellent product.
+- The preferred approach is: excellent SDK standards plus a subtraction
+  roadmap.
+- The public API reference list should include
+  `pseudocodes/tqsdk-rs/tree/main/tqsdk-rs`.
+
+## Evidence Model
+
+The audit will use four evidence classes.
+
+### 1. Current Repository Contracts
+
+Primary evidence:
+
+- `AGENTS.md`
+- `README.md`
+- `docs/architecture/*`
+- `crates/*/README.md`
+- `crates/*/src/lib.rs`
+- `crates/*/examples/api_contract_s*.rs`
+- `docs/reviews/public-api-scenario-review.md`
+- `docs/reviews/public-api-disposition-matrix.md`
+- `docs/scenarios/user-layer-iteration-plan.md`
+- Existing verification results from this branch.
+
+Architecture docs and current code are authoritative. Review docs, scenario
+docs, and superpowers plans are evidence, not authority.
+
+### 2. Rust SDK Quality Criteria
+
+An excellent Rust SDK should have:
+
+- A small, obvious root API for first-time users.
+- Clear crate ownership and no duplicate runtime/state paths.
+- Feature flags that match user choices without surprising compile failures.
+- Error types that are useful without leaking implementation details.
+- Examples that double as stable API contracts.
+- Advanced escape hatches, but not in the ordinary prelude.
+- Async behavior that is explicit about runtime expectations and cancellation.
+- Semver discipline around public exports.
+
+### 3. Trading SDK Domain Criteria
+
+Trading SDKs need more complexity than ordinary data clients. The audit should
+not cut complexity that protects these invariants:
+
+- A stable state snapshot after each update.
+- Reconnect/resync barriers before exposing incomplete state.
+- Explicit order intent, idempotency, and command lifecycle.
+- Separate one-shot metadata queries from continuous live consumption.
+- Clear live, historical, replay, and testing boundaries.
+- Account, position, and order ownership that prevents accidental cross-account
+  or same-symbol task conflicts.
+- Safe defaults for real-money operations.
+
+### 4. External Public API Calibration
+
+The user-supplied reference `pseudocodes/tqsdk-rs` is useful as a contrast, not
+as a direct template.
+
+Observed strengths:
+
+- A single `Client` / `ClientBuilder` entrypoint is easy to explain.
+- README examples show market, history, trade, builder, callback, channel, and
+  stream usage quickly.
+- The crate demonstrates how a compact first screen can lower user friction.
+
+Observed pitfalls:
+
+- The root re-exports `DataManager`, auth, WebSocket, logger, subscription
+  internals, and broad domain types, which makes implementation details part of
+  the public contract.
+- It offers callback, channel, and stream shapes in the ordinary path, which can
+  blur the recommended default.
+- Its single-crate shape is ergonomic, but does not by itself solve runtime
+  recovery, state consistency, order idempotency, or long-term semver hygiene.
+
+For `tqsdk-rust`, the lesson is not "collapse the workspace into one crate".
+The lesson is: the default facade must feel almost as direct as a single-client
+SDK, while keeping advanced runtime and implementation surfaces behind explicit
+advanced paths.
+
+## Working Judgment To Validate
+
+The current project does not look like random crate splitting. The core split
+has a coherent reason:
+
+- `tqsdk-core` owns runtime substrate, commit/revision/cursor, state store, and
+  schema-level protocol types.
+- `tqsdk-session` owns shared session and one-shot direct query.
+- `tqsdk-wait` owns Python-style single-owner `wait_update()` consumption.
+- `tqsdk-stream` owns async-native multi-consumer stream consumption.
+- `tqsdk-task` owns execution tooling.
+- `tqsdk-data` owns research/offline history, cache, and replay data concerns.
+- `tqsdk` should be a thin default facade.
+
+The likely problem is not the existence of layers. The likely problem is the
+public presentation and active documentation: too many advanced/foundation
+surfaces are described as if they are current SDK product promises.
+
+Read-only reviewer feedback supports this judgment:
+
+- The crate split should be kept because it protects one runtime state tree, one
+  commit/revision model, and distinct ownership for direct query, wait-style
+  consumption, stream fan-out, execution tooling, and offline data.
+- Most non-default crates should be hidden from first-read docs and presented as
+  advanced paths.
+- The root README currently makes users learn the crate taxonomy before the
+  default `tqsdk` flow is convincing.
+- `tqsdk-task` and `tqsdk-stream` have broad root surfaces that may be coherent
+  inside their crates, but are risky to stabilize wholesale as a 0.1 public API.
+- `tqsdk::advanced::*` is under-specified: it is presented as the escape hatch,
+  but currently exposes curated subsets rather than complete sibling-crate
+  surfaces.
+- The default facade contract is promising but thin; it needs more root-crate
+  contract examples before it can carry the whole SDK usability story.
+
+## Review Classification
+
+Every public surface or doc claim will be assigned one of four outcomes:
+
+| Outcome | Meaning |
+| --- | --- |
+| Keep | Essential SDK contract; keep public and documented. |
+| Keep as advanced | Useful for advanced users; keep out of the default facade/prelude. |
+| Defer | Valid idea, but not part of current public SDK contract. |
+| Remove from active docs/API | Stale, contradictory, or harmful as a current promise. |
+
+This matrix is the main mechanism for resisting overdesign without throwing
+away necessary trading SDK complexity.
+
+## Audit Focus Areas
+
+### Default Facade
+
+Check whether `tqsdk` gives ordinary users one clear path:
+
+- connect
+- subscribe/read quotes
+- wait for updates
+- inspect account/position
+- place or target orders safely
+- access history as an opt-in path
+
+The default facade should not force ordinary users to understand runtime
+handles, raw commits, low-level session internals, test harnesses, or durable
+sidecars.
+
+The first-read docs should start from install and the default facade flow, then
+move crate taxonomy and advanced escape hatches below the beginner path.
+
+### Public Export Hygiene
+
+Check whether crate roots and `tqsdk::advanced` expose only intentional
+contracts. Pay special attention to:
+
+- root prelude shape
+- `advanced::*` aliases and re-exports
+- task report/status types
+- stream event/health/retry/shutdown types
+- data cache/replay types
+- direct-query service types
+
+The audit must decide whether `advanced::*` should:
+
+- become a fuller curated facade for sibling crates, or
+- explicitly say that full-power users should depend on sibling crates directly.
+
+It should not remain ambiguous.
+
+### Documentation Drift
+
+Find contradictions where active docs still mention removed or deferred
+surfaces. Known candidates include:
+
+- `tqsdk-task` docs mentioning stream managed sink/WAL/journal sidecars.
+- scenario docs mentioning live cache pipe or `MarketCacheStreamWriter`.
+- active plans or review docs that describe platform/daemon behavior as current
+  SDK scope.
+- architecture docs that still use older `tqsdk-api-wait` /
+  `tqsdk-api-stream` naming or stale "V1 is not a facade SDK" wording after the
+  landed `tqsdk` facade.
+- data docs that describe the crate as extremely narrow while also listing
+  cache, replay, CSV export, Greeks, mmap history cache, and market cache
+  capabilities.
+
+### Validation Credibility
+
+An excellent SDK cannot rely only on architecture prose. The audit must record
+whether current validation gates pass. Known branch risks to re-check before
+planning implementation:
+
+- workspace tests previously had scheduler failures in `tqsdk-task`.
+- no-default feature validation previously failed in `tqsdk-session` live smoke
+  tests because service-gated methods were referenced without the right feature
+  surface.
+
+Any implementation plan that changes public API or docs must re-run at minimum:
+
+- `git diff --check`
+- relevant contract examples for changed crates
+- `cargo check --workspace --examples`
+- feature-matrix checks when feature gates or default dependency paths change
+
+### API Contract Examples
+
+The 58 current examples are useful, but they may also signal scope creep. The
+audit will separate:
+
+- examples that define core user contracts,
+- examples that should move to advanced docs,
+- examples that should be archived as sketches or historical inputs.
+
+Special scrutiny should go to examples that make strategy deployment,
+supervision, replay checkpointing, source merging, retry policies, or
+low-latency desk profiles feel like default SDK product scope.
+
+## Subagent Review Inputs
+
+Four read-only review roles contributed findings:
+
+- API contract reviewer: public API risks, export hygiene, acceptance criteria.
+- Architecture reviewer: necessary boundaries versus over-fragmentation.
+- Simplicity reviewer: YAGNI, overdesign smells, subtraction roadmap.
+- External calibration reviewer: Rust SDK and trading SDK best-practice
+  criteria, including the `pseudocodes/tqsdk-rs` reference.
+
+Their findings are advisory. The final audit and plan must reconcile conflicts
+against the project architecture docs and current code. The external-reference
+section uses the main-thread source read of `pseudocodes/tqsdk-rs` because one
+research subagent returned only a partial calibration.
+
+## Deliverables
+
+The next written output should contain:
+
+1. Overall verdict on the SDK's current design.
+2. Necessary-complexity map.
+3. Overdesign-risk map.
+4. Keep / advanced / defer / remove matrix.
+5. Public API maturity checklist.
+6. Iteration plan split into short, verifiable batches.
+7. Validation commands and known blockers.
+
+The recommended roadmap shape is:
+
+1. Documentation subtraction first: rewrite first-read docs around the default
+   facade, move taxonomy down, remove stale sink/WAL/journal and live-pipe
+   claims, and classify scenario examples.
+2. Public API quarantine before stabilization: keep `tqsdk::prelude` small,
+   clarify `advanced::*`, and mark or gate broad task/stream/data foundation
+   surfaces that are not committed default product contracts.
+3. Stabilize only core contracts: default facade, wait quote/order, stream
+   quote batches/lag/health, session metadata, data history/cache, target-pos,
+   basic risk, and test harness.
+
+## Non-Goals
+
+This audit will not:
+
+- rewrite the SDK now;
+- collapse the workspace into a single crate by default;
+- copy Python SDK API names mechanically;
+- copy `pseudocodes/tqsdk-rs` mechanically;
+- promote daemon, GUI, HTTP operations, durable queue, or cross-process cache
+  service behavior into core SDK scope;
+- judge quality by line count or number of crates alone.
+
+## Acceptance Criteria
+
+The audit and iteration plan are good enough when:
+
+- An ordinary Rust user can identify the default crate and first three API calls
+  without reading internal architecture docs.
+- Advanced users can still reach runtime/session/stream/data/task primitives
+  through explicit paths.
+- Removed/deferred surfaces are not described as current product promises in
+  active docs.
+- Every proposed cut explains whether it removes code, hides API, archives docs,
+  or merely changes README emphasis.
+- Every kept complexity maps to a trading SDK invariant or Rust SDK best
+  practice.
+- The plan contains verification commands, expected risks, and a clear stopping
+  point for each batch.
