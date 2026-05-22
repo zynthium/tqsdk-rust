@@ -556,8 +556,10 @@ public API。
   adapter foundation。
 - `api_contract_s18_local_market_cache` 已提升为正式 data example，覆盖
   cache record / reader-writer / replay foundation。
-- `api_contract_s18_live_market_cache_pipe` 已提升为正式 data example，覆盖
-  单进程 live stream -> cache writer pipe foundation。
+- live stream -> cache writer pipe 未提升为当前正式 data example。旧
+  `api_contract_s18_live_market_cache_pipe` 名称只作为历史 gap/sketch 追溯；
+  若后续仍需要 live pipe，应作为 `tqsdk-stream` sink adapter 与
+  `tqsdk-data` writer 边界的独立设计，不属于当前 active API。
 - 已撤回的 S18 cache maintenance / reader manifest / recovery / writer
   election / compaction ownership / service / daemon / supervisor examples 与
   cross-process cache service sketch 已归档到 `docs/archive/scenarios/2026-05-03/`。
@@ -570,7 +572,6 @@ public API。
 优先提升的场景：
 
 - `api_contract_s18_local_market_cache`（cache record/replay foundation 已提升为正式 data example）
-- `api_contract_s18_live_market_cache_pipe`（单进程 live pipe foundation 已提升为正式 data example）
 - `api_contract_s30_history_series_cache` 已提升为正式 data example，覆盖
   看盘软件 / 交易终端所需的 typed history series range cache、缺口下载、
   Python 兼容默认目录 / 自定义目录、mmap 读、mutable tail refresh、segment
