@@ -160,7 +160,7 @@ let mut batches = stream
 let batch = batches.next().await.ok_or("quote stream closed")??;
 ```
 
-`quote_batches(...)` 是多品种实时 quote 的推荐高性能入口：每个 runtime commit
+`quote_batches(...)` 是 multi-consumer stream 场景下的批量 quote 入口：每个 runtime commit
 最多产出一个 batch，内部只 decode 本轮实际变化的合约。`quotes(...)` 仍保留为
 兼容的逐 quote item stream。
 

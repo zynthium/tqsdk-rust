@@ -88,7 +88,7 @@ Create:
 
 - `crates/tqsdk-wait/src/step.rs`: `WaitStep` and `WaitReadHandle`.
 - `crates/tqsdk-wait/src/backtest.rs`: `TqBacktest` config, once API surface is stable.
-- `crates/tqsdk-wait/examples/api_contract_s32_wait_live_backtest_same_body.rs`: same strategy body for live/backtest builders.
+- `crates/tqsdk-wait/examples/api_contract_s36_wait_live_backtest_same_body.rs`: same strategy body for live/backtest builders.
 
 ## Task 1: Add Breaking Surface Tests
 
@@ -1009,7 +1009,7 @@ git commit -m "feat(wait): end backtest via step none"
 - Modify: `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`
 - Modify: `crates/tqsdk-wait/examples/api_contract_s26_security_trade_refs.rs`
 - Modify: `crates/tqsdk-wait/examples/api_contract_s26_trade_system_refs.rs`
-- Create: `crates/tqsdk-wait/examples/api_contract_s32_wait_live_backtest_same_body.rs`
+- Create: `crates/tqsdk-wait/examples/api_contract_s36_wait_live_backtest_same_body.rs`
 
 - [ ] **Step 1: Rewrite S01 quote example**
 
@@ -1083,7 +1083,7 @@ while let Some(step) = api.step_until(Some(deadline)).await? {
 
 - [ ] **Step 4: Add live/backtest same-body contract**
 
-Create `crates/tqsdk-wait/examples/api_contract_s32_wait_live_backtest_same_body.rs` with two builder functions and one shared strategy function:
+Create `crates/tqsdk-wait/examples/api_contract_s36_wait_live_backtest_same_body.rs` with two builder functions and one shared strategy function:
 
 ```rust
 async fn run_strategy(mut api: tqsdk_wait::TqApi, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {

@@ -135,7 +135,7 @@ V1 是：
   - root fan-out capacity 配置与 typed lag diagnostics
   - commit/path/scope/domain/object/field filters
   - 批量 quote stream 入口 `quote_batches(...)`，按 commit 只 decode 本轮
-    changed quote symbols，作为多品种实时行情的高性能 async 入口
+    changed quote symbols，作为 multi-consumer stream 场景的批量 quote 入口
   - typed path stream / ready kline-tick row batch / trade session events
   - bounded fan-out lag diagnostics、health status 和 sink-free graceful shutdown
   - health status / restart hint

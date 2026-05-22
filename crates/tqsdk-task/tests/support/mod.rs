@@ -1,9 +1,9 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use tqsdk_core::adapter::{MarketAdapter, TradeAdapter};
 use tqsdk_core::{
     AdapterRegistry, CommitScope, ContractError, InputPayload, IoEvent, NormalizedMutation,
-    OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain, RuntimeCommand, RuntimeHandle,
-    RuntimeInput, TradeCommand,
+    OutboundDispatch, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
+    RuntimeCommand, RuntimeHandle, RuntimeInput, TradeCommand,
 };
 use tqsdk_session::testing::ManualSession;
 use tqsdk_task::TaskHost;
@@ -86,15 +86,46 @@ impl ProtocolAdapter for FailNthTradeInsertAdapter {
     }
 }
 
-pub fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
-    match request {
-        OutboundRequest::Transport(OutboundFrame::Text(text)) => {
-            serde_json::from_str(text).expect("transport frame should contain valid json payload")
-        }
-        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => serde_json::from_slice(bytes)
-            .expect("transport frame should contain valid json payload"),
-        other => panic!("expected transport request, got {other:?}"),
+pub fn drain_dispatches(host: &TaskHost) -> Vec<OutboundDispatch> {
+    host.api()
+        .session()
+        .handle()
+        .drain_dispatches()
+        .expect("manual test host should drain dispatches")
+}
+
+pub fn drain_order_dispatches(host: &TaskHost) -> Vec<OutboundDispatch> {
+    drain_dispatches(host)
+        .into_iter()
+        .filter(is_order_dispatch)
+        .collect()
+}
+
+fn is_order_dispatch(dispatch: &OutboundDispatch) -> bool {
+    if dispatch.domain != ProtocolDomain::Trade {
+        return false;
     }
+    try_transport_payload(&dispatch.request).is_some_and(|payload| {
+        matches!(
+            payload.get("aid").and_then(Value::as_str),
+            Some("insert_order" | "cancel_order")
+        )
+    })
+}
+
+fn try_transport_payload(request: &OutboundRequest) -> Option<Value> {
+    match request {
+        OutboundRequest::Transport(OutboundFrame::Text(text)) => serde_json::from_str(text).ok(),
+        OutboundRequest::Transport(OutboundFrame::Binary(bytes)) => {
+            serde_json::from_slice(bytes).ok()
+        }
+        _ => None,
+    }
+}
+
+pub fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
+    try_transport_payload(request)
+        .unwrap_or_else(|| panic!("expected transport request, got {request:?}"))
 }
 
 pub fn seed_quote_commit(host: &TaskHost, symbol: &str, last_price: f64) {

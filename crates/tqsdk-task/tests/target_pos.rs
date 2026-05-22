@@ -10,10 +10,11 @@ use tqsdk_task::{
 mod support;
 
 use support::{
-    FailNthTradeInsertAdapter, OrderStatusSeed, host_with_trade_adapter, market_only_host,
-    seed_order_status_commit, seed_order_status_commit_with_seed, seed_position_commit,
-    seed_position_detail_commit, seed_quote_book_commit, seed_quote_commit, seed_trade_commit,
-    seed_wait_order_finished_commit, seeded_host, transport_payload,
+    FailNthTradeInsertAdapter, OrderStatusSeed, drain_dispatches, drain_order_dispatches,
+    host_with_trade_adapter, market_only_host, seed_order_status_commit,
+    seed_order_status_commit_with_seed, seed_position_commit, seed_position_detail_commit,
+    seed_quote_book_commit, seed_quote_commit, seed_trade_commit, seed_wait_order_finished_commit,
+    seeded_host, transport_payload,
 };
 
 #[test]
@@ -124,7 +125,7 @@ async fn target_pos_task_reaches_target_only_after_host_wait_update() {
 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -159,7 +160,7 @@ async fn target_pos_wait_update_subscribes_quote_before_pricing_when_quote_missi
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     let subscribe = transport_payload(&dispatches[0].request);
     assert_eq!(subscribe["aid"], "subscribe_quote");
@@ -172,7 +173,7 @@ async fn target_pos_wait_update_subscribes_quote_before_pricing_when_quote_missi
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -188,14 +189,7 @@ async fn host_wait_update_timeout_still_advances_target_pos_with_existing_quote(
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     let task = host
         .target_pos("sim", "SHFE.rb2601")
@@ -212,7 +206,7 @@ async fn host_wait_update_timeout_still_advances_target_pos_with_existing_quote(
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -233,7 +227,7 @@ async fn host_wait_update_applies_latest_target_request_only() {
 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -321,7 +315,7 @@ async fn open_only_target_pos_submits_buy_open_order_with_active_price() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -358,7 +352,7 @@ async fn open_only_target_pos_uses_passive_price_for_buy_orders() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3677.0);
@@ -379,7 +373,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -392,7 +386,7 @@ async fn open_only_target_pos_splits_large_orders_by_split_policy() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -424,14 +418,7 @@ async fn open_only_target_pos_does_not_submit_order_when_position_already_matche
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume(), Some(2));
 }
@@ -449,27 +436,12 @@ async fn open_only_target_pos_does_not_resubmit_same_request_on_later_updates() 
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert_eq!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(drain_order_dispatches(&host).len(), 1);
 
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_target_reached()).await;
     assert!(pending.is_err());
@@ -488,7 +460,7 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["volume"], 2);
@@ -498,14 +470,7 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3676.0, 3677.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_order_status_commit(
         &host,
@@ -520,7 +485,7 @@ async fn open_only_target_pos_waits_for_live_order_to_finish_before_resubmitting
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -541,7 +506,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3678.0);
@@ -551,7 +516,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -560,14 +525,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_order_status_commit(
         &host,
@@ -582,7 +540,7 @@ async fn open_only_target_pos_cancels_stale_live_order_before_repricing() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -603,7 +561,7 @@ async fn open_only_target_pos_resubmits_after_terminal_order_without_position_ch
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -615,7 +573,7 @@ async fn open_only_target_pos_resubmits_after_terminal_order_without_position_ch
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -639,7 +597,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 1);
     seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 2, 1);
@@ -648,7 +606,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -669,14 +627,7 @@ async fn open_only_target_pos_retargets_to_current_position_by_canceling_live_or
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3675.0, 3676.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume(), Some(1));
@@ -695,7 +646,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -707,7 +658,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -730,14 +681,7 @@ async fn open_only_target_pos_retarget_cancels_unmaterialized_live_order_before_
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume(), Some(0));
     assert_eq!(task.execution_report().cancel_request_count, 1);
@@ -756,7 +700,7 @@ async fn open_only_target_pos_repeated_same_target_does_not_duplicate_unmaterial
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -768,14 +712,7 @@ async fn open_only_target_pos_repeated_same_target_does_not_duplicate_unmaterial
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert_eq!(task.execution_report().submitted_order_count, 1);
     assert_eq!(task.execution_report().cancel_request_count, 0);
 }
@@ -793,15 +730,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert_eq!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(drain_order_dispatches(&host).len(), 1);
 
     task.cancel().await.unwrap();
     let pending = tokio::time::timeout(Duration::from_millis(10), task.wait_finished()).await;
@@ -817,7 +746,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
             .is_err()
     );
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -827,14 +756,7 @@ async fn target_pos_cancel_waits_for_live_order_to_finish_before_releasing_owner
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
     assert!(!task.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
     seed_quote_book_commit(&host, "SHFE.rb2601", 3681.0, 3680.0, 3680.5);
@@ -860,7 +782,7 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     assert_eq!(
         task.execution_report().events,
@@ -879,7 +801,7 @@ async fn target_pos_execution_report_records_insert_and_cancel_requests() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     assert_eq!(
         task.execution_report().events,
@@ -960,7 +882,7 @@ async fn target_pos_execution_report_records_terminal_order_and_target_reached()
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     seed_position_commit(&host, "sim", "SHFE.rb2601", 2);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
@@ -1008,7 +930,7 @@ async fn target_pos_execution_report_records_trade_events_from_commit_deltas() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     seed_trade_commit(
         &host,
@@ -1059,7 +981,7 @@ async fn target_pos_execution_report_accumulates_trade_buffer_and_summary() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     seed_trade_commit(
         &host,
@@ -1161,7 +1083,7 @@ async fn target_pos_execution_cursor_reads_only_new_events_and_trades() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     let (event_cursor, initial_events) = task.execution_events_since(0);
     assert_eq!(event_cursor, 1);
@@ -1229,14 +1151,7 @@ async fn target_pos_wait_target_reached_returns_error_when_insert_order_submissi
     assert!(updated);
 
     assert!(task.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
     assert!(matches!(
         task.wait_target_reached().await,
@@ -1259,7 +1174,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
 
     assert!(!task.is_finished());
     assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1272,7 +1187,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
     assert!(updated);
 
     assert!(!task.is_finished());
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1292,14 +1207,7 @@ async fn target_pos_cancels_inserted_orders_when_later_batch_submission_fails() 
     assert!(updated);
 
     assert!(task.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert!(matches!(
         task.wait_finished().await,
         Err(TaskError::Wait(_))
@@ -1323,7 +1231,7 @@ async fn open_only_target_pos_uses_opposite_open_order_to_reduce_net_position() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1343,7 +1251,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["direction"], "SELL");
@@ -1359,14 +1267,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 0, 0, 0);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
@@ -1375,7 +1276,7 @@ async fn default_target_pos_advances_shfe_close_today_then_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1404,7 +1305,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1448,7 +1349,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1457,14 +1358,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     seed_quote_book_commit(&host, "SHFE.rb2601", 3676.0, 3675.0, 3675.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_order_status_commit_with_seed(
         &host,
@@ -1484,7 +1378,7 @@ async fn default_target_pos_reprices_remaining_batch_order_after_partial_fill() 
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1509,7 +1403,7 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1553,7 +1447,7 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1576,14 +1470,7 @@ async fn default_target_pos_replan_cancels_only_stale_subset_of_live_batch() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.2, 3677.0, 3677.7);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 0, 1, 0, 0);
     seed_order_status_commit_with_seed(
@@ -1646,7 +1533,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 3);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1708,7 +1595,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let cancel = transport_payload(&dispatches[0].request);
     assert_eq!(cancel["aid"], "cancel_order");
@@ -1732,7 +1619,7 @@ async fn default_target_pos_replan_keeps_live_orders_after_stale_subset_finishes
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["aid"], "insert_order");
@@ -1771,7 +1658,7 @@ async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_mis
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -1796,7 +1683,7 @@ async fn open_only_target_pos_retarget_keeps_matching_live_order_and_submits_mis
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1819,7 +1706,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     let first_close = transport_payload(&dispatches[0].request);
     assert_eq!(first_close["direction"], "SELL");
@@ -1835,14 +1722,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     seed_quote_book_commit(&host, "CFFEX.IF2606", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_position_detail_commit(&host, "sim", "CFFEX.IF2606", 0, 0, 0, 0);
     seed_wait_order_finished_commit(&host, "sim", "CFFEX.IF2606", 1, 1);
@@ -1851,7 +1731,7 @@ async fn default_target_pos_uses_non_shfe_close_then_open() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1884,7 +1764,7 @@ async fn today_yesterday_then_open_target_pos_submits_open_in_same_batch() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 3);
     let close_today = transport_payload(&dispatches[0].request);
     assert_eq!(close_today["direction"], "SELL");
@@ -1918,7 +1798,7 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     let close_order = transport_payload(&dispatches[0].request);
     assert_eq!(close_order["direction"], "SELL");
@@ -1934,14 +1814,7 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     seed_quote_book_commit(&host, "SHFE.rb2601", 3679.0, 3678.0, 3678.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_position_detail_commit(&host, "sim", "SHFE.rb2601", 1, 0, 1, 0);
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 2);
@@ -1949,14 +1822,7 @@ async fn yesterday_then_open_target_pos_skips_today_position_until_open_needed()
     seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     task.wait_target_reached().await.unwrap();
     assert_eq!(task.applied_target_volume(), Some(0));

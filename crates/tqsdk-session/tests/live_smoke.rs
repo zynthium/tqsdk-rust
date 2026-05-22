@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+#[cfg(feature = "services")]
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -7,9 +8,11 @@ use tokio::time::Instant;
 use tqsdk_core::{Account, TradeCommand};
 use tqsdk_core::{MarketCommand, QueryCommand, QueryId, Quote, RuntimeCommand, Symbol};
 use tqsdk_session::{
-    AllLevelOptionQuery, AtmOptionQuery, EdbDataAlign, EdbDataFill, FinanceOptionLevelQuery,
-    OptionQueryFilter, SessionClientBuilder, SymbolRankingType,
+    AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionQueryFilter,
+    SessionClientBuilder,
 };
+#[cfg(feature = "services")]
+use tqsdk_session::{EdbDataAlign, EdbDataFill, SymbolRankingType};
 
 const LIVE_SYMBOL_INFO_QUERY: &str = r#"query($instrument_id:[String]){
   multi_symbol_info(instrument_id: $instrument_id) {
@@ -311,6 +314,7 @@ async fn live_metadata_query_pack_smoke() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(feature = "services")]
 #[ignore = "live network smoke; requires TQ_AUTH_USER/TQ_AUTH_PASS and service query access"]
 async fn live_service_query_pack_smoke() {
     let Some(auth_user) = read_env("TQ_AUTH_USER") else {
@@ -507,10 +511,12 @@ fn read_f64_env(name: &str) -> Option<f64> {
     read_env(name).and_then(|value| value.parse().ok())
 }
 
+#[cfg(feature = "services")]
 fn read_i32_env(name: &str) -> Option<i32> {
     read_env(name).and_then(|value| value.parse().ok())
 }
 
+#[cfg(feature = "services")]
 fn is_edb_permission_error(error: &tqsdk_session::SessionFacadeError) -> bool {
     let message = error.to_string();
     message.contains("edb query failed") && message.contains("tqsdk-buy")

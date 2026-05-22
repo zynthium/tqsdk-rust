@@ -866,11 +866,19 @@ fn insert_i64_if_nonzero(value: &mut Map<String, Value>, key: &str, field: i64) 
 }
 
 fn kline_chart_id(symbol: &str, duration_ns: i64, view_width: usize) -> String {
+    let symbol = sanitize_chart_token(symbol);
     format!("wait-kline-{symbol}-{duration_ns}-{view_width}")
 }
 
 fn tick_chart_id(symbol: &str, view_width: usize) -> String {
+    let symbol = sanitize_chart_token(symbol);
     format!("wait-tick-{symbol}-{view_width}")
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn duration_to_ns(duration: Duration) -> i64 {

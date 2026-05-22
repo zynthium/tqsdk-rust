@@ -14,10 +14,10 @@ use tqsdk_task::{
 mod support;
 
 use support::{
-    FailNthTradeInsertAdapter, OrderStatusSeed, host_with_trade_adapter, market_only_host,
-    seed_order_status_commit, seed_order_status_commit_with_seed, seed_position_commit,
-    seed_position_detail_commit, seed_quote_book_commit, seed_quote_commit, seed_trade_commit,
-    seed_wait_order_finished_commit, seeded_host, transport_payload,
+    FailNthTradeInsertAdapter, OrderStatusSeed, drain_order_dispatches, host_with_trade_adapter,
+    market_only_host, seed_order_status_commit, seed_order_status_commit_with_seed,
+    seed_position_commit, seed_position_detail_commit, seed_quote_book_commit, seed_quote_commit,
+    seed_trade_commit, seed_wait_order_finished_commit, seeded_host, transport_payload,
 };
 
 #[test]
@@ -162,15 +162,7 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
         }
     );
     assert!(!scheduler.is_finished());
-    assert_eq!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(drain_order_dispatches(&host).len(), 1);
 
     tokio::time::sleep(Duration::from_millis(25)).await;
     seed_order_status_commit(&host, "sim", "SHFE.rb2601", "wait-order-1", "ALIVE", 3, 3);
@@ -179,7 +171,7 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     assert!(updated);
     assert!(!scheduler.is_finished());
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -190,14 +182,7 @@ async fn scheduler_advances_steps_via_host_wait_updates() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
     assert!(!scheduler.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert_eq!(scheduler.execution_report().applied_steps.len(), 1);
 
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 3);
@@ -261,7 +246,7 @@ async fn scheduler_execution_events_include_internal_task_commands() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     assert_eq!(
         scheduler.execution_events(),
@@ -389,7 +374,7 @@ async fn scheduler_drives_internal_target_task_until_last_step_reaches_target() 
         }
     );
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -521,7 +506,7 @@ async fn scheduler_execution_cursor_reads_only_new_events_and_trades() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    host.api().session().handle().drain_dispatches().unwrap();
+    drain_order_dispatches(&host);
 
     let (event_cursor, initial_events) = scheduler.execution_events_since(0);
     assert_eq!(event_cursor, 1);
@@ -596,7 +581,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3678.0, 3677.0, 3677.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -608,7 +593,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -617,14 +602,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3680.0, 3679.0, 3679.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_order_status_commit(
         &host,
@@ -639,7 +617,7 @@ async fn scheduler_reprices_stale_live_order_via_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -709,7 +687,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         transport_payload(&dispatches[0].request)["order_id"],
@@ -753,7 +731,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -815,14 +793,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     seed_quote_book_commit(&host, "SHFE.rb2601", 3676.0, 3675.0, 3675.5);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_order_status_commit_with_seed(
         &host,
@@ -842,7 +813,7 @@ async fn scheduler_reprices_remaining_batch_order_after_partial_fill() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -903,7 +874,7 @@ async fn scheduler_uses_step_passive_price_mode_for_internal_target_task() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["limit_price"], 3677.0);
@@ -932,14 +903,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert_eq!(
         scheduler.execution_report(),
         TargetPosExecutionReport {
@@ -959,14 +923,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.1);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert_eq!(scheduler.execution_report().applied_steps.len(), 1);
 
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -974,7 +931,7 @@ async fn scheduler_pause_step_waits_interval_then_advances_without_orders() {
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "BUY");
@@ -1026,14 +983,7 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     let scheduler = host
         .target_pos_scheduler("sim", "SHFE.rb2601")
@@ -1051,14 +1001,7 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
         .await
         .unwrap();
     assert!(!updated);
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     tokio::time::sleep(Duration::from_millis(25)).await;
     let updated = host
@@ -1069,7 +1012,7 @@ async fn scheduler_pause_step_can_advance_on_timeout_without_new_commit() {
         .unwrap();
     assert!(!updated);
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "insert_order");
@@ -1123,14 +1066,7 @@ async fn scheduler_last_pause_step_finishes_without_submitting_orders() {
     assert!(updated);
 
     scheduler.wait_finished().await.unwrap();
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert_eq!(
         scheduler.execution_report(),
         TargetPosExecutionReport {
@@ -1223,15 +1159,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
     seed_quote_commit(&host, "SHFE.rb2601", 3678.0);
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
-    assert_eq!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(drain_order_dispatches(&host).len(), 1);
 
     scheduler.cancel().await.unwrap();
     let pending = tokio::time::timeout(Duration::from_millis(10), scheduler.wait_finished()).await;
@@ -1247,7 +1175,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
             .is_err()
     );
 
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");
@@ -1257,14 +1185,7 @@ async fn scheduler_cancel_waits_for_live_order_to_finish_before_releasing_owners
     let updated = host.wait_update(None).await.unwrap();
     assert!(updated);
     assert!(!scheduler.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
 
     seed_wait_order_finished_commit(&host, "sim", "SHFE.rb2601", 1, 1);
     seed_quote_commit(&host, "SHFE.rb2601", 3681.0);
@@ -1313,14 +1234,7 @@ async fn scheduler_wait_finished_returns_error_when_step_insert_order_submission
     assert!(updated);
 
     assert!(scheduler.is_finished());
-    assert!(
-        host.api()
-            .session()
-            .handle()
-            .drain_dispatches()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(drain_order_dispatches(&host).is_empty());
     assert!(matches!(scheduler.last_error(), Some(TaskError::Wait(_))));
     assert!(matches!(
         scheduler.wait_finished().await,
@@ -1349,7 +1263,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
     assert!(updated);
 
     assert!(!scheduler.is_finished());
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["direction"], "SELL");
@@ -1375,7 +1289,7 @@ async fn scheduler_wait_finished_returns_error_when_step_batch_submission_partia
     assert!(updated);
 
     assert!(!scheduler.is_finished());
-    let dispatches = host.api().session().handle().drain_dispatches().unwrap();
+    let dispatches = drain_order_dispatches(&host);
     assert_eq!(dispatches.len(), 1);
     let payload = transport_payload(&dispatches[0].request);
     assert_eq!(payload["aid"], "cancel_order");

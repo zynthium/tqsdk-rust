@@ -98,6 +98,10 @@ fn seed_account_position_quote(
 }
 
 fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
+    let chart_token = sanitize_chart_token(symbol);
+    let kline_chart_id = format!("wait-kline-{chart_token}-60000000000-16");
+    let tick_chart_id = format!("wait-tick-{chart_token}-16");
+
     host.api()
         .session()
         .handle()
@@ -109,7 +113,7 @@ fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
                     "aid": "rtn_data",
                     "data": [{
                         "charts": {
-                            "wait-kline-SHFE.rb2601-60000000000-16": {
+                            kline_chart_id: {
                                 "state": {
                                     "ins_list": symbol,
                                     "duration": 60_000_000_000_i64
@@ -119,7 +123,7 @@ fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
                                 "more_data": false,
                                 "ready": true
                             },
-                            "wait-tick-SHFE.rb2601-16": {
+                            tick_chart_id: {
                                 "state": {
                                     "ins_list": symbol,
                                     "duration": 0
@@ -165,6 +169,12 @@ fn seed_ready_kline_and_tick(host: &TaskHost, symbol: &str) {
         )
         .unwrap()
         .expect("seed serial market commit should produce a commit");
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 #[tokio::test(flavor = "current_thread")]

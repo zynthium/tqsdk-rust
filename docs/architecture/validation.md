@@ -176,13 +176,14 @@ cargo check --workspace --no-default-features --examples
 cargo check --workspace --all-features --examples
 ```
 
-Known branch risks that must be rechecked before a source API narrowing batch:
+Regression guards fixed in the facade iteration and still required before a source API narrowing batch:
 
-- `cargo test --workspace` previously exposed scheduler test failures in
-  `crates/tqsdk-task/tests/scheduler.rs`.
-- `cargo test -p tqsdk-session --no-default-features` previously exposed
-  `tests/live_smoke.rs` compilation failures when service-gated methods were
-  referenced without the corresponding feature surface.
+- `cargo test -p tqsdk-task --test scheduler -- --test-threads=1` verifies
+  scheduler order dispatch assertions separately from market-interest
+  side-effects.
+- `cargo test -p tqsdk-session --no-default-features` verifies
+  `tests/live_smoke.rs` keeps service-only smoke coverage behind the matching
+  feature surface.
 
 ## 内部生产发布门禁
 

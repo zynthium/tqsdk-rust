@@ -159,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 完整可编译示例见
-[examples/api_contract_s33_batch_quote_subscription.rs](examples/api_contract_s33_batch_quote_subscription.rs)。
+[examples/api_contract_s34_batch_quote_subscription.rs](examples/api_contract_s34_batch_quote_subscription.rs)。
 
 如果只需要一次 typed 行情快照，可以在示例本地封装一个很薄的 helper：先通过
 `TqApi::quote(symbol).await` 创建 handle，再用 `step_until(deadline).await` 等待

@@ -154,7 +154,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 closed event，或关闭 stream driver 来刻画消费者行为。普通用户代码不应把它当成运行时
 控制 API。
 
-`quote_batches(...).await` 是多品种实时 quote 的推荐高性能入口。它按 runtime
+`quote_batches(...).await` 是 multi-consumer stream 场景下的批量 quote 入口。它按 runtime
 commit 输出 `QuoteBatch`，内部根据 changed object/path 只 decode 本轮实际变化的合约；
 `quotes(...).await` 保留为兼容的逐 quote item stream。
 

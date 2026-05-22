@@ -148,9 +148,10 @@ Before any follow-up source API narrowing, re-run the broader matrix:
 - `cargo check --workspace --no-default-features --examples`
 - `cargo check --workspace --all-features --examples`
 
-Known risks to verify before source changes:
+Regression guards fixed in the facade iteration and still required before source changes:
 
-- Scheduler tests in `tqsdk-task` have previously failed under full workspace
-  tests.
-- `tqsdk-session` no-default live smoke tests have previously referenced
-  service-gated methods without a compatible feature surface.
+- `cargo test -p tqsdk-task --test scheduler -- --test-threads=1` covers
+  scheduler order dispatch assertions separately from market-interest
+  side-effects.
+- `cargo test -p tqsdk-session --no-default-features` covers no-default
+  compilation for live smoke tests with service-only code behind `services`.
