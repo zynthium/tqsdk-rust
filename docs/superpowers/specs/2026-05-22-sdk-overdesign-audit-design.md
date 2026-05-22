@@ -269,6 +269,44 @@ The audit must decide whether `advanced::*` should:
 
 It should not remain ambiguous.
 
+### Performance And API Deduplication
+
+Rust-side performance is a first-class SDK requirement. The audit must not
+recommend simplification that forces users onto slower paths, extra allocation,
+unnecessary cloning, full-universe scans per commit, or avoidable background task
+fan-out.
+
+At the same time, performance cannot justify multiple public ways to perform the
+same user task. A strong SDK should expose one canonical high-performance path
+per workflow. Additional entrypoints are acceptable only when they are:
+
+- thin ergonomic aliases over the same implementation;
+- clearly advanced escape hatches;
+- or genuinely different consumption models, such as single-owner `wait_update`
+  versus multi-consumer `Stream`.
+
+The audit should flag redundant API combinations where users can build the same
+workflow through several public surfaces with no semantic difference. Examples
+to examine include:
+
+- quote subscription through default facade, `tqsdk-wait`, `tqsdk-stream`, and
+  raw session handles;
+- direct query access through root facade versus `session()` escape hatches;
+- order submission through root facade, wait helpers, task host helpers, and
+  lower-level session commands;
+- history access through `Tq::history()`, `tqsdk-data`, and session direct-query
+  helpers.
+
+For each duplicate-looking path, the final plan must decide whether to:
+
+- keep one as the canonical public path;
+- keep another only as an advanced escape hatch;
+- collapse it into a thin alias;
+- or remove/archive it from first-read docs.
+
+The preferred shape is not "few APIs at any cost". It is: minimal public choices
+with no hidden performance penalty.
+
 ### Wait / Stream Boundary
 
 The audit must explicitly test whether `tqsdk-stream` is still necessary if
@@ -387,6 +425,9 @@ The next written output should contain:
 9. Wait / stream boundary decision: whether `tqsdk-stream` remains, which
    workloads justify it, and which high-performance quote APIs should move into
    or remain in `tqsdk-wait`.
+10. Duplicate-path audit: for each important user task, identify the canonical
+    high-performance API, advanced escape hatches, and public paths to remove or
+    de-emphasize.
 
 The recommended roadmap shape is:
 
@@ -427,6 +468,10 @@ The audit and iteration plan are good enough when:
   or merely changes README emphasis.
 - Every kept complexity maps to a trading SDK invariant or Rust SDK best
   practice.
+- Performance-critical workflows have an explicitly named canonical API and no
+  required fallback to slower or more allocation-heavy paths.
+- Duplicate public paths are justified by different semantics or consumption
+  models, not by historical layering accidents.
 - Every Python benchmark item is classified as: match behavior, improve with a
   Rust-native API, or intentionally reject as language-specific shape.
 - The plan does not justify `tqsdk-stream` merely by full-universe quote
