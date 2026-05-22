@@ -44,7 +44,7 @@ Raw runtime outbox envelopes and multi-source aggregation helpers are not part o
 V1 不交付任何用户态 facade。
 
 ## V2+ 才出现的 adapter 层
-### `tqsdk-api-wait`
+### `tqsdk-wait`
 建立在：
 
 - `RuntimeHandle::reader()`
@@ -60,7 +60,7 @@ V1 不交付任何用户态 facade。
 约束：
 - 不得回改 commit 生成逻辑
 
-### `tqsdk-api-stream`
+### `tqsdk-stream`
 ```rust
 pub trait CommitStreamApi {
     type CommitStream: Stream<Item = SharedCommitResult>;

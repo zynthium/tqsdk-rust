@@ -10,6 +10,8 @@
 - 提供建立在 commit 过滤之上的 typed path、kline/tick row batch、账户级 trade object / trade session 事件流，以及 market / system / trade / security 对象 stream 薄包装
 - 保留 `RuntimeReader` 与 `SessionClient` 作为高性能读面和 direct-query 逃生舱
 
+`tqsdk-stream` 不是普通策略获取更快 quote 的默认路径。它适合多个 async consumer 共享同一 live session，并且需要独立进度、显式背压、lag diagnostics、过滤器、事件管道或 service-style shutdown/health/retry 语义的场景。单 owner `wait_update()` 策略应优先使用 `tqsdk` / `tqsdk-wait`。
+
 它明确不负责：
 
 - GraphQL / HTTP direct query

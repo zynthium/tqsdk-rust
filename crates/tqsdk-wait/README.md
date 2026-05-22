@@ -125,6 +125,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - 常见多合约实时行情入口使用 `quotes(...).await`，一次提交批量 quote 订阅并返回
   symbol-indexed `QuoteSet`；单合约 `quote(...)` 仍保留为便利入口。订阅意图由底层
   `SessionClient` 去重，避免 wait / stream 在同一 session 内重复提交或互相取消。
+- 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，性能优化应留在 wait facade：通过当前 `WaitStep` 的 changed symbols / changed snapshots 只读取本轮变化对象，而不是每轮扫描所有订阅合约。`tqsdk-stream` 不应成为单消费者 quote throughput 的默认答案。
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串

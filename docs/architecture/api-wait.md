@@ -1,4 +1,4 @@
-# `tqsdk-api-wait` 专题设计
+# `tqsdk-wait` 专题设计
 
 ## 文档定位
 本文档描述的是建立在 V1 runtime contract 之上的 wait consumption adapter。
@@ -20,7 +20,7 @@
 - [验收与测试矩阵](validation.md)
 
 ## 对 runtime contract 的依赖
-`tqsdk-api-wait` 必须只依赖这些基础能力：
+`tqsdk-wait` 必须只依赖这些基础能力：
 
 - `RuntimeHandle`
 - `RuntimeReader`
@@ -73,6 +73,7 @@ wait adapter 层未来可以提供：
   应一次表达一批 quote interest，并返回 symbol-indexed refs。它必须复用
   `tqsdk-session` 的 session-scoped market interest registry，不能在 wait
   facade 私下维护会与 stream 冲突的订阅真相。
+- full-universe 或大批量 quote 订阅不应被迫走 `tqsdk-stream`。如果消费模型仍是单 owner `wait_update()`，`tqsdk-wait` 应提供 step-bound changed quote iteration，避免用户每个 commit 扫描全部 symbol。候选形状包括 `QuoteSet::changed(&WaitStep)`、`QuoteSet::changed_snapshots(&WaitStep)` 或等价薄 helper；它们必须解释当前 `WaitStep` 对应的 commit，不维护 facade 私有 revision。
 - quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
   `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
   quote 的 ready / load 语义。
