@@ -8,11 +8,9 @@
 
 ## 项目定位
 
-普通用户优先从顶层 `tqsdk` crate 开始：连接账号、订阅行情、等待更新、读取账户/持仓、下单或设置目标持仓、按需访问历史数据。内部 crate 仍保持独立边界，但第一次阅读不需要先理解整个 workspace taxonomy。
+普通用户优先从顶层 `tqsdk` crate 开始：连接账号、订阅行情、等待更新、读取账户/持仓、设置目标持仓，或按需下钻到 `wait` / `task` 执行接口、访问历史数据。内部 crate 仍保持独立边界，但第一次阅读不需要先理解整个 workspace taxonomy。
 
 `tqsdk-rust` 的核心约束是所有可见状态变化都经过同一套 runtime state tree、commit/revision 和 cursor 语义。`tqsdk` 只是默认 facade；它不会复制 direct query、stream、task 或 data 实现。
-
-高级用户可以按需要下钻：
 
 ## 当前状态
 
@@ -23,6 +21,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 用户可见 API 的改动应保持这些示例清晰、可编译。
 
 ## 默认入口与高级 crate
+
+高级用户可以按需要下钻：
 
 | Crate | 适合场景 |
 | --- | --- |
