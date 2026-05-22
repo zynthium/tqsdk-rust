@@ -127,3 +127,30 @@ The audit should create a follow-up source plan for wait quote iteration only af
 | `WaitStep::changed_quote_symbols()` | Expose symbols touched by the current step. | Must not expose raw internal state paths as the ordinary API. |
 
 These APIs should be additive and measured against the current `tqsdk-stream::QuoteBatchSubscription` performance shape before stabilization.
+
+## Validation Baseline
+
+Minimum verification for this docs audit batch:
+
+- `git diff --check`
+- `cargo check --workspace --examples`
+
+This batch result on 2026-05-22:
+
+- `git diff --check` passed.
+- `cargo check --workspace --examples` passed.
+
+Before any follow-up source API narrowing, re-run the broader matrix:
+
+- `cargo fmt --all --check`
+- `cargo test --workspace`
+- `cargo check --workspace --no-default-features`
+- `cargo check --workspace --no-default-features --examples`
+- `cargo check --workspace --all-features --examples`
+
+Known risks to verify before source changes:
+
+- Scheduler tests in `tqsdk-task` have previously failed under full workspace
+  tests.
+- `tqsdk-session` no-default live smoke tests have previously referenced
+  service-gated methods without a compatible feature surface.

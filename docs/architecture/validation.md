@@ -157,6 +157,33 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 `cargo check -p tqsdk-task --example api_contract_s31_low_latency_trading_desk`
 单独覆盖。
 
+## Public API Documentation Batch Validation
+
+For docs-only public API audit batches, run:
+
+```bash
+git diff --check
+cargo check --workspace --examples
+```
+
+If public API source, feature flags, or crate dependencies change, also run:
+
+```bash
+cargo fmt --all --check
+cargo test --workspace
+cargo check --workspace --no-default-features
+cargo check --workspace --no-default-features --examples
+cargo check --workspace --all-features --examples
+```
+
+Known branch risks that must be rechecked before a source API narrowing batch:
+
+- `cargo test --workspace` previously exposed scheduler test failures in
+  `crates/tqsdk-task/tests/scheduler.rs`.
+- `cargo test -p tqsdk-session --no-default-features` previously exposed
+  `tests/live_smoke.rs` compilation failures when service-gated methods were
+  referenced without the corresponding feature surface.
+
 ## 内部生产发布门禁
 
 内部生产版本发布前，必须在离线 CI 或本地 release-check 环境通过：
