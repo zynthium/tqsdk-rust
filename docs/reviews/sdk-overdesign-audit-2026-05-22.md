@@ -2,7 +2,7 @@
 
 ## Verdict
 
-The SDK is not overdesigned because it has multiple crates. The crate split is mostly justified by trading-SDK invariants: one runtime state tree, one commit/revision model, separate one-shot direct query, single-owner wait consumption, multi-consumer stream consumption, execution tooling, and offline data/replay concerns.
+The SDK is not overdesigned because it has multiple crates. The crate split is mostly justified by trading-SDK invariants: one runtime state tree, one commit/revision model, separate one-shot direct query, single-owner wait consumption, multi-consumer stream consumption, execution tooling, session replay control-plane helpers, task strategy/backtest replay, and offline market cache replay concerns.
 
 The active overdesign risk is public presentation and stabilization breadth. Too many advanced or foundation surfaces are documented as if they are ordinary SDK product promises, and several workflows can be reached through multiple public-looking paths without a clear canonical choice. The next iteration should subtract from first-read docs, quarantine advanced APIs, and stabilize only the smallest high-performance path for each user workflow.
 
@@ -20,6 +20,10 @@ Primary in-repo evidence:
 - `docs/reviews/public-api-disposition-matrix.md`
 - `docs/scenarios/user-layer-iteration-plan.md`
 - `crates/tqsdk/src/lib.rs`
+- `crates/tqsdk-wait/src/lib.rs`
+- `crates/tqsdk-stream/src/lib.rs`
+- `crates/tqsdk-task/src/lib.rs`
+- `crates/tqsdk-data/src/lib.rs`
 - `crates/tqsdk/README.md`
 - `crates/tqsdk-wait/README.md`
 - `crates/tqsdk-stream/README.md`
@@ -39,11 +43,11 @@ Architecture docs and current code are authoritative. Existing review docs, scen
 | --- | --- | --- |
 | `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor` | Yes | A trading SDK needs stable snapshots, reconnect/resync barriers, causality, and commit-bound change interpretation. |
 | `tqsdk-core` protocol/runtime substrate | Yes | It protects protocol completeness and avoids tying the kernel to one facade style. |
-| `tqsdk-session` one-shot request/response/direct query | Yes | GraphQL, schema, metadata, calendar, ranking, settlement, EDB, auth refresh, and replay control are not live object consumption. |
+| `tqsdk-session` one-shot request/response/direct query | Yes | GraphQL, schema, metadata, calendar, ranking, settlement, EDB, auth refresh, and session replay control-plane helpers are not live object consumption. |
 | `tqsdk-wait` single-owner `wait_update()` facade | Yes | It is the closest Rust equivalent to the official Python strategy loop while preserving typed refs and explicit errors. |
 | `tqsdk-stream` advanced multi-consumer facade | Yes, as advanced | It is justified by independent consumers, bounded lag, filtering, health, and `futures::Stream` composition, not by ordinary quote throughput alone. |
-| `tqsdk-task` execution tools | Yes, narrowed | Target position, ownership guard, typed order builder, basic risk, strategy test harness, and local sim are mature trading workflow needs. |
-| `tqsdk-data` research/offline data | Yes, narrowed | History page/series/download, CSV export, Greeks, cache, and replay are opt-in research/offline workflows that should not pollute live facades. |
+| `tqsdk-task` execution tools | Yes, narrowed | Target position, ownership guard, typed order builder, basic risk, strategy test harness, local sim, and task strategy/backtest replay are mature trading workflow needs. |
+| `tqsdk-data` research/offline data | Yes, narrowed | History page/series/download, CSV export, Greeks, cache, and offline market cache replay are opt-in research/offline workflows that should not pollute live facades. |
 | `tqsdk` top-level facade | Yes, thin | Ordinary users need one dependency and one obvious first path while advanced users can depend on sibling crates directly. |
 
 ## Overdesign Risk Map
@@ -52,9 +56,9 @@ Architecture docs and current code are authoritative. Existing review docs, scen
 | --- | --- | --- |
 | First-read docs teach crate taxonomy before user flow | `README.md` starts with workspace/crate explanation before a default facade workflow has become convincing. | Rewrite first-read docs around `tqsdk` install, connect, quote, wait, order/target, and history; move crate taxonomy below. |
 | `tqsdk::advanced::*` is ambiguous | `crates/tqsdk/src/lib.rs` exposes curated subsets but docs can read as a full sibling-crate portal. | Document it as curated convenience only; tell full-power users to depend on sibling crates directly. |
-| `tqsdk-stream` root surface is wide | `crates/tqsdk-stream/README.md` lists many object/event streams. | Keep `quote_batches`, commit stream, filters, lag, health, and shutdown as advanced contracts; mark broad object/event streams as advanced until use cases are proven stable. |
-| `tqsdk-task` reads like a strategy platform | README and scenario docs include supervisor, deployment, replay, desk, telemetry, fake broker, and sim surfaces. | Keep task as execution tooling; remove wording that implies production daemon, OMS, durable audit, or managed sink ownership. |
-| `tqsdk-data` presents a narrow goal with a long surface list | README lists history, cache, download, CSV, Greeks, replay, and cache maintenance types. | Keep as opt-in research/offline crate; ensure first-read docs do not imply live cache service or hot-path dependency. |
+| `tqsdk-stream` root surface is wide | `crates/tqsdk-stream/README.md` lists many object/event streams. | Keep `quote_batches`, commit stream, filters, lag, health, shutdown, and scenario-backed object/event streams active but advanced; higher-level family APIs or unproven broad families need further review before semver stabilization. |
+| `tqsdk-task` reads like a strategy platform | README and scenario docs include legitimate task-layer primitives such as supervisor, deployment wrappers, task strategy/backtest replay, trading desk profile, telemetry hooks, fake broker, and local sim, but some wording can read as production platform ownership. | Keep these primitives as task-layer foundations; remove wording that implies production daemon, OMS, durable audit, managed sink, or platform ownership. |
+| `tqsdk-data` presents a narrow goal with a long surface list | README lists history, cache, download, CSV, Greeks, offline market cache replay, and cache maintenance types. | Keep as opt-in research/offline crate; ensure first-read docs do not imply live cache service or hot-path dependency. |
 | Active docs still contain stale names or claims | `docs/architecture/api-layers.md` and `docs/architecture/api-wait.md` use `tqsdk-api-*`; `crates/tqsdk-task/README.md` still mentions stream managed sink/WAL/journal. | Rename current docs to `tqsdk-wait`/`tqsdk-stream` and remove stale sidecar ownership claims. |
 
 ## Official Python SDK Benchmark
@@ -69,7 +73,7 @@ Architecture docs and current code are authoritative. Existing review docs, scen
 | Order insert/cancel, account/position/order/trade refs | Match behavior and improve | Keep typed order price, direction, offset, tickets, and explicit `Result` errors. |
 | `TargetPosTask` one owner per account/symbol | Match behavior | Keep in `tqsdk-task` and expose ordinary wrapper through `tqsdk` only when it stays thin. |
 | Local risk hooks | Match behavior and improve | Keep basic pre-trade risk in task with typed rejection reports; avoid global risk service claims. |
-| Backtest/replay and downloader/data series | Match behavior with separate ownership | Keep local sim/replay in task and history/cache/download in data; do not make them default live-loop concerns. |
+| Task strategy/backtest replay and downloader/data series | Match behavior with separate ownership | Keep local sim and task strategy/backtest replay in task, and history/cache/download plus offline market cache replay in data; do not make them default live-loop concerns. |
 | Single huge `TqApi` class and broad root namespace | Reject shape | Rust should prefer typed builders, enums, newtypes, feature gates, and explicit advanced crates. |
 | Implicit mutable pandas-like tables | Reject shape | Rust should keep borrowed/owned typed snapshots and low-copy hot paths. |
 
