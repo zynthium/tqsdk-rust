@@ -269,6 +269,46 @@ The audit must decide whether `advanced::*` should:
 
 It should not remain ambiguous.
 
+### Wait / Stream Boundary
+
+The audit must explicitly test whether `tqsdk-stream` is still necessary if
+`tqsdk-wait` can implement high-performance full-universe quote subscription.
+
+The expected boundary is:
+
+- `tqsdk-wait` should own the default and single-owner strategy path, including
+  high-performance full-universe market data if the workload has one strategy
+  loop or one coordinating consumer.
+- `tqsdk-stream` should not rely on "faster quote subscription" as its core
+  reason to exist.
+- `tqsdk-stream` remains justified only for async-native system-integration
+  workloads: independent consumers, commit fan-out, explicit bounded backpressure
+  and lag diagnostics, path/domain/object/field filters, event pipelines, and
+  service-style composition with `futures::Stream`.
+- Both facades must consume the same `RuntimeReader` / `UpdateCursor` /
+  `SessionClient` substrate and must not create a second state tree.
+
+The review should distinguish subscription throughput from consumption model.
+Full-universe subscription is not enough to justify a separate crate if the
+consumer still wants a single stable snapshot after each step. Conversely,
+single-owner `wait_update()` performance is not enough to replace a stream
+facade when multiple downstream tasks need independent progress, isolation from
+slow consumers, and typed lag/error events.
+
+Concrete audit questions:
+
+- Can `tqsdk-wait` expose changed quote batches from `WaitStep` so full-universe
+  users avoid scanning all symbols on each commit?
+- Should `QuoteSet` add step-bound helpers such as changed symbol iteration or
+  changed snapshots, matching the performance shape currently proven by
+  `tqsdk-stream::QuoteBatchSubscription`?
+- Which `tqsdk-stream` APIs are true stream-only value, and which are merely
+  alternate syntax for wait-style single-consumer state reads?
+- Should `tqsdk-stream` be documented as an advanced integration crate rather
+  than a primary market-data-performance path?
+- Should broad object/event stream root exports be kept, hidden behind modules
+  or features, or deferred until their system-integration use cases are proven?
+
 ### Documentation Drift
 
 Find contradictions where active docs still mention removed or deferred
@@ -344,6 +384,9 @@ The next written output should contain:
 7. Validation commands and known blockers.
 8. Official Python SDK benchmark matrix: matched semantics, Rust improvements,
    and intentionally rejected Python shapes.
+9. Wait / stream boundary decision: whether `tqsdk-stream` remains, which
+   workloads justify it, and which high-performance quote APIs should move into
+   or remain in `tqsdk-wait`.
 
 The recommended roadmap shape is:
 
@@ -386,5 +429,8 @@ The audit and iteration plan are good enough when:
   practice.
 - Every Python benchmark item is classified as: match behavior, improve with a
   Rust-native API, or intentionally reject as language-specific shape.
+- The plan does not justify `tqsdk-stream` merely by full-universe quote
+  subscription performance if `tqsdk-wait` can provide the same single-consumer
+  throughput.
 - The plan contains verification commands, expected risks, and a clear stopping
   point for each batch.
