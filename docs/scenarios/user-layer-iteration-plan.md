@@ -55,6 +55,8 @@ public API。
 
 ## 使用者分层
 
+2026-05-22 sequencing rule: a scenario can be active without being first-read default. Default docs should show only the smallest ordinary `tqsdk` / `tqsdk-wait` path. Stream, task, and data scenario contracts remain active when they prove distinct advanced workflows, but they should not expand the default facade or root prelude by default.
+
 | 使用者 | 主要需求 | Rust 推荐入口 | 对应场景 | 迭代判断 |
 | --- | --- | --- | --- | --- |
 | 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情、低延迟柜台链路 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27, 31 | 维持薄底座，不上移厚 facade |
@@ -533,8 +535,9 @@ public API。
   foundation。
 - `MarketCacheReplay` 提供按事件时间、接收时间排序的 deterministic
   offline replay iterator。
-- `MarketCacheStreamWriter` 提供单进程 live `MarketEvent` -> cache writer
-  pipe foundation，明确不承诺 durable daemon orchestration。
+- 当前 active API 不包含 `MarketCacheStreamWriter` 或 live stream pipe；本地缓存仍保持
+  offline `MarketCacheEvent` / writer / reader / replay，live pipe / cache service
+  归属用户工具或未来独立设计边界。
 - queue、lock、index、compaction、reader manifest、recovery scan、writer
   election、service、daemon 和 supervisor 等跨进程或准跨进程编排表面已回退，
   不再作为 `tqsdk-data` public contract。

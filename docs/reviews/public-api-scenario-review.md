@@ -43,6 +43,15 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 是否避免 provider protocol / 手写 task / channel / `Arc<Mutex<_>>` 泄漏、是否
 维持单一 runtime commit / revision、是否属于 SDK 核心而不是用户策略或运维系统。
 
+## 2026-05-22 Contract Classification
+
+| Class | Meaning | Example groups |
+| --- | --- | --- |
+| Default contract | Ordinary users can start here without understanding internal crate boundaries. | `tqsdk` facade examples, wait quote/order/target-position flows. |
+| Core advanced contract | Stable enough to remain active, but aimed at users who chose a specific crate or consumption model. | session direct query, stream commit/quote batches/lag/health, data history/cache/export, task risk/test/local sim. |
+| Foundation advanced contract | Useful foundation that should stay out of first-read docs until stabilization evidence is stronger. | broad stream object/event families, task supervisor/deployment/desk/telemetry surfaces. |
+| Archived or non-core sketch | Historical design input or user-tooling/platform scope. | daemon orchestration, GUI/web helpers, managed sink/WAL/journal ownership, cross-process cache service, automatic hedge/flatten engines. |
+
 ## 边界复核口径
 
 本报告按 [`../scenarios/user-layer-iteration-plan.md`](../scenarios/user-layer-iteration-plan.md)
