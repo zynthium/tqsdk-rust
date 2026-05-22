@@ -28,7 +28,8 @@ S31 低延迟柜台 profile 已提升为
 也已归档到 `docs/archive/scenarios/2026-05-02/`。
 S18 跨进程 cache service sketch 已随 public API 回退归档到
 `docs/archive/scenarios/2026-05-03/`；当前核心契约只保留本地 record/replay 与
-单进程 live pipe。
+offline replay foundation。单进程 live pipe 也不属于当前 active API；如后续需要，
+应作为 `tqsdk-stream` sink adapter 与 `tqsdk-data` writer 边界的独立设计重新审查。
 
 场景评审时应先判断示例主要服务哪类 Rust 使用者，而不是按官方 Python SDK 的
 方法名逐项对齐。使用者分层与迭代顺序见
