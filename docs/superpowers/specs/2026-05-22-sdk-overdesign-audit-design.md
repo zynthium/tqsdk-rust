@@ -15,6 +15,8 @@ The audit must balance:
 - External calibration from mature or adjacent libraries, including the user
   supplied public API reference:
   <https://github.com/pseudocodes/tqsdk-rs/tree/main/tqsdk-rs>.
+- Official Python SDK calibration from
+  <https://github.com/shinnytech/tqsdk-python>.
 
 This is a design for the audit and iteration plan. It does not authorize broad
 code changes yet.
@@ -42,6 +44,10 @@ Produce a decision-grade review that answers four questions:
   roadmap.
 - The public API reference list should include
   `pseudocodes/tqsdk-rs/tree/main/tqsdk-rs`.
+- The official Python SDK should be treated as a benchmark for functional
+  semantics and mature trading workflows. Because it is a different language,
+  the Rust audit should focus on what behavior to match, where the Rust API can
+  be more idiomatic, and where Rust should deliver lower overhead.
 
 ## Evidence Model
 
@@ -94,8 +100,56 @@ not cut complexity that protects these invariants:
 
 ### 4. External Public API Calibration
 
-The user-supplied reference `pseudocodes/tqsdk-rs` is useful as a contrast, not
-as a direct template.
+Two external references will be used differently.
+
+### 4a. Official Python SDK Functional Benchmark
+
+`shinnytech/tqsdk-python` is the official maturity benchmark. It should be used
+to evaluate feature completeness and user workflow semantics, not copied as a
+Rust shape.
+
+Observed benchmark semantics:
+
+- `TqApi` presents one default user object that owns network connections,
+  receives market/trade data, and maintains a complete in-memory business data
+  snapshot.
+- `wait_update()` is the central progression point: it sends pending requests,
+  advances background tasks, receives and merges diffs, and returns only after
+  new business data or timeout.
+- Initialization waits for an available snapshot before ordinary strategy code
+  runs.
+- Reconnect handling records requests, resends subscriptions/login commands,
+  suppresses incomplete upstream data, and releases data only after a complete
+  market or trade snapshot is received.
+- `get_quote`, `get_quote_list`, `get_kline_serial`, `insert_order`,
+  `cancel_order`, account/position/order/trade refs, risk rules, target-position
+  tasks, backtest/replay, and `DataDownloader` define the mature trading SDK
+  workflow set.
+- `TargetPosTask` enforces one task per account/symbol and documents that order
+  actions are driven by subsequent `wait_update()` calls.
+- Local risk hooks run before insert/cancel operations and update internal risk
+  counters as data and orders flow through the API.
+
+Rust audit implications:
+
+- Match the official SDK's functional coverage where it represents mature user
+  semantics: stable snapshots, reconnect recovery, live refs, order lifecycle,
+  target position, multi-account explicitness, risk hooks, backtest/replay, and
+  history download.
+- Do not copy the single large `TqApi` class, implicit mutable pandas
+  DataFrames, stringly typed order parameters, hidden event loop ownership, or
+  broad root namespace as Rust API shape.
+- Prefer typed builders, enums, newtypes, `Result` errors, explicit feature
+  gates, explicit async runtime ownership, immutable commit snapshots, and
+  zero-copy or low-copy hot paths where Rust can be materially better.
+- Use Python SDK behavior to judge whether a Rust feature is missing or
+  immature; use Rust norms to judge whether the exposed API is elegant and
+  performant.
+
+### 4b. Unofficial Rust Public API Contrast
+
+The user-supplied reference `pseudocodes/tqsdk-rs` is useful as a public API
+contrast, not as a direct template.
 
 Observed strengths:
 
@@ -187,6 +241,14 @@ sidecars.
 
 The first-read docs should start from install and the default facade flow, then
 move crate taxonomy and advanced escape hatches below the beginner path.
+
+The default facade should be compared against Python `TqApi` for workflow
+coverage, while intentionally using Rust shapes:
+
+- typed `TqBuilder` instead of one constructor with many optional modes;
+- typed refs and order tickets instead of string/dict-style mutation;
+- explicit `Result` and feature-gated capabilities;
+- clear ownership for `wait_update()` versus stream fan-out.
 
 ### Public Export Hygiene
 
@@ -280,6 +342,8 @@ The next written output should contain:
 5. Public API maturity checklist.
 6. Iteration plan split into short, verifiable batches.
 7. Validation commands and known blockers.
+8. Official Python SDK benchmark matrix: matched semantics, Rust improvements,
+   and intentionally rejected Python shapes.
 
 The recommended roadmap shape is:
 
@@ -300,6 +364,7 @@ This audit will not:
 - rewrite the SDK now;
 - collapse the workspace into a single crate by default;
 - copy Python SDK API names mechanically;
+- copy Python SDK implementation shape mechanically;
 - copy `pseudocodes/tqsdk-rs` mechanically;
 - promote daemon, GUI, HTTP operations, durable queue, or cross-process cache
   service behavior into core SDK scope;
@@ -319,5 +384,7 @@ The audit and iteration plan are good enough when:
   or merely changes README emphasis.
 - Every kept complexity maps to a trading SDK invariant or Rust SDK best
   practice.
+- Every Python benchmark item is classified as: match behavior, improve with a
+  Rust-native API, or intentionally reject as language-specific shape.
 - The plan contains verification commands, expected risks, and a clear stopping
   point for each batch.
