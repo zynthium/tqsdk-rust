@@ -20,7 +20,7 @@ It is the gate for public API narrowing work.
 | `remove-from-active-docs` | Remove or rewrite active docs that present this as a current SDK promise. |
 | `removed` | Removed from public API after architecture/docs/examples were rewritten. |
 
-## Summary
+## 2026-04-29 Summary
 
 | Crate | `keep` | `deprecate` | `internalize` | `needs-arch-change` | `split-plan` | `removed` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -64,7 +64,7 @@ It is the gate for public API narrowing work.
 - The clear `tqsdk-core` immediate internalization candidates from this pass, the aggregation surface and `OutboundEnvelope`, have been closed.
 - `AuthContext` field privatization was handled as a focused source-breaking change separate from broad public API surface reduction.
 
-## Verification
+## 2026-04-29 Verification
 
 Command:
 
