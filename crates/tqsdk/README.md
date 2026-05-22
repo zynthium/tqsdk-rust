@@ -43,13 +43,15 @@ while tq.next().await? {
 - `services`：向内部 crate 传播服务查询相关 HTTP 能力。
 - `default-features = false`：保留 facade 类型和不依赖 live auth 的组合入口；live-only helper 不参与编译。
 
-高级用户可以继续使用：
+`tqsdk::advanced::*` 是 curated convenience，不是完整 sibling crate mirror。它只暴露默认 facade 常见下钻点：
 
 ```rust
 use tqsdk::advanced::session::SessionClientBuilder;
 use tqsdk::advanced::stream::TqStreamBuilder;
 use tqsdk::advanced::runtime::RuntimeReader;
 ```
+
+需要完整 stream、task、data、session 或 core surface 的用户应直接依赖对应 sibling crate。这样可以让 `tqsdk` 的 semver surface 保持小，同时不限制高级用户使用底层能力。
 
 ## 边界
 
