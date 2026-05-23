@@ -30,7 +30,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-core`](crates/tqsdk-core) | 底层 async protocol substrate、状态树、commit/revision、runtime reader、cursor、adapter 和 schema types |
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
-| [`tqsdk-stream`](crates/tqsdk-stream) | Rust async-native 多消费者 commit stream、object stream、row-batch kline/tick stream、过滤器、lag diagnostics 和 health status |
+| [`tqsdk-stream`](crates/tqsdk-stream) | 高级 Rust async-native 多消费者 commit stream、row-batch kline/tick stream、过滤器、lag diagnostics 和 health status |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、Python-compatible local backtest sim、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、离线 cache 和 replay foundation |
 
@@ -38,7 +38,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 
 - 普通策略、目标持仓和轻量历史访问：先用 `tqsdk`。
 - 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
-- 需要多个异步消费者、fan-out、lag diagnostics 或事件管道：用 `tqsdk-stream`。
+- 需要多个异步消费者、独立 consumer 进度、fan-out、lag diagnostics 或事件管道：用 `tqsdk-stream`。
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出、离线 cache 和 replay：用 `tqsdk-data`。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
@@ -81,6 +81,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 高级用户仍可直接依赖 `tqsdk-session`、`tqsdk-stream`、`tqsdk-wait`、
 `tqsdk-task` 或 `tqsdk-data`，但普通策略和研究入口应先尝试 `tqsdk`。
+`tqsdk-stream` 是多消费者异步集成入口，不是普通 quote 订阅的默认性能路径。
 
 ## 快速开始
 
@@ -146,9 +147,10 @@ let snapshot = quotes.get("SHFE.au2602").unwrap().load()?;
 
 `tqsdk-wait` 的 `quotes(...)` 会一次表达批量 quote interest；`quote(...)` 仍是单合约便利入口。`kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。
 
-### Rust async stream facade
+### Advanced Rust async stream facade
 
-适合多个异步消费者共享同一个 live session：
+适合多个异步消费者共享同一个 live session，并且需要独立进度、显式背压或事件管道。
+单 owner 策略应继续优先使用 `tqsdk` / `tqsdk-wait`：
 
 ```rust
 use futures::StreamExt;
@@ -161,7 +163,8 @@ let batch = batches.next().await.ok_or("quote stream closed")??;
 ```
 
 `quote_batches(...)` 是 multi-consumer stream 场景下的批量 quote 入口：每个 runtime commit
-最多产出一个 batch，内部只 decode 本轮实际变化的合约。`quotes(...)` 仍保留为
+最多产出一个 batch，内部只 decode 本轮实际变化的合约。它的价值是消费模型和
+fan-out 隔离，不应作为单消费者 quote throughput 的默认推荐。`quotes(...)` 仍保留为
 兼容的逐 quote item stream。
 
 ### Direct query / metadata
@@ -201,7 +204,7 @@ let page = client.get_kline_data_page(request).await?;
 | 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
 | Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote replay + `TqSim`，不连接真实服务 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
-| quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
+| 高级 quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 多消费者 async 集成示例，需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
 | 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` | 需要账号；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |
 | command wait helper | `cargo run -p tqsdk-session --example query_command_wait` | 需要账号；默认查询 `SSE.000300`，可用 `TQ_QUERY_SYMBOL` 覆盖 |
 | K 线分页查询 | `cargo run -p tqsdk-data --example kline_data_page` | 需要账号和历史数据权限；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |

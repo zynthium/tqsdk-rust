@@ -52,6 +52,8 @@ use tqsdk::advanced::runtime::RuntimeReader;
 ```
 
 需要完整 stream、task、data、session 或 core surface 的用户应直接依赖对应 sibling crate。这样可以让 `tqsdk` 的 semver surface 保持小，同时不限制高级用户使用底层能力。
+其中 `advanced::stream` 面向已经明确需要多消费者 async stream 的用户；普通单 owner
+策略仍应优先通过 `tqsdk::prelude::*` / `Tq::next()` 或直接使用 `tqsdk-wait`。
 
 ## 边界
 
@@ -60,6 +62,6 @@ use tqsdk::advanced::runtime::RuntimeReader;
 
 - direct query / metadata：`tqsdk-session`
 - single-owner `wait_update()`：`tqsdk-wait`
-- async stream：`tqsdk-stream`
+- async multi-consumer stream：`tqsdk-stream`
 - execution tooling：`tqsdk-task`
 - research/offline data：`tqsdk-data`

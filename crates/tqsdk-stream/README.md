@@ -2,12 +2,12 @@
 
 `tqsdk-stream` 是建立在 `tqsdk-core + tqsdk-session` 之上的 Rust async-native stream facade。
 
-它当前的最小职责很窄：
+它是高级 crate，当前核心职责很窄：
 
 - 提供共享 session 驱动的 `TqStream`
 - 提供多消费者 raw commit fan-out
 - 提供基于 path / scope / domain / object / field 的轻量 commit 过滤
-- 提供建立在 commit 过滤之上的 typed path、kline/tick row batch、账户级 trade object / trade session 事件流，以及 market / system / trade / security 对象 stream 薄包装
+- 提供 `quote_batches`、typed path、kline/tick row batch、统一 market event、账户级 trade object / trade session 事件流等 commit-backed projection
 - 保留 `RuntimeReader` 与 `SessionClient` 作为高性能读面和 direct-query 逃生舱
 
 `tqsdk-stream` 不是普通策略获取更快 quote 的默认路径。它适合多个 async consumer 共享同一 live session，并且需要独立进度、显式背压、lag diagnostics、过滤器、事件管道或 service-style shutdown/health/retry 语义的场景。单 owner `wait_update()` 策略应优先使用 `tqsdk` / `tqsdk-wait`。
@@ -38,7 +38,15 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 ## 当前公开面
 
-当前最小 surface 包含：
+当前公开面分两层看待：
+
+- 稳定核心候选：`TqStream` / `TqStreamBuilder`、`CommitStream`、commit filters、
+  `quote_batches(...)`、`PathValueStream<T>`、kline/tick row batch、lag diagnostics、
+  health/reconnect/graceful shutdown。
+- advanced projection：market / system / trade / security 对象 stream 与事件 stream。
+  这些 API 已有场景和测试支撑，但比核心 fan-out surface 更宽，后续 semver 稳定前仍应单独复核。
+
+当前 crate root 暴露：
 
 - `TqStreamBuilder`
 - `TqStream`
