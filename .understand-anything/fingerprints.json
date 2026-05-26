@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "7d9abd496ea892f83563b04cfede88a8a6ce2bdb",
-  "generatedAt": "2026-05-25T15:38:58.102Z",
+  "gitCommitHash": "6268a6321a61c5b61a58a8f76f31bbf5398b79c9",
+  "generatedAt": "2026-05-25T20:02:32.662Z",
   "files": {
     ".github/workflows/ci.yml": {
       "filePath": ".github/workflows/ci.yml",
@@ -11,26 +11,6 @@
       "imports": [],
       "exports": [],
       "totalLines": 75,
-      "hasStructuralAnalysis": true
-    },
-    ".understand-anything/.understandignore": {
-      "filePath": ".understand-anything/.understandignore",
-      "contentHash": "71300621d0c2a59d98c0b32c1721063f601d521ebd888104ea163f5eeb830a24",
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "exports": [],
-      "totalLines": 47,
-      "hasStructuralAnalysis": false
-    },
-    ".understand-anything/config.json": {
-      "filePath": ".understand-anything/config.json",
-      "contentHash": "5d2ff006cff22c68edd4776249d562ea8c73915a61c6214eb85933865a9402e7",
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "exports": [],
-      "totalLines": 4,
       "hasStructuralAnalysis": true
     },
     "AGENTS.md": {

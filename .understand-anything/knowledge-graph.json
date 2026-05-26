@@ -3,14 +3,12 @@
   "project": {
     "name": "tqsdk-rust",
     "languages": [
-      "json",
       "markdown",
       "python",
       "rust",
       "shell",
       "template",
       "toml",
-      "unknown",
       "yaml"
     ],
     "frameworks": [
@@ -18,8 +16,8 @@
       "Tokio"
     ],
     "description": "面向天勤/TQSDK 生态的 Rust SDK workspace，用共享异步 runtime 支撑行情、交易、策略执行和研究数据工作流。",
-    "analyzedAt": "2026-05-25T15:38:26.781Z",
-    "gitCommitHash": "7d9abd496ea892f83563b04cfede88a8a6ce2bdb"
+    "analyzedAt": "2026-05-25T20:02:08.095Z",
+    "gitCommitHash": "6268a6321a61c5b61a58a8f76f31bbf5398b79c9"
   },
   "nodes": [
     {
@@ -40,11 +38,13 @@
       "type": "document",
       "name": "AGENTS.md",
       "filePath": "AGENTS.md",
-      "summary": "项目文件，用于解释当前设计意图、使用方式或决策上下文。结构上包含 13 个文档章节。",
+      "summary": "AI 代码代理的仓库级入口，定义必读顺序、crate 边界、验证命令、架构更新规则，以及当前 GitNexus 工具索引信息。",
       "tags": [
         "documentation",
-        "markdown",
-        "project-structure"
+        "ai-workflow",
+        "gitnexus",
+        "architecture",
+        "project-governance"
       ],
       "complexity": "moderate"
     },
@@ -53,11 +53,12 @@
       "type": "document",
       "name": "CLAUDE.md",
       "filePath": "CLAUDE.md",
-      "summary": "项目文件，用于解释当前设计意图、使用方式或决策上下文。结构上包含 7 个文档章节。",
+      "summary": "Claude Code 专属补充入口，保留 GitNexus 索引统计和 Claude 环境下的工具说明，并以 AGENTS.md 为跨工具主入口。",
       "tags": [
         "documentation",
-        "markdown",
-        "project-structure"
+        "claude-code",
+        "gitnexus",
+        "ai-workflow"
       ],
       "complexity": "simple"
     },
@@ -491,31 +492,6 @@
         "project-structure"
       ],
       "complexity": "moderate"
-    },
-    {
-      "id": "file:.understand-anything/.understandignore",
-      "type": "file",
-      "name": ".understandignore",
-      "filePath": ".understand-anything/.understandignore",
-      "summary": "项目文件，负责承载该路径下的核心实现或示例逻辑。",
-      "tags": [
-        "unknown",
-        "source-code"
-      ],
-      "complexity": "simple"
-    },
-    {
-      "id": "config:.understand-anything/config.json",
-      "type": "config",
-      "name": "config.json",
-      "filePath": ".understand-anything/config.json",
-      "summary": "项目文件，控制构建、依赖、lint 或工具行为。结构上包含 1 个文档章节。",
-      "tags": [
-        "configuration",
-        "json",
-        "project-structure"
-      ],
-      "complexity": "simple"
     },
     {
       "id": "config:crates/tqsdk-core/Cargo.toml",
@@ -102209,7 +102185,6 @@
       "name": "工作区入口与治理",
       "description": "包含根 README、workspace manifest、CI、AI 代理入口、验证脚本和仓库级配置，是理解项目使用方式与协作约束的入口层。",
       "nodeIds": [
-        "config:.understand-anything/config.json",
         "config:Cargo.toml",
         "config:deny.toml",
         "document:AGENTS.md",
@@ -102217,7 +102192,6 @@
         "document:README.md",
         "document:ROADMAP.md",
         "document:docs/README.md",
-        "file:.understand-anything/.understandignore",
         "file:scripts/check_api_contract_examples.sh",
         "pipeline:.github/workflows/ci.yml"
       ]
