@@ -132,10 +132,10 @@ impl BacktestPump {
             awaiting_page: true,
             current_page_left_id: None,
             current_page_right_id: None,
-            current_serial_last_id: None,
             next_emit_id: None,
             first_emitted_id: None,
             last_emitted_id: None,
+            last_loaded_right_id: None,
             exhausted: false,
         };
         self.internal_tick_charts
@@ -188,6 +188,8 @@ impl BacktestPump {
                     user_chart_id,
                     left_id,
                 } => {
+                    self.internal_tick_charts
+                        .retain(|_, mapped_user_chart_id| mapped_user_chart_id != &user_chart_id);
                     let internal_chart_id = self
                         .request_tick_page(session, &symbol, TickPageRequest::LeftId(left_id))
                         .await?;
@@ -223,6 +225,9 @@ impl BacktestPump {
             };
 
             if let Some(serial) = self.tick_serials.get_mut(&user_chart_id) {
+                trace_backtest_tick(format_args!(
+                    "load_page internal={internal_chart_id} user={user_chart_id}"
+                ));
                 serial.load_page(reader, &internal_chart_id)?;
             }
         }
@@ -335,10 +340,10 @@ struct BacktestTickSerial {
     awaiting_page: bool,
     current_page_left_id: Option<i64>,
     current_page_right_id: Option<i64>,
-    current_serial_last_id: Option<i64>,
     next_emit_id: Option<i64>,
     first_emitted_id: Option<i64>,
     last_emitted_id: Option<i64>,
+    last_loaded_right_id: Option<i64>,
     exhausted: bool,
 }
 
@@ -348,21 +353,41 @@ impl BacktestTickSerial {
         let Some(chart) = market.decode_path::<Chart>(&["charts", internal_chart_id])? else {
             return Ok(());
         };
+        trace_backtest_tick(format_args!(
+            "chart {internal_chart_id} ready={} more_data={} left={} right={} last_loaded={:?} last_emitted={:?}",
+            chart.ready,
+            chart.more_data,
+            chart.left_id,
+            chart.right_id,
+            self.last_loaded_right_id,
+            self.last_emitted_id
+        ));
         if !chart.ready {
             return Ok(());
         }
         let serial_last_id = tick_last_id(&market, &self.symbol);
-        if chart.more_data
-            || market_mdhis_more_data(&market)
-            || !tick_rows_ready(&market, &self.symbol, &chart, serial_last_id)
-        {
+        let mdhis_more_data = market_mdhis_more_data(&market);
+        let rows_ready = tick_rows_ready(&market, &self.symbol, &chart, serial_last_id);
+        if chart.more_data || mdhis_more_data || !rows_ready {
+            trace_backtest_tick(format_args!(
+                "wait page chart_more_data={} mdhis_more_data={} rows_ready={} serial_last_id={serial_last_id:?}",
+                chart.more_data, mdhis_more_data, rows_ready
+            ));
             return Ok(());
         }
 
         self.awaiting_page = false;
         self.current_page_left_id = Some(chart.left_id);
         self.current_page_right_id = Some(chart.right_id);
-        self.current_serial_last_id = serial_last_id;
+        if self
+            .last_loaded_right_id
+            .is_some_and(|last_right_id| chart.right_id <= last_right_id)
+        {
+            self.exhausted = true;
+            self.next_emit_id = None;
+            return Ok(());
+        }
+        self.last_loaded_right_id = Some(chart.right_id);
 
         if chart.left_id <= chart.right_id {
             let next_after_last = self
@@ -416,6 +441,12 @@ impl BacktestTickSerial {
                 WaitFacadeError::InvalidState("backtest tick row missing datetime"),
             )?;
             if datetime < backtest.start_datetime_ns() {
+                if id % 1_000 == 0 {
+                    trace_backtest_tick(format_args!(
+                        "skip before start id={id} datetime={datetime} start={}",
+                        backtest.start_datetime_ns()
+                    ));
+                }
                 id = match id.checked_add(1) {
                     Some(next) => next,
                     None => break,
@@ -433,6 +464,9 @@ impl BacktestTickSerial {
             let width_left_id = id.saturating_sub(self.view_width.saturating_sub(1) as i64);
             let first_visible_id = width_left_id.max(first_emitted_id);
 
+            trace_backtest_tick(format_args!(
+                "emit id={id} datetime={datetime} first_visible_id={first_visible_id}"
+            ));
             return Ok(TickPumpDecision::Emit {
                 symbol: self.symbol.clone(),
                 user_chart_id: self.user_chart_id.clone(),
@@ -448,13 +482,13 @@ impl BacktestTickSerial {
     }
 
     fn next_page_or_finish(&mut self) -> Result<TickPumpDecision> {
-        if let (Some(right_id), Some(last_id)) =
-            (self.current_page_right_id, self.current_serial_last_id)
-            && right_id < last_id
-        {
+        if let Some(right_id) = self.current_page_right_id {
+            trace_backtest_tick(format_args!(
+                "request next page left_id={right_id} symbol={}",
+                self.symbol
+            ));
             self.current_page_left_id = None;
             self.current_page_right_id = None;
-            self.current_serial_last_id = None;
             self.next_emit_id = None;
             return Ok(TickPumpDecision::RequestNextPage {
                 symbol: self.symbol.clone(),
@@ -466,6 +500,12 @@ impl BacktestTickSerial {
         self.exhausted = true;
         self.next_emit_id = None;
         Ok(TickPumpDecision::None)
+    }
+}
+
+fn trace_backtest_tick(args: std::fmt::Arguments<'_>) {
+    if std::env::var_os("TQSDK_WAIT_BACKTEST_TRACE").is_some() {
+        eprintln!("[tqsdk-wait backtest tick] {args}");
     }
 }
 

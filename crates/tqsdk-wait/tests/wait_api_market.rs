@@ -122,6 +122,79 @@ fn seed_backtest_tick_page_with_bounds(
         .expect("backtest tick page should produce a commit");
 }
 
+fn seed_backtest_tick_page_with_rows(
+    api: &mut tqsdk_wait::TqApi,
+    chart_id: &str,
+    symbol: &str,
+    left_id: i64,
+    right_id: i64,
+    tick_last_id: i64,
+    rows: Vec<(i64, i64, f64)>,
+) {
+    let mut data = serde_json::Map::new();
+    for (id, datetime, last_price) in rows {
+        data.insert(
+            id.to_string(),
+            json!({
+                "datetime": datetime,
+                "last_price": last_price,
+                "average": last_price,
+                "highest": last_price,
+                "lowest": last_price,
+                "ask_price1": last_price + 0.2,
+                "ask_volume1": 3,
+                "bid_price1": last_price - 0.2,
+                "bid_volume1": 4,
+                "volume": 12,
+                "amount": 7_416.0,
+                "open_interest": 101
+            }),
+        );
+    }
+
+    api.session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "mdhis_more_data": false,
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "aid": "set_chart",
+                                    "chart_id": chart_id,
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                    "view_width": 10_000,
+                                    "focus_datetime": 1_000,
+                                    "focus_position": 10_000,
+                                },
+                                "left_id": left_id,
+                                "right_id": right_id,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "last_id": tick_last_id,
+                                "data": data
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("backtest tick page should produce a commit");
+}
+
 fn seed_backtest_tick_page_header_only(api: &mut tqsdk_wait::TqApi, chart_id: &str, symbol: &str) {
     api.session()
         .handle()
@@ -790,6 +863,68 @@ async fn backtest_tick_next_page_starts_from_previous_right_id() {
         .into_iter()
         .find(|payload| payload.get("left_kline_id").is_some())
         .expect("next hidden chart request should be submitted");
+    assert_eq!(next_chart["left_kline_id"], 11);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_tick_requests_next_page_when_loaded_last_id_equals_right_id() {
+    let mut api = support::backtest_api_for_test(1_000, 4_000);
+
+    let ticks = api.tick_ready("SHFE.au2602", 2, None).await.unwrap();
+    let chart_id = hidden_backtest_chart_id(&api, "SHFE.au2602");
+    seed_backtest_tick_page_with_bounds(&mut api, &chart_id, "SHFE.au2602", 11, false);
+
+    let _ready_step = api.step().await.unwrap().expect("ready chart commit");
+    let _first = api.step().await.unwrap().expect("first backtest tick");
+    let second = api.step().await.unwrap().expect("second backtest tick");
+    assert_eq!(second.current_dt(), Some(2_500));
+    assert!(second.is_changing(&ticks));
+
+    let no_synthetic = api
+        .step_until(Some(tokio::time::Instant::now()))
+        .await
+        .unwrap();
+    assert!(no_synthetic.is_none());
+
+    let next_chart = drain_backtest_set_chart_payloads(&api)
+        .into_iter()
+        .find(|payload| payload.get("left_kline_id").is_some())
+        .expect("next hidden chart request should not depend on tick last_id exceeding right_id");
+    assert_eq!(next_chart["left_kline_id"], 11);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_tick_skips_page_before_start_and_requests_next_page() {
+    let mut api = support::backtest_api_for_test(10_000, 20_000);
+
+    let ticks = api.tick_ready("SHFE.au2602", 2, None).await.unwrap();
+    let chart_id = hidden_backtest_chart_id(&api, "SHFE.au2602");
+    seed_backtest_tick_page_with_rows(
+        &mut api,
+        &chart_id,
+        "SHFE.au2602",
+        10,
+        11,
+        12,
+        vec![(10, 1_500, 618.0), (11, 2_500, 619.0)],
+    );
+
+    let ready_step = api.step().await.unwrap().expect("ready chart commit");
+    assert!(ready_step.is_changing(&ticks));
+
+    let no_synthetic = api
+        .step_until(Some(tokio::time::Instant::now()))
+        .await
+        .unwrap();
+    assert!(
+        no_synthetic.is_none(),
+        "a hidden page entirely before backtest start must stay hidden"
+    );
+
+    let next_chart = drain_backtest_set_chart_payloads(&api)
+        .into_iter()
+        .find(|payload| payload.get("left_kline_id").is_some())
+        .expect("next hidden chart request should be submitted after skipping old rows");
     assert_eq!(next_chart["left_kline_id"], 11);
 }
 
