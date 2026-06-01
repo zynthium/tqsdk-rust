@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use tqsdk_core::{ChartId, MarketStateReadGuard, ObjectKey, StatePath, Tick};
 
 use crate::{
+    backtest::BACKTEST_TICK_ROW_MARKER_FIELD,
     change::ChangeTrackedRef,
     step::{WaitReadHandle, WaitStep},
     views::TickWindow,
@@ -169,6 +170,14 @@ impl TickHandle {
             {
                 ids.insert(*tick_id);
             }
+
+            if let ObjectKey::Chart { chart_id } = &hit.object
+                && chart_id.as_str() == self.chart_id
+                && hit.field == BACKTEST_TICK_ROW_MARKER_FIELD
+                && let Some(tick_id) = self.current_backtest_tick_marker()
+            {
+                ids.insert(tick_id);
+            }
         }
 
         for path in &step.changes().path_hits {
@@ -178,6 +187,17 @@ impl TickHandle {
         }
 
         ids
+    }
+
+    fn current_backtest_tick_marker(&self) -> Option<i64> {
+        let guard = self.reader.reader().read_market_state();
+        guard
+            .get_path(&[
+                "charts",
+                self.chart_id.as_str(),
+                BACKTEST_TICK_ROW_MARKER_FIELD,
+            ])
+            .and_then(serde_json::Value::as_i64)
     }
 
     fn decode_row_from_guard(

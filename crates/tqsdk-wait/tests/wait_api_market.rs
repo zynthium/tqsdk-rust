@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use tqsdk_core::{OutboundFrame, OutboundRequest};
+use serde_json::json;
+use tqsdk_core::{
+    CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest, ProtocolDomain,
+    RuntimeInput,
+};
 
 mod support;
 
@@ -17,6 +21,95 @@ fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
             .expect("transport frame should contain valid json payload"),
         other => panic!("expected transport request, got {other:?}"),
     }
+}
+
+fn hidden_backtest_chart_id(api: &tqsdk_wait::TqApi, symbol: &str) -> String {
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| {
+            payload["aid"] == "set_chart"
+                && payload["ins_list"] == symbol
+                && payload["duration"] == 0
+                && payload["view_width"] == 10_000
+                && payload["focus_position"] == 10_000
+        })
+        .and_then(|payload| payload["chart_id"].as_str().map(ToOwned::to_owned))
+        .expect("backtest tick subscription should request a hidden history chart")
+}
+
+fn seed_backtest_tick_page(api: &mut tqsdk_wait::TqApi, chart_id: &str, symbol: &str) {
+    api.session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "mdhis_more_data": false,
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "aid": "set_chart",
+                                    "chart_id": chart_id,
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                    "view_width": 10_000,
+                                    "focus_datetime": 1_000,
+                                    "focus_position": 10_000,
+                                },
+                                "left_id": 10,
+                                "right_id": 11,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "last_id": 11,
+                                "data": {
+                                    "10": {
+                                        "datetime": 1_500,
+                                        "last_price": 618.0,
+                                        "average": 618.0,
+                                        "highest": 618.0,
+                                        "lowest": 618.0,
+                                        "ask_price1": 618.2,
+                                        "ask_volume1": 4,
+                                        "bid_price1": 617.8,
+                                        "bid_volume1": 5,
+                                        "volume": 12,
+                                        "amount": 7_416.0,
+                                        "open_interest": 101
+                                    },
+                                    "11": {
+                                        "datetime": 2_500,
+                                        "last_price": 619.0,
+                                        "average": 618.4,
+                                        "highest": 619.0,
+                                        "lowest": 618.0,
+                                        "ask_price1": 619.2,
+                                        "ask_volume1": 3,
+                                        "bid_price1": 618.8,
+                                        "bid_volume1": 6,
+                                        "volume": 15,
+                                        "amount": 9_285.0,
+                                        "open_interest": 102
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("backtest tick page should produce a commit");
 }
 
 #[test]
@@ -475,6 +568,50 @@ async fn tick_handle_reuses_existing_chart_without_resubmitting_set_chart() {
 
     assert!(first_dispatch_count > 0);
     assert_eq!(second_dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_tick_ready_and_steps_emit_page_rows_one_tick_at_a_time() {
+    let mut api = support::backtest_api_for_test(1_000, 3_000);
+
+    let ticks = api.tick_ready("SHFE.au2602", 2, None).await.unwrap();
+    let chart_id = hidden_backtest_chart_id(&api, "SHFE.au2602");
+    seed_backtest_tick_page(&mut api, &chart_id, "SHFE.au2602");
+
+    let ready_step = api.step().await.unwrap().expect("ready chart commit");
+    assert!(ready_step.is_changing(&ticks));
+    assert!(ticks.is_ready().unwrap());
+    assert!(ticks.window().unwrap().is_empty());
+
+    let first = api.step().await.unwrap().expect("first backtest tick");
+    assert_eq!(first.current_dt(), Some(1_500));
+    assert!(first.is_changing(&ticks));
+    let first_rows = ticks.changed_rows(&first).unwrap();
+    assert_eq!(
+        first_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![10]
+    );
+    assert_eq!(first_rows[0].last_price, 618.0);
+
+    let second = api.step().await.unwrap().expect("second backtest tick");
+    assert_eq!(second.current_dt(), Some(2_500));
+    assert!(second.is_changing(&ticks));
+    let second_rows = ticks.changed_rows(&second).unwrap();
+    assert_eq!(
+        second_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![11]
+    );
+    assert_eq!(second_rows[0].last_price, 619.0);
+    assert_eq!(
+        ticks
+            .window()
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![10, 11]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

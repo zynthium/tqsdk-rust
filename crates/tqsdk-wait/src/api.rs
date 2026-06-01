@@ -10,7 +10,7 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 
-use crate::backtest::TqBacktest;
+use crate::backtest::{BacktestCommitAction, BacktestPump, BacktestSyntheticCommit, TqBacktest};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
@@ -73,6 +73,7 @@ impl TqApi {
                 quote_subscriptions: Default::default(),
                 trading_status_subscriptions: Default::default(),
                 serial_charts: Default::default(),
+                backtest_pump: backtest.as_ref().map(|_| BacktestPump::new()),
                 backtest,
                 backtest_finished: false,
             },
@@ -92,7 +93,46 @@ impl TqApi {
 
         loop {
             if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
-                self.driver.last_commit = Some(commit);
+                match handle_backtest_reader_commit(
+                    self.driver.backtest.clone(),
+                    self.driver.backtest_pump.as_mut(),
+                    self.driver.session.clone(),
+                    self.driver.reader.clone(),
+                    commit,
+                )
+                .await?
+                {
+                    Some(HandledBacktestCommit::Commit(commit)) => {
+                        self.driver.last_commit = Some(commit);
+                        return Ok(true);
+                    }
+                    Some(HandledBacktestCommit::Synthetic(synthetic)) => {
+                        consume_returned_synthetic_commit(
+                            &self.driver.reader,
+                            &mut self.driver.cursor,
+                            &synthetic.commit,
+                        );
+                        self.driver.last_commit = Some(synthetic.commit);
+                        return Ok(true);
+                    }
+                    None => continue,
+                }
+            }
+
+            if let Some(synthetic) = emit_pending_backtest_commit(
+                self.driver.backtest.clone(),
+                self.driver.backtest_pump.as_mut(),
+                self.driver.session.clone(),
+                self.driver.reader.clone(),
+            )
+            .await?
+            {
+                consume_returned_synthetic_commit(
+                    &self.driver.reader,
+                    &mut self.driver.cursor,
+                    &synthetic.commit,
+                );
+                self.driver.last_commit = Some(synthetic.commit);
                 return Ok(true);
             }
 
@@ -133,8 +173,66 @@ impl TqApi {
 
         loop {
             if let Some(commit) = self.driver.reader.next(&mut self.driver.cursor) {
-                self.driver.last_commit = Some(commit.clone());
-                let step = WaitStep::new(commit, current_dt_from_reader(&self.driver.reader));
+                match handle_backtest_reader_commit(
+                    self.driver.backtest.clone(),
+                    self.driver.backtest_pump.as_mut(),
+                    self.driver.session.clone(),
+                    self.driver.reader.clone(),
+                    commit,
+                )
+                .await?
+                {
+                    Some(HandledBacktestCommit::Commit(commit)) => {
+                        self.driver.last_commit = Some(commit.clone());
+                        let step =
+                            WaitStep::new(commit, current_dt_from_reader(&self.driver.reader));
+                        if backtest_reached_end(self.driver.backtest.as_ref(), &step) {
+                            self.driver.backtest_finished = true;
+                        }
+                        return Ok(Some(step));
+                    }
+                    Some(HandledBacktestCommit::Synthetic(synthetic)) => {
+                        consume_returned_synthetic_commit(
+                            &self.driver.reader,
+                            &mut self.driver.cursor,
+                            &synthetic.commit,
+                        );
+                        self.driver.last_commit = Some(synthetic.commit.clone());
+                        let step = WaitStep::new(
+                            synthetic.commit,
+                            synthetic
+                                .current_dt
+                                .or_else(|| current_dt_from_reader(&self.driver.reader)),
+                        );
+                        if backtest_reached_end(self.driver.backtest.as_ref(), &step) {
+                            self.driver.backtest_finished = true;
+                        }
+                        return Ok(Some(step));
+                    }
+                    None => continue,
+                }
+            }
+
+            if let Some(synthetic) = emit_pending_backtest_commit(
+                self.driver.backtest.clone(),
+                self.driver.backtest_pump.as_mut(),
+                self.driver.session.clone(),
+                self.driver.reader.clone(),
+            )
+            .await?
+            {
+                consume_returned_synthetic_commit(
+                    &self.driver.reader,
+                    &mut self.driver.cursor,
+                    &synthetic.commit,
+                );
+                self.driver.last_commit = Some(synthetic.commit.clone());
+                let step = WaitStep::new(
+                    synthetic.commit,
+                    synthetic
+                        .current_dt
+                        .or_else(|| current_dt_from_reader(&self.driver.reader)),
+                );
                 if backtest_reached_end(self.driver.backtest.as_ref(), &step) {
                     self.driver.backtest_finished = true;
                 }
@@ -355,19 +453,35 @@ impl TqApi {
         let chart_id = format!("wait-tick-{}-{data_length}", sanitize_chart_token(symbol));
 
         if !self.driver.serial_charts.contains(&chart_id) {
-            self.driver
-                .session
-                .ensure_chart(MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol)],
-                    duration_ns: 0,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                })
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
+            if let Some(backtest) = self.driver.backtest.clone() {
+                let Some(pump) = self.driver.backtest_pump.as_mut() else {
+                    return Err(crate::error::WaitFacadeError::InvalidState(
+                        "backtest pump not initialized",
+                    ));
+                };
+                pump.ensure_tick_serial(
+                    &self.driver.session,
+                    &backtest,
+                    symbol,
+                    data_length,
+                    &chart_id,
+                )
+                .await?;
+            } else {
+                self.driver
+                    .session
+                    .ensure_chart(MarketChartCommand {
+                        chart_id: chart_id.clone(),
+                        symbols: vec![Symbol::new(symbol)],
+                        duration_ns: 0,
+                        view_width: data_length,
+                        left_kline_id: None,
+                        focus_datetime_ns: None,
+                        focus_position: None,
+                    })
+                    .await
+                    .map_err(crate::error::WaitFacadeError::Session)?;
+            }
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
@@ -584,6 +698,69 @@ impl TqApi {
 
     pub(crate) fn read_handle(&self) -> WaitReadHandle {
         WaitReadHandle::new(self.driver.reader.clone())
+    }
+}
+
+async fn emit_pending_backtest_commit(
+    backtest: Option<TqBacktest>,
+    pump: Option<&mut BacktestPump>,
+    session: SessionClient,
+    reader: tqsdk_core::RuntimeReader,
+) -> crate::error::Result<Option<BacktestSyntheticCommit>> {
+    let Some(backtest) = backtest else {
+        return Ok(None);
+    };
+    let Some(pump) = pump else {
+        return Ok(None);
+    };
+
+    pump.emit_pending_tick(&session, &reader, &backtest).await
+}
+
+async fn handle_backtest_reader_commit(
+    backtest: Option<TqBacktest>,
+    pump: Option<&mut BacktestPump>,
+    session: SessionClient,
+    reader: tqsdk_core::RuntimeReader,
+    commit: tqsdk_core::SharedCommitResult,
+) -> crate::error::Result<Option<HandledBacktestCommit>> {
+    let Some(backtest) = backtest else {
+        return Ok(Some(HandledBacktestCommit::Commit(commit)));
+    };
+    let Some(pump) = pump else {
+        return Ok(Some(HandledBacktestCommit::Commit(commit)));
+    };
+
+    match pump
+        .handle_commit(commit, &session, &reader, &backtest)
+        .await?
+    {
+        BacktestCommitAction::Expose(commit) => Ok(Some(HandledBacktestCommit::Commit(commit))),
+        BacktestCommitAction::Synthetic(commit) => {
+            Ok(Some(HandledBacktestCommit::Synthetic(commit)))
+        }
+        BacktestCommitAction::Suppressed => Ok(None),
+    }
+}
+
+enum HandledBacktestCommit {
+    Commit(tqsdk_core::SharedCommitResult),
+    Synthetic(BacktestSyntheticCommit),
+}
+
+fn consume_returned_synthetic_commit(
+    reader: &tqsdk_core::RuntimeReader,
+    cursor: &mut tqsdk_core::UpdateCursor,
+    synthetic: &tqsdk_core::CommitResult,
+) {
+    if cursor.next_revision() == synthetic.revision {
+        let consumed = reader.next(cursor);
+        debug_assert!(
+            consumed
+                .as_ref()
+                .is_some_and(|commit| commit.revision == synthetic.revision),
+            "returned synthetic commit should be the next unread commit",
+        );
     }
 }
 
