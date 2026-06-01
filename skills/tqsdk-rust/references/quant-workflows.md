@@ -4,9 +4,9 @@
 
 ## Live Monitoring
 
-单策略循环或 notebook-like live monitoring 使用 `tqsdk-wait`。通过 `quote`、`trading_status`、`kline` 或 `tick` 创建 handle，然后调用 `step()` / `step_until(...)`；只有 `WaitStep::is_changing()` 表示相关 commit 后才加载 ref。Ref 是 live handle；snapshot 要在 commit 后加载。
+普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote`、`target_pos_tqkq` 和 `next()` 写策略主体。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
 
-契约锚点：S1、S3、S8-S10、S25-S26。
+契约锚点：S33、S1、S3、S8-S10、S25-S26。
 
 ## Event Pipeline
 
@@ -28,7 +28,7 @@ history pages、time-range series、pull-based downloads、CSV export 和 option
 
 ## Strategy Execution
 
-target-position execution、order ownership、risk checks、schedulers、multi-account allocation、strategy context、replay 和 fake broker tests 使用 `tqsdk-task`。优先使用 typed builders 和 typed tickets。让 `TaskHost` 拥有 wait loop。没有 ownership 的一次性 order wrapper 可以用 `tqsdk-wait`，但必须说明 live-order 副作用。
+普通 target-position path 使用 `tqsdk` 的 `TargetPos` wrapper。需要 execution ownership、order internals、risk checks、schedulers、multi-account allocation、strategy context、replay 和 fake broker tests 时使用 `tqsdk-task`。优先使用 typed builders 和 typed tickets。让 `TaskHost` 拥有 wait loop。没有 ownership 的一次性 order wrapper 可以用 `tqsdk-wait`，但必须说明 live-order 副作用。
 
 契约锚点：S6-S13、S19、S29。Production lifecycle：S15、S20。
 

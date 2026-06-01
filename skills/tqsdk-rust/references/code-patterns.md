@@ -12,7 +12,39 @@
 - Trading Task Pattern
 - Direct Order Wrapper
 
+## Default Tq Strategy Loop
+
+普通策略、目标持仓和轻量历史访问优先使用默认 `tqsdk` facade。
+
+```rust
+use tqsdk::prelude::*;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> tqsdk::Result<()> {
+    let mut tq = Tq::futures()
+        .auth_env()?
+        .trade_target_tqkq()
+        .connect()
+        .await?;
+
+    let quote = tq.quote("SHFE.au2602").await?;
+    let target = tq.target_pos_tqkq("SHFE.au2602").await?;
+
+    while tq.next().await? {
+        let snapshot = quote.load()?;
+        if snapshot.last_price > 3600.0 {
+            target.set(1)?;
+        } else {
+            target.close()?;
+        }
+    }
+    Ok(())
+}
+```
+
 ## Wait Quote Loop 行情循环
+
+明确需要 Python-style `step()` / `WaitStep::is_changing()` 时使用 `tqsdk-wait`。
 
 ```rust
 use tqsdk_wait::TqApiBuilder;
@@ -125,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 owned historical materialization 和导出使用 `tqsdk-data`。CSV export 优先使用 async writer，并把 live session 和离线研究流程分开。
 
 ```rust
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_data::{DataClient, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
@@ -138,12 +170,14 @@ let session = SessionClientBuilder::new(user, pass)
     .build()?;
 
 let client = DataClient::from_session(session);
+let end_ns = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?;
+let start_ns = end_ns - i64::try_from(Duration::from_secs(4 * 60 * 60).as_nanos())?;
 let series = client
     .get_kline_data_series(KlineDataSeriesRequest::new(
         "SHFE.au2602",
         Duration::from_secs(60),
-        0,
-        0,
+        start_ns,
+        end_ns,
     ))
     .await?;
 println!("rows={}", series.len());

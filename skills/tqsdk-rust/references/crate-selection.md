@@ -6,7 +6,8 @@
 
 | 用户目标 | 使用 | 原因 |
 | --- | --- | --- |
-| Python-style live market/trade loop | `tqsdk-wait` | single owner、`step()` / `step_until(...)`、`WaitStep::is_changing()`、live refs、serial windows |
+| Ordinary strategy, target position, light history access | `tqsdk` | 默认 facade、`prelude`、`Tq::next()`、常用 live refs、`TargetPos` wrapper、`Tq::history()` helper |
+| Explicit Python-style live market/trade loop | `tqsdk-wait` | single owner、`step()` / `step_until(...)`、`WaitStep::is_changing()`、live refs、serial windows |
 | Multi-consumer async events or fan-out | `tqsdk-stream` | commit stream、filters、event streams、row-batch market streams、lag diagnostics |
 | One-shot metadata/query/service calls | `tqsdk-session` | GraphQL/query、schema、symbol info、quotes metadata、calendar、settlement、ranking、EDB |
 | Strategy execution helpers | `tqsdk-task` | `TaskHost`、`TargetPosTask`、scheduler、risk gate、typed order builders、fake broker tests |
@@ -15,6 +16,7 @@
 
 ## 边界规则
 
+- `tqsdk` 是普通用户默认入口：`prelude`、`Tq` 主循环、常用 wait-style live refs、target-position wrapper、history helper 和 curated `advanced::*` 下钻入口。它不拥有第二套 runtime、状态树、direct query、stream、task 或 data 实现。
 - `tqsdk-session` 负责 one-shot request/response API：GraphQL、schema、metadata、calendar、settlement、ranking、EDB、auth refresh、replay control 和 low-level command wait helpers。
 - `tqsdk-wait` 负责 Python-style single-owner live refs 和 `step()` 消费。它可以暴露 `session()`，但不能复制 direct-query API。
 - `tqsdk-stream` 负责 multi-consumer commit/event streams、filters、row-batch market streams 和 lag diagnostics。它可以暴露 `session()`，但不能变成 metadata/query 层，也不能直接依赖 mmap history cache 或 managed sink/WAL。
@@ -28,7 +30,8 @@
 
 | 回答 | Crate |
 | --- | --- |
-| “会变化的 live object” | `tqsdk-wait` |
+| “普通策略/默认入口/先跑起来” | `tqsdk` |
+| “明确要 Python-style wait_update/live refs” | `tqsdk-wait` |
 | “给多个消费者的 events” | `tqsdk-stream` |
 | “一次 query result” | `tqsdk-session` |
 | “managed order/strategy abstraction” | `tqsdk-task` |
@@ -44,7 +47,7 @@
 
 ```toml
 [dependencies]
-tqsdk-wait = "<version>"
+tqsdk = "<version>"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
@@ -52,7 +55,7 @@ Git dependency：
 
 ```toml
 [dependencies]
-tqsdk-wait = { git = "https://github.com/OWNER/tqsdk-rust" }
+tqsdk = { git = "https://github.com/OWNER/tqsdk-rust" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
@@ -60,10 +63,10 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ```toml
 [dependencies]
-tqsdk-wait = { path = "../tqsdk-rust/crates/tqsdk-wait" }
+tqsdk = { path = "../tqsdk-rust/crates/tqsdk" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
-把 `tqsdk-wait` 替换成选中的 crate。有些模式需要多个 crate，例如 `tqsdk-task` 加 `tqsdk-core` 来使用 typed trade enums。
+普通用户保留 `tqsdk`。高级模式把 `tqsdk` 替换成选中的 sibling crate，或额外添加 sibling crate；例如明确 Python-style wait loop 用 `tqsdk-wait`，低层 typed trade enums 可加 `tqsdk-core`。
 
 `SessionClientBuilder::build()` 和 `DataClientBuilder::build()` 是同步构造器。`TqApiBuilder::build().await` 和 `TqStreamBuilder::build().await` 是 async，因为这些 facade 包装了 live session startup 行为。
