@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tqsdk_core::{
@@ -132,7 +132,7 @@ impl BacktestPump {
             awaiting_page: true,
             current_page_left_id: None,
             current_page_right_id: None,
-            current_page_more_data: false,
+            current_serial_last_id: None,
             next_emit_id: None,
             first_emitted_id: None,
             last_emitted_id: None,
@@ -211,15 +211,20 @@ impl BacktestPump {
         reader: &RuntimeReader,
         backtest: &TqBacktest,
     ) -> Result<BacktestCommitAction> {
-        let Some(internal_chart_id) = self.touched_internal_tick_chart(&commit) else {
+        let internal_chart_ids = self.touched_internal_tick_charts(&commit);
+        if internal_chart_ids.is_empty() {
             return Ok(BacktestCommitAction::Expose(commit));
-        };
-        let Some(user_chart_id) = self.internal_tick_charts.get(&internal_chart_id).cloned() else {
-            return Ok(BacktestCommitAction::Expose(commit));
-        };
+        }
 
-        if let Some(serial) = self.tick_serials.get_mut(&user_chart_id) {
-            serial.load_page(reader, &internal_chart_id)?;
+        for internal_chart_id in internal_chart_ids {
+            let Some(user_chart_id) = self.internal_tick_charts.get(&internal_chart_id).cloned()
+            else {
+                continue;
+            };
+
+            if let Some(serial) = self.tick_serials.get_mut(&user_chart_id) {
+                serial.load_page(reader, &internal_chart_id)?;
+            }
         }
 
         if let Some(commit) = self.emit_pending_tick(session, reader, backtest).await? {
@@ -229,12 +234,13 @@ impl BacktestPump {
         Ok(BacktestCommitAction::Suppressed)
     }
 
-    fn touched_internal_tick_chart(&self, commit: &tqsdk_core::CommitResult) -> Option<String> {
+    fn touched_internal_tick_charts(&self, commit: &tqsdk_core::CommitResult) -> Vec<String> {
+        let mut chart_ids = BTreeSet::new();
         for object in &commit.changes.object_hits {
             if let ObjectKey::Chart { chart_id } = object {
                 let chart_id = chart_id.as_str();
                 if self.internal_tick_charts.contains_key(chart_id) {
-                    return Some(chart_id.to_string());
+                    chart_ids.insert(chart_id.to_string());
                 }
             }
         }
@@ -245,11 +251,33 @@ impl BacktestPump {
                 && root == "charts"
                 && self.internal_tick_charts.contains_key(chart_id)
             {
-                return Some(chart_id.clone());
+                chart_ids.insert(chart_id.clone());
             }
         }
 
-        None
+        let touched_symbols = touched_tick_symbols(commit);
+        let global_history_state_changed = commit
+            .changes
+            .path_hits
+            .iter()
+            .any(|path| matches!(path.segments(), [field] if field == "mdhis_more_data"));
+
+        if !touched_symbols.is_empty() || global_history_state_changed {
+            for (internal_chart_id, user_chart_id) in &self.internal_tick_charts {
+                let Some(serial) = self.tick_serials.get(user_chart_id) else {
+                    continue;
+                };
+                if !serial.awaiting_page {
+                    continue;
+                }
+                if global_history_state_changed || touched_symbols.contains(serial.symbol.as_str())
+                {
+                    chart_ids.insert(internal_chart_id.clone());
+                }
+            }
+        }
+
+        chart_ids.into_iter().collect()
     }
 
     async fn request_tick_page(
@@ -307,7 +335,7 @@ struct BacktestTickSerial {
     awaiting_page: bool,
     current_page_left_id: Option<i64>,
     current_page_right_id: Option<i64>,
-    current_page_more_data: bool,
+    current_serial_last_id: Option<i64>,
     next_emit_id: Option<i64>,
     first_emitted_id: Option<i64>,
     last_emitted_id: Option<i64>,
@@ -323,11 +351,18 @@ impl BacktestTickSerial {
         if !chart.ready {
             return Ok(());
         }
+        let serial_last_id = tick_last_id(&market, &self.symbol);
+        if chart.more_data
+            || market_mdhis_more_data(&market)
+            || !tick_rows_ready(&market, &self.symbol, &chart, serial_last_id)
+        {
+            return Ok(());
+        }
 
         self.awaiting_page = false;
         self.current_page_left_id = Some(chart.left_id);
         self.current_page_right_id = Some(chart.right_id);
-        self.current_page_more_data = chart.more_data;
+        self.current_serial_last_id = serial_last_id;
 
         if chart.left_id <= chart.right_id {
             let next_after_last = self
@@ -335,8 +370,6 @@ impl BacktestTickSerial {
                 .and_then(|id| id.checked_add(1))
                 .unwrap_or(chart.left_id);
             self.next_emit_id = Some(next_after_last.max(chart.left_id));
-        } else if chart.more_data {
-            self.next_emit_id = None;
         } else {
             self.exhausted = true;
             self.next_emit_id = None;
@@ -415,17 +448,18 @@ impl BacktestTickSerial {
     }
 
     fn next_page_or_finish(&mut self) -> Result<TickPumpDecision> {
-        if self.current_page_more_data
-            && let Some(right_id) = self.current_page_right_id
-            && let Some(left_id) = right_id.checked_add(1)
+        if let (Some(right_id), Some(last_id)) =
+            (self.current_page_right_id, self.current_serial_last_id)
+            && right_id < last_id
         {
             self.current_page_left_id = None;
             self.current_page_right_id = None;
+            self.current_serial_last_id = None;
             self.next_emit_id = None;
             return Ok(TickPumpDecision::RequestNextPage {
                 symbol: self.symbol.clone(),
                 user_chart_id: self.user_chart_id.clone(),
-                left_id,
+                left_id: right_id,
             });
         }
 
@@ -433,6 +467,67 @@ impl BacktestTickSerial {
         self.next_emit_id = None;
         Ok(TickPumpDecision::None)
     }
+}
+
+fn market_mdhis_more_data(market: &tqsdk_core::MarketStateReadGuard<'_>) -> bool {
+    market
+        .get_path(&["mdhis_more_data"])
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn tick_last_id(market: &tqsdk_core::MarketStateReadGuard<'_>, symbol: &str) -> Option<i64> {
+    market
+        .get_path(&["ticks", symbol, "last_id"])
+        .and_then(Value::as_i64)
+}
+
+fn tick_rows_ready(
+    market: &tqsdk_core::MarketStateReadGuard<'_>,
+    symbol: &str,
+    chart: &Chart,
+    last_id: Option<i64>,
+) -> bool {
+    if chart.left_id > chart.right_id {
+        return true;
+    }
+
+    if last_id.is_none_or(|last_id| last_id < chart.left_id) {
+        return false;
+    }
+
+    (chart.left_id..=chart.right_id).any(|id| {
+        let id_key = id.to_string();
+        market
+            .get_path(&["ticks", symbol, "data", id_key.as_str()])
+            .is_some()
+    })
+}
+
+fn touched_tick_symbols(commit: &tqsdk_core::CommitResult) -> BTreeSet<&str> {
+    let mut symbols = BTreeSet::new();
+
+    for object in &commit.changes.object_hits {
+        if let ObjectKey::Tick { symbol, .. } = object {
+            symbols.insert(symbol.as_str());
+        }
+    }
+
+    for hit in &commit.changes.field_hits {
+        if let ObjectKey::Tick { symbol, .. } = &hit.object {
+            symbols.insert(symbol.as_str());
+        }
+    }
+
+    for path in &commit.changes.path_hits {
+        if let [root, symbol, ..] = path.segments()
+            && root == "ticks"
+        {
+            symbols.insert(symbol.as_str());
+        }
+    }
+
+    symbols
 }
 
 #[derive(Debug)]
