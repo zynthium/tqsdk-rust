@@ -5,7 +5,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 # TQSDK Rust
 
-使用本 skill 时，把 TQSDK Rust 请求映射到正确的 crate、调用形态和最小代码，同时保持 workspace 的 crate 边界。
+使用本 skill 时，把 TQSDK Rust 请求映射到正确的入口、crate、调用形态和最小代码，同时保持 workspace 的 crate 边界。
 
 ## 先路由请求
 
@@ -17,13 +17,13 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 4. 用户要求按角色给示例、完整覆盖场景、场景契约、public API 证据，或问“每类用户应该怎么做”时，读 [references/scenario-contracts.md](references/scenario-contracts.md)。
 5. 策略循环、事件总线、研究、回放、测试、低延迟柜台工作流，读 [references/quant-workflows.md](references/quant-workflows.md)。
 6. 凭证、权限、实盘交易、模拟、下单副作用、风控、live smoke test，读 [references/safety-and-operations.md](references/safety-and-operations.md)。
-7. 只有用户要求新建独立 starter project 时，才使用 [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) 和 [assets/templates/wait-quote-loop](assets/templates/wait-quote-loop)。
+7. 只有用户要求新建独立 starter project 时，才使用 [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) 和 [assets/templates/tq-strategy-loop](assets/templates/tq-strategy-loop)。明确要求 Python-style wait starter 时才选 `--template wait-quote-loop`。
 
 ## 核心规则
 
-- 写代码前先选择能覆盖场景的最高层 crate。
+- 写代码前先选择能覆盖场景的最高层入口。普通策略、目标持仓和轻量历史访问优先从默认 `tqsdk` crate 开始；明确需要内部能力时再下钻。
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
-- one-shot query 放在 `tqsdk-session`，live ref 放在 `tqsdk-wait`，事件管线放在 `tqsdk-stream`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。
+- 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，事件管线放在 `tqsdk-stream`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。
 - history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)` 或显式 `HistorySeriesCache::open(...)` cache-only reader 才生效。
 - `tqsdk-data` 不提供 live stream 写 Python-compatible mmap history cache 的 bridge；`tqsdk-stream` 本身也不读写 mmap/cache，不为热路径增加持久化语义。
 - `HistorySeriesCache` 只服务 offline `get_*_data_series` / cache-only `read_*_data_series` / scan / maintenance；不要使用它作为 live serial 缓存或外部最新行情 API。
@@ -40,6 +40,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - wait/stream app 里不要为了 metadata 再建第二个 client；复用 shared session。
 - 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要持久化 live `KlineRowBatch` / `TickRowBatch` 或 commit stream，使用调用方自己的 sidecar，不要把 Python-compatible mmap history cache 接进 live 热路径。
+- 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、stream、session、task、data 或 core 的完整 surface。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
 - typed ticket、ref 或 status helper 已存在时，不要发明本地订单 overlay，也不要解析 status 字符串。
 - 不要用字符串或 adapter-local 判断绕过 `record_command_status()` 和 runtime command lifecycle。
@@ -48,11 +49,11 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 ## 回答风格
 
-- 开头先说明使用哪个 crate 以及原因：live ref、event stream、one-shot query、task execution、offline rows 或 runtime substrate。
+- 开头先说明使用哪个入口或 crate 以及原因：默认 facade、Python-style live ref、event stream、one-shot query、task execution、offline rows 或 runtime substrate。
 - 优先给和当前 example 匹配的短 Rust snippet，不要写大段伪代码。
 - 覆盖用户角色或宽工作流时，引用 `scenario-contracts.md` 中对应的 `api_contract_sXX_*.rs` 示例。
 - 点名用户下一步应调用的具体 API。
-- 如果 Rust 答案刻意不同于 Python TqSdk，要说明原因是 Rust workspace 拆成了 `session`、`wait`、`stream`、`task`、`data`。
+- 如果 Rust 答案刻意不同于 Python TqSdk，要说明原因是 Rust workspace 有默认 `tqsdk` facade，并把高级能力拆成了 `session`、`wait`、`stream`、`task`、`data`。
 - 代码会下单、撤单、使用实盘账户或依赖付费行情权限时，先说明安全门槛。
 - 请求不明确时，只问一个形状问题：“你需要一个带 ref 的单 live loop、多个事件消费者、one-shot query、task/order 抽象、历史 rows，还是 runtime commits？”
 
@@ -65,7 +66,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 ## 项目脚手架
 
-从内置 asset template 创建最小 quote loop 项目：
+从内置 asset template 创建默认 `tqsdk` quote loop 项目：
 
 ```bash
 python3 scripts/new-tqsdk-rust-project.py ./my-tqsdk-app \
@@ -75,3 +76,4 @@ python3 scripts/new-tqsdk-rust-project.py ./my-tqsdk-app \
 ```
 
 本地开发使用 `--sdk-source path --sdk-value /path/to/tqsdk-rust`；crate 发布后可使用 `--sdk-source version --sdk-value <version>`。
+明确需要 Python-style wait facade starter 时，加 `--template wait-quote-loop`。

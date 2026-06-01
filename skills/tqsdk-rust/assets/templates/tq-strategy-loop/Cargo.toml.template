@@ -1,0 +1,8 @@
+[package]
+name = "tqsdk-strategy-loop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+{{TQSDK_DEPENDENCY}}
+tokio = { version = "1", features = ["macros", "rt", "time"] }

@@ -13,7 +13,7 @@
 
 | 用户角色 | 首选 crate | 契约示例 | 说明 |
 | --- | --- | --- | --- |
-| 单策略作者 | `tqsdk-wait`, `tqsdk-task` | S1, S3, S6-S11, S25-S26, S29, S34, S36 | Python-style 稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop。 |
+| 单策略作者 | `tqsdk`, `tqsdk-wait`, `tqsdk-task` | S33, S1, S3, S6-S11, S25-S26, S29, S34, S36 | 默认 `tqsdk` facade / prelude；明确 Python-style 时用稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop。 |
 | Async 系统集成方 | `tqsdk-stream`, `tqsdk-session` | S2, S4, S20-S22, S35 | Multi-consumer streams、dynamic subscriptions、row-batch market events、health、retry diagnostics、slow-consumer isolation、quote batch consumption。 |
 | 低层 / 低延迟用户 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S23, S27, S31 | Thin session substrate、direct metadata query、hot-path `RuntimeReader`、same-revision market/trade reads、low-latency desk profile。 |
 | 执行工具用户 | `tqsdk-task`, `tqsdk-wait` | S6-S13, S19, S29, S31 | Typed order tickets、cancel/partial-fill helpers、risk gates、execution groups、account groups、target-pos ownership。 |
@@ -28,9 +28,9 @@
 
 ### 单策略作者
 
-live loop 从 `tqsdk-wait` 起步。只有用户需要 target-position ownership、risk gates、strategy context 或 test harness 时，再加 `tqsdk-task`。
+普通策略从 `tqsdk` facade 起步。明确需要 Python-style `wait_update()` / `WaitStep` 时下钻 `tqsdk-wait`；需要 target-position ownership、risk gates、strategy context 或 test harness 内部能力时，再加 `tqsdk-task`。
 
-- 首选示例：S1 quote loop、S3 snapshot、S25 serial/status、S6-S7 order lifecycle、S8 account/position、S9 startup recovery、S10 reconnect order intent。
+- 首选示例：S33 default facade、S1 quote loop、S3 snapshot、S25 serial/status、S6-S7 order lifecycle、S8 account/position、S9 startup recovery、S10 reconnect order intent。
 - 执行层升级：S11 simple strategy、S29 target-pos ownership、S34 batch quote interest、S36 live/backtest same-body loop。
 - 避免：在 `TqApi` 上复制 direct metadata helpers、本地 order overlay、解析 order status 字符串、隐藏实盘账户副作用。
 

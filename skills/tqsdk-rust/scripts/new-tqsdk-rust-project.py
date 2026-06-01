@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 TEMPLATES = {
+    "tq-strategy-loop": ["tqsdk"],
     "wait-quote-loop": ["tqsdk-wait"],
 }
 
@@ -44,7 +45,7 @@ def materialize_template_filenames(root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", help="Directory to create")
-    parser.add_argument("--template", choices=sorted(TEMPLATES), default="wait-quote-loop")
+    parser.add_argument("--template", choices=sorted(TEMPLATES), default="tq-strategy-loop")
     parser.add_argument("--sdk-source", choices=["git", "path", "version"], required=True)
     parser.add_argument("--sdk-value", required=True, help="Git URL, local SDK checkout path, or crate version")
     parser.add_argument("--symbol", default="SHFE.au2602")
@@ -61,6 +62,7 @@ def main() -> int:
         raise SystemExit(f"template not found: {template_dir}")
 
     tokens = {
+        "{{TQSDK_DEPENDENCY}}": dependency_line("tqsdk", args.sdk_source, args.sdk_value),
         "{{TQSDK_WAIT_DEPENDENCY}}": dependency_line("tqsdk-wait", args.sdk_source, args.sdk_value),
         "{{SYMBOL}}": args.symbol,
     }

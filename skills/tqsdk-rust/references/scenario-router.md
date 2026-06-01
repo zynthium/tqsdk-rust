@@ -10,13 +10,15 @@
 
 ## 快速决策
 
-| 用户说 | 大概率需要 | Crate | 主要调用 |
+| 用户说 | 大概率需要 | 入口 / Crate | 主要调用 |
 | --- | --- | --- | --- |
-| "实时行情", "quote", "批量订阅", "盘口", "价格变化", "像 Python TqApi", "wait_update", "is_changing" | Single-owner live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `quotes`, `step`, `WaitStep::is_changing`, `QuoteRef::load`, `QuoteSet::changed_snapshot` |
+| "普通策略", "默认入口", "先跑起来", "目标持仓", "轻量历史", "一个 crate" | Ordinary strategy facade | `tqsdk` | `tqsdk::prelude::*`, `Tq::futures`, `auth_env`, `trade_target_tqkq`, `connect`, `quote`, `target_pos_tqkq`, `next`, `history` |
+| "实时行情", "quote", "批量订阅", "盘口", "价格变化" 且没有明确要内部 crate | Default live strategy loop | `tqsdk` first; `tqsdk-wait` only when explicit Python-style wait API is needed | `Tq::futures`, `quote`, `quotes`, `next`, `QuoteRef::load`; advanced wait: `TqApiBuilder`, `step`, `WaitStep::is_changing` |
+| "像 Python TqApi", "wait_update", "is_changing", "step_until" | Explicit Python-style live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `quotes`, `step`, `WaitStep::is_changing`, `QuoteRef::load`, `QuoteSet::changed_snapshot` |
 | "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `kline`, `tick`, `trading_status`, `step_until`, window/ref load methods |
 | "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_batches`, `quote_stream`, `market_events`, row-batch kline/tick streams, trade/session event streams |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
-| "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk-task` when ownership/risk/task semantics are needed; `tqsdk-wait` for thin direct order wrappers | `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
+| "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk` for ordinary target-position path; `tqsdk-task` when ownership/risk/task internals are needed; `tqsdk-wait` for thin direct order wrappers | `Tq::target_pos_tqkq`, `TargetPos`; advanced: `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, cache/replay APIs |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
@@ -26,17 +28,17 @@
 
 ### 1. 在策略循环中监控一个合约
 
-使用 `tqsdk-wait`。
+普通策略使用 `tqsdk`；只有用户明确要 Python-style wait API 时使用 `tqsdk-wait`。
 
 调用顺序：
 
-1. 用凭证构造 `TqApi`。
+1. 用 `Tq::futures().auth_env()?.connect().await?` 构造默认 facade。
 2. 调用 `quote(symbol).await`。
-3. 循环调用 `step().await?`。
-4. 使用 `step.is_changing(&quote)`。
-5. 只有相关变化后才加载 quote snapshot。把 ref 当作 live handle，不要当作 owned snapshot。
+3. 循环调用 `next().await?`。
+4. commit 后加载 quote snapshot。把 ref 当作 live handle，不要当作 owned snapshot。
+5. 明确需要 `WaitStep::is_changing()` 时，下钻 `tqsdk-wait`。
 
-继续读：`references/code-patterns.md` 的 Wait Quote Loop 示例。
+继续读：`references/code-patterns.md` 的 Default Tq Strategy Loop 或 Wait Quote Loop 示例。
 
 ### 2. 策略启动前查询合约 metadata
 
@@ -74,17 +76,18 @@
 
 ### 4. 实现 target-position 策略
 
-使用 `tqsdk-task`。
+普通 target-position 策略使用 `tqsdk`。需要 execution ownership、risk gate、scheduler、multi-account 或 test harness 内部能力时使用 `tqsdk-task`。
 
 调用顺序：
 
-1. 从 `tqsdk-wait` 构造 `TqApi`。
-2. 包装成 `TaskHost`。
-3. 需要时配置 `RiskEngine`。
-4. 创建 `TargetPosTask` 或 typed order builder。
-5. 让 `TaskHost::wait_update()` 推进 task。
-6. 使用 typed tickets/reports，不要解析 status 字符串。
-7. real-account order placement 必须 opt-in；示例要显式展示副作用。
+1. 普通路径用 `Tq::futures().trade_target_tqkq().connect().await?`。
+2. 创建 `target_pos_tqkq(symbol).await?`。
+3. 用 `Tq::next()` 推进策略。
+4. 高级路径从 `tqsdk-wait` 构造 `TqApi`，包装成 `TaskHost`。
+5. 需要时配置 `RiskEngine`，创建 `TargetPosTask` 或 typed order builder。
+6. 让 `TaskHost::wait_update()` 推进 task。
+7. 使用 typed tickets/reports，不要解析 status 字符串。
+8. real-account order placement 必须 opt-in；示例要显式展示副作用。
 
 ### 5. 下载历史数据用于研究或回测输入
 
