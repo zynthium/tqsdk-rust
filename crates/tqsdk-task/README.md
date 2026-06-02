@@ -242,6 +242,41 @@ match ticket.outcome(host.api())? {
 # }
 ```
 
+## 本地回测模拟账户
+
+Python-style 联机 backtest-market 的 same-body wait loop 属于 `tqsdk-wait`；本 crate
+承接的是不连接真实服务的本地确定性回测模拟账户。入口是
+`StrategyBacktest + TqSim`，行情输入来自 `tqsdk-data::MarketCacheReplay`：
+
+```rust
+use tqsdk_data::MarketCacheReplay;
+use tqsdk_task::{StrategyBacktest, TqSim};
+
+# async fn run(replay: MarketCacheReplay) -> tqsdk_task::Result<()> {
+let symbol = "SHFE.rb2501";
+let mut backtest = StrategyBacktest::builder(replay)
+    .sim(TqSim::new().with_margin(symbol, 1_000.0))
+    .quote(symbol)
+    .build()
+    .await?;
+
+while let Some(mut ctx) = backtest.next().await? {
+    let quote = ctx.quote(symbol)?;
+    if ctx.position("TQSIM", symbol)?.pos_long == 0 {
+        ctx.orders("TQSIM")
+            .buy_open(symbol, 1)
+            .limit(quote.ask_price1 + 1.0)
+            .send_once("backtest-entry-1")
+            .await?;
+        let _report = ctx.finish_sim_step()?;
+    }
+}
+# Ok(())
+# }
+```
+
+当前本地最小闭环覆盖 quote event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置。回测报告、tick/kline 自动 quote 合成、主连合约表、股票/期权完整账户语义仍是后续范围。
+
 ## 示例
 
 当前提供这些 task examples：
@@ -252,11 +287,13 @@ match ticket.outcome(host.api())? {
 - [examples/api_contract_s12_spread_arbitrage.rs](examples/api_contract_s12_spread_arbitrage.rs)
 - [examples/api_contract_s13_multi_account_ordering.rs](examples/api_contract_s13_multi_account_ordering.rs)
 - [examples/api_contract_s15_live_sim_replay_switch.rs](examples/api_contract_s15_live_sim_replay_switch.rs)
+- [examples/api_contract_s16_history_replay_strategy.rs](examples/api_contract_s16_history_replay_strategy.rs)
 - [examples/api_contract_s19_pre_trade_risk.rs](examples/api_contract_s19_pre_trade_risk.rs)
 - [examples/api_contract_s20_strategy_supervisor.rs](examples/api_contract_s20_strategy_supervisor.rs)
 - [examples/api_contract_s24_testable_strategy.rs](examples/api_contract_s24_testable_strategy.rs)
 - [examples/api_contract_s29_target_pos_ownership.rs](examples/api_contract_s29_target_pos_ownership.rs)
 - [examples/api_contract_s31_low_latency_trading_desk.rs](examples/api_contract_s31_low_latency_trading_desk.rs)
+- [examples/api_contract_s32_python_backtest_sim.rs](examples/api_contract_s32_python_backtest_sim.rs)
 
 `api_contract_s24_testable_strategy.rs` 使用 public fake harness，不需要真实账号或网络。
 

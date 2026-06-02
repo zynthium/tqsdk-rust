@@ -118,6 +118,11 @@ cargo run -p tqsdk-task --example api_contract_s24_testable_strategy
 cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 ```
 
+如果要对齐 Python `TqApi(backtest=TqBacktest(...))` 的 live/backtest 同策略主体心智，
+使用 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
+`stock_backtest(...)`；如果要本地历史/cache 行情 + `TqSim` 账户撮合，则使用
+`tqsdk-task::StrategyBacktest` 搭配 `tqsdk-data::MarketCacheReplay`。
+
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 
 ```bash

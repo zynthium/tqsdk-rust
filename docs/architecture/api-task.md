@@ -98,6 +98,7 @@
     strategy execution 搬入 data
 - `StrategyBacktest` / `TqSim`
   - 消费 `tqsdk-data::MarketCacheReplay` 的本地 quote event，作为 Python-compatible 回测模拟账户 foundation
+  - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
