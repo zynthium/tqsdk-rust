@@ -110,7 +110,7 @@
 1. 如果用户明确要像 Python `TqApi(backtest=TqBacktest(...))` 那样让同一段 wait 策略主体跑 live/backtest，使用 `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` 或 `TqBacktest`。策略主体只依赖 `quote` / `kline` handles 和 `step()`；backtest 结束时 `step()` 返回 `None`。契约锚点是 S36。
 2. 如果用户要不连接真实服务、用本地历史/cache 行情和 Python-compatible `TqSim` 撮合账户跑确定性回测，使用 `tqsdk-data::MarketCacheReplay` 加 `tqsdk-task::{StrategyBacktest,TqSim}`。契约锚点是 S32。
 3. 如果只是准备历史输入、导出或缓存，才单独路由到 `tqsdk-data`；不要把“策略回测”回答成单纯历史下载。
-4. 当前本地 `StrategyBacktest` 最小闭环只支持 quote event、futures 单账户、基础限价/市价撮合、保证金和手续费配置；tick/kline 自动 quote 合成、回测报告、主连合约表、股票/期权完整账户语义仍是后续范围。
+4. 当前本地 `StrategyBacktest` 最小闭环支持 quote/tick/kline cache event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
 
 ### 7. 编写低延迟自定义循环
 

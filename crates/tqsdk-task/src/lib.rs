@@ -44,6 +44,7 @@ pub use account_group::{
 };
 pub use backtest::{
     StrategyBacktest, StrategyBacktestBuilder, StrategyBacktestContext, StrategyBacktestEvent,
+    StrategyBacktestSummary,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{

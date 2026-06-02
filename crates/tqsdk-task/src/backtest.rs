@@ -1,8 +1,13 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Number, Value, json};
-use tqsdk_core::{CommitScope, InputPayload, IoEvent, ProtocolDomain, Quote, RuntimeInput};
-use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReplay};
+use tqsdk_core::{
+    Account, CommitScope, InputPayload, IoEvent, Kline, Order, Position, ProtocolDomain, Quote,
+    RuntimeInput, Tick, Trade,
+};
+use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReplay};
 
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
@@ -14,6 +19,7 @@ pub struct StrategyBacktestBuilder {
     replay: MarketCacheReplay,
     sim: TqSim,
     quotes: Vec<String>,
+    price_ticks: HashMap<String, f64>,
 }
 
 /// Local Python-compatible strategy backtest host.
@@ -21,6 +27,9 @@ pub struct StrategyBacktest {
     replay: MarketCacheReplay,
     strategy: StrategyHost,
     sim: TqSim,
+    tracked_symbols: Vec<String>,
+    price_ticks: HashMap<String, f64>,
+    summary: StrategyBacktestSummary,
 }
 
 /// Metadata for the market event that produced a backtest context.
@@ -30,6 +39,19 @@ pub struct StrategyBacktestEvent {
     symbol: String,
     received_at_ns: i64,
     event_time_ns: i64,
+}
+
+/// Lightweight local backtest summary.
+#[derive(Debug, Clone)]
+pub struct StrategyBacktestSummary {
+    event_count: usize,
+    quote_count: usize,
+    tick_count: usize,
+    kline_count: usize,
+    orders: Vec<Order>,
+    trades: Vec<Trade>,
+    final_account: Account,
+    final_positions: Vec<Position>,
 }
 
 /// Strategy context plus local sim controls for the current backtest step.
@@ -50,21 +72,24 @@ impl StrategyBacktest {
             return Ok(None);
         };
         let backtest_event = StrategyBacktestEvent::from_cache_event(&event);
+        let payload_kind = event.payload.kind();
         match &event.payload {
             MarketCachePayload::Quote(quote) => {
-                ingest_quote_event(self.strategy.task_host(), &event.symbol, quote)?;
-                let report = self
-                    .sim
-                    .update_quote(event.symbol.clone(), (**quote).clone());
-                self.sim
-                    .ingest_step_report(self.strategy.task_host(), &report)?;
+                self.ingest_quote(&event.symbol, quote)?;
             }
-            MarketCachePayload::Kline { .. } | MarketCachePayload::Tick(_) => {
-                return Err(TaskError::Unsupported(
-                    "StrategyBacktest currently supports quote events only",
-                ));
+            MarketCachePayload::Tick(tick) => {
+                let quote = quote_from_tick(tick);
+                self.ingest_quote(&event.symbol, &quote)?;
+            }
+            MarketCachePayload::Kline { row, .. } => {
+                let price_tick = self.price_tick(&event.symbol)?;
+                let checkpoints = kline_quote_checkpoints(row, price_tick);
+                for quote in checkpoints {
+                    self.ingest_quote(&event.symbol, &quote)?;
+                }
             }
         }
+        self.summary.record_payload(payload_kind);
 
         let context = self.strategy.next_once().await?;
         Ok(Some(StrategyBacktestContext {
@@ -93,6 +118,32 @@ impl StrategyBacktest {
     pub fn strategy_mut(&mut self) -> &mut StrategyHost {
         &mut self.strategy
     }
+
+    #[must_use]
+    pub fn summary(&self) -> StrategyBacktestSummary {
+        let mut summary = self.summary.clone();
+        summary.refresh_from_sim(&self.sim, &self.tracked_symbols);
+        summary
+    }
+
+    fn ingest_quote(&mut self, symbol: &str, quote: &Quote) -> Result<()> {
+        ingest_quote_event(self.strategy.task_host(), symbol, quote)?;
+        let report = self.sim.update_quote(symbol.to_owned(), quote.clone());
+        self.sim
+            .ingest_step_report(self.strategy.task_host(), &report)?;
+        self.summary
+            .refresh_from_sim(&self.sim, &self.tracked_symbols);
+        Ok(())
+    }
+
+    fn price_tick(&self, symbol: &str) -> Result<f64> {
+        self.price_ticks
+            .get(symbol)
+            .copied()
+            .ok_or(TaskError::Unsupported(
+                "StrategyBacktest kline event requires price_tick(symbol, tick)",
+            ))
+    }
 }
 
 impl StrategyBacktestBuilder {
@@ -102,6 +153,7 @@ impl StrategyBacktestBuilder {
             replay,
             sim: TqSim::new(),
             quotes: Vec::new(),
+            price_ticks: HashMap::new(),
         }
     }
 
@@ -120,7 +172,15 @@ impl StrategyBacktestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn price_tick(mut self, symbol: impl AsRef<str>, price_tick: f64) -> Self {
+        self.price_ticks
+            .insert(symbol.as_ref().to_owned(), price_tick);
+        self
+    }
+
     pub async fn build(self) -> Result<StrategyBacktest> {
+        validate_price_ticks(&self.price_ticks)?;
         let harness = StrategyTestHarness::new().build()?;
         let host = harness.into_task_host();
         let mut sim = self.sim;
@@ -134,11 +194,102 @@ impl StrategyBacktestBuilder {
         }
         let mut strategy = builder.build().await?;
         drain_initial_commits(&mut strategy).await?;
+        let tracked_symbols = self.quotes;
+        let summary = StrategyBacktestSummary::from_sim(&sim, &tracked_symbols);
         Ok(StrategyBacktest {
             replay: self.replay,
             strategy,
             sim,
+            tracked_symbols,
+            price_ticks: self.price_ticks,
+            summary,
         })
+    }
+}
+
+impl StrategyBacktestSummary {
+    fn from_sim(sim: &TqSim, symbols: &[String]) -> Self {
+        let mut summary = Self {
+            event_count: 0,
+            quote_count: 0,
+            tick_count: 0,
+            kline_count: 0,
+            orders: Vec::new(),
+            trades: Vec::new(),
+            final_account: sim.account(),
+            final_positions: Vec::new(),
+        };
+        summary.refresh_from_sim(sim, symbols);
+        summary
+    }
+
+    fn record_payload(&mut self, kind: MarketCachePayloadKind) {
+        self.event_count += 1;
+        match kind {
+            MarketCachePayloadKind::Quote => self.quote_count += 1,
+            MarketCachePayloadKind::Kline => self.kline_count += 1,
+            MarketCachePayloadKind::Tick => self.tick_count += 1,
+        }
+    }
+
+    fn refresh_from_sim(&mut self, sim: &TqSim, symbols: &[String]) {
+        self.orders = sim.orders();
+        self.trades = sim.trades();
+        self.final_account = sim.account();
+        self.final_positions = self
+            .orders
+            .iter()
+            .map(|order| format!("{}.{}", order.exchange_id, order.instrument_id))
+            .chain(symbols.iter().cloned())
+            .chain(
+                self.trades
+                    .iter()
+                    .map(|trade| format!("{}.{}", trade.exchange_id, trade.instrument_id)),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|symbol| sim.position(symbol))
+            .collect();
+    }
+
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    #[must_use]
+    pub fn quote_count(&self) -> usize {
+        self.quote_count
+    }
+
+    #[must_use]
+    pub fn tick_count(&self) -> usize {
+        self.tick_count
+    }
+
+    #[must_use]
+    pub fn kline_count(&self) -> usize {
+        self.kline_count
+    }
+
+    #[must_use]
+    pub fn orders(&self) -> &[Order] {
+        &self.orders
+    }
+
+    #[must_use]
+    pub fn trades(&self) -> &[Trade] {
+        &self.trades
+    }
+
+    #[must_use]
+    pub fn final_account(&self) -> &Account {
+        &self.final_account
+    }
+
+    #[must_use]
+    pub fn final_positions(&self) -> &[Position] {
+        &self.final_positions
     }
 }
 
@@ -241,16 +392,99 @@ fn quote_update(symbol: &str, quote: &Quote) -> Value {
     let mut quote_value = Map::new();
     insert_string_if_present(&mut quote_value, "datetime", &quote.datetime);
     insert_f64_if_finite(&mut quote_value, "last_price", quote.last_price);
+    insert_f64_if_finite(&mut quote_value, "highest", quote.highest);
+    insert_f64_if_finite(&mut quote_value, "lowest", quote.lowest);
+    insert_f64_if_finite(&mut quote_value, "open", quote.open);
+    insert_f64_if_finite(&mut quote_value, "close", quote.close);
+    insert_f64_if_finite(&mut quote_value, "average", quote.average);
     insert_f64_if_finite(&mut quote_value, "ask_price1", quote.ask_price1);
     insert_i64_if_nonzero(&mut quote_value, "ask_volume1", quote.ask_volume1);
     insert_f64_if_finite(&mut quote_value, "bid_price1", quote.bid_price1);
     insert_i64_if_nonzero(&mut quote_value, "bid_volume1", quote.bid_volume1);
+    insert_i64_if_nonzero(&mut quote_value, "volume", quote.volume);
+    insert_f64_if_finite(&mut quote_value, "amount", quote.amount);
+    insert_i64_if_nonzero(&mut quote_value, "open_interest", quote.open_interest);
+    insert_f64_if_finite(&mut quote_value, "price_tick", quote.price_tick);
 
     json!({
         "quotes": {
             symbol: Value::Object(quote_value)
         }
     })
+}
+
+fn quote_from_tick(tick: &Tick) -> Quote {
+    Quote {
+        datetime: tick.datetime.to_string(),
+        last_price: tick.last_price,
+        average: tick.average,
+        highest: tick.highest,
+        lowest: tick.lowest,
+        ask_price1: tick.ask_price1,
+        ask_volume1: tick.ask_volume1,
+        bid_price1: tick.bid_price1,
+        bid_volume1: tick.bid_volume1,
+        ask_price2: tick.ask_price2,
+        ask_volume2: tick.ask_volume2,
+        bid_price2: tick.bid_price2,
+        bid_volume2: tick.bid_volume2,
+        ask_price3: tick.ask_price3,
+        ask_volume3: tick.ask_volume3,
+        bid_price3: tick.bid_price3,
+        bid_volume3: tick.bid_volume3,
+        ask_price4: tick.ask_price4,
+        ask_volume4: tick.ask_volume4,
+        bid_price4: tick.bid_price4,
+        bid_volume4: tick.bid_volume4,
+        ask_price5: tick.ask_price5,
+        ask_volume5: tick.ask_volume5,
+        bid_price5: tick.bid_price5,
+        bid_volume5: tick.bid_volume5,
+        volume: tick.volume,
+        amount: tick.amount,
+        open_interest: tick.open_interest,
+        ..Quote::default()
+    }
+}
+
+fn kline_quote_checkpoints(row: &Kline, price_tick: f64) -> [Quote; 3] {
+    [
+        quote_from_kline_checkpoint(row, row.high, price_tick),
+        quote_from_kline_checkpoint(row, row.low, price_tick),
+        quote_from_kline_checkpoint(row, row.close, price_tick),
+    ]
+}
+
+fn quote_from_kline_checkpoint(row: &Kline, price: f64, price_tick: f64) -> Quote {
+    Quote {
+        datetime: row.datetime.to_string(),
+        last_price: price,
+        highest: row.high,
+        lowest: row.low,
+        open: row.open,
+        close: row.close,
+        ask_price1: price + price_tick,
+        ask_volume1: i64::MAX,
+        bid_price1: price - price_tick,
+        bid_volume1: i64::MAX,
+        volume: row.volume,
+        open_interest: row.close_oi,
+        price_tick,
+        ..Quote::default()
+    }
+}
+
+fn validate_price_ticks(price_ticks: &HashMap<String, f64>) -> Result<()> {
+    for (symbol, price_tick) in price_ticks {
+        if !price_tick.is_finite() || *price_tick <= 0.0 {
+            return Err(TaskError::InvalidState(if symbol.is_empty() {
+                "StrategyBacktest price_tick must be finite and positive"
+            } else {
+                "StrategyBacktest price_tick(symbol, tick) must be finite and positive"
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
