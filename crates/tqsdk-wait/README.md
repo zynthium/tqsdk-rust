@@ -119,6 +119,13 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 并发 `wait_update()` 防线，或把已生成 commit 放回下一次 `wait_update()` 前置队列。
 普通用户代码不应把它当成运行时控制 API。
 
+`TqBacktest` 和 `TqApiBuilder::{futures_backtest,stock_backtest}` 对应官方 Python
+`TqApi(backtest=TqBacktest(...))` 的 wait 心智：同一段策略主体继续依赖
+`quote` / `kline` handles 和 `step()` 推进，live 与 backtest 的差异只放在 builder
+配置里。需要本地 `TqSim` 账户撮合和不连接真实服务的确定性回测时，使用
+`tqsdk-task::StrategyBacktest` 搭配 `tqsdk-data::MarketCacheReplay`，不要把它塞进
+wait facade。
+
 ## 设计边界
 
 - market / trade 对象都只是状态树上的轻量 `Ref`
@@ -160,6 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 完整可编译示例见
 [examples/api_contract_s34_batch_quote_subscription.rs](examples/api_contract_s34_batch_quote_subscription.rs)。
+
+live/backtest same-body loop 的可编译契约示例见
+[examples/api_contract_s36_wait_live_backtest_same_body.rs](examples/api_contract_s36_wait_live_backtest_same_body.rs)。
 
 如果只需要一次 typed 行情快照，可以在示例本地封装一个很薄的 helper：先通过
 `TqApi::quote(symbol).await` 创建 handle，再用 `step_until(deadline).await` 等待

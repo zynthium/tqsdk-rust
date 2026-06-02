@@ -43,3 +43,12 @@ hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading
 离线 event source 使用 `tqsdk-data` market cache records；确定性策略测试使用 `tqsdk-task` replay/fake broker tools。除非用户明确要求 integration smoke test，否则 unit-level strategy test 不应需要 live credentials。live smoke test 保持 ignored 或环境变量门控。
 
 契约锚点：S15-S16、S18、S24、S30。
+
+## Backtest
+
+官方 Python 回测心智是 `TqApi(account=TqSim(), backtest=TqBacktest(...))`：策略主体继续围绕 `wait_update()` / live refs 编写，回测配置只在构造阶段切换。Rust 有两个入口要分清：
+
+- `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` / `TqBacktest` 用于 Python-style live/backtest same-body loop。策略主体只依赖 `quote` / `kline` handles 和 `step()`，回测结束时 `step()` 返回 `None`。契约锚点：S36。
+- `tqsdk-task` 的 `StrategyBacktest + TqSim` 消费 `tqsdk-data::MarketCacheReplay`，用于不连接真实服务的本地确定性回测模拟账户。当前覆盖 quote event、futures 单账户、基础限价/市价撮合、保证金和手续费配置；回测报告、tick/kline 自动 quote 合成、主连合约表、股票/期权完整账户语义还不是当前最小闭环。契约锚点：S32。
+
+不要把“回测策略程序”只路由成 `tqsdk-data` 历史下载；`tqsdk-data` 在这里负责历史/cache/replay 输入，不负责策略执行或模拟账户撮合。
