@@ -50,6 +50,7 @@
 - 默认安装入口
 - `prelude`
 - `Tq` 主循环和常用 live refs 的轻量包装
+- 零分支跨模态回测统一 API（`backtest` / `local_backtest`）
 - `TargetPos` / history helper 这类低样板组合入口
 - `advanced::*` 下钻到底层 crate
 
