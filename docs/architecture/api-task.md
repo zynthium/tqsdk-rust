@@ -48,7 +48,7 @@
   - strategy host / strategy context
   - strategy environment adapter
   - strategy cache replay driver
-  - Python-compatible local backtest sim foundation
+  - Python-compatible local backtest sim foundation (driving zero-branch `tqsdk::Tq` local backtest)
   - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
   - S31 低延迟 trading desk thin profile

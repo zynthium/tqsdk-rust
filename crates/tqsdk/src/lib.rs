@@ -21,8 +21,7 @@ pub mod advanced {
     }
 
     pub mod data {
-        pub type DataClient = tqsdk_data::DataClient;
-        pub type DataError = tqsdk_data::DataError;
+        pub use tqsdk_data::{DataClient, DataError, MarketCacheReplay};
     }
 
     pub mod runtime {
@@ -42,8 +41,8 @@ pub mod advanced {
 
     pub mod task {
         pub use tqsdk_task::{
-            OffsetPriority, PriceMode, TargetPosConfig, TargetPosTask,
-            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
+            OffsetPriority, PriceMode, StrategyBacktest, StrategyBacktestSummary, TargetPosConfig,
+            TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
         };
     }
 
@@ -139,48 +138,104 @@ impl From<tqsdk_data::DataError> for Error {
 ///
 /// `Tq` owns a wait-style API plus task host so common strategy loops can use
 /// one object for `next()`, live refs, history access, and target-position tasks.
+///
+/// In local-backtest mode the inner driver switches to [`tqsdk_task::StrategyBacktest`]
+/// while keeping the same public surface (`next()`, `quote()`, etc.).
 pub struct Tq {
-    host: tqsdk_task::TaskHost,
+    inner: TqInner,
+}
+
+enum TqInner {
+    Live(tqsdk_task::TaskHost),
+    LocalBacktest(tqsdk_task::StrategyBacktest),
 }
 
 impl Tq {
+    /// Create a new builder. This is the recommended entry point.
+    #[must_use]
+    pub fn new() -> TqBuilder {
+        TqBuilder::new()
+    }
+
+    /// Alias for [`Tq::new()`] — kept for backward compatibility.
     #[must_use]
     pub fn futures() -> TqBuilder {
-        TqBuilder::futures()
+        TqBuilder::new()
     }
 
     #[must_use]
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
-            host: tqsdk_task::TaskHost::new(api),
+            inner: TqInner::Live(tqsdk_task::TaskHost::new(api)),
         }
     }
 
+    fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
+        Self {
+            inner: TqInner::LocalBacktest(backtest),
+        }
+    }
+
+    // ── Internal accessors (live mode only) ──
+
+    fn task_host_live(&self) -> Option<&tqsdk_task::TaskHost> {
+        match &self.inner {
+            TqInner::Live(host) => Some(host),
+            TqInner::LocalBacktest(_) => None,
+        }
+    }
+
+    fn api_mut_any(&mut self) -> &mut tqsdk_wait::TqApi {
+        match &mut self.inner {
+            TqInner::Live(host) => host.api_mut(),
+            TqInner::LocalBacktest(bt) => bt.strategy_mut().task_host_mut().api_mut(),
+        }
+    }
+
+    fn api_any(&self) -> &tqsdk_wait::TqApi {
+        match &self.inner {
+            TqInner::Live(host) => host.api(),
+            TqInner::LocalBacktest(bt) => bt.strategy().task_host().api(),
+        }
+    }
+
+    // ── Public accessors ──
+
+    /// Returns a reference to the underlying [`tqsdk_wait::TqApi`].
+    ///
+    /// Available in both live and local-backtest modes.
     #[must_use]
     pub fn api(&self) -> &tqsdk_wait::TqApi {
-        self.host.api()
+        self.api_any()
     }
 
+    /// Returns a mutable reference to the underlying [`tqsdk_wait::TqApi`].
     #[must_use]
     pub fn api_mut(&mut self) -> &mut tqsdk_wait::TqApi {
-        self.host.api_mut()
+        self.api_mut_any()
     }
 
+    /// Returns the [`tqsdk_task::TaskHost`] (live mode only).
+    ///
+    /// Returns `None` in local-backtest mode.
     #[must_use]
-    pub fn task_host(&self) -> &tqsdk_task::TaskHost {
-        &self.host
+    pub fn task_host(&self) -> Option<&tqsdk_task::TaskHost> {
+        self.task_host_live()
     }
 
-    #[must_use]
-    pub fn task_host_mut(&mut self) -> &mut tqsdk_task::TaskHost {
-        &mut self.host
-    }
-
+    /// Returns a reference to the [`tqsdk_session::SessionClient`] (live mode only).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called in local-backtest mode (no session exists).
     #[must_use]
     pub fn session(&self) -> &tqsdk_session::SessionClient {
-        self.api().session()
+        self.api_any().session()
     }
 
+    /// Create a [`tqsdk_data::DataClient`] from the underlying session.
+    ///
+    /// Only meaningful in live mode where a real session exists.
     #[must_use]
     pub fn history(&self) -> tqsdk_data::DataClient {
         tqsdk_data::DataClient::from_session(self.session().clone())
@@ -214,16 +269,36 @@ impl Tq {
         self.target_pos(&account_id, symbol)
     }
 
+    // ── Core loop ──
+
+    /// Advance one step. Returns `false` when there are no more events
+    /// (backtest finished or session closed).
     pub async fn next(&mut self) -> Result<bool> {
-        self.host.wait_update(None).await.map_err(Error::from)
+        match &mut self.inner {
+            TqInner::Live(host) => host.wait_update(None).await.map_err(Error::from),
+            TqInner::LocalBacktest(bt) => {
+                let Some(mut ctx) = bt.next().await? else {
+                    return Ok(false);
+                };
+                ctx.finish_sim_step()?;
+                Ok(true)
+            }
+        }
     }
 
+    /// Advance one step with a deadline (live mode). In local-backtest mode
+    /// the deadline is ignored.
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
-        self.host.wait_update(deadline).await.map_err(Error::from)
+        match &mut self.inner {
+            TqInner::Live(host) => host.wait_update(deadline).await.map_err(Error::from),
+            TqInner::LocalBacktest(_) => self.next().await,
+        }
     }
+
+    // ── Market data ──
 
     pub async fn quote(&mut self, symbol: &str) -> Result<tqsdk_wait::QuoteRef> {
-        self.api_mut().quote(symbol).await.map_err(Error::from)
+        self.api_mut_any().quote(symbol).await.map_err(Error::from)
     }
 
     pub async fn quotes<I, S>(&mut self, symbols: I) -> Result<tqsdk_wait::QuoteSet>
@@ -231,41 +306,117 @@ impl Tq {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.api_mut().quotes(symbols).await.map_err(Error::from)
+        self.api_mut_any().quotes(symbols).await.map_err(Error::from)
     }
 
     #[must_use]
     pub fn account(&self, account_id: &str) -> tqsdk_wait::AccountRef {
-        self.api().account(account_id)
+        self.api_any().account(account_id)
     }
 
     #[must_use]
     pub fn position(&self, account_id: &str, symbol: &str) -> tqsdk_wait::PositionRef {
-        self.api().position(account_id, symbol)
+        self.api_any().position(account_id, symbol)
     }
 
     pub fn target_pos(&mut self, account_id: &str, symbol: &str) -> Result<TargetPos> {
-        let task = self.host.target_pos(account_id, symbol).build()?;
-        Ok(TargetPos::new(task))
+        match &mut self.inner {
+            TqInner::Live(host) => {
+                let task = host.target_pos(account_id, symbol).build()?;
+                Ok(TargetPos::new(task))
+            }
+            TqInner::LocalBacktest(_) => Err(Error::Task(Box::new(
+                tqsdk_task::TaskError::Unsupported(
+                    "target_pos is not yet supported in local backtest mode",
+                ),
+            ))),
+        }
+    }
+
+    /// Returns `true` if this `Tq` is in local-backtest mode.
+    #[must_use]
+    pub fn is_local_backtest(&self) -> bool {
+        matches!(self.inner, TqInner::LocalBacktest(_))
+    }
+
+    /// Returns the backtest summary (local-backtest mode only).
+    pub fn backtest_summary(&self) -> Option<tqsdk_task::StrategyBacktestSummary> {
+        match &self.inner {
+            TqInner::LocalBacktest(bt) => Some(bt.summary()),
+            TqInner::Live(_) => None,
+        }
     }
 }
 
 /// Builder for [`Tq`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TqBuilder {
     auth: Option<Auth>,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
+    market_mode: MarketMode,
+    backtest: Option<BacktestConfig>,
+    quote_symbols: Vec<String>,
+    price_ticks: std::collections::HashMap<String, f64>,
 }
 
 impl TqBuilder {
     #[must_use]
-    pub fn futures() -> Self {
+    pub fn new() -> Self {
         Self {
             auth: None,
             query_enabled: false,
             trade_targets: Vec::new(),
+            market_mode: MarketMode::FuturesLive,
+            backtest: None,
+            quote_symbols: Vec::new(),
+            price_ticks: std::collections::HashMap::new(),
         }
+    }
+
+    /// Alias for [`TqBuilder::new()`].
+    #[must_use]
+    pub fn futures() -> Self {
+        Self::new()
+    }
+
+    /// Switch to stock market mode.
+    #[must_use]
+    pub fn stock(mut self) -> Self {
+        self.market_mode = MarketMode::StockLive;
+        self
+    }
+
+    /// Enter server-side backtest mode (≈ Python `TqBacktest`).
+    ///
+    /// The strategy body (`next()` / `quote()` / etc.) stays identical to live.
+    #[must_use]
+    pub fn backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
+        self.backtest = Some(BacktestConfig::Server { start_ns, end_ns });
+        self
+    }
+
+    /// Enter local-backtest mode using the provided replay cache.
+    ///
+    /// Uses [`tqsdk_task::TqSim`] for matching. The strategy body stays identical to live.
+    #[must_use]
+    pub fn local_backtest(mut self, replay: tqsdk_data::MarketCacheReplay) -> Self {
+        self.backtest = Some(BacktestConfig::Local { replay });
+        self
+    }
+
+    /// Pre-declare a symbol for local backtest.
+    #[must_use]
+    pub fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.quote_symbols.push(symbol.into());
+        self
+    }
+
+    /// Pre-declare a price tick for local backtest (required if replay contains klines).
+    #[must_use]
+    pub fn price_tick(mut self, symbol: impl Into<String>, tick: f64) -> Self {
+        self.price_ticks.insert(symbol.into(), tick);
+        self
     }
 
     #[must_use]
@@ -331,18 +482,47 @@ impl TqBuilder {
     }
 
     pub async fn connect(self) -> Result<Tq> {
+        if let Some(BacktestConfig::Local { replay }) = self.backtest {
+            let mut builder = tqsdk_task::StrategyBacktest::builder(replay);
+            for symbol in &self.quote_symbols {
+                builder = builder.quote(symbol);
+            }
+            for (symbol, tick) in &self.price_ticks {
+                builder = builder.price_tick(symbol, *tick);
+            }
+            let backtest = builder.build().await?;
+            return Ok(Tq::from_local_backtest(backtest));
+        }
+
         let auth = self.auth.ok_or(Error::MissingAuth)?;
-        let mut builder =
-            tqsdk_session::SessionClientBuilder::new(auth.user, auth.pass).futures_market();
+        let mut session_builder =
+            tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
+
+        // Apply market mode.
+        session_builder = match self.market_mode {
+            MarketMode::FuturesLive => session_builder.futures_market(),
+            MarketMode::StockLive => session_builder.stock_market(),
+        };
+
         if self.query_enabled {
-            builder = builder.enable_query();
+            session_builder = session_builder.enable_query();
         }
         for target in self.trade_targets {
-            builder = target.apply(builder);
+            session_builder = target.apply(session_builder);
         }
-        let api = tqsdk_wait::TqApiBuilder::from_session_builder(builder)
-            .build()
-            .await?;
+
+        let mut wait_builder =
+            tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
+
+        // Apply backtest if configured.
+        if let Some(BacktestConfig::Server { start_ns, end_ns }) = self.backtest {
+            wait_builder = match self.market_mode {
+                MarketMode::FuturesLive => wait_builder.futures_backtest(start_ns, end_ns)?,
+                MarketMode::StockLive => wait_builder.stock_backtest(start_ns, end_ns)?,
+            };
+        }
+
+        let api = wait_builder.build().await?;
         Ok(Tq::from_api(api))
     }
 }
@@ -402,6 +582,30 @@ impl TargetPos {
 struct Auth {
     user: String,
     pass: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarketMode {
+    FuturesLive,
+    StockLive,
+}
+
+enum BacktestConfig {
+    Server { start_ns: i64, end_ns: i64 },
+    Local { replay: tqsdk_data::MarketCacheReplay },
+}
+
+impl std::fmt::Debug for BacktestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Server { start_ns, end_ns } => f
+                .debug_struct("Server")
+                .field("start_ns", start_ns)
+                .field("end_ns", end_ns)
+                .finish(),
+            Self::Local { .. } => f.debug_struct("Local").finish_non_exhaustive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

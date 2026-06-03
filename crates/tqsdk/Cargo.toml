@@ -39,5 +39,15 @@ tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = fal
 name = "api_contract_s33_default_facade"
 required-features = ["live"]
 
+[[example]]
+name = "api_contract_s37_facade_server_backtest"
+required-features = ["live"]
+
+[[example]]
+name = "api_contract_s38_facade_local_backtest"
+
+[[example]]
+name = "api_contract_s39_facade_same_body"
+
 [lints]
 workspace = true
