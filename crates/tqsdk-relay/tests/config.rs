@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tqsdk_relay::{RelayConfig, RelayError};
+use tqsdk_relay::{BootstrapConfig, RelayConfig, RelayError};
 
 #[test]
 fn default_config_is_memory_only_and_local() {
@@ -26,8 +26,10 @@ fn default_config_is_memory_only_and_local() {
 
 #[test]
 fn debug_redacts_upstream_auth_pass() {
-    let mut config = RelayConfig::default();
-    config.upstream_auth_pass = Some("super-secret-password".to_string());
+    let config = RelayConfig {
+        upstream_auth_pass: Some("super-secret-password".to_string()),
+        ..RelayConfig::default()
+    };
 
     let debug = format!("{config:?}");
 
@@ -38,8 +40,10 @@ fn debug_redacts_upstream_auth_pass() {
 
 #[test]
 fn config_rejects_empty_upstream_market_url() {
-    let mut config = RelayConfig::default();
-    config.upstream_market_url = String::new();
+    let config = RelayConfig {
+        upstream_market_url: String::new(),
+        ..RelayConfig::default()
+    };
 
     let err = config.validate().unwrap_err();
 
@@ -52,8 +56,10 @@ fn config_rejects_empty_upstream_market_url() {
 
 #[test]
 fn config_rejects_zero_ring_capacity() {
-    let mut config = RelayConfig::default();
-    config.tick_ring_capacity = 0;
+    let config = RelayConfig {
+        tick_ring_capacity: 0,
+        ..RelayConfig::default()
+    };
 
     let err = config.validate().unwrap_err();
 
@@ -65,8 +71,13 @@ fn config_rejects_zero_ring_capacity() {
 
 #[test]
 fn config_rejects_zero_min_remote_request_interval() {
-    let mut config = RelayConfig::default();
-    config.bootstrap.min_remote_request_interval = Duration::ZERO;
+    let config = RelayConfig {
+        bootstrap: BootstrapConfig {
+            min_remote_request_interval: Duration::ZERO,
+            ..BootstrapConfig::default()
+        },
+        ..RelayConfig::default()
+    };
 
     let err = config.validate().unwrap_err();
 
@@ -78,8 +89,13 @@ fn config_rejects_zero_min_remote_request_interval() {
 
 #[test]
 fn config_rejects_zero_per_series_cooldown() {
-    let mut config = RelayConfig::default();
-    config.bootstrap.per_series_cooldown = Duration::ZERO;
+    let config = RelayConfig {
+        bootstrap: BootstrapConfig {
+            per_series_cooldown: Duration::ZERO,
+            ..BootstrapConfig::default()
+        },
+        ..RelayConfig::default()
+    };
 
     let err = config.validate().unwrap_err();
 
