@@ -80,7 +80,7 @@ pub struct RelayKlineRow {
 impl RelayMarketFrame {
     #[must_use]
     pub fn rtn_data(data: Vec<Self>) -> Self {
-        let values = data.into_iter().map(Self::into_inner_value).collect();
+        let values = data.into_iter().flat_map(Self::into_inner_values).collect();
         Self::RtnData(values)
     }
 
@@ -140,15 +140,9 @@ impl RelayMarketFrame {
         }
     }
 
-    fn into_inner_value(self) -> Value {
+    fn into_inner_values(self) -> Vec<Value> {
         match self {
-            Self::RtnData(mut values) => {
-                if values.len() == 1 {
-                    values.remove(0)
-                } else {
-                    json!({ "data": values })
-                }
-            }
+            Self::RtnData(values) => values,
         }
     }
 }

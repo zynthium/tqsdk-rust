@@ -20,6 +20,20 @@ fn parses_subscribe_quote_command() {
 }
 
 #[test]
+fn parses_subscribe_quote_empty_ins_list() {
+    let command = DownstreamCommand::from_value(json!({
+        "aid": "subscribe_quote",
+        "ins_list": ""
+    }))
+    .unwrap();
+
+    assert_eq!(
+        command,
+        DownstreamCommand::SubscribeQuote { symbols: vec![] }
+    );
+}
+
+#[test]
 fn rejects_subscribe_quote_missing_ins_list() {
     let err = DownstreamCommand::from_value(json!({
         "aid": "subscribe_quote"
@@ -160,6 +174,26 @@ fn encodes_compatible_rtn_data_for_ticks_and_klines() {
                         }
                     }
                 }
+            ]
+        })
+    );
+}
+
+#[test]
+fn rtn_data_flattens_multi_fragment_inner_frames() {
+    let frame = RelayMarketFrame::rtn_data(vec![
+        RelayMarketFrame::RtnData(vec![json!({ "a": 1 }), json!({ "b": 2 })]),
+        RelayMarketFrame::RtnData(vec![json!({ "c": 3 })]),
+    ]);
+
+    assert_eq!(
+        frame.into_value(),
+        json!({
+            "aid": "rtn_data",
+            "data": [
+                { "a": 1 },
+                { "b": 2 },
+                { "c": 3 }
             ]
         })
     );
