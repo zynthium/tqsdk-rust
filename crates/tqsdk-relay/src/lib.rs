@@ -5,6 +5,8 @@
 //! direct-to-TQ behavior remains the default unless users explicitly point the
 //! market endpoint at a relay instance.
 
+pub mod config;
 pub mod error;
 
+pub use config::{BootstrapConfig, RelayConfig};
 pub use error::{RelayError, RelayResult};
