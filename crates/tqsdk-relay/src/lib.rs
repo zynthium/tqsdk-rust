@@ -7,6 +7,10 @@
 
 pub mod config;
 pub mod error;
+pub mod protocol;
 
 pub use config::{BootstrapConfig, RelayConfig};
 pub use error::{RelayError, RelayResult};
+pub use protocol::{
+    DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
+};
