@@ -30,11 +30,11 @@ impl DownstreamCommand {
             .ok_or_else(|| RelayError::invalid_protocol("market command missing string aid"))?;
         match aid {
             "subscribe_quote" => Ok(Self::SubscribeQuote {
-                symbols: split_symbols(value.get("ins_list").and_then(Value::as_str).unwrap_or("")),
+                symbols: split_symbols(required_string_field(&value, "ins_list")?),
             }),
             "set_chart" => Ok(Self::SetChart(SetChartCommand {
                 chart_id: required_string(&value, "chart_id")?,
-                symbols: split_symbols(value.get("ins_list").and_then(Value::as_str).unwrap_or("")),
+                symbols: split_symbols(required_string_field(&value, "ins_list")?),
                 duration_ns: required_i64(&value, "duration")?,
                 view_width: required_usize(&value, "view_width")?,
                 left_kline_id: value.get("left_kline_id").and_then(Value::as_i64),
@@ -160,6 +160,13 @@ fn split_symbols(ins_list: &str) -> Vec<String> {
         .filter(|symbol| !symbol.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn required_string_field<'a>(value: &'a Value, key: &'static str) -> RelayResult<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| RelayError::invalid_protocol(format!("market command missing {key}")))
 }
 
 fn required_string(value: &Value, key: &'static str) -> RelayResult<String> {
