@@ -8,12 +8,14 @@
 pub mod cache;
 pub mod config;
 pub mod error;
+pub mod interest;
 pub mod kline;
 pub mod protocol;
 
 pub use cache::MarketCache;
 pub use config::{BootstrapConfig, RelayConfig};
 pub use error::{RelayError, RelayResult};
+pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
