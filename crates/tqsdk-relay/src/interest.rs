@@ -79,4 +79,37 @@ impl InterestRegistry {
                     .then_some(chart_id.as_str())
             })
     }
+
+    #[must_use]
+    pub fn quote_clients(&self, symbol: &str) -> Vec<ClientId> {
+        self.client_quotes
+            .iter()
+            .filter_map(|(client_id, symbols)| symbols.contains(symbol).then_some(*client_id))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn sources_for_symbol(&self, symbol: &str) -> Vec<SourceKey> {
+        let mut sources: Vec<_> = self
+            .chart_mappings
+            .values()
+            .filter(|source| source.symbols.iter().any(|candidate| candidate == symbol))
+            .cloned()
+            .collect();
+        sources.sort();
+        sources.dedup();
+        sources
+    }
+
+    #[must_use]
+    pub fn chart_clients(&self, source: &SourceKey) -> Vec<ClientId> {
+        self.chart_mappings
+            .iter()
+            .filter_map(|((client_id, _), mapped_source)| {
+                (mapped_source == source).then_some(*client_id)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }

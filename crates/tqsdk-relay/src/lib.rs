@@ -8,17 +8,21 @@
 pub mod bootstrap;
 pub mod cache;
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod interest;
 pub mod kline;
 pub mod protocol;
+pub mod upstream;
 
 pub use bootstrap::{BootstrapQueue, BootstrapRequest};
 pub use cache::MarketCache;
 pub use config::{BootstrapConfig, RelayConfig};
+pub use engine::{DownstreamFrame, RelayEngine};
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
+pub use upstream::{FakeUpstreamTickSource, UpstreamTick, UpstreamTickSource};
