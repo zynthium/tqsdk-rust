@@ -20,6 +20,19 @@ fn parses_subscribe_quote_command() {
 }
 
 #[test]
+fn rejects_subscribe_quote_missing_ins_list() {
+    let err = DownstreamCommand::from_value(json!({
+        "aid": "subscribe_quote"
+    }))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay protocol: market command missing ins_list"
+    );
+}
+
+#[test]
 fn parses_set_chart_command() {
     let command = DownstreamCommand::from_value(json!({
         "aid": "set_chart",
@@ -42,6 +55,22 @@ fn parses_set_chart_command() {
             focus_datetime_ns: None,
             focus_position: None,
         })
+    );
+}
+
+#[test]
+fn rejects_set_chart_missing_ins_list() {
+    let err = DownstreamCommand::from_value(json!({
+        "aid": "set_chart",
+        "chart_id": "client-chart-1",
+        "duration": 60000000000i64,
+        "view_width": 64
+    }))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay protocol: market command missing ins_list"
     );
 }
 
