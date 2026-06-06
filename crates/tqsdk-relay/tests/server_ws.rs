@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tqsdk_relay::{FakeUpstreamTickSource, RelayEngine, RelayServer, RelayTickRow, UpstreamTick};
 
 #[tokio::test(flavor = "current_thread")]
@@ -170,6 +170,96 @@ async fn relay_pumps_upstream_tick_frames_to_connected_downstream_client() {
 
     stream.shutdown().await.unwrap();
     server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_pump_upstream_until_drains_source_to_downstream_client() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let dispatcher = server.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602,DCE.m2609"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 2).await;
+
+    let mut upstream = FakeUpstreamTickSource::default();
+    upstream.push(UpstreamTick {
+        symbol: "SHFE.au2602".to_string(),
+        row: tick(1, 1_000, 610.0),
+    });
+    upstream.push(UpstreamTick {
+        symbol: "DCE.m2609".to_string(),
+        row: tick(2, 2_000, 3300.0),
+    });
+
+    assert_eq!(
+        dispatcher
+            .pump_upstream_until(&mut upstream, shutdown_rx)
+            .await
+            .unwrap(),
+        2
+    );
+    let first: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    let second: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+
+    assert_eq!(
+        first["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
+        610.0
+    );
+    assert_eq!(
+        second["data"][0]["quotes"]["DCE.m2609"]["last_price"],
+        3300.0
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_pump_upstream_until_stops_when_shutdown_arrives_before_next_tick() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine);
+    let (_tick_tx, tick_rx) = mpsc::unbounded_channel();
+    let mut upstream = ChannelUpstreamTickSource { tick_rx };
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        shutdown_tx.send(()).unwrap();
+    });
+
+    let sent = tokio::time::timeout(
+        Duration::from_secs(1),
+        server.pump_upstream_until(&mut upstream, shutdown_rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(sent, 0);
+}
+
+struct ChannelUpstreamTickSource {
+    tick_rx: mpsc::UnboundedReceiver<UpstreamTick>,
+}
+
+impl tqsdk_relay::UpstreamTickSource for ChannelUpstreamTickSource {
+    async fn next_tick(&mut self) -> Option<UpstreamTick> {
+        self.tick_rx.recv().await
+    }
 }
 
 fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
