@@ -69,11 +69,11 @@ impl RelayEngine {
             DownstreamCommand::SetChart(command) => {
                 let source = self.interests.set_chart(client_id, command);
                 self.bootstrap.enqueue(BootstrapRequest {
-                    source,
+                    source: source.clone(),
                     start_id: i64::MIN,
                     end_id: i64::MAX,
                 });
-                Ok(Vec::new())
+                self.replay_cached_kline_frames(client_id, &source)
             }
             DownstreamCommand::PeekMessage => Ok(Vec::new()),
         }
@@ -227,6 +227,50 @@ impl RelayEngine {
                         });
                     }
                 }
+            }
+        }
+        Ok(frames)
+    }
+
+    fn replay_cached_kline_frames(
+        &mut self,
+        client_id: ClientId,
+        source: &SourceKey,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        if source.duration_ns <= 0 || self.klines.contains_key(source) {
+            return Ok(Vec::new());
+        }
+        let Some(symbol) = source.symbols.first() else {
+            return Ok(Vec::new());
+        };
+        let ticks = self.cache.ticks(symbol);
+        if ticks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut synthesis = KlineSynthesis::new(symbol.clone(), source.duration_ns);
+        let mut completed_rows = Vec::new();
+        for tick in ticks {
+            completed_rows.extend(synthesis.push_tick(tick)?);
+        }
+        self.klines.insert(source.clone(), synthesis);
+
+        let mut frames = Vec::new();
+        for completed in completed_rows {
+            frames.push(DownstreamFrame {
+                client_id,
+                payload: RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
+                    symbol,
+                    source.duration_ns,
+                    completed.clone(),
+                )])
+                .into_value(),
+            });
+            if let Some(chart_id) = self.interests.downstream_chart_id(client_id, source) {
+                frames.push(DownstreamFrame {
+                    client_id,
+                    payload: chart_payload(chart_id, completed.id),
+                });
             }
         }
         Ok(frames)

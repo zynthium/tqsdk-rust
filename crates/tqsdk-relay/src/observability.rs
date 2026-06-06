@@ -1,6 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RelaySourceStatus {
     Connecting,
     Up,
@@ -8,14 +11,14 @@ pub enum RelaySourceStatus {
     Down,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthSnapshot {
     pub ready: bool,
     pub upstream_status: RelaySourceStatus,
     pub downstream_clients: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetricsSnapshot {
     pub downstream_clients: usize,
     pub quote_subscriptions: usize,

@@ -329,8 +329,12 @@ sink、WAL、journal 或 cache writer。
 - 代理 market route 子集
 - 维护共享上游 tick source、内存行情 cache、K 线合成、bootstrap/resync 队列
 - 在 relay 内部做期货产品到当前活跃合约集合的 typed metadata 发现与每日固定时间刷新
-- 在连接上游前检查 `ins_list` 长度阈值，避免已知过长订阅字符串进入天勤行情连接
-- 提供 relay 自身 health / metrics / sources 观测
+- metadata 查询按批执行，避免动态产品发现本身制造过大的单次 query 请求
+- 在连接上游前检查 `ins_list` 长度阈值，避免已知过长订阅字符串进入天勤行情连接；
+  超出 hard limit 时给出 relay 实例拆分建议
+- 提供 relay 自身 dry-run 启动自检、结构化启动日志、HTTP health / metrics 观测
+- 新 K 线订阅可用 relay 内存 tick ring 回放已闭合的合成 K 线；这不代表远端 K 线回填
+  或跨重启持久化已进入 V1
 
 ### 不应承担的职责
 

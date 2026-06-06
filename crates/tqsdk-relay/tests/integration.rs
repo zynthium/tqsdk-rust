@@ -107,6 +107,49 @@ fn relay_engine_tracks_bootstrap_request_without_subscribing_remote_kline_immedi
     assert_eq!(engine.interests().chart_interest_count(&source), 1);
 }
 
+#[test]
+fn relay_engine_replays_tick_ring_for_new_kline_chart_subscription() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .ingest_tick("SHFE.au2602", tick(1, 0, 610.0))
+        .unwrap();
+    engine
+        .ingest_tick("SHFE.au2602", tick(2, 30_000_000_000, 612.0))
+        .unwrap();
+    engine
+        .ingest_tick("SHFE.au2602", tick(3, 60_000_000_000, 620.0))
+        .unwrap();
+
+    let frames = engine
+        .handle_command(client, chart_command("client-chart"))
+        .unwrap();
+
+    let kline_frame = frames
+        .iter()
+        .find(|frame| frame.payload["data"][0].get("klines").is_some())
+        .expect("cold start should emit completed kline from cached ticks");
+    assert_eq!(kline_frame.client_id, client);
+    assert_eq!(
+        kline_frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["datetime"],
+        0
+    );
+    assert_eq!(
+        kline_frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"],
+        612.0
+    );
+
+    let chart_frame = frames
+        .iter()
+        .find(|frame| frame.payload["data"][0].get("charts").is_some())
+        .expect("cold start should mark downstream chart ready");
+    assert_eq!(
+        chart_frame.payload["data"][0]["charts"]["client-chart"]["right_id"],
+        0
+    );
+}
+
 #[tokio::test]
 async fn fake_upstream_tick_source_pops_ticks_fifo() {
     let mut upstream = FakeUpstreamTickSource::default();

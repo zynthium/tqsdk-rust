@@ -7,7 +7,7 @@ use tqsdk_core::Quote;
 use tqsdk_session::{SessionClient, SessionClientBuilder};
 
 #[cfg(feature = "metadata")]
-use crate::config::RelayConfig;
+use crate::config::{DEFAULT_FUTURES_METADATA_BATCH_SIZE, RelayConfig};
 use crate::error::{RelayError, RelayResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,12 +155,29 @@ impl FuturesUniverseResolver for StaticFuturesUniverseResolver {
 #[cfg(feature = "metadata")]
 pub struct SessionFuturesUniverseResolver {
     client: SessionClient,
+    metadata_batch_size: usize,
 }
 
 #[cfg(feature = "metadata")]
 impl SessionFuturesUniverseResolver {
     pub fn new(client: SessionClient) -> Self {
-        Self { client }
+        Self::new_with_metadata_batch_size(client, DEFAULT_FUTURES_METADATA_BATCH_SIZE)
+            .expect("default futures metadata batch size is non-zero")
+    }
+
+    pub fn new_with_metadata_batch_size(
+        client: SessionClient,
+        metadata_batch_size: usize,
+    ) -> RelayResult<Self> {
+        if metadata_batch_size == 0 {
+            return Err(RelayError::invalid_config(
+                "futures metadata batch size must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            client,
+            metadata_batch_size,
+        })
     }
 
     pub fn from_config(config: &RelayConfig) -> RelayResult<Self> {
@@ -183,7 +200,7 @@ impl SessionFuturesUniverseResolver {
             .futures_market()
             .build()
             .map_err(|err| RelayError::Internal(err.to_string()))?;
-        Ok(Self::new(client))
+        Self::new_with_metadata_batch_size(client, config.futures_metadata_batch_size)
     }
 }
 
@@ -198,14 +215,31 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
         if symbols.is_empty() {
             return Ok(Vec::new());
         }
-        let symbol_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-        let quotes = self
-            .client
-            .query_symbol_info(&symbol_refs)
-            .await
-            .map_err(|err| RelayError::Transport(format!("futures metadata failed: {err}")))?;
+        let mut quotes = Vec::new();
+        for batch in futures_metadata_symbol_batches(&symbols, self.metadata_batch_size)? {
+            quotes.extend(
+                self.client.query_symbol_info(&batch).await.map_err(|err| {
+                    RelayError::Transport(format!("futures metadata failed: {err}"))
+                })?,
+            );
+        }
         quotes.iter().map(FuturesContract::from_quote).collect()
     }
+}
+
+pub fn futures_metadata_symbol_batches(
+    symbols: &[String],
+    batch_size: usize,
+) -> RelayResult<Vec<Vec<&str>>> {
+    if batch_size == 0 {
+        return Err(RelayError::invalid_config(
+            "futures metadata batch size must be greater than zero",
+        ));
+    }
+    Ok(symbols
+        .chunks(batch_size)
+        .map(|chunk| chunk.iter().map(String::as_str).collect())
+        .collect())
 }
 
 pub async fn resolve_futures_symbols<R>(
