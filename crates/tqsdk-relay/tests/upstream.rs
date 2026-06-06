@@ -1,5 +1,8 @@
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use serde_json::json;
-use tqsdk_relay::{RelayConfig, UpstreamTickChart, decode_upstream_ticks};
+use tqsdk_relay::{RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_ticks};
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
@@ -46,6 +49,28 @@ fn upstream_tick_chart_uses_duration_zero_and_sorted_symbols() {
         chart.symbols(),
         &["DCE.m2609".to_string(), "SHFE.au2602".to_string()]
     );
+}
+
+#[test]
+fn config_builds_upstream_tick_chart_from_futures_symbols() {
+    let config = RelayConfig {
+        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        ..RelayConfig::default()
+    };
+
+    let chart = config.upstream_tick_chart().unwrap().unwrap();
+
+    assert_eq!(chart.chart_id(), "relay-upstream-all-futures-ticks");
+    assert_eq!(chart.symbols(), &["DCE.m2609", "SHFE.au2602"]);
+    assert_eq!(chart.duration_ns(), 0);
+    assert_eq!(chart.view_width(), 10_000);
+}
+
+#[test]
+fn config_omits_upstream_tick_chart_without_futures_symbols() {
+    let config = RelayConfig::default();
+
+    assert!(config.upstream_tick_chart().unwrap().is_none());
 }
 
 #[test]
@@ -293,4 +318,136 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
             .await
             .unwrap();
     server.join();
+}
+
+#[tokio::test]
+async fn configured_upstream_source_subscribes_configured_futures_symbols() {
+    use tqsdk_relay::{RelayConfig, connect_configured_upstream};
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        assert_eq!(set_chart["ins_list"], "DCE.m2609,SHFE.au2602");
+        assert_eq!(set_chart["duration"], 0);
+        assert_eq!(set_chart["view_width"], 10_000);
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let config = RelayConfig {
+        upstream_market_url: server.url("/market"),
+        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        ..RelayConfig::default()
+    };
+
+    let _source = connect_configured_upstream(&config).await.unwrap().unwrap();
+    server.join();
+}
+
+#[tokio::test]
+async fn configured_upstream_source_is_absent_without_futures_symbols() {
+    use tqsdk_relay::{RelayConfig, connect_configured_upstream};
+
+    assert!(
+        connect_configured_upstream(&RelayConfig::default())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn configured_upstream_pump_ingests_upstream_ticks() {
+    use tqsdk_relay::{RelayConfig, RelayServer, spawn_configured_upstream_pump};
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let upstream = TestWebSocketServer::spawn(|mut socket| {
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        ..RelayConfig::default()
+    };
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+
+    let _shutdown = spawn_configured_upstream_pump(&config, server)
+        .await
+        .unwrap()
+        .unwrap();
+
+    wait_for_ticks_ingested(&engine, 1).await;
+    assert_eq!(engine.lock().unwrap().metrics_snapshot().ticks_ingested, 1);
+    assert_eq!(
+        engine.lock().unwrap().health_snapshot().upstream_status,
+        tqsdk_relay::RelaySourceStatus::Up
+    );
+    upstream.join();
+}
+
+async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let ticks_ingested = engine.lock().unwrap().metrics_snapshot().ticks_ingested;
+        if ticks_ingested >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} ingested ticks; saw {ticks_ingested}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

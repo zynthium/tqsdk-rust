@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
+use crate::upstream::UpstreamTickChart;
+
+const UPSTREAM_TICK_CHART_ID: &str = "relay-upstream-all-futures-ticks";
+const UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfig {
@@ -80,6 +84,18 @@ impl Default for BootstrapConfig {
 }
 
 impl RelayConfig {
+    pub fn upstream_tick_chart(&self) -> RelayResult<Option<UpstreamTickChart>> {
+        if self.futures_symbols.is_empty() {
+            return Ok(None);
+        }
+        UpstreamTickChart::new(
+            UPSTREAM_TICK_CHART_ID,
+            self.futures_symbols.iter().map(String::as_str),
+            UPSTREAM_TICK_VIEW_WIDTH,
+        )
+        .map(Some)
+    }
+
     pub fn validate(&self) -> RelayResult<()> {
         if self.upstream_market_url.trim().is_empty() {
             return Err(RelayError::invalid_config(

@@ -15,6 +15,8 @@ pub mod kline;
 pub mod observability;
 pub mod protocol;
 pub mod pump;
+#[cfg(feature = "server")]
+pub mod runtime;
 pub mod server;
 pub mod upstream;
 
@@ -30,6 +32,8 @@ pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
 pub use pump::{pump_available, pump_once};
+#[cfg(feature = "server")]
+pub use runtime::{connect_configured_upstream, spawn_configured_upstream_pump};
 pub use server::RelayServer;
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;
