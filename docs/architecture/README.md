@@ -168,6 +168,10 @@ V1 是：
   - history integrity report for owned kline/tick series
   - offline market cache record / JSONL reader-writer / ordered replay foundation
   - history series -> market cache replay adapter
+- `tqsdk-relay`
+  - 可选 market relay / cache service
+  - 不改变 SDK 默认直连路径，不代理 trade/query/auth
+  - 现有 SDK crates 不依赖 relay；用户显式配置 market endpoint 时才使用
 
 这两层当前仍然遵守同一个约束：
 
