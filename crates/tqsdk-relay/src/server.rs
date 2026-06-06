@@ -79,6 +79,35 @@ impl RelayServer {
         self.dispatch_frames(frames)
     }
 
+    pub async fn pump_upstream_until<S>(
+        &self,
+        source: &mut S,
+        mut shutdown: oneshot::Receiver<()>,
+    ) -> RelayResult<usize>
+    where
+        S: UpstreamTickSource,
+    {
+        let mut sent = 0_usize;
+        loop {
+            let tick = tokio::select! {
+                biased;
+                _ = &mut shutdown => return Ok(sent),
+                tick = source.next_tick() => tick,
+            };
+            let Some(tick) = tick else {
+                return Ok(sent);
+            };
+            let frames = {
+                let mut engine = self
+                    .engine
+                    .lock()
+                    .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+                engine.ingest_tick(tick.symbol, tick.row)?
+            };
+            sent = sent.saturating_add(self.dispatch_frames(frames)?);
+        }
+    }
+
     pub async fn handle_text(
         &self,
         raw_client_id: u64,
