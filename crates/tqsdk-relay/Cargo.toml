@@ -17,6 +17,7 @@ server = ["dep:yawc"]
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
 yawc = { workspace = true, optional = true }
