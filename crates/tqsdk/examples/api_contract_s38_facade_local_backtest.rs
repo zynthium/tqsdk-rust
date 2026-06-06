@@ -27,15 +27,15 @@ async fn main() -> tqsdk::Result<()> {
     // This loop runs purely offline driven by the replay cache
     while tq.next().await? {
         let snapshot = quote.load()?;
-        println!(
-            "{} last_price={}",
-            snapshot.datetime, snapshot.last_price
-        );
+        println!("{} last_price={}", snapshot.datetime, snapshot.last_price);
     }
 
     // You can also inspect the summary of the backtest afterwards
     if let Some(summary) = tq.backtest_summary() {
-        println!("Backtest finished! Executed {} events.", summary.event_count());
+        println!(
+            "Backtest finished! Executed {} events.",
+            summary.event_count()
+        );
     }
 
     Ok(())

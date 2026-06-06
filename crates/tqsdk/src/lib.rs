@@ -357,7 +357,6 @@ pub struct TqBuilder {
     auth: Option<Auth>,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
-    market_mode: MarketMode,
     market_url: Option<String>,
     backtest: Option<BacktestConfig>,
     quote_symbols: Vec<String>,
@@ -371,7 +370,6 @@ impl TqBuilder {
             auth: None,
             query_enabled: false,
             trade_targets: Vec::new(),
-            market_mode: MarketMode::FuturesLive,
             market_url: None,
             backtest: None,
             quote_symbols: Vec::new(),
@@ -383,13 +381,6 @@ impl TqBuilder {
     #[must_use]
     pub fn futures() -> Self {
         Self::new()
-    }
-
-    /// Switch to stock market mode.
-    #[must_use]
-    pub fn stock(mut self) -> Self {
-        self.market_mode = MarketMode::StockLive;
-        self
     }
 
     #[must_use]
@@ -507,12 +498,7 @@ impl TqBuilder {
 
         let auth = self.auth.ok_or(Error::MissingAuth)?;
         let mut session_builder = tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
-
-        // Apply market mode.
-        session_builder = match self.market_mode {
-            MarketMode::FuturesLive => session_builder.futures_market(),
-            MarketMode::StockLive => session_builder.stock_market(),
-        };
+        session_builder = session_builder.futures_market();
 
         if let Some(market_url) = self.market_url {
             session_builder = session_builder.market_relay(market_url);
@@ -529,10 +515,7 @@ impl TqBuilder {
 
         // Apply backtest if configured.
         if let Some(BacktestConfig::Server { start_ns, end_ns }) = self.backtest {
-            wait_builder = match self.market_mode {
-                MarketMode::FuturesLive => wait_builder.futures_backtest(start_ns, end_ns)?,
-                MarketMode::StockLive => wait_builder.stock_backtest(start_ns, end_ns)?,
-            };
+            wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
         }
 
         let api = wait_builder.build().await?;
@@ -595,12 +578,6 @@ impl TargetPos {
 struct Auth {
     user: String,
     pass: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarketMode {
-    FuturesLive,
-    StockLive,
 }
 
 enum BacktestConfig {

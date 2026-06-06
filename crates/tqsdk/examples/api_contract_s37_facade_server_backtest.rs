@@ -24,10 +24,7 @@ async fn main() -> tqsdk::Result<()> {
 
     while tq.next().await? {
         let snapshot = quote.load()?;
-        println!(
-            "{} last_price={}",
-            snapshot.datetime, snapshot.last_price
-        );
+        println!("{} last_price={}", snapshot.datetime, snapshot.last_price);
     }
 
     Ok(())
