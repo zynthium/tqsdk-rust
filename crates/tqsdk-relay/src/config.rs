@@ -9,6 +9,10 @@ use crate::upstream::UpstreamTickChart;
 
 const UPSTREAM_TICK_CHART_ID: &str = "relay-upstream-all-futures-ticks";
 const UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
+const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
+const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
+const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
+const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfig {
@@ -84,6 +88,31 @@ impl Default for BootstrapConfig {
 }
 
 impl RelayConfig {
+    pub fn from_env() -> RelayResult<Self> {
+        Self::from_env_vars(|key| std::env::var(key).ok())
+    }
+
+    pub fn from_env_vars(mut get: impl FnMut(&str) -> Option<String>) -> RelayResult<Self> {
+        let mut config = Self::default();
+        if let Some(value) = get(ENV_UPSTREAM_MARKET_URL) {
+            config.upstream_market_url = value;
+        }
+        if let Some(value) = get(ENV_DOWNSTREAM_LISTEN) {
+            config.downstream_listen = value;
+        }
+        if let Some(value) = get(ENV_METRICS_LISTEN) {
+            config.metrics_listen = value;
+        }
+        if let Some(value) = get(ENV_FUTURES_SYMBOLS) {
+            config.futures_symbols = value
+                .split(',')
+                .map(|symbol| symbol.trim().to_string())
+                .collect();
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn upstream_tick_chart(&self) -> RelayResult<Option<UpstreamTickChart>> {
         if self.futures_symbols.is_empty() {
             return Ok(None);
