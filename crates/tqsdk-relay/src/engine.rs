@@ -83,6 +83,10 @@ impl RelayEngine {
         self.interests.remove_client(client_id);
     }
 
+    pub fn mark_upstream_degraded(&mut self) {
+        self.upstream_status = RelaySourceStatus::Degraded;
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests
