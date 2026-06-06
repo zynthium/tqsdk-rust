@@ -112,4 +112,21 @@ impl InterestRegistry {
             .into_iter()
             .collect()
     }
+
+    #[must_use]
+    pub fn client_count(&self) -> usize {
+        let mut clients: BTreeSet<_> = self.client_quotes.keys().copied().collect();
+        clients.extend(self.chart_mappings.keys().map(|(client_id, _)| *client_id));
+        clients.len()
+    }
+
+    #[must_use]
+    pub fn total_quote_subscriptions(&self) -> usize {
+        self.client_quotes.values().map(BTreeSet::len).sum()
+    }
+
+    #[must_use]
+    pub fn total_chart_subscriptions(&self) -> usize {
+        self.chart_mappings.len()
+    }
 }
