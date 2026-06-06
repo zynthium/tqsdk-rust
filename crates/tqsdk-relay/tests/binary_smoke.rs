@@ -1,0 +1,141 @@
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::json;
+
+#[path = "../../tqsdk-core/tests/support/websocket.rs"]
+mod websocket_support;
+
+#[test]
+fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let symbols_file = temp_symbols_file("binary-smoke-symbols");
+    fs::write(&symbols_file, "SHFE.au2602\n").unwrap();
+    let upstream = TestWebSocketServer::spawn(|mut socket| {
+        assert_eq!(socket.request().path, "/market");
+
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
+        assert_eq!(set_chart["duration"], 0);
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let downstream_addr = free_loopback_addr();
+    let metrics_addr = free_loopback_addr();
+    let mut child = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+            .env("TQSDK_RELAY_FUTURES_SYMBOLS_FILE", &symbols_file)
+            .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", upstream.url("/market"))
+            .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
+            .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+
+    wait_for_downstream_websocket(downstream_addr, &mut child);
+    upstream.join();
+    fs::remove_file(symbols_file).unwrap();
+}
+
+struct ChildGuard {
+    child: Child,
+}
+
+impl ChildGuard {
+    fn spawn(command: &mut Command) -> Self {
+        Self {
+            child: command.spawn().unwrap(),
+        }
+    }
+
+    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().unwrap()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_for_downstream_websocket(addr: SocketAddr, child: &mut ChildGuard) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait() {
+            panic!("relay binary exited before opening downstream listener: {status}");
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            websocket_handshake(&mut stream, addr);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relay downstream listener at {addr}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn websocket_handshake(stream: &mut TcpStream, addr: SocketAddr) {
+    let request = format!(
+        "GET /market HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+Sec-WebSocket-Version: 13\r\n\
+\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 128];
+    while !response.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).unwrap();
+        assert!(read > 0, "relay websocket handshake ended early");
+        response.extend_from_slice(&chunk[..read]);
+    }
+    let response = String::from_utf8(response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 101"),
+        "unexpected websocket handshake response: {response}"
+    );
+}
+
+fn free_loopback_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+fn temp_symbols_file(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "tqsdk-relay-{name}-{}-{nanos}.txt",
+        std::process::id()
+    ))
+}
