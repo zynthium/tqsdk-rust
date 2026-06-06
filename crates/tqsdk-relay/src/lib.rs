@@ -31,4 +31,7 @@ pub use protocol::{
 };
 pub use pump::{pump_available, pump_once};
 pub use server::RelayServer;
-pub use upstream::{FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickSource};
+pub use upstream::{
+    FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickSource,
+    decode_upstream_ticks,
+};

@@ -1,4 +1,5 @@
-use tqsdk_relay::{RelayConfig, UpstreamTickChart};
+use serde_json::json;
+use tqsdk_relay::{RelayConfig, UpstreamTickChart, decode_upstream_ticks};
 
 #[test]
 fn config_accepts_explicit_futures_universe() {
@@ -41,5 +42,114 @@ fn upstream_tick_chart_uses_duration_zero_and_sorted_symbols() {
     assert_eq!(
         chart.symbols(),
         &["DCE.m2609".to_string(), "SHFE.au2602".to_string()]
+    );
+}
+
+#[test]
+fn decode_upstream_ticks_extracts_tick_rows_from_rtn_data() {
+    let ticks = decode_upstream_ticks(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    "SHFE.au2602": {
+                        "last_id": 17,
+                        "data": {
+                            "17": {
+                                "id": 17,
+                                "datetime": 1_000,
+                                "last_price": 610.0,
+                                "volume": 170,
+                                "open_interest": 1007
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(ticks.len(), 1);
+    assert_eq!(ticks[0].symbol, "SHFE.au2602");
+    assert_eq!(ticks[0].row.id, 17);
+    assert_eq!(ticks[0].row.datetime, 1_000);
+    assert_eq!(ticks[0].row.last_price, 610.0);
+    assert_eq!(ticks[0].row.volume, 170);
+    assert_eq!(ticks[0].row.open_interest, 1007);
+}
+
+#[test]
+fn decode_upstream_ticks_uses_data_key_as_row_id_when_id_field_is_absent() {
+    let ticks = decode_upstream_ticks(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    "DCE.m2609": {
+                        "data": {
+                            "9": {
+                                "datetime": 2_000,
+                                "last_price": 3300.0,
+                                "volume": 90,
+                                "open_interest": 900
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(ticks.len(), 1);
+    assert_eq!(ticks[0].symbol, "DCE.m2609");
+    assert_eq!(ticks[0].row.id, 9);
+}
+
+#[test]
+fn decode_upstream_ticks_ignores_non_tick_rtn_data_frames() {
+    let ticks = decode_upstream_ticks(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "quotes": {
+                    "SHFE.au2602": {
+                        "last_price": 610.0
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert!(ticks.is_empty());
+}
+
+#[test]
+fn decode_upstream_ticks_rejects_tick_rows_missing_required_fields() {
+    let err = decode_upstream_ticks(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    "SHFE.au2602": {
+                        "data": {
+                            "17": {
+                                "datetime": 1_000,
+                                "volume": 170,
+                                "open_interest": 1007
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay protocol: upstream tick row missing last_price"
     );
 }
