@@ -306,7 +306,10 @@ impl Tq {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.api_mut_any().quotes(symbols).await.map_err(Error::from)
+        self.api_mut_any()
+            .quotes(symbols)
+            .await
+            .map_err(Error::from)
     }
 
     #[must_use]
@@ -325,11 +328,11 @@ impl Tq {
                 let task = host.target_pos(account_id, symbol).build()?;
                 Ok(TargetPos::new(task))
             }
-            TqInner::LocalBacktest(_) => Err(Error::Task(Box::new(
-                tqsdk_task::TaskError::Unsupported(
+            TqInner::LocalBacktest(_) => {
+                Err(Error::Task(Box::new(tqsdk_task::TaskError::Unsupported(
                     "target_pos is not yet supported in local backtest mode",
-                ),
-            ))),
+                ))))
+            }
         }
     }
 
@@ -355,6 +358,7 @@ pub struct TqBuilder {
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_mode: MarketMode,
+    market_url: Option<String>,
     backtest: Option<BacktestConfig>,
     quote_symbols: Vec<String>,
     price_ticks: std::collections::HashMap<String, f64>,
@@ -368,6 +372,7 @@ impl TqBuilder {
             query_enabled: false,
             trade_targets: Vec::new(),
             market_mode: MarketMode::FuturesLive,
+            market_url: None,
             backtest: None,
             quote_symbols: Vec::new(),
             price_ticks: std::collections::HashMap::new(),
@@ -384,6 +389,12 @@ impl TqBuilder {
     #[must_use]
     pub fn stock(mut self) -> Self {
         self.market_mode = MarketMode::StockLive;
+        self
+    }
+
+    #[must_use]
+    pub fn market_relay(mut self, relay_url: impl Into<String>) -> Self {
+        self.market_url = Some(relay_url.into());
         self
     }
 
@@ -495,14 +506,17 @@ impl TqBuilder {
         }
 
         let auth = self.auth.ok_or(Error::MissingAuth)?;
-        let mut session_builder =
-            tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
+        let mut session_builder = tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
 
         // Apply market mode.
         session_builder = match self.market_mode {
             MarketMode::FuturesLive => session_builder.futures_market(),
             MarketMode::StockLive => session_builder.stock_market(),
         };
+
+        if let Some(market_url) = self.market_url {
+            session_builder = session_builder.market_relay(market_url);
+        }
 
         if self.query_enabled {
             session_builder = session_builder.enable_query();
@@ -511,8 +525,7 @@ impl TqBuilder {
             session_builder = target.apply(session_builder);
         }
 
-        let mut wait_builder =
-            tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
+        let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
 
         // Apply backtest if configured.
         if let Some(BacktestConfig::Server { start_ns, end_ns }) = self.backtest {
@@ -591,8 +604,13 @@ enum MarketMode {
 }
 
 enum BacktestConfig {
-    Server { start_ns: i64, end_ns: i64 },
-    Local { replay: tqsdk_data::MarketCacheReplay },
+    Server {
+        start_ns: i64,
+        end_ns: i64,
+    },
+    Local {
+        replay: tqsdk_data::MarketCacheReplay,
+    },
 }
 
 impl std::fmt::Debug for BacktestConfig {

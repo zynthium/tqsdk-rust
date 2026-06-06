@@ -66,6 +66,21 @@ fn builder_accepts_explicit_query_schema_and_replay_urls() {
 }
 
 #[test]
+fn builder_accepts_explicit_market_relay_url_without_enabling_other_routes() {
+    let builder = SessionClientBuilder::new("user", "pass")
+        .futures_market()
+        .market_relay("ws://127.0.0.1:7788/market");
+
+    let endpoints = builder.endpoints();
+    assert_eq!(
+        endpoints.market_url.as_deref(),
+        Some("ws://127.0.0.1:7788/market")
+    );
+    assert_eq!(endpoints.trade_url, None);
+    assert_eq!(endpoints.query_url, None);
+}
+
+#[test]
 fn builder_can_enable_query_without_explicit_query_url() {
     let builder = SessionClientBuilder::new("user", "pass").enable_query();
 

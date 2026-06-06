@@ -58,6 +58,17 @@ impl SessionClientBuilder {
     }
 
     #[must_use]
+    pub fn market_url(mut self, market_url: impl Into<String>) -> Self {
+        self.endpoints = self.endpoints.with_market_url(market_url);
+        self
+    }
+
+    #[must_use]
+    pub fn market_relay(self, relay_url: impl Into<String>) -> Self {
+        self.market_url(relay_url)
+    }
+
+    #[must_use]
     pub fn enable_query(mut self) -> Self {
         self.query_enabled = true;
         self
@@ -301,6 +312,18 @@ macro_rules! __tqsdk_impl_session_builder_forwarders {
         #[must_use]
         pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
             self.inner = self.inner.replay_url(replay_url);
+            self
+        }
+
+        #[must_use]
+        pub fn market_url(mut self, market_url: impl Into<String>) -> Self {
+            self.inner = self.inner.market_url(market_url);
+            self
+        }
+
+        #[must_use]
+        pub fn market_relay(mut self, relay_url: impl Into<String>) -> Self {
+            self.inner = self.inner.market_relay(relay_url);
             self
         }
     };

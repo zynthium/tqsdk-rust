@@ -176,6 +176,17 @@ fn facade_exposes_tqkq_target_helpers_instead_of_literal_account_ids() {
 }
 
 #[test]
+fn facade_exposes_market_relay_builder_method() {
+    let builder = tqsdk::Tq::futures()
+        .auth("demo-user", "demo-pass")
+        .market_relay("ws://127.0.0.1:7788/market")
+        .trade_target_tqkq();
+
+    let debug = format!("{builder:?}");
+    assert!(debug.contains("market_url"));
+}
+
+#[test]
 fn target_pos_wrapper_uses_sync_intent_api_and_no_direct_wait() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
         .expect("read facade source");
