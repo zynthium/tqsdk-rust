@@ -1,6 +1,9 @@
 use serde_json::json;
 use tqsdk_relay::{RelayConfig, UpstreamTickChart, decode_upstream_ticks};
 
+#[path = "../../tqsdk-core/tests/support/websocket.rs"]
+mod websocket_support;
+
 #[test]
 fn config_accepts_explicit_futures_universe() {
     let config = RelayConfig {
@@ -152,4 +155,102 @@ fn decode_upstream_ticks_rejects_tick_rows_missing_required_fields() {
         err.to_string(),
         "invalid relay protocol: upstream tick row missing last_price"
     );
+}
+
+#[tokio::test]
+async fn websocket_upstream_tick_source_reads_tick_frame() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    let tick = source.next_tick().await.unwrap();
+    assert_eq!(tick.symbol, "SHFE.au2602");
+    assert_eq!(tick.row.id, 17);
+    assert_eq!(tick.row.last_price, 610.0);
+    assert!(source.next_tick().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
+async fn websocket_upstream_tick_source_buffers_multiple_ticks_from_one_frame() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        },
+                                        "18": {
+                                            "datetime": 2_000,
+                                            "last_price": 611.0,
+                                            "volume": 180,
+                                            "open_interest": 1008
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    let first = source.next_tick().await.unwrap();
+    let second = source.next_tick().await.unwrap();
+    assert_eq!(first.row.id, 17);
+    assert_eq!(second.row.id, 18);
+    assert!(source.next_tick().await.is_none());
+    server.join();
 }
