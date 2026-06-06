@@ -5,6 +5,10 @@ use std::collections::VecDeque;
 use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
 use serde_json::Value;
+#[cfg(feature = "server")]
+use tqsdk_core::internal::WebSocketTransport;
+#[cfg(feature = "server")]
+use tqsdk_core::{RawFrame, Transport};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpstreamTick {
@@ -151,5 +155,71 @@ impl FakeUpstreamTickSource {
 impl UpstreamTickSource for FakeUpstreamTickSource {
     async fn next_tick(&mut self) -> Option<UpstreamTick> {
         self.ticks.pop_front()
+    }
+}
+
+#[cfg(feature = "server")]
+pub struct WebSocketUpstreamTickSource {
+    transport: WebSocketTransport,
+    buffered: VecDeque<UpstreamTick>,
+    closed: bool,
+}
+
+#[cfg(feature = "server")]
+impl WebSocketUpstreamTickSource {
+    pub async fn connect(url: impl Into<String>) -> RelayResult<Self> {
+        let mut transport = WebSocketTransport::new(url);
+        transport.connect().await.map_err(|err| {
+            RelayError::Transport(format!("upstream websocket connect failed: {err}"))
+        })?;
+        Ok(Self {
+            transport,
+            buffered: VecDeque::new(),
+            closed: false,
+        })
+    }
+
+    async fn recv_ticks(&mut self) -> RelayResult<Option<Vec<UpstreamTick>>> {
+        match self.transport.recv().await {
+            Ok(RawFrame::Text(text)) => {
+                let value = serde_json::from_str::<Value>(&text).map_err(|err| {
+                    RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
+                })?;
+                decode_upstream_ticks(value).map(Some)
+            }
+            Ok(RawFrame::Binary(bytes)) => {
+                let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
+                    RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
+                })?;
+                decode_upstream_ticks(value).map(Some)
+            }
+            Ok(RawFrame::Ping | RawFrame::Pong) => Ok(Some(Vec::new())),
+            Ok(RawFrame::Close) => Ok(None),
+            Err(err) => Err(RelayError::Transport(format!(
+                "upstream websocket recv failed: {err}"
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl UpstreamTickSource for WebSocketUpstreamTickSource {
+    async fn next_tick(&mut self) -> Option<UpstreamTick> {
+        loop {
+            if let Some(tick) = self.buffered.pop_front() {
+                return Some(tick);
+            }
+            if self.closed {
+                return None;
+            }
+            match self.recv_ticks().await {
+                Ok(Some(ticks)) => {
+                    self.buffered.extend(ticks);
+                }
+                Ok(None) | Err(_) => {
+                    self.closed = true;
+                }
+            }
+        }
     }
 }

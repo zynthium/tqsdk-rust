@@ -31,6 +31,8 @@ pub use protocol::{
 };
 pub use pump::{pump_available, pump_once};
 pub use server::RelayServer;
+#[cfg(feature = "server")]
+pub use upstream::WebSocketUpstreamTickSource;
 pub use upstream::{
     FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickSource,
     decode_upstream_ticks,
