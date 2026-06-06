@@ -17,8 +17,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), RelayError> {
-    let config = RelayConfig::default();
-    config.validate()?;
+    let config = RelayConfig::from_env()?;
 
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(
         config.tick_ring_capacity,

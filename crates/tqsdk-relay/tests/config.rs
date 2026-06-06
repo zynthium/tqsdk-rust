@@ -40,6 +40,40 @@ fn debug_redacts_upstream_auth_pass() {
 }
 
 #[test]
+fn config_loads_env_overrides_without_touching_sdk_defaults() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_UPSTREAM_MARKET_URL" => Some("ws://127.0.0.1:9001/market".to_string()),
+        "TQSDK_RELAY_DOWNSTREAM_LISTEN" => Some("127.0.0.1:17788".to_string()),
+        "TQSDK_RELAY_METRICS_LISTEN" => Some("127.0.0.1:17789".to_string()),
+        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some(" SHFE.au2602, DCE.m2609 ".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.upstream_market_url, "ws://127.0.0.1:9001/market");
+    assert_eq!(config.downstream_listen, "127.0.0.1:17788");
+    assert_eq!(config.metrics_listen, "127.0.0.1:17789");
+    assert_eq!(
+        config.futures_symbols,
+        vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()]
+    );
+}
+
+#[test]
+fn config_env_rejects_empty_futures_symbol_entries() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602, ,DCE.m2609".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: futures_symbols must not contain empty symbols"
+    );
+}
+
+#[test]
 fn config_rejects_empty_upstream_market_url() {
     let config = RelayConfig {
         upstream_market_url: String::new(),

@@ -34,3 +34,20 @@ let mut tq = tqsdk::Tq::futures()
 ```
 
 Without `.market_relay(...)`, SDK clients continue to connect directly to Tianqin.
+
+Run the relay process with an explicit futures universe:
+
+```bash
+TQSDK_RELAY_FUTURES_SYMBOLS="SHFE.au2602,DCE.m2609" \
+TQSDK_RELAY_UPSTREAM_MARKET_URL="wss://openmd.shinnytech.com/t/md/front/mobile" \
+cargo run -p tqsdk-relay
+```
+
+Supported relay-process environment overrides:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TQSDK_RELAY_FUTURES_SYMBOLS` | empty | Comma-separated futures symbols for the single upstream tick chart. If empty, the relay starts downstream service only and does not connect upstream. |
+| `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | Upstream Tianqin market websocket URL. |
+| `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | Downstream SDK websocket listen address. |
+| `TQSDK_RELAY_METRICS_LISTEN` | `127.0.0.1:7789` | Reserved metrics listen address. |
