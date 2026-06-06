@@ -19,6 +19,7 @@ fn default_config_is_memory_only_and_local() {
         config.bootstrap.per_series_cooldown,
         Duration::from_secs(30)
     );
+    assert!(config.futures_symbols.is_empty());
     assert!(config.disk_cache_dir.is_none());
     assert!(config.best_effort_duration_tag);
     assert!(config.validate().is_ok());
