@@ -254,3 +254,43 @@ async fn websocket_upstream_tick_source_buffers_multiple_ticks_from_one_frame() 
     assert!(source.next_tick().await.is_none());
     server.join();
 }
+
+#[tokio::test]
+async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
+    use tqsdk_relay::{UpstreamTickChart, WebSocketUpstreamTickSource};
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        assert_eq!(set_chart["ins_list"], "DCE.m2609,SHFE.au2602");
+        assert_eq!(set_chart["duration"], 0);
+        assert_eq!(set_chart["view_width"], 10_000);
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let chart = UpstreamTickChart::new(
+        "relay-upstream-all-futures-ticks",
+        ["SHFE.au2602", "DCE.m2609"],
+        10_000,
+    )
+    .unwrap();
+
+    let _source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+    server.join();
+}
