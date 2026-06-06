@@ -108,7 +108,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
 | 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、resolved TQKQ target-position helper、`TargetPos` intent API 和 curated `advanced::*` 下钻命名空间 |
-| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、bootstrap 队列限流、observability、WebSocket loopback 和 upstream tick scaffold |
+| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、动态期货产品发现、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、bootstrap 队列限流、observability、WebSocket loopback 和 upstream tick scaffold |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
 
 推荐的 V1 回归入口：

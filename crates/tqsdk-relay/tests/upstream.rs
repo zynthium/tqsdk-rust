@@ -370,6 +370,26 @@ async fn configured_upstream_source_is_absent_without_futures_symbols() {
 }
 
 #[tokio::test]
+async fn configured_product_discovery_requires_auth_credentials() {
+    use tqsdk_relay::{FuturesProductFilter, RelayConfig, connect_configured_upstream};
+
+    let config = RelayConfig {
+        futures_product_filter: FuturesProductFilter::All,
+        ..RelayConfig::default()
+    };
+
+    let err = match connect_configured_upstream(&config).await {
+        Ok(_) => panic!("product discovery without auth should fail"),
+        Err(err) => err,
+    };
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQ_AUTH_USER is required for futures product discovery"
+    );
+}
+
+#[tokio::test]
 async fn configured_upstream_pump_ingests_upstream_ticks() {
     use tqsdk_relay::{RelayConfig, RelayServer, spawn_configured_upstream_pump};
     use websocket_support::{ClientFrame, TestWebSocketServer};

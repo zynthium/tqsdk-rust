@@ -18,6 +18,7 @@ pub mod pump;
 #[cfg(feature = "server")]
 pub mod runtime;
 pub mod server;
+pub mod universe;
 pub mod upstream;
 
 pub use bootstrap::{BootstrapQueue, BootstrapRequest};
@@ -38,6 +39,12 @@ pub use runtime::{
     spawn_configured_upstream_pump_with_retry_interval,
 };
 pub use server::RelayServer;
+#[cfg(feature = "metadata")]
+pub use universe::SessionFuturesUniverseResolver;
+pub use universe::{
+    FuturesContract, FuturesProductCode, FuturesProductFilter, StaticFuturesUniverseResolver,
+    resolve_futures_symbols,
+};
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;
 pub use upstream::{
