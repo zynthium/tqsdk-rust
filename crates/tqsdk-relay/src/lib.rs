@@ -12,6 +12,7 @@ pub mod engine;
 pub mod error;
 pub mod interest;
 pub mod kline;
+pub mod observability;
 pub mod protocol;
 pub mod upstream;
 
@@ -22,6 +23,7 @@ pub use engine::{DownstreamFrame, RelayEngine};
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;
+pub use observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStatus};
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };

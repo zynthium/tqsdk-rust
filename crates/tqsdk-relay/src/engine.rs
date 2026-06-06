@@ -10,6 +10,7 @@ use crate::cache::MarketCache;
 use crate::error::RelayResult;
 use crate::interest::{ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
+use crate::observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStatus};
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,8 @@ pub struct RelayEngine {
     interests: InterestRegistry,
     bootstrap: BootstrapQueue,
     klines: HashMap<SourceKey, KlineSynthesis>,
+    upstream_status: RelaySourceStatus,
+    ticks_ingested: u64,
 }
 
 impl RelayEngine {
@@ -34,6 +37,8 @@ impl RelayEngine {
             interests: InterestRegistry::default(),
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
+            upstream_status: RelaySourceStatus::Connecting,
+            ticks_ingested: 0,
         }
     }
 
@@ -66,6 +71,8 @@ impl RelayEngine {
         row: RelayTickRow,
     ) -> RelayResult<Vec<DownstreamFrame>> {
         let symbol = symbol.as_ref();
+        self.ticks_ingested = self.ticks_ingested.saturating_add(1);
+        self.upstream_status = RelaySourceStatus::Up;
         self.cache.push_tick(symbol, row.clone());
         let mut frames = self.quote_frames(symbol);
         frames.extend(self.kline_frames(symbol, row)?);
@@ -80,6 +87,27 @@ impl RelayEngine {
     #[must_use]
     pub fn bootstrap_pending_len(&self) -> usize {
         self.bootstrap.len()
+    }
+
+    #[must_use]
+    pub fn health_snapshot(&self) -> HealthSnapshot {
+        HealthSnapshot {
+            ready: true,
+            upstream_status: self.upstream_status,
+            downstream_clients: self.interests.client_count(),
+        }
+    }
+
+    #[must_use]
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            downstream_clients: self.interests.client_count(),
+            quote_subscriptions: self.interests.total_quote_subscriptions(),
+            chart_subscriptions: self.interests.total_chart_subscriptions(),
+            ticks_ingested: self.ticks_ingested,
+            bootstrap_pending: self.bootstrap.len(),
+            bootstrap_inflight: self.bootstrap.inflight(),
+        }
     }
 
     fn quote_frames(&self, symbol: &str) -> Vec<DownstreamFrame> {
