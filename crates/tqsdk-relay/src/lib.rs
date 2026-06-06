@@ -33,7 +33,10 @@ pub use protocol::{
 };
 pub use pump::{pump_available, pump_once};
 #[cfg(feature = "server")]
-pub use runtime::{connect_configured_upstream, spawn_configured_upstream_pump};
+pub use runtime::{
+    connect_configured_upstream, spawn_configured_upstream_pump,
+    spawn_configured_upstream_pump_with_retry_interval,
+};
 pub use server::RelayServer;
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;
