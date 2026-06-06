@@ -29,4 +29,4 @@ pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
 pub use server::RelayServer;
-pub use upstream::{FakeUpstreamTickSource, UpstreamTick, UpstreamTickSource};
+pub use upstream::{FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickSource};

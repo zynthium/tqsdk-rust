@@ -14,6 +14,7 @@ pub struct RelayConfig {
     pub downstream_listen: String,
     pub metrics_listen: String,
     pub futures_universe_refresh: Duration,
+    pub futures_symbols: Vec<String>,
     pub tick_ring_capacity: usize,
     pub kline_ring_capacity: usize,
     pub disk_cache_dir: Option<PathBuf>,
@@ -32,6 +33,7 @@ impl fmt::Debug for RelayConfig {
             .field("downstream_listen", &self.downstream_listen)
             .field("metrics_listen", &self.metrics_listen)
             .field("futures_universe_refresh", &self.futures_universe_refresh)
+            .field("futures_symbols", &self.futures_symbols)
             .field("tick_ring_capacity", &self.tick_ring_capacity)
             .field("kline_ring_capacity", &self.kline_ring_capacity)
             .field("disk_cache_dir", &self.disk_cache_dir)
@@ -57,6 +59,7 @@ impl Default for RelayConfig {
             downstream_listen: "127.0.0.1:7788".to_string(),
             metrics_listen: "127.0.0.1:7789".to_string(),
             futures_universe_refresh: Duration::from_secs(300),
+            futures_symbols: Vec::new(),
             tick_ring_capacity: 200_000,
             kline_ring_capacity: 10_000,
             disk_cache_dir: None,
@@ -101,6 +104,15 @@ impl RelayConfig {
         if self.kline_ring_capacity == 0 {
             return Err(RelayError::invalid_config(
                 "kline_ring_capacity must be greater than zero",
+            ));
+        }
+        if self
+            .futures_symbols
+            .iter()
+            .any(|symbol| symbol.trim().is_empty())
+        {
+            return Err(RelayError::invalid_config(
+                "futures_symbols must not contain empty symbols",
             ));
         }
         if self.bootstrap.max_concurrent_remote_charts == 0 {
