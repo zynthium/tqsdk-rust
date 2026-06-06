@@ -8,7 +8,7 @@ use serde_json::Value;
 #[cfg(feature = "server")]
 use tqsdk_core::internal::WebSocketTransport;
 #[cfg(feature = "server")]
-use tqsdk_core::{RawFrame, Transport};
+use tqsdk_core::{OutboundFrame, RawFrame, Transport};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpstreamTick {
@@ -177,6 +177,35 @@ impl WebSocketUpstreamTickSource {
             buffered: VecDeque::new(),
             closed: false,
         })
+    }
+
+    pub async fn connect_with_tick_chart(
+        url: impl Into<String>,
+        chart: UpstreamTickChart,
+    ) -> RelayResult<Self> {
+        let mut source = Self::connect(url).await?;
+        source.subscribe_tick_chart(&chart).await?;
+        Ok(source)
+    }
+
+    async fn subscribe_tick_chart(&mut self, chart: &UpstreamTickChart) -> RelayResult<()> {
+        self.send_json(serde_json::json!({
+            "aid": "set_chart",
+            "chart_id": chart.chart_id(),
+            "ins_list": chart.symbols().join(","),
+            "duration": chart.duration_ns(),
+            "view_width": chart.view_width(),
+        }))
+        .await?;
+        self.send_json(serde_json::json!({"aid": "peek_message"}))
+            .await
+    }
+
+    async fn send_json(&mut self, value: Value) -> RelayResult<()> {
+        self.transport
+            .send(OutboundFrame::Text(value.to_string()))
+            .await
+            .map_err(|err| RelayError::Transport(format!("upstream websocket send failed: {err}")))
     }
 
     async fn recv_ticks(&mut self) -> RelayResult<Option<Vec<UpstreamTick>>> {
