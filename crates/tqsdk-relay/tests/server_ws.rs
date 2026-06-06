@@ -5,7 +5,13 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
-use tqsdk_relay::{FakeUpstreamTickSource, RelayEngine, RelayServer, RelayTickRow, UpstreamTick};
+use tqsdk_relay::{
+    FakeUpstreamTickSource, RelayConfig, RelayEngine, RelayServer, RelayTickRow, UpstreamTick,
+    spawn_configured_upstream_pump,
+};
+
+#[path = "../../tqsdk-core/tests/support/websocket.rs"]
+mod websocket_support;
 
 #[tokio::test(flavor = "current_thread")]
 async fn relay_accepts_websocket_market_command_and_updates_engine() {
@@ -170,6 +176,92 @@ async fn relay_pumps_upstream_tick_frames_to_connected_downstream_client() {
 
     stream.shutdown().await.unwrap();
     server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
+    let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        send_tick_rx.recv().unwrap();
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        ..RelayConfig::default()
+    };
+    let _upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
+    send_tick_tx.send(()).unwrap();
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
+        610.0
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+    upstream.join();
 }
 
 #[tokio::test(flavor = "current_thread")]
