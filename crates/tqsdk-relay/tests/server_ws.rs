@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tqsdk_relay::{RelayEngine, RelayServer, RelayTickRow};
+use tqsdk_relay::{FakeUpstreamTickSource, RelayEngine, RelayServer, RelayTickRow, UpstreamTick};
 
 #[tokio::test(flavor = "current_thread")]
 async fn relay_accepts_websocket_market_command_and_updates_engine() {
@@ -121,6 +121,51 @@ async fn relay_dispatches_ingested_tick_frames_to_connected_downstream_client() 
     assert_eq!(
         payload["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
         610.0
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_pumps_upstream_tick_frames_to_connected_downstream_client() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let dispatcher = server.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
+
+    let mut upstream = FakeUpstreamTickSource::default();
+    upstream.push(UpstreamTick {
+        symbol: "SHFE.au2602".to_string(),
+        row: tick(1, 1_000, 610.0),
+    });
+    assert_eq!(
+        dispatcher.pump_upstream_once(&mut upstream).await.unwrap(),
+        1
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
+        610.0
+    );
+    assert_eq!(
+        dispatcher.pump_upstream_once(&mut upstream).await.unwrap(),
+        0
     );
 
     stream.shutdown().await.unwrap();
