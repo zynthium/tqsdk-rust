@@ -131,6 +131,16 @@ impl UpstreamTickChart {
     }
 
     #[must_use]
+    pub fn ins_list(&self) -> String {
+        self.symbols.join(",")
+    }
+
+    #[must_use]
+    pub fn ins_list_chars(&self) -> usize {
+        self.ins_list().len()
+    }
+
+    #[must_use]
     pub const fn duration_ns(&self) -> i64 {
         0
     }
@@ -192,7 +202,7 @@ impl WebSocketUpstreamTickSource {
         self.send_json(serde_json::json!({
             "aid": "set_chart",
             "chart_id": chart.chart_id(),
-            "ins_list": chart.symbols().join(","),
+            "ins_list": chart.ins_list(),
             "duration": chart.duration_ns(),
             "view_width": chart.view_width(),
         }))

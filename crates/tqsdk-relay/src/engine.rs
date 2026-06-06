@@ -27,6 +27,13 @@ pub struct RelayEngine {
     klines: HashMap<SourceKey, KlineSynthesis>,
     upstream_status: RelaySourceStatus,
     ticks_ingested: u64,
+    upstream_symbols: usize,
+    upstream_ins_list_chars: usize,
+    upstream_ins_list_warn_chars: Option<usize>,
+    upstream_ins_list_max_chars: Option<usize>,
+    upstream_ins_list_over_warn: bool,
+    last_universe_refresh_unix_secs: Option<u64>,
+    last_universe_refresh_error: Option<String>,
 }
 
 impl RelayEngine {
@@ -39,6 +46,13 @@ impl RelayEngine {
             klines: HashMap::new(),
             upstream_status: RelaySourceStatus::Connecting,
             ticks_ingested: 0,
+            upstream_symbols: 0,
+            upstream_ins_list_chars: 0,
+            upstream_ins_list_warn_chars: None,
+            upstream_ins_list_max_chars: None,
+            upstream_ins_list_over_warn: false,
+            last_universe_refresh_unix_secs: None,
+            last_universe_refresh_error: None,
         }
     }
 
@@ -87,6 +101,29 @@ impl RelayEngine {
         self.upstream_status = RelaySourceStatus::Degraded;
     }
 
+    pub fn record_universe_refresh_success(
+        &mut self,
+        upstream_symbols: usize,
+        upstream_ins_list_chars: usize,
+        warn_chars: Option<usize>,
+        max_chars: Option<usize>,
+        unix_secs: u64,
+    ) {
+        self.upstream_symbols = upstream_symbols;
+        self.upstream_ins_list_chars = upstream_ins_list_chars;
+        self.upstream_ins_list_warn_chars = warn_chars;
+        self.upstream_ins_list_max_chars = max_chars;
+        self.upstream_ins_list_over_warn =
+            warn_chars.is_some_and(|warn_chars| upstream_ins_list_chars > warn_chars);
+        self.last_universe_refresh_unix_secs = Some(unix_secs);
+        self.last_universe_refresh_error = None;
+    }
+
+    pub fn record_universe_refresh_error(&mut self, message: impl Into<String>, unix_secs: u64) {
+        self.last_universe_refresh_unix_secs = Some(unix_secs);
+        self.last_universe_refresh_error = Some(message.into());
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests
@@ -115,6 +152,13 @@ impl RelayEngine {
             ticks_ingested: self.ticks_ingested,
             bootstrap_pending: self.bootstrap.len(),
             bootstrap_inflight: self.bootstrap.inflight(),
+            upstream_symbols: self.upstream_symbols,
+            upstream_ins_list_chars: self.upstream_ins_list_chars,
+            upstream_ins_list_warn_chars: self.upstream_ins_list_warn_chars,
+            upstream_ins_list_max_chars: self.upstream_ins_list_max_chars,
+            upstream_ins_list_over_warn: self.upstream_ins_list_over_warn,
+            last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
+            last_universe_refresh_error: self.last_universe_refresh_error.clone(),
         }
     }
 

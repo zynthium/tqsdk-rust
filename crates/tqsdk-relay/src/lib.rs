@@ -23,7 +23,10 @@ pub mod upstream;
 
 pub use bootstrap::{BootstrapQueue, BootstrapRequest};
 pub use cache::MarketCache;
-pub use config::{BootstrapConfig, RelayConfig};
+pub use config::{
+    BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig,
+    UpstreamInsListLimits, next_daily_refresh_delay,
+};
 pub use engine::{DownstreamFrame, RelayEngine};
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};

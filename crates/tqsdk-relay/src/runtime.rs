@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::RelayConfig;
 use crate::error::RelayError;
@@ -9,6 +10,7 @@ use crate::server::RelayServer;
 #[cfg(feature = "metadata")]
 use crate::universe::{SessionFuturesUniverseResolver, resolve_futures_symbols};
 use crate::upstream::WebSocketUpstreamTickSource;
+use chrono::Timelike;
 use tokio::sync::oneshot;
 
 const DEFAULT_UPSTREAM_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -22,6 +24,33 @@ pub async fn connect_configured_upstream(
     WebSocketUpstreamTickSource::connect_with_tick_chart(config.upstream_market_url.clone(), chart)
         .await
         .map(Some)
+}
+
+struct ConfiguredUpstream {
+    source: WebSocketUpstreamTickSource,
+}
+
+async fn connect_configured_upstream_for_pump(
+    config: &RelayConfig,
+    server: &RelayServer,
+) -> RelayResult<Option<ConfiguredUpstream>> {
+    let chart = match configured_upstream_tick_chart(config).await {
+        Ok(Some(chart)) => chart,
+        Ok(None) => return Ok(None),
+        Err(err) => {
+            record_universe_refresh_error(server, err.to_string());
+            return Err(err);
+        }
+    };
+    record_universe_refresh_success(
+        server,
+        config,
+        chart.symbols().len(),
+        chart.ins_list_chars(),
+    );
+    WebSocketUpstreamTickSource::connect_with_tick_chart(config.upstream_market_url.clone(), chart)
+        .await
+        .map(|source| Some(ConfiguredUpstream { source }))
 }
 
 async fn configured_upstream_tick_chart(
@@ -88,10 +117,10 @@ async fn run_upstream_retry_loop(
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
-        match connect_configured_upstream(&config).await {
-            Ok(Some(mut source)) => {
+        match connect_configured_upstream_for_pump(&config, &server).await {
+            Ok(Some(mut upstream)) => {
                 let (pump_shutdown_tx, pump_shutdown_rx) = oneshot::channel();
-                let refresh = tokio::time::sleep(config.futures_universe_refresh);
+                let refresh = tokio::time::sleep(next_universe_refresh_delay(&config));
                 tokio::pin!(refresh);
                 let reconnect_delay = tokio::select! {
                     biased;
@@ -103,7 +132,7 @@ async fn run_upstream_retry_loop(
                         let _ = pump_shutdown_tx.send(());
                         Duration::ZERO
                     }
-                    result = server.pump_upstream_until(&mut source, pump_shutdown_rx) => {
+                    result = server.pump_upstream_until(&mut upstream.source, pump_shutdown_rx) => {
                         if let Err(err) = result {
                             mark_upstream_degraded(&server);
                             eprintln!("{err}");
@@ -140,4 +169,44 @@ fn mark_upstream_degraded(server: &RelayServer) {
         Ok(mut engine) => engine.mark_upstream_degraded(),
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }
+}
+
+fn record_universe_refresh_success(
+    server: &RelayServer,
+    config: &RelayConfig,
+    upstream_symbols: usize,
+    upstream_ins_list_chars: usize,
+) {
+    let engine = server.engine();
+    match engine.lock() {
+        Ok(mut engine) => engine.record_universe_refresh_success(
+            upstream_symbols,
+            upstream_ins_list_chars,
+            config.upstream_ins_list_limits.warn_chars,
+            config.upstream_ins_list_limits.max_chars,
+            current_unix_secs(),
+        ),
+        Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
+    }
+}
+
+fn record_universe_refresh_error(server: &RelayServer, message: String) {
+    let engine = server.engine();
+    match engine.lock() {
+        Ok(mut engine) => engine.record_universe_refresh_error(message, current_unix_secs()),
+        Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
+    }
+}
+
+fn next_universe_refresh_delay(config: &RelayConfig) -> Duration {
+    let seconds_after_midnight = chrono::Local::now().num_seconds_from_midnight();
+    config
+        .futures_universe_refresh
+        .delay_from_seconds_after_midnight(seconds_after_midnight)
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }

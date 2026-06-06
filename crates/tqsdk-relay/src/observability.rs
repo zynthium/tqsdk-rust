@@ -23,4 +23,11 @@ pub struct MetricsSnapshot {
     pub ticks_ingested: u64,
     pub bootstrap_pending: usize,
     pub bootstrap_inflight: usize,
+    pub upstream_symbols: usize,
+    pub upstream_ins_list_chars: usize,
+    pub upstream_ins_list_warn_chars: Option<usize>,
+    pub upstream_ins_list_max_chars: Option<usize>,
+    pub upstream_ins_list_over_warn: bool,
+    pub last_universe_refresh_unix_secs: Option<u64>,
+    pub last_universe_refresh_error: Option<String>,
 }

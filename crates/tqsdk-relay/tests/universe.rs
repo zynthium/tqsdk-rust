@@ -1,3 +1,4 @@
+use tqsdk_core::Quote;
 use tqsdk_relay::{
     FuturesContract, FuturesProductCode, FuturesProductFilter, StaticFuturesUniverseResolver,
     resolve_futures_symbols,
@@ -44,4 +45,22 @@ fn futures_contract_extracts_product_code_from_symbol() {
     assert_eq!(contract.exchange_id, "CZCE");
     assert_eq!(contract.product_id, "MA");
     assert_eq!(contract.symbol, "CZCE.MA609");
+}
+
+#[test]
+fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
+    let quote = Quote {
+        instrument_id: "CZCE.MA609".to_string(),
+        exchange_id: "CZCE".to_string(),
+        product_id: "typed-product".to_string(),
+        expired: true,
+        ..Quote::default()
+    };
+
+    let contract = FuturesContract::from_quote(&quote).unwrap();
+
+    assert_eq!(contract.symbol, "CZCE.MA609");
+    assert_eq!(contract.exchange_id, "CZCE");
+    assert_eq!(contract.product_id, "typed-product");
+    assert!(contract.expired);
 }

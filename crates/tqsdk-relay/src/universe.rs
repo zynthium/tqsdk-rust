@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use tqsdk_core::Quote;
 #[cfg(feature = "metadata")]
 use tqsdk_session::{SessionClient, SessionClientBuilder};
 
@@ -105,6 +106,15 @@ impl FuturesContract {
         Self::new(symbol.clone(), exchange_id, product_id, expired)
     }
 
+    pub fn from_quote(quote: &Quote) -> RelayResult<Self> {
+        Self::new(
+            quote.instrument_id.clone(),
+            quote.exchange_id.clone(),
+            quote.product_id.clone(),
+            quote.expired,
+        )
+    }
+
     fn matches_product(&self, product: &FuturesProductCode) -> bool {
         product
             .exchange_id
@@ -185,10 +195,16 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
             .query_quotes(Some("FUTURE"), None, None, Some(false), None)
             .await
             .map_err(|err| RelayError::Transport(format!("futures discovery failed: {err}")))?;
-        symbols
-            .into_iter()
-            .map(|symbol| FuturesContract::from_symbol(symbol, false))
-            .collect()
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let symbol_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+        let quotes = self
+            .client
+            .query_symbol_info(&symbol_refs)
+            .await
+            .map_err(|err| RelayError::Transport(format!("futures metadata failed: {err}")))?;
+        quotes.iter().map(FuturesContract::from_quote).collect()
     }
 }
 

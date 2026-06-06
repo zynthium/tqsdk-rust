@@ -50,6 +50,7 @@ fn upstream_tick_chart_uses_duration_zero_and_sorted_symbols() {
         chart.symbols(),
         &["DCE.m2609".to_string(), "SHFE.au2602".to_string()]
     );
+    assert_eq!(chart.ins_list_chars(), "DCE.m2609,SHFE.au2602".len());
 }
 
 #[test]
@@ -450,7 +451,10 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
         .unwrap();
 
     wait_for_ticks_ingested(&engine, 1).await;
-    assert_eq!(engine.lock().unwrap().metrics_snapshot().ticks_ingested, 1);
+    let metrics = engine.lock().unwrap().metrics_snapshot();
+    assert_eq!(metrics.ticks_ingested, 1);
+    assert_eq!(metrics.upstream_symbols, 1);
+    assert_eq!(metrics.upstream_ins_list_chars, "SHFE.au2602".len());
     assert_eq!(
         engine.lock().unwrap().health_snapshot().upstream_status,
         tqsdk_relay::RelaySourceStatus::Up

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_relay::{
-    BootstrapConfig, FuturesProductCode, FuturesProductFilter, RelayConfig, RelayError,
+    BootstrapConfig, DailyRefreshTime, FuturesProductCode, FuturesProductFilter,
+    FuturesUniverseRefreshSchedule, RelayConfig, RelayError, UpstreamInsListLimits,
+    next_daily_refresh_delay,
 };
 
 #[test]
@@ -12,7 +14,17 @@ fn default_config_is_memory_only_and_local() {
 
     assert_eq!(config.downstream_listen, "127.0.0.1:7788");
     assert_eq!(config.metrics_listen, "127.0.0.1:7789");
-    assert_eq!(config.futures_universe_refresh, Duration::from_secs(86_400));
+    assert_eq!(
+        config.futures_universe_refresh,
+        FuturesUniverseRefreshSchedule::Daily(DailyRefreshTime::from_hms(8, 30, 0).unwrap())
+    );
+    assert_eq!(
+        config.upstream_ins_list_limits,
+        UpstreamInsListLimits {
+            warn_chars: Some(32_000),
+            max_chars: None,
+        }
+    );
     assert_eq!(config.tick_ring_capacity, 200_000);
     assert_eq!(config.kline_ring_capacity, 10_000);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
@@ -95,18 +107,67 @@ fn config_loads_futures_product_codes_from_env() {
 }
 
 #[test]
-fn config_loads_auth_and_futures_universe_refresh_from_env() {
+fn config_loads_auth_and_daily_futures_universe_refresh_from_env() {
     let config = RelayConfig::from_env_vars(|key| match key {
         "TQ_AUTH_USER" => Some(" demo-user ".to_string()),
         "TQ_AUTH_PASS" => Some(" demo-pass ".to_string()),
-        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS" => Some("86400".to_string()),
+        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT" => Some("08:25:30".to_string()),
         _ => None,
     })
     .unwrap();
 
     assert_eq!(config.upstream_auth_user.as_deref(), Some("demo-user"));
     assert_eq!(config.upstream_auth_pass.as_deref(), Some("demo-pass"));
-    assert_eq!(config.futures_universe_refresh, Duration::from_secs(86_400));
+    assert_eq!(
+        config.futures_universe_refresh,
+        FuturesUniverseRefreshSchedule::Daily(DailyRefreshTime::from_hms(8, 25, 30).unwrap())
+    );
+}
+
+#[test]
+fn config_keeps_legacy_interval_futures_universe_refresh_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS" => Some("3600".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        config.futures_universe_refresh,
+        FuturesUniverseRefreshSchedule::Interval(Duration::from_secs(3600))
+    );
+}
+
+#[test]
+fn config_rejects_invalid_daily_futures_universe_refresh_time() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT" => Some("25:00:00".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT must be HH:MM[:SS]"
+    );
+}
+
+#[test]
+fn next_daily_refresh_delay_targets_next_local_wall_clock_time() {
+    let refresh_at = DailyRefreshTime::from_hms(8, 30, 0).unwrap();
+
+    assert_eq!(
+        next_daily_refresh_delay(8 * 3600 + 29 * 60 + 50, refresh_at),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        next_daily_refresh_delay(8 * 3600 + 30 * 60, refresh_at),
+        Duration::from_secs(86_400)
+    );
+    assert_eq!(
+        next_daily_refresh_delay(23 * 3600, refresh_at),
+        Duration::from_secs(9 * 3600 + 30 * 60)
+    );
 }
 
 #[test]
@@ -205,7 +266,7 @@ fn config_rejects_zero_ring_capacity() {
 #[test]
 fn config_rejects_zero_futures_universe_refresh() {
     let config = RelayConfig {
-        futures_universe_refresh: Duration::ZERO,
+        futures_universe_refresh: FuturesUniverseRefreshSchedule::Interval(Duration::ZERO),
         ..RelayConfig::default()
     };
 
@@ -213,7 +274,58 @@ fn config_rejects_zero_futures_universe_refresh() {
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: futures_universe_refresh must be greater than zero"
+        "invalid relay config: futures_universe_refresh interval must be greater than zero"
+    );
+}
+
+#[test]
+fn config_loads_upstream_ins_list_limits_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS" => Some("120".to_string()),
+        "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS" => Some("200".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        config.upstream_ins_list_limits,
+        UpstreamInsListLimits {
+            warn_chars: Some(120),
+            max_chars: Some(200),
+        }
+    );
+}
+
+#[test]
+fn config_rejects_zero_upstream_ins_list_limit() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS" => Some("0".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS must be greater than zero"
+    );
+}
+
+#[test]
+fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
+    let config = RelayConfig {
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        upstream_ins_list_limits: UpstreamInsListLimits {
+            warn_chars: Some(8),
+            max_chars: Some(10),
+        },
+        ..RelayConfig::default()
+    };
+
+    let err = config.upstream_tick_chart().unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: upstream ins_list length 11 exceeds hard limit 10 chars"
     );
 }
 
