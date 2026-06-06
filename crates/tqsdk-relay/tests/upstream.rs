@@ -1,3 +1,4 @@
+use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -440,7 +441,8 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
 #[tokio::test]
 async fn configured_upstream_pump_degrades_without_blocking_when_connect_fails() {
     use tqsdk_relay::{
-        RelayConfig, RelayServer, RelaySourceStatus, spawn_configured_upstream_pump,
+        RelayConfig, RelayServer, RelaySourceStatus,
+        spawn_configured_upstream_pump_with_retry_interval,
     };
 
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
@@ -451,15 +453,92 @@ async fn configured_upstream_pump_degrades_without_blocking_when_connect_fails()
         ..RelayConfig::default()
     };
 
-    let shutdown = spawn_configured_upstream_pump(&config, server)
-        .await
-        .unwrap();
+    let shutdown = spawn_configured_upstream_pump_with_retry_interval(
+        &config,
+        server,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
 
-    assert!(shutdown.is_none());
-    assert_eq!(
-        engine.lock().unwrap().health_snapshot().upstream_status,
-        RelaySourceStatus::Degraded
-    );
+    assert!(shutdown.is_some());
+    wait_for_upstream_status(&engine, RelaySourceStatus::Degraded).await;
+}
+
+#[tokio::test]
+async fn configured_upstream_pump_retries_after_startup_connect_failure() {
+    use tqsdk_relay::{
+        RelayConfig, RelayServer, RelaySourceStatus,
+        spawn_configured_upstream_pump_with_retry_interval,
+    };
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let addr = free_loopback_addr();
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: format!("ws://{addr}/market"),
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        ..RelayConfig::default()
+    };
+
+    let shutdown = spawn_configured_upstream_pump_with_retry_interval(
+        &config,
+        server,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    wait_for_upstream_status(&engine, RelaySourceStatus::Degraded).await;
+
+    let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        assert_eq!(set_chart["aid"], "set_chart");
+        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "18": {
+                                            "datetime": 2_000,
+                                            "last_price": 611.0,
+                                            "volume": 180,
+                                            "open_interest": 1008
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    wait_for_ticks_ingested(&engine, 1).await;
+    wait_for_upstream_status(&engine, RelaySourceStatus::Up).await;
+    let _ = shutdown.send(());
+    upstream.join();
 }
 
 async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
@@ -475,4 +554,27 @@ async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_upstream_status(
+    engine: &Arc<Mutex<RelayEngine>>,
+    expected: tqsdk_relay::RelaySourceStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let status = engine.lock().unwrap().health_snapshot().upstream_status;
+        if status == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for upstream status {expected:?}; saw {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn free_loopback_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
 }

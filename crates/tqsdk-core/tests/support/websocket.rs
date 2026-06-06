@@ -136,6 +136,27 @@ impl TestWebSocketServer {
     {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
+        Self::spawn_with_listener(listener, addr, handler)
+    }
+
+    #[allow(dead_code)]
+    pub fn spawn_on<F>(addr: SocketAddr, handler: F) -> io::Result<Self>
+    where
+        F: FnOnce(TestWebSocketConnection) + Send + 'static,
+    {
+        let listener = TcpListener::bind(addr)?;
+        let addr = listener.local_addr()?;
+        Self::spawn_with_listener(listener, addr, handler)
+    }
+
+    fn spawn_with_listener<F>(
+        listener: TcpListener,
+        addr: SocketAddr,
+        handler: F,
+    ) -> io::Result<Self>
+    where
+        F: FnOnce(TestWebSocketConnection) + Send + 'static,
+    {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("websocket test accept failed");
             let request = read_handshake_request(&mut stream).expect("websocket test handshake");
