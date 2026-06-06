@@ -12,6 +12,7 @@ use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
 use crate::interest::ClientId;
 use crate::protocol::DownstreamCommand;
+use crate::upstream::UpstreamTickSource;
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -59,6 +60,23 @@ impl RelayServer {
             outbound.remove(&client_id);
         }
         Ok(sent)
+    }
+
+    pub async fn pump_upstream_once<S>(&self, source: &mut S) -> RelayResult<usize>
+    where
+        S: UpstreamTickSource,
+    {
+        let Some(tick) = source.next_tick().await else {
+            return Ok(0);
+        };
+        let frames = {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.ingest_tick(tick.symbol, tick.row)?
+        };
+        self.dispatch_frames(frames)
     }
 
     pub async fn handle_text(
