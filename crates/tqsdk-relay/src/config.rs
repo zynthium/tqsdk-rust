@@ -19,10 +19,13 @@ const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
 const ENV_FUTURES_PRODUCTS: &str = "TQSDK_RELAY_FUTURES_PRODUCTS";
 const ENV_FUTURES_UNIVERSE_REFRESH_AT: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT";
 const ENV_FUTURES_UNIVERSE_REFRESH_SECS: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS";
+const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
 const ENV_UPSTREAM_INS_LIST_WARN_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS";
 const ENV_UPSTREAM_INS_LIST_MAX_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS";
+const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
 const ENV_AUTH_USER: &str = "TQ_AUTH_USER";
 const ENV_AUTH_PASS: &str = "TQ_AUTH_PASS";
+pub const DEFAULT_FUTURES_METADATA_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuturesUniverseRefreshSchedule {
@@ -150,8 +153,9 @@ impl UpstreamInsListLimits {
         if let Some(max_chars) = self.max_chars
             && chars > max_chars
         {
+            let suggested = self.suggested_shards(chars).unwrap_or(1);
             return Err(RelayError::invalid_config(format!(
-                "upstream ins_list length {chars} exceeds hard limit {max_chars} chars"
+                "upstream ins_list length {chars} exceeds hard limit {max_chars} chars; suggest splitting into at least {suggested} relay instances"
             )));
         }
         Ok(())
@@ -160,6 +164,15 @@ impl UpstreamInsListLimits {
     #[must_use]
     pub fn over_warn(&self, chars: usize) -> bool {
         self.warn_chars.is_some_and(|warn_chars| chars > warn_chars)
+    }
+
+    #[must_use]
+    pub fn suggested_shards(&self, chars: usize) -> Option<usize> {
+        let limit = self.max_chars.or(self.warn_chars)?;
+        if chars <= limit {
+            return None;
+        }
+        Some(chars.div_ceil(limit).max(1))
     }
 }
 
@@ -171,6 +184,7 @@ pub struct RelayConfig {
     pub downstream_listen: String,
     pub metrics_listen: String,
     pub futures_universe_refresh: FuturesUniverseRefreshSchedule,
+    pub futures_metadata_batch_size: usize,
     pub futures_symbols: Vec<String>,
     pub futures_product_filter: FuturesProductFilter,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
@@ -179,6 +193,7 @@ pub struct RelayConfig {
     pub disk_cache_dir: Option<PathBuf>,
     pub bootstrap: BootstrapConfig,
     pub best_effort_duration_tag: bool,
+    pub dry_run: bool,
 }
 
 impl fmt::Debug for RelayConfig {
@@ -192,6 +207,10 @@ impl fmt::Debug for RelayConfig {
             .field("downstream_listen", &self.downstream_listen)
             .field("metrics_listen", &self.metrics_listen)
             .field("futures_universe_refresh", &self.futures_universe_refresh)
+            .field(
+                "futures_metadata_batch_size",
+                &self.futures_metadata_batch_size,
+            )
             .field("futures_symbols", &self.futures_symbols)
             .field("futures_product_filter", &self.futures_product_filter)
             .field("upstream_ins_list_limits", &self.upstream_ins_list_limits)
@@ -200,6 +219,7 @@ impl fmt::Debug for RelayConfig {
             .field("disk_cache_dir", &self.disk_cache_dir)
             .field("bootstrap", &self.bootstrap)
             .field("best_effort_duration_tag", &self.best_effort_duration_tag)
+            .field("dry_run", &self.dry_run)
             .finish()
     }
 }
@@ -220,6 +240,7 @@ impl Default for RelayConfig {
             downstream_listen: "127.0.0.1:7788".to_string(),
             metrics_listen: "127.0.0.1:7789".to_string(),
             futures_universe_refresh: FuturesUniverseRefreshSchedule::default(),
+            futures_metadata_batch_size: DEFAULT_FUTURES_METADATA_BATCH_SIZE,
             futures_symbols: Vec::new(),
             futures_product_filter: FuturesProductFilter::None,
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
@@ -228,6 +249,7 @@ impl Default for RelayConfig {
             disk_cache_dir: None,
             bootstrap: BootstrapConfig::default(),
             best_effort_duration_tag: true,
+            dry_run: false,
         }
     }
 }
@@ -264,6 +286,9 @@ impl RelayConfig {
         if let Some(value) = get(ENV_AUTH_PASS) {
             config.upstream_auth_pass = Some(value.trim().to_string());
         }
+        if let Some(value) = get(ENV_DRY_RUN) {
+            config.dry_run = parse_bool_env(ENV_DRY_RUN, &value)?;
+        }
         let refresh_at = get(ENV_FUTURES_UNIVERSE_REFRESH_AT);
         let refresh_secs = get(ENV_FUTURES_UNIVERSE_REFRESH_SECS);
         if refresh_at.is_some() && refresh_secs.is_some() {
@@ -287,6 +312,10 @@ impl RelayConfig {
             })?;
             config.futures_universe_refresh =
                 FuturesUniverseRefreshSchedule::Interval(Duration::from_secs(seconds));
+        }
+        if let Some(value) = get(ENV_FUTURES_METADATA_BATCH_SIZE) {
+            config.futures_metadata_batch_size =
+                parse_positive_usize_env(ENV_FUTURES_METADATA_BATCH_SIZE, &value)?;
         }
         if let Some(value) = get(ENV_UPSTREAM_INS_LIST_WARN_CHARS) {
             config.upstream_ins_list_limits.warn_chars = Some(parse_positive_usize_env(
@@ -388,6 +417,11 @@ impl RelayConfig {
         }
         self.futures_universe_refresh.validate()?;
         self.upstream_ins_list_limits.validate()?;
+        if self.futures_metadata_batch_size == 0 {
+            return Err(RelayError::invalid_config(
+                "futures_metadata_batch_size must be greater than zero",
+            ));
+        }
         if self.tick_ring_capacity == 0 {
             return Err(RelayError::invalid_config(
                 "tick_ring_capacity must be greater than zero",
@@ -455,6 +489,16 @@ fn parse_positive_usize_env(name: &str, value: &str) -> RelayResult<usize> {
         )));
     }
     Ok(parsed)
+}
+
+fn parse_bool_env(name: &str, value: &str) -> RelayResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(RelayError::invalid_config(format!(
+            "{name} must be boolean: use true/false or 1/0"
+        ))),
+    }
 }
 
 fn parse_futures_product_filter(value: &str) -> RelayResult<FuturesProductFilter> {

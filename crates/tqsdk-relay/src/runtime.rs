@@ -26,6 +26,12 @@ pub async fn connect_configured_upstream(
         .map(Some)
 }
 
+pub async fn resolve_configured_upstream_tick_chart(
+    config: &RelayConfig,
+) -> RelayResult<Option<crate::upstream::UpstreamTickChart>> {
+    configured_upstream_tick_chart(config).await
+}
+
 struct ConfiguredUpstream {
     source: WebSocketUpstreamTickSource,
 }

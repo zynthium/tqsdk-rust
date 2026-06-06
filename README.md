@@ -88,7 +88,8 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 全品种、多周期行情订阅压力时，才显式把 market endpoint 指向 relay。
 relay 侧推荐配置 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` 或产品代码列表，由 relay 动态
 查询当前活跃合约集合，并默认在本地时间每天 `08:30:00` 重新发现。relay 会暴露上游
-合约数、`ins_list` 长度和阈值命中 metrics；静态完整合约文件只作为兼容覆盖入口。
+合约数、`ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
+检查订阅规模；静态完整合约文件只作为兼容覆盖入口。
 
 ## 快速开始
 

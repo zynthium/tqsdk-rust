@@ -1,5 +1,6 @@
 use tqsdk_relay::{
-    ClientId, DownstreamCommand, RelayEngine, RelaySourceStatus, RelayTickRow, SetChartCommand,
+    ClientId, DownstreamCommand, RelayConfig, RelayEngine, RelaySourceStatus, RelayStartupReport,
+    RelayTickRow, SetChartCommand, UpstreamTickChart,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -108,4 +109,31 @@ fn metrics_remember_last_universe_refresh_error() {
         metrics.last_universe_refresh_error.as_deref(),
         Some("metadata unavailable")
     );
+}
+
+#[test]
+fn startup_report_serializes_operational_summary() {
+    let config = RelayConfig {
+        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        ..RelayConfig::default()
+    };
+    let chart = UpstreamTickChart::new(
+        "relay-upstream-all-futures-ticks",
+        ["SHFE.au2602", "DCE.m2609"],
+        10_000,
+    )
+    .unwrap();
+
+    let report = RelayStartupReport::from_config_and_chart(&config, Some(&chart));
+    let line = report.log_line();
+
+    assert_eq!(report.upstream_symbols, 2);
+    assert_eq!(
+        report.upstream_ins_list_chars,
+        "DCE.m2609,SHFE.au2602".len()
+    );
+    assert_eq!(report.upstream_source, "static-symbols");
+    assert!(line.contains("\"event\":\"relay_startup\""));
+    assert!(line.contains("\"upstream_symbols\":2"));
+    assert!(line.contains("\"metrics_listen\":\"127.0.0.1:7789\""));
 }

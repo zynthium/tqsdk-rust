@@ -231,6 +231,33 @@ crate 自己维护。
 
 - 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait/stream。
 
+### `tqsdk-relay`
+
+职责：
+
+- 可选独立 market relay / cache 服务
+- 代理 SDK market websocket 子集；不代理 trade/query/auth/schema/metadata 给下游
+- 维护共享上游 tick source、内存 tick/quote/K 线 cache、K 线合成和 bootstrap 队列
+- relay 内部可用 `tqsdk-session` metadata 查询动态发现当前活跃期货合约集合，并按批执行
+  `query_symbol_info`
+- 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
+  长度阈值；超出 hard limit 时给出 relay 实例拆分建议
+- 提供 dry-run 启动自检、结构化启动日志、HTTP `/health` 和 `/metrics`
+- 新 K 线订阅可用内存 tick ring 回放已闭合的合成 K 线
+
+设计原因：
+
+- relay 是为减少多进程、全品种、多周期行情订阅字符串压力的可选部署层，不改变 SDK
+  默认直连路径。
+- relay 自身可以使用 metadata 查询来构建上游 tick 源，但不得把 query/auth/schema
+  代理暴露给下游 SDK 客户端。
+
+禁止回退：
+
+- 不要让现有 SDK crates 默认依赖 relay。
+- 不要把 relay 变成通用天勤代理或多 provider 行情聚合框架。
+- 不要把 relay 内存 cache 伪装成跨重启持久化历史数据能力。
+
 ## Runtime 不变量
 
 下面是不允许被局部重构破坏的系统级不变量。

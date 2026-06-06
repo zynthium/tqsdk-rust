@@ -57,6 +57,57 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     fs::remove_file(symbols_file).unwrap();
 }
 
+#[test]
+fn relay_binary_dry_run_prints_diagnostic_without_connecting_upstream() {
+    let symbols_file = temp_symbols_file("binary-dry-run-symbols");
+    fs::write(&symbols_file, "SHFE.au2602\nDCE.m2609\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+        .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+        .env("TQSDK_RELAY_DRY_RUN", "1")
+        .env("TQSDK_RELAY_FUTURES_SYMBOLS_FILE", &symbols_file)
+        .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", "ws://127.0.0.1:9/market")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dry-run failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["event"], "relay_startup");
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["upstream_symbols"], 2);
+    assert_eq!(report["upstream_source"], "static-symbols");
+    fs::remove_file(symbols_file).unwrap();
+}
+
+#[test]
+fn relay_binary_serves_health_and_metrics_json() {
+    let downstream_addr = free_loopback_addr();
+    let metrics_addr = free_loopback_addr();
+    let mut child = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
+            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
+            .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+
+    let health = wait_for_http_json(metrics_addr, "/health", &mut child);
+    assert_eq!(health["ready"], true);
+    assert_eq!(health["upstream_status"], "connecting");
+
+    let metrics = wait_for_http_json(metrics_addr, "/metrics", &mut child);
+    assert_eq!(metrics["downstream_clients"], 0);
+    assert_eq!(metrics["ticks_ingested"], 0);
+    assert_eq!(metrics["upstream_symbols"], 0);
+}
+
 struct ChildGuard {
     child: Child,
 }
@@ -93,6 +144,36 @@ fn wait_for_downstream_websocket(addr: SocketAddr, child: &mut ChildGuard) {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for relay downstream listener at {addr}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_http_json(addr: SocketAddr, path: &str, child: &mut ChildGuard) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait() {
+            panic!("relay binary exited before opening metrics listener: {status}");
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            let request = format!(
+                "GET {path} HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Connection: close\r\n\
+\r\n"
+            );
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            let response = String::from_utf8(response).unwrap();
+            if response.starts_with("HTTP/1.1 200") {
+                let (_, body) = response.split_once("\r\n\r\n").unwrap();
+                return serde_json::from_str(body).unwrap();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relay metrics listener at {addr}"
         );
         thread::sleep(Duration::from_millis(20));
     }

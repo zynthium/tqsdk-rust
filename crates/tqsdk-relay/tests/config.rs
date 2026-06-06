@@ -27,6 +27,7 @@ fn default_config_is_memory_only_and_local() {
     );
     assert_eq!(config.tick_ring_capacity, 200_000);
     assert_eq!(config.kline_ring_capacity, 10_000);
+    assert_eq!(config.futures_metadata_batch_size, 500);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
     assert_eq!(
         config.bootstrap.min_remote_request_interval,
@@ -297,6 +298,42 @@ fn config_loads_upstream_ins_list_limits_from_env() {
 }
 
 #[test]
+fn config_loads_futures_metadata_batch_size_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE" => Some("123".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.futures_metadata_batch_size, 123);
+}
+
+#[test]
+fn config_loads_dry_run_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_DRY_RUN" => Some("true".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert!(config.dry_run);
+}
+
+#[test]
+fn config_rejects_zero_futures_metadata_batch_size() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE" => Some("0".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE must be greater than zero"
+    );
+}
+
+#[test]
 fn config_rejects_zero_upstream_ins_list_limit() {
     let err = RelayConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS" => Some("0".to_string()),
@@ -325,7 +362,7 @@ fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: upstream ins_list length 11 exceeds hard limit 10 chars"
+        "invalid relay config: upstream ins_list length 11 exceeds hard limit 10 chars; suggest splitting into at least 2 relay instances"
     );
 }
 

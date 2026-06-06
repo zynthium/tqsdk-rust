@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tqsdk_relay::{
+    RelayConfig, RelayEngine, RelayError, RelayServer, RelayStartupReport, serve_metrics_until,
+};
 #[cfg(feature = "server")]
-use tqsdk_relay::spawn_configured_upstream_pump;
-use tqsdk_relay::{RelayConfig, RelayEngine, RelayError, RelayServer};
+use tqsdk_relay::{resolve_configured_upstream_tick_chart, spawn_configured_upstream_pump};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -19,15 +21,40 @@ async fn main() {
 async fn run() -> Result<(), RelayError> {
     let config = RelayConfig::from_env()?;
 
+    if config.dry_run {
+        #[cfg(feature = "server")]
+        let chart = resolve_configured_upstream_tick_chart(&config).await?;
+        #[cfg(not(feature = "server"))]
+        let chart = config.upstream_tick_chart()?;
+        println!(
+            "{}",
+            RelayStartupReport::from_config_and_chart(&config, chart.as_ref()).log_line()
+        );
+        return Ok(());
+    }
+
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(
         config.tick_ring_capacity,
         config.kline_ring_capacity,
     )));
-    let server = RelayServer::new(engine);
+    let startup_chart = if !config.futures_symbols.is_empty() {
+        config.upstream_tick_chart()?
+    } else {
+        None
+    };
+    eprintln!(
+        "{}",
+        RelayStartupReport::from_config_and_chart(&config, startup_chart.as_ref()).log_line()
+    );
+    let server = RelayServer::new(engine.clone());
     let listener = TcpListener::bind(&config.downstream_listen)
         .await
         .map_err(|err| RelayError::Transport(format!("downstream bind failed: {err}")))?;
+    let metrics_listener = TcpListener::bind(&config.metrics_listen)
+        .await
+        .map_err(|err| RelayError::Transport(format!("metrics bind failed: {err}")))?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel();
     #[cfg(feature = "server")]
     let upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone()).await?;
     #[cfg(not(feature = "server"))]
@@ -41,10 +68,16 @@ async fn run() -> Result<(), RelayError> {
     };
 
     tokio::spawn(async move {
+        if let Err(err) = serve_metrics_until(metrics_listener, engine, metrics_shutdown_rx).await {
+            eprintln!("{err}");
+        }
+    });
+    tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             if let Some(upstream_shutdown) = upstream_shutdown {
                 let _ = upstream_shutdown.send(());
             }
+            let _ = metrics_shutdown_tx.send(());
             let _ = shutdown_tx.send(());
         }
     });
