@@ -79,3 +79,33 @@ fn metrics_include_chart_subscriptions_and_bootstrap_queue() {
     assert_eq!(metrics.chart_subscriptions, 2);
     assert_eq!(metrics.bootstrap_pending, 1);
 }
+
+#[test]
+fn metrics_include_upstream_universe_subscription_state() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_universe_refresh_success(2, 21, Some(20), Some(64), 1_700_000_000);
+
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.upstream_symbols, 2);
+    assert_eq!(metrics.upstream_ins_list_chars, 21);
+    assert_eq!(metrics.upstream_ins_list_warn_chars, Some(20));
+    assert_eq!(metrics.upstream_ins_list_max_chars, Some(64));
+    assert!(metrics.upstream_ins_list_over_warn);
+    assert_eq!(metrics.last_universe_refresh_unix_secs, Some(1_700_000_000));
+    assert_eq!(metrics.last_universe_refresh_error, None);
+}
+
+#[test]
+fn metrics_remember_last_universe_refresh_error() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_universe_refresh_error("metadata unavailable", 1_700_000_001);
+
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.last_universe_refresh_unix_secs, Some(1_700_000_001));
+    assert_eq!(
+        metrics.last_universe_refresh_error.as_deref(),
+        Some("metadata unavailable")
+    );
+}

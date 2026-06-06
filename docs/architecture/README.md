@@ -171,7 +171,10 @@ V1 是：
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
-  - relay 内部可用 metadata 查询动态发现当前活跃期货合约集合，但不向下游代理 query/auth
+  - relay 内部可用 metadata 查询动态发现当前活跃期货合约集合，使用 typed
+    `query_symbol_info` 字段过滤产品和过期状态，但不向下游代理 query/auth
+  - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
+    长度阈值
   - 现有 SDK crates 不依赖 relay；用户显式配置 market endpoint 时才使用
 
 这两层当前仍然遵守同一个约束：
