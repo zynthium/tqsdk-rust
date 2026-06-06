@@ -13,6 +13,7 @@ const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
 const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
 const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
 const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
+const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfig {
@@ -103,11 +104,23 @@ impl RelayConfig {
         if let Some(value) = get(ENV_METRICS_LISTEN) {
             config.metrics_listen = value;
         }
-        if let Some(value) = get(ENV_FUTURES_SYMBOLS) {
-            config.futures_symbols = value
-                .split(',')
-                .map(|symbol| symbol.trim().to_string())
-                .collect();
+        let inline_futures_symbols = get(ENV_FUTURES_SYMBOLS);
+        let futures_symbols_file = get(ENV_FUTURES_SYMBOLS_FILE);
+        if inline_futures_symbols.is_some() && futures_symbols_file.is_some() {
+            return Err(RelayError::invalid_config(format!(
+                "set only one of {ENV_FUTURES_SYMBOLS} or {ENV_FUTURES_SYMBOLS_FILE}"
+            )));
+        }
+        if let Some(value) = inline_futures_symbols {
+            config.futures_symbols = parse_futures_symbols(&value);
+        }
+        if let Some(path) = futures_symbols_file {
+            let contents = std::fs::read_to_string(&path).map_err(|err| {
+                RelayError::invalid_config(format!(
+                    "failed to read {ENV_FUTURES_SYMBOLS_FILE} {path}: {err}"
+                ))
+            })?;
+            config.futures_symbols = parse_futures_symbols(&contents);
         }
         config.validate()?;
         Ok(config)
@@ -177,4 +190,12 @@ impl RelayConfig {
         }
         Ok(())
     }
+}
+
+fn parse_futures_symbols(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(|symbol| symbol.trim().to_string())
+        .collect()
 }
