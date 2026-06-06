@@ -100,7 +100,13 @@ fn relay_binary_serves_health_and_metrics_json() {
 
     let health = wait_for_http_json(metrics_addr, "/health", &mut child);
     assert_eq!(health["ready"], true);
+    assert_eq!(health["process_started"], true);
+    assert_eq!(health["downstream_listening"], true);
     assert_eq!(health["upstream_status"], "connecting");
+    assert_eq!(health["upstream_connected"], false);
+    assert_eq!(health["universe_ready"], false);
+    assert_eq!(health["data_fresh"], false);
+    assert_eq!(health["market_data_ready"], false);
 
     let metrics = wait_for_http_json(metrics_addr, "/metrics", &mut child);
     assert_eq!(metrics["downstream_clients"], 0);

@@ -37,6 +37,45 @@ fn health_reports_up_when_engine_is_constructed() {
 }
 
 #[test]
+fn health_snapshot_exposes_readiness_dimensions() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    let initial = serde_json::to_value(engine.health_snapshot()).unwrap();
+    assert_eq!(initial["ready"], true);
+    assert_eq!(initial["process_started"], true);
+    assert_eq!(initial["downstream_listening"], true);
+    assert_eq!(initial["upstream_connected"], false);
+    assert_eq!(initial["universe_ready"], false);
+    assert_eq!(initial["data_fresh"], false);
+    assert_eq!(initial["market_data_ready"], false);
+
+    engine.record_universe_refresh_success(2, 21, Some(32_000), None, 1_700_000_000);
+    engine.ingest_tick("SHFE.au2602", tick(1)).unwrap();
+
+    let live = serde_json::to_value(engine.health_snapshot()).unwrap();
+    assert_eq!(live["ready"], true);
+    assert_eq!(live["upstream_connected"], true);
+    assert_eq!(live["universe_ready"], true);
+    assert_eq!(live["data_fresh"], true);
+    assert_eq!(live["market_data_ready"], true);
+    assert_eq!(live["upstream_symbols"], 2);
+    assert_eq!(live["ticks_ingested"], 1);
+}
+
+#[test]
+fn health_snapshot_marks_data_stale_after_freshness_window() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_data_activity_at(1_700_000_000);
+
+    let fresh = serde_json::to_value(engine.health_snapshot_at(1_700_000_030)).unwrap();
+    assert_eq!(fresh["data_fresh"], true);
+
+    let stale = serde_json::to_value(engine.health_snapshot_at(1_700_000_031)).unwrap();
+    assert_eq!(stale["data_fresh"], false);
+}
+
+#[test]
 fn metrics_include_clients_subscriptions_and_cache_events() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     engine
