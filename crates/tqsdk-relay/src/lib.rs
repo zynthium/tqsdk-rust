@@ -14,6 +14,7 @@ pub mod interest;
 pub mod kline;
 pub mod observability;
 pub mod protocol;
+pub mod pump;
 pub mod server;
 pub mod upstream;
 
@@ -28,5 +29,6 @@ pub use observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStatus};
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
+pub use pump::{pump_available, pump_once};
 pub use server::RelayServer;
 pub use upstream::{FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickSource};
