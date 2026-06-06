@@ -33,6 +33,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-stream`](crates/tqsdk-stream) | 高级 Rust async-native 多消费者 commit stream、row-batch kline/tick stream、过滤器、lag diagnostics 和 health status |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、Python-compatible local backtest sim、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、离线 cache 和 replay foundation |
+| [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
 
@@ -82,6 +83,9 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 高级用户仍可直接依赖 `tqsdk-session`、`tqsdk-stream`、`tqsdk-wait`、
 `tqsdk-task` 或 `tqsdk-data`，但普通策略和研究入口应先尝试 `tqsdk`。
 `tqsdk-stream` 是多消费者异步集成入口，不是普通 quote 订阅的默认性能路径。
+
+`tqsdk-relay` 是可选基础设施。普通 SDK 使用不需要启动 relay；只有需要降低多进程、
+全品种、多周期行情订阅压力时，才显式把 market endpoint 指向 relay。
 
 ## 快速开始
 

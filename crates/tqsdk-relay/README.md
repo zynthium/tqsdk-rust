@@ -1,16 +1,36 @@
 # `tqsdk-relay`
 
 `tqsdk-relay` is an optional market relay and cache service for `tqsdk-rust`.
+It is infrastructure, not the default SDK runtime path.
 
-It is not part of the default SDK path. Existing SDK crates continue to connect
-directly to Tianqin unless users explicitly configure their market endpoint to a
-relay instance.
+Use it when one process can subscribe to all futures ticks but many SDK clients
+or many K-line periods would exceed Tianqin market subscription limits.
 
 V1 scope:
 
 - market route only
 - futures tick upstream first
-- quote / tick / K-line fan-out
+- quote / tick / fixed-duration K-line fan-out
 - in-memory cache first
-- optional disk cache later in the relay crate
-- no trade / query / auth proxy
+- bootstrap / resync queue with hard concurrency limits
+- health / metrics / sources snapshots
+
+Non-goals:
+
+- trade proxy
+- query / schema / metadata proxy
+- auth proxy for downstream clients
+- multi-provider aggregation
+- SDK default behavior changes
+
+SDK clients opt in by pointing their market endpoint at relay:
+
+```rust
+let mut tq = tqsdk::Tq::futures()
+    .auth_env()?
+    .market_relay("ws://127.0.0.1:7788/market")
+    .connect()
+    .await?;
+```
+
+Without `.market_relay(...)`, SDK clients continue to connect directly to Tianqin.

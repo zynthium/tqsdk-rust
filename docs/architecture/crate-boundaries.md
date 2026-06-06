@@ -321,6 +321,22 @@ sink、WAL、journal 或 cache writer。
 
 后续主要工作不是继续拓宽 public surface，而是继续稳固 planner、ownership 和执行报告语义。
 
+## `tqsdk-relay`
+
+### 正确职责
+
+- 可选独立进程 / binary
+- 代理 market route 子集
+- 维护共享上游 tick source、内存行情 cache、K 线合成、bootstrap/resync 队列
+- 提供 relay 自身 health / metrics / sources 观测
+
+### 不应承担的职责
+
+- 不代理 trade / query / auth / schema / metadata
+- 不进入现有 SDK crate 的默认依赖路径
+- 不改变 `tqsdk-core` runtime contract
+- 不作为多 provider 行情聚合框架
+
 ## 常见场景下的边界合理性
 
 ### 场景 1：高性能 live 交易用户
