@@ -1,8 +1,10 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tqsdk_relay::{RelayEngine, RelayServer};
 
 #[tokio::test(flavor = "current_thread")]
@@ -33,6 +35,74 @@ async fn relay_accepts_websocket_market_command_and_updates_engine() {
             .quote_subscriptions,
         1
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_accept_loop_accepts_multiple_downstream_clients_until_shutdown() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_until(listener, shutdown_rx).await.unwrap();
+    });
+
+    let mut first_stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut first_stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+
+    let mut second_stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut second_stream,
+        json!({"aid": "subscribe_quote", "ins_list": "DCE.m2609"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 2).await;
+
+    assert_eq!(
+        engine
+            .lock()
+            .unwrap()
+            .metrics_snapshot()
+            .quote_subscriptions,
+        2
+    );
+
+    first_stream.shutdown().await.unwrap();
+    second_stream.shutdown().await.unwrap();
+    wait_for_quote_subscriptions(&engine, 0).await;
+    shutdown_tx.send(()).unwrap();
+    server_task.await.unwrap();
+
+    assert_eq!(
+        engine
+            .lock()
+            .unwrap()
+            .metrics_snapshot()
+            .quote_subscriptions,
+        0
+    );
+}
+
+async fn wait_for_quote_subscriptions(engine: &Arc<Mutex<RelayEngine>>, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if engine
+            .lock()
+            .unwrap()
+            .metrics_snapshot()
+            .quote_subscriptions
+            == expected
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn connect_ws(addr: std::net::SocketAddr) -> TcpStream {
