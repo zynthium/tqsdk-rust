@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_relay::{BootstrapConfig, RelayConfig, RelayError};
 
@@ -74,6 +76,39 @@ fn config_env_rejects_empty_futures_symbol_entries() {
 }
 
 #[test]
+fn config_loads_futures_symbols_from_file_env() {
+    let path = temp_symbols_file("futures-symbols");
+    fs::write(&path, "SHFE.au2602\nDCE.m2609\n").unwrap();
+
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some(path.display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        config.futures_symbols,
+        vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()]
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn config_rejects_inline_and_file_futures_symbols_together() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
+        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some("symbols.txt".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: set only one of TQSDK_RELAY_FUTURES_SYMBOLS or TQSDK_RELAY_FUTURES_SYMBOLS_FILE"
+    );
+}
+
+#[test]
 fn config_rejects_empty_upstream_market_url() {
     let config = RelayConfig {
         upstream_market_url: String::new(),
@@ -138,4 +173,15 @@ fn config_rejects_zero_per_series_cooldown() {
         err.to_string(),
         "invalid relay config: bootstrap.per_series_cooldown must be greater than zero"
     );
+}
+
+fn temp_symbols_file(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "tqsdk-relay-{name}-{}-{nanos}.txt",
+        std::process::id()
+    ))
 }
