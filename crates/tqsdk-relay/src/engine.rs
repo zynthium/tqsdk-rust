@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -10,7 +11,9 @@ use crate::cache::MarketCache;
 use crate::error::RelayResult;
 use crate::interest::{ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
-use crate::observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStatus};
+use crate::observability::{
+    DEFAULT_DATA_STALE_AFTER_SECS, HealthSnapshot, MetricsSnapshot, RelaySourceStatus,
+};
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +37,7 @@ pub struct RelayEngine {
     upstream_ins_list_over_warn: bool,
     last_universe_refresh_unix_secs: Option<u64>,
     last_universe_refresh_error: Option<String>,
+    last_tick_unix_secs: Option<u64>,
 }
 
 impl RelayEngine {
@@ -53,6 +57,7 @@ impl RelayEngine {
             upstream_ins_list_over_warn: false,
             last_universe_refresh_unix_secs: None,
             last_universe_refresh_error: None,
+            last_tick_unix_secs: None,
         }
     }
 
@@ -87,6 +92,7 @@ impl RelayEngine {
         let symbol = symbol.as_ref();
         self.ticks_ingested = self.ticks_ingested.saturating_add(1);
         self.upstream_status = RelaySourceStatus::Up;
+        self.record_data_activity_at(current_unix_secs());
         self.cache.push_tick(symbol, row.clone());
         let mut frames = self.quote_frames(symbol);
         frames.extend(self.kline_frames(symbol, row)?);
@@ -124,6 +130,10 @@ impl RelayEngine {
         self.last_universe_refresh_error = Some(message.into());
     }
 
+    pub fn record_data_activity_at(&mut self, unix_secs: u64) {
+        self.last_tick_unix_secs = Some(unix_secs);
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests
@@ -136,10 +146,36 @@ impl RelayEngine {
 
     #[must_use]
     pub fn health_snapshot(&self) -> HealthSnapshot {
+        self.health_snapshot_at(current_unix_secs())
+    }
+
+    #[must_use]
+    pub fn health_snapshot_at(&self, now_unix_secs: u64) -> HealthSnapshot {
+        let process_started = true;
+        let downstream_listening = true;
+        let upstream_connected = self.upstream_status == RelaySourceStatus::Up;
+        let universe_ready = self.last_universe_refresh_unix_secs.is_some()
+            && self.last_universe_refresh_error.is_none();
+        let data_fresh = self.last_tick_unix_secs.is_some_and(|last_tick_unix_secs| {
+            now_unix_secs.saturating_sub(last_tick_unix_secs) <= DEFAULT_DATA_STALE_AFTER_SECS
+        });
+        let market_data_ready = upstream_connected && universe_ready && data_fresh;
         HealthSnapshot {
-            ready: true,
+            ready: process_started && downstream_listening,
+            market_data_ready,
+            process_started,
+            downstream_listening,
             upstream_status: self.upstream_status,
+            upstream_connected,
+            universe_ready,
+            data_fresh,
             downstream_clients: self.interests.client_count(),
+            upstream_symbols: self.upstream_symbols,
+            ticks_ingested: self.ticks_ingested,
+            last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
+            last_universe_refresh_error: self.last_universe_refresh_error.clone(),
+            last_tick_unix_secs: self.last_tick_unix_secs,
+            data_stale_after_secs: DEFAULT_DATA_STALE_AFTER_SECS,
         }
     }
 
@@ -159,6 +195,7 @@ impl RelayEngine {
             upstream_ins_list_over_warn: self.upstream_ins_list_over_warn,
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
+            last_tick_unix_secs: self.last_tick_unix_secs,
         }
     }
 
@@ -293,4 +330,10 @@ fn chart_payload(chart_id: &str, right_id: i64) -> Value {
             }
         ]
     })
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }

@@ -9,7 +9,6 @@ use tokio::sync::oneshot;
 
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::observability::RelaySourceStatus;
 
 pub async fn serve_metrics_until(
     listener: TcpListener,
@@ -47,11 +46,8 @@ async fn serve_metrics_stream(
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
                 .health_snapshot();
-            json!({
-                "ready": health.ready,
-                "upstream_status": source_status(health.upstream_status),
-                "downstream_clients": health.downstream_clients,
-            })
+            serde_json::to_value(health)
+                .map_err(|err| RelayError::Internal(format!("health JSON encode failed: {err}")))?
         }
         "/metrics" => {
             let metrics = engine
@@ -129,13 +125,4 @@ Connection: close\r\n\
         .write_all(response.as_bytes())
         .await
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
-}
-
-fn source_status(status: RelaySourceStatus) -> &'static str {
-    match status {
-        RelaySourceStatus::Connecting => "connecting",
-        RelaySourceStatus::Up => "up",
-        RelaySourceStatus::Degraded => "degraded",
-        RelaySourceStatus::Down => "down",
-    }
 }

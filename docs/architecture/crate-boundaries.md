@@ -332,7 +332,8 @@ sink、WAL、journal 或 cache writer。
 - metadata 查询按批执行，避免动态产品发现本身制造过大的单次 query 请求
 - 在连接上游前检查 `ins_list` 长度阈值，避免已知过长订阅字符串进入天勤行情连接；
   超出 hard limit 时给出 relay 实例拆分建议
-- 提供 relay 自身 dry-run 启动自检、结构化启动日志、HTTP health / metrics 观测
+- 提供 relay 自身 dry-run 启动自检、结构化启动日志、HTTP health / metrics 观测；
+  health 必须区分进程/下游监听、上游连接、合约集合刷新和数据 freshness
 - 新 K 线订阅可用 relay 内存 tick ring 回放已闭合的合成 K 线；这不代表远端 K 线回填
   或跨重启持久化已进入 V1
 

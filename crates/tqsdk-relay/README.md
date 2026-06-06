@@ -201,8 +201,18 @@ curl http://127.0.0.1:7789/health
 curl http://127.0.0.1:7789/metrics
 ```
 
-`/health` 返回 readiness、上游状态和下游客户端数。`/metrics` 返回
-`RelayEngine::metrics_snapshot()` 的完整 JSON。
+`/health` 返回分层 readiness JSON。`ready` 只表示 relay 进程和下游监听已经可用，保持
+对早期监控的兼容；`market_data_ready` 表示上游已连通、合约集合已刷新成功，并且最近
+tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
+
+- `process_started`：relay engine 已启动。
+- `downstream_listening`：下游 market websocket 监听已可接入。
+- `upstream_connected` / `upstream_status`：上游行情连接是否已进入可用状态。
+- `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
+- `data_fresh`：最近一次 tick 活跃时间未超过 freshness 窗口。
+- `market_data_ready`：`upstream_connected && universe_ready && data_fresh`。
+
+`/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
 ### 观测字段
 
@@ -214,6 +224,7 @@ curl http://127.0.0.1:7789/metrics
 - `upstream_ins_list_warn_chars` / `upstream_ins_list_max_chars`：配置阈值。
 - `upstream_ins_list_over_warn`：当前长度是否超过 warn threshold。
 - `last_universe_refresh_unix_secs` / `last_universe_refresh_error`：最近一次合约集合刷新尝试的时间和错误。
+- `last_tick_unix_secs`：最近一次摄入 tick 的 relay 本地 Unix 秒时间。
 
 ### 下游命令子集
 
