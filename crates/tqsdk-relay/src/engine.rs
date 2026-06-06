@@ -79,6 +79,10 @@ impl RelayEngine {
         Ok(frames)
     }
 
+    pub fn remove_client(&mut self, client_id: ClientId) {
+        self.interests.remove_client(client_id);
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests

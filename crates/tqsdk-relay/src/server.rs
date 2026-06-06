@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
 use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
@@ -49,12 +50,63 @@ impl RelayServer {
             .accept()
             .await
             .map_err(|err| RelayError::Transport(format!("websocket accept failed: {err}")))?;
-        accept_handshake(&mut stream).await?;
-        let text = read_client_text_frame(&mut stream).await?;
-        let frames = self.handle_text(1, text).await?;
-        for frame in frames {
-            write_server_text_frame(&mut stream, frame.payload.to_string()).await?;
+        self.serve_stream(ClientId::new(1), &mut stream).await
+    }
+
+    pub async fn serve_until(
+        &self,
+        listener: TcpListener,
+        mut shutdown: oneshot::Receiver<()>,
+    ) -> RelayResult<()> {
+        let mut next_client_id = 1_u64;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return Ok(()),
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.map_err(|err| {
+                        RelayError::Transport(format!("websocket accept failed: {err}"))
+                    })?;
+                    let client_id = ClientId::new(next_client_id);
+                    next_client_id = next_client_id.saturating_add(1);
+                    let server = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = server.serve_stream(client_id, &mut stream).await {
+                            eprintln!("{err}");
+                        }
+                        if let Err(err) = server.remove_client(client_id) {
+                            eprintln!("{err}");
+                        }
+                    });
+                }
+            }
         }
+    }
+
+    async fn serve_stream(&self, client_id: ClientId, stream: &mut TcpStream) -> RelayResult<()> {
+        accept_handshake(stream).await?;
+        loop {
+            match read_client_text_frame(stream).await {
+                Ok(text) => {
+                    let frames = self.handle_text(client_id.value(), text).await?;
+                    for frame in frames {
+                        write_server_text_frame(stream, frame.payload.to_string()).await?;
+                    }
+                }
+                Err(RelayError::Transport(message)) if message.contains("early eof") => {
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn remove_client(&self, client_id: ClientId) -> RelayResult<()> {
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+        engine.remove_client(client_id);
         Ok(())
     }
 }

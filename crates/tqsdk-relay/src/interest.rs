@@ -12,6 +12,11 @@ impl ClientId {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
