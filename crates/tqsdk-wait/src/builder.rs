@@ -142,6 +142,17 @@ mod tests {
     }
 
     #[test]
+    fn market_relay_forwards_to_inner_session_builder() {
+        let builder =
+            TqApiBuilder::new("demo-user", "demo-pass").market_relay("ws://127.0.0.1:7788/market");
+
+        assert_eq!(
+            builder.inner.endpoints().market_url.as_deref(),
+            Some("ws://127.0.0.1:7788/market")
+        );
+    }
+
+    #[test]
     fn tqkq_trade_methods_forward_to_inner_session_builder() {
         let builder = TqApiBuilder::new("demo-user", "demo-pass")
             .trade_target_tqkq()
