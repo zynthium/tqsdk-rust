@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tqsdk_relay::{RelayEngine, RelayServer};
+use tqsdk_relay::{RelayEngine, RelayServer, RelayTickRow};
 
 #[tokio::test(flavor = "current_thread")]
 async fn relay_accepts_websocket_market_command_and_updates_engine() {
@@ -89,6 +89,54 @@ async fn relay_accept_loop_accepts_multiple_downstream_clients_until_shutdown() 
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn relay_dispatches_ingested_tick_frames_to_connected_downstream_client() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let dispatcher = server.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
+
+    let frames = engine
+        .lock()
+        .unwrap()
+        .ingest_tick("SHFE.au2602", tick(1, 1_000, 610.0))
+        .unwrap();
+    assert_eq!(dispatcher.dispatch_frames(frames).unwrap(), 1);
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
+        610.0
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+}
+
+fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
+    RelayTickRow {
+        id,
+        datetime,
+        last_price: price,
+        volume: id * 10,
+        open_interest: 1000 + id,
+    }
+}
+
 async fn wait_for_quote_subscriptions(engine: &Arc<Mutex<RelayEngine>>, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline {
@@ -152,4 +200,20 @@ async fn send_masked_text(stream: &mut TcpStream, text: String) {
             .map(|(index, byte)| *byte ^ mask[index % 4]),
     );
     stream.write_all(&frame).await.unwrap();
+}
+
+async fn read_unmasked_text(stream: &mut TcpStream) -> String {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(header[0] & 0x0f, 0x1);
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut extended = [0_u8; 2];
+        stream.read_exact(&mut extended).await.unwrap();
+        len = u64::from(u16::from_be_bytes(extended));
+    }
+    assert_ne!(header[1] & 0x80, 0x80, "server frames must not be masked");
+    let mut payload = vec![0_u8; usize::try_from(len).unwrap()];
+    stream.read_exact(&mut payload).await.unwrap();
+    String::from_utf8(payload).unwrap()
 }

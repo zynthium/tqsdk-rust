@@ -1,11 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
@@ -17,17 +18,47 @@ const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 #[derive(Clone)]
 pub struct RelayServer {
     engine: Arc<Mutex<RelayEngine>>,
+    outbound: Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Value>>>>,
 }
 
 impl RelayServer {
     #[must_use]
     pub fn new(engine: Arc<Mutex<RelayEngine>>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            outbound: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     #[must_use]
     pub fn engine(&self) -> Arc<Mutex<RelayEngine>> {
         self.engine.clone()
+    }
+
+    pub fn dispatch_frames<I>(&self, frames: I) -> RelayResult<usize>
+    where
+        I: IntoIterator<Item = DownstreamFrame>,
+    {
+        let mut sent = 0_usize;
+        let mut stale_clients = Vec::new();
+        let mut outbound = self
+            .outbound
+            .lock()
+            .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?;
+        for frame in frames {
+            let Some(sender) = outbound.get(&frame.client_id) else {
+                continue;
+            };
+            if sender.send(frame.payload).is_ok() {
+                sent = sent.saturating_add(1);
+            } else {
+                stale_clients.push(frame.client_id);
+            }
+        }
+        for client_id in stale_clients {
+            outbound.remove(&client_id);
+        }
+        Ok(sent)
     }
 
     pub async fn handle_text(
@@ -85,18 +116,27 @@ impl RelayServer {
 
     async fn serve_stream(&self, client_id: ClientId, stream: &mut TcpStream) -> RelayResult<()> {
         accept_handshake(stream).await?;
+        let mut outbound = self.register_client(client_id)?;
         loop {
-            match read_client_text_frame(stream).await {
-                Ok(text) => {
-                    let frames = self.handle_text(client_id.value(), text).await?;
-                    for frame in frames {
-                        write_server_text_frame(stream, frame.payload.to_string()).await?;
+            tokio::select! {
+                read = read_client_text_frame(stream) => {
+                    match read {
+                        Ok(text) => {
+                            let frames = self.handle_text(client_id.value(), text).await?;
+                            self.dispatch_frames(frames)?;
+                        }
+                        Err(RelayError::Transport(message)) if message.contains("early eof") => {
+                            return Ok(());
+                        }
+                        Err(err) => return Err(err),
                     }
                 }
-                Err(RelayError::Transport(message)) if message.contains("early eof") => {
-                    return Ok(());
+                payload = outbound.recv() => {
+                    let Some(payload) = payload else {
+                        return Ok(());
+                    };
+                    write_server_text_frame(stream, payload.to_string()).await?;
                 }
-                Err(err) => return Err(err),
             }
         }
     }
@@ -107,7 +147,21 @@ impl RelayServer {
             .lock()
             .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
         engine.remove_client(client_id);
+        drop(engine);
+        self.outbound
+            .lock()
+            .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
+            .remove(&client_id);
         Ok(())
+    }
+
+    fn register_client(&self, client_id: ClientId) -> RelayResult<mpsc::UnboundedReceiver<Value>> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.outbound
+            .lock()
+            .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
+            .insert(client_id, sender);
+        Ok(receiver)
     }
 }
 
