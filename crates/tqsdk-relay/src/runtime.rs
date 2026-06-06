@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use crate::config::RelayConfig;
+use crate::error::RelayError;
 use crate::error::RelayResult;
 use crate::server::RelayServer;
 use crate::upstream::WebSocketUpstreamTickSource;
@@ -21,7 +22,21 @@ pub async fn spawn_configured_upstream_pump(
     config: &RelayConfig,
     server: RelayServer,
 ) -> RelayResult<Option<oneshot::Sender<()>>> {
-    let Some(mut source) = connect_configured_upstream(config).await? else {
+    let Some(mut source) = (match connect_configured_upstream(config).await {
+        Ok(source) => source,
+        Err(RelayError::Transport(message)) => {
+            {
+                let engine = server.engine();
+                let mut engine = engine
+                    .lock()
+                    .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+                engine.mark_upstream_degraded();
+            }
+            eprintln!("relay upstream unavailable: {message}");
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    }) else {
         return Ok(None);
     };
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

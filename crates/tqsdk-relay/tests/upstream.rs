@@ -437,6 +437,31 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
     upstream.join();
 }
 
+#[tokio::test]
+async fn configured_upstream_pump_degrades_without_blocking_when_connect_fails() {
+    use tqsdk_relay::{
+        RelayConfig, RelayServer, RelaySourceStatus, spawn_configured_upstream_pump,
+    };
+
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: "ws://127.0.0.1:9/market".to_string(),
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        ..RelayConfig::default()
+    };
+
+    let shutdown = spawn_configured_upstream_pump(&config, server)
+        .await
+        .unwrap();
+
+    assert!(shutdown.is_none());
+    assert_eq!(
+        engine.lock().unwrap().health_snapshot().upstream_status,
+        RelaySourceStatus::Degraded
+    );
+}
+
 async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
