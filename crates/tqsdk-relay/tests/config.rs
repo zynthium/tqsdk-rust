@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tqsdk_relay::{BootstrapConfig, RelayConfig, RelayError};
+use tqsdk_relay::{
+    BootstrapConfig, FuturesProductCode, FuturesProductFilter, RelayConfig, RelayError,
+};
 
 #[test]
 fn default_config_is_memory_only_and_local() {
@@ -10,6 +12,7 @@ fn default_config_is_memory_only_and_local() {
 
     assert_eq!(config.downstream_listen, "127.0.0.1:7788");
     assert_eq!(config.metrics_listen, "127.0.0.1:7789");
+    assert_eq!(config.futures_universe_refresh, Duration::from_secs(86_400));
     assert_eq!(config.tick_ring_capacity, 200_000);
     assert_eq!(config.kline_ring_capacity, 10_000);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
@@ -62,6 +65,51 @@ fn config_loads_env_overrides_without_touching_sdk_defaults() {
 }
 
 #[test]
+fn config_loads_all_futures_products_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.futures_product_filter, FuturesProductFilter::All);
+    assert!(config.futures_symbols.is_empty());
+}
+
+#[test]
+fn config_loads_futures_product_codes_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("SHFE.au,DCE.m,MA".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        config.futures_product_filter,
+        FuturesProductFilter::Products(vec![
+            FuturesProductCode::new(Some("SHFE"), "au").unwrap(),
+            FuturesProductCode::new(Some("DCE"), "m").unwrap(),
+            FuturesProductCode::new(None, "MA").unwrap(),
+        ])
+    );
+}
+
+#[test]
+fn config_loads_auth_and_futures_universe_refresh_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQ_AUTH_USER" => Some(" demo-user ".to_string()),
+        "TQ_AUTH_PASS" => Some(" demo-pass ".to_string()),
+        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS" => Some("86400".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.upstream_auth_user.as_deref(), Some("demo-user"));
+    assert_eq!(config.upstream_auth_pass.as_deref(), Some("demo-pass"));
+    assert_eq!(config.futures_universe_refresh, Duration::from_secs(86_400));
+}
+
+#[test]
 fn config_env_rejects_empty_futures_symbol_entries() {
     let err = RelayConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602, ,DCE.m2609".to_string()),
@@ -109,6 +157,21 @@ fn config_rejects_inline_and_file_futures_symbols_together() {
 }
 
 #[test]
+fn config_rejects_futures_symbols_and_products_together() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
+        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: set only one futures universe source"
+    );
+}
+
+#[test]
 fn config_rejects_empty_upstream_market_url() {
     let config = RelayConfig {
         upstream_market_url: String::new(),
@@ -136,6 +199,21 @@ fn config_rejects_zero_ring_capacity() {
     assert_eq!(
         err.to_string(),
         "invalid relay config: tick_ring_capacity must be greater than zero"
+    );
+}
+
+#[test]
+fn config_rejects_zero_futures_universe_refresh() {
+    let config = RelayConfig {
+        futures_universe_refresh: Duration::ZERO,
+        ..RelayConfig::default()
+    };
+
+    let err = config.validate().unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: futures_universe_refresh must be greater than zero"
     );
 }
 

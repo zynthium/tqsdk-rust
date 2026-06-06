@@ -36,7 +36,8 @@ relay 不改变 SDK 运行时模型：
 | --- | --- |
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
-| 上游数据源 | 打开一个天勤行情 websocket，并为配置的期货合约集合发送 duration 为 `0` 的 `set_chart`。 |
+| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，并发送 duration 为 `0` 的 `set_chart`。 |
+| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合；产品发现模式下会按刷新间隔重建上游 tick chart。 |
 | quote 分发 | 将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
 | 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线。 |
 | 缓存 | 保留内存 tick ring 和 quote 快照。当前二进制程序尚未启用磁盘持久化。 |
@@ -49,20 +50,26 @@ duration 为 `0` 的下游 tick chart 兼容不是 V1 已完成的主要能力�
 
 ## 快速开始
 
-创建一个期货合约集合文件。大规模合约集合推荐每行一个合约：
-
-```text
-SHFE.au2602
-DCE.m2609
-CZCE.MA609
-```
-
-启动 relay：
+推荐让 relay 自己查询当前活跃期货合约集合。订阅全期货品种时：
 
 ```bash
-TQSDK_RELAY_FUTURES_SYMBOLS_FILE="./futures-symbols.txt" \
+export TQ_AUTH_USER="your-account"
+export TQ_AUTH_PASS="your-password"
+TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
 cargo run -p tqsdk-relay
 ```
+
+只订阅指定产品代码时：
+
+```bash
+export TQ_AUTH_USER="your-account"
+export TQ_AUTH_PASS="your-password"
+TQSDK_RELAY_FUTURES_PRODUCTS="SHFE.au,DCE.m,CZCE.MA" \
+cargo run -p tqsdk-relay
+```
+
+`SHFE.au` 表示交易所限定的产品代码；`MA` 表示不限定交易所的产品代码。relay 会在
+启动时通过天勤 metadata 查询当前未过期合约，再把结果组成一个上游 tick chart。
 
 默认情况下，进程会在 `127.0.0.1:7788` 监听 SDK 行情 websocket 客户端，并连接
 上游 `wss://openmd.shinnytech.com/t/md/front/mobile`。
@@ -79,16 +86,24 @@ let mut tq = tqsdk::Tq::futures()
 
 不调用 `.market_relay(...)` 时，同一个 SDK 客户端会使用正常的天勤直连行情端点。
 
-小规模冒烟测试也可以直接用内联合约列表：
+小规模冒烟测试或临时排查也可以直接用完整合约列表：
 
 ```bash
 TQSDK_RELAY_FUTURES_SYMBOLS="SHFE.au2602,DCE.m2609" \
 cargo run -p tqsdk-relay
 ```
 
-如果既没有设置 `TQSDK_RELAY_FUTURES_SYMBOLS`，也没有设置
-`TQSDK_RELAY_FUTURES_SYMBOLS_FILE`，relay 只会启动下游服务，不连接上游。这个模式
-适合做本地协议冒烟测试，但不会产生实时行情数据。
+完整合约文件仍保留为兼容入口，但不推荐作为长期部署方式，因为合约会随上市/退市
+变化：
+
+```bash
+TQSDK_RELAY_FUTURES_SYMBOLS_FILE="./futures-symbols.txt" \
+cargo run -p tqsdk-relay
+```
+
+如果既没有设置 `TQSDK_RELAY_FUTURES_PRODUCTS`，也没有设置完整合约覆盖入口，relay
+只会启动下游服务，不连接上游。这个模式适合做本地协议冒烟测试，但不会产生实时行情
+数据。
 
 ## 配置
 
@@ -96,8 +111,12 @@ cargo run -p tqsdk-relay
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 单个上游 tick chart 使用的逗号分隔期货合约列表。与 `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
-| `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` | 空 | 合约文件路径。文件可用换行或逗号分隔；空条目会被拒绝。全期货合约集合推荐使用此方式。 |
+| `TQSDK_RELAY_FUTURES_PRODUCTS` | 空 | 推荐入口。设置为 `ALL` / `all` / `*` 表示动态查询全部活跃期货合约；也可传逗号分隔产品代码，例如 `SHFE.au,DCE.m,CZCE.MA`。 |
+| `TQ_AUTH_USER` | 空 | 产品发现需要的天勤账号。只有使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 时必需。 |
+| `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。只有使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 时必需。 |
+| `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | `86400` | 产品发现模式下重建上游合约集合的间隔秒数。默认每日一次；生产部署建议在开盘前启动 relay，或用外部 supervisor 将进程启动/重启时间对齐到开盘前刷新窗口。 |
+| `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。单个上游 tick chart 使用的逗号分隔完整期货合约列表。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
+| `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` | 空 | 兼容入口。完整合约文件路径；文件可用换行或逗号分隔。长期部署不推荐依赖静态文件。 |
 | `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | 上游天勤行情 websocket URL。 |
 | `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | 下游 SDK websocket 监听地址。 |
 | `TQSDK_RELAY_METRICS_LISTEN` | `127.0.0.1:7789` | 预留 metrics 监听地址。当前二进制程序会打印该地址，但不会绑定 HTTP metrics 服务。 |
@@ -106,6 +125,7 @@ cargo run -p tqsdk-relay
 
 - `tick_ring_capacity`：默认每个合约 `200_000` 行。
 - `kline_ring_capacity`：默认 `10_000` 行。
+- `futures_product_filter`：动态产品发现过滤器，可选全部期货或产品代码列表。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。
 - `bootstrap.min_remote_request_interval`：默认 `250ms`。
 - `bootstrap.per_series_cooldown`：默认 `30s`。
@@ -114,7 +134,7 @@ cargo run -p tqsdk-relay
 
 ### 上游订阅
 
-对于已配置的期货合约集合，relay 会创建一个上游 chart：
+对于动态发现或显式配置得到的期货合约集合，relay 会创建一个上游 chart：
 
 ```json
 {
@@ -150,12 +170,14 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
 
 - 将下游监听保持在 loopback、私有网络或你自己的访问控制之后。relay 不认证下游
   客户端。
-- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_SYMBOLS_FILE`，避免 shell 命令行和
-  进程列表过长。
+- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL`，让 relay 在启动和
+  刷新时动态查询当前活跃合约。
 - relay 的目标是通过共享一个上游 tick chart 降低订阅字符串膨胀；不要把它当成通用
   天勤代理。
 - 上游连接失败会将 source 标记为 degraded 并重试。仅因上游临时不可用，已有下游
   连接不会被主动断开。
+- 产品发现模式依赖 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 做 relay 内部 metadata 查询；这些
+  凭证不会下发给下游 SDK 客户端。
 - 当前缓存是内存态。重启 relay 会丢失 tick、quote 和 K 线物化状态。
 
 ## 开发
