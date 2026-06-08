@@ -211,6 +211,11 @@ impl WebSocketUpstreamTickSource {
             .await
     }
 
+    async fn send_peek_message(&mut self) -> RelayResult<()> {
+        self.send_json(serde_json::json!({"aid": "peek_message"}))
+            .await
+    }
+
     async fn send_json(&mut self, value: Value) -> RelayResult<()> {
         self.transport
             .send(OutboundFrame::Text(value.to_string()))
@@ -224,15 +229,22 @@ impl WebSocketUpstreamTickSource {
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                decode_upstream_ticks(value).map(Some)
+                let ticks = decode_upstream_ticks(value)?;
+                self.send_peek_message().await?;
+                Ok(Some(ticks))
             }
             Ok(RawFrame::Binary(bytes)) => {
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                decode_upstream_ticks(value).map(Some)
+                let ticks = decode_upstream_ticks(value)?;
+                self.send_peek_message().await?;
+                Ok(Some(ticks))
             }
-            Ok(RawFrame::Ping | RawFrame::Pong) => Ok(Some(Vec::new())),
+            Ok(RawFrame::Ping | RawFrame::Pong) => {
+                self.send_peek_message().await?;
+                Ok(Some(Vec::new()))
+            }
             Ok(RawFrame::Close) => Ok(None),
             Err(err) => Err(RelayError::Transport(format!(
                 "upstream websocket recv failed: {err}"
