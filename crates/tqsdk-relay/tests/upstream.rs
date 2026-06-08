@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use tqsdk_relay::{RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_ticks};
+use tqsdk_relay::{
+    RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_tick_report, decode_upstream_ticks,
+};
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
@@ -157,8 +159,89 @@ fn decode_upstream_ticks_ignores_non_tick_rtn_data_frames() {
 }
 
 #[test]
-fn decode_upstream_ticks_rejects_tick_rows_missing_required_fields() {
-    let err = decode_upstream_ticks(json!({
+fn decode_upstream_ticks_skips_invalid_rows_and_keeps_valid_rows() {
+    let ticks = decode_upstream_ticks(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    "SHFE.rb2606": {
+                        "data": {
+                            "3299418": {
+                                "datetime": 1_780_569_599_093_000_000i64,
+                                "last_price": "",
+                                "volume": 0,
+                                "open_interest": 660
+                            },
+                            "3299419": {
+                                "datetime": 1_780_569_600_500_000_000i64,
+                                "last_price": 3094.0,
+                                "volume": 30,
+                                "open_interest": 660
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(ticks.len(), 1);
+    assert_eq!(ticks[0].symbol, "SHFE.rb2606");
+    assert_eq!(ticks[0].row.id, 3_299_419);
+    assert_eq!(ticks[0].row.last_price, 3094.0);
+}
+
+#[test]
+fn decode_upstream_tick_report_counts_invalid_rows_and_keeps_valid_rows() {
+    let report = decode_upstream_tick_report(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    "SHFE.rb2606": {
+                        "data": {
+                            "3299418": {
+                                "datetime": 1_780_569_599_093_000_000i64,
+                                "last_price": "",
+                                "volume": 0,
+                                "open_interest": 660
+                            },
+                            "3299419": {
+                                "datetime": 1_780_569_600_500_000_000i64,
+                                "last_price": 3094.0,
+                                "volume": 30,
+                                "open_interest": 660
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(report.invalid_rows(), 1);
+    assert!(
+        report
+            .last_invalid_row_error()
+            .unwrap()
+            .contains("SHFE.rb2606 row 3299418")
+    );
+    assert!(
+        report
+            .last_invalid_row_error()
+            .unwrap()
+            .contains("last_price")
+    );
+    assert_eq!(report.ticks().len(), 1);
+    assert_eq!(report.ticks()[0].row.id, 3_299_419);
+}
+
+#[test]
+fn decode_upstream_ticks_skips_rows_missing_required_fields() {
+    let ticks = decode_upstream_ticks(json!({
         "aid": "rtn_data",
         "data": [
             {
@@ -176,12 +259,9 @@ fn decode_upstream_ticks_rejects_tick_rows_missing_required_fields() {
             }
         ]
     }))
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(
-        err.to_string(),
-        "invalid relay protocol: upstream tick row missing last_price"
-    );
+    assert!(ticks.is_empty());
 }
 
 #[tokio::test]
@@ -279,6 +359,53 @@ async fn websocket_upstream_tick_source_buffers_multiple_ticks_from_one_frame() 
     assert_eq!(first.row.id, 17);
     assert_eq!(second.row.id, 18);
     assert!(source.next_tick().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
+async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    assert!(source.next_tick().await.is_none());
+    assert_eq!(source.take_invalid_tick_rows(), 1);
+    let error = source.take_last_invalid_tick_row_error().unwrap();
+    assert!(error.contains("SHFE.au2602 row 17"));
+    assert!(error.contains("last_price"));
+    assert_eq!(source.take_invalid_tick_rows(), 0);
+    assert!(source.take_last_invalid_tick_row_error().is_none());
     server.join();
 }
 
