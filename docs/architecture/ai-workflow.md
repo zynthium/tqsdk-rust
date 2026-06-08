@@ -239,7 +239,7 @@ crate 自己维护。
 - 代理 SDK market websocket 子集；不代理 trade/query/auth/schema/metadata 给下游
 - 维护共享上游 tick source、内存 tick/quote/K 线 cache、K 线合成和 bootstrap 队列
 - relay 内部可用 `tqsdk-session` metadata 查询动态发现当前活跃期货合约集合，并按批执行
-  `query_symbol_info`
+  轻量 `multi_symbol_info` typed metadata 查询
 - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
   长度阈值；超出 hard limit 时给出 relay 实例拆分建议
 - 提供 dry-run 启动自检、结构化启动日志、HTTP `/health` 和 `/metrics`；
