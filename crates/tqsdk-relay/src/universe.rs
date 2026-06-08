@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+#[cfg(feature = "metadata")]
+use serde_json::{Value, json};
 use tqsdk_core::Quote;
 #[cfg(feature = "metadata")]
 use tqsdk_session::{SessionClient, SessionClientBuilder};
@@ -9,6 +11,21 @@ use tqsdk_session::{SessionClient, SessionClientBuilder};
 #[cfg(feature = "metadata")]
 use crate::config::{DEFAULT_FUTURES_METADATA_BATCH_SIZE, RelayConfig};
 use crate::error::{RelayError, RelayResult};
+
+#[cfg(feature = "metadata")]
+const FUTURES_DISCOVERY_SYMBOL_INFO_QUERY: &str = r#"query($instrument_id:[String]){
+  multi_symbol_info(instrument_id: $instrument_id){
+    ... on basic {
+      instrument_id
+      exchange_id
+      class
+    }
+    ... on future {
+      expired
+      product_id
+    }
+  }
+}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuturesProductFilter {
@@ -195,13 +212,18 @@ impl SessionFuturesUniverseResolver {
             .ok_or_else(|| {
                 RelayError::invalid_config("TQ_AUTH_PASS is required for futures product discovery")
             })?;
-        let client = SessionClientBuilder::new(user, pass)
-            .enable_query()
-            .futures_market()
+        let client = session_client_builder_for_futures_discovery(user, pass)
             .build()
             .map_err(|err| RelayError::Internal(err.to_string()))?;
         Self::new_with_metadata_batch_size(client, config.futures_metadata_batch_size)
     }
+}
+
+#[cfg(feature = "metadata")]
+fn session_client_builder_for_futures_discovery(user: &str, pass: &str) -> SessionClientBuilder {
+    SessionClientBuilder::new(user, pass)
+        .enable_query()
+        .stock_market()
 }
 
 #[cfg(feature = "metadata")]
@@ -215,16 +237,63 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
         if symbols.is_empty() {
             return Ok(Vec::new());
         }
-        let mut quotes = Vec::new();
+        let mut contracts = Vec::new();
         for batch in futures_metadata_symbol_batches(&symbols, self.metadata_batch_size)? {
-            quotes.extend(
-                self.client.query_symbol_info(&batch).await.map_err(|err| {
-                    RelayError::Transport(format!("futures metadata failed: {err}"))
-                })?,
-            );
+            let symbol_list: Vec<String> =
+                batch.iter().map(|symbol| (*symbol).to_string()).collect();
+            let payload = self
+                .client
+                .query_graphql_value(
+                    FUTURES_DISCOVERY_SYMBOL_INFO_QUERY,
+                    Some(json!({ "instrument_id": symbol_list })),
+                )
+                .await
+                .map_err(|err| RelayError::Transport(format!("futures metadata failed: {err}")))?;
+            contracts.extend(parse_futures_discovery_contracts(&payload)?);
         }
-        quotes.iter().map(FuturesContract::from_quote).collect()
+        Ok(contracts)
     }
+}
+
+#[cfg(feature = "metadata")]
+fn parse_futures_discovery_contracts(payload: &Value) -> RelayResult<Vec<FuturesContract>> {
+    let Some(symbols) = payload
+        .get("result")
+        .and_then(|result| result.get("multi_symbol_info"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut contracts = Vec::new();
+    for symbol in symbols {
+        let Some(node) = symbol.as_object() else {
+            continue;
+        };
+        if node.get("class").and_then(Value::as_str) != Some("FUTURE") {
+            continue;
+        }
+        let Some(instrument_id) = node.get("instrument_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(exchange_id) = node.get("exchange_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(product_id) = node.get("product_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let expired = node
+            .get("expired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        contracts.push(FuturesContract::new(
+            instrument_id,
+            exchange_id,
+            product_id,
+            expired,
+        )?);
+    }
+    Ok(contracts)
 }
 
 pub fn futures_metadata_symbol_batches(
@@ -279,4 +348,66 @@ fn active_symbols(
         }
     }
     Ok(symbols.into_iter().collect())
+}
+
+#[cfg(all(test, feature = "metadata"))]
+mod tests {
+    use serde_json::json;
+    use tqsdk_core::MarketSessionTarget;
+
+    use super::{parse_futures_discovery_contracts, session_client_builder_for_futures_discovery};
+
+    #[test]
+    fn futures_discovery_uses_stock_query_market_target() {
+        let builder = session_client_builder_for_futures_discovery("user", "pass");
+
+        assert!(builder.query_enabled());
+        assert_eq!(
+            builder.market_target_ref(),
+            &MarketSessionTarget::stock_live()
+        );
+    }
+
+    #[test]
+    fn parses_minimal_futures_discovery_metadata() {
+        let payload = json!({
+            "result": {
+                "multi_symbol_info": [
+                    {
+                        "instrument_id": "SHFE.au2602",
+                        "exchange_id": "SHFE",
+                        "class": "FUTURE",
+                        "expired": false,
+                        "product_id": "au"
+                    },
+                    {
+                        "instrument_id": "SSE.600000",
+                        "exchange_id": "SSE",
+                        "class": "STOCK",
+                        "expired": false,
+                        "product_id": "600000"
+                    },
+                    {
+                        "instrument_id": "DCE.m2609",
+                        "exchange_id": "DCE",
+                        "class": "FUTURE",
+                        "expired": true,
+                        "product_id": "m"
+                    }
+                ]
+            }
+        });
+
+        let contracts = parse_futures_discovery_contracts(&payload).unwrap();
+
+        assert_eq!(contracts.len(), 2);
+        assert_eq!(contracts[0].symbol, "SHFE.au2602");
+        assert_eq!(contracts[0].exchange_id, "SHFE");
+        assert_eq!(contracts[0].product_id, "au");
+        assert!(!contracts[0].expired);
+        assert_eq!(contracts[1].symbol, "DCE.m2609");
+        assert_eq!(contracts[1].exchange_id, "DCE");
+        assert_eq!(contracts[1].product_id, "m");
+        assert!(contracts[1].expired);
+    }
 }

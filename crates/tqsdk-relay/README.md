@@ -71,7 +71,7 @@ cargo run -p tqsdk-relay
 ```
 
 `SHFE.au` 表示交易所限定的产品代码；`MA` 表示不限定交易所的产品代码。relay 会在
-启动时通过天勤 metadata 查询当前未过期合约，再用 `query_symbol_info` 返回的
+启动时通过天勤 metadata 查询当前未过期合约，再用轻量 `multi_symbol_info` 查询返回的
 `exchange_id`、`product_id` 和 `expired` 等 typed metadata 过滤，最后把结果组成一个
 上游 tick chart。
 
@@ -142,7 +142,7 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
-| `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时 `query_symbol_info` 的批大小；必须大于 `0`。 |
+| `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 上游 tick chart `ins_list` 字符串长度告警阈值。超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误，并提示至少需要拆成几个 relay 实例；默认不启用硬失败。 |
 | `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。单个上游 tick chart 使用的逗号分隔完整期货合约列表。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
