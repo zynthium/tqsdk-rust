@@ -38,6 +38,8 @@ pub struct RelayEngine {
     last_universe_refresh_unix_secs: Option<u64>,
     last_universe_refresh_error: Option<String>,
     last_tick_unix_secs: Option<u64>,
+    upstream_invalid_tick_rows: u64,
+    last_upstream_invalid_tick_row_error: Option<String>,
 }
 
 impl RelayEngine {
@@ -58,6 +60,8 @@ impl RelayEngine {
             last_universe_refresh_unix_secs: None,
             last_universe_refresh_error: None,
             last_tick_unix_secs: None,
+            upstream_invalid_tick_rows: 0,
+            last_upstream_invalid_tick_row_error: None,
         }
     }
 
@@ -137,6 +141,16 @@ impl RelayEngine {
         self.last_tick_unix_secs = Some(unix_secs);
     }
 
+    pub fn record_upstream_invalid_tick_rows(&mut self, count: u64, last_error: Option<String>) {
+        if count == 0 {
+            return;
+        }
+        self.upstream_invalid_tick_rows = self.upstream_invalid_tick_rows.saturating_add(count);
+        if let Some(error) = last_error {
+            self.last_upstream_invalid_tick_row_error = Some(error);
+        }
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests
@@ -175,6 +189,8 @@ impl RelayEngine {
             downstream_clients: self.interests.client_count(),
             upstream_symbols: self.upstream_symbols,
             ticks_ingested: self.ticks_ingested,
+            upstream_invalid_tick_rows: self.upstream_invalid_tick_rows,
+            last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
@@ -196,6 +212,8 @@ impl RelayEngine {
             upstream_ins_list_warn_chars: self.upstream_ins_list_warn_chars,
             upstream_ins_list_max_chars: self.upstream_ins_list_max_chars,
             upstream_ins_list_over_warn: self.upstream_ins_list_over_warn,
+            upstream_invalid_tick_rows: self.upstream_invalid_tick_rows,
+            last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
