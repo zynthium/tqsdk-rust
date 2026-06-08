@@ -108,6 +108,40 @@ fn relay_engine_tracks_bootstrap_request_without_subscribing_remote_kline_immedi
 }
 
 #[test]
+fn relay_engine_drops_pending_bootstrap_when_last_chart_client_disconnects() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .handle_command(client, chart_command("client-chart"))
+        .unwrap();
+    assert_eq!(engine.bootstrap_pending_len(), 1);
+
+    engine.remove_client(client);
+
+    assert_eq!(engine.bootstrap_pending_len(), 0);
+}
+
+#[test]
+fn relay_engine_keeps_pending_bootstrap_for_shared_chart_source() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let first = ClientId::new(1);
+    let second = ClientId::new(2);
+
+    engine
+        .handle_command(first, chart_command("first-chart"))
+        .unwrap();
+    engine
+        .handle_command(second, chart_command("second-chart"))
+        .unwrap();
+    assert_eq!(engine.bootstrap_pending_len(), 1);
+
+    engine.remove_client(first);
+
+    assert_eq!(engine.bootstrap_pending_len(), 1);
+}
+
+#[test]
 fn relay_engine_replays_tick_ring_for_new_kline_chart_subscription() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let client = ClientId::new(1);
