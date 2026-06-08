@@ -16,18 +16,69 @@ pub struct UpstreamTick {
     pub row: RelayTickRow,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpstreamTickDecodeReport {
+    ticks: Vec<UpstreamTick>,
+    invalid_rows: u64,
+    last_invalid_row_error: Option<String>,
+}
+
+impl UpstreamTickDecodeReport {
+    #[must_use]
+    pub fn ticks(&self) -> &[UpstreamTick] {
+        &self.ticks
+    }
+
+    #[must_use]
+    pub fn invalid_rows(&self) -> u64 {
+        self.invalid_rows
+    }
+
+    #[must_use]
+    pub fn last_invalid_row_error(&self) -> Option<&str> {
+        self.last_invalid_row_error.as_deref()
+    }
+
+    #[must_use]
+    pub fn into_ticks(self) -> Vec<UpstreamTick> {
+        self.ticks
+    }
+}
+
 pub trait UpstreamTickSource {
     fn next_tick(&mut self) -> impl std::future::Future<Output = Option<UpstreamTick>> + Send + '_;
+
+    fn take_invalid_tick_rows(&mut self) -> u64 {
+        0
+    }
+
+    fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
+        None
+    }
 }
 
 pub fn decode_upstream_ticks(frame: Value) -> RelayResult<Vec<UpstreamTick>> {
+    decode_upstream_tick_report(frame).map(UpstreamTickDecodeReport::into_ticks)
+}
+
+pub fn decode_upstream_tick_report(frame: Value) -> RelayResult<UpstreamTickDecodeReport> {
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
-        return Ok(Vec::new());
+        return Ok(UpstreamTickDecodeReport {
+            ticks: Vec::new(),
+            invalid_rows: 0,
+            last_invalid_row_error: None,
+        });
     }
     let Some(data) = frame.get("data").and_then(Value::as_array) else {
-        return Ok(Vec::new());
+        return Ok(UpstreamTickDecodeReport {
+            ticks: Vec::new(),
+            invalid_rows: 0,
+            last_invalid_row_error: None,
+        });
     };
     let mut ticks = Vec::new();
+    let mut invalid_rows = 0_u64;
+    let mut last_invalid_row_error = None;
     for fragment in data {
         let Some(symbols) = fragment.get("ticks").and_then(Value::as_object) else {
             continue;
@@ -37,14 +88,24 @@ pub fn decode_upstream_ticks(frame: Value) -> RelayResult<Vec<UpstreamTick>> {
                 continue;
             };
             for (row_id, row) in rows {
-                ticks.push(UpstreamTick {
-                    symbol: symbol.clone(),
-                    row: decode_tick_row(row_id, row)?,
-                });
+                match decode_tick_row(row_id, row) {
+                    Ok(row) => ticks.push(UpstreamTick {
+                        symbol: symbol.clone(),
+                        row,
+                    }),
+                    Err(error) => {
+                        invalid_rows = invalid_rows.saturating_add(1);
+                        last_invalid_row_error = Some(format!("{symbol} row {row_id}: {error}"));
+                    }
+                }
             }
         }
     }
-    Ok(ticks)
+    Ok(UpstreamTickDecodeReport {
+        ticks,
+        invalid_rows,
+        last_invalid_row_error,
+    })
 }
 
 fn decode_tick_row(row_id: &str, row: &Value) -> RelayResult<RelayTickRow> {
@@ -173,6 +234,8 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamTick>,
     closed: bool,
+    invalid_tick_rows: u64,
+    last_invalid_tick_row_error: Option<String>,
 }
 
 #[cfg(feature = "server")]
@@ -186,6 +249,8 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             closed: false,
+            invalid_tick_rows: 0,
+            last_invalid_tick_row_error: None,
         })
     }
 
@@ -229,7 +294,9 @@ impl WebSocketUpstreamTickSource {
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let ticks = decode_upstream_ticks(value)?;
+                let report = decode_upstream_tick_report(value)?;
+                self.record_decode_report(&report);
+                let ticks = report.into_ticks();
                 self.send_peek_message().await?;
                 Ok(Some(ticks))
             }
@@ -237,7 +304,9 @@ impl WebSocketUpstreamTickSource {
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let ticks = decode_upstream_ticks(value)?;
+                let report = decode_upstream_tick_report(value)?;
+                self.record_decode_report(&report);
+                let ticks = report.into_ticks();
                 self.send_peek_message().await?;
                 Ok(Some(ticks))
             }
@@ -249,6 +318,13 @@ impl WebSocketUpstreamTickSource {
             Err(err) => Err(RelayError::Transport(format!(
                 "upstream websocket recv failed: {err}"
             ))),
+        }
+    }
+
+    fn record_decode_report(&mut self, report: &UpstreamTickDecodeReport) {
+        self.invalid_tick_rows = self.invalid_tick_rows.saturating_add(report.invalid_rows());
+        if let Some(error) = report.last_invalid_row_error() {
+            self.last_invalid_tick_row_error = Some(error.to_owned());
         }
     }
 }
@@ -272,5 +348,13 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
                 }
             }
         }
+    }
+
+    fn take_invalid_tick_rows(&mut self) -> u64 {
+        std::mem::take(&mut self.invalid_tick_rows)
+    }
+
+    fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
+        self.last_invalid_tick_row_error.take()
     }
 }
