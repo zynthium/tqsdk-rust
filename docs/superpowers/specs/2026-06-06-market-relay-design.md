@@ -91,7 +91,7 @@ relay 内部由以下组件组成：
 | Quote projector | 从 tick 和必要字段维护 quote snapshot，并向 `subscribe_quote` interest 推送更新 |
 | Kline synthesizer | 从 tick store / live tick 合成多周期 K 线，并维护每个 series 的可变尾 bar 和已完成 bars |
 | Bootstrap / resync queue | 对远端 K 线 bootstrap、oracle 对齐和缺口修复做合并、排队、限流和使用后取消 |
-| Observability endpoint | 提供 `/healthz`、`/metrics`、`/sources` 等运行状态接口 |
+| Observability endpoint | 当前提供 `/health` 分层 readiness JSON 和 `/metrics` JSON；Prometheus 输出、`/sources` 可作为后续扩展 |
 
 ## 下游协议范围
 
@@ -241,13 +241,17 @@ SDK 客户端配置只需要显式 market endpoint 指向 relay。未配置时�
 
 ## 运行观测
 
-relay 至少提供以下观测面：
+relay 当前已落地以下观测面：
 
-- `/healthz`：进程存活、上游连接、主 tick source 状态。
-- `/metrics`：Prometheus 风格指标，覆盖连接数、订阅数、cache 命中率、fan-out 延迟、
-  bootstrap 队列、resync 次数、oracle mismatch、下游慢消费者断开。
-- `/sources`：结构化返回当前上游 source、合约全集版本、活跃内部 series、degraded source
-  和 best-effort duration。
+- `/health`：分层 readiness JSON，区分进程/下游监听、上游连接、合约集合刷新和
+  tick 数据 freshness；`ready` 只表示进程和下游监听可用，`market_data_ready`
+  表示上游已连通、合约集合已刷新成功且最近 tick 未超过 freshness 窗口。
+- `/metrics`：JSON metrics，覆盖下游客户端数、quote/chart 订阅数、tick 摄入数、
+  bootstrap 队列、上游合约数、`ins_list` 长度、阈值命中、最近一次合约集合刷新结果和
+  最近 tick 时间。
+
+后续如果需要接入标准监控系统，可以在不改变现有 JSON endpoint 的前提下增加
+Prometheus text endpoint 或 `/sources` 这类更细的 source 诊断面。
 
 日志必须避免输出账号密码、token 和完整敏感配置。
 
