@@ -1,0 +1,126 @@
+use std::collections::BTreeMap;
+
+use tqsdk_relay::{
+    RelayTickRow, SymbolMetricsQuery, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
+    SymbolTelemetryStore,
+};
+
+fn tick(id: i64, datetime_ns: i64, price: f64) -> RelayTickRow {
+    RelayTickRow {
+        id,
+        datetime: datetime_ns,
+        last_price: price,
+        volume: id * 10,
+        open_interest: 100 + id,
+    }
+}
+
+#[test]
+fn universe_symbol_without_tick_is_missing() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.au2602"], 1_700_000_000_000);
+
+    let snapshot = store.snapshot_at(
+        1_700_000_010_000,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.total, 1);
+    assert_eq!(snapshot.summary.missing, 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Missing);
+    assert!(snapshot.symbols[0].receive_gap_ms.is_none());
+}
+
+#[test]
+fn ticked_symbol_transitions_from_live_to_stale() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.au2602"], 1_700_000_000_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, 1_700_000_001_000_000_000, 610.0),
+        1_700_000_001_200,
+    );
+
+    let live = store.snapshot_at(
+        1_700_000_002_000,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(live.symbols[0].status, SymbolStatus::Live);
+    assert_eq!(live.symbols[0].receive_gap_ms, Some(800));
+    assert_eq!(live.symbols[0].market_time_lag_ms, Some(1_000));
+
+    let stale = store.snapshot_at(
+        1_700_000_032_201,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(stale.symbols[0].status, SymbolStatus::Stale);
+    assert_eq!(stale.summary.stale, 1);
+}
+
+#[test]
+fn subscribed_symbol_outside_universe_is_inactive() {
+    let store = SymbolTelemetryStore::default();
+    let mut subscriptions: BTreeMap<String, SymbolSubscriptionCounts> = Default::default();
+    subscriptions.insert(
+        "DCE.m2609".to_string(),
+        SymbolSubscriptionCounts {
+            quote_subscriber_count: 1,
+            chart_subscriber_count: 0,
+        },
+    );
+
+    let snapshot = store.snapshot_at(
+        1_700_000_010_000,
+        30_000,
+        &subscriptions,
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.total, 1);
+    assert_eq!(snapshot.summary.inactive, 1);
+    assert_eq!(snapshot.summary.subscribed, 1);
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Inactive);
+    assert!(snapshot.symbols[0].subscribed);
+}
+
+#[test]
+fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(
+        ["SHFE.au2602", "DCE.m2609", "CZCE.AP610"],
+        1_700_000_000_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, 1_700_000_001_000_000_000, 610.0),
+        1_700_000_001_000,
+    );
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(2, 1_700_000_000_500_000_000, 3100.0),
+        1_700_000_000_500,
+    );
+
+    let query = SymbolMetricsQuery {
+        statuses: vec![SymbolStatus::Live, SymbolStatus::Stale],
+        subscribed_only: false,
+        q: Some("260".to_string()),
+        sort: SymbolSort::ReceiveGapDesc,
+        limit: Some(1),
+    };
+    let snapshot = store.snapshot_at(1_700_000_002_000, 30_000, &Default::default(), &query);
+
+    assert_eq!(snapshot.summary.total, 3);
+    assert_eq!(snapshot.summary.live, 2);
+    assert_eq!(snapshot.summary.missing, 1);
+    assert_eq!(snapshot.summary.p95_receive_gap_ms, Some(1_500));
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "DCE.m2609");
+}

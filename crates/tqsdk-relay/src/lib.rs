@@ -20,6 +20,7 @@ pub mod pump;
 #[cfg(feature = "server")]
 pub mod runtime;
 pub mod server;
+pub mod symbol_metrics;
 pub mod universe;
 pub mod upstream;
 
@@ -46,6 +47,10 @@ pub use runtime::{
     spawn_configured_upstream_pump, spawn_configured_upstream_pump_with_retry_interval,
 };
 pub use server::RelayServer;
+pub use symbol_metrics::{
+    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolSort, SymbolStatus,
+    SymbolSubscriptionCounts, SymbolTelemetrySnapshot, SymbolTelemetryStore,
+};
 #[cfg(feature = "metadata")]
 pub use universe::SessionFuturesUniverseResolver;
 pub use universe::{
