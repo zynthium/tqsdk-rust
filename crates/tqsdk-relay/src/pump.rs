@@ -11,7 +11,9 @@ pub async fn pump_once<S>(
 where
     S: UpstreamTickSource,
 {
-    let Some(tick) = source.next_tick().await else {
+    let tick = source.next_tick().await;
+    record_upstream_source_diagnostics(engine, source);
+    let Some(tick) = tick else {
         return Ok(Vec::new());
     };
     engine.ingest_tick(tick.symbol, tick.row)
@@ -26,9 +28,20 @@ where
 {
     let mut frames = Vec::new();
     loop {
-        let Some(tick) = source.next_tick().await else {
+        let tick = source.next_tick().await;
+        record_upstream_source_diagnostics(engine, source);
+        let Some(tick) = tick else {
             return Ok(frames);
         };
         frames.extend(engine.ingest_tick(tick.symbol, tick.row)?);
     }
+}
+
+fn record_upstream_source_diagnostics<S>(engine: &mut RelayEngine, source: &mut S)
+where
+    S: UpstreamTickSource,
+{
+    let invalid_rows = source.take_invalid_tick_rows();
+    let last_error = source.take_last_invalid_tick_row_error();
+    engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
 }

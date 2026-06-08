@@ -151,6 +151,33 @@ fn metrics_remember_last_universe_refresh_error() {
 }
 
 #[test]
+fn health_and_metrics_include_invalid_upstream_tick_row_diagnostics() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_upstream_invalid_tick_rows(
+        2,
+        Some(
+            "SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price"
+                .to_string(),
+        ),
+    );
+
+    let health = engine.health_snapshot();
+    assert_eq!(health.upstream_invalid_tick_rows, 2);
+    assert_eq!(
+        health.last_upstream_invalid_tick_row_error.as_deref(),
+        Some("SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price")
+    );
+
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.upstream_invalid_tick_rows, 2);
+    assert_eq!(
+        metrics.last_upstream_invalid_tick_row_error.as_deref(),
+        Some("SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price")
+    );
+}
+
+#[test]
 fn startup_report_serializes_operational_summary() {
     let config = RelayConfig {
         futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],

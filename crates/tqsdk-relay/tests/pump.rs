@@ -87,3 +87,44 @@ async fn pump_available_drains_ready_upstream_ticks() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn pump_once_records_invalid_tick_rows_even_without_a_tick() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let mut upstream = InvalidOnlySource {
+        invalid_rows: 1,
+        last_error: Some(
+            "SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price"
+                .to_string(),
+        ),
+    };
+
+    let frames = pump_once(&mut engine, &mut upstream).await.unwrap();
+
+    assert!(frames.is_empty());
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.upstream_invalid_tick_rows, 1);
+    assert_eq!(
+        metrics.last_upstream_invalid_tick_row_error.as_deref(),
+        Some("SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price")
+    );
+}
+
+struct InvalidOnlySource {
+    invalid_rows: u64,
+    last_error: Option<String>,
+}
+
+impl tqsdk_relay::UpstreamTickSource for InvalidOnlySource {
+    async fn next_tick(&mut self) -> Option<UpstreamTick> {
+        None
+    }
+
+    fn take_invalid_tick_rows(&mut self) -> u64 {
+        std::mem::take(&mut self.invalid_rows)
+    }
+
+    fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
+}

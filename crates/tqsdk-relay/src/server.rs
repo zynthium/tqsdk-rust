@@ -73,7 +73,15 @@ impl RelayServer {
     where
         S: UpstreamTickSource,
     {
-        let Some(tick) = source.next_tick().await else {
+        let tick = source.next_tick().await;
+        let invalid_rows = source.take_invalid_tick_rows();
+        let last_error = source.take_last_invalid_tick_row_error();
+        let Some(tick) = tick else {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
             return Ok(0);
         };
         let frames = {
@@ -81,6 +89,7 @@ impl RelayServer {
                 .engine
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
             engine.ingest_tick(tick.symbol, tick.row)?
         };
         self.dispatch_frames(frames)
@@ -101,14 +110,17 @@ impl RelayServer {
                 _ = &mut shutdown => return Ok(sent),
                 tick = source.next_tick() => tick,
             };
-            let Some(tick) = tick else {
-                return Ok(sent);
-            };
+            let invalid_rows = source.take_invalid_tick_rows();
+            let last_error = source.take_last_invalid_tick_row_error();
             let frames = {
                 let mut engine = self
                     .engine
                     .lock()
                     .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+                engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
+                let Some(tick) = tick else {
+                    return Ok(sent);
+                };
                 engine.ingest_tick(tick.symbol, tick.row)?
             };
             sent = sent.saturating_add(self.dispatch_frames(frames)?);

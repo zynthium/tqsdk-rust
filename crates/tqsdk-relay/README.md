@@ -216,6 +216,8 @@ curl http://127.0.0.1:7789/metrics
   "downstream_clients": 0,
   "upstream_symbols": 0,
   "ticks_ingested": 0,
+  "upstream_invalid_tick_rows": 0,
+  "last_upstream_invalid_tick_row_error": null,
   "last_universe_refresh_unix_secs": null,
   "last_universe_refresh_error": null,
   "last_tick_unix_secs": null,
@@ -233,6 +235,8 @@ tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括�
 - `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
 - `data_fresh`：最近一次 tick 活跃时间未超过 freshness 窗口。
 - `market_data_ready`：`upstream_connected && universe_ready && data_fresh`。
+- `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：已跳过的上游坏
+  tick row 数量和最近一条解码错误。
 
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
@@ -245,6 +249,8 @@ tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括�
 - `upstream_ins_list_chars`：当前上游 `ins_list` 字符串长度。
 - `upstream_ins_list_warn_chars` / `upstream_ins_list_max_chars`：配置阈值。
 - `upstream_ins_list_over_warn`：当前长度是否超过 warn threshold。
+- `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：上游 tick row
+  解码失败后被跳过的数量和最近一条错误；有效 tick 仍会继续摄入。
 - `last_universe_refresh_unix_secs` / `last_universe_refresh_error`：最近一次合约集合刷新尝试的时间和错误。
 - `last_tick_unix_secs`：最近一次摄入 tick 的 relay 本地 Unix 秒时间。
 
