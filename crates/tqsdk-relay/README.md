@@ -201,6 +201,28 @@ curl http://127.0.0.1:7789/health
 curl http://127.0.0.1:7789/metrics
 ```
 
+`/health` 示例：
+
+```json
+{
+  "ready": true,
+  "market_data_ready": false,
+  "process_started": true,
+  "downstream_listening": true,
+  "upstream_status": "connecting",
+  "upstream_connected": false,
+  "universe_ready": false,
+  "data_fresh": false,
+  "downstream_clients": 0,
+  "upstream_symbols": 0,
+  "ticks_ingested": 0,
+  "last_universe_refresh_unix_secs": null,
+  "last_universe_refresh_error": null,
+  "last_tick_unix_secs": null,
+  "data_stale_after_secs": 30
+}
+```
+
 `/health` 返回分层 readiness JSON。`ready` 只表示 relay 进程和下游监听已经可用，保持
 对早期监控的兼容；`market_data_ready` 表示上游已连通、合约集合已刷新成功，并且最近
 tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
