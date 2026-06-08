@@ -65,6 +65,10 @@ impl BootstrapQueue {
         self.inflight = self.inflight.saturating_sub(1);
     }
 
+    pub fn retain_pending(&mut self, mut retain: impl FnMut(&BootstrapRequest) -> bool) {
+        self.pending.retain(|request| retain(request));
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.pending.len()

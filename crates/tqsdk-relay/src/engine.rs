@@ -101,6 +101,9 @@ impl RelayEngine {
 
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.interests.remove_client(client_id);
+        let interests = &self.interests;
+        self.bootstrap
+            .retain_pending(|request| interests.chart_interest_count(&request.source) > 0);
     }
 
     pub fn mark_upstream_degraded(&mut self) {
