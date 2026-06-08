@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tqsdk_core::{Kline, Quote};
-use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
 use tqsdk_task::{
-    StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySourceBuilder, StrategyReplaySpeed,
+    ReplayMarketEvent, ReplayMarketPayloadKind, ReplayMarketSource, StrategyReplay,
+    StrategyReplayCheckpointStore, StrategyReplaySourceBuilder, StrategyReplaySpeed,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -14,8 +14,8 @@ async fn strategy_replay_drives_quote_events_into_strategy_context() {
         last_price: 480.5,
         ..Quote::default()
     };
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote("cache", "SHFE.au2602", 1_000, Some(900), quote).unwrap(),
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote("cache", "SHFE.au2602", 1_000, Some(900), quote).unwrap(),
     ]);
 
     let mut strategy = StrategyReplay::builder(replay)
@@ -167,7 +167,7 @@ async fn strategy_replay_source_builder_merges_multiple_series_by_event_time() {
     };
     let builder = StrategyReplay::source_builder()
         .events(vec![kline_event(2_000, 481.0)])
-        .event(MarketCacheEvent::quote("quote-cache", symbol, 1_550, Some(1_500), quote).unwrap())
+        .event(ReplayMarketEvent::quote("quote-cache", symbol, 1_550, Some(1_500), quote).unwrap())
         .events(vec![kline_event(1_000, 480.0)]);
 
     assert_eq!(builder.len(), 3);
@@ -216,6 +216,62 @@ async fn strategy_replay_source_builder_merges_multiple_series_by_event_time() {
 fn strategy_replay_source_builder_allows_empty_replay() {
     let replay = StrategyReplaySourceBuilder::new().build();
     assert!(replay.is_empty());
+}
+
+#[test]
+fn replay_market_event_exposes_validated_accessors() {
+    let event = ReplayMarketEvent::quote(
+        "quote-cache",
+        "SHFE.au2602",
+        1_000,
+        Some(900),
+        Quote {
+            last_price: 480.5,
+            ..Quote::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(event.source(), "quote-cache");
+    assert_eq!(event.symbol(), "SHFE.au2602");
+    assert_eq!(event.received_at_ns(), 1_000);
+    assert_eq!(event.event_time_ns(), 900);
+    assert_eq!(event.payload_kind(), ReplayMarketPayloadKind::Quote);
+}
+
+#[test]
+fn replay_market_event_constructors_reject_invalid_invariants() {
+    assert_task_error_contains(
+        ReplayMarketEvent::quote(" ", "SHFE.au2602", 1, Some(1), Quote::default()),
+        "source must not be empty",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::quote("cache", "", 1, Some(1), Quote::default()),
+        "symbol must not be empty",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::quote("cache", "SHFE.au2602", -1, Some(1), Quote::default()),
+        "received_at_ns must be non-negative",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::quote("cache", "SHFE.au2602", 1, Some(-1), Quote::default()),
+        "event_time_ns must be non-negative",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::kline("cache", "SHFE.au2602", 1, Some(1), 0, Kline::default()),
+        "kline duration must be positive",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::kline(
+            "cache",
+            "SHFE.au2602",
+            1,
+            Some(1),
+            -60_000_000_000,
+            Kline::default(),
+        ),
+        "kline duration must be positive",
+    );
 }
 
 #[test]
@@ -270,25 +326,25 @@ async fn strategy_replay_real_time_speed_waits_between_event_times() {
     );
 }
 
-fn two_kline_replay() -> MarketCacheReplay {
+fn two_kline_replay() -> ReplayMarketSource {
     two_kline_replay_with_times(1_000, 2_000)
 }
 
-fn two_kline_replay_with_times(older_time_ns: i64, newer_time_ns: i64) -> MarketCacheReplay {
-    MarketCacheReplay::new(vec![
+fn two_kline_replay_with_times(older_time_ns: i64, newer_time_ns: i64) -> ReplayMarketSource {
+    ReplayMarketSource::new(vec![
         kline_event(newer_time_ns, 481.0),
         kline_event(older_time_ns, 480.0),
     ])
 }
 
-fn kline_event(datetime_ns: i64, close: f64) -> MarketCacheEvent {
+fn kline_event(datetime_ns: i64, close: f64) -> ReplayMarketEvent {
     let older = Kline {
         id: datetime_ns / 1_000,
         datetime: datetime_ns,
         close,
         ..Kline::default()
     };
-    MarketCacheEvent::kline(
+    ReplayMarketEvent::kline(
         "cache",
         "SHFE.au2602",
         datetime_ns + 100,
@@ -299,7 +355,7 @@ fn kline_event(datetime_ns: i64, close: f64) -> MarketCacheEvent {
     .unwrap()
 }
 
-async fn replay_strategy(replay: MarketCacheReplay) -> StrategyReplay {
+async fn replay_strategy(replay: ReplayMarketSource) -> StrategyReplay {
     StrategyReplay::builder(replay)
         .market(FakeMarket::new().account("sim", 100_000.0))
         .broker(FakeBroker::new().fill_all())
@@ -315,4 +371,12 @@ fn temp_checkpoint_path(name: &str) -> PathBuf {
         "tqsdk-rust-strategy-replay-{name}-{}.json",
         std::process::id()
     ))
+}
+
+fn assert_task_error_contains<T: std::fmt::Debug>(result: tqsdk_task::Result<T>, expected: &str) {
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains(expected),
+        "expected error containing {expected:?}, got {err}"
+    );
 }

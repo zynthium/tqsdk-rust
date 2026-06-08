@@ -7,16 +7,18 @@ use tqsdk_core::{
     Account, CommitScope, InputPayload, IoEvent, Kline, Order, Position, ProtocolDomain, Quote,
     RuntimeInput, Tick, Trade,
 };
-use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReplay};
 
+use crate::replay::{
+    ReplayMarketEvent, ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource,
+};
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
 use crate::testing::StrategyTestHarness;
 use crate::{Result, StrategyContext, StrategyHost, TaskError, TaskHost};
 
-/// Local Python-compatible strategy backtest over normalized market cache events.
+/// Local Python-compatible strategy backtest over task-owned replay market events.
 pub struct StrategyBacktestBuilder {
-    replay: MarketCacheReplay,
+    replay: ReplayMarketSource,
     sim: TqSim,
     quotes: Vec<String>,
     price_ticks: HashMap<String, f64>,
@@ -24,7 +26,7 @@ pub struct StrategyBacktestBuilder {
 
 /// Local Python-compatible strategy backtest host.
 pub struct StrategyBacktest {
-    replay: MarketCacheReplay,
+    replay: ReplayMarketSource,
     strategy: StrategyHost,
     sim: TqSim,
     tracked_symbols: Vec<String>,
@@ -63,7 +65,7 @@ pub struct StrategyBacktestContext<'a> {
 
 impl StrategyBacktest {
     #[must_use]
-    pub fn builder(replay: MarketCacheReplay) -> StrategyBacktestBuilder {
+    pub fn builder(replay: ReplayMarketSource) -> StrategyBacktestBuilder {
         StrategyBacktestBuilder::new(replay)
     }
 
@@ -71,21 +73,21 @@ impl StrategyBacktest {
         let Some(event) = self.replay.next() else {
             return Ok(None);
         };
-        let backtest_event = StrategyBacktestEvent::from_cache_event(&event);
-        let payload_kind = event.payload.kind();
-        match &event.payload {
-            MarketCachePayload::Quote(quote) => {
-                self.ingest_quote(&event.symbol, quote)?;
+        let backtest_event = StrategyBacktestEvent::from_replay_event(&event);
+        let payload_kind = event.payload_kind();
+        match event.payload() {
+            ReplayMarketPayload::Quote(quote) => {
+                self.ingest_quote(event.symbol(), quote)?;
             }
-            MarketCachePayload::Tick(tick) => {
+            ReplayMarketPayload::Tick(tick) => {
                 let quote = quote_from_tick(tick);
-                self.ingest_quote(&event.symbol, &quote)?;
+                self.ingest_quote(event.symbol(), &quote)?;
             }
-            MarketCachePayload::Kline { row, .. } => {
-                let price_tick = self.price_tick(&event.symbol)?;
+            ReplayMarketPayload::Kline { row, .. } => {
+                let price_tick = self.price_tick(event.symbol())?;
                 let checkpoints = kline_quote_checkpoints(row, price_tick);
                 for quote in checkpoints {
-                    self.ingest_quote(&event.symbol, &quote)?;
+                    self.ingest_quote(event.symbol(), &quote)?;
                 }
             }
         }
@@ -148,7 +150,7 @@ impl StrategyBacktest {
 
 impl StrategyBacktestBuilder {
     #[must_use]
-    pub fn new(replay: MarketCacheReplay) -> Self {
+    pub fn new(replay: ReplayMarketSource) -> Self {
         Self {
             replay,
             sim: TqSim::new(),
@@ -223,12 +225,12 @@ impl StrategyBacktestSummary {
         summary
     }
 
-    fn record_payload(&mut self, kind: MarketCachePayloadKind) {
+    fn record_payload(&mut self, kind: ReplayMarketPayloadKind) {
         self.event_count += 1;
         match kind {
-            MarketCachePayloadKind::Quote => self.quote_count += 1,
-            MarketCachePayloadKind::Kline => self.kline_count += 1,
-            MarketCachePayloadKind::Tick => self.tick_count += 1,
+            ReplayMarketPayloadKind::Quote => self.quote_count += 1,
+            ReplayMarketPayloadKind::Kline => self.kline_count += 1,
+            ReplayMarketPayloadKind::Tick => self.tick_count += 1,
         }
     }
 
@@ -294,11 +296,11 @@ impl StrategyBacktestSummary {
 }
 
 impl StrategyBacktestEvent {
-    fn from_cache_event(event: &MarketCacheEvent) -> Self {
+    fn from_replay_event(event: &ReplayMarketEvent) -> Self {
         Self {
-            source: event.source.clone(),
-            symbol: event.symbol.clone(),
-            received_at_ns: event.received_at_ns,
+            source: event.source().to_owned(),
+            symbol: event.symbol().to_owned(),
+            received_at_ns: event.received_at_ns(),
             event_time_ns: event.event_time_ns(),
         }
     }

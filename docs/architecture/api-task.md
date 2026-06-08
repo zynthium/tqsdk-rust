@@ -47,7 +47,7 @@
   - account group / multi-account order foundation
   - strategy host / strategy context
   - strategy environment adapter
-  - strategy cache replay driver
+  - strategy replay driver
   - Python-compatible local backtest sim foundation (driving zero-branch `tqsdk::Tq` local backtest)
   - public fake market / fake broker test harness
   - 事件流 + 稳定聚合摘要的 execution report
@@ -87,17 +87,21 @@
   - 暴露 typed stop reason、health/metrics snapshot、transport-neutral telemetry/export hook、显式有限 retry 和 ctrl-c shutdown hook
   - retry 默认不隐藏启用，避免策略步骤已产生下单副作用后被 SDK 静默重复执行
 - `StrategyReplay`
-  - 消费 `tqsdk-data::MarketCacheReplay` 的有序 quote/kline/tick cache event
-  - 将 cache event 推进为正常 runtime market commit
+  - 消费 task-owned `ReplayMarketSource` 的有序 quote/kline/tick replay event
+  - 将 replay event 推进为正常 runtime market commit
   - 暴露 deterministic replay time、checkpoint 和 resume-from foundation
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
-  - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/cache event series 合并
+  - 暴露 `ReplayMarketEvent` / `ReplayMarketPayload` /
+    `ReplayMarketPayloadKind` / `ReplayMarketSource`
+  - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/replay event series 合并，
+    并提供 `kline_series(...)` / `tick_series(...)` 从 `tqsdk-data`
+    owned history series 构建 replay source
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
     strategy execution 搬入 data
 - `StrategyBacktest` / `TqSim`
-  - 消费 `tqsdk-data::MarketCacheReplay` 的本地 quote/tick/kline event，作为 Python-compatible 回测模拟账户 foundation
+  - 消费 task-owned `ReplayMarketSource` 的本地 quote/tick/kline event，作为 Python-compatible 回测模拟账户 foundation
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单

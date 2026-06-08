@@ -6,23 +6,24 @@
 //! - 同一套策略 context 读取 quote/account/position 并提交 typed order
 //!
 //! API contract:
-//! - `StrategyBacktest` 消费 `MarketCacheReplay`
+//! - `StrategyBacktest` 消费 task-owned `ReplayMarketSource`
 //! - `TqSim` 是本地模拟账户，不依赖 TQKQ provider-backed sim
 //! - 限价单按 Python 语义撮合：穿过对手价时一次性全部成交，成交价为委托价
-//! - 本地 cache quote/tick/kline event 都能进入最小回测闭环
+//! - 本地 replay quote/tick/kline event 都能进入最小回测闭环
 //! - 市价类订单没有对手盘时撤单
 //! - `summary()` 只提供轻量计数与最终账户/订单/成交/持仓快照，不承诺完整报告
 //! - fake broker 仍是测试工具，不承担 Python-compatible 账户语义
 
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
-use tqsdk_task::{StrategyBacktest, StrategyBacktestSummary, TqSim};
+use tqsdk_task::{
+    ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, StrategyBacktestSummary, TqSim,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let symbol = "SHFE.rb2501";
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote(
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
             "fixture",
             symbol,
             1_000,
@@ -37,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Quote::default()
             },
         )?,
-        MarketCacheEvent::tick(
+        ReplayMarketEvent::tick(
             "fixture",
             symbol,
             2_000,
@@ -54,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Tick::default()
             },
         )?,
-        MarketCacheEvent::kline(
+        ReplayMarketEvent::kline(
             "fixture",
             symbol,
             3_000,

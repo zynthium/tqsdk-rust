@@ -24,7 +24,7 @@
 
 history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。`HistorySeriesCache` 是 offline `data_series` mmap cache 和 cache-only reader，不是 live 最新行情 API。
 
-契约锚点：S17-S18、S28-S30。Replay integration：S16。
+契约锚点：S17、S28-S30。Replay integration：S16；S18 JSONL local market cache 已移出当前核心 SDK public API。
 
 ## Strategy Execution
 
@@ -40,15 +40,15 @@ hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading
 
 ## Replay and Testing
 
-离线 event source 使用 `tqsdk-data` market cache records；确定性策略测试使用 `tqsdk-task` replay/fake broker tools。除非用户明确要求 integration smoke test，否则 unit-level strategy test 不应需要 live credentials。live smoke test 保持 ignored 或环境变量门控。
+离线 deterministic event source 使用 `tqsdk-task::ReplayMarketSource`；历史 rows 可由 `tqsdk-data` 拉取后通过 `StrategyReplaySourceBuilder` 转成 replay source。确定性策略测试使用 `tqsdk-task` replay/fake broker tools。除非用户明确要求 integration smoke test，否则 unit-level strategy test 不应需要 live credentials。live smoke test 保持 ignored 或环境变量门控。
 
-契约锚点：S15-S16、S18、S24、S30。
+契约锚点：S15-S16、S24、S30；S18 JSONL local market cache 已移出当前核心 SDK public API。
 
 ## Backtest
 
 官方 Python 回测心智是 `TqApi(account=TqSim(), backtest=TqBacktest(...))`：策略主体继续围绕 `wait_update()` / live refs 编写，回测配置只在构造阶段切换。Rust 有两个入口要分清：
 
 - `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` / `TqBacktest` 用于 Python-style live/backtest same-body loop。策略主体只依赖 `quote` / `kline` handles 和 `step()`，回测结束时 `step()` 返回 `None`。契约锚点：S36。
-- `tqsdk-task` 的 `StrategyBacktest + TqSim` 消费 `tqsdk-data::MarketCacheReplay`，用于不连接真实服务的本地确定性回测模拟账户。当前覆盖 quote/tick/kline cache event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义还不是当前最小闭环。契约锚点：S32。
+- `tqsdk-task` 的 `StrategyBacktest + TqSim` 消费 task-owned `ReplayMarketSource`，用于不连接真实服务的本地确定性回测模拟账户；历史 rows 可由 `tqsdk-data` 拉取并通过 `StrategyReplaySourceBuilder` 转成 replay source。当前覆盖 quote/tick/kline replay event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义还不是当前最小闭环。契约锚点：S32。
 
-不要把“回测策略程序”只路由成 `tqsdk-data` 历史下载；`tqsdk-data` 在这里负责历史/cache/replay 输入，不负责策略执行或模拟账户撮合。
+不要把“回测策略程序”只路由成 `tqsdk-data` 历史下载；`tqsdk-data` 在这里负责历史 rows，不负责 replay source、策略执行或模拟账户撮合。

@@ -448,8 +448,6 @@ mod tests {
     };
     use tqsdk_session::SessionClient;
 
-    use crate::market_cache::MarketCachePayload;
-
     use super::*;
 
     #[cfg(feature = "services")]
@@ -1017,83 +1015,6 @@ mod tests {
                     if message == "get_tick_data_series requires a session-backed data client"
             ));
         });
-    }
-
-    #[test]
-    fn kline_data_series_converts_to_market_cache_replay() {
-        let series = KlineDataSeries::new(
-            "SHFE.au2602".to_string(),
-            60_000_000_000,
-            1_000,
-            3_000,
-            vec![
-                Kline {
-                    id: 2,
-                    datetime: 2_000,
-                    close: 481.0,
-                    ..Kline::default()
-                },
-                Kline {
-                    id: 1,
-                    datetime: 1_000,
-                    close: 480.0,
-                    ..Kline::default()
-                },
-            ],
-        );
-
-        let events: Vec<_> = series
-            .into_market_cache_replay("history")
-            .unwrap()
-            .collect();
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].source, "history");
-        assert_eq!(events[0].symbol, "SHFE.au2602");
-        assert_eq!(events[0].received_at_ns, 1_000);
-        assert_eq!(events[0].exchange_time_ns, Some(1_000));
-        match &events[0].payload {
-            MarketCachePayload::Kline { duration_ns, row } => {
-                assert_eq!(*duration_ns, 60_000_000_000);
-                assert_eq!(row.close, 480.0);
-            }
-            _ => panic!("expected kline payload"),
-        }
-    }
-
-    #[test]
-    fn tick_data_series_converts_to_market_cache_events() {
-        let series = TickDataSeries::new(
-            "SHFE.au2602".to_string(),
-            1_000,
-            3_000,
-            vec![
-                Tick {
-                    id: 1,
-                    datetime: 1_000,
-                    last_price: 480.5,
-                    ..Tick::default()
-                },
-                Tick {
-                    id: 2,
-                    datetime: 2_000,
-                    last_price: 481.5,
-                    ..Tick::default()
-                },
-            ],
-        );
-
-        let events = series.into_market_cache_events("history").unwrap();
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].source, "history");
-        assert_eq!(events[1].symbol, "SHFE.au2602");
-        assert_eq!(events[1].received_at_ns, 2_000);
-        assert_eq!(events[1].exchange_time_ns, Some(2_000));
-        match &events[1].payload {
-            MarketCachePayload::Tick(row) => assert_eq!(row.last_price, 481.5),
-            _ => panic!("expected tick payload"),
-        }
     }
 
     #[test]

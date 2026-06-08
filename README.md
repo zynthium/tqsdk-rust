@@ -31,8 +31,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-stream`](crates/tqsdk-stream) | 高级 Rust async-native 多消费者 commit stream、row-batch kline/tick stream、过滤器、lag diagnostics 和 health status |
-| [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、Python-compatible local backtest sim、低延迟 trading desk profile |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、离线 cache 和 replay foundation |
+| [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、Python-compatible local backtest sim、低延迟 trading desk profile |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据和 Python-compatible history series mmap cache |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -41,7 +41,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
 - 需要多个异步消费者、独立 consumer 进度、fan-out、lag diagnostics 或事件管道：用 `tqsdk-stream`。
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
-- 做历史数据、批量导出、离线 cache 和 replay：用 `tqsdk-data`。
+- 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
+- 做确定性 replay / 本地回测行情输入：用 `tqsdk-task::ReplayMarketSource`。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
 - 自建 facade 或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 
@@ -129,9 +130,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 
 如果要对齐 Python `TqApi(backtest=TqBacktest(...))` 的 live/backtest 同策略主体心智，
 使用 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
-`stock_backtest(...)`；如果要本地历史/cache 行情 + `TqSim` 账户撮合，则使用
-`tqsdk-task::StrategyBacktest` 搭配 `tqsdk-data::MarketCacheReplay`。当前本地路径已覆盖
-quote/tick/kline cache event 的最小 quote synthesis 和轻量 `summary()`；完整报告、
+`stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合，则使用
+`tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。当前本地路径已覆盖
+quote/tick/kline replay event 的最小 quote synthesis 和轻量 `summary()`；完整报告、
 自动分钟线和主连历史映射仍是后续范围。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
@@ -196,7 +197,7 @@ let rows = session.query_symbol_info(&["SHFE.au2602"]).await?;
 
 ### 历史数据与研究工作流
 
-适合 kline/tick 历史数据、导出、cache 和 replay：
+适合 kline/tick 历史数据、导出、history series cache 和研究查询：
 
 ```rust
 use std::time::Duration;

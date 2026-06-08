@@ -289,7 +289,7 @@
 - ownership / guarded order
 - execution report
 - strategy host / strategy context / strategy environment / deployment / supervisor adapter
-- strategy cache replay driver
+- strategy replay driver with task-owned replay market source
 - 低延迟 trading desk thin profile：
   - hot path 使用 shared `SessionClient + RuntimeReader`
   - 风控与下单契约复用 `RiskEngine` / `TaskOrderIntent`
@@ -298,9 +298,10 @@
 - 规划与执行之间的本地任务状态机
 
 它是执行工具层，不是消费 facade，也不是协议 substrate。
-它可以消费 `tqsdk-data` cache/history event 构建 strategy replay driver；这是
-上层集成路径，不代表 cache storage 进入 task，也不代表 strategy execution
-进入 data。
+它拥有 `ReplayMarketEvent` / `ReplayMarketSource` 这类 replay/backtest 输入类型；
+也可以通过 builder 接收 `tqsdk-data` 的 history series rows 构建 replay source。
+这是上层集成路径，不代表 JSONL cache storage 进入 `tqsdk-data` public surface，
+也不代表 strategy execution 进入 data。
 S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
 但不复用 `TaskHost::wait_update()` hot path。慢日志、WAL、journal、落盘重试、
 audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有
@@ -443,8 +444,8 @@ sink、WAL、journal 或 cache writer。
 
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
-- 本地行情 cache record / reader-writer / ordered replay foundation
-- history series -> market cache replay adapter
+- Python-compatible history series mmap cache
+- history page/series/download/export
 - DataFrame / polars
 - 衍生计算
 - 离线分析

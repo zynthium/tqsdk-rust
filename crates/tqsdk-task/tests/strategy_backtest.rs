@@ -1,12 +1,11 @@
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
-use tqsdk_task::{StrategyBacktest, TaskError, TqSim};
+use tqsdk_task::{ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, TaskError, TqSim};
 use tqsdk_wait::OrderTicketState;
 
 #[tokio::test]
 async fn strategy_backtest_fills_limit_order_against_replayed_quote() {
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote(
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
             "fixture",
             "SHFE.rb2501",
             1_000,
@@ -57,7 +56,7 @@ async fn strategy_backtest_fills_limit_order_against_replayed_quote() {
 
 #[tokio::test]
 async fn strategy_backtest_fills_alive_limit_order_on_later_quote() {
-    let replay = MarketCacheReplay::new(vec![
+    let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
         quote_event("SHFE.rb2501", 2_000, 98.0, 10, 97.0, 8),
     ]);
@@ -91,7 +90,7 @@ async fn strategy_backtest_fills_alive_limit_order_on_later_quote() {
 
 #[tokio::test]
 async fn strategy_backtest_synthesizes_tick_as_quote_and_fills_pending_order() {
-    let replay = MarketCacheReplay::new(vec![
+    let replay = ReplayMarketSource::new(vec![
         tick_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
         tick_event("SHFE.rb2501", 2_000, 98.0, 10, 97.0, 8),
     ]);
@@ -125,7 +124,7 @@ async fn strategy_backtest_synthesizes_tick_as_quote_and_fills_pending_order() {
 
 #[tokio::test]
 async fn strategy_backtest_synthesizes_kline_close_quote_once_for_strategy() {
-    let replay = MarketCacheReplay::new(vec![kline_event(
+    let replay = ReplayMarketSource::new(vec![kline_event(
         "SHFE.rb2501",
         1_000,
         101.0,
@@ -154,7 +153,7 @@ async fn strategy_backtest_synthesizes_kline_close_quote_once_for_strategy() {
 
 #[tokio::test]
 async fn strategy_backtest_kline_checkpoints_fill_pending_orders_without_extra_strategy_steps() {
-    let replay = MarketCacheReplay::new(vec![
+    let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 120.0, 10, 90.0, 10),
         kline_event("SHFE.rb2501", 2_000, 100.0, 110.0, 95.0, 102.0),
     ]);
@@ -204,7 +203,7 @@ async fn strategy_backtest_kline_checkpoints_fill_pending_orders_without_extra_s
 
 #[tokio::test]
 async fn strategy_backtest_rejects_kline_without_price_tick() {
-    let replay = MarketCacheReplay::new(vec![kline_event(
+    let replay = ReplayMarketSource::new(vec![kline_event(
         "SHFE.rb2501",
         1_000,
         101.0,
@@ -228,7 +227,7 @@ async fn strategy_backtest_rejects_kline_without_price_tick() {
 #[tokio::test]
 async fn strategy_backtest_rejects_invalid_price_tick_config() {
     for price_tick in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let replay = MarketCacheReplay::new(Vec::new());
+        let replay = ReplayMarketSource::new(Vec::new());
         let err = match StrategyBacktest::builder(replay)
             .quote("SHFE.rb2501")
             .price_tick("SHFE.rb2501", price_tick)
@@ -244,7 +243,7 @@ async fn strategy_backtest_rejects_invalid_price_tick_config() {
 
 #[tokio::test]
 async fn strategy_backtest_summary_tracks_counts_and_final_snapshots() {
-    let replay = MarketCacheReplay::new(vec![
+    let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
         tick_event("SHFE.rb2501", 2_000, 101.0, 10, 100.0, 8),
     ]);
@@ -284,8 +283,8 @@ fn quote_event(
     ask_volume1: i64,
     bid_price1: f64,
     bid_volume1: i64,
-) -> MarketCacheEvent {
-    MarketCacheEvent::quote(
+) -> ReplayMarketEvent {
+    ReplayMarketEvent::quote(
         "fixture",
         symbol,
         datetime,
@@ -310,8 +309,8 @@ fn tick_event(
     ask_volume1: i64,
     bid_price1: f64,
     bid_volume1: i64,
-) -> MarketCacheEvent {
-    MarketCacheEvent::tick(
+) -> ReplayMarketEvent {
+    ReplayMarketEvent::tick(
         "fixture",
         symbol,
         datetime,
@@ -341,8 +340,8 @@ fn kline_event(
     high: f64,
     low: f64,
     close: f64,
-) -> MarketCacheEvent {
-    MarketCacheEvent::kline(
+) -> ReplayMarketEvent {
+    ReplayMarketEvent::kline(
         "fixture",
         symbol,
         datetime,

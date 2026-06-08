@@ -123,7 +123,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 `TqApi(backtest=TqBacktest(...))` 的 wait 心智：同一段策略主体继续依赖
 `quote` / `kline` handles 和 `step()` 推进，live 与 backtest 的差异只放在 builder
 配置里。需要本地 `TqSim` 账户撮合和不连接真实服务的确定性回测时，使用
-`tqsdk-task::StrategyBacktest` 搭配 `tqsdk-data::MarketCacheReplay`，不要把它塞进
+`tqsdk-task::StrategyBacktest` 搭配 `tqsdk-task::ReplayMarketSource`，不要把它塞进
 wait facade。
 
 ## 设计边界

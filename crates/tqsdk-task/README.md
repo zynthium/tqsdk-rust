@@ -94,18 +94,18 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - 暴露 typed health/metrics snapshot、transport-neutral telemetry/export hook、显式有限 retry、ctrl-c shutdown hook 和 typed shutdown report
   - retry 默认不隐藏启用，避免策略步骤有下单副作用时被 SDK 静默重复执行
 - `StrategyReplay`
-  - 使用 `tqsdk-data::MarketCacheReplay` 作为离线 market event source
-  - 将 cache quote/kline/tick 转成正常 runtime market commit
-  - 可接收由 `KlineDataSeries` / `TickDataSeries` adapter 生成的 history replay
+  - 使用 task-owned `ReplayMarketSource` 作为离线 market event source
+  - 将 `ReplayMarketEvent` 的 quote/kline/tick 转成正常 runtime market commit
+  - `StrategyReplaySourceBuilder` 可接收 `KlineDataSeries` / `TickDataSeries` 生成 history replay
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
-  - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/cache event series 合并
+  - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/replay event series 合并
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
 - `StrategyBacktest` / `TqSim`
-  - 使用 `tqsdk-data::MarketCacheReplay` 作为本地回测行情输入
+  - 使用 task-owned `ReplayMarketSource` 作为本地回测行情输入
   - `TqSim` 提供 Python-compatible 本地模拟账户 foundation，默认账户为 `TQSIM`，默认资金为 `10_000_000.0`
-  - 当前最小闭环覆盖 quote/tick/kline cache event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金 per-symbol 配置
+  - 当前最小闭环覆盖 quote/tick/kline replay event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金 per-symbol 配置
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；不会自动查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、最终订单/成交/账户/持仓快照
@@ -248,14 +248,26 @@ match ticket.outcome(host.api())? {
 
 Python-style 联机 backtest-market 的 same-body wait loop 属于 `tqsdk-wait`；本 crate
 承接的是不连接真实服务的本地确定性回测模拟账户。入口是
-`StrategyBacktest + TqSim`，行情输入来自 `tqsdk-data::MarketCacheReplay`：
+`StrategyBacktest + TqSim`，行情输入来自 task-owned `ReplayMarketSource`：
 
 ```rust
-use tqsdk_data::MarketCacheReplay;
-use tqsdk_task::{StrategyBacktest, TqSim};
+use tqsdk_core::Quote;
+use tqsdk_task::{ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, TqSim};
 
-# async fn run(replay: MarketCacheReplay) -> tqsdk_task::Result<()> {
+# async fn run() -> tqsdk_task::Result<()> {
 let symbol = "SHFE.rb2501";
+let replay = ReplayMarketSource::new(vec![ReplayMarketEvent::quote(
+    "fixture",
+    symbol,
+    1_000,
+    Some(1_000),
+    Quote {
+        last_price: 100.0,
+        ask_price1: 100.0,
+        bid_price1: 99.0,
+        ..Quote::default()
+    },
+)?]);
 let mut backtest = StrategyBacktest::builder(replay)
     .sim(TqSim::new().with_margin(symbol, 1_000.0))
     .quote(symbol)
@@ -280,7 +292,7 @@ println!("events={} trades={}", summary.event_count(), summary.trades().len());
 # }
 ```
 
-当前本地最小闭环覆盖 quote/tick/kline cache event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置，并提供轻量 `summary()`。kline 合成需要显式配置 `price_tick(symbol, tick)`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
+当前本地最小闭环覆盖 quote/tick/kline replay event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置，并提供轻量 `summary()`。kline 合成需要显式配置 `price_tick(symbol, tick)`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
 
 ## 示例
 

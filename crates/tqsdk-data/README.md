@@ -111,12 +111,6 @@ Python-compatible mmap 缓存。
 - `OptionGreeksRow`
 - `KlineCsvExportSummary`
 - `TickCsvExportSummary`
-- `MarketCacheEvent`
-- `MarketCachePayload`
-- `MarketCachePayloadKind`
-- `MarketCacheWriter`
-- `MarketCacheReader`
-- `MarketCacheReplay`
 
 ## `data_page` / `data_series` / `data_download` 的定位
 
@@ -143,23 +137,6 @@ Python-compatible mmap 缓存。
 提供最薄的数据质量报告，包括 requested/returned range、缺口、重复行、时间倒退、
 越界行、cache hit/miss/downloaded 状态和权限检查状态。它只检查 SDK 已经拿到的
 owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Parquet 或 DataFrame。
-
-## Market Cache Foundation
-
-`MarketCacheEvent` / `MarketCacheWriter` / `MarketCacheReader` /
-`MarketCacheReplay` 定义了标准 `Quote` / `Kline` / `Tick` payload 的离线
-cache record 与 replay foundation。
-
-当前 active public API 不包含 `MarketCacheStreamWriter`、live stream pipe、跨进程 cache service、daemon/supervisor orchestration 或 hot-path live cache dependency。
-
-`KlineDataSeries::into_market_cache_events` /
-`KlineDataSeries::into_market_cache_replay` 以及对应的 tick methods 会把 owned
-history series 接到 replay foundation 上，用户不需要手写 cache events。
-
-这不是 live durable sink runtime 或 cache service：它不暴露 live stream pipe、
-queue files、lock leases、reader manifests、writer election、compaction
-ownership、daemon/supervisor orchestration、HTTP endpoints、GUI integration 或
-cross-process cache management。如果这些能力确实需要，应由用户工具或独立服务承接。
 
 ## 后续仍应承接的能力
 
@@ -227,7 +204,6 @@ cross-process cache management。如果这些能力确实需要，应由用户�
 - [examples/tick_export_csv.rs](examples/tick_export_csv.rs)
 - [examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
 - [examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
-- [examples/api_contract_s18_local_market_cache.rs](examples/api_contract_s18_local_market_cache.rs)
 - [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。

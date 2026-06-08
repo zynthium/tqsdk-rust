@@ -17,8 +17,8 @@
 | Async 系统集成方 | `tqsdk-stream`, `tqsdk-session` | S2, S4, S20-S22, S35 | Multi-consumer streams、dynamic subscriptions、row-batch market events、health、retry diagnostics、slow-consumer isolation、quote batch consumption。 |
 | 低层 / 低延迟用户 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S23, S27, S31 | Thin session substrate、direct metadata query、hot-path `RuntimeReader`、same-revision market/trade reads、low-latency desk profile。 |
 | 执行工具用户 | `tqsdk-task`, `tqsdk-wait` | S6-S13, S19, S29, S31 | Typed order tickets、cancel/partial-fill helpers、risk gates、execution groups、account groups、target-pos ownership。 |
-| 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task` | S16-S18, S23, S27-S30, S32 | Historical series、downloads、CSV export、option Greeks、本地 cache/replay、Python-compatible history cache、Python-compatible 本地回测模拟账户。 |
-| 测试 / 回放用户 | `tqsdk-task`, `tqsdk-data`, `tqsdk-wait` | S15-S16, S18, S24, S30, S32, S36 | Live/sim/replay environment、deterministic fake market/broker、replay sources、history/cache-backed tests、Python-compatible sim backtest、same-body wait backtest loop。 |
+| 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task` | S16-S18, S23, S27-S30, S32 | Historical series、downloads、CSV export、option Greeks、Python-compatible history cache、task-owned replay source、Python-compatible 本地回测模拟账户。 |
+| 测试 / 回放用户 | `tqsdk-task`, `tqsdk-data`, `tqsdk-wait` | S15-S16, S18, S24, S30, S32, S36 | Live/sim/replay environment、deterministic fake market/broker、task-owned replay sources、history-row-backed tests、Python-compatible sim backtest、same-body wait backtest loop。 |
 | 生产 runtime 构建者 | `tqsdk-stream`, `tqsdk-task` | S20-S22 | Typed health/telemetry、graceful shutdown、retry policy、bounded fan-out、lag diagnostics。不内置 HTTP endpoint、GUI、daemon manager 或 managed sink/WAL。 |
 | Multi-provider 基础设施用户 | 用户层 facade / 未来独立项目 | S14 gap only | Multi-provider aggregation 不是当前 core SDK API。不要把它推入 core/session。 |
 
@@ -60,10 +60,10 @@
 
 ### 研究 / 行情数据用户
 
-owned historical rows、downloads、CSV、Greeks、cache/replay materialization 从 `tqsdk-data` 起步。只有用于框定查询的一次性 metadata 才使用 `tqsdk-session`。
+owned historical rows、downloads、CSV、Greeks 和 history series cache 从 `tqsdk-data` 起步；deterministic replay source 从 `tqsdk-task` 起步。只有用于框定查询的一次性 metadata 才使用 `tqsdk-session`。
 
 - 首选示例：S17 research K-line batch、S28 download/export and Greeks。
-- Cache/replay 示例：S18 local market cache、S30 history series cache、S16 replay integration。
+- Cache/replay 示例：S30 history series cache、S16 replay integration；S18 JSONL local market cache 已移出当前核心 SDK public API。
 - live mmap bridge：当前 SDK 不提供 `tqsdk-stream` row batches/events 写入 `HistorySeriesCache` 的 public API；需要 live 持久化时使用调用方 sidecar。
 - Metadata 示例：S23、S27。
 - 避免：把 history 建模成 live refs、把 DataFrame/polars 语义塞进 session/wait、确定性测试依赖 live credentials。
@@ -108,9 +108,9 @@ stream health、reconnect monitoring、bounded fan-out 和 lag diagnostics 从 `
 | S13 Multi-account ordering | `crates/tqsdk-task/examples/api_contract_s13_multi_account_ordering.rs` | account group、比例拆单、per-account outcome | `AccountGroup`、`MultiAccountOrderTicket`、revision-bound account report；advanced compensation/audit 是用户层能力。 |
 | S14 Multi-provider aggregation | `docs/scenarios/api_gaps/api_contract_s14_multi_provider_market_aggregation.rs` | 多行情 provider、failover、dedupe | Active gap 且非核心 SDK 目标。只作为边界样本；不要移动到 core/session。 |
 | S15 Live / sim / replay switch | `crates/tqsdk-task/examples/api_contract_s15_live_sim_replay_switch.rs` | 同一策略在 live、sim、replay 间切换 | `StrategyEnvironment`、`StrategyDeployment`、`StrategySupervisor`；multi-provider environment 仍是 out of scope。 |
-| S16 History replay strategy | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs` | 用历史/cache events 跑策略 | `StrategyReplay`、`StrategyReplaySourceBuilder`、checkpoint/speed controls；production daemon reconnect 是 out of scope。 |
+| S16 History replay strategy | `crates/tqsdk-task/examples/api_contract_s16_history_replay_strategy.rs` | 用历史 rows / replay events 跑策略 | `ReplayMarketSource`、`StrategyReplay`、`StrategyReplaySourceBuilder`、checkpoint/speed controls；production daemon reconnect 是 out of scope。 |
 | S17 Research kline batch | `crates/tqsdk-data/examples/api_contract_s17_research_kline_batch.rs` | 批量历史 K 线研究 | `DataClient::get_kline_data_series`；owned rows，不是 live refs。 |
-| S18 Local market cache | `crates/tqsdk-data/examples/api_contract_s18_local_market_cache.rs` | JSONL cache record/replay | `MarketCacheWriter`、`MarketCacheReader`、`MarketCacheReplay`；live pipe 和 cross-process cache daemon 是用户层能力。 |
+| S18 Local market cache | Removed / non-core | JSONL cache record/replay | Removed from current core SDK public API；live pipe、JSONL cache 和 cross-process cache daemon 是用户层能力。 |
 | S19 Pre-trade risk | `crates/tqsdk-task/examples/api_contract_s19_pre_trade_risk.rs` | 下单前本地 risk gates | `RiskEngine`、`RiskCheckReport`、`RiskProjectionReport`、`RiskDecision`；portfolio margin engine 和 durable audit 是 out of scope。 |
 | S20 Production primitives | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs` | Health、reconnect monitor、graceful shutdown、strategy supervisor | 只提供 typed health/telemetry/shutdown primitives；不内置 GUI、HTTP endpoint 或 process manager。 |
 | S21 Slow consumer isolation | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs` | bounded fan-out、lag diagnostics | `TqStreamBuilder::commit_channel_capacity`、`TqStream::with_commit_channel_capacity`、`commit_stream`、`StreamFacadeError::Lagged`；managed sink/WAL/journal 和 distributed queue 是 out of scope。 |

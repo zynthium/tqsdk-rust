@@ -121,12 +121,6 @@
 - `query_option_greeks(OptionGreeksRequest)`
 - `export_kline_data_csv(KlineDataSeriesRequest, &mut impl AsyncWrite)`
 - `export_tick_data_csv(TickDataSeriesRequest, &mut impl AsyncWrite)`
-- `MarketCacheEvent`
-- `MarketCachePayload`
-- `MarketCacheWriter`
-- `MarketCacheReader`
-- `MarketCacheReplay`
-- `MarketCachePayloadKind`
 - `KlineDataPage`
 - `KlineDataPageRequest`
 - `TickDataPage`
@@ -184,8 +178,9 @@
    - 已有 cache-only history series reader、schema/version scan report、
      typed cache miss，以及最薄的容量/保留期清理策略；Python/Rust 文件格式
      互通但不承诺同目录同时写
-   - 已有最薄的 offline market cache record / JSONL reader-writer / ordered replay foundation
    - 后续再考虑路径管理型文件导出
+   - deterministic replay / local backtest event source 由 `tqsdk-task` 拥有；
+     `tqsdk-data` 只提供 history rows，不提供 JSONL market cache public surface
    - 跨进程 daemon orchestration、跨进程 cache 管理服务、queue/lock/election/recovery/compaction ownership 等编排表面不属于当前 `tqsdk-data` public API
    - 可选 tabular adapters
 
@@ -231,17 +226,18 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
-- `MarketCacheEvent` / `MarketCachePayload` 也已经落在 `tqsdk-data`
-- `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay` 也已经落在 `tqsdk-data`
-- `MarketCacheStreamWriter`、live stream pipe、stream feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
+- `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /
+  `MarketCacheReader` / `MarketCacheReplay` 这类 JSONL market cache public API；
+  deterministic replay / local backtest 输入属于 `tqsdk-task`
+- live stream pipe、stream feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
 - `tqsdk-data` 不再提供 `LiveHistoryCacheWriter`；live diff consumption 留在
   `tqsdk-stream`，hot-path persistence 由调用方或独立上层服务拥有，Python-compatible
   mmap history cache 只服务 `get_*_data_series` 的离线时间范围读取
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界
-- `KlineDataSeries` / `TickDataSeries` 到 `MarketCacheReplay` 的 adapter
-  已经落在 `tqsdk-data`
+- `KlineDataSeries` / `TickDataSeries` 到 replay event/source 的 adapter
+  已经移到 `tqsdk-task::StrategyReplaySourceBuilder`
 - `HistoryIntegrityReport` 已经落在 `tqsdk-data`，作为 owned history series 的本地质量报告：
   K 线按 duration 做 calendar-agnostic cadence 缺口检查，tick 不假设固定间隔；
   报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
@@ -259,19 +255,12 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
-- `MarketCache*` 是 offline data-layer foundation：它定义标准行情对象的
-  cache record、JSONL reader/writer、deterministic replay iterator，以及
-  offline cache/replay foundation；它不公开 live pipe、queue/lock/election/
-  recovery/compaction/service/daemon/supervisor 编排表面，不拥有 live session、
-  不创建 Tokio runtime、不隔离慢消费者，也不驱动 `StrategyHost`
 - 历史序列 mmap cache 与 Python `DataSeries` 文件格式兼容，适合迁移和交替使用；
   同目录同时写仍是 non-goal，因为 Python 官方实现自身也没有承诺同一合约周期
   多进程/线程/协程并发写
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，
   而不是把 live session、进程管理、HTTP endpoint、GUI 或底层文件编排表面
   下沉进 `tqsdk-data`
-- history series replay adapter 只把 owned `KlineDataSeries` / `TickDataSeries`
-  materialize 成 `MarketCacheEvent` / `MarketCacheReplay`，不引入策略执行语义
 - async history 相关入口会主动获取 auth context 并校验 `tq_dl`，避免把权限问题拖到 chart/websocket timeout
 - `data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 async 读取阶段会再次强校验
 - 默认 SHFE 历史示例会显式切到 `futures_market()`，避免把 futures history 请求发到 stock market route
@@ -281,7 +270,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - 不把研究/批量历史接口继续塞进 `tqsdk-session`
 - 不把历史数据读取和 `wait_update()` / stream 模式耦合在一起
 - 给 file writer / export / dataframe 预留稳定的 `page -> download -> materialization` 递进路径
-- 后续可以在 `tqsdk-data` 上继续叠加路径管理型文件导出、tabular adapters、cache daemon/tooling，而不污染 core/session/live facade 的边界
+- 后续可以在 `tqsdk-data` 上继续叠加路径管理型文件导出、tabular adapters 或
+  history cache maintenance tooling，而不污染 core/session/live facade 的边界；
+  deterministic replay / local backtest event source 继续留在 `tqsdk-task`
 
 这样做的收益是：
 
@@ -295,5 +286,5 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 1. 先保持 `DataClient + query_his_cont_quotes` 足够窄
 2. 在此基础上继续保持 `DataClient + data_page + data_series + data_download` 也只是底层 substrate
-3. 继续按 history/query -> batch fetch -> materialization/cache foundation -> replay driver 的顺序迭代；当前 history series -> cache replay adapter 和 offline market cache record/replay 已完成，后续重点是路径管理型 materialization，跨进程 cache 管理服务不作为当前核心 public API 推进
+3. 继续按 history/query -> batch fetch -> materialization/history cache 的顺序迭代；deterministic replay / local backtest 输入由 `tqsdk-task` 拥有，后续重点是路径管理型 materialization，跨进程 cache 管理服务不作为当前核心 public API 推进
 4. 避免为了兼容 DataFrame 形状而提前做宽 surface

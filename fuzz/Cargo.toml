@@ -31,13 +31,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "data_market_cache_event"
-path = "fuzz_targets/data_market_cache_event.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "data_history_cache_scan"
 path = "fuzz_targets/data_history_cache_scan.rs"
 test = false

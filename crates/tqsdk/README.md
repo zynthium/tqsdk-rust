@@ -6,7 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Server-side backtest (`.backtest()`)
-- Local offline backtest (`.local_backtest()`)
+- Local offline backtest (`.local_backtest()` with `tqsdk_task::ReplayMarketSource`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper

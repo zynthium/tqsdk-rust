@@ -11,8 +11,8 @@
 | Multi-consumer async events or fan-out | `tqsdk-stream` | commit stream、filters、event streams、row-batch market streams、lag diagnostics |
 | One-shot metadata/query/service calls | `tqsdk-session` | GraphQL/query、schema、symbol info、quotes metadata、calendar、settlement、ranking、EDB |
 | Strategy execution helpers | `tqsdk-task` | `TaskHost`、`TargetPosTask`、scheduler、risk gate、typed order builders、fake broker tests |
-| Strategy backtest | `tqsdk-wait` or `tqsdk-task + tqsdk-data` | Python-style live/backtest same-body loop 用 `TqApiBuilder::futures_backtest`；本地确定性 `TqSim` 回测用 `StrategyBacktest` + `MarketCacheReplay` |
-| Historical/offline research | `tqsdk-data` | data pages、data series、downloads、CSV export、history cache、option Greeks、offline replay cache |
+| Strategy backtest | `tqsdk-wait` or `tqsdk-task + tqsdk-data` | Python-style live/backtest same-body loop 用 `TqApiBuilder::futures_backtest`；本地确定性 `TqSim` 回测用 `StrategyBacktest` + `ReplayMarketSource`，历史 rows 可由 `tqsdk-data` 提供 |
+| Historical/offline research | `tqsdk-data` | data pages、data series、downloads、CSV export、history cache、option Greeks |
 | Runtime substrate or custom facade | `tqsdk-core` plus `tqsdk-session` | commands、adapters、commit/revision/cursor、`RuntimeReader` hot path |
 
 ## 边界规则
@@ -21,8 +21,8 @@
 - `tqsdk-session` 负责 one-shot request/response API：GraphQL、schema、metadata、calendar、settlement、ranking、EDB、auth refresh、replay control 和 low-level command wait helpers。
 - `tqsdk-wait` 负责 Python-style single-owner live refs 和 `step()` 消费，也承接 server/backtest-market 的 same-body wait 策略入口。它可以暴露 `session()`，但不能复制 direct-query API。
 - `tqsdk-stream` 负责 multi-consumer commit/event streams、filters、row-batch market streams 和 lag diagnostics。它可以暴露 `session()`，但不能变成 metadata/query 层，也不能直接依赖 mmap history cache 或 managed sink/WAL。
-- `tqsdk-task` 负责 strategy execution、target position、schedulers、risk gates、ownership、multi-account order foundations、fake broker tests、replay strategy host、Python-compatible local `TqSim` backtest foundation 和 S31 trading desk profile。
-- `tqsdk-data` 负责 research/offline data、history pages/series/downloads、CSV export、Python-compatible history cache、option Greeks 和 market-cache replay materialization；它不提供 live stream 写 mmap history cache 的 bridge。
+- `tqsdk-task` 负责 strategy execution、target position、schedulers、risk gates、ownership、multi-account order foundations、fake broker tests、task-owned replay source、Python-compatible local `TqSim` backtest foundation 和 S31 trading desk profile。
+- `tqsdk-data` 负责 research/offline data、history pages/series/downloads、CSV export、Python-compatible history cache 和 option Greeks；它不提供 live stream 写 mmap history cache 的 bridge，也不提供 JSONL market cache public API。
 - `tqsdk-core` 只负责 runtime substrate。不要重新导出 auth/http/TqKq 实现细节，也不要在这里增加 facade convenience API。
 
 ## 快速判断问题
@@ -37,7 +37,7 @@
 | “一次 query result” | `tqsdk-session` |
 | “managed order/strategy abstraction” | `tqsdk-task` |
 | “像 Python TqBacktest 那样 live/backtest 同一策略主体” | `tqsdk-wait` |
-| “本地历史/cache + TqSim 确定性策略回测” | `tqsdk-task` plus `tqsdk-data` |
+| “本地历史 rows / replay event + TqSim 确定性策略回测” | `tqsdk-task` plus `tqsdk-data` |
 | “historical rows/files/cache” | `tqsdk-data` |
 | “把 live window 写进 history cache” | 当前 SDK 不提供；使用调用方 sidecar |
 | “runtime commits/cursors” | `tqsdk-core` plus `tqsdk-session` |

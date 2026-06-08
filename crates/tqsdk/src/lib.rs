@@ -21,7 +21,7 @@ pub mod advanced {
     }
 
     pub mod data {
-        pub use tqsdk_data::{DataClient, DataError, MarketCacheReplay};
+        pub use tqsdk_data::{DataClient, DataError};
     }
 
     pub mod runtime {
@@ -41,8 +41,10 @@ pub mod advanced {
 
     pub mod task {
         pub use tqsdk_task::{
-            OffsetPriority, PriceMode, StrategyBacktest, StrategyBacktestSummary, TargetPosConfig,
-            TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
+            OffsetPriority, PriceMode, ReplayMarketEvent, ReplayMarketPayload,
+            ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest, StrategyBacktestSummary,
+            TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost,
+            VolumeSplitPolicy,
         };
     }
 
@@ -402,7 +404,7 @@ impl TqBuilder {
     ///
     /// Uses [`tqsdk_task::TqSim`] for matching. The strategy body stays identical to live.
     #[must_use]
-    pub fn local_backtest(mut self, replay: tqsdk_data::MarketCacheReplay) -> Self {
+    pub fn local_backtest(mut self, replay: tqsdk_task::ReplayMarketSource) -> Self {
         self.backtest = Some(BacktestConfig::Local { replay });
         self
     }
@@ -586,7 +588,7 @@ enum BacktestConfig {
         end_ns: i64,
     },
     Local {
-        replay: tqsdk_data::MarketCacheReplay,
+        replay: tqsdk_task::ReplayMarketSource,
     },
 }
 

@@ -10,7 +10,7 @@ use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
     CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote, RuntimeInput, Tick,
 };
-use tqsdk_data::{MarketCacheEvent, MarketCachePayload, MarketCacheReplay};
+use tqsdk_data::{KlineDataSeries, TickDataSeries};
 
 use crate::strategy::StrategyHostBuilder;
 use crate::testing::{FakeBroker, FakeMarket, StrategyTestReport};
@@ -18,9 +18,42 @@ use crate::{
     Result, StrategyContext, StrategyHost, StrategyUpdate, TargetPosBuilder, TaskError, TaskHost,
 };
 
-/// Offline strategy replay builder backed by ordered market cache events.
+/// Normalized market payload for task-level replay and local backtest input.
+#[derive(Debug, Clone)]
+pub enum ReplayMarketPayload {
+    Quote(Box<Quote>),
+    Kline { duration_ns: i64, row: Kline },
+    Tick(Tick),
+}
+
+/// Stable payload classifier for task-level replay summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReplayMarketPayloadKind {
+    Quote,
+    Kline,
+    Tick,
+}
+
+/// Normalized market event for task-level deterministic replay.
+#[derive(Debug, Clone)]
+pub struct ReplayMarketEvent {
+    source: String,
+    symbol: String,
+    received_at_ns: i64,
+    event_time_ns: i64,
+    payload: ReplayMarketPayload,
+}
+
+/// Ordered task-level market replay source.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayMarketSource {
+    events: Vec<ReplayMarketEvent>,
+    index: usize,
+}
+
+/// Offline strategy replay builder backed by ordered replay market events.
 pub struct StrategyReplayBuilder {
-    replay: MarketCacheReplay,
+    replay: ReplayMarketSource,
     market: FakeMarket,
     broker: FakeBroker,
     accounts: Vec<String>,
@@ -34,12 +67,12 @@ pub struct StrategyReplayBuilder {
 /// Builder that combines multiple normalized market event series into one replay.
 #[derive(Debug, Clone, Default)]
 pub struct StrategyReplaySourceBuilder {
-    events: Vec<MarketCacheEvent>,
+    events: Vec<ReplayMarketEvent>,
 }
 
 /// Offline strategy replay host.
 pub struct StrategyReplay {
-    replay: MarketCacheReplay,
+    replay: ReplayMarketSource,
     strategy: StrategyHost,
     klines: Vec<ReplayKlineSpec>,
     ticks: Vec<ReplayTickSpec>,
@@ -104,7 +137,7 @@ struct ReplayTickSpec {
 
 impl StrategyReplay {
     #[must_use]
-    pub fn builder(replay: MarketCacheReplay) -> StrategyReplayBuilder {
+    pub fn builder(replay: ReplayMarketSource) -> StrategyReplayBuilder {
         StrategyReplayBuilder::new(replay)
     }
 
@@ -117,12 +150,12 @@ impl StrategyReplay {
         let Some(event) = self.replay.next() else {
             return Ok(None);
         };
-        let replay_event = StrategyReplayEvent::from_cache_event(&event);
+        let replay_event = StrategyReplayEvent::from_replay_event(&event);
         let event_time_ns = replay_event.event_time_ns();
         if let Some(delay) = self.speed.delay_between(self.replay_time_ns, event_time_ns) {
             tokio::time::sleep(delay).await;
         }
-        ingest_market_cache_event(self.strategy.task_host(), &event, &self.klines, &self.ticks)?;
+        ingest_replay_market_event(self.strategy.task_host(), &event, &self.klines, &self.ticks)?;
         let context = self.strategy.next_once().await?;
         self.next_event_index += 1;
         self.replay_time_ns = Some(event_time_ns);
@@ -178,15 +211,51 @@ impl StrategyReplaySourceBuilder {
     }
 
     #[must_use]
-    pub fn event(mut self, event: MarketCacheEvent) -> Self {
+    pub fn event(mut self, event: ReplayMarketEvent) -> Self {
         self.events.push(event);
         self
     }
 
     #[must_use]
-    pub fn events(mut self, events: impl IntoIterator<Item = MarketCacheEvent>) -> Self {
+    pub fn events(mut self, events: impl IntoIterator<Item = ReplayMarketEvent>) -> Self {
         self.events.extend(events);
         self
+    }
+
+    pub fn kline_series(
+        mut self,
+        series: KlineDataSeries,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        let source = source.as_ref();
+        let symbol = series.symbol().to_owned();
+        let duration_ns = series.duration_ns();
+        for row in series.into_rows() {
+            self.events.push(ReplayMarketEvent::kline(
+                source,
+                symbol.as_str(),
+                row.datetime,
+                Some(row.datetime),
+                duration_ns,
+                row,
+            )?);
+        }
+        Ok(self)
+    }
+
+    pub fn tick_series(mut self, series: TickDataSeries, source: impl AsRef<str>) -> Result<Self> {
+        let source = source.as_ref();
+        let symbol = series.symbol().to_owned();
+        for row in series.into_rows() {
+            self.events.push(ReplayMarketEvent::tick(
+                source,
+                symbol.as_str(),
+                row.datetime,
+                Some(row.datetime),
+                row,
+            )?);
+        }
+        Ok(self)
     }
 
     #[must_use]
@@ -200,14 +269,14 @@ impl StrategyReplaySourceBuilder {
     }
 
     #[must_use]
-    pub fn build(self) -> MarketCacheReplay {
-        MarketCacheReplay::new(self.events)
+    pub fn build(self) -> ReplayMarketSource {
+        ReplayMarketSource::new(self.events)
     }
 }
 
 impl StrategyReplayBuilder {
     #[must_use]
-    pub fn new(replay: MarketCacheReplay) -> Self {
+    pub fn new(replay: ReplayMarketSource) -> Self {
         Self {
             replay,
             market: FakeMarket::new(),
@@ -504,7 +573,7 @@ impl StrategyReplayCheckpoint {
 }
 
 impl StrategyReplayEvent {
-    fn from_cache_event(event: &MarketCacheEvent) -> Self {
+    fn from_replay_event(event: &ReplayMarketEvent) -> Self {
         Self {
             source: event.source.clone(),
             symbol: event.symbol.clone(),
@@ -531,6 +600,169 @@ impl StrategyReplayEvent {
     #[must_use]
     pub fn event_time_ns(&self) -> i64 {
         self.event_time_ns
+    }
+}
+
+impl ReplayMarketPayload {
+    #[must_use]
+    pub fn kind(&self) -> ReplayMarketPayloadKind {
+        match self {
+            Self::Quote(_) => ReplayMarketPayloadKind::Quote,
+            Self::Kline { .. } => ReplayMarketPayloadKind::Kline,
+            Self::Tick(_) => ReplayMarketPayloadKind::Tick,
+        }
+    }
+}
+
+impl ReplayMarketEvent {
+    pub fn quote(
+        source: impl Into<String>,
+        symbol: impl Into<String>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        quote: Quote,
+    ) -> Result<Self> {
+        Self::new(
+            source,
+            symbol,
+            received_at_ns,
+            event_time_ns,
+            ReplayMarketPayload::Quote(Box::new(quote)),
+        )
+    }
+
+    pub fn kline(
+        source: impl Into<String>,
+        symbol: impl Into<String>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        duration_ns: i64,
+        row: Kline,
+    ) -> Result<Self> {
+        if duration_ns <= 0 {
+            return Err(TaskError::InvalidState(
+                "replay kline duration must be positive",
+            ));
+        }
+        Self::new(
+            source,
+            symbol,
+            received_at_ns,
+            event_time_ns,
+            ReplayMarketPayload::Kline { duration_ns, row },
+        )
+    }
+
+    pub fn tick(
+        source: impl Into<String>,
+        symbol: impl Into<String>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        tick: Tick,
+    ) -> Result<Self> {
+        Self::new(
+            source,
+            symbol,
+            received_at_ns,
+            event_time_ns,
+            ReplayMarketPayload::Tick(tick),
+        )
+    }
+
+    fn new(
+        source: impl Into<String>,
+        symbol: impl Into<String>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        payload: ReplayMarketPayload,
+    ) -> Result<Self> {
+        let source = source.into();
+        let symbol = symbol.into();
+        if source.trim().is_empty() {
+            return Err(TaskError::InvalidState(
+                "replay market event source must not be empty",
+            ));
+        }
+        if symbol.trim().is_empty() {
+            return Err(TaskError::InvalidState(
+                "replay market event symbol must not be empty",
+            ));
+        }
+        if received_at_ns < 0 {
+            return Err(TaskError::InvalidState(
+                "replay market event received_at_ns must be non-negative",
+            ));
+        }
+        if event_time_ns.is_some_and(|time| time < 0) {
+            return Err(TaskError::InvalidState(
+                "replay market event event_time_ns must be non-negative",
+            ));
+        }
+        Ok(Self {
+            source,
+            symbol,
+            received_at_ns,
+            event_time_ns: event_time_ns.unwrap_or(received_at_ns),
+            payload,
+        })
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn received_at_ns(&self) -> i64 {
+        self.received_at_ns
+    }
+
+    #[must_use]
+    pub fn event_time_ns(&self) -> i64 {
+        self.event_time_ns
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &ReplayMarketPayload {
+        &self.payload
+    }
+
+    #[must_use]
+    pub fn payload_kind(&self) -> ReplayMarketPayloadKind {
+        self.payload.kind()
+    }
+}
+
+impl ReplayMarketSource {
+    #[must_use]
+    pub fn new(mut events: Vec<ReplayMarketEvent>) -> Self {
+        events.sort_by_key(|event| (event.event_time_ns(), event.received_at_ns));
+        Self { events, index: 0 }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len().saturating_sub(self.index)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Iterator for ReplayMarketSource {
+    type Item = ReplayMarketEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let event = self.events.get(self.index)?.clone();
+        self.index += 1;
+        Some(event)
     }
 }
 
@@ -607,18 +839,18 @@ impl StrategyReplayContext<'_> {
     }
 }
 
-fn ingest_market_cache_event(
+fn ingest_replay_market_event(
     host: &TaskHost,
-    event: &MarketCacheEvent,
+    event: &ReplayMarketEvent,
     klines: &[ReplayKlineSpec],
     ticks: &[ReplayTickSpec],
 ) -> Result<()> {
     let body = match &event.payload {
-        MarketCachePayload::Quote(quote) => quote_update(&event.symbol, quote),
-        MarketCachePayload::Kline { duration_ns, row } => {
+        ReplayMarketPayload::Quote(quote) => quote_update(&event.symbol, quote),
+        ReplayMarketPayload::Kline { duration_ns, row } => {
             kline_update(&event.symbol, *duration_ns, row, klines)
         }
-        MarketCachePayload::Tick(tick) => tick_update(&event.symbol, tick, ticks),
+        ReplayMarketPayload::Tick(tick) => tick_update(&event.symbol, tick, ticks),
     };
 
     host.api().session().handle().ingest(

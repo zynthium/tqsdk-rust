@@ -34,12 +34,12 @@
 use std::time::Duration;
 
 use tqsdk_core::{Quote, TradeAccountType};
-use tqsdk_data::MarketCacheEvent;
 use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 use tqsdk_task::{
-    RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
-    StrategyEnvironmentContext, StrategyLifecycle, StrategyReplay, StrategyReplaySpeed,
-    StrategyRetryPolicy, StrategyShutdownSignal, StrategySupervisor, StrategySupervisorReport,
+    ReplayMarketEvent, RiskEngine, StrategyDeployment, StrategyDeploymentConfig,
+    StrategyEnvironment, StrategyEnvironmentContext, StrategyLifecycle, StrategyReplay,
+    StrategyReplaySpeed, StrategyRetryPolicy, StrategyShutdownSignal, StrategySupervisor,
+    StrategySupervisorReport,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -209,7 +209,7 @@ async fn replay_deployment(
     symbol: &str,
 ) -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
     let replay = StrategyReplay::source_builder()
-        .event(MarketCacheEvent::quote(
+        .event(ReplayMarketEvent::quote(
             "inline-cache",
             symbol,
             1_000,
