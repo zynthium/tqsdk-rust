@@ -323,6 +323,112 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
+    use tqsdk_relay::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::{ClientFrame, TestWebSocketServer};
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
+            panic!("expected upstream set_chart text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&set_chart).unwrap()["aid"],
+            "set_chart"
+        );
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected initial upstream peek_message text frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected peek_message after first upstream frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "18": {
+                                            "datetime": 2_000,
+                                            "last_price": 611.0,
+                                            "volume": 180,
+                                            "open_interest": 1008
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
+            panic!("expected peek_message after second upstream frame");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            json!({"aid": "peek_message"})
+        );
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let chart = UpstreamTickChart::new("relay-upstream-all-futures-ticks", ["SHFE.au2602"], 10_000)
+        .unwrap();
+
+    let mut source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+
+    let first = source.next_tick().await.unwrap();
+    let second = source.next_tick().await.unwrap();
+    assert_eq!(first.row.id, 17);
+    assert_eq!(second.row.id, 18);
+    server.join();
+}
+
+#[tokio::test]
 async fn configured_upstream_source_subscribes_configured_futures_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
     use websocket_support::{ClientFrame, TestWebSocketServer};

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use sha1::{Digest, Sha1};
 
@@ -100,6 +101,10 @@ impl TestWebSocketConnection {
 
     pub fn send_close(&mut self) -> io::Result<()> {
         self.send_frame(0x8, &[])
+    }
+
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(timeout)
     }
 
     fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
