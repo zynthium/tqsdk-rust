@@ -39,12 +39,11 @@
 //! 或内置 HTTP health/metrics endpoint 作为 S20 完成标准。
 
 use tqsdk_core::Quote;
-use tqsdk_data::MarketCacheEvent;
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
 use tqsdk_task::{
-    StrategyDeployment, StrategyEnvironment, StrategyEnvironmentContext, StrategyLifecycle,
-    StrategyReplay, StrategyRetryPolicy, StrategyShutdownSignal, StrategySupervisor,
-    StrategyTelemetryEvent,
+    ReplayMarketEvent, StrategyDeployment, StrategyEnvironment, StrategyEnvironmentContext,
+    StrategyLifecycle, StrategyReplay, StrategyRetryPolicy, StrategyShutdownSignal,
+    StrategySupervisor, StrategyTelemetryEvent,
 };
 
 const ACCOUNT_ID: &str = "sim";
@@ -106,7 +105,7 @@ async fn print_quote_step(ctx: &mut StrategyEnvironmentContext<'_>) -> tqsdk_tas
 
 async fn replay_deployment() -> Result<StrategyDeployment, Box<dyn std::error::Error>> {
     let replay = StrategyReplay::source_builder()
-        .event(MarketCacheEvent::quote(
+        .event(ReplayMarketEvent::quote(
             "inline-cache",
             SYMBOL,
             1_000,

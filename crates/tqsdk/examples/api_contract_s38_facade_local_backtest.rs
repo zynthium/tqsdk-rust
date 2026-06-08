@@ -5,14 +5,14 @@
 //! The exact same `while tq.next()` and `quote.load()` strategy code runs
 //! against a locally downloaded market data cache without connecting to servers.
 
+use tqsdk::advanced::task::ReplayMarketSource;
 use tqsdk::prelude::*;
-use tqsdk_data::MarketCacheReplay;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
-    // Usually you'd load from a file like `MarketCacheReplay::from_file(...)`
+    // Usually you'd build this from downloaded history rows or explicit replay events,
     // but here we just use an empty replay to prove it compiles and runs.
-    let replay = MarketCacheReplay::new(vec![]);
+    let replay = ReplayMarketSource::new(vec![]);
 
     let mut tq = Tq::new()
         // No auth_env() or connect to server needed for local backtest

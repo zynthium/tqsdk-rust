@@ -3,14 +3,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use tqsdk_core::Quote;
-use tqsdk_data::{MarketCacheEvent, MarketCacheReplay};
 use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 use tqsdk_task::{
-    RiskEngine, StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironment,
-    StrategyEnvironmentContext, StrategyEnvironmentKind, StrategyEnvironmentProvider,
-    StrategyLifecycle, StrategyRetryPolicy, StrategyRunStopReason, StrategyShutdownSignal,
-    StrategySupervisor, StrategySupervisorHealthStatus, StrategySupervisorStopReason,
-    StrategyTelemetryEvent, StrategyTelemetryEventKind, TaskError,
+    ReplayMarketEvent, ReplayMarketSource, RiskEngine, StrategyDeployment,
+    StrategyDeploymentConfig, StrategyEnvironment, StrategyEnvironmentContext,
+    StrategyEnvironmentKind, StrategyEnvironmentProvider, StrategyLifecycle, StrategyRetryPolicy,
+    StrategyRunStopReason, StrategyShutdownSignal, StrategySupervisor,
+    StrategySupervisorHealthStatus, StrategySupervisorStopReason, StrategyTelemetryEvent,
+    StrategyTelemetryEventKind, TaskError,
 };
 
 const SYMBOL: &str = "SHFE.au2602";
@@ -61,8 +61,8 @@ async fn strategy_environment_runs_same_strategy_step_on_test_harness() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_environment_runs_same_strategy_step_on_replay() {
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote(
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
             "cache",
             SYMBOL,
             1_000,
@@ -119,8 +119,8 @@ fn deployment_config_describes_provider_backed_tqkq_sim_without_protocol_leaks()
 
 #[tokio::test(flavor = "current_thread")]
 async fn deployment_lifecycle_runs_replay_until_max_steps() {
-    let replay = MarketCacheReplay::new(vec![
-        MarketCacheEvent::quote(
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
             "cache",
             SYMBOL,
             1_000,
@@ -131,7 +131,7 @@ async fn deployment_lifecycle_runs_replay_until_max_steps() {
             },
         )
         .unwrap(),
-        MarketCacheEvent::quote(
+        ReplayMarketEvent::quote(
             "cache",
             SYMBOL,
             2_000,
@@ -361,7 +361,7 @@ async fn replay_deployment_with_events(
 ) -> StrategyDeployment {
     let events = (0..event_count)
         .map(|idx| {
-            MarketCacheEvent::quote(
+            ReplayMarketEvent::quote(
                 "cache",
                 SYMBOL,
                 1_000 + idx as i64,
@@ -374,7 +374,7 @@ async fn replay_deployment_with_events(
             .unwrap()
         })
         .collect();
-    let replay = MarketCacheReplay::new(events);
+    let replay = ReplayMarketSource::new(events);
     let replay_builder = tqsdk_task::StrategyReplay::builder(replay).market(
         FakeMarket::new()
             .account("sim", 100_000.0)

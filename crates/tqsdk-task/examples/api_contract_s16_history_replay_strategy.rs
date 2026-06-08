@@ -6,9 +6,9 @@
 //! - 回放策略可以复用 typed 下单与 fake broker 验证成交
 //!
 //! API contract:
-//! - history series 到 replay event 的转换是 public API
-//! - 多个 history/cache event series 可通过 public replay source builder 合并
-//! - history/cache replay 是 public strategy replay driver，不是用户手写 runtime for-loop
+//! - history series 到 task-owned replay event 的转换是 `tqsdk-task` public API
+//! - 多个 history/replay event series 可通过 public replay source builder 合并
+//! - history/replay source 是 public strategy replay driver，不是用户手写 runtime for-loop
 //! - replay event 输出标准 kline/tick/quote 状态读取面
 //! - replay context 暴露 deterministic replay time 和可恢复 checkpoint
 //! - replay speed policy 是 public API，默认可选择最快回放
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
     let replay = StrategyReplay::source_builder()
-        .events(series.into_market_cache_events("history")?)
+        .kline_series(series, "history")?
         .build();
     let checkpoint_store =
         std::env::var("TQ_REPLAY_CHECKPOINT_FILE").map(StrategyReplayCheckpointStore::json_file);

@@ -150,7 +150,7 @@ V1 是：
   - strategy host / strategy context / strategy environment / deployment / supervisor adapter
   - supervisor typed health/metrics/shutdown report 和 telemetry/export hook；生产观测导出保持
     transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
-  - strategy cache replay foundation
+  - strategy replay foundation with task-owned replay market source
   - Python-compatible local backtest sim foundation
   - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
     `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
@@ -166,8 +166,8 @@ V1 是：
   - `HistoricalContQuotesRow`
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
-  - offline market cache record / JSONL reader-writer / ordered replay foundation
-  - history series -> market cache replay adapter
+  - Python-compatible history series mmap cache
+  - history page/series/download/export foundation
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
@@ -186,8 +186,9 @@ V1 是：
 - 不反向修改 `tqsdk-core` 的 runtime contract
 - 不在 facade 层复制第二棵状态树
 - direct query 不重新塞回 `tqsdk-wait`
-- `tqsdk-task` 可以消费 `tqsdk-data` cache/history event 构建 strategy replay
-  driver；这是上层集成路径，不代表 cache storage 进入 task，也不代表 strategy
+- `tqsdk-task` 拥有 deterministic replay / backtest 输入类型，并可以从
+  `tqsdk-data` 的 history series rows 构建 replay source；这是上层集成路径，
+  不代表 JSONL cache storage 进入 data public surface，也不代表 strategy
   execution 进入 data
 - `tqsdk-task` 可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供
   Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait/stream

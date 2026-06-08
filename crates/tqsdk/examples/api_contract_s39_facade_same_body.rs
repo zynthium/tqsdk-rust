@@ -4,7 +4,7 @@
 //! Demonstrates how to write a strategy body as a single function taking `&mut Tq`,
 //! and then running it identically in live, server backtest, and local backtest modes.
 
-use tqsdk::advanced::data::MarketCacheReplay;
+use tqsdk::advanced::task::ReplayMarketSource;
 use tqsdk::prelude::*;
 
 // The strategy body knows nothing about the execution mode!
@@ -42,7 +42,7 @@ async fn main() -> tqsdk::Result<()> {
 
     println!("=== 2. Local Offline Backtest ===");
     // Local backtest
-    let replay = MarketCacheReplay::new(vec![]);
+    let replay = ReplayMarketSource::new(vec![]);
     let mut tq_local = Tq::new()
         .local_backtest(replay)
         .quote_symbol("SHFE.au2510")

@@ -19,8 +19,8 @@
 | "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_batches`, `quote_stream`, `market_events`, row-batch kline/tick streams, trade/session event streams |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk` for ordinary target-position path; `tqsdk-task` when ownership/risk/task internals are needed; `tqsdk-wait` for thin direct order wrappers | `Tq::target_pos_tqkq`, `TargetPos`; advanced: `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
-| "回测", "策略回测", "TqBacktest", "TqSim", "本地模拟账户", "同一策略跑实盘和回测" | Strategy backtest | `tqsdk-wait` for Python-style server/backtest-market same-body loop; `tqsdk-task` + `tqsdk-data` for local deterministic backtest sim | wait: `TqApiBuilder::futures_backtest`, `TqBacktest`, `step`; local: `StrategyBacktest`, `TqSim`, `MarketCacheReplay`, `finish_sim_step` |
-| "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` | `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, cache/replay APIs |
+| "回测", "策略回测", "TqBacktest", "TqSim", "本地模拟账户", "同一策略跑实盘和回测" | Strategy backtest | `tqsdk-wait` for Python-style server/backtest-market same-body loop; `tqsdk-task` + `tqsdk-data` for local deterministic backtest sim | wait: `TqApiBuilder::futures_backtest`, `TqBacktest`, `step`; local: `StrategyBacktest`, `TqSim`, `ReplayMarketSource`, `finish_sim_step` |
+| "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` for rows/cache/export; `tqsdk-task` for replay source | data: `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`; task replay: `ReplayMarketSource`, `StrategyReplaySourceBuilder` |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
 请求涉及角色覆盖或 public API 证据时，继续读 `references/scenario-contracts.md`，并把回答锚定到对应 `api_contract_sXX_*.rs` 示例。
@@ -100,7 +100,7 @@
 2. 创建 `DataClient` 或 `DataClient::from_session(session)`。
 3. 选择 page、series、download、CSV export、cache 或 replay API。
 4. 输出保持 owned/materialized；不要建模成 live refs。
-5. 确定性策略测试尽量用 cache/replay API，而不是 live credentials。
+5. 确定性策略测试尽量用 task-owned replay source 或 fake harness，而不是 live credentials。
 6. `HistorySeriesCache` 只用于 offline data_series mmap cache；如果用户要求 live window 写入该缓存，说明当前 SDK 不提供这个 public API。
 
 ### 6. 运行策略回测
@@ -108,9 +108,9 @@
 按用户想要的回测形态分两条入口：
 
 1. 如果用户明确要像 Python `TqApi(backtest=TqBacktest(...))` 那样让同一段 wait 策略主体跑 live/backtest，使用 `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` 或 `TqBacktest`。策略主体只依赖 `quote` / `kline` handles 和 `step()`；backtest 结束时 `step()` 返回 `None`。契约锚点是 S36。
-2. 如果用户要不连接真实服务、用本地历史/cache 行情和 Python-compatible `TqSim` 撮合账户跑确定性回测，使用 `tqsdk-data::MarketCacheReplay` 加 `tqsdk-task::{StrategyBacktest,TqSim}`。契约锚点是 S32。
+2. 如果用户要不连接真实服务、用本地历史行情或显式 replay event 和 Python-compatible `TqSim` 撮合账户跑确定性回测，使用 `tqsdk-task::{ReplayMarketSource,StrategyBacktest,TqSim}`；历史 rows 可由 `tqsdk-data` 拉取并通过 `StrategyReplaySourceBuilder` 转成 replay source。契约锚点是 S32。
 3. 如果只是准备历史输入、导出或缓存，才单独路由到 `tqsdk-data`；不要把“策略回测”回答成单纯历史下载。
-4. 当前本地 `StrategyBacktest` 最小闭环支持 quote/tick/kline cache event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
+4. 当前本地 `StrategyBacktest` 最小闭环支持 quote/tick/kline replay event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
 
 ### 7. 编写低延迟自定义循环
 

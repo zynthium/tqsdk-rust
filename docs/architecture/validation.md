@@ -218,7 +218,6 @@ Regression guards fixed in the facade iteration and still required before a sour
 ```bash
 cargo +nightly fuzz run core_frame_payload -- -runs=1000
 cargo +nightly fuzz run core_adapter_decode -- -runs=1000
-cargo +nightly fuzz run data_market_cache_event -- -runs=1000
 cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 ```
 

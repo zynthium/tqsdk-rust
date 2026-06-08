@@ -17,7 +17,6 @@ services = ["dep:reqwest", "tqsdk-session/services"]
 [dependencies]
 chrono.workspace = true
 reqwest = { workspace = true, optional = true }
-serde.workspace = true
 serde_json.workspace = true
 fs2 = "0.4"
 memmap2 = "0.9"

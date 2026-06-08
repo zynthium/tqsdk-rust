@@ -5,7 +5,6 @@ use tqsdk_core::{Kline, Tick};
 use crate::error::{DataError, Result};
 use crate::history_series_cache::HistorySeriesCacheReport;
 use crate::integrity::{HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus};
-use crate::market_cache::{MarketCacheEvent, MarketCacheReplay};
 
 use super::{
     DEFAULT_HISTORY_PAGE_VIEW_WIDTH, DEFAULT_HISTORY_REQUEST_TIMEOUT, normalize_history_view_width,
@@ -663,34 +662,6 @@ impl KlineDataSeries {
         }
         check.inspect_klines(&self.rows)
     }
-
-    pub fn into_market_cache_events(
-        self,
-        source: impl AsRef<str>,
-    ) -> Result<Vec<MarketCacheEvent>> {
-        let source = source.as_ref();
-        let symbol = self.symbol;
-        let duration_ns = self.duration_ns;
-        self.rows
-            .into_iter()
-            .map(|row| {
-                MarketCacheEvent::kline(
-                    source,
-                    symbol.as_str(),
-                    row.datetime,
-                    Some(row.datetime),
-                    duration_ns,
-                    row,
-                )
-            })
-            .collect()
-    }
-
-    pub fn into_market_cache_replay(self, source: impl AsRef<str>) -> Result<MarketCacheReplay> {
-        Ok(MarketCacheReplay::new(
-            self.into_market_cache_events(source)?,
-        ))
-    }
 }
 
 /// Request for a one-shot owned tick history series in `[start_datetime_ns, end_datetime_ns)`.
@@ -878,32 +849,6 @@ impl TickDataSeries {
             check = check.with_cache_report(cache_report);
         }
         check.inspect_ticks(&self.rows)
-    }
-
-    pub fn into_market_cache_events(
-        self,
-        source: impl AsRef<str>,
-    ) -> Result<Vec<MarketCacheEvent>> {
-        let source = source.as_ref();
-        let symbol = self.symbol;
-        self.rows
-            .into_iter()
-            .map(|row| {
-                MarketCacheEvent::tick(
-                    source,
-                    symbol.as_str(),
-                    row.datetime,
-                    Some(row.datetime),
-                    row,
-                )
-            })
-            .collect()
-    }
-
-    pub fn into_market_cache_replay(self, source: impl AsRef<str>) -> Result<MarketCacheReplay> {
-        Ok(MarketCacheReplay::new(
-            self.into_market_cache_events(source)?,
-        ))
     }
 }
 

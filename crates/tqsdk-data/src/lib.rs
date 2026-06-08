@@ -19,7 +19,6 @@
 //! - `DataClient::from_session(...).query_option_greeks(...)`
 //! - `DataClient::from_session(...).export_kline_data_csv(...)`
 //! - `DataClient::from_session(...).export_tick_data_csv(...)`
-//! - `MarketCacheWriter` / `MarketCacheReader` / `MarketCacheReplay`
 //!
 //! All of them return owned Rust-native data without committing to any
 //! DataFrame, CSV writer, or polars integration yet.
@@ -27,18 +26,13 @@
 //! # Example
 //!
 //! ```
-//! let event = tqsdk_data::MarketCacheEvent::quote(
-//!     "example",
+//! let request = tqsdk_data::KlineDataSeriesRequest::new(
 //!     "SHFE.au2602",
+//!     std::time::Duration::from_secs(60),
 //!     1_000,
-//!     Some(900),
-//!     tqsdk_core::Quote::default(),
-//! )?;
-//!
-//! let mut bytes = Vec::new();
-//! let mut writer = tqsdk_data::MarketCacheWriter::new(&mut bytes);
-//! writer.write_event(&event)?;
-//! writer.flush()?;
+//!     2_000,
+//! );
+//! assert_eq!(request.symbol(), "SHFE.au2602");
 //! # Ok::<(), tqsdk_data::DataError>(())
 //! ```
 
@@ -50,7 +44,6 @@ mod greeks;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
-mod market_cache;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
@@ -94,8 +87,4 @@ pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,
     HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
-};
-pub use market_cache::{
-    MarketCacheEvent, MarketCachePayload, MarketCachePayloadKind, MarketCacheReader,
-    MarketCacheReplay, MarketCacheWriter,
 };

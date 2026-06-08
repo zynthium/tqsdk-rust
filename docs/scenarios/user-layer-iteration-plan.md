@@ -410,8 +410,8 @@ public API。
   `FakeBroker::disconnect_for_steps` 与
   `FakeBrokerConnectionStatus` 已提供 broker disconnect/reconnect 注入；用户不需要
   hidden `*_for_test` API、runtime handle、channel 或 provider protocol。
-- `tqsdk-task::StrategyReplay` 已连接 `tqsdk-data::MarketCacheReplay`，
-  cache quote/kline/tick event 可以按时间顺序推进到同构 `StrategyContext`，
+- `tqsdk-task::StrategyReplay` 已连接 task-owned `ReplayMarketSource`，
+  quote/kline/tick replay event 可以按时间顺序推进到同构 `StrategyContext`，
   并复用 typed order builder 与 fake broker。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已提供
   deterministic replay clock 与内存级 checkpoint/resume foundation。
@@ -421,7 +421,7 @@ public API。
   已提供 JSON file-backed durable checkpoint persistence foundation。
 - `StrategyReplaySourceBuilder` 已提供多序列 event source 合并入口，用户不需要
   手写 vector 拼接和排序。
-- `KlineDataSeries` / `TickDataSeries` 已提供 history series -> cache replay
+- `StrategyReplaySourceBuilder` 已提供 `kline_series(...)` / `tick_series(...)`
   adapter，S16 可以从 `DataClient` 历史序列直接进入 `StrategyReplay`。
 - S11 简单策略已提升为正式 task example；S24 最小可测试策略已新增正式
   task example；S16 history series -> strategy context 子集已提升为正式 task
@@ -517,31 +517,29 @@ public API。
 
 目标：
 
-- live 行情可以写入本地缓存。
-- 其他进程或策略可以读取缓存快照和增量。
-- 历史数据、缓存数据和 replay driver 能接到同一策略事件模型。
+- live 行情持久化和 JSONL cache record/replay 属于用户工具或独立服务。
+- 历史数据 rows 可以通过 task-owned replay source 接到策略事件模型。
+- 当前核心 SDK 不承诺跨进程缓存快照、增量或 cache daemon。
 
 建议落点：
 
-- `tqsdk-data`：cache writer / reader / export / import。
+- `tqsdk-data`：history page/series/download/export 和 history series mmap cache。
 - `tqsdk-stream`：live sink adapter。
-- `tqsdk-task`：策略 replay driver 只消费标准事件。
+- `tqsdk-task`：策略 replay driver 和 task-owned replay event/source。
 
 已落地：
 
-- `tqsdk-data::MarketCacheEvent` 定义标准 `Quote` / `Kline` / `Tick`
-  cache record。
-- `MarketCacheWriter` / `MarketCacheReader` 提供最薄 JSONL 离线读写
-  foundation。
-- `MarketCacheReplay` 提供按事件时间、接收时间排序的 deterministic
-  offline replay iterator。
-- 当前 active API 不包含 `MarketCacheStreamWriter` 或 live stream pipe；本地缓存仍保持
-  offline `MarketCacheEvent` / writer / reader / replay，live pipe / cache service
-  归属用户工具或未来独立设计边界。
+- `tqsdk-data` 不再导出 `MarketCacheEvent` / `MarketCacheWriter` /
+  `MarketCacheReader` / `MarketCacheReplay`；S18 JSONL cache record/replay
+  不再是当前核心 SDK public API。
+- `ReplayMarketEvent` / `ReplayMarketSource` 提供按事件时间、接收时间排序的
+  deterministic offline replay iterator，归属 `tqsdk-task`。
+- 当前 active API 不包含 `MarketCacheStreamWriter` 或 live stream pipe；live pipe /
+  cache service 归属用户工具或未来独立设计边界。
 - queue、lock、index、compaction、reader manifest、recovery scan、writer
   election、service、daemon 和 supervisor 等跨进程或准跨进程编排表面已回退，
   不再作为 `tqsdk-data` public contract。
-- `tqsdk-task::StrategyReplay` 已消费 `MarketCacheReplay` 并推进同构
+- `tqsdk-task::StrategyReplay` 已消费 `ReplayMarketSource` 并推进同构
   `StrategyContext`，覆盖 cache replay -> strategy runtime foundation。
 - `StrategyReplayCheckpoint` / `StrategyReplayBuilder::resume_from` 已覆盖
   S16 replay clock 与内存级 checkpoint/resume foundation。
@@ -551,11 +549,10 @@ public API。
   已覆盖 S16 最小 durable checkpoint persistence foundation。
 - `StrategyReplaySourceBuilder` 已覆盖 S16 多序列 replay convenience builder
   foundation。
-- `KlineDataSeries` / `TickDataSeries` 已提供 `into_market_cache_events`
-  与 `into_market_cache_replay`，覆盖 history series -> cache replay
-  adapter foundation。
-- `api_contract_s18_local_market_cache` 已提升为正式 data example，覆盖
-  cache record / reader-writer / replay foundation。
+- `StrategyReplaySourceBuilder` 已提供 `kline_series(...)` / `tick_series(...)`，
+  覆盖 history series -> task replay source adapter foundation。
+- `api_contract_s18_local_market_cache` 已移除；JSONL cache record /
+  reader-writer / replay foundation 不再作为正式 data example。
 - live stream -> cache writer pipe 未提升为当前正式 data example。旧
   `api_contract_s18_live_market_cache_pipe` 名称只作为历史 gap/sketch 追溯；
   若后续仍需要 live pipe，应作为 `tqsdk-stream` sink adapter 与
@@ -571,7 +568,7 @@ public API。
 
 优先提升的场景：
 
-- `api_contract_s18_local_market_cache`（cache record/replay foundation 已提升为正式 data example）
+- S18 JSONL cache record/replay 已降级为用户层工具或独立项目职责，不再优先提升
 - `api_contract_s30_history_series_cache` 已提升为正式 data example，覆盖
   看盘软件 / 交易终端所需的 typed history series range cache、缺口下载、
   Python 兼容默认目录 / 自定义目录、mmap 读、mutable tail refresh、segment

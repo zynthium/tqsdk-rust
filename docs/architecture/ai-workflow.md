@@ -188,7 +188,7 @@ crate 自己维护。
 - strategy host / strategy context / strategy environment / deployment / supervisor adapter
 - strategy supervisor 的 typed health/metrics/shutdown report 和 telemetry/export hook；
   生产观测导出保持 transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
-- strategy cache replay driver
+- strategy replay driver with task-owned replay market source
 - Python-compatible local backtest sim foundation
 - S31 低延迟 trading desk thin profile，hot path 使用
   `tqsdk-session + RuntimeReader`，并复用 task 层 `RiskEngine` / `TaskOrderIntent`
@@ -201,9 +201,10 @@ crate 自己维护。
 
 - 任务层维护业务执行状态，既不是协议 substrate，也不是通用消费 facade。
 - 它可以依赖 `tqsdk-wait` 的稳定截面语义，但不得反向要求 core 改写提交模型。
-- 它可以在 strategy replay driver 中消费 `tqsdk-data` 的 cache/history event。
-  这是上层集成路径；不得把 cache storage 下沉进 task，也不得把 strategy
-  execution 下沉进 data。
+- 它拥有 `ReplayMarketEvent` / `ReplayMarketSource` 这类 deterministic replay
+  输入类型，并可通过 builder 接收 `tqsdk-data` 的 history series rows。不得把
+  JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
+  下沉进 data。
 - 它可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供 Python-compatible
   本地回测模拟账户能力；这不允许反向改变 core/session/wait/stream 的职责边界。
 
@@ -219,8 +220,8 @@ crate 自己维护。
 - research/offline data crate
 - history page/series/download
 - CSV export
-- offline market cache record / JSONL reader-writer / ordered replay foundation
-- history series -> market cache replay adapter
+- Python-compatible history series mmap cache
+- history page/series/download/export
 - Greeks、历史主连等研究派生能力
 
 设计原因：
