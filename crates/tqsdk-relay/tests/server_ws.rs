@@ -44,6 +44,40 @@ async fn relay_accepts_websocket_market_command_and_updates_engine() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn relay_answers_downstream_ping_and_keeps_client_connected() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_ping(&mut stream, b"relay").await;
+    let pong = read_unmasked_control(&mut stream).await;
+    assert_eq!(pong, (0x0a, b"relay".to_vec()));
+
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+
+    assert_eq!(
+        engine
+            .lock()
+            .unwrap()
+            .metrics_snapshot()
+            .quote_subscriptions,
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn relay_accept_loop_accepts_multiple_downstream_clients_until_shutdown() {
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
@@ -427,6 +461,41 @@ async fn send_masked_text(stream: &mut TcpStream, text: String) {
             .map(|(index, byte)| *byte ^ mask[index % 4]),
     );
     stream.write_all(&frame).await.unwrap();
+}
+
+async fn send_masked_ping(stream: &mut TcpStream, payload: &[u8]) {
+    send_masked_control(stream, 0x9, payload).await;
+}
+
+async fn send_masked_control(stream: &mut TcpStream, opcode: u8, payload: &[u8]) {
+    assert!(
+        payload.len() <= 125,
+        "control frames must use the short websocket length path"
+    );
+    let mask = [1_u8, 2, 3, 4];
+    let mut frame = Vec::with_capacity(payload.len() + 6);
+    frame.push(0x80 | opcode);
+    frame.push(0x80 | payload.len() as u8);
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| *byte ^ mask[index % 4]),
+    );
+    stream.write_all(&frame).await.unwrap();
+}
+
+async fn read_unmasked_control(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).await.unwrap();
+    let opcode = header[0] & 0x0f;
+    assert!(matches!(opcode, 0x8..=0x0a));
+    let len = usize::from(header[1] & 0x7f);
+    assert_ne!(header[1] & 0x80, 0x80, "server frames must not be masked");
+    let mut payload = vec![0_u8; len];
+    stream.read_exact(&mut payload).await.unwrap();
+    (opcode, payload)
 }
 
 async fn read_unmasked_text(stream: &mut TcpStream) -> String {

@@ -16,6 +16,13 @@ use crate::upstream::UpstreamTickSource;
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+enum ClientWebSocketFrame {
+    Text(String),
+    Ping(Vec<u8>),
+    Pong,
+    Close,
+}
+
 #[derive(Clone)]
 pub struct RelayServer {
     engine: Arc<Mutex<RelayEngine>>,
@@ -166,11 +173,18 @@ impl RelayServer {
         let mut outbound = self.register_client(client_id)?;
         loop {
             tokio::select! {
-                read = read_client_text_frame(stream) => {
+                read = read_client_frame(stream) => {
                     match read {
-                        Ok(text) => {
+                        Ok(ClientWebSocketFrame::Text(text)) => {
                             let frames = self.handle_text(client_id.value(), text).await?;
                             self.dispatch_frames(frames)?;
+                        }
+                        Ok(ClientWebSocketFrame::Ping(payload)) => {
+                            write_server_control_frame(stream, 0x0a, &payload).await?;
+                        }
+                        Ok(ClientWebSocketFrame::Pong) => {}
+                        Ok(ClientWebSocketFrame::Close) => {
+                            return Ok(());
                         }
                         Err(RelayError::Transport(message)) if message.contains("early eof") => {
                             return Ok(());
@@ -252,21 +266,13 @@ Sec-WebSocket-Accept: {accept}\r\n\
     Ok(())
 }
 
-async fn read_client_text_frame(stream: &mut TcpStream) -> RelayResult<String> {
+async fn read_client_frame(stream: &mut TcpStream) -> RelayResult<ClientWebSocketFrame> {
     let mut header = [0_u8; 2];
     stream
         .read_exact(&mut header)
         .await
         .map_err(|err| RelayError::Transport(format!("websocket frame read failed: {err}")))?;
     let opcode = header[0] & 0x0f;
-    if opcode == 0x8 {
-        return Ok(r#"{"aid":"peek_message"}"#.to_string());
-    }
-    if opcode != 0x1 {
-        return Err(RelayError::invalid_protocol(
-            "relay expects websocket text frames",
-        ));
-    }
     let masked = header[1] & 0x80 != 0;
     let mut len = u64::from(header[1] & 0x7f);
     if len == 126 {
@@ -298,9 +304,19 @@ async fn read_client_text_frame(stream: &mut TcpStream) -> RelayResult<String> {
             *byte ^= mask[index % mask.len()];
         }
     }
-    String::from_utf8(payload).map_err(|err| {
-        RelayError::invalid_protocol(format!("invalid websocket text payload: {err}"))
-    })
+    match opcode {
+        0x1 => String::from_utf8(payload)
+            .map(ClientWebSocketFrame::Text)
+            .map_err(|err| {
+                RelayError::invalid_protocol(format!("invalid websocket text payload: {err}"))
+            }),
+        0x8 => Ok(ClientWebSocketFrame::Close),
+        0x9 => Ok(ClientWebSocketFrame::Ping(payload)),
+        0x0a => Ok(ClientWebSocketFrame::Pong),
+        _ => Err(RelayError::invalid_protocol(
+            "relay expects websocket text or control frames",
+        )),
+    }
 }
 
 async fn write_server_text_frame(stream: &mut TcpStream, text: String) -> RelayResult<()> {
@@ -319,6 +335,26 @@ async fn write_server_text_frame(stream: &mut TcpStream, text: String) -> RelayR
         }
     }
     frame.extend_from_slice(bytes);
+    stream
+        .write_all(&frame)
+        .await
+        .map_err(|err| RelayError::Transport(format!("websocket frame write failed: {err}")))
+}
+
+async fn write_server_control_frame(
+    stream: &mut TcpStream,
+    opcode: u8,
+    payload: &[u8],
+) -> RelayResult<()> {
+    if payload.len() > 125 {
+        return Err(RelayError::invalid_protocol(
+            "websocket control frame payload exceeds 125 bytes",
+        ));
+    }
+    let mut frame = Vec::with_capacity(payload.len() + 2);
+    frame.push(0x80 | opcode);
+    frame.push(payload.len() as u8);
+    frame.extend_from_slice(payload);
     stream
         .write_all(&frame)
         .await
