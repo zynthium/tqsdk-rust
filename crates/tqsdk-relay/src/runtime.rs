@@ -48,12 +48,7 @@ async fn connect_configured_upstream_for_pump(
             return Err(err);
         }
     };
-    record_universe_refresh_success(
-        server,
-        config,
-        chart.symbols().len(),
-        chart.ins_list_chars(),
-    );
+    record_universe_refresh_success(server, config, chart.symbols(), chart.ins_list_chars());
     WebSocketUpstreamTickSource::connect_with_tick_chart(config.upstream_market_url.clone(), chart)
         .await
         .map(|source| Some(ConfiguredUpstream { source }))
@@ -180,13 +175,13 @@ fn mark_upstream_degraded(server: &RelayServer) {
 fn record_universe_refresh_success(
     server: &RelayServer,
     config: &RelayConfig,
-    upstream_symbols: usize,
+    symbols: &[String],
     upstream_ins_list_chars: usize,
 ) {
     let engine = server.engine();
     match engine.lock() {
-        Ok(mut engine) => engine.record_universe_refresh_success(
-            upstream_symbols,
+        Ok(mut engine) => engine.record_universe_refresh_success_for_symbols(
+            symbols.iter().map(String::as_str),
             upstream_ins_list_chars,
             config.upstream_ins_list_limits.warn_chars,
             config.upstream_ins_list_limits.max_chars,

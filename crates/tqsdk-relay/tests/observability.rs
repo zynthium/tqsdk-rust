@@ -103,6 +103,84 @@ fn metrics_include_clients_subscriptions_and_cache_events() {
 }
 
 #[test]
+fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602", "DCE.m2609"],
+        21,
+        Some(32_000),
+        None,
+        1_700_000_000,
+    );
+    engine
+        .ingest_tick_at_for_test("SHFE.au2602", tick(1), 1_700_000_001_000)
+        .unwrap();
+
+    let live = engine.symbol_metrics_snapshot_at(
+        1_700_000_002_000,
+        &tqsdk_relay::SymbolMetricsQuery::default(),
+    );
+    assert_eq!(live.summary.total, 2);
+    assert_eq!(live.summary.live, 1);
+    assert_eq!(live.summary.missing, 1);
+
+    let stale = engine.symbol_metrics_snapshot_at(
+        1_700_000_032_001,
+        &tqsdk_relay::SymbolMetricsQuery::default(),
+    );
+    let au = stale
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "SHFE.au2602")
+        .unwrap();
+    assert_eq!(au.status, tqsdk_relay::SymbolStatus::Stale);
+}
+
+#[test]
+fn engine_symbol_metrics_include_quote_and_chart_subscriptions() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    engine
+        .handle_command(
+            ClientId::new(1),
+            DownstreamCommand::SubscribeQuote {
+                symbols: vec!["SHFE.au2602".to_string()],
+            },
+        )
+        .unwrap();
+    engine
+        .handle_command(ClientId::new(2), chart_command("chart-2"))
+        .unwrap();
+
+    let snapshot = engine.symbol_metrics_snapshot_at(
+        1_700_000_002_000,
+        &tqsdk_relay::SymbolMetricsQuery::default(),
+    );
+    let symbol = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "SHFE.au2602")
+        .unwrap();
+
+    assert_eq!(symbol.status, tqsdk_relay::SymbolStatus::Inactive);
+    assert!(symbol.subscribed);
+    assert_eq!(symbol.quote_subscriber_count, 1);
+    assert_eq!(symbol.chart_subscriber_count, 1);
+
+    engine.remove_client(ClientId::new(1));
+    let after_remove = engine.symbol_metrics_snapshot_at(
+        1_700_000_002_000,
+        &tqsdk_relay::SymbolMetricsQuery::default(),
+    );
+    let symbol = after_remove
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "SHFE.au2602")
+        .unwrap();
+    assert_eq!(symbol.quote_subscriber_count, 0);
+    assert_eq!(symbol.chart_subscriber_count, 1);
+}
+
+#[test]
 fn metrics_include_chart_subscriptions_and_bootstrap_queue() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     engine
