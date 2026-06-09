@@ -61,6 +61,16 @@ TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
 cargo run -p tqsdk-relay
 ```
 
+如果只想尽量减少启动时的上游 tick chart 历史补齐，可以把上游 `view_width` 调小：
+
+```bash
+TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
+TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
+cargo run -p tqsdk-relay
+```
+
+`view_width=1` 仍会发送 tick chart 请求，但只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。
+
 只订阅指定产品代码时：
 
 ```bash
@@ -93,7 +103,7 @@ cargo run -p tqsdk-relay
 dry-run 会向 stdout 输出一行 JSON，例如：
 
 ```json
-{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"upstream_symbols":2,"upstream_ins_list_chars":21,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
+{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":21,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
 ```
 
 如果 dry-run 使用 `TQSDK_RELAY_FUTURES_PRODUCTS`，它会执行一次 metadata 查询来得到当前
@@ -145,6 +155,7 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 上游 tick chart `ins_list` 字符串长度告警阈值。超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误，并提示至少需要拆成几个 relay 实例；默认不启用硬失败。 |
+| `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给上游 tick chart 的 `view_width`。调小可减少启动 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
 | `TQSDK_RELAY_TICK_RING_CAPACITY` | `200000` | 每个合约保留的内存 tick ring 行数；必须大于 `0`。全品种持久运行建议调低到 `10000` / `20000` 级别。 |
 | `TQSDK_RELAY_KLINE_RING_CAPACITY` | `10000` | relay 内部 K 线 ring 容量配置；必须大于 `0`。当前二进制主要用于保留配置边界，K 线合成热状态仍按订阅 source 保存当前 bar。 |
 | `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。单个上游 tick chart 使用的逗号分隔完整期货合约列表。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
@@ -160,6 +171,7 @@ cargo run -p tqsdk-relay
 - `futures_product_filter`：动态产品发现过滤器，可选全部期货或产品代码列表。
 - `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新，也可设置兼容 interval。
 - `futures_metadata_batch_size`：默认 `500`，控制产品发现时 metadata 查询分批大小。
+- `upstream_tick_view_width`：默认 `10_000`，控制上游 tick chart `view_width`。
 - `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。
 - `bootstrap.min_remote_request_interval`：默认 `250ms`。
@@ -180,6 +192,8 @@ cargo run -p tqsdk-relay
   "view_width": 10000
 }
 ```
+
+其中 `view_width` 来自 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` / `RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay 本地保留多少 tick，不影响上游补历史窗口。
 
 随后它会发送 `{"aid":"peek_message"}`，并从上游 websocket 解码 `rtn_data` tick
 片段。

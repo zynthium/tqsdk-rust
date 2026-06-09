@@ -10,7 +10,7 @@ use crate::upstream::UpstreamTickChart;
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const UPSTREAM_TICK_CHART_ID: &str = "relay-upstream-all-futures-ticks";
-const UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
+pub const DEFAULT_UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
 const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
 const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
 const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
@@ -22,6 +22,7 @@ const ENV_FUTURES_UNIVERSE_REFRESH_SECS: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_RE
 const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
 const ENV_UPSTREAM_INS_LIST_WARN_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS";
 const ENV_UPSTREAM_INS_LIST_MAX_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS";
+const ENV_UPSTREAM_TICK_VIEW_WIDTH: &str = "TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH";
 const ENV_TICK_RING_CAPACITY: &str = "TQSDK_RELAY_TICK_RING_CAPACITY";
 const ENV_KLINE_RING_CAPACITY: &str = "TQSDK_RELAY_KLINE_RING_CAPACITY";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
@@ -190,6 +191,7 @@ pub struct RelayConfig {
     pub futures_symbols: Vec<String>,
     pub futures_product_filter: FuturesProductFilter,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
+    pub upstream_tick_view_width: usize,
     pub tick_ring_capacity: usize,
     pub kline_ring_capacity: usize,
     pub disk_cache_dir: Option<PathBuf>,
@@ -216,6 +218,7 @@ impl fmt::Debug for RelayConfig {
             .field("futures_symbols", &self.futures_symbols)
             .field("futures_product_filter", &self.futures_product_filter)
             .field("upstream_ins_list_limits", &self.upstream_ins_list_limits)
+            .field("upstream_tick_view_width", &self.upstream_tick_view_width)
             .field("tick_ring_capacity", &self.tick_ring_capacity)
             .field("kline_ring_capacity", &self.kline_ring_capacity)
             .field("disk_cache_dir", &self.disk_cache_dir)
@@ -246,6 +249,7 @@ impl Default for RelayConfig {
             futures_symbols: Vec::new(),
             futures_product_filter: FuturesProductFilter::None,
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
+            upstream_tick_view_width: DEFAULT_UPSTREAM_TICK_VIEW_WIDTH,
             tick_ring_capacity: 200_000,
             kline_ring_capacity: 10_000,
             disk_cache_dir: None,
@@ -331,6 +335,10 @@ impl RelayConfig {
                 &value,
             )?);
         }
+        if let Some(value) = get(ENV_UPSTREAM_TICK_VIEW_WIDTH) {
+            config.upstream_tick_view_width =
+                parse_positive_usize_env(ENV_UPSTREAM_TICK_VIEW_WIDTH, &value)?;
+        }
         if let Some(value) = get(ENV_TICK_RING_CAPACITY) {
             config.tick_ring_capacity = parse_positive_usize_env(ENV_TICK_RING_CAPACITY, &value)?;
         }
@@ -389,8 +397,11 @@ impl RelayConfig {
         if symbols.is_empty() {
             return Ok(None);
         }
-        let chart =
-            UpstreamTickChart::new(UPSTREAM_TICK_CHART_ID, symbols, UPSTREAM_TICK_VIEW_WIDTH)?;
+        let chart = UpstreamTickChart::new(
+            UPSTREAM_TICK_CHART_ID,
+            symbols,
+            self.upstream_tick_view_width,
+        )?;
         self.upstream_ins_list_limits
             .validate_ins_list_chars(chart.ins_list_chars())?;
         Ok(Some(chart))
@@ -428,6 +439,11 @@ impl RelayConfig {
         if self.futures_metadata_batch_size == 0 {
             return Err(RelayError::invalid_config(
                 "futures_metadata_batch_size must be greater than zero",
+            ));
+        }
+        if self.upstream_tick_view_width == 0 {
+            return Err(RelayError::invalid_config(
+                "upstream_tick_view_width must be greater than zero",
             ));
         }
         if self.tick_ring_capacity == 0 {
