@@ -54,3 +54,19 @@ fn generic_object_flattening_uses_push_pop_path_stack() {
         "recursive flattening should reuse a push/pop path stack"
     );
 }
+
+#[test]
+fn state_apply_records_changed_field_names_without_value_clone() {
+    let source = include_str!("../src/state/store.rs");
+    let apply_fields = function_block(source, "fn apply_fields(", "\n}\n\nfn preserves_null_field");
+    assert!(
+        !apply_fields.contains("changed_fields.push(field.clone())"),
+        "state apply should not clone changed serde_json::Value data for commit metadata"
+    );
+
+    let commit_engine = include_str!("../src/runtime/commit_engine.rs");
+    assert!(
+        commit_engine.contains("ChangeSet::from_applied_changes(&applied)"),
+        "commit metadata should be built from applied-change records, not cloned mutations"
+    );
+}

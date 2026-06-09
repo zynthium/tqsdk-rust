@@ -27,6 +27,30 @@ impl ChangeHit {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedChange {
+    pub(crate) root: &'static str,
+    pub(crate) path: StatePath,
+    pub(crate) object: Option<ObjectKey>,
+    pub(crate) fields: Vec<String>,
+}
+
+impl AppliedChange {
+    pub(crate) fn new(
+        root: &'static str,
+        path: StatePath,
+        object: Option<ObjectKey>,
+        fields: Vec<String>,
+    ) -> Self {
+        Self {
+            root,
+            path,
+            object,
+            fields,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeSet {
     pub path_hits: Vec<StatePath>,
@@ -66,6 +90,40 @@ impl ChangeSet {
         }
 
         changes
+    }
+
+    pub(crate) fn from_applied_changes(changes: &[AppliedChange]) -> Self {
+        let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(changes.len());
+        let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(changes.len());
+        let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
+            HashSet::with_capacity(changes.len());
+
+        let mut change_set = Self::default();
+
+        for change in changes {
+            debug_assert!(!change.root.is_empty());
+            if path_seen.insert(&change.path) {
+                change_set.path_hits.push(change.path.clone());
+            }
+
+            if let Some(object) = &change.object {
+                if object_seen.insert(object) {
+                    change_set.object_hits.push(object.clone());
+                }
+
+                for field in &change.fields {
+                    if field_seen.insert((&change.path, object, field.as_str())) {
+                        change_set.field_hits.push(ChangeHit::field(
+                            change.path.clone(),
+                            object.clone(),
+                            field.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        change_set
     }
 }
 

@@ -11,8 +11,8 @@ use serde_json::{Map, Value};
 use crate::{Result, events::NormalizedMutation, ids::Revision};
 
 use super::{
-    MarketStateReadGuard, MarketStateView, MarketTradeStateReadGuard, ObjectKey, PathSegment,
-    StateReadView, TradeStateReadGuard, TradeStateView, read::get_at_path,
+    AppliedChange, MarketStateReadGuard, MarketStateView, MarketTradeStateReadGuard, ObjectKey,
+    PathSegment, StateReadView, TradeStateReadGuard, TradeStateView, read::get_at_path,
 };
 
 /// Owned snapshot clone of the runtime state tree.
@@ -219,7 +219,7 @@ impl StateStore {
         &self,
         revision: Revision,
         mutations: &[NormalizedMutation],
-    ) -> Vec<NormalizedMutation> {
+    ) -> Vec<AppliedChange> {
         self.apply_with(revision, mutations, |applied| applied)
             .unwrap_or_default()
     }
@@ -231,7 +231,7 @@ impl StateStore {
         on_applied: F,
     ) -> Option<T>
     where
-        F: FnOnce(Vec<NormalizedMutation>) -> T,
+        F: FnOnce(Vec<AppliedChange>) -> T,
     {
         let mut roots = BTreeSet::new();
         for mutation in mutations {
@@ -286,7 +286,7 @@ fn apply_mutation_at_partition(
     root: &mut Value,
     path: &[PathSegment],
     mutation: &NormalizedMutation,
-) -> Option<NormalizedMutation> {
+) -> Option<AppliedChange> {
     let mut changed_fields = Vec::new();
     apply_mutation_at_path(
         root,
@@ -299,12 +299,13 @@ fn apply_mutation_at_partition(
     if changed_fields.is_empty() {
         None
     } else {
-        Some(NormalizedMutation {
-            path: mutation.path.clone(),
-            object: mutation.object.clone(),
-            fields: changed_fields,
-            source: mutation.source,
-        })
+        let (root, _) = partition_path(mutation);
+        Some(AppliedChange::new(
+            root.as_str(),
+            mutation.path.clone(),
+            mutation.object.clone(),
+            changed_fields,
+        ))
     }
 }
 
@@ -451,7 +452,7 @@ fn apply_mutation_at_path(
     path: &[PathSegment],
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
-    changed_fields: &mut Vec<crate::events::FieldMutation>,
+    changed_fields: &mut Vec<String>,
 ) {
     if path.is_empty() {
         apply_fields(cursor, object, fields, changed_fields);
@@ -468,7 +469,7 @@ fn apply_fields(
     cursor: &mut Value,
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
-    changed_fields: &mut Vec<crate::events::FieldMutation>,
+    changed_fields: &mut Vec<String>,
 ) {
     if !cursor.is_object() {
         *cursor = Value::Object(Map::new());
@@ -496,7 +497,7 @@ fn apply_fields(
             map.insert(field.field.clone(), field.value.clone());
         }
 
-        changed_fields.push(field.clone());
+        changed_fields.push(field.field.clone());
     }
 }
 
