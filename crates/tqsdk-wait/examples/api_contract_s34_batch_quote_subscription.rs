@@ -7,7 +7,7 @@
 //!
 //! API contract:
 //! - `TqApi::quotes([...]).await` 返回 symbol-indexed `QuoteSet`
-//! - `QuoteSet::iter()` 可配合 `WaitStep::is_changing(...)`
+//! - `QuoteSet::changed_snapshots(&step)` 只读取本轮变化的已订阅 quote
 //! - 底层订阅意图由 shared session 统一去重和恢复
 
 use std::time::Duration;
@@ -48,11 +48,8 @@ async fn print_first_batch(
 ) -> Result<(), Box<dyn std::error::Error>> {
     while let Some(step) = api.step_until(Some(deadline)).await? {
         let mut printed = false;
-        for quote in quotes.iter() {
-            if step.is_changing(quote)
-                && let Some(snapshot) = quote.changed_snapshot(&step)?
-                && !snapshot.datetime.is_empty()
-            {
+        for snapshot in quotes.changed_snapshots(&step)? {
+            if !snapshot.datetime.is_empty() {
                 println!(
                     "symbol={} datetime={} last_price={}",
                     snapshot.instrument_id, snapshot.datetime, snapshot.last_price
