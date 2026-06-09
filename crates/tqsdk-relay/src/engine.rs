@@ -15,6 +15,7 @@ use crate::observability::{
     DEFAULT_DATA_STALE_AFTER_SECS, HealthSnapshot, MetricsSnapshot, RelaySourceStatus,
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
+use crate::symbol_metrics::{SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolTelemetryStore};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownstreamFrame {
@@ -28,6 +29,7 @@ pub struct RelayEngine {
     interests: InterestRegistry,
     bootstrap: BootstrapQueue,
     klines: HashMap<SourceKey, KlineSynthesis>,
+    symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
     ticks_ingested: u64,
     upstream_symbols: usize,
@@ -50,6 +52,7 @@ impl RelayEngine {
             interests: InterestRegistry::default(),
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
+            symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
             ticks_ingested: 0,
             upstream_symbols: 0,
@@ -93,10 +96,30 @@ impl RelayEngine {
         symbol: impl AsRef<str>,
         row: RelayTickRow,
     ) -> RelayResult<Vec<DownstreamFrame>> {
+        self.ingest_tick_at(symbol, row, current_unix_millis())
+    }
+
+    pub fn ingest_tick_at_for_test(
+        &mut self,
+        symbol: impl AsRef<str>,
+        row: RelayTickRow,
+        receive_unix_millis: u64,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        self.ingest_tick_at(symbol, row, receive_unix_millis)
+    }
+
+    fn ingest_tick_at(
+        &mut self,
+        symbol: impl AsRef<str>,
+        row: RelayTickRow,
+        receive_unix_millis: u64,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
         let symbol = symbol.as_ref();
         self.ticks_ingested = self.ticks_ingested.saturating_add(1);
         self.upstream_status = RelaySourceStatus::Up;
-        self.record_data_activity_at(current_unix_secs());
+        self.record_data_activity_at(receive_unix_millis / 1_000);
+        self.symbol_metrics
+            .record_tick_at(symbol, &row, receive_unix_millis);
         self.cache.push_tick(symbol, row.clone());
         let mut frames = self.quote_frames(symbol);
         frames.extend(self.kline_frames(symbol, row)?);
@@ -130,6 +153,32 @@ impl RelayEngine {
             warn_chars.is_some_and(|warn_chars| upstream_ins_list_chars > warn_chars);
         self.last_universe_refresh_unix_secs = Some(unix_secs);
         self.last_universe_refresh_error = None;
+    }
+
+    pub fn record_universe_refresh_success_for_symbols<I, S>(
+        &mut self,
+        symbols: I,
+        upstream_ins_list_chars: usize,
+        warn_chars: Option<usize>,
+        max_chars: Option<usize>,
+        unix_secs: u64,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols: Vec<String> = symbols
+            .into_iter()
+            .map(|symbol| symbol.as_ref().to_string())
+            .collect();
+        self.record_universe_refresh_success(
+            symbols.len(),
+            upstream_ins_list_chars,
+            warn_chars,
+            max_chars,
+            unix_secs,
+        );
+        self.symbol_metrics
+            .record_universe(symbols, unix_secs.saturating_mul(1_000));
     }
 
     pub fn record_universe_refresh_error(&mut self, message: impl Into<String>, unix_secs: u64) {
@@ -218,6 +267,25 @@ impl RelayEngine {
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
         }
+    }
+
+    #[must_use]
+    pub fn symbol_metrics_snapshot_at(
+        &self,
+        now_unix_millis: u64,
+        query: &SymbolMetricsQuery,
+    ) -> SymbolMetricsSnapshot {
+        self.symbol_metrics.snapshot_at(
+            now_unix_millis,
+            DEFAULT_DATA_STALE_AFTER_SECS.saturating_mul(1_000),
+            &self.interests.symbol_subscription_counts(),
+            query,
+        )
+    }
+
+    #[must_use]
+    pub fn symbol_metrics_snapshot(&self, query: &SymbolMetricsQuery) -> SymbolMetricsSnapshot {
+        self.symbol_metrics_snapshot_at(current_unix_millis(), query)
     }
 
     fn quote_frames(&self, symbol: &str) -> Vec<DownstreamFrame> {
@@ -357,4 +425,12 @@ fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }

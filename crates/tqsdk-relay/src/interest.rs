@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol::SetChartCommand;
+use crate::symbol_metrics::SymbolSubscriptionCounts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClientId(u64);
@@ -133,5 +134,27 @@ impl InterestRegistry {
     #[must_use]
     pub fn total_chart_subscriptions(&self) -> usize {
         self.chart_mappings.len()
+    }
+
+    #[must_use]
+    pub fn symbol_subscription_counts(&self) -> BTreeMap<String, SymbolSubscriptionCounts> {
+        let mut counts = BTreeMap::new();
+        for symbols in self.client_quotes.values() {
+            for symbol in symbols {
+                counts
+                    .entry(symbol.clone())
+                    .or_insert_with(SymbolSubscriptionCounts::default)
+                    .quote_subscriber_count += 1;
+            }
+        }
+        for source in self.chart_mappings.values() {
+            for symbol in &source.symbols {
+                counts
+                    .entry(symbol.clone())
+                    .or_insert_with(SymbolSubscriptionCounts::default)
+                    .chart_subscriber_count += 1;
+            }
+        }
+        counts
     }
 }
