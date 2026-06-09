@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
 use serde_json::Value;
+use tqsdk_core::Quote;
 #[cfg(feature = "server")]
 use tqsdk_core::internal::WebSocketTransport;
 #[cfg(feature = "server")]
@@ -16,17 +17,35 @@ pub struct UpstreamTick {
     pub row: RelayTickRow,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct UpstreamTickDecodeReport {
+#[derive(Debug, Clone)]
+pub struct UpstreamQuote {
+    pub symbol: String,
+    pub quote: Quote,
+}
+
+#[derive(Debug, Clone)]
+pub enum UpstreamMarketEvent {
+    Tick(UpstreamTick),
+    Quote(Box<UpstreamQuote>),
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamMarketDecodeReport {
     ticks: Vec<UpstreamTick>,
+    quotes: Vec<UpstreamQuote>,
     invalid_rows: u64,
     last_invalid_row_error: Option<String>,
 }
 
-impl UpstreamTickDecodeReport {
+impl UpstreamMarketDecodeReport {
     #[must_use]
     pub fn ticks(&self) -> &[UpstreamTick] {
         &self.ticks
+    }
+
+    #[must_use]
+    pub fn quotes(&self) -> &[UpstreamQuote] {
+        &self.quotes
     }
 
     #[must_use]
@@ -43,10 +62,34 @@ impl UpstreamTickDecodeReport {
     pub fn into_ticks(self) -> Vec<UpstreamTick> {
         self.ticks
     }
+
+    #[must_use]
+    pub fn into_events(self) -> Vec<UpstreamMarketEvent> {
+        self.ticks
+            .into_iter()
+            .map(UpstreamMarketEvent::Tick)
+            .chain(
+                self.quotes
+                    .into_iter()
+                    .map(|quote| UpstreamMarketEvent::Quote(Box::new(quote))),
+            )
+            .collect()
+    }
 }
+
+pub type UpstreamTickDecodeReport = UpstreamMarketDecodeReport;
 
 pub trait UpstreamTickSource {
     fn next_tick(&mut self) -> impl std::future::Future<Output = Option<UpstreamTick>> + Send + '_;
+
+    fn next_event(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<UpstreamMarketEvent>> + Send + '_
+    where
+        Self: Send,
+    {
+        async { self.next_tick().await.map(UpstreamMarketEvent::Tick) }
+    }
 
     fn take_invalid_tick_rows(&mut self) -> u64 {
         0
@@ -58,51 +101,73 @@ pub trait UpstreamTickSource {
 }
 
 pub fn decode_upstream_ticks(frame: Value) -> RelayResult<Vec<UpstreamTick>> {
-    decode_upstream_tick_report(frame).map(UpstreamTickDecodeReport::into_ticks)
+    decode_upstream_tick_report(frame).map(UpstreamMarketDecodeReport::into_ticks)
 }
 
 pub fn decode_upstream_tick_report(frame: Value) -> RelayResult<UpstreamTickDecodeReport> {
+    decode_upstream_market_report(frame)
+}
+
+pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarketDecodeReport> {
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
-        return Ok(UpstreamTickDecodeReport {
+        return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
+            quotes: Vec::new(),
             invalid_rows: 0,
             last_invalid_row_error: None,
         });
     }
     let Some(data) = frame.get("data").and_then(Value::as_array) else {
-        return Ok(UpstreamTickDecodeReport {
+        return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
+            quotes: Vec::new(),
             invalid_rows: 0,
             last_invalid_row_error: None,
         });
     };
     let mut ticks = Vec::new();
+    let mut quotes = Vec::new();
     let mut invalid_rows = 0_u64;
     let mut last_invalid_row_error = None;
     for fragment in data {
-        let Some(symbols) = fragment.get("ticks").and_then(Value::as_object) else {
-            continue;
-        };
-        for (symbol, series) in symbols {
-            let Some(rows) = series.get("data").and_then(Value::as_object) else {
-                continue;
-            };
-            for (row_id, row) in rows {
-                match decode_tick_row(row_id, row) {
-                    Ok(row) => ticks.push(UpstreamTick {
-                        symbol: symbol.clone(),
-                        row,
-                    }),
-                    Err(error) => {
-                        invalid_rows = invalid_rows.saturating_add(1);
-                        last_invalid_row_error = Some(format!("{symbol} row {row_id}: {error}"));
+        if let Some(symbols) = fragment.get("ticks").and_then(Value::as_object) {
+            for (symbol, series) in symbols {
+                let Some(rows) = series.get("data").and_then(Value::as_object) else {
+                    continue;
+                };
+                for (row_id, row) in rows {
+                    match decode_tick_row(row_id, row) {
+                        Ok(row) => ticks.push(UpstreamTick {
+                            symbol: symbol.clone(),
+                            row,
+                        }),
+                        Err(error) => {
+                            invalid_rows = invalid_rows.saturating_add(1);
+                            last_invalid_row_error =
+                                Some(format!("{symbol} row {row_id}: {error}"));
+                        }
                     }
                 }
             }
         }
+        if let Some(symbols) = fragment.get("quotes").and_then(Value::as_object) {
+            for (symbol, quote) in symbols {
+                let mut quote = serde_json::from_value::<Quote>(quote.clone()).map_err(|err| {
+                    RelayError::invalid_protocol(format!("invalid upstream quote row: {err}"))
+                })?;
+                if quote.instrument_id.is_empty() {
+                    quote.instrument_id = symbol.clone();
+                }
+                quotes.push(UpstreamQuote {
+                    symbol: symbol.clone(),
+                    quote,
+                });
+            }
+        }
     }
-    Ok(UpstreamTickDecodeReport {
+    Ok(UpstreamMarketDecodeReport {
         ticks,
+        quotes,
         invalid_rows,
         last_invalid_row_error,
     })
@@ -214,25 +279,39 @@ impl UpstreamTickChart {
 
 #[derive(Debug, Default)]
 pub struct FakeUpstreamTickSource {
-    ticks: VecDeque<UpstreamTick>,
+    events: VecDeque<UpstreamMarketEvent>,
 }
 
 impl FakeUpstreamTickSource {
     pub fn push(&mut self, tick: UpstreamTick) {
-        self.ticks.push_back(tick);
+        self.events.push_back(UpstreamMarketEvent::Tick(tick));
+    }
+
+    pub fn push_quote(&mut self, quote: UpstreamQuote) {
+        self.events
+            .push_back(UpstreamMarketEvent::Quote(Box::new(quote)));
     }
 }
 
 impl UpstreamTickSource for FakeUpstreamTickSource {
     async fn next_tick(&mut self) -> Option<UpstreamTick> {
-        self.ticks.pop_front()
+        while let Some(event) = self.events.pop_front() {
+            if let UpstreamMarketEvent::Tick(tick) = event {
+                return Some(tick);
+            }
+        }
+        None
+    }
+
+    async fn next_event(&mut self) -> Option<UpstreamMarketEvent> {
+        self.events.pop_front()
     }
 }
 
 #[cfg(feature = "server")]
 pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
-    buffered: VecDeque<UpstreamTick>,
+    buffered: VecDeque<UpstreamMarketEvent>,
     closed: bool,
     invalid_tick_rows: u64,
     last_invalid_tick_row_error: Option<String>,
@@ -265,6 +344,11 @@ impl WebSocketUpstreamTickSource {
 
     async fn subscribe_tick_chart(&mut self, chart: &UpstreamTickChart) -> RelayResult<()> {
         self.send_json(serde_json::json!({
+            "aid": "subscribe_quote",
+            "ins_list": chart.ins_list(),
+        }))
+        .await?;
+        self.send_json(serde_json::json!({
             "aid": "set_chart",
             "chart_id": chart.chart_id(),
             "ins_list": chart.ins_list(),
@@ -288,27 +372,27 @@ impl WebSocketUpstreamTickSource {
             .map_err(|err| RelayError::Transport(format!("upstream websocket send failed: {err}")))
     }
 
-    async fn recv_ticks(&mut self) -> RelayResult<Option<Vec<UpstreamTick>>> {
+    async fn recv_events(&mut self) -> RelayResult<Option<Vec<UpstreamMarketEvent>>> {
         match self.transport.recv().await {
             Ok(RawFrame::Text(text)) => {
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let report = decode_upstream_tick_report(value)?;
+                let report = decode_upstream_market_report(value)?;
                 self.record_decode_report(&report);
-                let ticks = report.into_ticks();
+                let events = report.into_events();
                 self.send_peek_message().await?;
-                Ok(Some(ticks))
+                Ok(Some(events))
             }
             Ok(RawFrame::Binary(bytes)) => {
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let report = decode_upstream_tick_report(value)?;
+                let report = decode_upstream_market_report(value)?;
                 self.record_decode_report(&report);
-                let ticks = report.into_ticks();
+                let events = report.into_events();
                 self.send_peek_message().await?;
-                Ok(Some(ticks))
+                Ok(Some(events))
             }
             Ok(RawFrame::Ping | RawFrame::Pong) => {
                 self.send_peek_message().await?;
@@ -321,7 +405,7 @@ impl WebSocketUpstreamTickSource {
         }
     }
 
-    fn record_decode_report(&mut self, report: &UpstreamTickDecodeReport) {
+    fn record_decode_report(&mut self, report: &UpstreamMarketDecodeReport) {
         self.invalid_tick_rows = self.invalid_tick_rows.saturating_add(report.invalid_rows());
         if let Some(error) = report.last_invalid_row_error() {
             self.last_invalid_tick_row_error = Some(error.to_owned());
@@ -332,16 +416,25 @@ impl WebSocketUpstreamTickSource {
 #[cfg(feature = "server")]
 impl UpstreamTickSource for WebSocketUpstreamTickSource {
     async fn next_tick(&mut self) -> Option<UpstreamTick> {
-        loop {
-            if let Some(tick) = self.buffered.pop_front() {
+        while let Some(event) = self.next_event().await {
+            if let UpstreamMarketEvent::Tick(tick) = event {
                 return Some(tick);
+            }
+        }
+        None
+    }
+
+    async fn next_event(&mut self) -> Option<UpstreamMarketEvent> {
+        loop {
+            if let Some(event) = self.buffered.pop_front() {
+                return Some(event);
             }
             if self.closed {
                 return None;
             }
-            match self.recv_ticks().await {
-                Ok(Some(ticks)) => {
-                    self.buffered.extend(ticks);
+            match self.recv_events().await {
+                Ok(Some(events)) => {
+                    self.buffered.extend(events);
                 }
                 Ok(None) | Err(_) => {
                     self.closed = true;

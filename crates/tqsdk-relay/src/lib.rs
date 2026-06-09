@@ -61,6 +61,7 @@ pub use universe::{
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;
 pub use upstream::{
-    FakeUpstreamTickSource, UpstreamTick, UpstreamTickChart, UpstreamTickDecodeReport,
-    UpstreamTickSource, decode_upstream_tick_report, decode_upstream_ticks,
+    FakeUpstreamTickSource, UpstreamMarketDecodeReport, UpstreamMarketEvent, UpstreamQuote,
+    UpstreamTick, UpstreamTickChart, UpstreamTickDecodeReport, UpstreamTickSource,
+    decode_upstream_market_report, decode_upstream_tick_report, decode_upstream_ticks,
 };

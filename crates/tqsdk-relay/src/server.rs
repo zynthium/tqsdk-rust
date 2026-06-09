@@ -12,7 +12,7 @@ use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
 use crate::interest::ClientId;
 use crate::protocol::DownstreamCommand;
-use crate::upstream::UpstreamTickSource;
+use crate::upstream::{UpstreamMarketEvent, UpstreamTickSource};
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -71,12 +71,12 @@ impl RelayServer {
 
     pub async fn pump_upstream_once<S>(&self, source: &mut S) -> RelayResult<usize>
     where
-        S: UpstreamTickSource,
+        S: UpstreamTickSource + Send,
     {
-        let tick = source.next_tick().await;
+        let event = source.next_event().await;
         let invalid_rows = source.take_invalid_tick_rows();
         let last_error = source.take_last_invalid_tick_row_error();
-        let Some(tick) = tick else {
+        let Some(event) = event else {
             let mut engine = self
                 .engine
                 .lock()
@@ -90,7 +90,7 @@ impl RelayServer {
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
             engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
-            engine.ingest_tick(tick.symbol, tick.row)?
+            ingest_upstream_event(&mut engine, event)?
         };
         self.dispatch_frames(frames)
     }
@@ -101,14 +101,14 @@ impl RelayServer {
         mut shutdown: oneshot::Receiver<()>,
     ) -> RelayResult<usize>
     where
-        S: UpstreamTickSource,
+        S: UpstreamTickSource + Send,
     {
         let mut sent = 0_usize;
         loop {
-            let tick = tokio::select! {
+            let event = tokio::select! {
                 biased;
                 _ = &mut shutdown => return Ok(sent),
-                tick = source.next_tick() => tick,
+                event = source.next_event() => event,
             };
             let invalid_rows = source.take_invalid_tick_rows();
             let last_error = source.take_last_invalid_tick_row_error();
@@ -118,10 +118,10 @@ impl RelayServer {
                     .lock()
                     .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
                 engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
-                let Some(tick) = tick else {
+                let Some(event) = event else {
                     return Ok(sent);
                 };
-                engine.ingest_tick(tick.symbol, tick.row)?
+                ingest_upstream_event(&mut engine, event)?
             };
             sent = sent.saturating_add(self.dispatch_frames(frames)?);
         }
@@ -235,6 +235,16 @@ impl RelayServer {
             .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
             .insert(client_id, sender);
         Ok(receiver)
+    }
+}
+
+fn ingest_upstream_event(
+    engine: &mut RelayEngine,
+    event: UpstreamMarketEvent,
+) -> RelayResult<Vec<DownstreamFrame>> {
+    match event {
+        UpstreamMarketEvent::Tick(tick) => engine.ingest_tick(tick.symbol, tick.row),
+        UpstreamMarketEvent::Quote(quote) => engine.ingest_quote(quote.symbol, quote.quote),
     }
 }
 
