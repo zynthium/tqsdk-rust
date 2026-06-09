@@ -15,8 +15,9 @@ pub enum SymbolStatus {
     Inactive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SymbolSort {
+    #[default]
     SymbolAsc,
     StatusAsc,
     ReceiveGapDesc,
@@ -24,31 +25,13 @@ pub enum SymbolSort {
     TicksIngestedDesc,
 }
 
-impl Default for SymbolSort {
-    fn default() -> Self {
-        Self::SymbolAsc
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolMetricsQuery {
     pub statuses: Vec<SymbolStatus>,
     pub subscribed_only: bool,
     pub q: Option<String>,
     pub sort: SymbolSort,
     pub limit: Option<usize>,
-}
-
-impl Default for SymbolMetricsQuery {
-    fn default() -> Self {
-        Self {
-            statuses: Vec::new(),
-            subscribed_only: false,
-            q: None,
-            sort: SymbolSort::default(),
-            limit: None,
-        }
-    }
 }
 
 impl SymbolMetricsQuery {
@@ -85,7 +68,7 @@ pub struct SymbolSubscriptionCounts {
     pub chart_subscriber_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SymbolTelemetry {
     ticks_ingested: u64,
     last_receive_unix_millis: Option<u64>,
@@ -95,21 +78,6 @@ pub struct SymbolTelemetry {
     last_open_interest: Option<i64>,
     invalid_rows: u64,
     last_invalid_row_error: Option<String>,
-}
-
-impl Default for SymbolTelemetry {
-    fn default() -> Self {
-        Self {
-            ticks_ingested: 0,
-            last_receive_unix_millis: None,
-            last_tick_datetime_ns: None,
-            last_price: None,
-            last_volume: None,
-            last_open_interest: None,
-            invalid_rows: 0,
-            last_invalid_row_error: None,
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]
