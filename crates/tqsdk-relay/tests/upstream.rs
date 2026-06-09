@@ -105,6 +105,19 @@ fn config_builds_upstream_tick_chart_from_futures_symbols() {
 }
 
 #[test]
+fn config_uses_configured_upstream_tick_view_width() {
+    let config = RelayConfig {
+        futures_symbols: vec!["SHFE.au2602".to_string()],
+        upstream_tick_view_width: 1,
+        ..RelayConfig::default()
+    };
+
+    let chart = config.upstream_tick_chart().unwrap().unwrap();
+
+    assert_eq!(chart.view_width(), 1);
+}
+
+#[test]
 fn config_omits_upstream_tick_chart_without_futures_symbols() {
     let config = RelayConfig::default();
 

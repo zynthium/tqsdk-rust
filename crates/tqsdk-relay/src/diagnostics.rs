@@ -16,6 +16,7 @@ pub struct RelayStartupReport {
     pub refresh_schedule: String,
     pub futures_metadata_batch_size: usize,
     pub upstream_symbols: usize,
+    pub upstream_tick_view_width: usize,
     pub upstream_ins_list_chars: usize,
     pub upstream_ins_list_warn_chars: Option<usize>,
     pub upstream_ins_list_max_chars: Option<usize>,
@@ -37,6 +38,10 @@ impl RelayStartupReport {
             refresh_schedule: refresh_schedule(config.futures_universe_refresh),
             futures_metadata_batch_size: config.futures_metadata_batch_size,
             upstream_symbols: chart.map_or(0, |chart| chart.symbols().len()),
+            upstream_tick_view_width: chart.map_or(
+                config.upstream_tick_view_width,
+                UpstreamTickChart::view_width,
+            ),
             upstream_ins_list_chars,
             upstream_ins_list_warn_chars: config.upstream_ins_list_limits.warn_chars,
             upstream_ins_list_max_chars: config.upstream_ins_list_limits.max_chars,

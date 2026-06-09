@@ -27,6 +27,7 @@ fn default_config_is_memory_only_and_local() {
     );
     assert_eq!(config.tick_ring_capacity, 200_000);
     assert_eq!(config.kline_ring_capacity, 10_000);
+    assert_eq!(config.upstream_tick_view_width, 10_000);
     assert_eq!(config.futures_metadata_batch_size, 500);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
     assert_eq!(
@@ -88,6 +89,17 @@ fn config_loads_ring_capacities_from_env() {
 
     assert_eq!(config.tick_ring_capacity, 20_000);
     assert_eq!(config.kline_ring_capacity, 2_000);
+}
+
+#[test]
+fn config_loads_upstream_tick_view_width_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH" => Some("1".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.upstream_tick_view_width, 1);
 }
 
 #[test]
@@ -288,6 +300,20 @@ fn config_rejects_zero_ring_capacity_from_env() {
     assert_eq!(
         err.to_string(),
         "invalid relay config: TQSDK_RELAY_TICK_RING_CAPACITY must be greater than zero"
+    );
+}
+
+#[test]
+fn config_rejects_zero_upstream_tick_view_width_from_env() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH" => Some("0".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH must be greater than zero"
     );
 }
 

@@ -327,6 +327,7 @@ fn startup_report_serializes_operational_summary() {
     let line = report.log_line();
 
     assert_eq!(report.upstream_symbols, 2);
+    assert_eq!(report.upstream_tick_view_width, 10_000);
     assert_eq!(
         report.upstream_ins_list_chars,
         "DCE.m2609,SHFE.au2602".len()
@@ -334,5 +335,6 @@ fn startup_report_serializes_operational_summary() {
     assert_eq!(report.upstream_source, "static-symbols");
     assert!(line.contains("\"event\":\"relay_startup\""));
     assert!(line.contains("\"upstream_symbols\":2"));
+    assert!(line.contains("\"upstream_tick_view_width\":10000"));
     assert!(line.contains("\"metrics_listen\":\"127.0.0.1:7789\""));
 }
