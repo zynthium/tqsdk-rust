@@ -114,7 +114,7 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(metrics["upstream_symbols"], 0);
 
     let symbol_metrics = wait_for_http_json(metrics_addr, "/symbol-metrics", &mut child);
-    assert_eq!(symbol_metrics["now_unix_millis"].is_number(), true);
+    assert!(symbol_metrics["now_unix_millis"].is_number());
     assert_eq!(symbol_metrics["data_stale_after_millis"], 30_000);
     assert_eq!(symbol_metrics["summary"]["total"], 0);
     assert_eq!(symbol_metrics["symbols"].as_array().unwrap().len(), 0);
