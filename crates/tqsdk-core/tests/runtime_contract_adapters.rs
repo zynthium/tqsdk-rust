@@ -1300,6 +1300,173 @@ fn default_protocol_adapters_decode_live_serial_data_shapes_into_typed_mutations
     );
 }
 
+#[test]
+fn market_adapter_decodes_quote_payload_with_golden_fast_path_contract() {
+    let market = decode_market_payload(json!({
+        "aid": "rtn_data",
+        "data": [{
+            "quotes": {
+                "SHFE.au2602": {
+                    "last_price": 618.5,
+                    "bid_price1": null
+                }
+            }
+        }]
+    }));
+
+    assert_eq!(
+        market,
+        vec![NormalizedMutation {
+            path: StatePath::new(["quotes", "SHFE.au2602"]),
+            object: Some(ObjectKey::Quote {
+                symbol: Symbol::new("SHFE.au2602"),
+            }),
+            fields: vec![
+                FieldMutation {
+                    field: "bid_price1".to_string(),
+                    value: Value::Null,
+                },
+                FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(618.5),
+                },
+            ],
+            source: MutationSource::MarketDiff,
+        }]
+    );
+}
+
+#[test]
+fn market_adapter_preserves_mixed_rtn_data_order_around_quotes() {
+    let market = decode_market_payload(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "trading_status": {
+                    "SHFE.au2602": {
+                        "symbol": "SHFE.au2602",
+                        "trade_status": "CONTINOUS"
+                    }
+                }
+            },
+            {
+                "quotes": {
+                    "SHFE.au2602": {
+                        "last_price": 618.5
+                    }
+                }
+            },
+            {
+                "charts": {
+                    "chart-1": {
+                        "left_id": 40,
+                        "right_id": 42,
+                        "more_data": false
+                    }
+                }
+            }
+        ]
+    }));
+
+    assert_eq!(
+        market,
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["trading_status", "SHFE.au2602"]),
+                object: Some(ObjectKey::TradingStatus {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "symbol".to_string(),
+                        value: json!("SHFE.au2602"),
+                    },
+                    FieldMutation {
+                        field: "trade_status".to_string(),
+                        value: json!("CONTINOUS"),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2602"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(618.5),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["charts", "chart-1"]),
+                object: Some(ObjectKey::Chart {
+                    chart_id: ChartId::new("chart-1"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "left_id".to_string(),
+                        value: json!(40),
+                    },
+                    FieldMutation {
+                        field: "more_data".to_string(),
+                        value: json!(false),
+                    },
+                    FieldMutation {
+                        field: "right_id".to_string(),
+                        value: json!(42),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+        ]
+    );
+}
+
+#[test]
+fn market_adapter_falls_back_for_nested_quote_like_shapes() {
+    let market = decode_market_payload(json!({
+        "aid": "rtn_data",
+        "data": [{
+            "quotes": {
+                "SHFE.au2602": {
+                    "last_price": 618.5,
+                    "depth": {
+                        "bid_price1": 618.0
+                    }
+                }
+            }
+        }]
+    }));
+
+    assert_eq!(
+        market,
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2602"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(618.5),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2602", "depth"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "bid_price1".to_string(),
+                    value: json!(618.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+        ]
+    );
+}
+
 fn mutation(prefix: &str, field: &str, value: &str, source: MutationSource) -> NormalizedMutation {
     NormalizedMutation {
         path: StatePath::new([prefix]),
@@ -1436,6 +1603,18 @@ fn trade_adapter_decodes_trade_session_branch_into_session_object() {
             source: MutationSource::TradeReply,
         }]
     );
+}
+
+fn decode_market_payload(payload: Value) -> Vec<NormalizedMutation> {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+    registry
+        .decode_input(&RuntimeInput::Io(tqsdk_core::IoEvent {
+            route: "market.shared".to_string(),
+            domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(payload),
+        }))
+        .unwrap()
 }
 
 fn assert_json_frame(request: &OutboundRequest, expected: Value) {

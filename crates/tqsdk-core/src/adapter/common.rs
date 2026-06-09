@@ -368,12 +368,69 @@ fn decode_json_envelope(
     {
         let mut mutations = Vec::new();
         for item in data {
-            mutations.extend(decode_json_value(item, source, prefix.clone())?);
+            if let Some(decoded) = decode_market_quote_rtn_data_item(item, source, &prefix) {
+                mutations.extend(decoded);
+            } else {
+                mutations.extend(decode_json_value(item, source, prefix.clone())?);
+            }
         }
         return Ok(mutations);
     }
 
     decode_json_value(value, source, prefix)
+}
+
+fn decode_market_quote_rtn_data_item(
+    value: &Value,
+    source: MutationSource,
+    prefix: &[String],
+) -> Option<Vec<NormalizedMutation>> {
+    if source != MutationSource::MarketDiff || !prefix.is_empty() {
+        return None;
+    }
+
+    let item = value.as_object()?;
+    if item.len() != 1 {
+        return None;
+    }
+
+    let quotes = item.get("quotes")?.as_object()?;
+    decode_quote_object_fast_path(quotes)
+}
+
+fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<NormalizedMutation>> {
+    let mut mutations = Vec::with_capacity(quotes.len());
+
+    for (symbol, value) in quotes {
+        let fields = value.as_object()?;
+        if fields.values().any(Value::is_object) {
+            return None;
+        }
+
+        let mut fields = fields
+            .iter()
+            .map(|(field, value)| FieldMutation {
+                field: field.clone(),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        fields.sort_by(|left, right| left.field.cmp(&right.field));
+
+        if fields.is_empty() {
+            continue;
+        }
+
+        mutations.push(NormalizedMutation {
+            path: StatePath::new(["quotes", symbol.as_str()]),
+            object: Some(ObjectKey::Quote {
+                symbol: Symbol::new(symbol.clone()),
+            }),
+            fields,
+            source: MutationSource::MarketDiff,
+        });
+    }
+
+    Some(mutations)
 }
 
 fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
