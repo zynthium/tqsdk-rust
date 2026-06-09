@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use tqsdk_core::Kline;
 
 /// Owned snapshot of the current kline serial window.
@@ -8,6 +10,123 @@ pub struct KlineWindow {
     view_width: usize,
     chart_id: String,
     rows: Vec<Kline>,
+}
+
+/// One row in a multi-contract kline serial, aligned on the primary symbol id.
+#[derive(Debug, Clone, Default)]
+pub struct MultiKlineRow {
+    primary_id: i64,
+    rows: BTreeMap<String, Kline>,
+}
+
+impl MultiKlineRow {
+    #[must_use]
+    pub fn new(primary_id: i64, rows: BTreeMap<String, Kline>) -> Self {
+        Self { primary_id, rows }
+    }
+
+    #[must_use]
+    pub fn primary_id(&self) -> i64 {
+        self.primary_id
+    }
+
+    #[must_use]
+    pub fn get(&self, symbol: &str) -> Option<&Kline> {
+        self.rows.get(symbol)
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &BTreeMap<String, Kline> {
+        &self.rows
+    }
+}
+
+/// Owned snapshot of a multi-contract kline serial window.
+#[derive(Debug, Clone, Default)]
+pub struct MultiKlineWindow {
+    symbols: Vec<String>,
+    duration_ns: i64,
+    view_width: usize,
+    chart_id: String,
+    rows: Vec<MultiKlineRow>,
+}
+
+impl MultiKlineWindow {
+    #[must_use]
+    pub fn new(
+        symbols: Vec<String>,
+        duration_ns: i64,
+        view_width: usize,
+        chart_id: String,
+        rows: Vec<MultiKlineRow>,
+    ) -> Self {
+        Self {
+            symbols,
+            duration_ns,
+            view_width,
+            chart_id,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[MultiKlineRow] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Vec<MultiKlineRow> {
+        self.rows
+    }
+
+    #[must_use]
+    pub fn first(&self) -> Option<&MultiKlineRow> {
+        self.rows.first()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&MultiKlineRow> {
+        self.rows.last()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &MultiKlineRow> {
+        self.rows.iter()
+    }
+
+    #[must_use]
+    pub fn symbols(&self) -> Vec<&str> {
+        self.symbols.iter().map(String::as_str).collect()
+    }
+
+    #[must_use]
+    pub fn primary_symbol(&self) -> &str {
+        self.symbols.first().map_or("", String::as_str)
+    }
+
+    #[must_use]
+    pub fn duration_ns(&self) -> i64 {
+        self.duration_ns
+    }
+
+    #[must_use]
+    pub fn view_width(&self) -> usize {
+        self.view_width
+    }
+
+    #[must_use]
+    pub fn chart_id(&self) -> &str {
+        &self.chart_id
+    }
 }
 
 impl KlineWindow {

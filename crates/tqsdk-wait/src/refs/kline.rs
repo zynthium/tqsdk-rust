@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tqsdk_core::{ChartId, Kline, MarketStateReadGuard, ObjectKey, StatePath};
 
 use crate::{
     change::ChangeTrackedRef,
     step::{WaitReadHandle, WaitStep},
-    views::KlineWindow,
+    views::{KlineWindow, MultiKlineRow, MultiKlineWindow},
 };
 
 /// Handle to a subscribed kline chart plus its current materialized window.
@@ -298,4 +298,223 @@ impl ChangeTrackedRef for KlineHandle {
     fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
         self.visit_extra_state_paths(visit);
     }
+}
+
+/// Handle to a multi-contract kline chart aligned by the primary symbol.
+#[derive(Clone)]
+pub struct MultiKlineHandle {
+    reader: WaitReadHandle,
+    symbols: Vec<String>,
+    duration_ns: i64,
+    view_width: usize,
+    chart_id: String,
+}
+
+impl std::fmt::Debug for MultiKlineHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MultiKlineHandle")
+            .field("symbols", &self.symbols)
+            .field("duration_ns", &self.duration_ns)
+            .field("view_width", &self.view_width)
+            .field("chart_id", &self.chart_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MultiKlineHandle {
+    pub(crate) fn new(
+        reader: WaitReadHandle,
+        symbols: Vec<String>,
+        duration_ns: i64,
+        view_width: usize,
+        chart_id: String,
+    ) -> Self {
+        Self {
+            reader,
+            symbols,
+            duration_ns,
+            view_width,
+            chart_id,
+        }
+    }
+
+    pub fn is_ready(&self) -> crate::error::Result<bool> {
+        let guard = self.reader.reader().read_market_state();
+        Ok(chart_is_ready(&guard, self.chart_id.as_str()))
+    }
+
+    pub fn has_rows(&self) -> crate::error::Result<bool> {
+        Ok(!self.window()?.is_empty())
+    }
+
+    pub fn window(&self) -> crate::error::Result<MultiKlineWindow> {
+        let guard = self.reader.reader().read_market_state();
+        let mut rows = Vec::new();
+
+        if let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) {
+            for id in left_id..=right_id {
+                if let Some(row) = self.decode_aligned_row_from_guard(&guard, id)? {
+                    rows.push(row);
+                }
+            }
+        }
+
+        let excess = rows.len().saturating_sub(self.view_width);
+        if excess > 0 {
+            rows.drain(0..excess);
+        }
+
+        Ok(MultiKlineWindow::new(
+            self.symbols.clone(),
+            self.duration_ns,
+            self.view_width,
+            self.chart_id.clone(),
+            rows,
+        ))
+    }
+
+    #[must_use]
+    pub fn symbols(&self) -> Vec<&str> {
+        self.symbols.iter().map(String::as_str).collect()
+    }
+
+    #[must_use]
+    pub fn primary_symbol(&self) -> &str {
+        self.symbols.first().map_or("", String::as_str)
+    }
+
+    #[must_use]
+    pub fn duration_ns(&self) -> i64 {
+        self.duration_ns
+    }
+
+    #[must_use]
+    pub fn view_width(&self) -> usize {
+        self.view_width
+    }
+
+    #[must_use]
+    pub fn chart_id(&self) -> &str {
+        &self.chart_id
+    }
+
+    fn decode_aligned_row_from_guard(
+        &self,
+        guard: &MarketStateReadGuard<'_>,
+        primary_id: i64,
+    ) -> crate::error::Result<Option<MultiKlineRow>> {
+        let Some(primary_symbol) = self.symbols.first() else {
+            return Ok(None);
+        };
+        let Some(primary_row) =
+            decode_kline_row(guard, primary_symbol.as_str(), self.duration_ns, primary_id)?
+        else {
+            return Ok(None);
+        };
+
+        let mut rows = BTreeMap::new();
+        rows.insert(primary_symbol.clone(), primary_row);
+
+        for symbol in self.symbols.iter().skip(1) {
+            let Some(bound_id) = binding_row_id(
+                guard,
+                primary_symbol.as_str(),
+                self.duration_ns,
+                symbol.as_str(),
+                primary_id,
+            ) else {
+                return Ok(None);
+            };
+            let Some(row) = decode_kline_row(guard, symbol.as_str(), self.duration_ns, bound_id)?
+            else {
+                return Ok(None);
+            };
+            rows.insert(symbol.clone(), row);
+        }
+
+        Ok(Some(MultiKlineRow::new(primary_id, rows)))
+    }
+}
+
+impl ChangeTrackedRef for MultiKlineHandle {
+    fn object_key(&self) -> Option<ObjectKey> {
+        Some(ObjectKey::Chart {
+            chart_id: ChartId::new(self.chart_id.clone()),
+        })
+    }
+
+    fn state_path(&self) -> StatePath {
+        StatePath::new(["charts", self.chart_id.as_str()])
+    }
+
+    fn visit_extra_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        let Some(primary_symbol) = self.symbols.first() else {
+            return;
+        };
+        let duration_key = self.duration_ns.to_string();
+        for symbol in &self.symbols {
+            visit(StatePath::new([
+                "klines",
+                symbol.as_str(),
+                duration_key.as_str(),
+                "data",
+            ]));
+        }
+        for symbol in self.symbols.iter().skip(1) {
+            visit(StatePath::new([
+                "klines",
+                primary_symbol.as_str(),
+                duration_key.as_str(),
+                "binding",
+                symbol.as_str(),
+            ]));
+        }
+    }
+
+    fn visit_field_state_paths(&self, visit: &mut dyn FnMut(StatePath)) {
+        self.visit_extra_state_paths(visit);
+    }
+}
+
+fn decode_kline_row(
+    guard: &MarketStateReadGuard<'_>,
+    symbol: &str,
+    duration_ns: i64,
+    id: i64,
+) -> crate::error::Result<Option<Kline>> {
+    let duration_key = duration_ns.to_string();
+    let id_key = id.to_string();
+    guard
+        .decode_path::<Kline>(&[
+            "klines",
+            symbol,
+            duration_key.as_str(),
+            "data",
+            id_key.as_str(),
+        ])
+        .map_err(Into::into)
+}
+
+fn binding_row_id(
+    guard: &MarketStateReadGuard<'_>,
+    primary_symbol: &str,
+    duration_ns: i64,
+    secondary_symbol: &str,
+    primary_id: i64,
+) -> Option<i64> {
+    let duration_key = duration_ns.to_string();
+    let id_key = primary_id.to_string();
+    let value = guard.get_path(&[
+        "klines",
+        primary_symbol,
+        duration_key.as_str(),
+        "binding",
+        secondary_symbol,
+        id_key.as_str(),
+    ])?;
+    let bound_id = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))?;
+    (bound_id >= 0).then_some(bound_id)
 }

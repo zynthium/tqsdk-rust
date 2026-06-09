@@ -135,6 +135,8 @@ wait facade。
 - 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，默认入口仍应是 wait facade 的 `quotes(...).await`。no-scan changed symbols / changed snapshots 属于 wait facade 的已接受后续优化方向，用来避免每轮扫描所有订阅合约；`tqsdk-stream` 不应成为单消费者 quote throughput 的默认答案。
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
+- 多合约 K 线使用 `kline_multi([...], duration, data_length)`，一个 `chart_id` 对应逗号拼接的 `ins_list`。和 Python TqSdk 一样，多合约 K 线启动请求使用 `view_width=10000` 让服务端补齐足够窗口；客户端返回 `MultiKlineWindow`，以第一个合约为主合约，并通过主合约 K 线分区下的 `binding/{secondary}/{primary_id}` 把副合约行对齐到同一行。缺少任一副合约 binding 或 row 的主合约行不会进入窗口。
+- Tick serial 不支持多合约。`tick("A,B", ...)` 会直接报错；需要多个合约 tick 时应分别创建多个单合约 `tick(...)` handle 或使用 stream/event 管线。
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
@@ -180,6 +182,7 @@ session 和 `RuntimeReader`，不会绕过 commit 边界。契约示例见
 实时交易状态、K 线 serial 和 tick serial 属于 wait continuous consumption：
 用户通过 `trading_status`、`kline`、`tick` 获取 live handle；`kline` / `tick`
 不阻塞等待 chart ready，严格等待路径使用 `kline_ready` / `tick_ready`。
+多合约 K 线使用 `kline_multi` 获取 `MultiKlineHandle`；Tick 没有 multi 入口。
 再在 `step()` / `step_until(...)` 后用 `WaitStep::is_changing()` /
 `WaitStep::is_changing_fields()` 判断是否加载当前
 typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `right_id`
@@ -190,6 +193,8 @@ typed status 或窗口。K 线 / Tick window 按对应 chart 的 `left_id` / `ri
 commit 并返回本轮变化涉及的当前窗口 rows。`KlineHandle::is_ready()` /
 `TickHandle::is_ready()` 可用于确认窗口初始化状态，窗口是否已有 rows 由
 `has_rows()` 或 `window()?.is_empty()` 判断。
+`MultiKlineHandle::window()` 返回按主合约 id 排序且截断到 `data_length` 的
+`MultiKlineWindow`；每个 `MultiKlineRow` 通过 `get(symbol)` 读取主/副合约行。
 K 线窗口或 handle 的 `completed_rows()` / `last_completed()` 用于跳过最新可变尾 bar。这不是
 `tqsdk-data` 的历史下载或 mmap 缓存，也不是 `tqsdk-session` 的 metadata direct
 query。契约示例见

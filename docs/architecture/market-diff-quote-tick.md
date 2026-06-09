@@ -135,6 +135,30 @@ charts/kline-au-1m
 klines/SHFE.au2608/60000000000/data/{id}
 ```
 
+多合约 K 线 serial 仍然是一个 `set_chart`，但 `ins_list` 是按传入顺序逗号拼接的
+合约列表，且第一个合约是主合约：
+
+```json
+{
+  "aid": "set_chart",
+  "chart_id": "kline-spread-1m",
+  "ins_list": "SHFE.au2608,DCE.m2609",
+  "duration": 60000000000,
+  "view_width": 10000
+}
+```
+
+服务端会把副合约 K 线通过主合约分区里的 `binding` 对齐到主合约 id。客户端读取
+multi window 时必须以主合约 `charts/{chart_id}.left_id/right_id` 为驱动，并按：
+
+```text
+klines/{primary}/{duration}/binding/{secondary}/{primary_id}
+klines/{secondary}/{duration}/data/{secondary_id}
+```
+
+取得副合约行。没有 binding 或缺少副合约 row 的主合约 id 不进入 multi window。
+Tick serial 不使用这套 binding 语义，仍然只支持单合约 chart。
+
 ## Quote 与 Tick 字段对比
 
 `Quote` 是合约行情和合约元信息的最新快照；`Tick` 是 serial 行。两者都来自

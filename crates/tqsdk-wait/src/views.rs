@@ -3,5 +3,5 @@
 mod kline_window;
 mod tick_window;
 
-pub use kline_window::KlineWindow;
+pub use kline_window::{KlineWindow, MultiKlineRow, MultiKlineWindow};
 pub use tick_window::TickWindow;

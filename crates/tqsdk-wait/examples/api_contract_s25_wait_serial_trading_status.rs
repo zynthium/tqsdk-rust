@@ -12,7 +12,9 @@
 //! API contract:
 //! - `TqApi::trading_status` 返回 diff-backed live trading status ref
 //! - `TqApi::kline` 返回 non-blocking diff-backed realtime K 线窗口 handle
+//! - `TqApi::kline_multi` 返回 non-blocking 多合约 K 线窗口 handle，按主合约 binding 对齐
 //! - `TqApi::tick` 返回 non-blocking diff-backed realtime tick 窗口 handle
+//! - Tick serial 保持单合约；多合约 tick 应拆成多个 `tick(...)` handle 或使用 stream/event
 //! - `TqApi::step_until` 是用户可见状态推进点
 //! - `WaitStep::is_changing` 判断对象是否在当前 commit 中变化
 //! - `WaitStep::is_changing_fields` 判断对象字段是否在当前 commit 中变化
@@ -65,6 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = read_env("TQ_AUTH_USER")?;
     let pass = read_env("TQ_AUTH_PASS")?;
     let symbol = std::env::var("TQ_TEST_SYMBOL").unwrap_or_else(|_| "SHFE.au2602".to_string());
+    let multi_kline_symbols = std::env::var("TQ_MULTI_KLINE_SYMBOLS").ok().map(|symbols| {
+        symbols
+            .split(',')
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    });
     let kline_seconds = read_env_u64("TQ_KLINE_SECONDS", 60);
     let serial_length = read_env_usize("TQ_SERIAL_LENGTH", 32);
 
@@ -77,6 +87,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .kline(&symbol, Duration::from_secs(kline_seconds), serial_length)
         .await?;
     let tick_serial = api.tick(&symbol, serial_length).await?;
+    let multi_kline_serial = match multi_kline_symbols.as_ref() {
+        Some(symbols) if symbols.len() >= 2 => Some(
+            api.kline_multi(
+                symbols.iter().map(String::as_str),
+                Duration::from_secs(kline_seconds),
+                serial_length,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
     while tokio::time::Instant::now() < deadline {
@@ -126,6 +147,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last.map(|row| row.id),
                 last.map(|row| row.last_price)
             );
+        }
+
+        if let Some(multi_kline_serial) = &multi_kline_serial {
+            if multi_kline_serial.is_ready()? && step.is_changing(multi_kline_serial) {
+                let window = multi_kline_serial.window()?;
+                let last_primary_id = window.last().map(|row| row.primary_id());
+                println!(
+                    "multi_kline_window primary={} symbols={:?} len={} last_primary_id={:?}",
+                    window.primary_symbol(),
+                    window.symbols(),
+                    window.len(),
+                    last_primary_id
+                );
+            }
         }
     }
 

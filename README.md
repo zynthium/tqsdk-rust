@@ -166,7 +166,7 @@ api.wait_update(None).await?;
 let snapshot = quotes.get("SHFE.au2602").unwrap().load()?;
 ```
 
-`tqsdk-wait` 的 `quotes(...)` 会一次表达批量 quote interest；`quote(...)` 仍是单合约便利入口。`kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。
+`tqsdk-wait` 的 `quotes(...)` 会一次表达批量 quote interest；`quote(...)` 仍是单合约便利入口。`kline(...)` / `tick(...)` 会立即返回 live serial handle；如果需要在启动阶段等待 chart 初始化，使用 `kline_ready(...)` / `tick_ready(...)`。多合约 K 线序列使用 `kline_multi([...], ...)`：它提交一个共享 `chart_id` 的逗号 `ins_list`，服务端初始 `view_width=10000`，客户端按主合约 `binding` 对齐副合约；Tick 序列保持单合约，逗号合约输入会报错。
 
 ### Advanced Rust async stream facade
 

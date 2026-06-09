@@ -69,6 +69,15 @@ wait adapter 层未来可以提供：
 - `TqApi::kline` / `TqApi::tick` 返回 non-blocking live handle，只提交或复用
   `SetChart`。严格等待 chart 初始化的路径应通过 `kline_ready` / `tick_ready`
   表达；ready 表示 `ready && !more_data`，不代表当前窗口已有 rows。
+- `TqApi::kline_multi([...], duration, data_length)` 是 wait facade 的多合约
+  K 线 serial 入口。它应提交一个共享 `chart_id` 的 `SetChart`，`ins_list`
+  按传入顺序逗号拼接，第一个合约是主合约；服务端初始 `view_width` 使用
+  `10000`，客户端读取主合约 `left_id` / `right_id` 后通过
+  `klines/{primary}/{duration}/binding/{secondary}/{primary_id}` 对齐副合约行，
+  并把最终 owned window 截断到用户请求的 `data_length`。缺少任一副合约
+  binding 或 row 的主合约行不进入窗口。
+- Tick serial 保持单合约语义；wait facade 不提供 multi-tick serial。调用方如需多个
+  tick 窗口，应分别持有多个 `tick(...)` handle，或使用 stream/event 消费形态。
 - 批量实时行情是 wait facade 的一等入口：`TqApi::quotes([...]).await`
   应一次表达一批 quote interest，并返回 symbol-indexed refs。它必须复用
   `tqsdk-session` 的 session-scoped market interest registry，不能在 wait
