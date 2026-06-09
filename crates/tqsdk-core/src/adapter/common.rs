@@ -471,7 +471,10 @@ fn decode_json_value(
 ) -> Result<Vec<NormalizedMutation>> {
     let mut mutations = Vec::new();
     match value {
-        Value::Object(map) => flatten_object(prefix, map, source, &mut mutations),
+        Value::Object(map) => {
+            let mut path = prefix;
+            flatten_object(&mut path, map, source, &mut mutations);
+        }
         _ if !prefix.is_empty() => mutations.push(NormalizedMutation {
             path: StatePath::new(prefix),
             object: None,
@@ -487,7 +490,7 @@ fn decode_json_value(
 }
 
 fn flatten_object(
-    path: Vec<String>,
+    path: &mut Vec<String>,
     map: &Map<String, Value>,
     source: MutationSource,
     out: &mut Vec<NormalizedMutation>,
@@ -495,7 +498,7 @@ fn flatten_object(
     let mut fields = map
         .iter()
         .filter(|(field, value)| {
-            !matches!(value, Value::Object(_)) && !emits_scalar_leaf(&path, field)
+            !matches!(value, Value::Object(_)) && !emits_scalar_leaf(path.as_slice(), field)
         })
         .map(|(field, value)| FieldMutation {
             field: field.clone(),
@@ -503,33 +506,35 @@ fn flatten_object(
         })
         .collect::<Vec<_>>();
     fields.sort_by(|left, right| left.field.cmp(&right.field));
-    inject_market_data_row_id(&path, &mut fields);
+    inject_market_data_row_id(path.as_slice(), &mut fields);
 
     if !path.is_empty() && !fields.is_empty() {
         out.push(NormalizedMutation {
-            path: StatePath::new(path.clone()),
-            object: infer_object_key_from_segments(&path),
+            path: StatePath::new(path.iter().cloned()),
+            object: infer_object_key_from_segments(path.as_slice()),
             fields,
             source,
         });
     }
 
     for (field, value) in map {
-        let mut child_path = path.clone();
-        child_path.push(field.clone());
-
         if let Value::Object(child) = value {
-            flatten_object(child_path, child, source, out);
-        } else if emits_scalar_leaf(&path, field) {
+            path.push(field.clone());
+            flatten_object(path, child, source, out);
+            path.pop();
+        } else if emits_scalar_leaf(path.as_slice(), field) {
+            let object = infer_object_key_from_segments(path.as_slice());
+            path.push(field.clone());
             out.push(NormalizedMutation {
-                path: StatePath::new(child_path),
-                object: infer_object_key_from_segments(&path),
+                path: StatePath::new(path.iter().cloned()),
+                object,
                 fields: vec![FieldMutation {
                     field: "value".to_string(),
                     value: value.clone(),
                 }],
                 source,
             });
+            path.pop();
         }
     }
 }
