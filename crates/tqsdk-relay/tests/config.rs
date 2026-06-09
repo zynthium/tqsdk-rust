@@ -78,6 +78,19 @@ fn config_loads_env_overrides_without_touching_sdk_defaults() {
 }
 
 #[test]
+fn config_loads_ring_capacities_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_TICK_RING_CAPACITY" => Some("20000".to_string()),
+        "TQSDK_RELAY_KLINE_RING_CAPACITY" => Some("2000".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.tick_ring_capacity, 20_000);
+    assert_eq!(config.kline_ring_capacity, 2_000);
+}
+
+#[test]
 fn config_loads_all_futures_products_from_env() {
     let config = RelayConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
@@ -261,6 +274,20 @@ fn config_rejects_zero_ring_capacity() {
     assert_eq!(
         err.to_string(),
         "invalid relay config: tick_ring_capacity must be greater than zero"
+    );
+}
+
+#[test]
+fn config_rejects_zero_ring_capacity_from_env() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_TICK_RING_CAPACITY" => Some("0".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_TICK_RING_CAPACITY must be greater than zero"
     );
 }
 
