@@ -85,6 +85,10 @@ fn metrics_expose_upstream_bootstrap_progress_before_market_data_arrives() {
     assert!(subscribed.upstream_subscription_sent);
     assert_eq!(subscribed.upstream_frames_received, 0);
     assert_eq!(subscribed.last_upstream_frame_unix_secs, None);
+    assert_eq!(
+        subscribed.upstream_stage_started_unix_secs,
+        Some(1_700_000_001)
+    );
 
     engine.record_upstream_frame_received_at(1_700_000_002, 0);
 
@@ -96,6 +100,7 @@ fn metrics_expose_upstream_bootstrap_progress_before_market_data_arrives() {
     assert_eq!(health.upstream_frames_received, 1);
     assert_eq!(health.upstream_events_decoded, 0);
     assert_eq!(health.last_upstream_frame_unix_secs, Some(1_700_000_002));
+    assert_eq!(health.upstream_stage_started_unix_secs, Some(1_700_000_001));
     assert!(!health.upstream_connected);
     assert!(!health.market_data_ready);
 
@@ -106,6 +111,10 @@ fn metrics_expose_upstream_bootstrap_progress_before_market_data_arrives() {
     assert_eq!(metrics.upstream_frames_received, 1);
     assert_eq!(metrics.upstream_events_decoded, 0);
     assert_eq!(metrics.last_upstream_frame_unix_secs, Some(1_700_000_002));
+    assert_eq!(
+        metrics.upstream_stage_started_unix_secs,
+        Some(1_700_000_001)
+    );
 }
 
 #[test]

@@ -112,6 +112,10 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(health["downstream_listening"], true);
     assert_eq!(health["upstream_status"], "connecting");
     assert_eq!(health["upstream_stage"], "connecting");
+    assert_eq!(
+        health["upstream_stage_started_unix_secs"],
+        serde_json::Value::Null
+    );
     assert_eq!(health["upstream_connected"], false);
     assert_eq!(health["upstream_transport_connected"], false);
     assert_eq!(health["upstream_subscription_sent"], false);
@@ -129,6 +133,10 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(metrics["downstream_clients"], 0);
     assert_eq!(metrics["ticks_ingested"], 0);
     assert_eq!(metrics["upstream_stage"], "connecting");
+    assert_eq!(
+        metrics["upstream_stage_started_unix_secs"],
+        serde_json::Value::Null
+    );
     assert_eq!(metrics["upstream_transport_connected"], false);
     assert_eq!(metrics["upstream_subscription_sent"], false);
     assert_eq!(metrics["upstream_frames_received"], 0);
@@ -193,6 +201,8 @@ fn relay_binary_serves_embedded_dashboard_assets() {
     assert!(js.contains("/symbol-metrics"));
     assert!(js.contains("/metrics"));
     assert!(js.contains("upstream_stage"));
+    assert!(js.contains("upstream_stage_started_unix_secs"));
+    assert!(js.contains("backfillProgress"));
 }
 
 struct ChildGuard {
