@@ -1,6 +1,6 @@
 use tqsdk_relay::{
-    ClientId, DownstreamCommand, RelayConfig, RelayEngine, RelaySourceStatus, RelayStartupReport,
-    RelayTickRow, SetChartCommand, UpstreamTickChart,
+    ClientId, DownstreamCommand, RelayConfig, RelayEngine, RelaySourceStage, RelaySourceStatus,
+    RelayStartupReport, RelayTickRow, SetChartCommand, UpstreamTickChart,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -48,6 +48,15 @@ fn health_snapshot_exposes_readiness_dimensions() {
     assert_eq!(initial["universe_ready"], false);
     assert_eq!(initial["data_fresh"], false);
     assert_eq!(initial["market_data_ready"], false);
+    assert_eq!(initial["upstream_stage"], "connecting");
+    assert_eq!(initial["upstream_transport_connected"], false);
+    assert_eq!(initial["upstream_subscription_sent"], false);
+    assert_eq!(initial["upstream_frames_received"], 0);
+    assert_eq!(initial["upstream_events_decoded"], 0);
+    assert_eq!(
+        initial["last_upstream_frame_unix_secs"],
+        serde_json::Value::Null
+    );
 
     engine.record_universe_refresh_success(2, 21, Some(32_000), None, 1_700_000_000);
     engine.ingest_tick("SHFE.au2602", tick(1)).unwrap();
@@ -60,6 +69,43 @@ fn health_snapshot_exposes_readiness_dimensions() {
     assert_eq!(live["market_data_ready"], true);
     assert_eq!(live["upstream_symbols"], 2);
     assert_eq!(live["ticks_ingested"], 1);
+    assert_eq!(live["upstream_stage"], "live");
+}
+
+#[test]
+fn metrics_expose_upstream_bootstrap_progress_before_market_data_arrives() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_upstream_transport_connected_at(1_700_000_000);
+    engine.record_upstream_subscription_sent_at(1_700_000_001);
+
+    let subscribed = engine.health_snapshot_at(1_700_000_001);
+    assert_eq!(subscribed.upstream_stage, RelaySourceStage::Backfilling);
+    assert!(subscribed.upstream_transport_connected);
+    assert!(subscribed.upstream_subscription_sent);
+    assert_eq!(subscribed.upstream_frames_received, 0);
+    assert_eq!(subscribed.last_upstream_frame_unix_secs, None);
+
+    engine.record_upstream_frame_received_at(1_700_000_002, 0);
+
+    let health = engine.health_snapshot_at(1_700_000_003);
+    assert_eq!(health.upstream_status, RelaySourceStatus::Connecting);
+    assert_eq!(health.upstream_stage, RelaySourceStage::Backfilling);
+    assert!(health.upstream_transport_connected);
+    assert!(health.upstream_subscription_sent);
+    assert_eq!(health.upstream_frames_received, 1);
+    assert_eq!(health.upstream_events_decoded, 0);
+    assert_eq!(health.last_upstream_frame_unix_secs, Some(1_700_000_002));
+    assert!(!health.upstream_connected);
+    assert!(!health.market_data_ready);
+
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.upstream_stage, RelaySourceStage::Backfilling);
+    assert!(metrics.upstream_transport_connected);
+    assert!(metrics.upstream_subscription_sent);
+    assert_eq!(metrics.upstream_frames_received, 1);
+    assert_eq!(metrics.upstream_events_decoded, 0);
+    assert_eq!(metrics.last_upstream_frame_unix_secs, Some(1_700_000_002));
 }
 
 #[test]

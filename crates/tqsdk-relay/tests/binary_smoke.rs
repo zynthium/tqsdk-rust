@@ -111,7 +111,16 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(health["process_started"], true);
     assert_eq!(health["downstream_listening"], true);
     assert_eq!(health["upstream_status"], "connecting");
+    assert_eq!(health["upstream_stage"], "connecting");
     assert_eq!(health["upstream_connected"], false);
+    assert_eq!(health["upstream_transport_connected"], false);
+    assert_eq!(health["upstream_subscription_sent"], false);
+    assert_eq!(health["upstream_frames_received"], 0);
+    assert_eq!(health["upstream_events_decoded"], 0);
+    assert_eq!(
+        health["last_upstream_frame_unix_secs"],
+        serde_json::Value::Null
+    );
     assert_eq!(health["universe_ready"], false);
     assert_eq!(health["data_fresh"], false);
     assert_eq!(health["market_data_ready"], false);
@@ -119,6 +128,15 @@ fn relay_binary_serves_health_and_metrics_json() {
     let metrics = wait_for_http_json(metrics_addr, "/metrics", &mut child);
     assert_eq!(metrics["downstream_clients"], 0);
     assert_eq!(metrics["ticks_ingested"], 0);
+    assert_eq!(metrics["upstream_stage"], "connecting");
+    assert_eq!(metrics["upstream_transport_connected"], false);
+    assert_eq!(metrics["upstream_subscription_sent"], false);
+    assert_eq!(metrics["upstream_frames_received"], 0);
+    assert_eq!(metrics["upstream_events_decoded"], 0);
+    assert_eq!(
+        metrics["last_upstream_frame_unix_secs"],
+        serde_json::Value::Null
+    );
     assert_eq!(metrics["upstream_symbols"], 0);
 
     let symbol_metrics = wait_for_http_json(metrics_addr, "/symbol-metrics", &mut child);
@@ -173,6 +191,8 @@ fn relay_binary_serves_embedded_dashboard_assets() {
     let js = wait_for_http_response(metrics_addr, "/dashboard/app.js", &mut child);
     assert!(js.starts_with("HTTP/1.1 200"));
     assert!(js.contains("/symbol-metrics"));
+    assert!(js.contains("/metrics"));
+    assert!(js.contains("upstream_stage"));
 }
 
 struct ChildGuard {

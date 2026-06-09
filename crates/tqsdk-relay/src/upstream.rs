@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::VecDeque;
+#[cfg(feature = "server")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
@@ -27,6 +29,31 @@ pub struct UpstreamQuote {
 pub enum UpstreamMarketEvent {
     Tick(UpstreamTick),
     Quote(Box<UpstreamQuote>),
+}
+
+#[derive(Debug, Clone)]
+pub enum UpstreamSourceUpdate {
+    Event(UpstreamMarketEvent),
+    Progress,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpstreamSourceProgress {
+    pub transport_connected: bool,
+    pub subscription_sent: bool,
+    pub frames_received: u64,
+    pub events_decoded: u64,
+    pub unix_secs: u64,
+}
+
+impl UpstreamSourceProgress {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.transport_connected
+            && !self.subscription_sent
+            && self.frames_received == 0
+            && self.events_decoded == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,12 +118,25 @@ pub trait UpstreamTickSource {
         async { self.next_tick().await.map(UpstreamMarketEvent::Tick) }
     }
 
+    fn next_update(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<UpstreamSourceUpdate>> + Send + '_
+    where
+        Self: Send,
+    {
+        async { self.next_event().await.map(UpstreamSourceUpdate::Event) }
+    }
+
     fn take_invalid_tick_rows(&mut self) -> u64 {
         0
     }
 
     fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
         None
+    }
+
+    fn take_progress(&mut self) -> UpstreamSourceProgress {
+        UpstreamSourceProgress::default()
     }
 }
 
@@ -315,6 +355,7 @@ pub struct WebSocketUpstreamTickSource {
     closed: bool,
     invalid_tick_rows: u64,
     last_invalid_tick_row_error: Option<String>,
+    progress: UpstreamSourceProgress,
 }
 
 #[cfg(feature = "server")]
@@ -324,13 +365,16 @@ impl WebSocketUpstreamTickSource {
         transport.connect().await.map_err(|err| {
             RelayError::Transport(format!("upstream websocket connect failed: {err}"))
         })?;
-        Ok(Self {
+        let mut source = Self {
             transport,
             buffered: VecDeque::new(),
             closed: false,
             invalid_tick_rows: 0,
             last_invalid_tick_row_error: None,
-        })
+            progress: UpstreamSourceProgress::default(),
+        };
+        source.record_transport_connected();
+        Ok(source)
     }
 
     pub async fn connect_with_tick_chart(
@@ -357,7 +401,9 @@ impl WebSocketUpstreamTickSource {
         }))
         .await?;
         self.send_json(serde_json::json!({"aid": "peek_message"}))
-            .await
+            .await?;
+        self.record_subscription_sent();
+        Ok(())
     }
 
     async fn send_peek_message(&mut self) -> RelayResult<()> {
@@ -381,6 +427,7 @@ impl WebSocketUpstreamTickSource {
                 let report = decode_upstream_market_report(value)?;
                 self.record_decode_report(&report);
                 let events = report.into_events();
+                self.record_frame_received(events.len());
                 self.send_peek_message().await?;
                 Ok(Some(events))
             }
@@ -391,10 +438,12 @@ impl WebSocketUpstreamTickSource {
                 let report = decode_upstream_market_report(value)?;
                 self.record_decode_report(&report);
                 let events = report.into_events();
+                self.record_frame_received(events.len());
                 self.send_peek_message().await?;
                 Ok(Some(events))
             }
             Ok(RawFrame::Ping | RawFrame::Pong) => {
+                self.record_frame_received(0);
                 self.send_peek_message().await?;
                 Ok(Some(Vec::new()))
             }
@@ -411,6 +460,25 @@ impl WebSocketUpstreamTickSource {
             self.last_invalid_tick_row_error = Some(error.to_owned());
         }
     }
+
+    fn record_transport_connected(&mut self) {
+        self.progress.transport_connected = true;
+        self.progress.unix_secs = current_unix_secs();
+    }
+
+    fn record_subscription_sent(&mut self) {
+        self.progress.subscription_sent = true;
+        self.progress.unix_secs = current_unix_secs();
+    }
+
+    fn record_frame_received(&mut self, events_decoded: usize) {
+        self.progress.frames_received = self.progress.frames_received.saturating_add(1);
+        self.progress.events_decoded = self
+            .progress
+            .events_decoded
+            .saturating_add(u64::try_from(events_decoded).unwrap_or(u64::MAX));
+        self.progress.unix_secs = current_unix_secs();
+    }
 }
 
 #[cfg(feature = "server")]
@@ -425,14 +493,26 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
     }
 
     async fn next_event(&mut self) -> Option<UpstreamMarketEvent> {
+        while let Some(update) = self.next_update().await {
+            if let UpstreamSourceUpdate::Event(event) = update {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    async fn next_update(&mut self) -> Option<UpstreamSourceUpdate> {
         loop {
             if let Some(event) = self.buffered.pop_front() {
-                return Some(event);
+                return Some(UpstreamSourceUpdate::Event(event));
             }
             if self.closed {
                 return None;
             }
             match self.recv_events().await {
+                Ok(Some(events)) if events.is_empty() => {
+                    return Some(UpstreamSourceUpdate::Progress);
+                }
                 Ok(Some(events)) => {
                     self.buffered.extend(events);
                 }
@@ -450,4 +530,15 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
     fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
         self.last_invalid_tick_row_error.take()
     }
+
+    fn take_progress(&mut self) -> UpstreamSourceProgress {
+        std::mem::take(&mut self.progress)
+    }
+}
+
+#[cfg(feature = "server")]
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }

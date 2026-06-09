@@ -2,7 +2,7 @@
 
 use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::RelayResult;
-use crate::upstream::{UpstreamMarketEvent, UpstreamTickSource};
+use crate::upstream::{UpstreamMarketEvent, UpstreamSourceUpdate, UpstreamTickSource};
 
 pub async fn pump_once<S>(
     engine: &mut RelayEngine,
@@ -11,12 +11,12 @@ pub async fn pump_once<S>(
 where
     S: UpstreamTickSource + Send,
 {
-    let event = source.next_event().await;
+    let update = source.next_update().await;
     record_upstream_source_diagnostics(engine, source);
-    let Some(event) = event else {
+    let Some(update) = update else {
         return Ok(Vec::new());
     };
-    ingest_event(engine, event)
+    ingest_update(engine, update)
 }
 
 pub async fn pump_available<S>(
@@ -28,12 +28,22 @@ where
 {
     let mut frames = Vec::new();
     loop {
-        let event = source.next_event().await;
+        let update = source.next_update().await;
         record_upstream_source_diagnostics(engine, source);
-        let Some(event) = event else {
+        let Some(update) = update else {
             return Ok(frames);
         };
-        frames.extend(ingest_event(engine, event)?);
+        frames.extend(ingest_update(engine, update)?);
+    }
+}
+
+fn ingest_update(
+    engine: &mut RelayEngine,
+    update: UpstreamSourceUpdate,
+) -> RelayResult<Vec<DownstreamFrame>> {
+    match update {
+        UpstreamSourceUpdate::Event(event) => ingest_event(engine, event),
+        UpstreamSourceUpdate::Progress => Ok(Vec::new()),
     }
 }
 
@@ -51,7 +61,9 @@ fn record_upstream_source_diagnostics<S>(engine: &mut RelayEngine, source: &mut 
 where
     S: UpstreamTickSource,
 {
+    let progress = source.take_progress();
     let invalid_rows = source.take_invalid_tick_rows();
     let last_error = source.take_last_invalid_tick_row_error();
+    engine.record_upstream_progress(progress);
     engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
 }

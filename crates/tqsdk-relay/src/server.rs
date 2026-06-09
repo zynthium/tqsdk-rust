@@ -12,7 +12,7 @@ use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
 use crate::interest::ClientId;
 use crate::protocol::DownstreamCommand;
-use crate::upstream::{UpstreamMarketEvent, UpstreamTickSource};
+use crate::upstream::{UpstreamMarketEvent, UpstreamSourceUpdate, UpstreamTickSource};
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -73,14 +73,16 @@ impl RelayServer {
     where
         S: UpstreamTickSource + Send,
     {
-        let event = source.next_event().await;
+        let update = source.next_update().await;
+        let progress = source.take_progress();
         let invalid_rows = source.take_invalid_tick_rows();
         let last_error = source.take_last_invalid_tick_row_error();
-        let Some(event) = event else {
+        let Some(update) = update else {
             let mut engine = self
                 .engine
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.record_upstream_progress(progress);
             engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
             return Ok(0);
         };
@@ -89,8 +91,9 @@ impl RelayServer {
                 .engine
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.record_upstream_progress(progress);
             engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
-            ingest_upstream_event(&mut engine, event)?
+            ingest_upstream_update(&mut engine, update)?
         };
         self.dispatch_frames(frames)
     }
@@ -105,11 +108,12 @@ impl RelayServer {
     {
         let mut sent = 0_usize;
         loop {
-            let event = tokio::select! {
+            let update = tokio::select! {
                 biased;
                 _ = &mut shutdown => return Ok(sent),
-                event = source.next_event() => event,
+                update = source.next_update() => update,
             };
+            let progress = source.take_progress();
             let invalid_rows = source.take_invalid_tick_rows();
             let last_error = source.take_last_invalid_tick_row_error();
             let frames = {
@@ -117,11 +121,12 @@ impl RelayServer {
                     .engine
                     .lock()
                     .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+                engine.record_upstream_progress(progress);
                 engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
-                let Some(event) = event else {
+                let Some(update) = update else {
                     return Ok(sent);
                 };
-                ingest_upstream_event(&mut engine, event)?
+                ingest_upstream_update(&mut engine, update)?
             };
             sent = sent.saturating_add(self.dispatch_frames(frames)?);
         }
@@ -235,6 +240,16 @@ impl RelayServer {
             .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
             .insert(client_id, sender);
         Ok(receiver)
+    }
+}
+
+fn ingest_upstream_update(
+    engine: &mut RelayEngine,
+    update: UpstreamSourceUpdate,
+) -> RelayResult<Vec<DownstreamFrame>> {
+    match update {
+        UpstreamSourceUpdate::Event(event) => ingest_upstream_event(engine, event),
+        UpstreamSourceUpdate::Progress => Ok(Vec::new()),
     }
 }
 

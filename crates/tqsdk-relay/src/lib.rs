@@ -37,7 +37,7 @@ pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;
 pub use metrics_http::serve_metrics_until;
-pub use observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStatus};
+pub use observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStage, RelaySourceStatus};
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
@@ -62,6 +62,7 @@ pub use universe::{
 pub use upstream::WebSocketUpstreamTickSource;
 pub use upstream::{
     FakeUpstreamTickSource, UpstreamMarketDecodeReport, UpstreamMarketEvent, UpstreamQuote,
-    UpstreamTick, UpstreamTickChart, UpstreamTickDecodeReport, UpstreamTickSource,
-    decode_upstream_market_report, decode_upstream_tick_report, decode_upstream_ticks,
+    UpstreamSourceProgress, UpstreamSourceUpdate, UpstreamTick, UpstreamTickChart,
+    UpstreamTickDecodeReport, UpstreamTickSource, decode_upstream_market_report,
+    decode_upstream_tick_report, decode_upstream_ticks,
 };
