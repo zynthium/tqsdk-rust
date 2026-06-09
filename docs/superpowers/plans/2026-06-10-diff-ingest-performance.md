@@ -162,6 +162,16 @@ gitnexus impact StateStore::apply_with --direction upstream
 gitnexus impact ChangeSet::from_mutations --direction upstream
 ```
 
+Semantic gate:
+
+- [ ] Write and pass golden behavior tests before changing the implementation.
+- [ ] Prove repeated identical quote diffs still return no commit and do not advance revision.
+- [ ] Prove `ChangeSet` is built only from actually applied field changes, never from decoded-but-noop input mutations.
+- [ ] Prove `path_hits`, `object_hits`, and `field_hits` ordering stays identical for representative quote, kline/tick live-serial, and trade scalar-leaf payloads.
+- [ ] Prove the write-side returned `SharedCommitResult` and the commit-log/cursor-visible commit still describe the same revision and same change metadata.
+- [ ] Do not change the public shape of `CommitResult`, `ChangeSet`, `ChangeHit`, `NormalizedMutation`, or `FieldMutation` in this task.
+- [ ] Do not change revision advancement semantics: a revision advances only when at least one field value actually changes in the state tree.
+
 Implementation:
 
 - [ ] Keep `NormalizedMutation` unchanged as the adapter output contract.
@@ -180,6 +190,7 @@ Tests:
 - [ ] Existing commit semantics tests still pass.
 - [ ] Add or extend a test proving noop field updates do not appear as changed fields.
 - [ ] Add or extend a test proving multi-field quote updates report all touched fields once.
+- [ ] Add or extend a test proving field-hit order remains deterministic after replacing cloned applied mutations with applied-change metadata.
 
 Expected win:
 
@@ -243,6 +254,16 @@ gitnexus impact MarketAdapter::decode --direction upstream
 gitnexus impact decode_tq_diff --direction upstream
 ```
 
+Fast path equivalence gate:
+
+- [ ] Write and pass golden adapter tests against the current generic flattening output before adding the quote fast path.
+- [ ] Prove quote fast path output preserves exact `NormalizedMutation` path, object key, source, field names, field values, and field ordering for representative payloads.
+- [ ] Prove mixed `rtn_data` array ordering is unchanged when quote payloads appear before, after, or between non-quote payloads.
+- [ ] Prove unrecognized quote-like shapes fall back to generic flattening instead of being silently dropped or normalized differently.
+- [ ] Prove null values remain field updates with `Value::Null` where the current generic path treats them that way.
+- [ ] Do not widen the public adapter API or export the fast path from `tqsdk-core`.
+- [ ] Continue only if the release benchmark shows a meaningful win for `ingest_quote_batch`; otherwise keep the golden tests and skip the fast path implementation.
+
 Implementation:
 
 - [ ] Detect `rtn_data.quotes` objects and decode them directly into quote object mutations.
@@ -293,6 +314,18 @@ gitnexus impact decode_live_serial_data --direction upstream
 gitnexus impact decode_tq_diff --direction upstream
 ```
 
+Fast path equivalence gate:
+
+- [ ] Do not start tick/kline fast paths until the quote fast path is implemented, benchmarked, and shown to justify the extra specialized decoder surface.
+- [ ] Write and pass golden adapter tests against the current generic flattening output before adding any live-serial fast path.
+- [ ] Prove kline fast path preserves parent series mutations such as `last_id` as well as row mutations under `data/{row_id}`.
+- [ ] Prove tick fast path preserves parent series mutations such as `last_id` as well as row mutations under `data/{row_id}`.
+- [ ] Prove row id injection remains identical to `inject_market_data_row_id`: add `id` only when absent and keep sorted field order after injection.
+- [ ] Prove object key inference remains identical for both legacy row paths and live-serial `data/{row_id}` paths.
+- [ ] Prove mixed quote + kline + tick payloads preserve current mutation ordering.
+- [ ] Prove malformed/non-numeric row ids keep the current generic behavior, including when object key inference returns `None`.
+- [ ] Do not optimize historical/direct-query parsing, chart lifecycle, or typed reader projection in this task.
+
 Implementation:
 
 - [ ] Add fast paths for live serial rows only if benchmark fixtures show row decode is significant.
@@ -325,6 +358,19 @@ git commit -m "perf(core): add live serial diff fast paths"
 ---
 
 ## Batch 3: Wait Facade No-Scan Changed Quote API
+
+Public API semantic gate:
+
+- [ ] Treat this batch as a public API contract change, not as an internal performance-only change.
+- [ ] Update `docs/architecture/api-wait.md`; this is required, not conditional.
+- [ ] Update `crates/tqsdk-wait/README.md`; this is required, not conditional.
+- [ ] Update `crates/tqsdk-wait/examples/api_contract_s34_batch_quote_subscription.rs` so the public contract demonstrates the no-scan changed quote path.
+- [ ] The API must explain only the current `WaitStep` commit; it must not maintain facade-private quote revisions, per-symbol epochs, or a second changed-symbol cache.
+- [ ] `WaitStep::changed_quote_symbols()` returns deduplicated changed quote symbols in current `ChangeSet` first-hit order.
+- [ ] `QuoteSet::changed(&WaitStep)` and `QuoteSet::changed_snapshots(&WaitStep)` return only members of that `QuoteSet`, in the same deterministic symbol order exposed by `QuoteSet::symbols()`.
+- [ ] `QuoteSet::changed*` may iterate the current step's changed symbols and perform membership lookups, but must not scan all subscribed symbols as the primary path.
+- [ ] Empty/no-commit steps, unrelated roots, trade-only commits, and core-level noop commits must return empty results.
+- [ ] The implementation must not add direct-query, schema, metadata, or session request/response helpers to `tqsdk-wait`.
 
 ### Task 3.1: Add Private Changed Quote Symbol Extraction
 
@@ -379,7 +425,7 @@ Target files:
 - `crates/tqsdk-wait/src/step.rs`
 - `crates/tqsdk-wait/tests/wait_api_market.rs`
 - `crates/tqsdk-wait/README.md`
-- `docs/architecture/api-wait.md` if the public API contract changes
+- `docs/architecture/api-wait.md`
 
 Required pre-edit analysis:
 
@@ -400,13 +446,20 @@ Tests:
 - [ ] Verify the method can be called after `wait_update()`.
 - [ ] Verify empty result on timeout/no commit.
 - [ ] Verify repeated call on the same step is stable.
+- [ ] Verify ordering follows current `ChangeSet` first-hit order and deduplicates repeated quote hits.
 
 Validation:
 
 ```bash
 cargo fmt --all --check
 cargo test -p tqsdk-wait --test wait_api_market
+cargo test -p tqsdk-wait
+cargo check -p tqsdk-wait --examples
 cargo check --workspace --examples
+cargo test --workspace
+cargo check --workspace --no-default-features
+cargo check --workspace --no-default-features --examples
+cargo check --workspace --all-features --examples
 git diff --check
 ```
 
@@ -426,7 +479,7 @@ Target files:
 - `crates/tqsdk-wait/tests/wait_api_market.rs`
 - `crates/tqsdk-wait/examples/api_contract_s34_batch_quote_subscription.rs`
 - `crates/tqsdk-wait/README.md`
-- `docs/architecture/api-wait.md` if public API contract changes
+- `docs/architecture/api-wait.md`
 
 Required pre-edit analysis:
 
@@ -447,9 +500,10 @@ Tests:
 
 - [ ] A `QuoteSet` with 100 subscribed symbols and 1 changed quote returns 1 changed quote.
 - [ ] Changed quote outside the set is ignored.
-- [ ] Multiple changed symbols preserve deterministic order.
+- [ ] Multiple changed symbols preserve `QuoteSet::symbols()` deterministic symbol order.
 - [ ] `changed_snapshots` returns the latest typed values.
 - [ ] Existing batch quote subscription example still compiles.
+- [ ] Source-level performance guard proves `QuoteSet::changed*` does not iterate `self.quotes.values()` or `self.quotes.iter()` as its primary changed-symbol path.
 
 Validation:
 
@@ -506,6 +560,17 @@ gitnexus impact PathDispatcher --direction upstream
 gitnexus impact PathMatcher --direction upstream
 ```
 
+Stream dispatcher semantic gate:
+
+- [ ] Keep raw `commit_stream()` behavior unchanged; this task may only change internal path-backed dispatch.
+- [ ] Indexed dispatch may narrow matching `DriverEvent::Commit` delivery, but `DriverEvent::Error`, `DriverEvent::Lagged`, and `DriverEvent::Closed` must continue to be delivered to every live path subscriber.
+- [ ] Preserve per-consumer delivery order for commits and driver events.
+- [ ] Preserve subscribe-after-start behavior: new path subscribers must attach to the existing dispatcher task without restarting the driver.
+- [ ] Preserve abort/closed behavior: aborting the dispatcher must notify all live path subscribers and mark the dispatcher closed.
+- [ ] Preserve slow-consumer lag behavior: lag remains visible as `Lagged`, not as silent skipped commits or stream termination.
+- [ ] Cleanup must remove dropped subscribers from every index without relying on implicit async drop side effects.
+- [ ] Benchmarks may demonstrate improvement, but semantic tests are required and cannot be replaced by benchmark output.
+
 Implementation:
 
 - [ ] Keep raw commit stream behavior unchanged.
@@ -521,6 +586,11 @@ Tests:
 - [ ] Path-specific stream receives matching paths only.
 - [ ] Generic path matcher still works.
 - [ ] Dropped consumers are removed from the dispatcher index.
+- [ ] Error events are delivered to all live path subscribers regardless of path filters.
+- [ ] Lagged events are delivered to all live path subscribers regardless of path filters.
+- [ ] Closed events are delivered to all live path subscribers regardless of path filters.
+- [ ] Subscribe-after-start reuses the existing dispatcher task and preserves delivery.
+- [ ] Abort notifies all live path subscribers and prevents new subscriptions.
 - [ ] Fan-out benchmark shows improvement at 100 and 500 consumers.
 
 Validation:
@@ -640,3 +710,180 @@ Stop the optimization pass when any of these is true:
 - Wait no-scan APIs are public API additions and require README/API contract updates.
 - Stream indexing must not change exact delivery semantics or cursor retention behavior.
 - Lossy/latest-only stream behavior is not a performance tweak; it is a separate semantic feature.
+
+---
+
+## Engineering Review Addendum
+
+This addendum records the `/plan-eng-review` hard gates added to keep the full plan intact while preventing performance work from changing business semantics.
+
+### What Already Exists
+
+- Core benchmark baseline: `crates/tqsdk-core/examples/diff_ingest_microbench.rs` already measures parse, ingest, noop ingest, batch ingest, large batch ingest, and typed quote reads.
+- Generic DIFF decoding: `crates/tqsdk-core/src/adapter/common.rs` already owns JSON envelope flattening, field sorting, object-key inference, scalar-leaf handling, and kline/tick row id injection.
+- Applied-change semantics: `StateStore::apply_with` already filters noop updates before `ChangeSet::from_mutations` sees them.
+- Runtime commit contract tests: `crates/tqsdk-core/tests/runtime_contract_commit_semantics.rs` already proves repeated identical quote diffs do not produce commits.
+- Wait changed-object model: `WaitStep::is_changing`, `is_changing_fields`, `QuoteRef::changed_snapshot`, and `ChangeTrackedRef` already consume `ChangeSet` without private facade revisions.
+- Wait batch quote storage: `QuoteSet` already stores refs in a symbol-indexed `BTreeMap`, giving deterministic symbol order.
+- Stream path dispatch: `PathDispatcher` and `PathMatcher` already share one root receiver for path-backed streams and precompile path filters by root.
+- Stream performance guards: `crates/tqsdk-stream/tests/performance_surface.rs` already guards against rebuilding raw path filters in the commit hot path.
+
+### NOT In Scope
+
+- Changing `RuntimeHandle`, `RuntimeReader`, `UpdateCursor`, `CommitResult`, `ChangeSet`, `ChangeHit`, `NormalizedMutation`, or `FieldMutation` public shapes.
+- Changing revision advancement semantics or allowing noop diffs to produce commits.
+- Adding a second state tree, facade-private quote revision, per-symbol epoch, or local order overlay.
+- Moving direct query, schema, metadata, calendar, or request/response helpers into `tqsdk-wait` or `tqsdk-stream`.
+- Changing chart lifecycle, typed reader projection, historical query parsing, or `tqsdk-data` cache behavior as part of market fast paths.
+- Adding lossy/latest-only stream behavior to the default stream semantics.
+- Making `tqsdk-stream` the default answer for single-owner quote throughput; wait remains the single-owner path.
+- Requiring full crate-wide stream example validation for Batch 4 in this plan; the accepted scope keeps Batch 4 validation focused on stream typed/performance/benchmark tests plus workspace examples.
+
+### Data Flow Diagram
+
+```text
+DIFF JSON / RuntimeInput
+        |
+        v
+ProtocolAdapter decode
+        |
+        |  NormalizedMutation[]
+        v
+StateStore::apply_with
+        |
+        |  applied field changes only
+        v
+ChangeSet
+        |
+        v
+CommitResult / SharedCommitResult
+        |
+        +--> RuntimeReader / UpdateCursor
+        |
+        +--> tqsdk-wait WaitStep
+        |       |
+        |       +--> is_changing / changed_quote_symbols / QuoteSet::changed*
+        |
+        +--> tqsdk-stream CommitStream / PathDispatcher
+                |
+                +--> matching commits by path index
+                +--> Error / Lagged / Closed broadcast to all live path subscribers
+```
+
+### Test Coverage Diagram
+
+```text
+CODE PATHS                                           STATUS
+Batch 1.1 flatten_object push/pop
+  ├── field sorting unchanged                        [planned]
+  ├── scalar leaf unchanged                          [planned]
+  └── mutation order unchanged                       [planned]
+
+Batch 1.2 StateStore applied metadata
+  ├── noop returns no commit                         [gate added]
+  ├── revision advances only on real field change    [gate added]
+  ├── ChangeSet from applied changes only            [gate added]
+  └── returned/logged commit metadata equivalent     [gate added]
+
+Batch 2 market fast path
+  ├── quote fast path equals generic output          [gate added]
+  ├── mixed rtn_data order                           [gate added]
+  ├── kline/tick parent + row mutations              [gate added]
+  └── malformed row id fallback                      [gate added]
+
+Batch 3 wait public API
+  ├── WaitStep changed symbols ordering              [gate added]
+  ├── QuoteSet changed order                         [gate added]
+  ├── no-scan source guard                           [planned]
+  └── public API validation matrix                   [strengthened]
+
+Batch 4 stream dispatcher
+  ├── matching commit dispatch                       [planned]
+  ├── Error/Lagged/Closed to all subscribers          [gate added]
+  ├── subscribe-after-start                          [gate added]
+  └── crate-wide stream examples                     [not required in accepted scope]
+```
+
+### Failure Modes
+
+| Codepath | Realistic failure mode | Test coverage | Error handling / user visibility |
+| --- | --- | --- | --- |
+| `StateStore::apply_with` applied metadata | Decoded-but-noop input appears in `ChangeSet`, causing false `is_changing` and spurious revisions | Batch 1.2 semantic gate | Would be user-visible as false quote/order changes; gate blocks it |
+| `ChangeSet` ordering | Field/path/object order changes, making changed quote iteration unstable | Batch 1.2 ordering tests | User-visible ordering drift; deterministic tests block it |
+| Quote fast path | Fast path emits different `NormalizedMutation` than generic flattening | Batch 2.1 equivalence gate | Silent state drift; golden tests block it |
+| Tick/kline fast path | Row id injection or parent `last_id` mutation is lost | Batch 2.2 equivalence gate | Typed row readers can miss or mislabel rows; golden tests block it |
+| Wait changed quote API | API scans all subscribed quotes or returns unstable ordering | Batch 3 semantic gate and source guard | User sees performance cliff or non-deterministic iteration; contract tests block it |
+| Stream indexed dispatcher | `Error`, `Lagged`, or `Closed` only reaches indexed matching paths | Batch 4 semantic gate | Silent stream hang or missed lag diagnostics; dispatcher tests block it |
+| Slow consumer pressure | Optimization hides lag instead of surfacing `Lagged` | Batch 4 semantic gate plus separate lossy-design rule | User loses commit continuity silently; lossy mode requires separate design |
+
+### Worktree Parallelization Strategy
+
+| Step | Modules touched | Depends on |
+| --- | --- | --- |
+| Batch 0 core benchmark stabilization | `crates/tqsdk-core/examples`, docs | - |
+| Batch 0 stream fan-out benchmark | `crates/tqsdk-stream/tests` | - |
+| Batch 1 core allocation reductions | `crates/tqsdk-core/src`, `crates/tqsdk-core/tests` | Batch 0 core baseline |
+| Batch 2 market fast paths | `crates/tqsdk-core/src`, `crates/tqsdk-core/tests` | Batch 1.3 re-measure |
+| Batch 3 wait changed quote API | `crates/tqsdk-wait`, `docs/architecture/api-wait.md` | Batch 1.2 applied-change semantics stable |
+| Batch 4 stream indexing | `crates/tqsdk-stream/src`, `crates/tqsdk-stream/tests` | Batch 0 stream fan-out benchmark |
+| Batch 5 performance report | docs | All implemented batches |
+
+Parallel lanes:
+
+- Lane A: Batch 0 core benchmark -> Batch 1 -> Batch 2. Sequential because core adapter/state tests and benchmark interpretation share modules.
+- Lane B: Batch 0 stream fan-out -> Batch 4. Independent from core implementation, but must wait for benchmark evidence before indexing.
+- Lane C: Batch 3 wait API. Can proceed after Batch 1.2 semantics are locked; it should not run in parallel with Batch 1.2 if `ChangeSet` behavior is still moving.
+- Lane D: Batch 5 report. Runs after the implemented lanes merge.
+
+Execution order:
+
+1. Launch Lane A Batch 0 and Lane B Batch 0 in parallel worktrees.
+2. Merge benchmark-only work first.
+3. Run Batch 1 in Lane A.
+4. After Batch 1.2 lands, Batch 2 and Batch 3 can run in separate worktrees if they avoid overlapping core files.
+5. Run Batch 4 only if stream fan-out benchmark justifies it.
+6. Run Batch 5 after all selected implementation batches merge.
+
+Conflict flags:
+
+- Batch 1 and Batch 2 both touch `crates/tqsdk-core/src/adapter` or adjacent core tests; run sequentially.
+- Batch 3 depends on stable `ChangeSet` behavior; do not implement it against an unmerged Batch 1.2 branch.
+- Batch 4 touches stream internals only and can stay independent from core/wait work.
+
+### Implementation Tasks
+
+Synthesized from this review's findings. Each task derives from a specific finding above. Run with Codex or another agentic worker; checkbox as you ship.
+
+- [ ] **T1 (P1, human: ~2h / CC: ~20min)** - core state - Lock applied-change semantics before removing cloned values
+  - Surfaced by: Architecture Issue 1 - Batch 1.2 could turn decoded-but-noop mutations into changed metadata
+  - Files: `crates/tqsdk-core/src/state/store.rs`, `crates/tqsdk-core/src/state/changes.rs`, `crates/tqsdk-core/tests/runtime_contract_commit_semantics.rs`
+  - Verify: `cargo test -p tqsdk-core --test runtime_contract_commit_semantics`
+- [ ] **T2 (P1, human: ~2h / CC: ~25min)** - core adapter - Add differential fast-path tests before specialized market decode
+  - Surfaced by: Architecture Issue 2 - Fast paths can diverge from generic flattening behavior
+  - Files: `crates/tqsdk-core/src/adapter/common.rs`, `crates/tqsdk-core/tests/runtime_contract_adapters.rs`
+  - Verify: `cargo test -p tqsdk-core --test runtime_contract_adapters`
+- [ ] **T3 (P1, human: ~2h / CC: ~20min)** - wait API - Treat changed quote iteration as a public API contract
+  - Surfaced by: Architecture Issue 3 - Wait changed quote APIs need fixed ordering and required docs
+  - Files: `crates/tqsdk-wait/src/step.rs`, `crates/tqsdk-wait/src/refs/quote.rs`, `crates/tqsdk-wait/README.md`, `docs/architecture/api-wait.md`
+  - Verify: `cargo test -p tqsdk-wait && cargo check -p tqsdk-wait --examples`
+- [ ] **T4 (P1, human: ~2h / CC: ~20min)** - stream dispatcher - Preserve non-commit driver event broadcast under path indexing
+  - Surfaced by: Architecture Issue 4 - Indexed dispatch could drop Error/Lagged/Closed for non-matching subscribers
+  - Files: `crates/tqsdk-stream/src/path_dispatcher.rs`, `crates/tqsdk-stream/src/filter.rs`, `crates/tqsdk-stream/tests/stream_typed.rs`
+  - Verify: `cargo test -p tqsdk-stream --test stream_typed`
+- [ ] **T5 (P2, human: ~30min / CC: ~5min)** - validation - Use public API validation matrix for Batch 3
+  - Surfaced by: Test Issue 1 - Wait public API changes need stronger validation than a single example check
+  - Files: `docs/superpowers/plans/2026-06-10-diff-ingest-performance.md`
+  - Verify: `cargo test -p tqsdk-wait && cargo check --workspace --examples`
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | - | - |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | - | - |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 6 issues found, 0 critical gaps; gates added for core semantics, fast-path equivalence, wait public API, stream dispatcher semantics, and Batch 3 validation |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | - | - |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | - | - |
+
+- **UNRESOLVED:** 0
+- **VERDICT:** ENG CLEARED - ready to implement the plan with the gates above.
