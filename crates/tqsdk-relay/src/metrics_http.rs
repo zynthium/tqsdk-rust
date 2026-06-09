@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
+use crate::symbol_metrics::SymbolMetricsQuery;
 
 pub async fn serve_metrics_until(
     listener: TcpListener,
@@ -39,8 +40,8 @@ async fn serve_metrics_stream(
     engine: Arc<Mutex<RelayEngine>>,
 ) -> RelayResult<()> {
     let request = read_http_request(stream).await?;
-    let path = request_path(&request)?;
-    let response = match path {
+    let target = request_target(&request)?;
+    let response = match target.path {
         "/health" => {
             let health = engine
                 .lock()
@@ -56,6 +57,22 @@ async fn serve_metrics_stream(
                 .metrics_snapshot();
             serde_json::to_value(metrics)
                 .map_err(|err| RelayError::Internal(format!("metrics JSON encode failed: {err}")))?
+        }
+        "/symbol-metrics" => {
+            let query = match SymbolMetricsQuery::from_query_string(target.query) {
+                Ok(query) => query,
+                Err(error) => {
+                    write_response(stream, 400, json!({ "error": error })).await?;
+                    return Ok(());
+                }
+            };
+            let symbol_metrics = engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
+                .symbol_metrics_snapshot(&query);
+            serde_json::to_value(symbol_metrics).map_err(|err| {
+                RelayError::Internal(format!("symbol metrics JSON encode failed: {err}"))
+            })?
         }
         _ => {
             write_response(stream, 404, json!({"error": "not found"})).await?;
@@ -89,7 +106,12 @@ async fn read_http_request(stream: &mut TcpStream) -> RelayResult<String> {
         .map_err(|err| RelayError::invalid_protocol(format!("invalid metrics HTTP request: {err}")))
 }
 
-fn request_path(request: &str) -> RelayResult<&str> {
+struct RequestTarget<'a> {
+    path: &'a str,
+    query: &'a str,
+}
+
+fn request_target(request: &str) -> RelayResult<RequestTarget<'_>> {
     let first = request
         .lines()
         .next()
@@ -98,7 +120,7 @@ fn request_path(request: &str) -> RelayResult<&str> {
     let method = parts
         .next()
         .ok_or_else(|| RelayError::invalid_protocol("metrics HTTP request missing method"))?;
-    let path = parts
+    let target = parts
         .next()
         .ok_or_else(|| RelayError::invalid_protocol("metrics HTTP request missing path"))?;
     if method != "GET" {
@@ -106,11 +128,12 @@ fn request_path(request: &str) -> RelayResult<&str> {
             "metrics HTTP server only accepts GET",
         ));
     }
-    Ok(path)
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    Ok(RequestTarget { path, query })
 }
 
 async fn write_response(stream: &mut TcpStream, status: u16, body: Value) -> RelayResult<()> {
-    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let reason = status_reason(status);
     let body = body.to_string();
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\n\
@@ -125,4 +148,14 @@ Connection: close\r\n\
         .write_all(response.as_bytes())
         .await
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
+}
+
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
 }

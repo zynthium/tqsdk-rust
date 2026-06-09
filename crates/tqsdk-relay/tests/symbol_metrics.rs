@@ -124,3 +124,25 @@ fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
     assert_eq!(snapshot.symbols.len(), 1);
     assert_eq!(snapshot.symbols[0].symbol, "DCE.m2609");
 }
+
+#[test]
+fn symbol_metrics_query_parses_http_query_shape() {
+    let query = SymbolMetricsQuery::from_query_string(
+        "status=live,stale&subscribed=true&q=260&sort=receive_gap_ms_desc&limit=10",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.statuses,
+        vec![SymbolStatus::Live, SymbolStatus::Stale]
+    );
+    assert!(query.subscribed_only);
+    assert_eq!(query.q.as_deref(), Some("260"));
+    assert_eq!(query.sort, SymbolSort::ReceiveGapDesc);
+    assert_eq!(query.limit, Some(10));
+
+    assert_eq!(
+        SymbolMetricsQuery::from_query_string("status=unknown").unwrap_err(),
+        "invalid status"
+    );
+}

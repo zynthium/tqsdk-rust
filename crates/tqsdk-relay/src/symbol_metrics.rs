@@ -51,6 +51,34 @@ impl Default for SymbolMetricsQuery {
     }
 }
 
+impl SymbolMetricsQuery {
+    pub fn from_query_string(query: &str) -> Result<Self, &'static str> {
+        let mut parsed = Self::default();
+        if query.is_empty() {
+            return Ok(parsed);
+        }
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "status" => parsed.statuses = parse_statuses(value)?,
+                "subscribed" => parsed.subscribed_only = parse_bool(value)?,
+                "q" => {
+                    if !value.is_empty() {
+                        parsed.q = Some(value.to_string());
+                    }
+                }
+                "sort" => parsed.sort = parse_sort(value)?,
+                "limit" => parsed.limit = Some(parse_limit(value)?),
+                _ => return Err("unknown query parameter"),
+            }
+        }
+        Ok(parsed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SymbolSubscriptionCounts {
     pub quote_subscriber_count: usize,
@@ -318,4 +346,48 @@ fn tick_datetime_ns_to_unix_millis(datetime_ns: i64) -> Option<u64> {
     u64::try_from(datetime_ns)
         .ok()
         .map(|value| value / 1_000_000)
+}
+
+fn parse_statuses(value: &str) -> Result<Vec<SymbolStatus>, &'static str> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value.split(',').map(parse_status).collect()
+}
+
+fn parse_status(value: &str) -> Result<SymbolStatus, &'static str> {
+    match value {
+        "live" => Ok(SymbolStatus::Live),
+        "stale" => Ok(SymbolStatus::Stale),
+        "missing" => Ok(SymbolStatus::Missing),
+        "inactive" => Ok(SymbolStatus::Inactive),
+        _ => Err("invalid status"),
+    }
+}
+
+fn parse_bool(value: &str) -> Result<bool, &'static str> {
+    match value {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err("invalid subscribed"),
+    }
+}
+
+fn parse_sort(value: &str) -> Result<SymbolSort, &'static str> {
+    match value {
+        "" | "symbol_asc" => Ok(SymbolSort::SymbolAsc),
+        "status_asc" => Ok(SymbolSort::StatusAsc),
+        "receive_gap_ms_desc" => Ok(SymbolSort::ReceiveGapDesc),
+        "market_time_lag_ms_desc" => Ok(SymbolSort::MarketTimeLagDesc),
+        "ticks_ingested_desc" => Ok(SymbolSort::TicksIngestedDesc),
+        _ => Err("invalid sort"),
+    }
+}
+
+fn parse_limit(value: &str) -> Result<usize, &'static str> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or("invalid limit")
 }
