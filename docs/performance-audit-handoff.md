@@ -34,6 +34,93 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
 - P3 `PathCommitStream` path 匹配效率：已引入构造期 `PathMatcher`，按 root
   segment 建索引，raw path stream 和内部 `PathDispatcher` subscriber 都复用预编译
   matcher，避免每个 commit 重新扫描原始 path filter 列表。
+- 2026-06 diff ingest 优化批次：已完成 core path allocation / applied-change metadata /
+  quote fast path、wait no-scan changed quote API、stream path dispatcher root+quote-symbol
+  索引。最终 core quote batch ingest 仍约为 JSON parse 的 5.0x，后续瓶颈主要在
+  state apply / commit metadata / commit fan-out，而不是 typed reader。
+
+---
+
+## 2026-06 diff ingest 优化结果
+
+基准命令：
+
+```bash
+cargo run -p tqsdk-core --example diff_ingest_microbench --release
+```
+
+计划基线：
+
+| case | ns/iter |
+| --- | ---: |
+| `parse_json_single_quote` | 3955.9 |
+| `ingest_single_quote` | 23796.7 |
+| `ingest_noop_single_quote` | 12756.2 |
+| `parse_json_quote_batch` | 275653.0 |
+| `ingest_quote_batch` | 1809209.0 |
+| `ingest_large_quote_batch` | 22446813.7 |
+| `read_market_quote_typed` | 1141.0 |
+
+各实现批次后本机测量值：
+
+| case | Batch 1.1 path push/pop | Batch 1.2 applied metadata | Batch 2.1 quote fast path | final current branch |
+| --- | ---: | ---: | ---: | ---: |
+| `parse_json_single_quote` | 3964.6 | 4545.9 | 3511.4 | 4088.9 |
+| `ingest_single_quote` | 19657.6 | 18502.5 | 16782.3 | 16909.8 |
+| `ingest_noop_single_quote` | 7385.5 | 7237.1 | 5868.3 | 5609.8 |
+| `parse_json_quote_batch` | 269272.8 | 253741.3 | 228272.0 | 219941.5 |
+| `ingest_quote_batch` | 1330728.1 | 1344598.6 | 1220134.5 | 1110584.5 |
+| `ingest_large_quote_batch` | 14863405.5 | 13527135.7 | 10921657.6 | 10223138.1 |
+| `read_market_quote_typed` | 1110.3 | 979.2 | 822.6 | 1023.3 |
+
+相对计划基线的最终变化：
+
+| case | baseline ns/iter | final ns/iter | change |
+| --- | ---: | ---: | ---: |
+| `ingest_single_quote` | 23796.7 | 16909.8 | 28.9% faster |
+| `ingest_noop_single_quote` | 12756.2 | 5609.8 | 56.0% faster |
+| `ingest_quote_batch` | 1809209.0 | 1110584.5 | 38.6% faster |
+| `ingest_large_quote_batch` | 22446813.7 | 10223138.1 | 54.5% faster |
+| `read_market_quote_typed` | 1141.0 | 1023.3 | 10.3% faster |
+
+stream fan-out benchmark command：
+
+```bash
+cargo test -p tqsdk-stream --test stream_fanout_microbench -- --ignored --nocapture
+```
+
+| case | before path index | after path index |
+| --- | ---: | ---: |
+| `quote_batches` 1 consumer / 4 commits | 808.068 us | 350.012 us |
+| `quote_batches` 10 consumers / 4 commits | 1.466 ms | 0.826 ms |
+| `quote_batches` 100 consumers / 4 commits | 6.720 ms | 5.167 ms |
+| `quote_batches` 500 consumers / 4 commits | 31.957 ms | 30.803 ms |
+| path quote streams 100 symbols | 25.679 ms | 24.936 ms |
+| path quote streams 500 symbols | 544.432 ms | 424.506 ms |
+| slow consumer lag, capacity 2 / 64 commits | skipped 62, 29.094 ms | skipped 62, 28.187 ms |
+
+结论：
+
+- core DIFF ingest 已明显改善，尤其是 noop quote 和 large quote batch；但最终
+  `ingest_quote_batch / parse_json_quote_batch` 约为 `5.0x`，说明剩余成本仍主要在
+  mutation apply、change metadata、commit publication，而不是 JSON parse 或 typed read。
+- wait 单 owner 大批量 quote 消费现在有
+  `WaitStep::changed_quote_symbols()` 和 `QuoteSet::changed*`，不需要每轮扫描全部订阅
+  quote。
+- stream raw `quote_batches` fan-out 不是主要瓶颈；path-specific stream 500 symbols
+  仍较重，但 root+quote-symbol index 已把该 benchmark 降低约 22%。剩余成本包含
+  500 个 typed path stream 的 broadcast wakeup、typed decode/read、测试调度开销。
+- slow consumer 语义未改变：默认 stream 仍是 exact delivery，压力通过 `Lagged`
+  显式暴露；没有引入 lossy/latest-only 模式。
+
+后续可选工作：
+
+- 如需继续压低 core ingest，可优先调查 `StateStore::apply_with` 的 map lookup /
+  field application 成本，以及 `ChangeSet` field hit 构造成本。
+- tick/kline fast path 仍未实现；只有在新增 row-heavy benchmark 证明 row decode 是主要
+  热点时才值得增加该 specialized decoder surface。
+- stream path dispatcher 如仍需扩展，可考虑 per-symbol typed batch API 或减少
+  `PathValueStream` 逐 stream wakeup，而不是改变默认 lossy 语义。
 
 ---
 

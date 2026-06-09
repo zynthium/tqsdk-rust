@@ -251,7 +251,8 @@ Required pre-edit analysis:
 
 ```bash
 gitnexus impact MarketAdapter::decode --direction upstream
-gitnexus impact decode_tq_diff --direction upstream
+gitnexus impact decode_io_payload --direction upstream
+gitnexus impact decode_json_envelope --direction upstream
 ```
 
 Fast path equivalence gate:
@@ -310,8 +311,9 @@ Target files:
 Required pre-edit analysis:
 
 ```bash
-gitnexus impact decode_live_serial_data --direction upstream
-gitnexus impact decode_tq_diff --direction upstream
+gitnexus impact MarketAdapter::decode --direction upstream
+gitnexus impact decode_json_value --direction upstream
+gitnexus impact flatten_object --direction upstream
 ```
 
 Fast path equivalence gate:
@@ -319,10 +321,11 @@ Fast path equivalence gate:
 - [ ] Do not start tick/kline fast paths until the quote fast path is implemented, benchmarked, and shown to justify the extra specialized decoder surface.
 - [ ] Write and pass golden adapter tests against the current generic flattening output before adding any live-serial fast path.
 - [ ] Prove kline fast path preserves parent series mutations such as `last_id` as well as row mutations under `data/{row_id}`.
+- [ ] Prove kline fast path preserves multi-contract binding scalar leaves under `binding/{secondary}/{primary_id}` exactly as generic flattening does.
 - [ ] Prove tick fast path preserves parent series mutations such as `last_id` as well as row mutations under `data/{row_id}`.
 - [ ] Prove row id injection remains identical to `inject_market_data_row_id`: add `id` only when absent and keep sorted field order after injection.
 - [ ] Prove object key inference remains identical for both legacy row paths and live-serial `data/{row_id}` paths.
-- [ ] Prove mixed quote + kline + tick payloads preserve current mutation ordering.
+- [ ] Prove mixed quote + kline + kline binding + tick payloads preserve current mutation ordering.
 - [ ] Prove malformed/non-numeric row ids keep the current generic behavior, including when object key inference returns `None`.
 - [ ] Do not optimize historical/direct-query parsing, chart lifecycle, or typed reader projection in this task.
 
@@ -334,6 +337,7 @@ Implementation:
 - [ ] Add fixture tests for:
   - one tick row
   - one kline row
+  - one multi-contract kline payload containing primary rows, `binding/{secondary}/{primary_id}`, and secondary rows
   - mixed update with quote and serial data
 - [ ] Do not optimize historical/direct-query parsing here; keep scope to diff ingestion.
 
@@ -725,6 +729,7 @@ This addendum records the `/plan-eng-review` hard gates added to keep the full p
 - Runtime commit contract tests: `crates/tqsdk-core/tests/runtime_contract_commit_semantics.rs` already proves repeated identical quote diffs do not produce commits.
 - Wait changed-object model: `WaitStep::is_changing`, `is_changing_fields`, `QuoteRef::changed_snapshot`, and `ChangeTrackedRef` already consume `ChangeSet` without private facade revisions.
 - Wait batch quote storage: `QuoteSet` already stores refs in a symbol-indexed `BTreeMap`, giving deterministic symbol order.
+- Wait multi-contract K-line model: `TqApi::kline_multi` uses one shared chart, and `MultiKlineHandle` reads `klines/{primary}/{duration}/binding/{secondary}/{primary_id}` to align secondary rows.
 - Stream path dispatch: `PathDispatcher` and `PathMatcher` already share one root receiver for path-backed streams and precompile path filters by root.
 - Stream performance guards: `crates/tqsdk-stream/tests/performance_surface.rs` already guards against rebuilding raw path filters in the commit hot path.
 
@@ -789,6 +794,7 @@ Batch 2 market fast path
   ├── quote fast path equals generic output          [gate added]
   ├── mixed rtn_data order                           [gate added]
   ├── kline/tick parent + row mutations              [gate added]
+  ├── multi-contract kline binding mutations         [gate added]
   └── malformed row id fallback                      [gate added]
 
 Batch 3 wait public API
@@ -812,6 +818,7 @@ Batch 4 stream dispatcher
 | `ChangeSet` ordering | Field/path/object order changes, making changed quote iteration unstable | Batch 1.2 ordering tests | User-visible ordering drift; deterministic tests block it |
 | Quote fast path | Fast path emits different `NormalizedMutation` than generic flattening | Batch 2.1 equivalence gate | Silent state drift; golden tests block it |
 | Tick/kline fast path | Row id injection or parent `last_id` mutation is lost | Batch 2.2 equivalence gate | Typed row readers can miss or mislabel rows; golden tests block it |
+| Multi-contract kline fast path | `binding/{secondary}/{primary_id}` mutations are dropped or reordered | Batch 2.2 binding equivalence gate | `MultiKlineHandle` can return empty, incomplete, or misaligned rows; golden tests block it |
 | Wait changed quote API | API scans all subscribed quotes or returns unstable ordering | Batch 3 semantic gate and source guard | User sees performance cliff or non-deterministic iteration; contract tests block it |
 | Stream indexed dispatcher | `Error`, `Lagged`, or `Closed` only reaches indexed matching paths | Batch 4 semantic gate | Silent stream hang or missed lag diagnostics; dispatcher tests block it |
 | Slow consumer pressure | Optimization hides lag instead of surfacing `Lagged` | Batch 4 semantic gate plus separate lossy-design rule | User loses commit continuity silently; lossy mode requires separate design |
