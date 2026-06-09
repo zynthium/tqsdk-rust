@@ -22,6 +22,8 @@ const ENV_FUTURES_UNIVERSE_REFRESH_SECS: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_RE
 const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
 const ENV_UPSTREAM_INS_LIST_WARN_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS";
 const ENV_UPSTREAM_INS_LIST_MAX_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS";
+const ENV_TICK_RING_CAPACITY: &str = "TQSDK_RELAY_TICK_RING_CAPACITY";
+const ENV_KLINE_RING_CAPACITY: &str = "TQSDK_RELAY_KLINE_RING_CAPACITY";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
 const ENV_AUTH_USER: &str = "TQ_AUTH_USER";
 const ENV_AUTH_PASS: &str = "TQ_AUTH_PASS";
@@ -328,6 +330,12 @@ impl RelayConfig {
                 ENV_UPSTREAM_INS_LIST_MAX_CHARS,
                 &value,
             )?);
+        }
+        if let Some(value) = get(ENV_TICK_RING_CAPACITY) {
+            config.tick_ring_capacity = parse_positive_usize_env(ENV_TICK_RING_CAPACITY, &value)?;
+        }
+        if let Some(value) = get(ENV_KLINE_RING_CAPACITY) {
+            config.kline_ring_capacity = parse_positive_usize_env(ENV_KLINE_RING_CAPACITY, &value)?;
         }
         let inline_futures_symbols = get(ENV_FUTURES_SYMBOLS);
         let futures_symbols_file = get(ENV_FUTURES_SYMBOLS_FILE);

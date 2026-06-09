@@ -145,13 +145,15 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 上游 tick chart `ins_list` 字符串长度告警阈值。超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误，并提示至少需要拆成几个 relay 实例；默认不启用硬失败。 |
+| `TQSDK_RELAY_TICK_RING_CAPACITY` | `200000` | 每个合约保留的内存 tick ring 行数；必须大于 `0`。全品种持久运行建议调低到 `10000` / `20000` 级别。 |
+| `TQSDK_RELAY_KLINE_RING_CAPACITY` | `10000` | relay 内部 K 线 ring 容量配置；必须大于 `0`。当前二进制主要用于保留配置边界，K 线合成热状态仍按订阅 source 保存当前 bar。 |
 | `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。单个上游 tick chart 使用的逗号分隔完整期货合约列表。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
 | `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` | 空 | 兼容入口。完整合约文件路径；文件可用换行或逗号分隔。长期部署不推荐依赖静态文件。 |
 | `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | 上游天勤行情 websocket URL。 |
 | `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | 下游 SDK websocket 监听地址。 |
 | `TQSDK_RELAY_METRICS_LISTEN` | `127.0.0.1:7789` | HTTP health / metrics 监听地址。 |
 
-库用户可以直接构造 `RelayConfig`，调整当前尚未通过环境变量暴露的默认值：
+库用户也可以直接构造 `RelayConfig`，调整默认值：
 
 - `tick_ring_capacity`：默认每个合约 `200_000` 行。
 - `kline_ring_capacity`：默认 `10_000` 行。
