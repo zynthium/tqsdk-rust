@@ -14,10 +14,10 @@ use crate::backtest::{BacktestCommitAction, BacktestPump, BacktestSyntheticCommi
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
-    AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
-    QuoteSet, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
-    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
-    TradingStatusRef,
+    AccountRef, KlineHandle, MultiKlineHandle, NotificationRef, OrderRef, PositionRef,
+    PreInsertOrderRef, QuoteRef, QuoteSet, RiskManagementDataRef, RiskManagementRuleRef,
+    SecurityAccountRef, SecurityOrderRef, SecurityPositionRef, SecurityTradeRef, SettlementInfoRef,
+    TickHandle, TradeRef, TradingStatusRef,
 };
 use crate::step::{WaitReadHandle, WaitStep};
 
@@ -398,6 +398,10 @@ impl TqApi {
         duration: Duration,
         data_length: usize,
     ) -> crate::error::Result<KlineHandle> {
+        validate_single_serial_symbol(
+            symbol,
+            "kline accepts one symbol; use kline_multi for multi-contract kline serials",
+        )?;
         let data_length = normalize_serial_data_length(data_length)?;
         let duration_ns = duration_to_ns(duration)?;
         let chart_id = format!(
@@ -431,6 +435,59 @@ impl TqApi {
         ))
     }
 
+    pub async fn kline_multi<I, S>(
+        &mut self,
+        symbols: I,
+        duration: Duration,
+        data_length: usize,
+    ) -> crate::error::Result<MultiKlineHandle>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = normalize_multi_kline_symbols(symbols)?;
+        let data_length = normalize_serial_data_length(data_length)?;
+        let duration_ns = duration_to_ns(duration)?;
+        let chart_id = format!(
+            "wait-kline-multi-{}-{duration_ns}-{data_length}",
+            symbols
+                .iter()
+                .map(|symbol| sanitize_chart_token(symbol))
+                .collect::<Vec<_>>()
+                .join("_")
+        );
+        let request_view_width = if symbols.len() == 1 {
+            data_length
+        } else {
+            MAX_SERIAL_DATA_LENGTH
+        };
+
+        if !self.driver.serial_charts.contains(&chart_id) {
+            self.driver
+                .session
+                .ensure_chart(MarketChartCommand {
+                    chart_id: chart_id.clone(),
+                    symbols: symbols.iter().map(Symbol::new).collect(),
+                    duration_ns,
+                    view_width: request_view_width,
+                    left_kline_id: None,
+                    focus_datetime_ns: None,
+                    focus_position: None,
+                })
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?;
+            self.driver.serial_charts.insert(chart_id.clone());
+        }
+
+        Ok(MultiKlineHandle::new(
+            self.read_handle(),
+            symbols,
+            duration_ns,
+            data_length,
+            chart_id,
+        ))
+    }
+
     pub async fn kline_ready(
         &mut self,
         symbol: &str,
@@ -449,6 +506,10 @@ impl TqApi {
         symbol: &str,
         data_length: usize,
     ) -> crate::error::Result<TickHandle> {
+        validate_single_serial_symbol(
+            symbol,
+            "tick serials accept one symbol; multi-contract tick serials are not supported",
+        )?;
         let data_length = normalize_serial_data_length(data_length)?;
         let chart_id = format!("wait-tick-{}-{data_length}", sanitize_chart_token(symbol));
 
@@ -794,6 +855,8 @@ fn current_dt_from_reader(reader: &tqsdk_core::RuntimeReader) -> Option<i64> {
         })
 }
 
+const MAX_SERIAL_DATA_LENGTH: usize = 10_000;
+
 fn normalize_serial_data_length(data_length: usize) -> crate::error::Result<usize> {
     if data_length == 0 {
         return Err(crate::error::WaitFacadeError::InvalidState(
@@ -801,7 +864,52 @@ fn normalize_serial_data_length(data_length: usize) -> crate::error::Result<usiz
         ));
     }
 
-    Ok(data_length.min(10_000))
+    Ok(data_length.min(MAX_SERIAL_DATA_LENGTH))
+}
+
+fn validate_single_serial_symbol(symbol: &str, message: &'static str) -> crate::error::Result<()> {
+    if symbol.split(',').count() > 1 {
+        return Err(crate::error::WaitFacadeError::InvalidState(message));
+    }
+    if symbol.trim().is_empty() {
+        return Err(crate::error::WaitFacadeError::InvalidState(
+            "serial symbol must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_multi_kline_symbols<I, S>(symbols: I) -> crate::error::Result<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut normalized = Vec::new();
+    for symbol in symbols {
+        let symbol = symbol.as_ref().trim();
+        if symbol.is_empty() {
+            return Err(crate::error::WaitFacadeError::InvalidState(
+                "kline_multi requires non-empty symbols",
+            ));
+        }
+        if symbol.contains(',') {
+            return Err(crate::error::WaitFacadeError::InvalidState(
+                "kline_multi expects separate symbols, not comma-joined items",
+            ));
+        }
+        if normalized.iter().any(|existing| existing == symbol) {
+            return Err(crate::error::WaitFacadeError::InvalidState(
+                "kline_multi symbols must be unique",
+            ));
+        }
+        normalized.push(symbol.to_string());
+    }
+    if normalized.is_empty() {
+        return Err(crate::error::WaitFacadeError::InvalidState(
+            "kline_multi requires at least one symbol",
+        ));
+    }
+    Ok(normalized)
 }
 
 fn sanitize_chart_token(raw: &str) -> String {

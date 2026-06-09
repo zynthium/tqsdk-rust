@@ -500,6 +500,79 @@ async fn kline_set_chart_uses_protocol_safe_chart_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn kline_multi_uses_one_chart_with_joined_symbols_and_bootstrap_width() {
+    let mut api = support::seeded_api();
+
+    let bars = api
+        .kline_multi(["SHFE.au2602", "DCE.m2609"], Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    let set_chart = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("multi kline should submit set_chart");
+
+    assert_eq!(bars.primary_symbol(), "SHFE.au2602");
+    assert_eq!(bars.symbols(), ["SHFE.au2602", "DCE.m2609"]);
+    assert_eq!(
+        set_chart["chart_id"],
+        "wait-kline-multi-SHFE_au2602_DCE_m2609-60000000000-64"
+    );
+    assert_eq!(set_chart["ins_list"], "SHFE.au2602,DCE.m2609");
+    assert_eq!(set_chart["duration"], 60_000_000_000_i64);
+    assert_eq!(set_chart["view_width"], 10_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kline_multi_window_aligns_secondary_rows_with_binding() {
+    let mut api = support::seeded_api();
+    support::seed_ready_multi_kline_chart(
+        &mut api,
+        &["SHFE.au2602", "DCE.m2609"],
+        60_000_000_000,
+        2,
+    );
+
+    let bars = api
+        .kline_multi(["SHFE.au2602", "DCE.m2609"], Duration::from_secs(60), 2)
+        .await
+        .unwrap();
+    let step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("chart commit should produce step");
+
+    assert!(step.is_changing(&bars));
+    let window = bars.window().unwrap();
+    assert_eq!(window.primary_symbol(), "SHFE.au2602");
+    assert_eq!(window.symbols(), ["SHFE.au2602", "DCE.m2609"]);
+    assert_eq!(window.view_width(), 2);
+    assert_eq!(window.len(), 2);
+    assert_eq!(
+        window
+            .rows()
+            .iter()
+            .map(|row| row.primary_id())
+            .collect::<Vec<_>>(),
+        vec![101, 103]
+    );
+    assert_eq!(
+        window.rows()[0].get("DCE.m2609").expect("secondary row").id,
+        301
+    );
+    assert_eq!(
+        window.rows()[1]
+            .get("DCE.m2609")
+            .expect("secondary row")
+            .close,
+        3205.0
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn kline_handle_reads_bounded_window_without_api_argument_after_step() {
     let mut api = support::seeded_api();
     support::seed_ready_kline_chart(&mut api, "SHFE.au2602", 60_000_000_000, 64);
@@ -619,6 +692,30 @@ async fn kline_handle_reuses_existing_chart_without_resubmitting_set_chart() {
 
     assert!(first_dispatch_count > 0);
     assert_eq!(second_dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn single_symbol_serial_rejects_comma_joined_symbols() {
+    let mut api = support::seeded_api();
+
+    let kline_error = api
+        .kline("SHFE.au2602,DCE.m2609", Duration::from_secs(60), 64)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        kline_error,
+        tqsdk_wait::WaitFacadeError::InvalidState(
+            "kline accepts one symbol; use kline_multi for multi-contract kline serials"
+        )
+    );
+
+    let tick_error = api.tick("SHFE.au2602,DCE.m2609", 64).await.unwrap_err();
+    assert_eq!(
+        tick_error,
+        tqsdk_wait::WaitFacadeError::InvalidState(
+            "tick serials accept one symbol; multi-contract tick serials are not supported"
+        )
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

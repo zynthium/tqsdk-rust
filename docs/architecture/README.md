@@ -124,7 +124,8 @@ V1 是：
   - market/trade 对象引用
   - 批量 quote 入口 `quotes(...)`，返回 symbol-indexed refs，并复用 session
     interest registry 管理订阅意图
-  - serial window 视图
+  - serial window 视图；K 线支持单合约 `kline(...)` 和多合约
+    `kline_multi([...])`，Tick serial 保持单合约
   - `kline` / `tick` non-blocking handle 与 `kline_ready` / `tick_ready` chart
     初始化等待路径
   - 基于 shared session 的 live `wait_update()` 驱动链路

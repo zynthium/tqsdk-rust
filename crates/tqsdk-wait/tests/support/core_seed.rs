@@ -199,6 +199,148 @@ pub fn seed_ready_kline_chart(api: &mut TqApi, symbol: &str, duration_ns: i64, v
 }
 
 #[allow(dead_code)]
+pub fn seed_ready_multi_kline_chart(
+    api: &mut TqApi,
+    symbols: &[&str],
+    duration_ns: i64,
+    view_width: usize,
+) {
+    let chart_id = format!(
+        "wait-kline-multi-{}-{duration_ns}-{view_width}",
+        symbols
+            .iter()
+            .map(|symbol| sanitize_chart_token(symbol))
+            .collect::<Vec<_>>()
+            .join("_")
+    );
+    let ins_list = symbols.join(",");
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": ins_list,
+                                    "duration": duration_ns,
+                                    "view_width": 10_000,
+                                },
+                                "left_id": 100,
+                                "right_id": 103,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "klines": {
+                            symbols[0]: {
+                                duration_ns.to_string(): {
+                                    "binding": {
+                                        symbols[1]: {
+                                            "100": 300,
+                                            "101": 301,
+                                            "103": 303
+                                        }
+                                    },
+                                    "data": {
+                                        "100": {
+                                            "datetime": 1_713_660_000_000_000_000_i64,
+                                            "open": 618.0,
+                                            "high": 620.0,
+                                            "low": 617.0,
+                                            "close": 619.0,
+                                            "volume": 12,
+                                            "open_oi": 100,
+                                            "close_oi": 101
+                                        },
+                                        "101": {
+                                            "datetime": 1_713_660_060_000_000_000_i64,
+                                            "open": 619.0,
+                                            "high": 621.0,
+                                            "low": 618.0,
+                                            "close": 620.0,
+                                            "volume": 15,
+                                            "open_oi": 101,
+                                            "close_oi": 103
+                                        },
+                                        "102": {
+                                            "datetime": 1_713_660_120_000_000_000_i64,
+                                            "open": 620.0,
+                                            "high": 622.0,
+                                            "low": 619.0,
+                                            "close": 621.0,
+                                            "volume": 16,
+                                            "open_oi": 103,
+                                            "close_oi": 104
+                                        },
+                                        "103": {
+                                            "datetime": 1_713_660_180_000_000_000_i64,
+                                            "open": 621.0,
+                                            "high": 623.0,
+                                            "low": 620.0,
+                                            "close": 622.0,
+                                            "volume": 18,
+                                            "open_oi": 104,
+                                            "close_oi": 106
+                                        }
+                                    }
+                                }
+                            },
+                            symbols[1]: {
+                                duration_ns.to_string(): {
+                                    "data": {
+                                        "300": {
+                                            "datetime": 1_713_660_000_000_000_000_i64,
+                                            "open": 3180.0,
+                                            "high": 3190.0,
+                                            "low": 3170.0,
+                                            "close": 3188.0,
+                                            "volume": 22,
+                                            "open_oi": 200,
+                                            "close_oi": 201
+                                        },
+                                        "301": {
+                                            "datetime": 1_713_660_060_000_000_000_i64,
+                                            "open": 3188.0,
+                                            "high": 3200.0,
+                                            "low": 3180.0,
+                                            "close": 3195.0,
+                                            "volume": 24,
+                                            "open_oi": 201,
+                                            "close_oi": 204
+                                        },
+                                        "303": {
+                                            "datetime": 1_713_660_180_000_000_000_i64,
+                                            "open": 3195.0,
+                                            "high": 3210.0,
+                                            "low": 3190.0,
+                                            "close": 3205.0,
+                                            "volume": 26,
+                                            "open_oi": 204,
+                                            "close_oi": 207
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready multi kline chart should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+#[allow(dead_code)]
 pub fn seed_ready_empty_kline_chart(
     api: &mut TqApi,
     symbol: &str,

@@ -139,7 +139,8 @@ crate 自己维护。
 - `WaitStep::is_changing()` / field-level changing checks
 - diff-backed market/trade live refs
 - serial/window 视图；`kline` / `tick` 返回 non-blocking handle，严格 chart
-  初始化等待使用 `kline_ready` / `tick_ready`
+  初始化等待使用 `kline_ready` / `tick_ready`；多合约 K 线使用
+  `kline_multi([...])` 和服务端 binding 对齐，Tick serial 仍为单合约
 - trade command 的 wait 风格薄包装
 
 设计原因：

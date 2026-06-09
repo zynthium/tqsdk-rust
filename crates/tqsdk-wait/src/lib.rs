@@ -49,10 +49,10 @@ pub use order_intent::{ClientOrderId, LimitOrderIntent, OrderTicket, OrderTicket
 pub use price::OrderPrice;
 pub use recovery::WaitStartupRecovery;
 pub use refs::{
-    AccountRef, KlineHandle, NotificationRef, OrderRef, PositionRef, PreInsertOrderRef, QuoteRef,
-    QuoteSet, RiskManagementDataRef, RiskManagementRuleRef, SecurityAccountRef, SecurityOrderRef,
-    SecurityPositionRef, SecurityTradeRef, SettlementInfoRef, TickHandle, TradeRef,
-    TradingStatusRef,
+    AccountRef, KlineHandle, MultiKlineHandle, NotificationRef, OrderRef, PositionRef,
+    PreInsertOrderRef, QuoteRef, QuoteSet, RiskManagementDataRef, RiskManagementRuleRef,
+    SecurityAccountRef, SecurityOrderRef, SecurityPositionRef, SecurityTradeRef, SettlementInfoRef,
+    TickHandle, TradeRef, TradingStatusRef,
 };
 pub use step::WaitStep;
-pub use views::{KlineWindow, TickWindow};
+pub use views::{KlineWindow, MultiKlineRow, MultiKlineWindow, TickWindow};
