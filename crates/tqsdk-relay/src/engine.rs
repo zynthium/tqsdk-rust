@@ -13,7 +13,8 @@ use crate::error::RelayResult;
 use crate::interest::{ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
 use crate::observability::{
-    DEFAULT_DATA_STALE_AFTER_SECS, HealthSnapshot, MetricsSnapshot, RelaySourceStatus,
+    DEFAULT_DATA_STALE_AFTER_SECS, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
+    RelaySourceStatus,
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolTelemetryStore};
@@ -32,6 +33,12 @@ pub struct RelayEngine {
     klines: HashMap<SourceKey, KlineSynthesis>,
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
+    upstream_stage: RelaySourceStage,
+    upstream_transport_connected: bool,
+    upstream_subscription_sent: bool,
+    upstream_frames_received: u64,
+    upstream_events_decoded: u64,
+    last_upstream_frame_unix_secs: Option<u64>,
     ticks_ingested: u64,
     upstream_symbols: usize,
     upstream_ins_list_chars: usize,
@@ -55,6 +62,12 @@ impl RelayEngine {
             klines: HashMap::new(),
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
+            upstream_stage: RelaySourceStage::Connecting,
+            upstream_transport_connected: false,
+            upstream_subscription_sent: false,
+            upstream_frames_received: 0,
+            upstream_events_decoded: 0,
+            last_upstream_frame_unix_secs: None,
             ticks_ingested: 0,
             upstream_symbols: 0,
             upstream_ins_list_chars: 0,
@@ -118,7 +131,7 @@ impl RelayEngine {
     ) -> RelayResult<Vec<DownstreamFrame>> {
         let symbol = symbol.as_ref();
         self.ticks_ingested = self.ticks_ingested.saturating_add(1);
-        self.upstream_status = RelaySourceStatus::Up;
+        self.mark_upstream_live();
         self.record_data_activity_at(receive_unix_millis / 1_000);
         self.symbol_metrics
             .record_tick_at(symbol, &row, receive_unix_millis);
@@ -143,7 +156,7 @@ impl RelayEngine {
         receive_unix_millis: u64,
     ) -> RelayResult<Vec<DownstreamFrame>> {
         let symbol = symbol.as_ref();
-        self.upstream_status = RelaySourceStatus::Up;
+        self.mark_upstream_live();
         self.record_data_activity_at(receive_unix_millis / 1_000);
         self.symbol_metrics
             .record_quote_at(symbol, &quote, receive_unix_millis);
@@ -160,6 +173,76 @@ impl RelayEngine {
 
     pub fn mark_upstream_degraded(&mut self) {
         self.upstream_status = RelaySourceStatus::Degraded;
+        self.upstream_stage = RelaySourceStage::Degraded;
+    }
+
+    pub fn record_upstream_transport_connected_at(&mut self, _unix_secs: u64) {
+        self.upstream_transport_connected = true;
+        if self.upstream_stage == RelaySourceStage::Connecting {
+            self.upstream_stage = RelaySourceStage::Subscribing;
+        }
+    }
+
+    pub fn record_upstream_subscription_sent_at(&mut self, _unix_secs: u64) {
+        self.upstream_transport_connected = true;
+        self.upstream_subscription_sent = true;
+        if matches!(
+            self.upstream_stage,
+            RelaySourceStage::Connecting | RelaySourceStage::Subscribing
+        ) {
+            self.upstream_stage = RelaySourceStage::Backfilling;
+        }
+    }
+
+    pub fn record_upstream_frame_received_at(&mut self, unix_secs: u64, decoded_events: usize) {
+        self.upstream_transport_connected = true;
+        self.upstream_frames_received = self.upstream_frames_received.saturating_add(1);
+        self.upstream_events_decoded = self
+            .upstream_events_decoded
+            .saturating_add(u64::try_from(decoded_events).unwrap_or(u64::MAX));
+        self.last_upstream_frame_unix_secs = Some(unix_secs);
+        if decoded_events == 0
+            && matches!(
+                self.upstream_stage,
+                RelaySourceStage::Connecting | RelaySourceStage::Subscribing
+            )
+        {
+            self.upstream_stage = RelaySourceStage::Backfilling;
+        }
+    }
+
+    pub fn record_upstream_progress(&mut self, progress: crate::upstream::UpstreamSourceProgress) {
+        if progress.transport_connected {
+            self.record_upstream_transport_connected_at(progress.unix_secs);
+        }
+        if progress.subscription_sent {
+            self.record_upstream_subscription_sent_at(progress.unix_secs);
+        }
+        if progress.frames_received > 0 {
+            self.upstream_transport_connected = true;
+            self.upstream_frames_received = self
+                .upstream_frames_received
+                .saturating_add(progress.frames_received);
+            self.upstream_events_decoded = self
+                .upstream_events_decoded
+                .saturating_add(progress.events_decoded);
+            self.last_upstream_frame_unix_secs = Some(progress.unix_secs);
+            if progress.events_decoded == 0
+                && matches!(
+                    self.upstream_stage,
+                    RelaySourceStage::Connecting | RelaySourceStage::Subscribing
+                )
+            {
+                self.upstream_stage = RelaySourceStage::Backfilling;
+            }
+        }
+    }
+
+    fn mark_upstream_live(&mut self) {
+        self.upstream_status = RelaySourceStatus::Up;
+        self.upstream_stage = RelaySourceStage::Live;
+        self.upstream_transport_connected = true;
+        self.upstream_subscription_sent = true;
     }
 
     pub fn record_universe_refresh_success(
@@ -257,17 +340,23 @@ impl RelayEngine {
             process_started,
             downstream_listening,
             upstream_status: self.upstream_status,
+            upstream_stage: self.upstream_stage,
             upstream_connected,
+            upstream_transport_connected: self.upstream_transport_connected,
+            upstream_subscription_sent: self.upstream_subscription_sent,
             universe_ready,
             data_fresh,
             downstream_clients: self.interests.client_count(),
             upstream_symbols: self.upstream_symbols,
             ticks_ingested: self.ticks_ingested,
+            upstream_frames_received: self.upstream_frames_received,
+            upstream_events_decoded: self.upstream_events_decoded,
             upstream_invalid_tick_rows: self.upstream_invalid_tick_rows,
             last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
+            last_upstream_frame_unix_secs: self.last_upstream_frame_unix_secs,
             data_stale_after_secs: DEFAULT_DATA_STALE_AFTER_SECS,
         }
     }
@@ -281,6 +370,11 @@ impl RelayEngine {
             ticks_ingested: self.ticks_ingested,
             bootstrap_pending: self.bootstrap.len(),
             bootstrap_inflight: self.bootstrap.inflight(),
+            upstream_stage: self.upstream_stage,
+            upstream_transport_connected: self.upstream_transport_connected,
+            upstream_subscription_sent: self.upstream_subscription_sent,
+            upstream_frames_received: self.upstream_frames_received,
+            upstream_events_decoded: self.upstream_events_decoded,
             upstream_symbols: self.upstream_symbols,
             upstream_ins_list_chars: self.upstream_ins_list_chars,
             upstream_ins_list_warn_chars: self.upstream_ins_list_warn_chars,
@@ -291,6 +385,7 @@ impl RelayEngine {
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
+            last_upstream_frame_unix_secs: self.last_upstream_frame_unix_secs,
         }
     }
 

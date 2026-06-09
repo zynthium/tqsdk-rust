@@ -9,7 +9,7 @@ use crate::error::RelayResult;
 use crate::server::RelayServer;
 #[cfg(feature = "metadata")]
 use crate::universe::{SessionFuturesUniverseResolver, resolve_futures_symbols};
-use crate::upstream::WebSocketUpstreamTickSource;
+use crate::upstream::{UpstreamTickSource, WebSocketUpstreamTickSource};
 use chrono::Timelike;
 use tokio::sync::oneshot;
 
@@ -49,9 +49,13 @@ async fn connect_configured_upstream_for_pump(
         }
     };
     record_universe_refresh_success(server, config, chart.symbols(), chart.ins_list_chars());
-    WebSocketUpstreamTickSource::connect_with_tick_chart(config.upstream_market_url.clone(), chart)
-        .await
-        .map(|source| Some(ConfiguredUpstream { source }))
+    let mut source = WebSocketUpstreamTickSource::connect_with_tick_chart(
+        config.upstream_market_url.clone(),
+        chart,
+    )
+    .await?;
+    record_upstream_progress(server, source.take_progress());
+    Ok(Some(ConfiguredUpstream { source }))
 }
 
 async fn configured_upstream_tick_chart(
@@ -161,6 +165,17 @@ async fn run_upstream_retry_loop(
             _ = &mut shutdown => return,
             () = tokio::time::sleep(retry_interval) => {}
         }
+    }
+}
+
+fn record_upstream_progress(
+    server: &RelayServer,
+    progress: crate::upstream::UpstreamSourceProgress,
+) {
+    let engine = server.engine();
+    match engine.lock() {
+        Ok(mut engine) => engine.record_upstream_progress(progress),
+        Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }
 }
 

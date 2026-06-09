@@ -504,6 +504,47 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
+    use tqsdk_relay::{
+        UpstreamSourceUpdate, UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource,
+    };
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        socket
+            .send_text(json!({"aid": "rtn_data", "data": [{}]}).to_string())
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let chart = UpstreamTickChart::new("relay-upstream-all-futures-ticks", ["SHFE.au2602"], 10_000)
+        .unwrap();
+
+    let mut source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+    let initial = source.take_progress();
+    assert!(initial.transport_connected);
+    assert!(initial.subscription_sent);
+
+    let update = source.next_update().await.unwrap();
+    assert!(matches!(update, UpstreamSourceUpdate::Progress));
+    let progress = source.take_progress();
+    assert_eq!(progress.frames_received, 1);
+    assert_eq!(progress.events_decoded, 0);
+    assert!(progress.unix_secs > 0);
+    server.join();
+}
+
+#[tokio::test]
 async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
     use tqsdk_relay::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
     use websocket_support::TestWebSocketServer;

@@ -214,17 +214,23 @@ open http://127.0.0.1:7789/dashboard
   "process_started": true,
   "downstream_listening": true,
   "upstream_status": "connecting",
+  "upstream_stage": "connecting",
   "upstream_connected": false,
+  "upstream_transport_connected": false,
+  "upstream_subscription_sent": false,
   "universe_ready": false,
   "data_fresh": false,
   "downstream_clients": 0,
   "upstream_symbols": 0,
   "ticks_ingested": 0,
+  "upstream_frames_received": 0,
+  "upstream_events_decoded": 0,
   "upstream_invalid_tick_rows": 0,
   "last_upstream_invalid_tick_row_error": null,
   "last_universe_refresh_unix_secs": null,
   "last_universe_refresh_error": null,
   "last_tick_unix_secs": null,
+  "last_upstream_frame_unix_secs": null,
   "data_stale_after_secs": 30
 }
 ```
@@ -235,7 +241,12 @@ open http://127.0.0.1:7789/dashboard
 
 - `process_started`：relay engine 已启动。
 - `downstream_listening`：下游 market websocket 监听已可接入。
-- `upstream_connected` / `upstream_status`：上游行情连接是否已进入可用状态。
+- `upstream_connected` / `upstream_status`：兼容字段，表示上游是否已经进入可用行情状态；只有收到有效 tick 或 quote 后才会变为 `up` / `true`。
+- `upstream_stage`：更细的上游阶段，可能为 `connecting`、`subscribing`、`backfilling`、`live`、`degraded` 或 `down`。`backfilling` 表示订阅命令已发送，relay 正在等待 tick chart bootstrap / 历史补齐产出可用 tick 或 quote；首个上游 frame 到达前 `upstream_frames_received` 仍可能为 0。
+- `upstream_transport_connected`：上游 websocket transport 已建立。
+- `upstream_subscription_sent`：relay 已向上游发送 `subscribe_quote`、`set_chart` 和初始 `peek_message`。
+- `upstream_frames_received` / `upstream_events_decoded`：已收到的上游 frame 数和解出的 tick / quote event 数，可用于区分“未建连”和“正在补历史但尚无可用行情”。
+- `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的 relay 本地 Unix 秒时间。
 - `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
 - `data_fresh`：最近一次 tick 或 quote 活跃时间未超过 freshness 窗口。
 - `market_data_ready`：`upstream_connected && universe_ready && data_fresh`。
@@ -251,8 +262,9 @@ open http://127.0.0.1:7789/dashboard
 同时包含 `market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距；`ticks_ingested`
 仍只统计 tick row，用于区分 quote-only 远月合约。
 
-`/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics`。它不连接 relay
-market websocket，不创建下游订阅，也不会触发额外行情命令。tick / quote ingest 热
+`/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics` 和 `/metrics`。它不连接 relay
+market websocket，不创建下游订阅，也不会触发额外行情命令。页面顶部会展示上游阶段、
+transport 连接、订阅发送、frame 接收数、解码事件数和最近 frame 时间；tick / quote ingest 热
 路径只更新当前合约的轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot
 请求侧。
 
@@ -261,6 +273,10 @@ market websocket，不创建下游订阅，也不会触发额外行情命令。t
 `RelayEngine::metrics_snapshot()` 和 `/metrics` 会返回当前下游客户端、quote/chart
 订阅、tick 摄入和 bootstrap 队列指标，也会返回上游订阅规模：
 
+- `upstream_stage`：当前上游阶段；比 `upstream_status` 更适合排查启动期是否停在连接、订阅发送或补历史阶段。
+- `upstream_transport_connected` / `upstream_subscription_sent`：上游 websocket 建连和订阅命令发送进度。
+- `upstream_frames_received` / `upstream_events_decoded`：上游 frame 与有效 tick / quote event 计数。
+- `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的本地 Unix 秒时间。
 - `upstream_symbols`：当前上游 tick chart 合约数。
 - `upstream_ins_list_chars`：当前上游 `ins_list` 字符串长度。
 - `upstream_ins_list_warn_chars` / `upstream_ins_list_max_chars`：配置阈值。

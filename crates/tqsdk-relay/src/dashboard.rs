@@ -64,6 +64,13 @@ pub const DASHBOARD_HTML: &str = r#"<!doctype html>
       margin-bottom: 14px;
     }
 
+    .upstream {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
     .tile {
       min-height: 72px;
       background: var(--panel);
@@ -157,7 +164,7 @@ pub const DASHBOARD_HTML: &str = r#"<!doctype html>
     @media (max-width: 1100px) {
       body { min-width: 0; }
       header { align-items: flex-start; flex-direction: column; gap: 6px; }
-      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary, .upstream { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .toolbar { grid-template-columns: 1fr 1fr; }
       .toolbar input { grid-column: 1 / -1; }
       button { width: 100%; }
@@ -171,6 +178,7 @@ pub const DASHBOARD_HTML: &str = r#"<!doctype html>
     <div class="timestamp" id="timestamp"></div>
   </header>
   <main>
+    <section class="upstream" id="upstream"></section>
     <section class="summary" id="summary"></section>
     <section class="toolbar">
       <input id="query" aria-label="Search symbol" placeholder="Search symbol">
@@ -227,6 +235,7 @@ pub const DASHBOARD_HTML: &str = r#"<!doctype html>
 "#;
 
 pub const DASHBOARD_JS: &str = r#"
+const upstream = document.getElementById('upstream');
 const summary = document.getElementById('summary');
 const symbols = document.getElementById('symbols');
 const timestamp = document.getElementById('timestamp');
@@ -273,7 +282,25 @@ function fmtPrice(value) {
   return Number(value).toString();
 }
 
-function render(data) {
+function renderUpstream(metrics) {
+  if (!metrics) {
+    upstream.innerHTML = '';
+    return;
+  }
+  upstream.innerHTML = [
+    ['stage', metrics.upstream_stage || '--'],
+    ['transport', metrics.upstream_transport_connected ? 'connected' : 'waiting'],
+    ['subscription', metrics.upstream_subscription_sent ? 'sent' : 'pending'],
+    ['frames', metrics.upstream_frames_received ?? 0],
+    ['decoded', metrics.upstream_events_decoded ?? 0],
+    ['last frame', fmtTime(metrics.last_upstream_frame_unix_secs ? metrics.last_upstream_frame_unix_secs * 1000 : null)]
+  ].map(([label, value]) => (
+    `<div class="tile"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`
+  )).join('');
+}
+
+function render(data, metrics) {
+  renderUpstream(metrics);
   const s = data.summary;
   timestamp.textContent = `Updated ${fmtTime(data.now_unix_millis)}`;
   summary.innerHTML = [
@@ -317,8 +344,11 @@ function render(data) {
 
 async function load() {
   const suffix = params();
-  const response = await fetch(`/symbol-metrics${suffix ? `?${suffix}` : ''}`);
-  render(await response.json());
+  const [symbolResponse, metricsResponse] = await Promise.all([
+    fetch(`/symbol-metrics${suffix ? `?${suffix}` : ''}`),
+    fetch('/metrics')
+  ]);
+  render(await symbolResponse.json(), await metricsResponse.json());
 }
 
 document.getElementById('refresh').addEventListener('click', load);
