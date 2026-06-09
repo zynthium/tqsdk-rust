@@ -272,6 +272,7 @@ V1 是：
 | 当前 workspace crate 边界审计 | [crate-boundaries.md](crate-boundaries.md) |
 | 未来 crate 蓝图与能力映射 | [crate-blueprint.md](crate-blueprint.md) |
 | DIFF 协议的纯 merge 语义 | [diff-core.md](diff-core.md) |
+| market DIFF、Quote/Tick 字段与实时性口径 | [market-diff-quote-tick.md](market-diff-quote-tick.md) |
 | runtime contract：命令、状态、commit、cursor、adapter | [runtime-core/overview.md](runtime-core/overview.md)、[runtime-core/modules.md](runtime-core/modules.md)、[runtime-core/protocol-flow.md](runtime-core/protocol-flow.md)、[runtime-core/data-contracts.md](runtime-core/data-contracts.md)、[runtime-core/type-system.md](runtime-core/type-system.md)、[runtime-core/session-auth.md](runtime-core/session-auth.md) |
 | Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
 | `wait_update` facade | [api-wait.md](api-wait.md) |
@@ -309,21 +310,22 @@ V1 是：
 ## 阅读顺序
 1. [AI 工作流与架构守则](ai-workflow.md)
 2. [diff-core](diff-core.md)
-3. [runtime-core 总览](runtime-core/overview.md)
-4. [Session/Auth](runtime-core/session-auth.md)
-5. [协议交互](runtime-core/protocol-flow.md)
-6. [模块清单](runtime-core/modules.md)
-7. [数据契约](runtime-core/data-contracts.md)
-8. [类型约束](runtime-core/type-system.md)
-9. [Python / Rust facade 范式对比](facade-paradigms.md)
-10. [当前 crate 边界审计](crate-boundaries.md)
-11. [未来 crate 蓝图与能力映射](crate-blueprint.md)
-12. [验收与测试矩阵](validation.md)
-13. [wait facade](api-wait.md)
-14. [stream facade](api-stream.md)
-15. [task facade](api-task.md)
-16. [data facade](api-data.md)
-17. [演进路线](roadmap.md)
+3. [Market DIFF、Quote 与 Tick](market-diff-quote-tick.md)
+4. [runtime-core 总览](runtime-core/overview.md)
+5. [Session/Auth](runtime-core/session-auth.md)
+6. [协议交互](runtime-core/protocol-flow.md)
+7. [模块清单](runtime-core/modules.md)
+8. [数据契约](runtime-core/data-contracts.md)
+9. [类型约束](runtime-core/type-system.md)
+10. [Python / Rust facade 范式对比](facade-paradigms.md)
+11. [当前 crate 边界审计](crate-boundaries.md)
+12. [未来 crate 蓝图与能力映射](crate-blueprint.md)
+13. [验收与测试矩阵](validation.md)
+14. [wait facade](api-wait.md)
+15. [stream facade](api-stream.md)
+16. [task facade](api-task.md)
+17. [data facade](api-data.md)
+18. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
