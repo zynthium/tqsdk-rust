@@ -112,6 +112,34 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(metrics["downstream_clients"], 0);
     assert_eq!(metrics["ticks_ingested"], 0);
     assert_eq!(metrics["upstream_symbols"], 0);
+
+    let symbol_metrics = wait_for_http_json(metrics_addr, "/symbol-metrics", &mut child);
+    assert_eq!(symbol_metrics["now_unix_millis"].is_number(), true);
+    assert_eq!(symbol_metrics["data_stale_after_millis"], 30_000);
+    assert_eq!(symbol_metrics["summary"]["total"], 0);
+    assert_eq!(symbol_metrics["symbols"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn relay_binary_rejects_invalid_symbol_metrics_query() {
+    let downstream_addr = free_loopback_addr();
+    let metrics_addr = free_loopback_addr();
+    let mut child = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
+            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
+            .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+
+    let response = wait_for_http_response(metrics_addr, "/symbol-metrics?sort=bad", &mut child);
+    assert!(response.starts_with("HTTP/1.1 400"));
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let error: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(error["error"], "invalid sort");
 }
 
 struct ChildGuard {
@@ -176,6 +204,32 @@ Connection: close\r\n\
                 let (_, body) = response.split_once("\r\n\r\n").unwrap();
                 return serde_json::from_str(body).unwrap();
             }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relay metrics listener at {addr}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_http_response(addr: SocketAddr, path: &str, child: &mut ChildGuard) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait() {
+            panic!("relay binary exited before opening metrics listener: {status}");
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            let request = format!(
+                "GET {path} HTTP/1.1\r\n\
+Host: {addr}\r\n\
+Connection: close\r\n\
+\r\n"
+            );
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            return String::from_utf8(response).unwrap();
         }
         assert!(
             Instant::now() < deadline,
