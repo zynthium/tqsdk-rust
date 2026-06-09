@@ -60,6 +60,8 @@ wait adapter 层未来可以提供：
 - facade 如提供 `snapshot()`，默认应建立在某个已提交 revision 的借用读视图之上
 - 只有明确需要 detached ownership 时，才应退回 `StateSnapshot` clone 路径
 - `WaitStep::is_changing()` 只解释当前 `step()` / `step_until(...)` 成功消费到的 commit
+- `WaitStep::changed_quote_symbols()` 只从当前 commit 的 `ChangeSet` 提取变化 quote
+  symbol；它不得查询状态树、维护私有 revision，或合并多个 step 的变化。
 - serial handle 可以提供 `last()`、`rows_since(last_seen_id)` 和
   `changed_rows(&WaitStep)` 这类便利方法，但它们只能读取同一棵 runtime state
   tree 的当前窗口，并且 `changed_rows` 只能解释传入的 `WaitStep` 所代表的单个
@@ -82,7 +84,7 @@ wait adapter 层未来可以提供：
   应一次表达一批 quote interest，并返回 symbol-indexed refs。它必须复用
   `tqsdk-session` 的 session-scoped market interest registry，不能在 wait
   facade 私下维护会与 stream 冲突的订阅真相。
-- full-universe 或大批量 quote 订阅不应被迫走 `tqsdk-stream`。如果消费模型仍是单 owner `wait_update()`，`tqsdk-wait` 应提供 step-bound changed quote iteration，避免用户每个 commit 扫描全部 symbol。候选形状包括 `QuoteSet::changed(&WaitStep)`、`QuoteSet::changed_snapshots(&WaitStep)` 或等价薄 helper；它们必须解释当前 `WaitStep` 对应的 commit，不维护 facade 私有 revision。
+- full-universe 或大批量 quote 订阅不应被迫走 `tqsdk-stream`。如果消费模型仍是单 owner `wait_update()`，`tqsdk-wait` 提供 step-bound `QuoteSet::changed(&WaitStep)` 和 `QuoteSet::changed_snapshots(&WaitStep)`，避免用户每个 commit 扫描全部 symbol。这两个 helper 必须先用 `WaitStep::changed_quote_symbols()` 定位本轮变化 symbol，再过滤到当前 `QuoteSet`；输出顺序跟随 `QuoteSet::symbols()` 的 symbol 顺序，并且只解释当前 `WaitStep` 对应的 commit，不维护 facade 私有 revision。
 - quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
   `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
   quote 的 ready / load 语义。

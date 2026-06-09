@@ -5,11 +5,41 @@ use tqsdk_core::{
     CommitScope, InputPayload, IoEvent, OutboundFrame, OutboundRequest, ProtocolDomain,
     RuntimeInput,
 };
+use tqsdk_wait::testing::WaitTestDriver;
 
 mod support;
 
 fn compact_source(source: &str) -> String {
     source.split_whitespace().collect::<String>()
+}
+
+fn function_block<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing function signature: {signature}"));
+    let after_signature = &source[start..];
+    let open_offset = after_signature
+        .find('{')
+        .unwrap_or_else(|| panic!("missing function body: {signature}"));
+    let body_start = start + open_offset;
+    let mut depth = 0usize;
+
+    for (offset, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth
+                    .checked_sub(1)
+                    .unwrap_or_else(|| panic!("unbalanced braces in: {signature}"));
+                if depth == 0 {
+                    return &source[start..body_start + offset + ch.len_utf8()];
+                }
+            }
+            _ => {}
+        }
+    }
+
+    panic!("unterminated function body: {signature}");
 }
 
 fn transport_payload(request: &OutboundRequest) -> serde_json::Value {
@@ -300,6 +330,45 @@ fn drain_backtest_set_chart_payloads(api: &tqsdk_wait::TqApi) -> Vec<serde_json:
         .collect()
 }
 
+fn seed_quote_batch_commit(
+    api: &mut tqsdk_wait::TqApi,
+    quotes: impl IntoIterator<Item = (&'static str, f64, &'static str)>,
+) {
+    let mut quote_map = serde_json::Map::new();
+    for (symbol, last_price, datetime) in quotes {
+        quote_map.insert(
+            symbol.to_string(),
+            json!({
+                "instrument_id": symbol,
+                "datetime": datetime,
+                "last_price": last_price
+            }),
+        );
+    }
+
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": quote_map
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed quote batch should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
 #[test]
 fn market_refs_read_market_partitions_instead_of_full_snapshot() {
     let quote_ref = include_str!("../src/refs/quote.rs");
@@ -318,6 +387,19 @@ fn market_refs_read_market_partitions_instead_of_full_snapshot() {
 }
 
 #[test]
+fn quote_set_changed_uses_step_symbol_metadata_instead_of_scanning_all_quotes() {
+    let quote_ref = include_str!("../src/refs/quote.rs");
+    let changed_block = compact_source(function_block(
+        quote_ref,
+        "pub fn changed<'a>(&'a self, step: &'a WaitStep)",
+    ));
+
+    assert!(changed_block.contains("step.changed_quote_symbols()"));
+    assert!(!changed_block.contains("self.quotes.values()"));
+    assert!(!changed_block.contains("self.quotes.iter()"));
+}
+
+#[test]
 fn changed_rows_uses_row_decoding_instead_of_materializing_window_first() {
     let kline_ref = include_str!("../src/refs/kline.rs");
     let tick_ref = include_str!("../src/refs/tick.rs");
@@ -326,6 +408,82 @@ fn changed_rows_uses_row_decoding_instead_of_materializing_window_first() {
     assert!(tick_ref.contains("pub fn row(&self, id: i64)"));
     assert!(!compact_source(kline_ref).contains("letwindow=self.window()?;letchanged_ids"));
     assert!(!compact_source(tick_ref).contains("letwindow=self.window()?;letchanged_ids"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_step_changed_quote_symbols_reports_only_market_quote_changes() {
+    let mut api = support::seeded_api();
+    seed_quote_batch_commit(
+        &mut api,
+        [
+            ("DCE.m2609", 3200.0, "2026-04-26 09:00:00.000000"),
+            ("SHFE.au2602", 618.0, "2026-04-26 09:00:00.000000"),
+        ],
+    );
+
+    let step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("quote batch commit should produce step");
+    let mut symbols = step.changed_quote_symbols().collect::<Vec<_>>();
+    symbols.sort_unstable();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "SHFE.au2602"]);
+
+    support::seed_trade_snapshot(&mut api, "sim", "SHFE.au2602");
+    let trade_step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("trade commit should produce step");
+    assert!(trade_step.changed_quote_symbols().next().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_step_changed_quote_symbols_stays_empty_for_noop_quote_update() {
+    let mut api = support::seeded_api();
+    support::seed_quote_commit_with_datetime(
+        &mut api,
+        "SHFE.au2602",
+        618.0,
+        "2026-04-26 09:00:00.000000",
+    );
+    let _step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("initial quote commit should produce step");
+
+    let noop_commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "instrument_id": "SHFE.au2602",
+                                "datetime": "2026-04-26 09:00:00.000000",
+                                "last_price": 618.0
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+
+    assert!(
+        noop_commit.is_none(),
+        "unchanged quote fields must not produce a diff commit"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -360,6 +518,52 @@ async fn quotes_submits_one_batch_and_returns_symbol_indexed_refs() {
         .collect::<Vec<_>>();
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0]["ins_list"], "DCE.m2609,SHFE.au2602");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quote_set_changed_filters_to_subscribed_quotes_without_full_set_scan() {
+    let mut api = support::seeded_api();
+    let mut symbols = (0..100)
+        .map(|idx| format!("SHFE.bench{idx:04}"))
+        .collect::<Vec<_>>();
+    symbols.push("SHFE.au2602".to_string());
+    symbols.push("DCE.m2609".to_string());
+
+    let quotes = api
+        .quotes(symbols.iter().map(String::as_str))
+        .await
+        .unwrap();
+    seed_quote_batch_commit(
+        &mut api,
+        [
+            ("SHFE.au2602", 618.0, "2026-04-26 09:00:00.000000"),
+            ("CZCE.MA607", 2550.0, "2026-04-26 09:00:00.000000"),
+            ("DCE.m2609", 3200.0, "2026-04-26 09:00:00.000000"),
+        ],
+    );
+
+    let step = api
+        .step()
+        .await
+        .unwrap()
+        .expect("quote batch commit should produce step");
+    let changed_symbols = quotes
+        .changed(&step)
+        .map(|quote| quote.symbol().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(changed_symbols, vec!["DCE.m2609", "SHFE.au2602"]);
+
+    let snapshots = quotes.changed_snapshots(&step).unwrap();
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|quote| quote.instrument_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["DCE.m2609", "SHFE.au2602"]
+    );
+    assert_eq!(snapshots[0].last_price, 3200.0);
+    assert_eq!(snapshots[1].last_price, 618.0);
 }
 
 #[tokio::test(flavor = "current_thread")]

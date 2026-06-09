@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::HashSet;
+
 use tqsdk_core::{ChangeSet, ObjectKey, StatePath};
 
 /// Lightweight handle that can be matched against the latest diff commit.
@@ -65,6 +67,32 @@ pub(crate) fn matches_fields(
         });
         matched
     })
+}
+
+pub(crate) fn changed_quote_symbols(changes: &ChangeSet) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    let mut symbols = Vec::new();
+
+    for path in &changes.path_hits {
+        let segments = path.segments();
+        if segments.len() >= 2 && segments[0] == "quotes" {
+            push_quote_symbol(&mut seen, &mut symbols, segments[1].as_str());
+        }
+    }
+
+    for object in &changes.object_hits {
+        if let ObjectKey::Quote { symbol } = object {
+            push_quote_symbol(&mut seen, &mut symbols, symbol.as_str());
+        }
+    }
+
+    symbols
+}
+
+fn push_quote_symbol<'a>(seen: &mut HashSet<&'a str>, symbols: &mut Vec<&'a str>, symbol: &'a str) {
+    if seen.insert(symbol) {
+        symbols.push(symbol);
+    }
 }
 
 fn path_matches(target: &StatePath, changed: &StatePath) -> bool {

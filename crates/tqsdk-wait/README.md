@@ -68,9 +68,10 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `testing::WaitTestDriver`
 - `step().await`
 - `step_until(deadline).await`
-- `WaitStep::{revision, current_dt, is_changing, is_changing_fields}`
+- `WaitStep::{revision, current_dt, is_changing, is_changing_fields, changed_quote_symbols}`
 - `quote(...).await`
 - `quotes(...).await`
+- `QuoteSet::{get, iter, symbols, changed, changed_snapshots}`
 - `trading_status(...).await`
 - `kline(...).await`
 - `kline_ready(...).await`
@@ -132,7 +133,7 @@ wait facade。
 - 常见多合约实时行情入口使用 `quotes(...).await`，一次提交批量 quote 订阅并返回
   symbol-indexed `QuoteSet`；单合约 `quote(...)` 仍保留为便利入口。订阅意图由底层
   `SessionClient` 去重，避免 wait / stream 在同一 session 内重复提交或互相取消。
-- 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，默认入口仍应是 wait facade 的 `quotes(...).await`。no-scan changed symbols / changed snapshots 属于 wait facade 的已接受后续优化方向，用来避免每轮扫描所有订阅合约；`tqsdk-stream` 不应成为单消费者 quote throughput 的默认答案。
+- 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，默认入口仍应是 wait facade 的 `quotes(...).await`。`WaitStep::changed_quote_symbols()` 只解释当前 commit 的 quote 变化；`QuoteSet::changed(&step)` 和 `QuoteSet::changed_snapshots(&step)` 用这份 commit metadata 先定位变化 symbol，再过滤到当前 `QuoteSet`，避免每轮扫描所有订阅合约。返回顺序按 `QuoteSet::symbols()` 的 symbol 顺序。`tqsdk-stream` 不应成为单消费者 quote throughput 的默认答案。
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - 多合约 K 线使用 `kline_multi([...], duration, data_length)`，一个 `chart_id` 对应逗号拼接的 `ins_list`。和 Python TqSdk 一样，多合约 K 线启动请求使用 `view_width=10000` 让服务端补齐足够窗口；客户端返回 `MultiKlineWindow`，以第一个合约为主合约，并通过主合约 K 线分区下的 `binding/{secondary}/{primary_id}` 把副合约行对齐到同一行。缺少任一副合约 binding 或 row 的主合约行不会进入窗口。
@@ -157,12 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let Some(step) = api.step().await? else { continue };
-        for quote in quotes.iter() {
-            if let Some(snapshot) = quote.changed_snapshot(&step)? {
-                println!("{} {}", snapshot.instrument_id, snapshot.last_price);
-            }
+        for snapshot in quotes.changed_snapshots(&step)? {
+            println!("{} {}", snapshot.instrument_id, snapshot.last_price);
         }
-
     }
 }
 ```

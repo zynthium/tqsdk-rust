@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tqsdk_core::{ChangeSet, CommitResult, Revision, RuntimeReader};
 
-use crate::change::{ChangeTrackedRef, matches_any, matches_fields};
+use crate::change::{ChangeTrackedRef, changed_quote_symbols, matches_any, matches_fields};
 
 #[derive(Clone)]
 pub(crate) struct WaitReadHandle {
@@ -50,6 +50,10 @@ impl WaitStep {
     #[must_use]
     pub fn is_changing_fields(&self, target: &impl ChangeTrackedRef, fields: &[&str]) -> bool {
         matches_fields(&self.commit.changes, target, fields)
+    }
+
+    pub fn changed_quote_symbols(&self) -> impl Iterator<Item = &str> + '_ {
+        changed_quote_symbols(&self.commit.changes).into_iter()
     }
 
     pub(crate) fn changes(&self) -> &ChangeSet {

@@ -33,6 +33,25 @@ impl QuoteSet {
     pub fn symbols(&self) -> impl Iterator<Item = &str> {
         self.quotes.keys().map(String::as_str)
     }
+
+    pub fn changed<'a>(&'a self, step: &'a WaitStep) -> impl Iterator<Item = &'a QuoteRef> + 'a {
+        let mut changed = step
+            .changed_quote_symbols()
+            .filter_map(|symbol| self.quotes.get(symbol))
+            .collect::<Vec<_>>();
+        changed.sort_by(|left, right| left.symbol().cmp(right.symbol()));
+        changed.into_iter()
+    }
+
+    pub fn changed_snapshots(&self, step: &WaitStep) -> crate::error::Result<Vec<Quote>> {
+        let mut snapshots = Vec::new();
+        for quote in self.changed(step) {
+            if let Some(snapshot) = quote.snapshot()? {
+                snapshots.push(snapshot);
+            }
+        }
+        Ok(snapshots)
+    }
 }
 
 impl QuoteRef {
