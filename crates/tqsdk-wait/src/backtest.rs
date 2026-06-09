@@ -166,7 +166,6 @@ impl BacktestPump {
                 TickPumpDecision::Emit {
                     symbol,
                     user_chart_id,
-                    view_width,
                     row_id,
                     row,
                     datetime,
@@ -176,7 +175,6 @@ impl BacktestPump {
                         session,
                         &symbol,
                         &user_chart_id,
-                        view_width,
                         row_id,
                         row,
                         datetime,
@@ -470,7 +468,6 @@ impl BacktestTickSerial {
             return Ok(TickPumpDecision::Emit {
                 symbol: self.symbol.clone(),
                 user_chart_id: self.user_chart_id.clone(),
-                view_width: self.view_width,
                 row_id: id,
                 row,
                 datetime,
@@ -575,7 +572,6 @@ enum TickPumpDecision {
     Emit {
         symbol: String,
         user_chart_id: String,
-        view_width: usize,
         row_id: i64,
         row: Value,
         datetime: i64,
@@ -628,7 +624,6 @@ fn synthesize_tick_commit(
     session: &SessionClient,
     symbol: &str,
     chart_id: &str,
-    _view_width: usize,
     row_id: i64,
     row: Value,
     datetime: i64,

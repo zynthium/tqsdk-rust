@@ -167,14 +167,13 @@ impl PathSubscriberRegistry {
                 dead.insert(subscriber_id);
                 continue;
             }
-            if subscriber.matcher.is_match(&commit) {
-                if subscriber
+            if subscriber.matcher.is_match(&commit)
+                && subscriber
                     .sender
                     .send(DriverEvent::Commit(commit.clone()))
                     .is_err()
-                {
-                    dead.insert(subscriber_id);
-                }
+            {
+                dead.insert(subscriber_id);
             }
         }
 
@@ -248,9 +247,9 @@ impl PathSubscriberRegistry {
         for subscriber_id in dead {
             self.subscribers[*subscriber_id] = None;
         }
-        remove_dead_ids(&mut self.generic_subscribers, &dead);
-        retain_live_index(&mut self.subscribers_by_root, &dead);
-        retain_live_index(&mut self.quote_subscribers_by_symbol, &dead);
+        remove_dead_ids(&mut self.generic_subscribers, dead);
+        retain_live_index(&mut self.subscribers_by_root, dead);
+        retain_live_index(&mut self.quote_subscribers_by_symbol, dead);
     }
 }
 

@@ -148,12 +148,13 @@ pub struct Tq {
 }
 
 enum TqInner {
-    Live(tqsdk_task::TaskHost),
-    LocalBacktest(tqsdk_task::StrategyBacktest),
+    Live(Box<tqsdk_task::TaskHost>),
+    LocalBacktest(Box<tqsdk_task::StrategyBacktest>),
 }
 
 impl Tq {
     /// Create a new builder. This is the recommended entry point.
+    #[allow(clippy::new_ret_no_self)]
     #[must_use]
     pub fn new() -> TqBuilder {
         TqBuilder::new()
@@ -168,13 +169,13 @@ impl Tq {
     #[must_use]
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
-            inner: TqInner::Live(tqsdk_task::TaskHost::new(api)),
+            inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
         }
     }
 
     fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
         Self {
-            inner: TqInner::LocalBacktest(backtest),
+            inner: TqInner::LocalBacktest(Box::new(backtest)),
         }
     }
 
@@ -522,6 +523,12 @@ impl TqBuilder {
 
         let api = wait_builder.build().await?;
         Ok(Tq::from_api(api))
+    }
+}
+
+impl Default for TqBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
