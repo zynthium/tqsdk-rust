@@ -8,6 +8,7 @@
 pub mod bootstrap;
 pub mod cache;
 pub mod config;
+pub mod dashboard;
 pub mod diagnostics;
 pub mod engine;
 pub mod error;
