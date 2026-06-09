@@ -176,8 +176,9 @@ V1 是：
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
   - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
     长度阈值；超出 hard limit 时给出 relay 实例拆分建议
-  - 提供 dry-run 启动自检、结构化启动日志、HTTP `/health` 和 `/metrics`；
-    `/health` 区分进程/下游监听、上游连接、合约集合刷新和数据 freshness
+  - 提供 dry-run 启动自检、结构化启动日志、HTTP `/health`、`/metrics`、
+    `/symbol-metrics` 和内置只读 `/dashboard`；`/health` 区分进程/下游监听、
+    上游连接、合约集合刷新和数据 freshness
   - 新 K 线订阅可用内存 tick ring 回放已闭合的合成 K 线，减少冷启动空窗
   - 现有 SDK crates 不依赖 relay；用户显式配置 market endpoint 时才使用
 

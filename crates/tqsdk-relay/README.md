@@ -199,6 +199,8 @@ warn threshold 时连接仍会继续，但启动诊断和 metrics 会暴露当�
 ```bash
 curl http://127.0.0.1:7789/health
 curl http://127.0.0.1:7789/metrics
+curl http://127.0.0.1:7789/symbol-metrics
+open http://127.0.0.1:7789/dashboard
 ```
 
 `/health` 示例：
@@ -239,6 +241,16 @@ tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括�
   tick row 数量和最近一条解码错误。
 
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
+
+`/symbol-metrics` 返回合约级 telemetry 快照，覆盖当前上游 universe 和下游实际订阅
+合约。状态主口径是 relay 接收间隔延迟：`live` 表示最近 `30s` 内收到 tick，`stale`
+表示收过 tick 但超过 freshness 窗口，`missing` 表示在上游 universe 中但从未收到
+tick，`inactive` 表示下游订阅了不在上游 universe 中的合约。响应同时包含
+`market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距。
+
+`/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics`。它不连接 relay
+market websocket，不创建下游订阅，也不会触发额外行情命令。tick ingest 热路径只更新
+当前合约的轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot 请求侧。
 
 ### 观测字段
 

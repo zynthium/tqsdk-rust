@@ -91,6 +91,7 @@ relay 侧推荐配置 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` 或产品代码列表�
 查询当前活跃合约集合，并默认在本地时间每天 `08:30:00` 重新发现。relay 会暴露上游
 合约数、`ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
 检查订阅规模；`/health` 会区分下游监听、上游连接、合约集合刷新和数据 freshness；
+`/symbol-metrics` 和 `/dashboard` 可用于查看每个合约的数据接收状态与延迟；
 静态完整合约文件只作为兼容覆盖入口。
 
 ## 快速开始
