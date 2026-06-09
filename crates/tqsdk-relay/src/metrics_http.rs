@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
+use crate::dashboard::{DASHBOARD_HTML, DASHBOARD_JS};
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::symbol_metrics::SymbolMetricsQuery;
@@ -73,6 +74,20 @@ async fn serve_metrics_stream(
             serde_json::to_value(symbol_metrics).map_err(|err| {
                 RelayError::Internal(format!("symbol metrics JSON encode failed: {err}"))
             })?
+        }
+        "/dashboard" => {
+            write_text_response(stream, 200, "text/html; charset=utf-8", DASHBOARD_HTML).await?;
+            return Ok(());
+        }
+        "/dashboard/app.js" => {
+            write_text_response(
+                stream,
+                200,
+                "application/javascript; charset=utf-8",
+                DASHBOARD_JS,
+            )
+            .await?;
+            return Ok(());
         }
         _ => {
             write_response(stream, 404, json!({"error": "not found"})).await?;
@@ -142,6 +157,28 @@ Content-Length: {}\r\n\
 Connection: close\r\n\
 \r\n\
 {body}",
+        body.len(),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
+}
+
+async fn write_text_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> RelayResult<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {}\r\n\
+Content-Type: {content_type}\r\n\
+Content-Length: {}\r\n\
+Connection: close\r\n\
+\r\n\
+{body}",
+        status_reason(status),
         body.len(),
     );
     stream

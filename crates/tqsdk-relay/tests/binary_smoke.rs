@@ -142,6 +142,31 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
     assert_eq!(error["error"], "invalid sort");
 }
 
+#[test]
+fn relay_binary_serves_embedded_dashboard_assets() {
+    let downstream_addr = free_loopback_addr();
+    let metrics_addr = free_loopback_addr();
+    let mut child = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
+            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
+            .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+
+    let html = wait_for_http_response(metrics_addr, "/dashboard", &mut child);
+    assert!(html.starts_with("HTTP/1.1 200"));
+    assert!(html.contains("Relay Symbol Dashboard"));
+    assert!(html.contains("/dashboard/app.js"));
+
+    let js = wait_for_http_response(metrics_addr, "/dashboard/app.js", &mut child);
+    assert!(js.starts_with("HTTP/1.1 200"));
+    assert!(js.contains("/symbol-metrics"));
+}
+
 struct ChildGuard {
     child: Child,
 }
