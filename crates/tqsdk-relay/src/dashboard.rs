@@ -282,7 +282,34 @@ function fmtPrice(value) {
   return Number(value).toString();
 }
 
-function renderUpstream(metrics) {
+function fmtSeconds(value) {
+  if (value === null || value === undefined) return '--';
+  if (value < 60) return `${value}s`;
+  if (value < 3600) return `${Math.floor(value / 60)}m ${value % 60}s`;
+  return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
+}
+
+function backfillProgress(metrics, nowUnixMillis) {
+  if (!metrics || metrics.upstream_stage !== 'backfilling') return '--';
+  const nowSecs = Math.floor(nowUnixMillis / 1000);
+  const started = metrics.upstream_stage_started_unix_secs;
+  const elapsed = started ? Math.max(0, nowSecs - started) : null;
+  const lastFrame = metrics.last_upstream_frame_unix_secs;
+  const idle = lastFrame ? Math.max(0, nowSecs - lastFrame) : null;
+  const frameRate = elapsed && elapsed > 0
+    ? (metrics.upstream_frames_received / elapsed).toFixed(2)
+    : null;
+  const parts = [];
+  if (elapsed !== null) parts.push(`elapsed ${fmtSeconds(elapsed)}`);
+  parts.push(`${metrics.upstream_frames_received ?? 0} frames`);
+  parts.push(`${metrics.upstream_events_decoded ?? 0} decoded`);
+  if (frameRate !== null) parts.push(`${frameRate}/s`);
+  if (idle !== null) parts.push(`idle ${fmtSeconds(idle)}`);
+  if ((metrics.upstream_events_decoded ?? 0) === 0) parts.push('waiting first event');
+  return parts.join(' · ');
+}
+
+function renderUpstream(metrics, nowUnixMillis) {
   if (!metrics) {
     upstream.innerHTML = '';
     return;
@@ -293,6 +320,7 @@ function renderUpstream(metrics) {
     ['subscription', metrics.upstream_subscription_sent ? 'sent' : 'pending'],
     ['frames', metrics.upstream_frames_received ?? 0],
     ['decoded', metrics.upstream_events_decoded ?? 0],
+    ['backfill', backfillProgress(metrics, nowUnixMillis)],
     ['last frame', fmtTime(metrics.last_upstream_frame_unix_secs ? metrics.last_upstream_frame_unix_secs * 1000 : null)]
   ].map(([label, value]) => (
     `<div class="tile"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`
@@ -300,7 +328,7 @@ function renderUpstream(metrics) {
 }
 
 function render(data, metrics) {
-  renderUpstream(metrics);
+  renderUpstream(metrics, data.now_unix_millis);
   const s = data.summary;
   timestamp.textContent = `Updated ${fmtTime(data.now_unix_millis)}`;
   summary.innerHTML = [

@@ -34,6 +34,7 @@ pub struct RelayEngine {
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
     upstream_stage: RelaySourceStage,
+    upstream_stage_started_unix_secs: Option<u64>,
     upstream_transport_connected: bool,
     upstream_subscription_sent: bool,
     upstream_frames_received: u64,
@@ -63,6 +64,7 @@ impl RelayEngine {
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
             upstream_stage: RelaySourceStage::Connecting,
+            upstream_stage_started_unix_secs: None,
             upstream_transport_connected: false,
             upstream_subscription_sent: false,
             upstream_frames_received: 0,
@@ -173,24 +175,24 @@ impl RelayEngine {
 
     pub fn mark_upstream_degraded(&mut self) {
         self.upstream_status = RelaySourceStatus::Degraded;
-        self.upstream_stage = RelaySourceStage::Degraded;
+        self.set_upstream_stage(RelaySourceStage::Degraded, None);
     }
 
-    pub fn record_upstream_transport_connected_at(&mut self, _unix_secs: u64) {
+    pub fn record_upstream_transport_connected_at(&mut self, unix_secs: u64) {
         self.upstream_transport_connected = true;
         if self.upstream_stage == RelaySourceStage::Connecting {
-            self.upstream_stage = RelaySourceStage::Subscribing;
+            self.set_upstream_stage(RelaySourceStage::Subscribing, Some(unix_secs));
         }
     }
 
-    pub fn record_upstream_subscription_sent_at(&mut self, _unix_secs: u64) {
+    pub fn record_upstream_subscription_sent_at(&mut self, unix_secs: u64) {
         self.upstream_transport_connected = true;
         self.upstream_subscription_sent = true;
         if matches!(
             self.upstream_stage,
             RelaySourceStage::Connecting | RelaySourceStage::Subscribing
         ) {
-            self.upstream_stage = RelaySourceStage::Backfilling;
+            self.set_upstream_stage(RelaySourceStage::Backfilling, Some(unix_secs));
         }
     }
 
@@ -207,7 +209,7 @@ impl RelayEngine {
                 RelaySourceStage::Connecting | RelaySourceStage::Subscribing
             )
         {
-            self.upstream_stage = RelaySourceStage::Backfilling;
+            self.set_upstream_stage(RelaySourceStage::Backfilling, Some(unix_secs));
         }
     }
 
@@ -233,16 +235,25 @@ impl RelayEngine {
                     RelaySourceStage::Connecting | RelaySourceStage::Subscribing
                 )
             {
-                self.upstream_stage = RelaySourceStage::Backfilling;
+                self.set_upstream_stage(RelaySourceStage::Backfilling, Some(progress.unix_secs));
             }
         }
     }
 
     fn mark_upstream_live(&mut self) {
         self.upstream_status = RelaySourceStatus::Up;
-        self.upstream_stage = RelaySourceStage::Live;
+        self.set_upstream_stage(RelaySourceStage::Live, None);
         self.upstream_transport_connected = true;
         self.upstream_subscription_sent = true;
+    }
+
+    fn set_upstream_stage(&mut self, stage: RelaySourceStage, unix_secs: Option<u64>) {
+        if self.upstream_stage != stage {
+            self.upstream_stage = stage;
+            self.upstream_stage_started_unix_secs = unix_secs;
+        } else if self.upstream_stage_started_unix_secs.is_none() {
+            self.upstream_stage_started_unix_secs = unix_secs;
+        }
     }
 
     pub fn record_universe_refresh_success(
@@ -341,6 +352,7 @@ impl RelayEngine {
             downstream_listening,
             upstream_status: self.upstream_status,
             upstream_stage: self.upstream_stage,
+            upstream_stage_started_unix_secs: self.upstream_stage_started_unix_secs,
             upstream_connected,
             upstream_transport_connected: self.upstream_transport_connected,
             upstream_subscription_sent: self.upstream_subscription_sent,
@@ -371,6 +383,7 @@ impl RelayEngine {
             bootstrap_pending: self.bootstrap.len(),
             bootstrap_inflight: self.bootstrap.inflight(),
             upstream_stage: self.upstream_stage,
+            upstream_stage_started_unix_secs: self.upstream_stage_started_unix_secs,
             upstream_transport_connected: self.upstream_transport_connected,
             upstream_subscription_sent: self.upstream_subscription_sent,
             upstream_frames_received: self.upstream_frames_received,

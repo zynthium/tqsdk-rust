@@ -92,6 +92,7 @@ relay 侧推荐配置 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` 或产品代码列表�
 合约数、`ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
 检查订阅规模；`/health` 会区分下游监听、上游连接、订阅/补历史阶段、合约集合刷新和数据 freshness；
 `/metrics` 和 `/dashboard` 会暴露上游 `connecting` / `subscribing` / `backfilling` / `live` 阶段，
+dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame idle；
 `/symbol-metrics` 可用于查看每个合约的数据接收状态与延迟；
 静态完整合约文件只作为兼容覆盖入口。
 
