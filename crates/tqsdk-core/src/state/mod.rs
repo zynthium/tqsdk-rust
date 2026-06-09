@@ -4,7 +4,7 @@ mod path;
 mod read;
 mod store;
 
-pub(crate) use changes::CursorTracker;
+pub(crate) use changes::{AppliedChange, CursorTracker};
 pub use changes::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, SharedCommitResult, UpdateCursor,
 };
