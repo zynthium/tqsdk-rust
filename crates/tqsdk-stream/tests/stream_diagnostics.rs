@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::StreamExt;
 use tqsdk_core::{ContractError, RetryHint, SessionPhase};
 use tqsdk_session::SessionFacadeError;
 use tqsdk_stream::{
@@ -184,6 +185,54 @@ async fn reconnect_monitor_reports_exhausted_reconnect_without_manual_polling() 
     );
     assert!(report.last_reconnect().unwrap().exhausted);
     assert_eq!(report.observed_commits(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_streams_receive_driver_error_regardless_of_path_filter() {
+    let stream = support::core_seed::seeded_stream();
+    let mut quote_stream = stream.quote_stream("SHFE.au2602").unwrap();
+    let mut status_stream = stream.trading_status_stream("DCE.m2609").unwrap();
+
+    StreamTestDriver::new(&stream).emit_session_error(SessionFacadeError::from(
+        ContractError::transport("driver failed"),
+    ));
+
+    let quote_error = quote_stream
+        .next()
+        .await
+        .expect("quote path stream should receive driver error")
+        .expect_err("driver error should be surfaced");
+    let status_error = status_stream
+        .next()
+        .await
+        .expect("status path stream should receive driver error")
+        .expect_err("driver error should be surfaced");
+
+    assert!(matches!(quote_error, StreamFacadeError::Session(_)));
+    assert!(matches!(status_error, StreamFacadeError::Session(_)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_streams_receive_closed_regardless_of_path_filter() {
+    let stream = support::core_seed::seeded_stream();
+    let mut quote_stream = stream.quote_stream("SHFE.au2602").unwrap();
+    let mut status_stream = stream.trading_status_stream("DCE.m2609").unwrap();
+
+    StreamTestDriver::new(&stream).close_driver();
+
+    let quote_error = quote_stream
+        .next()
+        .await
+        .expect("quote path stream should receive closed event")
+        .expect_err("closed event should be surfaced");
+    let status_error = status_stream
+        .next()
+        .await
+        .expect("status path stream should receive closed event")
+        .expect_err("closed event should be surfaced");
+
+    assert_eq!(quote_error, StreamFacadeError::Closed);
+    assert_eq!(status_error, StreamFacadeError::Closed);
 }
 
 #[tokio::test(flavor = "current_thread")]

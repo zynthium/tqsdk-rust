@@ -105,7 +105,11 @@ fn path_dispatcher_reuses_precompiled_path_matchers_per_subscriber() {
         "struct PathSubscriber",
         "\npub(crate) struct PathDispatcher",
     );
-    let notify_matching_block = function_block(source, "fn notify_matching", "\nfn notify_all");
+    let notify_matching_block = function_block(
+        source,
+        "fn notify_matching(&mut self",
+        "\n    fn notify_all",
+    );
 
     assert!(
         subscriber_block.contains("matcher: PathMatcher"),
@@ -118,5 +122,32 @@ fn path_dispatcher_reuses_precompiled_path_matchers_per_subscriber() {
     assert!(
         !notify_matching_block.contains("matches_path_filters"),
         "path dispatcher should not rebuild or rescan raw path filters while dispatching commits"
+    );
+}
+
+#[test]
+fn path_dispatcher_indexes_subscribers_for_commit_delivery() {
+    let source = include_str!("../src/path_dispatcher.rs");
+    let notify_matching_block = function_block(
+        source,
+        "fn notify_matching(&mut self",
+        "\n    fn notify_all",
+    );
+
+    assert!(
+        source.contains("subscribers_by_root"),
+        "path dispatcher should index broad path subscribers by root segment"
+    );
+    assert!(
+        source.contains("quote_subscribers_by_symbol"),
+        "path dispatcher should index quote path subscribers by symbol"
+    );
+    assert!(
+        !notify_matching_block.contains("notify("),
+        "commit dispatch should use the path index instead of scanning every subscriber through notify()"
+    );
+    assert!(
+        !notify_matching_block.contains("cleanup_dead()"),
+        "commit dispatch should not scan every subscriber for cleanup before each indexed delivery"
     );
 }
