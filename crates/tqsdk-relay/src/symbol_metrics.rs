@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use tqsdk_core::Quote;
 
 use crate::protocol::RelayTickRow;
 
@@ -148,6 +149,15 @@ impl SymbolTelemetryStore {
         telemetry.last_price = Some(row.last_price);
         telemetry.last_volume = Some(row.volume);
         telemetry.last_open_interest = Some(row.open_interest);
+    }
+
+    pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
+        let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
+        telemetry.last_receive_unix_millis = Some(receive_unix_millis);
+        telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
+        telemetry.last_price = Some(quote.last_price);
+        telemetry.last_volume = Some(quote.volume);
+        telemetry.last_open_interest = Some(quote.open_interest);
     }
 
     pub fn record_invalid_row(&mut self, symbol: &str, message: impl Into<String>) {

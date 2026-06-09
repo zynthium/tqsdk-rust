@@ -2,21 +2,21 @@
 
 use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::RelayResult;
-use crate::upstream::UpstreamTickSource;
+use crate::upstream::{UpstreamMarketEvent, UpstreamTickSource};
 
 pub async fn pump_once<S>(
     engine: &mut RelayEngine,
     source: &mut S,
 ) -> RelayResult<Vec<DownstreamFrame>>
 where
-    S: UpstreamTickSource,
+    S: UpstreamTickSource + Send,
 {
-    let tick = source.next_tick().await;
+    let event = source.next_event().await;
     record_upstream_source_diagnostics(engine, source);
-    let Some(tick) = tick else {
+    let Some(event) = event else {
         return Ok(Vec::new());
     };
-    engine.ingest_tick(tick.symbol, tick.row)
+    ingest_event(engine, event)
 }
 
 pub async fn pump_available<S>(
@@ -24,16 +24,26 @@ pub async fn pump_available<S>(
     source: &mut S,
 ) -> RelayResult<Vec<DownstreamFrame>>
 where
-    S: UpstreamTickSource,
+    S: UpstreamTickSource + Send,
 {
     let mut frames = Vec::new();
     loop {
-        let tick = source.next_tick().await;
+        let event = source.next_event().await;
         record_upstream_source_diagnostics(engine, source);
-        let Some(tick) = tick else {
+        let Some(event) = event else {
             return Ok(frames);
         };
-        frames.extend(engine.ingest_tick(tick.symbol, tick.row)?);
+        frames.extend(ingest_event(engine, event)?);
+    }
+}
+
+fn ingest_event(
+    engine: &mut RelayEngine,
+    event: UpstreamMarketEvent,
+) -> RelayResult<Vec<DownstreamFrame>> {
+    match event {
+        UpstreamMarketEvent::Tick(tick) => engine.ingest_tick(tick.symbol, tick.row),
+        UpstreamMarketEvent::Quote(quote) => engine.ingest_quote(quote.symbol, quote.quote),
     }
 }
 

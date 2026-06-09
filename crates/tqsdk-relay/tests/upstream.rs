@@ -4,11 +4,45 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tqsdk_relay::{
-    RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_tick_report, decode_upstream_ticks,
+    RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_market_report,
+    decode_upstream_tick_report, decode_upstream_ticks,
 };
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
+
+fn recv_text_json(
+    socket: &mut websocket_support::TestWebSocketConnection,
+    expected: &str,
+) -> serde_json::Value {
+    let websocket_support::ClientFrame::Text(text) = socket.recv().unwrap() else {
+        panic!("expected upstream {expected} text frame");
+    };
+    serde_json::from_str(&text).unwrap()
+}
+
+fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
+    let subscribe_quote = recv_text_json(socket, "subscribe_quote");
+    assert_eq!(subscribe_quote["aid"], "subscribe_quote");
+    assert_eq!(subscribe_quote["ins_list"], ins_list);
+}
+
+fn expect_set_chart(
+    socket: &mut websocket_support::TestWebSocketConnection,
+    ins_list: &str,
+) -> serde_json::Value {
+    let set_chart = recv_text_json(socket, "set_chart");
+    assert_eq!(set_chart["aid"], "set_chart");
+    assert_eq!(set_chart["ins_list"], ins_list);
+    set_chart
+}
+
+fn expect_peek_message(socket: &mut websocket_support::TestWebSocketConnection) {
+    assert_eq!(
+        recv_text_json(socket, "peek_message"),
+        json!({"aid": "peek_message"})
+    );
+}
 
 #[test]
 fn config_accepts_explicit_futures_universe() {
@@ -156,6 +190,36 @@ fn decode_upstream_ticks_ignores_non_tick_rtn_data_frames() {
     .unwrap();
 
     assert!(ticks.is_empty());
+}
+
+#[test]
+fn decode_upstream_market_report_extracts_quote_updates() {
+    let report = decode_upstream_market_report(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "quotes": {
+                    "SHFE.ag2705": {
+                        "datetime": "1780985438500000000",
+                        "instrument_id": "SHFE.ag2705",
+                        "last_price": 16666.0,
+                        "volume": 12,
+                        "open_interest": 34
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert!(report.ticks().is_empty());
+    assert_eq!(report.quotes().len(), 1);
+    assert_eq!(report.quotes()[0].symbol, "SHFE.ag2705");
+    assert_eq!(report.quotes()[0].quote.instrument_id, "SHFE.ag2705");
+    assert_eq!(report.quotes()[0].quote.datetime, "1780985438500000000");
+    assert_eq!(report.quotes()[0].quote.last_price, 16666.0);
+    assert_eq!(report.quotes()[0].quote.volume, 12);
+    assert_eq!(report.quotes()[0].quote.open_interest, 34);
 }
 
 #[test]
@@ -412,26 +476,16 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
 #[tokio::test]
 async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
     use tqsdk_relay::{UpstreamTickChart, WebSocketUpstreamTickSource};
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
-        assert_eq!(set_chart["aid"], "set_chart");
+        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
+        let set_chart = expect_set_chart(&mut socket, "DCE.m2609,SHFE.au2602");
         assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
-        assert_eq!(set_chart["ins_list"], "DCE.m2609,SHFE.au2602");
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
 
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected upstream peek_message text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -452,27 +506,15 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
 #[tokio::test]
 async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
     use tqsdk_relay::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&set_chart).unwrap()["aid"],
-            "set_chart"
-        );
-
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected initial upstream peek_message text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
@@ -498,13 +540,7 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
             )
             .unwrap();
 
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected peek_message after first upstream frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
@@ -530,13 +566,7 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
             )
             .unwrap();
 
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected peek_message after second upstream frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -558,26 +588,16 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
 #[tokio::test]
 async fn configured_upstream_source_subscribes_configured_futures_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
-        assert_eq!(set_chart["aid"], "set_chart");
+        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
+        let set_chart = expect_set_chart(&mut socket, "DCE.m2609,SHFE.au2602");
         assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
-        assert_eq!(set_chart["ins_list"], "DCE.m2609,SHFE.au2602");
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
 
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected upstream peek_message text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -626,23 +646,12 @@ async fn configured_product_discovery_requires_auth_credentials() {
 #[tokio::test]
 async fn configured_upstream_pump_ingests_upstream_ticks() {
     use tqsdk_relay::{RelayConfig, RelayServer, spawn_configured_upstream_pump};
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let upstream = TestWebSocketServer::spawn(|mut socket| {
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
-        assert_eq!(set_chart["aid"], "set_chart");
-        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
-
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected upstream peek_message text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
@@ -728,7 +737,7 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
         RelayConfig, RelayServer, RelaySourceStatus,
         spawn_configured_upstream_pump_with_retry_interval,
     };
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let addr = free_loopback_addr();
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
@@ -750,20 +759,9 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     wait_for_upstream_status(&engine, RelaySourceStatus::Degraded).await;
 
     let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
-        assert_eq!(set_chart["aid"], "set_chart");
-        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
-
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected upstream peek_message text frame");
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
-            json!({"aid": "peek_message"})
-        );
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({

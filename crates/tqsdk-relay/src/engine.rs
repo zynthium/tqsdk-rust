@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tqsdk_core::Quote;
 
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
 use crate::cache::MarketCache;
@@ -75,8 +76,9 @@ impl RelayEngine {
     ) -> RelayResult<Vec<DownstreamFrame>> {
         match command {
             DownstreamCommand::SubscribeQuote { symbols } => {
+                let frames = self.cached_quote_frames_for_client(client_id, &symbols);
                 self.interests.set_quotes(client_id, symbols);
-                Ok(Vec::new())
+                Ok(frames)
             }
             DownstreamCommand::SetChart(command) => {
                 let source = self.interests.set_chart(client_id, command);
@@ -124,6 +126,29 @@ impl RelayEngine {
         let mut frames = self.quote_frames(symbol);
         frames.extend(self.kline_frames(symbol, row)?);
         Ok(frames)
+    }
+
+    pub fn ingest_quote(
+        &mut self,
+        symbol: impl AsRef<str>,
+        quote: Quote,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        self.ingest_quote_at(symbol, quote, current_unix_millis())
+    }
+
+    pub fn ingest_quote_at(
+        &mut self,
+        symbol: impl AsRef<str>,
+        quote: Quote,
+        receive_unix_millis: u64,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        let symbol = symbol.as_ref();
+        self.upstream_status = RelaySourceStatus::Up;
+        self.record_data_activity_at(receive_unix_millis / 1_000);
+        self.symbol_metrics
+            .record_quote_at(symbol, &quote, receive_unix_millis);
+        self.cache.push_quote(symbol, quote);
+        Ok(self.quote_frames(symbol))
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) {
@@ -292,18 +317,7 @@ impl RelayEngine {
         let Some(quote) = self.cache.quote(symbol) else {
             return Vec::new();
         };
-        let payload = RelayMarketFrame::rtn_data(vec![RelayMarketFrame::RtnData(vec![json!({
-            "quotes": {
-                symbol: {
-                    "instrument_id": quote.instrument_id,
-                    "datetime": quote.datetime,
-                    "last_price": quote.last_price,
-                    "volume": quote.volume,
-                    "open_interest": quote.open_interest
-                }
-            }
-        })])])
-        .into_value();
+        let payload = quote_payload(symbol, quote);
 
         self.interests
             .quote_clients(symbol)
@@ -311,6 +325,22 @@ impl RelayEngine {
             .map(|client_id| DownstreamFrame {
                 client_id,
                 payload: payload.clone(),
+            })
+            .collect()
+    }
+
+    fn cached_quote_frames_for_client(
+        &self,
+        client_id: ClientId,
+        symbols: &[String],
+    ) -> Vec<DownstreamFrame> {
+        symbols
+            .iter()
+            .filter_map(|symbol| {
+                self.cache.quote(symbol).map(|quote| DownstreamFrame {
+                    client_id,
+                    payload: quote_payload(symbol, quote),
+                })
             })
             .collect()
     }
@@ -419,6 +449,21 @@ fn chart_payload(chart_id: &str, right_id: i64) -> Value {
             }
         ]
     })
+}
+
+fn quote_payload(symbol: &str, quote: Quote) -> Value {
+    RelayMarketFrame::rtn_data(vec![RelayMarketFrame::RtnData(vec![json!({
+        "quotes": {
+            symbol: {
+                "instrument_id": quote.instrument_id,
+                "datetime": quote.datetime,
+                "last_price": quote.last_price,
+                "volume": quote.volume,
+                "open_interest": quote.open_interest
+            }
+        }
+    })])])
+    .into_value()
 }
 
 fn current_unix_secs() -> u64 {

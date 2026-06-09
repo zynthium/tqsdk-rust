@@ -11,29 +11,37 @@ use serde_json::json;
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
 
+fn recv_text_json(
+    socket: &mut websocket_support::TestWebSocketConnection,
+    expected: &str,
+) -> serde_json::Value {
+    let websocket_support::ClientFrame::Text(text) = socket.recv().unwrap() else {
+        panic!("expected upstream {expected} text frame");
+    };
+    serde_json::from_str(&text).unwrap()
+}
+
 #[test]
 fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
-    use websocket_support::{ClientFrame, TestWebSocketServer};
+    use websocket_support::TestWebSocketServer;
 
     let symbols_file = temp_symbols_file("binary-smoke-symbols");
     fs::write(&symbols_file, "SHFE.au2602\n").unwrap();
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         assert_eq!(socket.request().path, "/market");
 
-        let ClientFrame::Text(set_chart) = socket.recv().unwrap() else {
-            panic!("expected upstream set_chart text frame");
-        };
-        let set_chart: serde_json::Value = serde_json::from_str(&set_chart).unwrap();
+        let subscribe_quote = recv_text_json(&mut socket, "subscribe_quote");
+        assert_eq!(subscribe_quote["aid"], "subscribe_quote");
+        assert_eq!(subscribe_quote["ins_list"], "SHFE.au2602");
+
+        let set_chart = recv_text_json(&mut socket, "set_chart");
         assert_eq!(set_chart["aid"], "set_chart");
         assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
         assert_eq!(set_chart["ins_list"], "SHFE.au2602");
         assert_eq!(set_chart["duration"], 0);
 
-        let ClientFrame::Text(peek) = socket.recv().unwrap() else {
-            panic!("expected upstream peek_message text frame");
-        };
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&peek).unwrap(),
+            recv_text_json(&mut socket, "peek_message"),
             json!({"aid": "peek_message"})
         );
         socket.send_close().unwrap();

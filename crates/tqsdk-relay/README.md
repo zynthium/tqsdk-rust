@@ -229,13 +229,13 @@ open http://127.0.0.1:7789/dashboard
 
 `/health` 返回分层 readiness JSON。`ready` 只表示 relay 进程和下游监听已经可用，保持
 对早期监控的兼容；`market_data_ready` 表示上游已连通、合约集合已刷新成功，并且最近
-tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
+行情更新活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
 
 - `process_started`：relay engine 已启动。
 - `downstream_listening`：下游 market websocket 监听已可接入。
 - `upstream_connected` / `upstream_status`：上游行情连接是否已进入可用状态。
 - `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
-- `data_fresh`：最近一次 tick 活跃时间未超过 freshness 窗口。
+- `data_fresh`：最近一次 tick 或 quote 活跃时间未超过 freshness 窗口。
 - `market_data_ready`：`upstream_connected && universe_ready && data_fresh`。
 - `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：已跳过的上游坏
   tick row 数量和最近一条解码错误。
@@ -243,14 +243,16 @@ tick 活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括�
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
 `/symbol-metrics` 返回合约级 telemetry 快照，覆盖当前上游 universe 和下游实际订阅
-合约。状态主口径是 relay 接收间隔延迟：`live` 表示最近 `30s` 内收到 tick，`stale`
-表示收过 tick 但超过 freshness 窗口，`missing` 表示在上游 universe 中但从未收到
-tick，`inactive` 表示下游订阅了不在上游 universe 中的合约。响应同时包含
-`market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距。
+合约。状态主口径是 relay 接收间隔延迟：`live` 表示最近 `30s` 内收到 tick 或 quote，
+`stale` 表示收过行情更新但超过 freshness 窗口，`missing` 表示在上游 universe 中但
+从未收到 tick 或 quote，`inactive` 表示下游订阅了不在上游 universe 中的合约。响应
+同时包含 `market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距；`ticks_ingested`
+仍只统计 tick row，用于区分 quote-only 远月合约。
 
 `/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics`。它不连接 relay
-market websocket，不创建下游订阅，也不会触发额外行情命令。tick ingest 热路径只更新
-当前合约的轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot 请求侧。
+market websocket，不创建下游订阅，也不会触发额外行情命令。tick / quote ingest 热
+路径只更新当前合约的轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot
+请求侧。
 
 ### 观测字段
 
@@ -264,7 +266,7 @@ market websocket，不创建下游订阅，也不会触发额外行情命令。t
 - `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：上游 tick row
   解码失败后被跳过的数量和最近一条错误；有效 tick 仍会继续摄入。
 - `last_universe_refresh_unix_secs` / `last_universe_refresh_error`：最近一次合约集合刷新尝试的时间和错误。
-- `last_tick_unix_secs`：最近一次摄入 tick 的 relay 本地 Unix 秒时间。
+- `last_tick_unix_secs`：最近一次摄入 tick 或 quote 的 relay 本地 Unix 秒时间。
 
 ### 下游命令子集
 

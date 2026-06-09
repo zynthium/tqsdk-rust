@@ -41,6 +41,14 @@ impl MarketCache {
         self.quotes.insert(symbol, quote);
     }
 
+    pub fn push_quote(&mut self, symbol: impl Into<String>, mut quote: Quote) {
+        let symbol = symbol.into();
+        if quote.instrument_id.is_empty() {
+            quote.instrument_id = symbol.clone();
+        }
+        self.quotes.insert(symbol, quote);
+    }
+
     #[must_use]
     pub fn ticks(&self, symbol: &str) -> Vec<RelayTickRow> {
         self.ticks

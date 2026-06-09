@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use tqsdk_core::Quote;
 use tqsdk_relay::{
     RelayTickRow, SymbolMetricsQuery, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
     SymbolTelemetryStore,
@@ -12,6 +13,17 @@ fn tick(id: i64, datetime_ns: i64, price: f64) -> RelayTickRow {
         last_price: price,
         volume: id * 10,
         open_interest: 100 + id,
+    }
+}
+
+fn quote(symbol: &str, datetime_ns: i64, price: f64) -> Quote {
+    Quote {
+        instrument_id: symbol.to_string(),
+        datetime: datetime_ns.to_string(),
+        last_price: price,
+        volume: 12,
+        open_interest: 34,
+        ..Quote::default()
     }
 }
 
@@ -62,6 +74,39 @@ fn ticked_symbol_transitions_from_live_to_stale() {
     );
     assert_eq!(stale.symbols[0].status, SymbolStatus::Stale);
     assert_eq!(stale.summary.stale, 1);
+}
+
+#[test]
+fn quote_only_symbol_transitions_from_live_to_stale_without_tick_count() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.ag2705"], 1_700_000_000_000);
+    store.record_quote_at(
+        "SHFE.ag2705",
+        &quote("SHFE.ag2705", 1_700_000_001_500_000_000, 16666.0),
+        1_700_000_001_700,
+    );
+
+    let live = store.snapshot_at(
+        1_700_000_002_000,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(live.symbols[0].status, SymbolStatus::Live);
+    assert_eq!(live.symbols[0].ticks_ingested, 0);
+    assert_eq!(live.symbols[0].last_price, Some(16666.0));
+    assert_eq!(live.symbols[0].receive_gap_ms, Some(300));
+    assert_eq!(live.symbols[0].market_time_lag_ms, Some(500));
+
+    let stale = store.snapshot_at(
+        1_700_000_032_001,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(stale.symbols[0].status, SymbolStatus::Stale);
+    assert_eq!(stale.summary.stale, 1);
+    assert_eq!(stale.summary.missing, 0);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use tqsdk_core::Quote;
 use tqsdk_relay::{
     ClientId, DownstreamCommand, FakeUpstreamTickSource, RelayEngine, RelayTickRow,
     SetChartCommand, SourceKey, UpstreamTick, UpstreamTickSource,
@@ -10,6 +11,17 @@ fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
         last_price: price,
         volume: id * 10,
         open_interest: 1000 + id,
+    }
+}
+
+fn quote(symbol: &str, datetime: &str, price: f64) -> Quote {
+    Quote {
+        instrument_id: symbol.to_string(),
+        datetime: datetime.to_string(),
+        last_price: price,
+        volume: 12,
+        open_interest: 34,
+        ..Quote::default()
     }
 }
 
@@ -61,6 +73,81 @@ fn relay_engine_does_not_emit_quotes_without_interest() {
         .unwrap();
 
     assert!(frames.is_empty());
+}
+
+#[test]
+fn relay_engine_fans_out_quotes_from_upstream_quote_updates() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .handle_command(
+            client,
+            DownstreamCommand::SubscribeQuote {
+                symbols: vec!["SHFE.ag2705".to_string()],
+            },
+        )
+        .unwrap();
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.ag2705"],
+        "SHFE.ag2705".len(),
+        None,
+        None,
+        1,
+    );
+
+    let frames = engine
+        .ingest_quote_at(
+            "SHFE.ag2705",
+            quote("SHFE.ag2705", "1780985438500000000", 16666.0),
+            1_780_985_438_500,
+        )
+        .unwrap();
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].client_id, client);
+    assert_eq!(
+        frames[0].payload["data"][0]["quotes"]["SHFE.ag2705"]["last_price"],
+        16666.0
+    );
+    let snapshot = engine.symbol_metrics_snapshot_at(1_780_985_438_500, &Default::default());
+    let symbol = snapshot
+        .symbols
+        .iter()
+        .find(|row| row.symbol == "SHFE.ag2705")
+        .expect("quote update should create symbol telemetry");
+    assert_eq!(symbol.ticks_ingested, 0);
+    assert_eq!(symbol.last_price, Some(16666.0));
+    assert_eq!(symbol.receive_gap_ms, Some(0));
+    assert_eq!(symbol.status, tqsdk_relay::SymbolStatus::Live);
+}
+
+#[test]
+fn subscribe_quote_replays_cached_quote_snapshot() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    engine
+        .ingest_quote_at(
+            "SHFE.au2706",
+            quote("SHFE.au2706", "1780985437000000000", 962.34),
+            1_780_985_437_000,
+        )
+        .unwrap();
+
+    let frames = engine
+        .handle_command(
+            ClientId::new(1),
+            DownstreamCommand::SubscribeQuote {
+                symbols: vec!["SHFE.au2706".to_string()],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].client_id, ClientId::new(1));
+    assert_eq!(
+        frames[0].payload["data"][0]["quotes"]["SHFE.au2706"]["last_price"],
+        962.34
+    );
 }
 
 #[test]
