@@ -557,9 +557,12 @@ fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mu
     let Value::Object(map) = root else {
         unreachable!("state snapshot intermediate nodes must always be objects");
     };
+    if !map.contains_key(segment) {
+        map.insert(segment.clone(), Value::Object(Map::new()));
+    }
     let child = map
-        .entry(segment.clone())
-        .or_insert_with(|| Value::Object(Map::new()));
+        .get_mut(segment)
+        .expect("child was inserted or already present");
     if !child.is_object() {
         *child = Value::Object(Map::new());
     }
