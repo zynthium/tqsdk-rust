@@ -154,6 +154,8 @@ async fn write_response(stream: &mut TcpStream, status: u16, body: Value) -> Rel
         "HTTP/1.1 {status} {reason}\r\n\
 Content-Type: application/json\r\n\
 Content-Length: {}\r\n\
+Cache-Control: no-store\r\n\
+X-Content-Type-Options: nosniff\r\n\
 Connection: close\r\n\
 \r\n\
 {body}",
@@ -175,6 +177,8 @@ async fn write_text_response(
         "HTTP/1.1 {status} {}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
+Cache-Control: no-store\r\n\
+X-Content-Type-Options: nosniff\r\n\
 Connection: close\r\n\
 \r\n\
 {body}",

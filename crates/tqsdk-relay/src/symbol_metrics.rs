@@ -1,9 +1,13 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
+use chrono::{NaiveTime, TimeZone, Timelike};
 use serde::Serialize;
-use tqsdk_core::Quote;
+use tqsdk_core::{
+    Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
+};
 
 use crate::protocol::RelayTickRow;
 
@@ -11,6 +15,7 @@ use crate::protocol::RelayTickRow;
 #[serde(rename_all = "snake_case")]
 pub enum SymbolStatus {
     Live,
+    Closed,
     Stale,
     Missing,
     Inactive,
@@ -46,16 +51,18 @@ impl SymbolMetricsQuery {
                 continue;
             }
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "status" => parsed.statuses = parse_statuses(value)?,
-                "subscribed" => parsed.subscribed_only = parse_bool(value)?,
+            let key = decode_query_component(key)?;
+            let value = decode_query_component(value)?;
+            match key.as_str() {
+                "status" => parsed.statuses = parse_statuses(&value)?,
+                "subscribed" => parsed.subscribed_only = parse_bool(&value)?,
                 "q" => {
                     if !value.is_empty() {
-                        parsed.q = Some(value.to_string());
+                        parsed.q = Some(value);
                     }
                 }
-                "sort" => parsed.sort = parse_sort(value)?,
-                "limit" => parsed.limit = Some(parse_limit(value)?),
+                "sort" => parsed.sort = parse_sort(&value)?,
+                "limit" => parsed.limit = Some(parse_limit(&value)?),
                 _ => return Err("unknown query parameter"),
             }
         }
@@ -71,6 +78,8 @@ pub struct SymbolSubscriptionCounts {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SymbolTelemetry {
+    instrument_name: Option<String>,
+    trading_segments: Option<Vec<TradingSessionSegment>>,
     ticks_ingested: u64,
     last_receive_unix_millis: Option<u64>,
     last_tick_datetime_ns: Option<i64>,
@@ -100,6 +109,7 @@ pub struct SymbolMetricsSnapshot {
 pub struct SymbolMetricsSummary {
     pub total: usize,
     pub live: usize,
+    pub closed: usize,
     pub stale: usize,
     pub missing: usize,
     pub inactive: usize,
@@ -110,6 +120,7 @@ pub struct SymbolMetricsSummary {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SymbolTelemetrySnapshot {
     pub symbol: String,
+    pub instrument_name: Option<String>,
     pub status: SymbolStatus,
     pub in_universe: bool,
     pub subscribed: bool,
@@ -153,6 +164,13 @@ impl SymbolTelemetryStore {
 
     pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
+        let instrument_name = quote.instrument_name.trim();
+        if !instrument_name.is_empty() {
+            telemetry.instrument_name = Some(instrument_name.to_string());
+        }
+        if let Some(trading_segments) = trading_segments_from_trading_time(&quote.trading_time) {
+            telemetry.trading_segments = Some(trading_segments);
+        }
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
         telemetry.last_price = Some(quote.last_price);
@@ -179,6 +197,7 @@ impl SymbolTelemetryStore {
         symbols.extend(subscriptions.keys().cloned());
 
         let mut unfiltered = Vec::new();
+        let local_day_offset = local_day_offset_from_unix_millis(now_unix_millis);
         for symbol in symbols {
             let in_universe = self.universe.contains(&symbol);
             let telemetry = self.telemetry.get(&symbol);
@@ -192,10 +211,19 @@ impl SymbolTelemetryStore {
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
                 .map(|tick_millis| now_unix_millis.saturating_sub(tick_millis));
-            let status = classify_symbol(in_universe, receive_gap_ms, stale_after_millis);
+            let trading_phase = telemetry.and_then(|telemetry| {
+                trading_phase_at(telemetry.trading_segments.as_deref(), local_day_offset)
+            });
+            let status = classify_symbol(
+                in_universe,
+                receive_gap_ms,
+                stale_after_millis,
+                trading_phase,
+            );
             let telemetry = telemetry.cloned().unwrap_or_default();
             unfiltered.push(SymbolTelemetrySnapshot {
                 symbol,
+                instrument_name: telemetry.instrument_name,
                 status,
                 in_universe,
                 subscribed,
@@ -215,15 +243,19 @@ impl SymbolTelemetryStore {
         }
 
         let summary = summarize(&unfiltered);
+        let needle = query.q.as_ref().map(|needle| needle.to_lowercase());
         let mut symbols = unfiltered
             .into_iter()
             .filter(|symbol| query.statuses.is_empty() || query.statuses.contains(&symbol.status))
             .filter(|symbol| !query.subscribed_only || symbol.subscribed)
             .filter(|symbol| {
-                query
-                    .q
-                    .as_ref()
-                    .is_none_or(|needle| symbol.symbol.contains(needle))
+                needle.as_ref().is_none_or(|needle| {
+                    symbol.symbol.to_lowercase().contains(needle)
+                        || symbol
+                            .instrument_name
+                            .as_deref()
+                            .is_some_and(|name| name.to_lowercase().contains(needle))
+                })
             })
             .collect::<Vec<_>>();
         sort_symbols(&mut symbols, query.sort);
@@ -244,7 +276,11 @@ fn classify_symbol(
     in_universe: bool,
     receive_gap_ms: Option<u64>,
     stale_after_millis: u64,
+    trading_phase: Option<TradingSessionPhase>,
 ) -> SymbolStatus {
+    if matches!(trading_phase, Some(TradingSessionPhase::Closed)) {
+        return SymbolStatus::Closed;
+    }
     match receive_gap_ms {
         Some(gap) if gap <= stale_after_millis => SymbolStatus::Live,
         Some(_) => SymbolStatus::Stale,
@@ -258,6 +294,7 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
     let mut summary = SymbolMetricsSummary {
         total: symbols.len(),
         live: 0,
+        closed: 0,
         stale: 0,
         missing: 0,
         inactive: 0,
@@ -267,6 +304,7 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
     for symbol in symbols {
         match symbol.status {
             SymbolStatus::Live => summary.live += 1,
+            SymbolStatus::Closed => summary.closed += 1,
             SymbolStatus::Stale => summary.stale += 1,
             SymbolStatus::Missing => summary.missing += 1,
             SymbolStatus::Inactive => summary.inactive += 1,
@@ -326,6 +364,110 @@ fn tick_datetime_ns_to_unix_millis(datetime_ns: i64) -> Option<u64> {
         .map(|value| value / 1_000_000)
 }
 
+fn trading_segments_from_trading_time(
+    trading_time: &TradingTime,
+) -> Option<Vec<TradingSessionSegment>> {
+    let segments = trading_time
+        .day
+        .iter()
+        .filter_map(|window| parse_trading_time_window(window, false))
+        .chain(
+            trading_time
+                .night
+                .iter()
+                .filter_map(|window| parse_trading_time_window(window, true)),
+        )
+        .collect::<Vec<_>>();
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn parse_trading_time_window(
+    window: &[String],
+    allow_cross_midnight: bool,
+) -> Option<TradingSessionSegment> {
+    let start = parse_hms_seconds(window.first()?)?;
+    let end = parse_hms_seconds(window.get(1)?)?;
+    if start == end {
+        return None;
+    }
+    if !allow_cross_midnight && end <= start {
+        return None;
+    }
+    TradingSessionSegment::new(Duration::from_secs(start), Duration::from_secs(end))
+}
+
+fn parse_hms_seconds(value: &str) -> Option<u64> {
+    let time = NaiveTime::parse_from_str(value, "%H:%M:%S").ok()?;
+    Some(u64::from(time.num_seconds_from_midnight()))
+}
+
+fn local_day_offset_from_unix_millis(now_unix_millis: u64) -> Duration {
+    let Ok(now_unix_millis) = i64::try_from(now_unix_millis) else {
+        return Duration::ZERO;
+    };
+    chrono::Local
+        .timestamp_millis_opt(now_unix_millis)
+        .single()
+        .map(|datetime| Duration::from_secs(u64::from(datetime.num_seconds_from_midnight())))
+        .unwrap_or(Duration::ZERO)
+}
+
+fn trading_phase_at(
+    segments: Option<&[TradingSessionSegment]>,
+    local_day_offset: Duration,
+) -> Option<TradingSessionPhase> {
+    let segments = segments.filter(|segments| !segments.is_empty())?;
+    Some(
+        TradingSessionSchedule::from_segments(segments.iter().copied())
+            .status_at(local_day_offset)
+            .phase,
+    )
+}
+
+fn decode_query_component(value: &str) -> Result<String, &'static str> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let high = bytes
+                    .get(index + 1)
+                    .copied()
+                    .ok_or("invalid query encoding")?;
+                let low = bytes
+                    .get(index + 2)
+                    .copied()
+                    .ok_or("invalid query encoding")?;
+                decoded.push(
+                    hex_value(high)
+                        .and_then(|high| hex_value(low).map(|low| (high << 4) | low))
+                        .ok_or("invalid query encoding")?,
+                );
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "invalid query encoding")
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn parse_statuses(value: &str) -> Result<Vec<SymbolStatus>, &'static str> {
     if value.is_empty() {
         return Ok(Vec::new());
@@ -336,6 +478,7 @@ fn parse_statuses(value: &str) -> Result<Vec<SymbolStatus>, &'static str> {
 fn parse_status(value: &str) -> Result<SymbolStatus, &'static str> {
     match value {
         "live" => Ok(SymbolStatus::Live),
+        "closed" => Ok(SymbolStatus::Closed),
         "stale" => Ok(SymbolStatus::Stale),
         "missing" => Ok(SymbolStatus::Missing),
         "inactive" => Ok(SymbolStatus::Inactive),
