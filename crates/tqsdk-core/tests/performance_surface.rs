@@ -88,6 +88,15 @@ fn diff_ingest_text_bench_does_not_measure_adapter_ignored_text_payloads() {
 }
 
 #[test]
+fn applied_change_metadata_does_not_store_owned_field_names() {
+    let source = include_str!("../src/state/changes.rs");
+    assert!(
+        !source.contains("pub(crate) fields: Vec<String>"),
+        "AppliedChange should track changed field indexes or borrowed metadata, not clone field names before ChangeSet construction"
+    );
+}
+
+#[test]
 fn state_apply_records_changed_field_names_without_value_clone() {
     let source = include_str!("../src/state/store.rs");
     let apply_fields = function_block(source, "fn apply_fields(", "\n}\n\nfn preserves_null_field");
@@ -98,7 +107,7 @@ fn state_apply_records_changed_field_names_without_value_clone() {
 
     let commit_engine = include_str!("../src/runtime/commit_engine.rs");
     assert!(
-        commit_engine.contains("ChangeSet::from_applied_changes(&applied)"),
+        commit_engine.contains("ChangeSet::from_applied_changes(&applied, &mutations)"),
         "commit metadata should be built from applied-change records, not cloned mutations"
     );
 }

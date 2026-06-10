@@ -244,7 +244,7 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut applied = Vec::new();
-        for mutation in mutations {
+        for (mutation_index, mutation) in mutations.iter().enumerate() {
             let (root, path) = partition_path(mutation);
             let Some((_, partition)) = guards
                 .iter_mut()
@@ -252,7 +252,9 @@ impl StateStore {
             else {
                 continue;
             };
-            if let Some(changed) = apply_mutation_at_partition(&mut *partition, path, mutation) {
+            if let Some(changed) =
+                apply_mutation_at_partition(&mut *partition, path, mutation_index, mutation)
+            {
                 applied.push(changed);
             }
         }
@@ -285,18 +287,19 @@ impl StateStore {
 fn apply_mutation_at_partition(
     root: &mut Value,
     path: &[PathSegment],
+    mutation_index: usize,
     mutation: &NormalizedMutation,
 ) -> Option<AppliedChange> {
-    let mut changed_fields = Vec::new();
+    let mut field_indexes = Vec::new();
     apply_mutation_at_path(
         root,
         path,
         mutation.object.as_ref(),
         &mutation.fields,
-        &mut changed_fields,
+        &mut field_indexes,
     );
 
-    if changed_fields.is_empty() {
+    if field_indexes.is_empty() {
         None
     } else {
         let (root, _) = partition_path(mutation);
@@ -304,7 +307,8 @@ fn apply_mutation_at_partition(
             root.as_str(),
             mutation.path.clone(),
             mutation.object.clone(),
-            changed_fields,
+            mutation_index,
+            field_indexes,
         ))
     }
 }
@@ -452,16 +456,16 @@ fn apply_mutation_at_path(
     path: &[PathSegment],
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
-    changed_fields: &mut Vec<String>,
+    field_indexes: &mut Vec<usize>,
 ) {
     if path.is_empty() {
-        apply_fields(cursor, object, fields, changed_fields);
+        apply_fields(cursor, object, fields, field_indexes);
         return;
     }
 
     let segment = &path[0];
     let child = ensure_child_object(cursor, segment);
-    apply_mutation_at_path(child, &path[1..], object, fields, changed_fields);
+    apply_mutation_at_path(child, &path[1..], object, fields, field_indexes);
     prune_empty_child(cursor, segment);
 }
 
@@ -469,7 +473,7 @@ fn apply_fields(
     cursor: &mut Value,
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
-    changed_fields: &mut Vec<String>,
+    field_indexes: &mut Vec<usize>,
 ) {
     if !cursor.is_object() {
         *cursor = Value::Object(Map::new());
@@ -479,7 +483,7 @@ fn apply_fields(
         unreachable!("state snapshot path targets must always resolve to objects");
     };
 
-    for field in fields {
+    for (field_index, field) in fields.iter().enumerate() {
         let preserve_null = preserves_null_field(object, &field.field);
         let has_changed = if field.value.is_null() && !preserve_null {
             map.contains_key(&field.field)
@@ -497,7 +501,7 @@ fn apply_fields(
             map.insert(field.field.clone(), field.value.clone());
         }
 
-        changed_fields.push(field.field.clone());
+        field_indexes.push(field_index);
     }
 }
 

@@ -119,6 +119,52 @@ fn runtime_change_metadata_is_built_from_applied_fields_only() {
 }
 
 #[test]
+fn runtime_change_metadata_preserves_public_hits_after_internal_apply_refactor() {
+    let handle = runtime_with_default_adapters();
+
+    handle
+        .ingest(
+            market_quote_input(618.5, 619.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .unwrap();
+
+    let changed = handle
+        .ingest(
+            market_quote_input(620.0, 621.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .unwrap();
+
+    let quote_path = StatePath::new(["quotes", "SHFE.au2602"]);
+    let quote_object = ObjectKey::Quote {
+        symbol: Symbol::new("SHFE.au2602"),
+    };
+    assert_eq!(changed.changes.path_hits, vec![quote_path.clone()]);
+    assert_eq!(changed.changes.object_hits, vec![quote_object.clone()]);
+    assert_eq!(
+        changed.changes.field_hits,
+        vec![
+            ChangeHit::field(quote_path.clone(), quote_object.clone(), "ask_price1"),
+            ChangeHit::field(quote_path, quote_object, "last_price"),
+        ]
+    );
+
+    let repeated = handle
+        .ingest(
+            market_quote_input(620.0, 621.0),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+    assert_eq!(repeated, None);
+}
+
+#[test]
 fn runtime_change_metadata_order_is_stable_for_market_and_trade_payloads() {
     let handle = runtime_with_default_adapters();
 

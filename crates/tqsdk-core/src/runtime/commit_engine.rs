@@ -28,7 +28,7 @@ impl CommitEngine {
 
         let next_revision = Revision::new(snapshot.revision().get() + 1);
         snapshot.apply_with(next_revision, &mutations, |applied| {
-            let changes = ChangeSet::from_applied_changes(&applied);
+            let changes = ChangeSet::from_applied_changes(&applied, &mutations);
             let commit = Arc::new(CommitResult::new(
                 next_revision,
                 domains,
