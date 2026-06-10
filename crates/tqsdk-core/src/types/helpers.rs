@@ -28,10 +28,10 @@ where
         serde_json::Value::Number(number) => number
             .as_f64()
             .ok_or_else(|| Error::custom("invalid number")),
-        serde_json::Value::String(text) if text.is_empty() || text == "-" => Ok(f64::NAN),
+        serde_json::Value::String(_) => Ok(f64::NAN),
         serde_json::Value::Null => Ok(f64::NAN),
         other => Err(Error::custom(format!(
-            "expected number, empty string, \"-\", or null, got {other}"
+            "expected number, string, or null, got {other}"
         ))),
     }
 }

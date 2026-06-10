@@ -34,6 +34,24 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
     assert_eq!(quote.trading_time.day.len(), 1);
     assert_eq!(quote.categories.len(), 1);
 
+    let quote_python_string_floats = serde_json::from_value::<Quote>(json!({
+        "instrument_id": "SHFE.rb2606",
+        "last_price": "not-a-number",
+        "highest": "",
+        "lowest": "-"
+    }))
+    .expect("quote string float placeholders should deserialize like Python prototypes");
+    assert!(quote_python_string_floats.last_price.is_nan());
+    assert!(quote_python_string_floats.highest.is_nan());
+    assert!(quote_python_string_floats.lowest.is_nan());
+
+    let quote_null_last_price = serde_json::from_value::<Quote>(json!({
+        "instrument_id": "SHFE.rb2606",
+        "last_price": null
+    }))
+    .expect("quote null last_price should deserialize like Python default nan");
+    assert!(quote_null_last_price.last_price.is_nan());
+
     let quote_numeric_floats = serde_json::from_value::<Quote>(json!({
         "instrument_id": "SSE.510300",
         "volume_multiple": 1000.0,
@@ -87,6 +105,13 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
     .expect("tick schema should deserialize");
     assert!(tick.ask_price2.is_nan());
     assert_eq!(tick.ask_volume2, 0);
+
+    let tick_python_string_last_price = serde_json::from_value::<Tick>(json!({
+        "datetime": 1776646800000000000_i64,
+        "last_price": "not-a-number"
+    }))
+    .expect("tick string last_price should deserialize like Python prototype default");
+    assert!(tick_python_string_last_price.last_price.is_nan());
 
     let trading_status = serde_json::from_value::<TradingStatus>(json!({
         "symbol": "SHFE.au2602",
