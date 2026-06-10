@@ -134,6 +134,19 @@ cargo test -p tqsdk-stream --test stream_fanout_microbench -- --ignored --nocapt
 - Public API impact: 无。`ChangeSet.path_hits`、`object_hits`、`field_hits` 的 public
   字段和顺序保持不变。
 
+### Runtime Lock Tail-Latency Decision
+
+- No-load command submit p95: `81.085us`
+- Under large market ingest p95: `50.267216ms`
+- Decision: 不在当前 diff ingest 性能批次中实现 runtime lock split；新建独立
+  architecture-gated sequencer 计划
+  `docs/superpowers/plans/2026-06-10-runtime-ingest-command-sequencer.md`。
+- Reason: Batches 1-3 后 command submit p95 仍远高于 2x 门槛，说明
+  `RuntimeHandle::ingest()` 持有 runtime mutex 覆盖大行情 decode/apply/publish 时，
+  command submission 仍会排队等待。这个风险需要重排写侧 sequencing，但必须保持单一
+  revision 序列、单一 `CommitLog`、命令账本状态机校验和现有 reader/cursor 语义，因此
+  应作为单独架构变更处理。
+
 ---
 
 ## 问题清单（按优先级排序）
