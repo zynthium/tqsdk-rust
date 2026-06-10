@@ -1337,6 +1337,70 @@ fn market_adapter_decodes_quote_payload_with_golden_fast_path_contract() {
 }
 
 #[test]
+fn market_adapter_decodes_multi_quote_fast_path_with_sorted_fields_and_nulls() {
+    let market = decode_market_payload(json!({
+        "aid": "rtn_data",
+        "data": [{
+            "quotes": {
+                "SHFE.au2602": {
+                    "volume": 42,
+                    "ask_price1": 619.0,
+                    "bid_price1": null
+                },
+                "DCE.m2609": {
+                    "last_price": 3250.5,
+                    "datetime": "2026-06-10 10:01:00.000000"
+                }
+            }
+        }]
+    }));
+
+    assert_eq!(
+        market,
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "DCE.m2609"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("DCE.m2609"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "datetime".to_string(),
+                        value: json!("2026-06-10 10:01:00.000000"),
+                    },
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(3250.5),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2602"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.au2602"),
+                }),
+                fields: vec![
+                    FieldMutation {
+                        field: "ask_price1".to_string(),
+                        value: json!(619.0),
+                    },
+                    FieldMutation {
+                        field: "bid_price1".to_string(),
+                        value: Value::Null,
+                    },
+                    FieldMutation {
+                        field: "volume".to_string(),
+                        value: json!(42),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+        ]
+    );
+}
+
+#[test]
 fn market_adapter_preserves_mixed_rtn_data_order_around_quotes() {
     let market = decode_market_payload(json!({
         "aid": "rtn_data",
