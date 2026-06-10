@@ -56,6 +56,38 @@ fn generic_object_flattening_uses_push_pop_path_stack() {
 }
 
 #[test]
+fn diff_ingest_bench_does_not_construct_quote_payloads_inside_ingest_timer() {
+    let source = include_str!("../examples/diff_ingest_microbench.rs");
+    let start = source
+        .find("fn run_ingest_case")
+        .expect("run_ingest_case must exist");
+    let end = source[start..]
+        .find("fn run_noop_case")
+        .map(|offset| start + offset)
+        .expect("run_noop_case must follow run_ingest_case");
+    let body = &source[start..end];
+
+    assert!(
+        !body.contains("quote_rtn_data(symbols, sequence)"),
+        "timed ingest benchmark must consume prebuilt inputs, not build quote payloads"
+    );
+    assert!(
+        !body.contains("market_input(quote_rtn_data"),
+        "timed ingest benchmark must not build RuntimeInput payloads inside the timer"
+    );
+}
+
+#[test]
+fn diff_ingest_text_bench_does_not_measure_adapter_ignored_text_payloads() {
+    let source = include_str!("../examples/diff_ingest_microbench.rs");
+
+    assert!(
+        !source.contains("InputPayload::Text"),
+        "wire-text benchmarks should parse prebuilt text into JSON inputs; adapters ignore InputPayload::Text"
+    );
+}
+
+#[test]
 fn state_apply_records_changed_field_names_without_value_clone() {
     let source = include_str!("../src/state/store.rs");
     let apply_fields = function_block(source, "fn apply_fields(", "\n}\n\nfn preserves_null_field");
