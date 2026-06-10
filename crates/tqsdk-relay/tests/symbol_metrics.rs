@@ -401,6 +401,78 @@ fn tick_only_symbol_uses_futures_session_fallback_for_midday_break() {
 }
 
 #[test]
+fn tick_only_symbol_uses_query_symbol_info_trading_time_before_fallback() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(14, 0, 0);
+    store.record_universe(["DCE.m2609"], now - 90_000);
+    store.record_symbol_trading_time(
+        "DCE.m2609",
+        &TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "10:15:00".to_string()]],
+            night: Vec::new(),
+        },
+    );
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(
+            1,
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(json["symbols"][0]["status"], "closed");
+    assert_eq!(json["symbols"][0]["problem"], false);
+    assert_eq!(json["summary"]["closed"], 1);
+    assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
+fn quote_without_trading_time_does_not_erase_query_symbol_info_schedule() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(14, 0, 0);
+    store.record_universe(["DCE.m2609"], now - 90_000);
+    store.record_symbol_trading_time(
+        "DCE.m2609",
+        &TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "10:15:00".to_string()]],
+            night: Vec::new(),
+        },
+    );
+    store.record_quote_at(
+        "DCE.m2609",
+        &quote(
+            "DCE.m2609",
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(json["symbols"][0]["status"], "closed");
+    assert_eq!(json["symbols"][0]["problem"], false);
+    assert_eq!(json["summary"]["closed"], 1);
+    assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
 fn tick_only_symbol_inside_futures_session_remains_problematic_when_stale() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);

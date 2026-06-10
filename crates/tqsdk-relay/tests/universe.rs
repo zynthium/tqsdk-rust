@@ -1,4 +1,4 @@
-use tqsdk_core::Quote;
+use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::universe::FuturesUniverseResolver;
 use tqsdk_relay::{
     FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
@@ -78,6 +78,34 @@ async fn resolver_selects_main_and_top_activity_contracts_per_product() {
 }
 
 #[tokio::test]
+async fn resolver_preserves_symbol_info_trading_time_in_selected_contracts() {
+    let trading_time = trading_time(&[("09:00:00", "10:15:00")], &[("21:00:00", "23:00:00")]);
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new_with_trading_time(
+            "SHFE.au2602",
+            "SHFE",
+            "au",
+            false,
+            trading_time.clone(),
+        )
+        .unwrap(),
+        FuturesContract::new("SHFE.au2512", "SHFE", "au", true).unwrap(),
+    ]);
+
+    let contracts = tqsdk_relay::universe::resolve_futures_contracts_with_selection(
+        &FuturesProductFilter::All,
+        FuturesUniverseSelection::default(),
+        &mut resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(contracts.len(), 1);
+    assert_eq!(contracts[0].symbol, "SHFE.au2602");
+    assert_eq!(contracts[0].trading_time, trading_time);
+}
+
+#[tokio::test]
 async fn resolver_falls_back_to_activity_when_main_symbol_is_unknown() {
     let mut resolver = StaticFuturesUniverseResolver::new([
         FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
@@ -141,11 +169,13 @@ fn futures_contract_extracts_product_code_from_symbol() {
 
 #[test]
 fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
+    let trading_time = trading_time(&[("09:00:00", "10:15:00")], &[]);
     let quote = Quote {
         instrument_id: "CZCE.MA609".to_string(),
         exchange_id: "CZCE".to_string(),
         product_id: "typed-product".to_string(),
         expired: true,
+        trading_time: trading_time.clone(),
         ..Quote::default()
     };
 
@@ -155,6 +185,7 @@ fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
     assert_eq!(contract.exchange_id, "CZCE");
     assert_eq!(contract.product_id, "typed-product");
     assert!(contract.expired);
+    assert_eq!(contract.trading_time, trading_time);
 }
 
 struct MainOnlyResolver {
@@ -193,6 +224,19 @@ fn quote(
         open_interest,
         volume,
         ..Quote::default()
+    }
+}
+
+fn trading_time(day: &[(&str, &str)], night: &[(&str, &str)]) -> TradingTime {
+    TradingTime {
+        day: day
+            .iter()
+            .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+            .collect(),
+        night: night
+            .iter()
+            .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+            .collect(),
     }
 }
 

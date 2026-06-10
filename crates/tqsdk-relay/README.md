@@ -106,9 +106,10 @@ cargo run -p tqsdk-relay
 ```
 
 `SHFE.au` 表示交易所限定的产品代码；`MA` 表示不限定交易所的产品代码。relay 会在
-启动时通过天勤 metadata 查询当前未过期合约，再用轻量 `multi_symbol_info` 查询返回的
-`exchange_id`、`product_id` 和 `expired` 等 typed metadata 过滤，最后把结果组成一个
-上游 tick chart 集合。
+启动时通过天勤 metadata 查询当前未过期合约，再按批调用 `query_symbol_info` 获取
+`exchange_id`、`product_id`、`expired` 和 `trading_time` 等 typed metadata。relay 用
+这些字段过滤合约、组成上游 tick chart 集合，并把官方交易时间段写入合约级
+telemetry。
 
 默认情况下，进程会在 `127.0.0.1:7788` 监听 SDK 行情 websocket 客户端，并连接
 上游 `wss://openmd.shinnytech.com/t/md/front/mobile`。
@@ -178,7 +179,7 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
-| `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
+| `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时 `query_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
 | `TQSDK_RELAY_FUTURES_MAIN_ONLY` | `false` | 产品发现模式的快捷入口。设置为 `1` / `true` / `yes` / `on` 时只保留每品种主力合约；与 `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` 互斥。 |
 | `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` | 空 | 产品发现模式的可选活跃度限制。设置为 `1` 表示每品种只保留主力，`2` 表示主力和次主力；其余合约按 `open_interest`、`volume` 排名补足前 N。必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
@@ -301,8 +302,9 @@ open http://127.0.0.1:7789/dashboard
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
 `/symbol-metrics` 返回合约级 telemetry 快照，覆盖当前上游 universe 和下游实际订阅
-合约。状态主口径是 relay 接收间隔延迟，并优先考虑 quote 中的精确交易时间表；tick-only
-上游尚未收到 quote 元数据时，会按期货交易所 / 品种代码使用内置交易时段兜底。`closed`
+合约。状态主口径是 relay 接收间隔延迟，并优先使用 `query_symbol_info` 返回的官方
+`trading_time`；若未配置产品发现或交易时段暂不可用，再考虑 quote 中的交易时间表，
+最后按期货交易所 / 品种代码使用内置交易时段兜底。`closed`
 表示当前不在该合约交易时间段内，不计入问题合约；`live` 表示最近 `30s` 内收到 tick
 或 quote，`stale` 表示交易时间内收过行情更新但超过 freshness 窗口，`missing` 表示
 交易时间内在上游 universe 中但从未收到 tick 或 quote，`inactive` 表示下游订阅了不在

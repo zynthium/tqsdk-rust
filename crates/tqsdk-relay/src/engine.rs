@@ -18,6 +18,7 @@ use crate::observability::{
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolTelemetryStore};
+use crate::universe::FuturesContract;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownstreamFrame {
@@ -298,6 +299,31 @@ impl RelayEngine {
         );
         self.symbol_metrics
             .record_universe(symbols, unix_secs.saturating_mul(1_000));
+    }
+
+    pub fn record_universe_refresh_success_for_contracts(
+        &mut self,
+        contracts: &[FuturesContract],
+        upstream_ins_list_chars: usize,
+        warn_chars: Option<usize>,
+        max_chars: Option<usize>,
+        unix_secs: u64,
+    ) {
+        self.record_universe_refresh_success(
+            contracts.len(),
+            upstream_ins_list_chars,
+            warn_chars,
+            max_chars,
+            unix_secs,
+        );
+        self.symbol_metrics.record_universe(
+            contracts.iter().map(|contract| contract.symbol.as_str()),
+            unix_secs.saturating_mul(1_000),
+        );
+        for contract in contracts {
+            self.symbol_metrics
+                .record_symbol_trading_time(&contract.symbol, &contract.trading_time);
+        }
     }
 
     pub fn record_universe_refresh_error(&mut self, message: impl Into<String>, unix_secs: u64) {

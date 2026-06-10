@@ -163,6 +163,15 @@ impl SymbolTelemetryStore {
         self.last_universe_refresh_unix_millis = Some(unix_millis);
     }
 
+    pub fn record_symbol_trading_time(&mut self, symbol: &str, trading_time: &TradingTime) {
+        if let Some(trading_segments) = trading_segments_from_trading_time(trading_time) {
+            self.telemetry
+                .entry(symbol.to_string())
+                .or_default()
+                .trading_segments = Some(trading_segments);
+        }
+    }
+
     pub fn record_tick_at(&mut self, symbol: &str, row: &RelayTickRow, receive_unix_millis: u64) {
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);
