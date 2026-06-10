@@ -1,4 +1,5 @@
 use tqsdk_core::Quote;
+use tqsdk_relay::universe::FuturesUniverseResolver;
 use tqsdk_relay::{
     FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
     StaticFuturesUniverseResolver, futures_metadata_symbol_batches, resolve_futures_symbols,
@@ -103,6 +104,32 @@ async fn resolver_falls_back_to_activity_when_main_symbol_is_unknown() {
     assert_eq!(symbols, vec!["SHFE.au2608", "SHFE.au2612"]);
 }
 
+#[tokio::test]
+async fn resolver_selects_only_main_contracts_without_quote_snapshots_when_limit_is_one() {
+    let mut resolver = MainOnlyResolver {
+        contracts: vec![
+            FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
+            FuturesContract::new("SHFE.au2608", "SHFE", "au", false).unwrap(),
+            FuturesContract::new("DCE.m2605", "DCE", "m", false).unwrap(),
+            FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+        ],
+        main_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2605".to_string()],
+    };
+    let selection = FuturesUniverseSelection {
+        active_contracts_per_product: Some(1),
+    };
+
+    let symbols = resolve_futures_symbols_with_selection(
+        &FuturesProductFilter::All,
+        selection,
+        &mut resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(symbols, vec!["DCE.m2605", "SHFE.au2602"]);
+}
+
 #[test]
 fn futures_contract_extracts_product_code_from_symbol() {
     let contract = FuturesContract::from_symbol("CZCE.MA609", false).unwrap();
@@ -128,6 +155,28 @@ fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
     assert_eq!(contract.exchange_id, "CZCE");
     assert_eq!(contract.product_id, "typed-product");
     assert!(contract.expired);
+}
+
+struct MainOnlyResolver {
+    contracts: Vec<FuturesContract>,
+    main_symbols: Vec<String>,
+}
+
+impl FuturesUniverseResolver for MainOnlyResolver {
+    async fn active_futures(&mut self) -> tqsdk_relay::RelayResult<Vec<FuturesContract>> {
+        Ok(self.contracts.clone())
+    }
+
+    async fn main_futures(&mut self) -> tqsdk_relay::RelayResult<Vec<String>> {
+        Ok(self.main_symbols.clone())
+    }
+
+    async fn quote_snapshots(
+        &mut self,
+        _symbols: &[String],
+    ) -> tqsdk_relay::RelayResult<Vec<Quote>> {
+        panic!("main-only selection must not subscribe quote snapshots")
+    }
 }
 
 fn quote(

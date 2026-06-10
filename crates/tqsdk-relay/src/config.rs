@@ -17,6 +17,7 @@ const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
 const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
 const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
 const ENV_FUTURES_PRODUCTS: &str = "TQSDK_RELAY_FUTURES_PRODUCTS";
+const ENV_FUTURES_MAIN_ONLY: &str = "TQSDK_RELAY_FUTURES_MAIN_ONLY";
 const ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT: &str =
     "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT";
 const ENV_FUTURES_UNIVERSE_REFRESH_AT: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT";
@@ -330,11 +331,22 @@ impl RelayConfig {
             config.futures_metadata_batch_size =
                 parse_positive_usize_env(ENV_FUTURES_METADATA_BATCH_SIZE, &value)?;
         }
+        let futures_main_only = get(ENV_FUTURES_MAIN_ONLY)
+            .map(|value| parse_bool_env(ENV_FUTURES_MAIN_ONLY, &value))
+            .transpose()?;
         if let Some(value) = get(ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT) {
             config.futures_active_contracts_per_product = Some(parse_positive_usize_env(
                 ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT,
                 &value,
             )?);
+        }
+        if futures_main_only == Some(true) {
+            if config.futures_active_contracts_per_product.is_some() {
+                return Err(RelayError::invalid_config(format!(
+                    "set only one of {ENV_FUTURES_MAIN_ONLY} or {ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT}"
+                )));
+            }
+            config.futures_active_contracts_per_product = Some(1);
         }
         if let Some(value) = get(ENV_UPSTREAM_INS_LIST_WARN_CHARS) {
             config.upstream_ins_list_limits.warn_chars = Some(parse_positive_usize_env(

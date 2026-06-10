@@ -279,7 +279,10 @@ impl SessionFuturesUniverseResolver {
             .map_err(|err| RelayError::Internal(err.to_string()))?;
         let mut resolver =
             Self::new_with_metadata_batch_size(client, config.futures_metadata_batch_size)?;
-        if config.futures_active_contracts_per_product.is_some() {
+        if config
+            .futures_active_contracts_per_product
+            .is_some_and(|contracts| contracts > 1)
+        {
             let activity_client = SessionClientBuilder::new(user, pass)
                 .futures_market()
                 .build()
@@ -477,16 +480,19 @@ where
     let Some(active_contracts_per_product) = selection.active_contracts_per_product else {
         return active_symbols(contracts, matches);
     };
-    let candidate_symbols = contracts
-        .iter()
-        .filter(|contract| !contract.expired && matches(contract))
-        .map(|contract| contract.symbol.clone())
-        .collect::<Vec<_>>();
     let main_symbols = resolver
         .main_futures()
         .await?
         .into_iter()
         .collect::<BTreeSet<_>>();
+    if active_contracts_per_product == 1 {
+        return main_active_symbols(contracts, matches, &main_symbols);
+    }
+    let candidate_symbols = contracts
+        .iter()
+        .filter(|contract| !contract.expired && matches(contract))
+        .map(|contract| contract.symbol.clone())
+        .collect::<Vec<_>>();
     let quote_snapshots = resolver.quote_snapshots(&candidate_symbols).await?;
     active_symbols_by_activity(
         contracts,
@@ -504,6 +510,20 @@ fn active_symbols(
     let mut symbols = BTreeSet::new();
     for contract in contracts {
         if !contract.expired && matches(&contract) {
+            symbols.insert(contract.symbol);
+        }
+    }
+    Ok(symbols.into_iter().collect())
+}
+
+fn main_active_symbols(
+    contracts: Vec<FuturesContract>,
+    matches: impl Fn(&FuturesContract) -> bool,
+    main_symbols: &BTreeSet<String>,
+) -> RelayResult<Vec<String>> {
+    let mut symbols = BTreeSet::new();
+    for contract in contracts {
+        if !contract.expired && matches(&contract) && main_symbols.contains(&contract.symbol) {
             symbols.insert(contract.symbol);
         }
     }
