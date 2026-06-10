@@ -32,7 +32,8 @@ pub(crate) struct AppliedChange {
     pub(crate) root: &'static str,
     pub(crate) path: StatePath,
     pub(crate) object: Option<ObjectKey>,
-    pub(crate) fields: Vec<String>,
+    pub(crate) mutation_index: usize,
+    pub(crate) field_indexes: Vec<usize>,
 }
 
 impl AppliedChange {
@@ -40,13 +41,15 @@ impl AppliedChange {
         root: &'static str,
         path: StatePath,
         object: Option<ObjectKey>,
-        fields: Vec<String>,
+        mutation_index: usize,
+        field_indexes: Vec<usize>,
     ) -> Self {
         Self {
             root,
             path,
             object,
-            fields,
+            mutation_index,
+            field_indexes,
         }
     }
 }
@@ -92,7 +95,10 @@ impl ChangeSet {
         changes
     }
 
-    pub(crate) fn from_applied_changes(changes: &[AppliedChange]) -> Self {
+    pub(crate) fn from_applied_changes(
+        changes: &[AppliedChange],
+        mutations: &[NormalizedMutation],
+    ) -> Self {
         let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(changes.len());
         let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(changes.len());
         let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
@@ -111,12 +117,23 @@ impl ChangeSet {
                     change_set.object_hits.push(object.clone());
                 }
 
-                for field in &change.fields {
-                    if field_seen.insert((&change.path, object, field.as_str())) {
+                let Some(mutation) = mutations.get(change.mutation_index) else {
+                    debug_assert!(false, "applied change must point at an input mutation");
+                    continue;
+                };
+                debug_assert_eq!(mutation.path, change.path);
+                debug_assert_eq!(mutation.object, change.object);
+
+                for field_index in &change.field_indexes {
+                    let Some(field) = mutation.fields.get(*field_index) else {
+                        debug_assert!(false, "applied field index must point at mutation field");
+                        continue;
+                    };
+                    if field_seen.insert((&change.path, object, field.field.as_str())) {
                         change_set.field_hits.push(ChangeHit::field(
                             change.path.clone(),
                             object.clone(),
-                            field.clone(),
+                            field.field.clone(),
                         ));
                     }
                 }
