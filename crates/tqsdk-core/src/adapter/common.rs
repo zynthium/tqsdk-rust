@@ -399,13 +399,20 @@ fn decode_market_quote_rtn_data_item(
 }
 
 fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<NormalizedMutation>> {
+    if quotes.values().any(|value| {
+        value
+            .as_object()
+            .is_none_or(|fields| fields.values().any(Value::is_object))
+    }) {
+        return None;
+    }
+
     let mut mutations = Vec::with_capacity(quotes.len());
 
     for (symbol, value) in quotes {
-        let fields = value.as_object()?;
-        if fields.values().any(Value::is_object) {
-            return None;
-        }
+        let fields = value
+            .as_object()
+            .expect("quote fast path shape was prevalidated");
 
         let mut fields = fields
             .iter()
@@ -414,7 +421,7 @@ fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<Norm
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
-        fields.sort_by(|left, right| left.field.cmp(&right.field));
+        fields.sort_unstable_by(|left, right| left.field.cmp(&right.field));
 
         if fields.is_empty() {
             continue;

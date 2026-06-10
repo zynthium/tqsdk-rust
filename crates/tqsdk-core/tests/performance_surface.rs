@@ -138,3 +138,39 @@ fn pure_market_mutations_skip_trade_order_lifecycle_scan_by_domain() {
         "pure market batches should skip trade order lifecycle scanning before iterating every mutation"
     );
 }
+
+#[test]
+fn quote_fast_path_uses_unstable_field_sorting() {
+    let source = include_str!("../src/adapter/common.rs");
+    let block = function_block(
+        source,
+        "fn decode_quote_object_fast_path(",
+        "\n}\n\nfn decode_query_envelope",
+    );
+
+    assert!(
+        block.contains("sort_unstable_by"),
+        "quote fast path fields have unique names and should use unstable sorting"
+    );
+}
+
+#[test]
+fn quote_fast_path_validates_shapes_before_allocating_mutations() {
+    let source = include_str!("../src/adapter/common.rs");
+    let block = function_block(
+        source,
+        "fn decode_quote_object_fast_path(",
+        "\n}\n\nfn decode_query_envelope",
+    );
+    let validation_offset = block
+        .find("quotes.values().any")
+        .expect("quote fast path should prevalidate quote shapes");
+    let allocation_offset = block
+        .find("Vec::with_capacity(quotes.len())")
+        .expect("quote fast path should still preallocate output after validation");
+
+    assert!(
+        validation_offset < allocation_offset,
+        "quote fast path should validate all shapes before allocating output mutations"
+    );
+}
