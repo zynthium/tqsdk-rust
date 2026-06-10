@@ -50,8 +50,9 @@ pub use runtime::{
 };
 pub use server::RelayServer;
 pub use symbol_metrics::{
-    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolSort, SymbolStatus,
-    SymbolSubscriptionCounts, SymbolTelemetrySnapshot, SymbolTelemetryStore,
+    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolProblemSeverity,
+    SymbolSort, SymbolStatus, SymbolSubscriptionCounts, SymbolTelemetrySnapshot,
+    SymbolTelemetryStore,
 };
 #[cfg(feature = "metadata")]
 pub use universe::SessionFuturesUniverseResolver;

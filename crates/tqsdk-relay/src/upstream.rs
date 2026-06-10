@@ -61,6 +61,7 @@ pub struct UpstreamMarketDecodeReport {
     ticks: Vec<UpstreamTick>,
     quotes: Vec<UpstreamQuote>,
     invalid_rows: u64,
+    invalid_rows_by_symbol: BTreeMap<String, u64>,
     last_invalid_row_error: Option<String>,
 }
 
@@ -78,6 +79,11 @@ impl UpstreamMarketDecodeReport {
     #[must_use]
     pub fn invalid_rows(&self) -> u64 {
         self.invalid_rows
+    }
+
+    #[must_use]
+    pub fn invalid_rows_by_symbol(&self) -> &BTreeMap<String, u64> {
+        &self.invalid_rows_by_symbol
     }
 
     #[must_use]
@@ -153,6 +159,10 @@ pub trait UpstreamTickSource {
         0
     }
 
+    fn take_invalid_tick_rows_by_symbol(&mut self) -> BTreeMap<String, u64> {
+        BTreeMap::new()
+    }
+
     fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
         None
     }
@@ -190,6 +200,7 @@ fn decode_upstream_market_report_inner(
             ticks: Vec::new(),
             quotes: Vec::new(),
             invalid_rows: 0,
+            invalid_rows_by_symbol: BTreeMap::new(),
             last_invalid_row_error: None,
         });
     }
@@ -198,12 +209,14 @@ fn decode_upstream_market_report_inner(
             ticks: Vec::new(),
             quotes: Vec::new(),
             invalid_rows: 0,
+            invalid_rows_by_symbol: BTreeMap::new(),
             last_invalid_row_error: None,
         });
     };
     let mut ticks = Vec::new();
     let mut quotes = Vec::new();
     let mut invalid_rows = 0_u64;
+    let mut invalid_rows_by_symbol = BTreeMap::new();
     let mut last_invalid_row_error = None;
     for fragment in data {
         if let Some(symbols) = fragment.get("ticks").and_then(Value::as_object) {
@@ -224,6 +237,7 @@ fn decode_upstream_market_report_inner(
                         Ok(None) => {}
                         Err(error) => {
                             invalid_rows = invalid_rows.saturating_add(1);
+                            *invalid_rows_by_symbol.entry(symbol.clone()).or_default() += 1;
                             last_invalid_row_error =
                                 Some(format!("{symbol} row {row_id}: {error}"));
                         }
@@ -250,6 +264,7 @@ fn decode_upstream_market_report_inner(
         ticks,
         quotes,
         invalid_rows,
+        invalid_rows_by_symbol,
         last_invalid_row_error,
     })
 }
@@ -436,6 +451,7 @@ pub struct WebSocketUpstreamTickSource {
     tick_row_cache: TickRowCache,
     closed: bool,
     invalid_tick_rows: u64,
+    invalid_tick_rows_by_symbol: BTreeMap<String, u64>,
     last_invalid_tick_row_error: Option<String>,
     progress: UpstreamSourceProgress,
 }
@@ -453,6 +469,7 @@ impl WebSocketUpstreamTickSource {
             tick_row_cache: TickRowCache::default(),
             closed: false,
             invalid_tick_rows: 0,
+            invalid_tick_rows_by_symbol: BTreeMap::new(),
             last_invalid_tick_row_error: None,
             progress: UpstreamSourceProgress::default(),
         };
@@ -548,6 +565,13 @@ impl WebSocketUpstreamTickSource {
 
     fn record_decode_report(&mut self, report: &UpstreamMarketDecodeReport) {
         self.invalid_tick_rows = self.invalid_tick_rows.saturating_add(report.invalid_rows());
+        for (symbol, count) in report.invalid_rows_by_symbol() {
+            let entry = self
+                .invalid_tick_rows_by_symbol
+                .entry(symbol.clone())
+                .or_default();
+            *entry = entry.saturating_add(*count);
+        }
         if let Some(error) = report.last_invalid_row_error() {
             self.last_invalid_tick_row_error = Some(error.to_owned());
         }
@@ -621,6 +645,10 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
 
     fn take_invalid_tick_rows(&mut self) -> u64 {
         std::mem::take(&mut self.invalid_tick_rows)
+    }
+
+    fn take_invalid_tick_rows_by_symbol(&mut self) -> BTreeMap<String, u64> {
+        std::mem::take(&mut self.invalid_tick_rows_by_symbol)
     }
 
     fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {

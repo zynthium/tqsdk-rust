@@ -21,6 +21,15 @@ pub enum SymbolStatus {
     Inactive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolProblemSeverity {
+    Live,
+    Closed,
+    Warn,
+    Bad,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SymbolSort {
     #[default]
@@ -122,6 +131,8 @@ pub struct SymbolTelemetrySnapshot {
     pub symbol: String,
     pub instrument_name: Option<String>,
     pub status: SymbolStatus,
+    pub problem: bool,
+    pub problem_severity: SymbolProblemSeverity,
     pub in_universe: bool,
     pub subscribed: bool,
     pub quote_subscriber_count: usize,
@@ -179,9 +190,18 @@ impl SymbolTelemetryStore {
     }
 
     pub fn record_invalid_row(&mut self, symbol: &str, message: impl Into<String>) {
+        self.record_invalid_rows(symbol, 1, Some(message.into()));
+    }
+
+    pub fn record_invalid_rows(&mut self, symbol: &str, count: u64, message: Option<String>) {
+        if count == 0 {
+            return;
+        }
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
-        telemetry.invalid_rows = telemetry.invalid_rows.saturating_add(1);
-        telemetry.last_invalid_row_error = Some(message.into());
+        telemetry.invalid_rows = telemetry.invalid_rows.saturating_add(count);
+        if let Some(message) = message {
+            telemetry.last_invalid_row_error = Some(message);
+        }
     }
 
     pub fn snapshot_at(
@@ -211,9 +231,7 @@ impl SymbolTelemetryStore {
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
                 .map(|tick_millis| now_unix_millis.saturating_sub(tick_millis));
-            let trading_phase = telemetry.and_then(|telemetry| {
-                trading_phase_at(telemetry.trading_segments.as_deref(), local_day_offset)
-            });
+            let trading_phase = trading_phase_for_symbol(&symbol, telemetry, local_day_offset);
             let status = classify_symbol(
                 in_universe,
                 receive_gap_ms,
@@ -221,10 +239,13 @@ impl SymbolTelemetryStore {
                 trading_phase,
             );
             let telemetry = telemetry.cloned().unwrap_or_default();
+            let problem_severity = problem_severity_for(status, telemetry.invalid_rows);
             unfiltered.push(SymbolTelemetrySnapshot {
                 symbol,
                 instrument_name: telemetry.instrument_name,
                 status,
+                problem: is_problem_severity(problem_severity),
+                problem_severity,
                 in_universe,
                 subscribed,
                 quote_subscriber_count: subscriptions.quote_subscriber_count,
@@ -270,6 +291,23 @@ impl SymbolTelemetryStore {
             symbols,
         }
     }
+}
+
+fn problem_severity_for(status: SymbolStatus, invalid_rows: u64) -> SymbolProblemSeverity {
+    match status {
+        SymbolStatus::Closed => SymbolProblemSeverity::Closed,
+        SymbolStatus::Missing | SymbolStatus::Inactive => SymbolProblemSeverity::Bad,
+        SymbolStatus::Stale => SymbolProblemSeverity::Warn,
+        SymbolStatus::Live if invalid_rows > 0 => SymbolProblemSeverity::Bad,
+        SymbolStatus::Live => SymbolProblemSeverity::Live,
+    }
+}
+
+fn is_problem_severity(severity: SymbolProblemSeverity) -> bool {
+    matches!(
+        severity,
+        SymbolProblemSeverity::Bad | SymbolProblemSeverity::Warn
+    )
 }
 
 fn classify_symbol(
@@ -364,6 +402,101 @@ fn tick_datetime_ns_to_unix_millis(datetime_ns: i64) -> Option<u64> {
         .map(|value| value / 1_000_000)
 }
 
+fn trading_phase_for_symbol(
+    symbol: &str,
+    telemetry: Option<&SymbolTelemetry>,
+    local_day_offset: Duration,
+) -> Option<TradingSessionPhase> {
+    telemetry
+        .and_then(|telemetry| {
+            trading_phase_at(telemetry.trading_segments.as_deref(), local_day_offset)
+        })
+        .or_else(|| fallback_trading_phase_for_symbol(symbol, local_day_offset))
+}
+
+fn fallback_trading_phase_for_symbol(
+    symbol: &str,
+    local_day_offset: Duration,
+) -> Option<TradingSessionPhase> {
+    let segments = fallback_trading_segments_for_symbol(symbol)?;
+    trading_phase_at(Some(&segments), local_day_offset)
+}
+
+fn fallback_trading_segments_for_symbol(symbol: &str) -> Option<Vec<TradingSessionSegment>> {
+    let (exchange, instrument_id) = symbol.split_once('.')?;
+    let exchange = exchange.to_ascii_uppercase();
+    let product_id = futures_product_id(instrument_id)?;
+    let product_id = product_id.to_ascii_lowercase();
+    match exchange.as_str() {
+        "CFFEX" => Some(cffex_trading_segments(&product_id)),
+        "SHFE" => Some(shfe_trading_segments(&product_id)),
+        "INE" => Some(ine_trading_segments(&product_id)),
+        "DCE" | "CZCE" | "GFEX" => Some(commodity_trading_segments(Some("23:00:00"))),
+        _ => None,
+    }
+}
+
+fn futures_product_id(instrument_id: &str) -> Option<&str> {
+    let end = instrument_id
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_ascii_digit().then_some(index))
+        .unwrap_or(instrument_id.len());
+    (end > 0).then_some(&instrument_id[..end])
+}
+
+fn cffex_trading_segments(product_id: &str) -> Vec<TradingSessionSegment> {
+    let afternoon_end = if matches!(product_id, "t" | "tf" | "tl" | "ts") {
+        "15:15:00"
+    } else {
+        "15:00:00"
+    };
+    segments_from_windows(&[
+        ("09:30:00", "11:30:00", false),
+        ("13:00:00", afternoon_end, false),
+    ])
+}
+
+fn shfe_trading_segments(product_id: &str) -> Vec<TradingSessionSegment> {
+    let night_end = match product_id {
+        "au" | "ag" => Some("02:30:00"),
+        "al" | "ao" | "cu" | "ni" | "pb" | "sn" | "zn" => Some("01:00:00"),
+        "wr" => None,
+        _ => Some("23:00:00"),
+    };
+    commodity_trading_segments(night_end)
+}
+
+fn ine_trading_segments(product_id: &str) -> Vec<TradingSessionSegment> {
+    let night_end = match product_id {
+        "sc" => Some("02:30:00"),
+        "bc" => Some("01:00:00"),
+        _ => Some("23:00:00"),
+    };
+    commodity_trading_segments(night_end)
+}
+
+fn commodity_trading_segments(night_end: Option<&str>) -> Vec<TradingSessionSegment> {
+    let mut windows = vec![
+        ("09:00:00", "10:15:00", false),
+        ("10:30:00", "11:30:00", false),
+        ("13:30:00", "15:00:00", false),
+    ];
+    if let Some(night_end) = night_end {
+        windows.push(("21:00:00", night_end, true));
+    }
+    segments_from_windows(&windows)
+}
+
+fn segments_from_windows(windows: &[(&str, &str, bool)]) -> Vec<TradingSessionSegment> {
+    windows
+        .iter()
+        .map(|(start, end, allow_cross_midnight)| {
+            parse_trading_segment(start, end, *allow_cross_midnight)
+                .expect("built-in futures trading session must be valid")
+        })
+        .collect()
+}
+
 fn trading_segments_from_trading_time(
     trading_time: &TradingTime,
 ) -> Option<Vec<TradingSessionSegment>> {
@@ -385,8 +518,16 @@ fn parse_trading_time_window(
     window: &[String],
     allow_cross_midnight: bool,
 ) -> Option<TradingSessionSegment> {
-    let start = parse_hms_seconds(window.first()?)?;
-    let end = parse_hms_seconds(window.get(1)?)?;
+    parse_trading_segment(window.first()?, window.get(1)?, allow_cross_midnight)
+}
+
+fn parse_trading_segment(
+    start: &str,
+    end: &str,
+    allow_cross_midnight: bool,
+) -> Option<TradingSessionSegment> {
+    let start = parse_hms_seconds(start)?;
+    let end = parse_hms_seconds(end)?;
     if start == end {
         return None;
     }

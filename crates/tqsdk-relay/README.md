@@ -301,11 +301,15 @@ open http://127.0.0.1:7789/dashboard
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
 `/symbol-metrics` 返回合约级 telemetry 快照，覆盖当前上游 universe 和下游实际订阅
-合约。状态主口径是 relay 接收间隔延迟：`live` 表示最近 `30s` 内收到 tick 或 quote，
-`stale` 表示收过行情更新但超过 freshness 窗口，`missing` 表示在上游 universe 中但
-从未收到 tick 或 quote，`inactive` 表示下游订阅了不在上游 universe 中的合约。响应
-同时包含 `market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距；`ticks_ingested`
-仍只统计 tick row，用于区分 quote-only 远月合约。
+合约。状态主口径是 relay 接收间隔延迟，并优先考虑 quote 中的精确交易时间表；tick-only
+上游尚未收到 quote 元数据时，会按期货交易所 / 品种代码使用内置交易时段兜底。`closed`
+表示当前不在该合约交易时间段内，不计入问题合约；`live` 表示最近 `30s` 内收到 tick
+或 quote，`stale` 表示交易时间内收过行情更新但超过 freshness 窗口，`missing` 表示
+交易时间内在上游 universe 中但从未收到 tick 或 quote，`inactive` 表示下游订阅了不在
+上游 universe 中的合约。每个合约还会返回 `problem` 和 `problem_severity`，作为
+dashboard 关注列表、风险排序、数据解码告警和完整性异常计数的统一口径；响应同时包含
+`market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计
+tick row，用于区分 quote-only 远月合约。
 
 `/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics` 和 `/metrics`。它不连接 relay
 market websocket，不创建下游订阅，也不会触发额外行情命令。页面顶部会展示上游阶段、

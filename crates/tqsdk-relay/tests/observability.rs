@@ -1,3 +1,4 @@
+use chrono::{Datelike, Local, TimeZone};
 use tqsdk_relay::{
     ClientId, DownstreamCommand, RelayConfig, RelayEngine, RelaySourceStage, RelaySourceStatus,
     RelayStartupReport, RelayTickRow, SetChartCommand,
@@ -23,6 +24,23 @@ fn chart_command(chart_id: &str) -> DownstreamCommand {
         focus_datetime_ns: None,
         focus_position: None,
     })
+}
+
+fn local_millis_at(hour: u32, minute: u32, second: u32) -> u64 {
+    let today = Local::now();
+    let timestamp = Local
+        .with_ymd_and_hms(
+            today.year(),
+            today.month(),
+            today.day(),
+            hour,
+            minute,
+            second,
+        )
+        .single()
+        .expect("local test time should be unambiguous")
+        .timestamp_millis();
+    u64::try_from(timestamp).expect("local test time should be after unix epoch")
 }
 
 #[test]
@@ -160,29 +178,25 @@ fn metrics_include_clients_subscriptions_and_cache_events() {
 #[test]
 fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
     engine.record_universe_refresh_success_for_symbols(
         ["SHFE.au2602", "DCE.m2609"],
         21,
         Some(32_000),
         None,
-        1_700_000_000,
+        now / 1_000 - 2,
     );
     engine
-        .ingest_tick_at_for_test("SHFE.au2602", tick(1), 1_700_000_001_000)
+        .ingest_tick_at_for_test("SHFE.au2602", tick(1), now - 1_000)
         .unwrap();
 
-    let live = engine.symbol_metrics_snapshot_at(
-        1_700_000_002_000,
-        &tqsdk_relay::SymbolMetricsQuery::default(),
-    );
+    let live = engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
     assert_eq!(live.summary.total, 2);
     assert_eq!(live.summary.live, 1);
     assert_eq!(live.summary.missing, 1);
 
-    let stale = engine.symbol_metrics_snapshot_at(
-        1_700_000_032_001,
-        &tqsdk_relay::SymbolMetricsQuery::default(),
-    );
+    let stale = engine
+        .symbol_metrics_snapshot_at(now + 30_001, &tqsdk_relay::SymbolMetricsQuery::default());
     let au = stale
         .symbols
         .iter()
@@ -194,6 +208,7 @@ fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
 #[test]
 fn engine_symbol_metrics_include_quote_and_chart_subscriptions() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
     engine
         .handle_command(
             ClientId::new(1),
@@ -206,10 +221,8 @@ fn engine_symbol_metrics_include_quote_and_chart_subscriptions() {
         .handle_command(ClientId::new(2), chart_command("chart-2"))
         .unwrap();
 
-    let snapshot = engine.symbol_metrics_snapshot_at(
-        1_700_000_002_000,
-        &tqsdk_relay::SymbolMetricsQuery::default(),
-    );
+    let snapshot =
+        engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
     let symbol = snapshot
         .symbols
         .iter()
@@ -222,10 +235,8 @@ fn engine_symbol_metrics_include_quote_and_chart_subscriptions() {
     assert_eq!(symbol.chart_subscriber_count, 1);
 
     engine.remove_client(ClientId::new(1));
-    let after_remove = engine.symbol_metrics_snapshot_at(
-        1_700_000_002_000,
-        &tqsdk_relay::SymbolMetricsQuery::default(),
-    );
+    let after_remove =
+        engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
     let symbol = after_remove
         .symbols
         .iter()

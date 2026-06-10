@@ -63,7 +63,12 @@ where
 {
     let progress = source.take_progress();
     let invalid_rows = source.take_invalid_tick_rows();
+    let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
     let last_error = source.take_last_invalid_tick_row_error();
     engine.record_upstream_progress(progress);
-    engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
+    engine.record_upstream_invalid_tick_rows_by_symbol(
+        invalid_rows,
+        invalid_rows_by_symbol,
+        last_error,
+    );
 }

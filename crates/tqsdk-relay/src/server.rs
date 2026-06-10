@@ -76,6 +76,7 @@ impl RelayServer {
         let update = source.next_update().await;
         let progress = source.take_progress();
         let invalid_rows = source.take_invalid_tick_rows();
+        let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
         let last_error = source.take_last_invalid_tick_row_error();
         let Some(update) = update else {
             let mut engine = self
@@ -83,7 +84,11 @@ impl RelayServer {
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
             engine.record_upstream_progress(progress);
-            engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
+            engine.record_upstream_invalid_tick_rows_by_symbol(
+                invalid_rows,
+                invalid_rows_by_symbol,
+                last_error,
+            );
             return Ok(0);
         };
         let frames = {
@@ -92,7 +97,11 @@ impl RelayServer {
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
             engine.record_upstream_progress(progress);
-            engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
+            engine.record_upstream_invalid_tick_rows_by_symbol(
+                invalid_rows,
+                invalid_rows_by_symbol,
+                last_error,
+            );
             ingest_upstream_update(&mut engine, update)?
         };
         self.dispatch_frames(frames)
@@ -115,6 +124,7 @@ impl RelayServer {
             };
             let progress = source.take_progress();
             let invalid_rows = source.take_invalid_tick_rows();
+            let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
             let last_error = source.take_last_invalid_tick_row_error();
             let frames = {
                 let mut engine = self
@@ -122,7 +132,11 @@ impl RelayServer {
                     .lock()
                     .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
                 engine.record_upstream_progress(progress);
-                engine.record_upstream_invalid_tick_rows(invalid_rows, last_error);
+                engine.record_upstream_invalid_tick_rows_by_symbol(
+                    invalid_rows,
+                    invalid_rows_by_symbol,
+                    last_error,
+                );
                 let Some(update) = update else {
                     return Ok(sent);
                 };

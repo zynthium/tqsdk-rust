@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -319,6 +319,26 @@ impl RelayEngine {
         }
     }
 
+    pub fn record_upstream_invalid_tick_rows_by_symbol(
+        &mut self,
+        count: u64,
+        invalid_rows_by_symbol: BTreeMap<String, u64>,
+        last_error: Option<String>,
+    ) {
+        self.record_upstream_invalid_tick_rows(count, last_error.clone());
+        if invalid_rows_by_symbol.is_empty() {
+            return;
+        }
+        let last_error_symbol = last_error.as_deref().and_then(invalid_row_error_symbol);
+        for (symbol, count) in invalid_rows_by_symbol {
+            let message = (last_error_symbol == Some(symbol.as_str()))
+                .then(|| last_error.clone())
+                .flatten();
+            self.symbol_metrics
+                .record_invalid_rows(&symbol, count, message);
+        }
+    }
+
     #[must_use]
     pub fn interests(&self) -> &InterestRegistry {
         &self.interests
@@ -572,6 +592,10 @@ fn quote_payload(symbol: &str, quote: Quote) -> Value {
         }
     })])])
     .into_value()
+}
+
+fn invalid_row_error_symbol(message: &str) -> Option<&str> {
+    message.split_once(" row ").map(|(symbol, _)| symbol)
 }
 
 fn current_unix_secs() -> u64 {

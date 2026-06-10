@@ -312,6 +312,10 @@ fn decode_upstream_tick_report_counts_invalid_rows_and_keeps_valid_rows() {
     .unwrap();
 
     assert_eq!(report.invalid_rows(), 1);
+    assert_eq!(
+        report.invalid_rows_by_symbol().get("SHFE.rb2606").copied(),
+        Some(1)
+    );
     assert!(
         report
             .last_invalid_row_error()
@@ -643,10 +647,18 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
 
     assert!(source.next_tick().await.is_none());
     assert_eq!(source.take_invalid_tick_rows(), 1);
+    assert_eq!(
+        source
+            .take_invalid_tick_rows_by_symbol()
+            .get("SHFE.au2602")
+            .copied(),
+        Some(1)
+    );
     let error = source.take_last_invalid_tick_row_error().unwrap();
     assert!(error.contains("SHFE.au2602 row 17"));
     assert!(error.contains("last_price"));
     assert_eq!(source.take_invalid_tick_rows(), 0);
+    assert!(source.take_invalid_tick_rows_by_symbol().is_empty());
     assert!(source.take_last_invalid_tick_row_error().is_none());
     server.join();
 }

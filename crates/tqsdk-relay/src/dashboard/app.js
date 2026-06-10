@@ -68,10 +68,17 @@ function statusLabel(status) {
   return ({ live: '正常', closed: '休盘', stale: '静默', missing: '未覆盖', inactive: '未激活' })[status] || status || '未知';
 }
 
+function isProblemRow(row) {
+  if (row.problem !== undefined && row.problem !== null) return row.problem === true;
+  if (row.status === 'closed') return false;
+  return PROBLEM_STATUSES.has(row.status) || Number(row.invalid_rows || 0) > 0;
+}
+
 function severityForRow(row) {
+  if (['bad', 'warn', 'closed', 'live'].includes(row.problem_severity)) return row.problem_severity;
+  if (row.status === 'closed') return 'closed';
   if (row.invalid_rows > 0 || row.status === 'missing' || row.status === 'inactive') return 'bad';
   if (row.status === 'stale') return 'warn';
-  if (row.status === 'closed') return 'closed';
   return 'live';
 }
 
@@ -114,9 +121,10 @@ function deriveModel(metrics, data, sampledAt) {
   const observed = universeRows.filter((row) => row.last_receive_unix_millis != null).length;
   const totalUniverse = universeRows.length || Number(metrics.upstream_symbols || data.summary.total || 0);
   const coverage = totalUniverse > 0 ? observed / totalUniverse * 100 : 0;
-  const problems = rows.filter((row) => PROBLEM_STATUSES.has(row.status) || row.invalid_rows > 0);
+  const problems = rows.filter(isProblemRow);
   const subscribedProblems = problems.filter((row) => row.subscribed);
   const invalidRows = Number(metrics.upstream_invalid_tick_rows || 0);
+  const activeInvalidRows = rows.reduce((sum, row) => sum + (isProblemRow(row) ? Number(row.invalid_rows || 0) : 0), 0);
   const idleMs = frameIdleMs(metrics, sampledAt);
   const rates = calculateRates(metrics, sampledAt);
   const flowThreshold = Number(data.data_stale_after_millis || 30_000);
@@ -127,16 +135,16 @@ function deriveModel(metrics, data, sampledAt) {
     : sourceWarming || (idleMs != null && idleMs > Math.min(5000, flowThreshold / 3))
       ? 'warn'
       : 'live';
-  const issueCount = problems.length + invalidRows;
+  const issueCount = problems.length + activeInvalidRows;
   const scorePenalty = Math.min(100,
     subscribedProblems.length * 8
       + problems.filter((row) => !row.subscribed).length * 0.5
-      + invalidRows * 2
+      + activeInvalidRows * 2
       + (globalFlow === 'bad' ? 35 : globalFlow === 'warn' ? 8 : 0));
   const score = Math.max(0, 100 - scorePenalty);
   return {
     metrics, data, rows, universeRows, problems, subscribedProblems, observed, totalUniverse,
-    coverage, invalidRows, idleMs, rates, globalFlow, sourceDown, sourceWarming, issueCount, score,
+    coverage, invalidRows, activeInvalidRows, idleMs, rates, globalFlow, sourceDown, sourceWarming, issueCount, score,
     sampledAt,
   };
 }
@@ -167,7 +175,7 @@ function renderHealth(model) {
     severity = 'error';
     title = `${model.subscribedProblems.length} 个订阅合约异常`;
     icon = '!';
-  } else if (model.problems.length > 0 || model.invalidRows > 0) {
+  } else if (model.problems.length > 0 || model.activeInvalidRows > 0) {
     severity = 'warning';
     title = '行情链路正常，存在局部异常';
     icon = '!';
@@ -199,9 +207,11 @@ function renderDiagnostics(model) {
   $('universeMeta').textContent = backfillProgress(model.metrics) || `覆盖 ${model.coverage.toFixed(1)}%`;
   setNodeState('universeState', universeSeverity); setDot('universeDot', universeSeverity);
 
-  const decoderSeverity = model.invalidRows > 0 ? 'bad' : 'live';
-  $('decoderState').textContent = model.invalidRows > 0 ? `${fmtNumber.format(model.invalidRows)} 坏行` : '正常';
-  $('decoderMeta').textContent = `${formatRate(model.rates.eventRate)} events/s`;
+  const decoderSeverity = model.activeInvalidRows > 0 ? 'bad' : 'live';
+  $('decoderState').textContent = model.activeInvalidRows > 0 ? `${fmtNumber.format(model.activeInvalidRows)} 当前坏行` : '正常';
+  $('decoderMeta').textContent = model.invalidRows > 0
+    ? `累计 ${fmtNumber.format(model.invalidRows)} 坏行 · ${formatRate(model.rates.eventRate)} events/s`
+    : `${formatRate(model.rates.eventRate)} events/s`;
   setNodeState('decoderState', decoderSeverity); setDot('decoderDot', decoderSeverity);
 
   const cacheSeverity = model.problems.length > 0 ? 'warn' : model.rows.length > 0 ? 'live' : 'warn';
@@ -253,8 +263,8 @@ function renderAttention(model) {
 
 function groupSeverity(rows) {
   if (rows.length === 0) return 'closed';
-  if (rows.some((row) => row.invalid_rows > 0 || row.status === 'missing' || row.status === 'inactive')) return 'bad';
-  if (rows.some((row) => row.status === 'stale')) return 'warn';
+  if (rows.some((row) => isProblemRow(row) && severityForRow(row) === 'bad')) return 'bad';
+  if (rows.some((row) => isProblemRow(row) && severityForRow(row) === 'warn')) return 'warn';
   if (rows.every((row) => row.status === 'closed')) return 'closed';
   return 'live';
 }
@@ -323,7 +333,7 @@ function detectEvents(model) {
     for (const row of model.rows) {
       const before = state.knownStatuses.get(row.symbol);
       if (before && before !== row.status) {
-        if (PROBLEM_STATUSES.has(row.status)) {
+        if (isProblemRow(row)) {
           addEvent(statusLabel(row.status), row.symbol, `${statusLabel(before)} → ${statusLabel(row.status)}`, row.subscribed ? '影响订阅' : '未订阅', severityForRow(row), model.sampledAt);
         } else if (PROBLEM_STATUSES.has(before) && row.status === 'live') {
           addEvent('恢复', row.symbol, `${statusLabel(before)} → 正常`, '--', 'blue', model.sampledAt);
@@ -351,7 +361,7 @@ function renderRanking(model) {
   const body = $('rankingRows');
   const rows = [...model.rows]
     .sort((a, b) => Number(b.subscribed) - Number(a.subscribed)
-      || Number(PROBLEM_STATUSES.has(b.status)) - Number(PROBLEM_STATUSES.has(a.status))
+      || Number(isProblemRow(b)) - Number(isProblemRow(a))
       || (b.ticks_ingested || 0) - (a.ticks_ingested || 0))
     .slice(0, 6);
   if (rows.length === 0) {
