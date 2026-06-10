@@ -120,3 +120,12 @@ fn state_store_apply_has_single_root_fast_path_before_btreeset_classification() 
         "StateStore::apply_with should have a single-root fast path for common quote batches"
     );
 }
+
+#[test]
+fn ensure_child_object_looks_up_existing_child_before_cloning_segment() {
+    let source = include_str!("../src/state/store.rs");
+    assert!(
+        !source.contains(".entry(segment.clone())"),
+        "existing state path children should be looked up by borrowed segment before allocating a key"
+    );
+}
