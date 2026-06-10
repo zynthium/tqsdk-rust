@@ -14,15 +14,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_query()
         .build()?;
 
-    let quotes = session.query_symbol_info(&[symbol.as_str()]).await?;
-    let quote = quotes
+    let infos = session.query_symbol_info(&[symbol.as_str()]).await?;
+    let info = infos
         .into_iter()
         .next()
         .ok_or("query_symbol_info returned no rows")?;
 
     println!(
-        "{} {} tick={} volume_multiple={}",
-        quote.instrument_id, quote.ins_class, quote.price_tick, quote.volume_multiple
+        "{} {} tick={:?} volume_multiple={:?} day={:?} night={:?}",
+        info.instrument_id,
+        info.ins_class,
+        info.price_tick,
+        info.volume_multiple,
+        info.trading_time.day,
+        info.trading_time.night
     );
 
     Ok(())

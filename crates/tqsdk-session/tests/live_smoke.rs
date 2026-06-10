@@ -39,18 +39,18 @@ async fn live_query_symbol_info_smoke() {
         .enable_query()
         .build()
         .expect("live session should build");
-    let quotes = session
+    let infos = session
         .query_symbol_info(&[symbol.as_str()])
         .await
         .expect("query_symbol_info should succeed");
-    let quote = quotes
+    let info = infos
         .into_iter()
         .next()
         .expect("query_symbol_info should return at least one row");
 
-    assert!(!quote.instrument_id.is_empty());
-    assert!(!quote.ins_class.is_empty());
-    assert!(quote.price_tick.is_finite());
+    assert!(!info.instrument_id.as_str().is_empty());
+    assert!(!info.ins_class.is_empty());
+    assert!(info.price_tick.is_some_and(f64::is_finite));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -222,12 +222,16 @@ async fn live_metadata_query_pack_smoke() {
         .expect("live session should build");
 
     let symbols = vec![future_symbol.as_str(), stock_symbol.as_str()];
-    let quotes = session
+    let infos = session
         .query_symbol_info(&symbols)
         .await
         .expect("query_symbol_info should succeed");
-    assert_eq!(quotes.len(), symbols.len());
-    assert!(quotes.iter().all(|quote| !quote.instrument_id.is_empty()));
+    assert_eq!(infos.len(), symbols.len());
+    assert!(
+        infos
+            .iter()
+            .all(|info| !info.instrument_id.as_str().is_empty())
+    );
 
     let specs = session
         .query_instrument_specs(&symbols)

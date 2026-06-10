@@ -2,12 +2,14 @@
 //!
 //! User goal:
 //! - 查询合约乘数、tick size、交易所、品种、到期日
+//! - 查询官方合约信息表字段，例如交易时间段、涨跌停、昨结算和开仓限额
 //! - 获得 typed metadata
 //! - 用结果做下单校验和展示
 //!
 //! API contract:
 //! - 使用 `tqsdk-session` 的 one-shot metadata public API
-//! - 返回 typed `InstrumentSpec`/metadata fields
+//! - `query_symbol_info` 返回 typed `SymbolInfo`
+//! - `query_instrument_specs` 返回更窄的 typed `InstrumentSpec`
 //! - 不要求 live subscription 或 `wait_update()`
 //! - 不手动创建 channel
 //! - 不手动使用 `Arc<Mutex<_>>`
@@ -20,7 +22,7 @@
 //!
 //! Regression signal:
 //! - metadata 查询必须走 wait/stream facade
-//! - 合约规格需要从字符串 payload 手动解析
+//! - 合约信息或规格需要从字符串 payload 手动解析
 //! - direct query 归属回流到 wait/stream
 //!
 //! Review questions:
@@ -43,6 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = SessionClientBuilder::new(user, pass)
         .enable_query()
         .build()?;
+    let info = session
+        .query_symbol_info(&[symbol.as_str()])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("query_symbol_info returned no rows")?;
     let spec = session
         .query_instrument_specs(&[symbol.as_str()])
         .await?
@@ -51,6 +59,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("query_instrument_specs returned no rows")?;
 
     println!(
+        "info symbol={} class={} day={:?} night={:?} open_limit={:?} pre_settlement={:?}",
+        info.instrument_id,
+        info.ins_class,
+        info.trading_time.day,
+        info.trading_time.night,
+        info.open_limit,
+        info.pre_settlement
+    );
+    println!(
         "symbol={} exchange={} product={} class={:?} tick={} multiplier={} expire={:?}",
         spec.symbol.as_str(),
         spec.exchange_id,
@@ -58,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spec.class,
         spec.price_tick,
         spec.volume_multiple,
-        spec.expire_datetime_ns
+        spec.expire_datetime_secs
     );
 
     Ok(())

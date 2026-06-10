@@ -58,7 +58,9 @@
 
 - 某交易所某品种的合约代码列表：`query_quotes(Some("FUTURE"), Some("SHFE"), Some("au"), Some(false), None)`。
 - 主连/连续合约：`query_cont_quotes(Some("SHFE"), Some("au"), None)`。
-- 已知合约的规格字段：`query_instrument_specs(&symbols)`；底层 metadata 表则用 `query_symbol_info(&symbols)`。
+- 已知合约的窄规格字段：`query_instrument_specs(&symbols)`；完整官方合约信息表
+  typed 结果用 `query_symbol_info(&symbols)` / `SymbolInfo`，包括交易时间段、
+  涨跌停、昨结算、开仓限额、到期/行权字段。
 - 期权链：`query_options(underlying, &OptionQueryFilter::new())`；按 ATM 或档位查询用 `query_atm_options`、`query_all_level_options`、`query_all_level_finance_options`。
 
 ### 3. 构建 live data bus

@@ -270,7 +270,8 @@ tqsdk-wait  tqsdk-stream
 能力：
 
 - `query_graphql`
-- `query_symbol_info`
+- `query_symbol_info` / `SymbolInfo`
+- `query_instrument_specs` / `InstrumentSpec`
 - `query_quotes`
 - `query_cont_quotes`
 - `query_options`

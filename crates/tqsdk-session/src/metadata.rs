@@ -1,22 +1,20 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use chrono::Utc;
-use serde_json::{Map, Value, json};
-use tqsdk_core::Quote;
-
 use crate::client::SessionClient;
 use crate::direct_query::{
     AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionLevelQuotes,
     OptionQueryFilter,
 };
 use crate::error::Result;
+use chrono::Utc;
+use serde_json::{Map, Value, json};
 
 #[path = "metadata_helpers.rs"]
 mod helpers;
 
 use self::helpers::{
     filter_option_nodes, non_empty_str, parse_option_nodes, parse_query_cont_quotes_result,
-    parse_query_options_result, parse_query_quotes_result, parse_query_symbol_info_quotes,
+    parse_query_options_result, parse_query_quotes_result, parse_query_symbol_infos,
     sort_options_and_get_atm_index, validate_finance_nearbys, validate_finance_underlying,
     validate_option_class, validate_price_levels, validation,
 };
@@ -72,7 +70,6 @@ const QUERY_SYMBOL_INFO: &str = r#"query($instrument_id:[String]){
       english_name
       class
       price_tick
-      price_decs
       trading_day
       trading_time {
         day
@@ -98,6 +95,7 @@ const QUERY_SYMBOL_INFO: &str = r#"query($instrument_id:[String]){
       delivery_month
       expire_datetime
       settlement_price
+      open_limit
       max_market_order_volume
       max_limit_order_volume
       min_market_order_volume
@@ -124,7 +122,6 @@ const QUERY_SYMBOL_INFO: &str = r#"query($instrument_id:[String]){
       open_min_limit_order_volume
       strike_price
       call_or_put
-      exercise_type
     }
     ... on combine {
       expired
@@ -152,7 +149,6 @@ const QUERY_SYMBOL_INFO: &str = r#"query($instrument_id:[String]){
               english_name
               class
               price_tick
-              price_decs
               trading_day
               trading_time { day night }
             }
@@ -302,7 +298,7 @@ fn build_query_cont_quotes_request(has_night: Option<bool>) -> Result<MetadataQu
 }
 
 impl SessionClient {
-    pub async fn query_symbol_info(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
+    pub async fn query_symbol_info(&self, symbols: &[&str]) -> Result<Vec<crate::SymbolInfo>> {
         if symbols.is_empty() {
             return Err(validation("symbols must not be empty"));
         }
@@ -320,7 +316,7 @@ impl SessionClient {
             )
             .await?;
 
-        parse_query_symbol_info_quotes(&payload, &symbol_list, Utc::now().timestamp())
+        parse_query_symbol_infos(&payload, &symbol_list, Utc::now().timestamp())
     }
 
     pub async fn query_instrument_specs(

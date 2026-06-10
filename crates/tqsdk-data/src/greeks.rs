@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, NaiveDateTime, TimeZone, Utc};
 use tqsdk_core::Quote;
+use tqsdk_session::{InstrumentClass, SymbolInfo};
 
 use crate::error::{DataError, Result};
 
@@ -217,31 +218,35 @@ impl GreeksMetrics {
     }
 }
 
-pub(crate) fn validate_option_metadata(symbol: &str, metadata: &Quote) -> Result<()> {
-    if !metadata.ins_class.ends_with("OPTION") {
+pub(crate) fn validate_option_metadata(symbol: &str, metadata: &SymbolInfo) -> Result<()> {
+    if !metadata.ins_class.ends_with("OPTION") && metadata.class != InstrumentClass::Option {
         return Err(DataError::Validation(format!(
             "symbol {symbol} is not an option contract"
         )));
     }
-    if metadata.underlying_symbol.is_empty() {
+    if metadata.underlying_symbol.is_none() {
         return Err(DataError::InvalidResponse(format!(
             "option metadata for {symbol} missing underlying_symbol"
         )));
     }
-    if metadata.expire_datetime.is_none() {
+    if metadata.expire_datetime_secs.is_none() {
         return Err(DataError::InvalidResponse(format!(
             "option metadata for {symbol} missing expire_datetime"
         )));
     }
-    if !metadata.strike_price.is_finite() || metadata.strike_price <= 0.0 {
+    if !metadata
+        .strike_price
+        .is_some_and(|strike_price| strike_price.is_finite() && strike_price > 0.0)
+    {
         return Err(DataError::InvalidResponse(format!(
             "option metadata for {symbol} has invalid strike_price"
         )));
     }
-    if option_class_sign(&metadata.option_class).is_none() {
+    let option_class = metadata.option_class.as_deref().unwrap_or_default();
+    if option_class_sign(option_class).is_none() {
         return Err(DataError::InvalidResponse(format!(
             "option metadata for {symbol} has unsupported option_class {}",
-            metadata.option_class
+            option_class
         )));
     }
     Ok(())
@@ -249,7 +254,7 @@ pub(crate) fn validate_option_metadata(symbol: &str, metadata: &Quote) -> Result
 
 pub(crate) fn build_option_greeks_row(
     symbol: &str,
-    metadata: &Quote,
+    metadata: &SymbolInfo,
     option_quote: &Quote,
     underlying_quote: &Quote,
     explicit_volatility: Option<f64>,
@@ -257,9 +262,24 @@ pub(crate) fn build_option_greeks_row(
 ) -> Result<OptionGreeksRow> {
     validate_option_metadata(symbol, metadata)?;
 
-    let expire_datetime = metadata.expire_datetime.ok_or_else(|| {
+    let expire_datetime = metadata.expire_datetime_secs.ok_or_else(|| {
         DataError::InvalidResponse(format!(
             "option metadata for {symbol} missing expire_datetime"
+        ))
+    })?;
+    let option_class = metadata.option_class.as_deref().ok_or_else(|| {
+        DataError::InvalidResponse(format!(
+            "option metadata for {symbol} has unsupported option_class "
+        ))
+    })?;
+    let strike_price = metadata.strike_price.ok_or_else(|| {
+        DataError::InvalidResponse(format!(
+            "option metadata for {symbol} has invalid strike_price"
+        ))
+    })?;
+    let underlying_symbol = metadata.underlying_symbol.as_ref().ok_or_else(|| {
+        DataError::InvalidResponse(format!(
+            "option metadata for {symbol} missing underlying_symbol"
         ))
     })?;
     let quote_datetime = effective_quote_datetime(option_quote, underlying_quote);
@@ -271,10 +291,10 @@ pub(crate) fn build_option_greeks_row(
         .or(metadata.expire_rest_days);
 
     let metrics = build_greeks_metrics(
-        metadata.option_class.as_str(),
+        option_class,
         underlying_last_price,
         option_last_price,
-        metadata.strike_price,
+        strike_price,
         risk_free_rate,
         time_to_expiry_years.unwrap_or(f64::NAN),
         explicit_volatility,
@@ -282,18 +302,14 @@ pub(crate) fn build_option_greeks_row(
 
     Ok(OptionGreeksRow {
         symbol: symbol.to_string(),
-        instrument_id: if metadata.instrument_id.is_empty() {
-            symbol.to_string()
-        } else {
-            metadata.instrument_id.clone()
-        },
+        instrument_id: metadata.instrument_id.as_str().to_string(),
         instrument_name: metadata.instrument_name.clone(),
         quote_datetime,
-        option_class: metadata.option_class.clone(),
+        option_class: option_class.to_string(),
         expire_rest_days,
-        expire_datetime: metadata.expire_datetime,
-        underlying_symbol: metadata.underlying_symbol.clone(),
-        strike_price: metadata.strike_price,
+        expire_datetime: metadata.expire_datetime_secs,
+        underlying_symbol: underlying_symbol.as_str().to_string(),
+        strike_price,
         option_last_price,
         underlying_last_price,
         volatility: metrics.volatility,
@@ -633,6 +649,53 @@ mod tests {
 
     use super::*;
 
+    fn option_metadata(
+        instrument_id: &str,
+        option_class: &str,
+        underlying_symbol: &str,
+        expire_datetime_secs: i64,
+    ) -> SymbolInfo {
+        SymbolInfo {
+            instrument_id: tqsdk_core::Symbol::new(instrument_id),
+            instrument_name: "测试期权".to_string(),
+            exchange_id: instrument_id
+                .split_once('.')
+                .map(|(exchange, _)| exchange.to_string())
+                .unwrap_or_default(),
+            product_id: String::new(),
+            ins_class: "OPTION".to_string(),
+            class: InstrumentClass::Option,
+            price_tick: Some(0.01),
+            volume_multiple: Some(1),
+            open_limit: None,
+            max_limit_order_volume: None,
+            max_market_order_volume: None,
+            min_limit_order_volume: None,
+            min_market_order_volume: None,
+            open_max_market_order_volume: None,
+            open_max_limit_order_volume: None,
+            open_min_market_order_volume: None,
+            open_min_limit_order_volume: None,
+            underlying_symbol: Some(tqsdk_core::Symbol::new(underlying_symbol)),
+            strike_price: Some(100.0),
+            expired: false,
+            expire_datetime_secs: Some(expire_datetime_secs),
+            expire_rest_days: None,
+            delivery_year: None,
+            delivery_month: None,
+            last_exercise_datetime_secs: None,
+            exercise_year: None,
+            exercise_month: None,
+            option_class: Some(option_class.to_string()),
+            upper_limit: None,
+            lower_limit: None,
+            pre_settlement: None,
+            pre_open_interest: None,
+            pre_close: None,
+            trading_time: tqsdk_core::TradingTime::default(),
+        }
+    }
+
     #[test]
     fn option_greeks_request_rejects_invalid_inputs() {
         let err = OptionGreeksRequest::new(Vec::<String>::new())
@@ -672,23 +735,18 @@ mod tests {
 
     #[test]
     fn build_option_greeks_row_uses_explicit_volatility() {
-        let mut metadata = Quote {
-            ins_class: "OPTION".to_string(),
-            instrument_id: "au2606C720".to_string(),
-            instrument_name: "沪金看涨期权".to_string(),
-            option_class: "CALL".to_string(),
-            underlying_symbol: "SHFE.au2606".to_string(),
-            strike_price: 100.0,
-            expire_datetime: Some(
-                cst_offset()
-                    .unwrap()
-                    .with_ymd_and_hms(2026, 12, 27, 0, 0, 0)
-                    .single()
-                    .unwrap()
-                    .timestamp(),
-            ),
-            ..Quote::default()
-        };
+        let mut metadata = option_metadata(
+            "SHFE.au2606C720",
+            "CALL",
+            "SHFE.au2606",
+            cst_offset()
+                .unwrap()
+                .with_ymd_and_hms(2026, 12, 27, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp(),
+        );
+        metadata.instrument_name = "沪金看涨期权".to_string();
         metadata.expire_rest_days = Some(360);
 
         let option_quote = Quote {
@@ -729,16 +787,13 @@ mod tests {
             .single()
             .unwrap();
         let expire = start + ChronoDuration::days(360);
-        let metadata = Quote {
-            ins_class: "ETF_OPTION".to_string(),
-            instrument_id: "510300C2601M000100".to_string(),
-            instrument_name: "测试期权".to_string(),
-            option_class: "CALL".to_string(),
-            underlying_symbol: "SSE.510300".to_string(),
-            strike_price: 100.0,
-            expire_datetime: Some(expire.timestamp()),
-            ..Quote::default()
-        };
+        let mut metadata = option_metadata(
+            "SSE.510300C2601M000100",
+            "CALL",
+            "SSE.510300",
+            expire.timestamp(),
+        );
+        metadata.ins_class = "ETF_OPTION".to_string();
         let option_quote = Quote {
             datetime: "2026-01-01 00:00:00.000000".to_string(),
             last_price: bs_price(100.0, 100.0, 0.05, 0.2, 1.0, 1.0),
@@ -770,15 +825,8 @@ mod tests {
             .single()
             .unwrap();
         let expire = start + ChronoDuration::days(180);
-        let metadata = Quote {
-            ins_class: "OPTION".to_string(),
-            instrument_id: "SHFE.au2606C720".to_string(),
-            option_class: "CALL".to_string(),
-            underlying_symbol: "SHFE.au2606".to_string(),
-            strike_price: 100.0,
-            expire_datetime: Some(expire.timestamp()),
-            ..Quote::default()
-        };
+        let metadata =
+            option_metadata("SHFE.au2606C720", "CALL", "SHFE.au2606", expire.timestamp());
         let option_quote = Quote {
             ask_price1: 10.6,
             bid_price1: 10.4,

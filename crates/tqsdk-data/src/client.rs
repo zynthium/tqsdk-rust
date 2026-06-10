@@ -195,12 +195,17 @@ impl DataClient {
             self.require_session("query_option_greeks requires a session-backed data client")?;
 
         let symbol_refs = spec.symbols.iter().map(String::as_str).collect::<Vec<_>>();
-        let metadata_quotes = session.query_symbol_info(&symbol_refs).await?;
+        let metadata_infos = session.query_symbol_info(&symbol_refs).await?;
         let mut live_symbols = dedup_symbols_preserve_order(spec.symbols.iter().cloned());
 
-        for (symbol, metadata) in spec.symbols.iter().zip(metadata_quotes.iter()) {
+        for (symbol, metadata) in spec.symbols.iter().zip(metadata_infos.iter()) {
             validate_option_metadata(symbol, metadata)?;
-            live_symbols.push(metadata.underlying_symbol.clone());
+            let underlying_symbol = metadata.underlying_symbol.as_ref().ok_or_else(|| {
+                DataError::InvalidResponse(format!(
+                    "option metadata for {symbol} missing underlying_symbol"
+                ))
+            })?;
+            live_symbols.push(underlying_symbol.as_str().to_string());
         }
         let live_symbols = dedup_symbols_preserve_order(live_symbols);
         let live_symbol_refs = live_symbols.iter().map(String::as_str).collect::<Vec<_>>();
@@ -212,17 +217,27 @@ impl DataClient {
 
         let mut rows = Vec::with_capacity(spec.symbols.len());
         for (index, (symbol, metadata)) in
-            spec.symbols.iter().zip(metadata_quotes.iter()).enumerate()
+            spec.symbols.iter().zip(metadata_infos.iter()).enumerate()
         {
             let option_quote = live_quotes.get(symbol).ok_or_else(|| {
                 DataError::InvalidResponse(format!("missing live quote snapshot for {symbol}"))
             })?;
             let underlying_quote = live_quotes
-                .get(metadata.underlying_symbol.as_str())
+                .get(
+                    metadata
+                        .underlying_symbol
+                        .as_ref()
+                        .map(|symbol| symbol.as_str())
+                        .unwrap_or_default(),
+                )
                 .ok_or_else(|| {
+                    let underlying = metadata
+                        .underlying_symbol
+                        .as_ref()
+                        .map(|symbol| symbol.as_str())
+                        .unwrap_or("<missing>");
                     DataError::InvalidResponse(format!(
-                        "missing live quote snapshot for underlying {} of {symbol}",
-                        metadata.underlying_symbol
+                        "missing live quote snapshot for underlying {underlying} of {symbol}"
                     ))
                 })?;
             let explicit_volatility = spec

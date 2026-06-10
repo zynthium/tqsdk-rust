@@ -112,7 +112,8 @@ crate 自己维护。
 - lazy establish、route/pending-route driving、reconnect/resync control
 - one-shot request/response helpers
 - low-level market command helpers that remain one-shot command submission
-- typed instrument metadata normalization
+- typed symbol metadata normalization：`SymbolInfo` 对齐官方合约信息表，
+  `InstrumentSpec` 保持窄的下单校验规格对象
 - GraphQL / HTTP query、schema refresh、metadata、calendar、settlement、ranking、EDB
 - value-style GraphQL direct query 内部串行化完整 query lifecycle；raw command-style
   query 仍由调用方负责推进顺序

@@ -124,6 +124,7 @@
 - `flush_outbound()` / `drive_pending_once()` / `drive_route_once()`
 - GraphQL / schema refresh
 - metadata query
+- `SymbolInfo` 这类官方合约信息表 typed 结果，以及 `InstrumentSpec` 这类窄规格对象
 - calendar / settlement / ranking / EDB
 - auth refresh
 - session-scoped order intent ledger（只记录 client order id 与 runtime order id
@@ -143,6 +144,7 @@
 - `query_graphql*`
 - `refresh_schema*`
 - `query_symbol_info`
+- `query_instrument_specs`
 - `query_quotes`
 - `query_cont_quotes`
 - `query_options`

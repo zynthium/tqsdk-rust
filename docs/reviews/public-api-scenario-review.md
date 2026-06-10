@@ -193,8 +193,10 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
   均有 typed error kind 和 retry hint；`StreamRetryPolicy` 提供 stream-facing
   retry decision / backoff runner；业务拒单仍应通过订单/风控 public API 判断，
   order/business retry audit 属于用户执行审计系统职责。
-- S23 合约信息查询与标准化继续保持“自然”：`SessionClient::query_instrument_specs`
-  返回 `InstrumentSpec`，用户不再把 live `Quote` 当作合约规格对象。
+- S23 合约信息查询与标准化继续保持“自然”：`SessionClient::query_symbol_info`
+  返回 `SymbolInfo` 对齐官方合约信息表字段，`SessionClient::query_instrument_specs`
+  返回更窄的 `InstrumentSpec` 供下单校验；用户不再把 live `Quote` 当作
+  metadata 对象。
 - S27 Session metadata 与 service query pack 继续保持“自然”：`SessionClient`
   直接提供合约列表、主连、期权、交易日历、结算价、排名和 EDB 的 typed
   one-shot request/response；raw GraphQL 仍只是 `SessionRawQuery::query_graphql_value`
@@ -244,7 +246,7 @@ Python SDK 的 public API 名称判断。Python SDK 提供成熟用户语义证�
 | 20. 生产守护进程 | 自然（SDK runtime primitives） | 中 | 无 | 无 | 中 | 低 | 维护边界 | `crates/tqsdk-stream/examples/api_contract_s20_production_daemon_health.rs`; `crates/tqsdk-task/examples/api_contract_s20_strategy_supervisor.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s20_production_daemon.rs`; `TqStream::health`; `TqStream::reconnect_monitor`; `TqStream::graceful_shutdown`; `StreamHealthSnapshot::{status, should_restart}`; `StreamReconnectMonitor`; `StreamReconnectOutcome`; `StreamReconnectReport`; `StreamGracefulShutdownReport`; `StrategySupervisor`; `StrategySupervisorHealth`; `StrategySupervisorMetrics`; `StrategyTelemetryEvent`; `StrategyTelemetryReporter`; `StrategyRetryPolicy`; `StrategyShutdownSignal`; S20 完成标准止于 typed health / telemetry / graceful shutdown primitives；Rust GUI、HTTP endpoint 和跨进程 daemon 管理均 out of scope |
 | 21. 慢消费者隔离 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s21_slow_consumer_isolation.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s21_slow_consumer_isolation.rs`; `TqStreamBuilder::commit_channel_capacity`; `TqStream::with_commit_channel_capacity`; `TqStream::commit_stream`; `StreamFacadeError::Lagged`; bounded fan-out / typed lag diagnostic 自然；durable distributed queue、managed sink、WAL/journal 和 runtime state snapshot recovery 不进入核心 SDK |
 | 22. 错误诊断与重试 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-stream/examples/api_contract_s22_error_diagnosis_retry.rs`; `docs/archive/scenarios/2026-05-01/api_contract_s22_error_diagnosis_retry.rs`; `StreamFacadeError::diagnostic`; `StreamRetryPolicy`; `StreamRetryDecision`; error kind / retry hint / stream-facing retry decision / backoff runner 自然；order/business retry audit 由用户层执行审计系统实现 |
-| 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::query_instrument_specs`; `InstrumentSpec`; `InstrumentClass` |
+| 23. 合约信息查询与标准化 | 自然 | 低 | 无 | 无 | 无 | 无 | API 微调 | `crates/tqsdk-session/examples/api_contract_s23_contract_metadata.rs`; `SessionClient::{query_symbol_info,query_instrument_specs}`; `SymbolInfo`; `InstrumentSpec`; `InstrumentClass` |
 | 24. 最小可测试策略 | 自然（核心 test foundation） | 中 | 无 | 无 | 低 | 低 | 维护边界 | `crates/tqsdk-task/examples/api_contract_s24_testable_strategy.rs`; `docs/archive/scenarios/2026-05-02/api_contract_s24_testable_strategy.rs`; `StrategyTestHarness`; `FakeMarket`; `FakeBroker`; `StrategyTestClock`; `OrderLifecycle`; `FakeBroker::partial_fills`; `FakeBroker::latency_steps`; `FakeBroker::disconnect_for_steps`; `FakeBrokerConnectionStatus`; durable fixtures and richer broker behavior remain non-core testing-tooling scope |
 | 25. Wait 行情序列与交易状态 | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s25_wait_serial_trading_status.rs`; `TqApi::{trading_status,kline,tick,step_until}`; `WaitStep::{is_changing,is_changing_fields}`; 实时序列窗口属于 wait，不属于 data download 或 session direct query |
 | 26. Wait trade 与 system live refs | 自然 | 低 | 无 | 无 | 低 | 低 | API 微调 | `crates/tqsdk-wait/examples/api_contract_s26_trade_system_refs.rs`; `crates/tqsdk-wait/examples/api_contract_s26_security_trade_refs.rs`; `TqApi::{notification,settlement_info,risk_management_rule,risk_management_data,security_account,security_position,security_order,security_trade,confirm_settlement}`; notification / settlement / risk 与证券 trade refs 继续归属 wait live refs |

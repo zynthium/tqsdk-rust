@@ -249,6 +249,13 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 
 生产发布联机 smoke 入口：
 
+本地合约信息 typed metadata 回归入口：
+
+```bash
+cargo test -p tqsdk-session parse_symbol_info_maps_graphql_payload_to_symbol_info_schema
+cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_symbol_info
+```
+
 1. `cargo test -p tqsdk-session live_query_symbol_info_smoke -- --ignored --nocapture`
 2. `cargo test -p tqsdk-session live_query_command_wait_smoke -- --ignored --nocapture`
 3. `cargo test -p tqsdk-session live_raw_and_control_plane_requests_smoke -- --ignored --nocapture`
