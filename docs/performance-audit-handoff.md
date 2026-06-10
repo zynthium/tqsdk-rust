@@ -34,10 +34,12 @@ TradeScope（Tauri v2 量化交易终端）在同时订阅数百个合约/周期
 - P3 `PathCommitStream` path 匹配效率：已引入构造期 `PathMatcher`，按 root
   segment 建索引，raw path stream 和内部 `PathDispatcher` subscriber 都复用预编译
   matcher，避免每个 commit 重新扫描原始 path filter 列表。
-- 2026-06 diff ingest 优化批次：已完成 core path allocation / applied-change metadata /
-  quote fast path、wait no-scan changed quote API、stream path dispatcher root+quote-symbol
-  索引。最终 core quote batch ingest 仍约为 JSON parse 的 5.0x，后续瓶颈主要在
-  state apply / commit metadata / commit fan-out，而不是 typed reader。
+- 2026-06 diff ingest 优化批次：已完成 core clean measurement、applied-change
+  metadata、state apply fast path、quote fast path cleanup、wait no-scan changed quote API、
+  stream path dispatcher root+quote-symbol 索引。最新 clean run 中
+  `ingest_prebuilt_quote_batch / decode_prebuilt_quote_batch` 约为 `4.6x`；大批量
+  benchmark 本机噪声较大。剩余确定性瓶颈转向 runtime mutex 下的 command tail
+  latency，需要独立 sequencer 架构计划处理。
 
 ---
 
@@ -146,6 +148,78 @@ cargo test -p tqsdk-stream --test stream_fanout_microbench -- --ignored --nocapt
   command submission 仍会排队等待。这个风险需要重排写侧 sequencing，但必须保持单一
   revision 序列、单一 `CommitLog`、命令账本状态机校验和现有 reader/cursor 语义，因此
   应作为单独架构变更处理。
+
+### Next Diff Ingest Performance Pass Report
+
+旧污染 benchmark 数字来自前一轮最终结果；其中 ingest case 在 timed loop 内构造
+payload，不能再作为后续优化收益基准，只保留用于说明为什么 Batch 0 必须先清理测量：
+
+| polluted case | ns/iter |
+| --- | ---: |
+| `parse_json_single_quote` | 4088.9 |
+| `ingest_single_quote` | 16909.8 |
+| `ingest_noop_single_quote` | 5609.8 |
+| `parse_json_quote_batch` | 219941.5 |
+| `ingest_quote_batch` | 1110584.5 |
+| `ingest_large_quote_batch` | 10223138.1 |
+| `read_market_quote_typed` | 1023.3 |
+
+最新 clean benchmark 命令：
+
+```bash
+cargo run -p tqsdk-core --example diff_ingest_microbench --release
+```
+
+最新 clean run：
+
+| clean case | ns/iter | note |
+| --- | ---: | --- |
+| `parse_json_single_quote` | 2928.7 | wire JSON parse baseline |
+| `ingest_single_quote` | 12066.1 | prebuilt runtime input ingest |
+| `ingest_noop_single_quote` | 5287.7 | no visible commit |
+| `parse_json_quote_batch` | 211553.9 | 100 symbols |
+| `decode_prebuilt_quote_batch` | 173055.4 | adapter decode only |
+| `decode_text_quote_batch` | 369393.6 | prebuilt wire text parse + decode |
+| `ingest_quote_batch` | 1037010.5 | legacy polluted-compatible case |
+| `ingest_prebuilt_quote_batch` | 794023.6 | clean 100-symbol ingest |
+| `ingest_text_quote_batch` | 999746.3 | prebuilt wire text parse + ingest |
+| `ingest_large_quote_batch` | 10964511.9 | legacy polluted-compatible case |
+| `ingest_prebuilt_large_quote_batch` | 23219135.4 | noisy outlier; do not use alone |
+| `ingest_sparse_quote_batch_1000x10x3` | 106076.0 | noisy outlier; compare with prior warm runs |
+| `read_market_quote_typed` | 1344.0 | typed hot read |
+
+Decode-only versus ingest:
+
+- `ingest_prebuilt_quote_batch / decode_prebuilt_quote_batch` = about `4.6x`.
+- `ingest_text_quote_batch / decode_text_quote_batch` = about `2.7x`.
+- The gap after adapter decode is still dominated by runtime apply / commit metadata /
+  publication work, not JSON parsing or typed read.
+
+Batch-level outcomes:
+
+- Clean measurement: timed ingest loops now consume prebuilt inputs, sparse updates are measured,
+  and text benchmarks parse prebuilt wire JSON instead of relying on adapter-ignored
+  `InputPayload::Text`.
+- ChangeSet clone reduction: Batch 1.1 reduced `ingest_prebuilt_large_quote_batch` from
+  `12,918,641.4 ns/iter` to `7,435,178.7 ns/iter` and sparse `1000x10x3` from
+  `85,292.0 ns/iter` to `48,309.8 ns/iter`, so public grouped `ChangeSet` was deferred.
+- State apply cleanup: single-root apply, borrowed child lookup, and pure-market lifecycle-scan
+  skip are guarded by source tests; observed benchmark runs were noisy, so no additional public
+  contract change is justified from these alone.
+- Quote fast path cleanup: quote field sorting now uses `sort_unstable_by`, and quote shape
+  validation happens before allocating output mutations. Adapter contract tests cover multi-quote,
+  out-of-order field, nested fallback, and null-field behavior.
+- Runtime lock tail latency: under large market ingest p95 command submit latency was
+  `50.267216ms` versus `81.085us` no-load p95. This exceeds the 2x threshold and is the next
+  real bottleneck, but it requires the separate architecture-gated sequencer plan.
+
+Stop criterion for this pass:
+
+- Low-risk allocation and sort cleanups are complete.
+- Further local wins are either noisy or below the threshold for added runtime complexity.
+- The remaining material issue is runtime write-side sequencing under large market ingest; continue
+  through `docs/superpowers/plans/2026-06-10-runtime-ingest-command-sequencer.md` instead of
+  making ad hoc lock-splitting changes in this pass.
 
 ---
 
