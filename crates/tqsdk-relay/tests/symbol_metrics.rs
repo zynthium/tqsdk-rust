@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use tqsdk_core::Quote;
+use chrono::{Datelike, Local, TimeZone};
+use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::{
     RelayTickRow, SymbolMetricsQuery, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
     SymbolTelemetryStore,
@@ -25,6 +26,52 @@ fn quote(symbol: &str, datetime_ns: i64, price: f64) -> Quote {
         open_interest: 34,
         ..Quote::default()
     }
+}
+
+fn quote_with_name(symbol: &str, instrument_name: &str, datetime_ns: i64, price: f64) -> Quote {
+    Quote {
+        instrument_name: instrument_name.to_string(),
+        ..quote(symbol, datetime_ns, price)
+    }
+}
+
+fn quote_with_trading_time(
+    symbol: &str,
+    datetime_ns: i64,
+    price: f64,
+    day: &[(&str, &str)],
+    night: &[(&str, &str)],
+) -> Quote {
+    Quote {
+        trading_time: TradingTime {
+            day: day
+                .iter()
+                .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+                .collect(),
+            night: night
+                .iter()
+                .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+                .collect(),
+        },
+        ..quote(symbol, datetime_ns, price)
+    }
+}
+
+fn local_millis_at(hour: u32, minute: u32, second: u32) -> u64 {
+    let today = Local::now();
+    let timestamp = Local
+        .with_ymd_and_hms(
+            today.year(),
+            today.month(),
+            today.day(),
+            hour,
+            minute,
+            second,
+        )
+        .single()
+        .expect("local test time should be unambiguous")
+        .timestamp_millis();
+    u64::try_from(timestamp).expect("local test time should be after unix epoch")
 }
 
 #[test]
@@ -110,6 +157,53 @@ fn quote_only_symbol_transitions_from_live_to_stale_without_tick_count() {
 }
 
 #[test]
+fn quote_snapshot_serializes_instrument_name() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.au2602"], 1_700_000_000_000);
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote_with_name("SHFE.au2602", "沪金2602", 1_700_000_001_500_000_000, 610.0),
+        1_700_000_001_700,
+    );
+
+    let snapshot = store.snapshot_at(
+        1_700_000_002_000,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(snapshot).unwrap();
+
+    assert_eq!(json["symbols"][0]["symbol"], "SHFE.au2602");
+    assert_eq!(json["symbols"][0]["instrument_name"], "沪金2602");
+}
+
+#[test]
+fn query_matches_instrument_name() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], 1_700_000_000_000);
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote_with_name("SHFE.au2602", "沪金2602", 1_700_000_001_500_000_000, 610.0),
+        1_700_000_001_700,
+    );
+    store.record_quote_at(
+        "DCE.m2609",
+        &quote_with_name("DCE.m2609", "豆粕2609", 1_700_000_001_500_000_000, 3100.0),
+        1_700_000_001_700,
+    );
+
+    let query = SymbolMetricsQuery {
+        q: Some("沪金".to_string()),
+        ..SymbolMetricsQuery::default()
+    };
+    let snapshot = store.snapshot_at(1_700_000_002_000, 30_000, &Default::default(), &query);
+
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
+}
+
+#[test]
 fn subscribed_symbol_outside_universe_is_inactive() {
     let store = SymbolTelemetryStore::default();
     let mut subscriptions: BTreeMap<String, SymbolSubscriptionCounts> = Default::default();
@@ -190,4 +284,184 @@ fn symbol_metrics_query_parses_http_query_shape() {
         SymbolMetricsQuery::from_query_string("status=unknown").unwrap_err(),
         "invalid status"
     );
+}
+
+#[test]
+fn symbol_metrics_query_decodes_statuses_and_filters_case_insensitively() {
+    let query =
+        SymbolMetricsQuery::from_query_string("status=live%2Cmissing&q=AU2602&limit=10").unwrap();
+    assert_eq!(
+        query.statuses,
+        vec![SymbolStatus::Live, SymbolStatus::Missing]
+    );
+    assert_eq!(query.q.as_deref(), Some("AU2602"));
+
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], 1_700_000_000_000);
+
+    let snapshot = store.snapshot_at(1_700_000_010_000, 30_000, &Default::default(), &query);
+
+    assert_eq!(snapshot.summary.total, 2);
+    assert_eq!(snapshot.summary.missing, 2);
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
+}
+
+#[test]
+fn stale_quote_inside_day_rest_session_is_closed_not_problematic() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(11, 0, 0);
+    store.record_universe(["SHFE.au2602"], now - 90_000);
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote_with_trading_time(
+            "SHFE.au2602",
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            610.0,
+            &[("09:00:00", "10:15:00"), ("13:30:00", "15:00:00")],
+            &[],
+        ),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(json["symbols"][0]["status"], "closed");
+    assert_eq!(json["summary"]["closed"], 1);
+    assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
+fn stale_quote_inside_open_session_remains_stale() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 90_000);
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote_with_trading_time(
+            "SHFE.au2602",
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            610.0,
+            &[("09:00:00", "10:15:00"), ("13:30:00", "15:00:00")],
+            &[],
+        ),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Stale);
+    assert_eq!(snapshot.summary.stale, 1);
+}
+
+#[test]
+fn product_specific_sessions_are_classified_independently() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(14, 0, 0);
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], now - 90_000);
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote_with_trading_time(
+            "SHFE.au2602",
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            610.0,
+            &[("09:00:00", "10:15:00")],
+            &[],
+        ),
+        now - 90_000,
+    );
+    store.record_quote_at(
+        "DCE.m2609",
+        &quote_with_trading_time(
+            "DCE.m2609",
+            i64::try_from((now - 1_000) * 1_000_000).unwrap(),
+            3100.0,
+            &[("13:30:00", "15:00:00")],
+            &[],
+        ),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(json["summary"]["closed"], 1);
+    assert_eq!(json["summary"]["live"], 1);
+    assert_eq!(json["symbols"][0]["symbol"], "DCE.m2609");
+    assert_eq!(json["symbols"][0]["status"], "live");
+    assert_eq!(json["symbols"][1]["symbol"], "SHFE.au2602");
+    assert_eq!(json["symbols"][1]["status"], "closed");
+}
+
+#[test]
+fn night_session_wraps_midnight_for_status_classification() {
+    let mut open_store = SymbolTelemetryStore::default();
+    let open_now = local_millis_at(23, 30, 0);
+    open_store.record_universe(["SHFE.rb2605"], open_now - 90_000);
+    open_store.record_quote_at(
+        "SHFE.rb2605",
+        &quote_with_trading_time(
+            "SHFE.rb2605",
+            i64::try_from((open_now - 90_000) * 1_000_000).unwrap(),
+            3300.0,
+            &[],
+            &[("21:00:00", "01:00:00")],
+        ),
+        open_now - 90_000,
+    );
+
+    let open = open_store.snapshot_at(
+        open_now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(open.symbols[0].status, SymbolStatus::Stale);
+
+    let mut closed_store = SymbolTelemetryStore::default();
+    let closed_now = local_millis_at(2, 0, 0);
+    closed_store.record_universe(["SHFE.rb2605"], closed_now - 90_000);
+    closed_store.record_quote_at(
+        "SHFE.rb2605",
+        &quote_with_trading_time(
+            "SHFE.rb2605",
+            i64::try_from((closed_now - 90_000) * 1_000_000).unwrap(),
+            3300.0,
+            &[],
+            &[("21:00:00", "01:00:00")],
+        ),
+        closed_now - 90_000,
+    );
+
+    let closed = closed_store.snapshot_at(
+        closed_now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&closed).unwrap();
+
+    assert_eq!(json["symbols"][0]["status"], "closed");
+    assert_eq!(json["summary"]["closed"], 1);
+}
+
+#[test]
+fn symbol_metrics_query_accepts_closed_status_filter() {
+    assert!(SymbolMetricsQuery::from_query_string("status=closed").is_ok());
 }

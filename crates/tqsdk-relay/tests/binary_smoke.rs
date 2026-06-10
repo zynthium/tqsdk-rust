@@ -181,6 +181,26 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
 }
 
 #[test]
+fn relay_binary_metrics_responses_are_not_cacheable() {
+    let downstream_addr = free_loopback_addr();
+    let metrics_addr = free_loopback_addr();
+    let mut child = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
+            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
+            .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+
+    let response = wait_for_http_response(metrics_addr, "/metrics", &mut child);
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("Cache-Control: no-store"));
+}
+
+#[test]
 fn relay_binary_serves_embedded_dashboard_assets() {
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();
@@ -197,16 +217,26 @@ fn relay_binary_serves_embedded_dashboard_assets() {
 
     let html = wait_for_http_response(metrics_addr, "/dashboard", &mut child);
     assert!(html.starts_with("HTTP/1.1 200"));
-    assert!(html.contains("Relay Symbol Dashboard"));
+    assert!(html.contains("行情中继合约监控"));
     assert!(html.contains("/dashboard/app.js"));
+    assert!(html.contains("id=\"health\""));
+    assert!(html.contains("id=\"diagnostics\""));
+    assert!(html.contains("问题合约"));
+    assert!(html.contains("中文名称"));
+    assert!(html.contains("休盘"));
 
     let js = wait_for_http_response(metrics_addr, "/dashboard/app.js", &mut child);
     assert!(js.starts_with("HTTP/1.1 200"));
     assert!(js.contains("/symbol-metrics"));
     assert!(js.contains("/metrics"));
+    assert!(js.contains("instrument_name"));
+    assert!(js.contains("closed"));
     assert!(js.contains("upstream_stage"));
     assert!(js.contains("upstream_stage_started_unix_secs"));
     assert!(js.contains("backfillProgress"));
+    assert!(js.contains("AbortController"));
+    assert!(js.contains("renderHealth"));
+    assert!(js.contains("renderDiagnostics"));
 }
 
 struct ChildGuard {
