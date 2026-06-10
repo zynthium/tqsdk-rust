@@ -122,6 +122,18 @@ cargo test -p tqsdk-stream --test stream_fanout_microbench -- --ignored --nocapt
 - stream path dispatcher 如仍需扩展，可考虑 per-symbol typed batch API 或减少
   `PathValueStream` 逐 stream wakeup，而不是改变默认 lossy 语义。
 
+### Grouped ChangeSet Decision
+
+- Batch 1.1 result: 本次 clean benchmark 中，`ingest_prebuilt_large_quote_batch`
+  从 `12,918,641.4 ns/iter` 降至 `7,435,178.7 ns/iter`，约 42.4% faster；
+  `ingest_sparse_quote_batch_1000x10x3` 从 `85,292.0 ns/iter` 降至
+  `48,309.8 ns/iter`，约 43.4% faster。
+- Decision: 暂停 public grouped `ChangeSet` 形状变更，不在本轮推进架构更新。
+- Reason: 内部 `AppliedChange` 字段索引化已经超过计划阈值（large batch >= 15%、
+  sparse batch >= 10%），剩余收益不足以抵消 public contract 变更成本。
+- Public API impact: 无。`ChangeSet.path_hits`、`object_hits`、`field_hits` 的 public
+  字段和顺序保持不变。
+
 ---
 
 ## 问题清单（按优先级排序）
