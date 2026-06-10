@@ -37,7 +37,7 @@ relay 不改变 SDK 运行时模型：
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
 | 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，并为每个合约发送一个 duration 为 `0` 的 tick `set_chart`。 |
-| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合；产品发现模式下按本地每日固定时间重建上游 tick chart 集合，默认 `08:30:00`。 |
+| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合，也可限制为每品种活跃度排名前 N 的合约；产品发现模式下按本地每日固定时间重建上游 tick chart 集合，默认 `08:30:00`。 |
 | 订阅长度防线 | 在连接上游前统计单个上游 tick chart 的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
 | 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
@@ -71,6 +71,20 @@ cargo run -p tqsdk-relay
 
 `view_width=1` 仍会发送 tick chart 请求，但只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。
 
+如果只需要每个品种的主力和次主力，可以限制每个产品保留的活跃合约数：
+
+```bash
+TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
+TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=2 \
+TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
+cargo run -p tqsdk-relay
+```
+
+`TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=1` 表示只保留每个品种的主力合约；
+`2` 表示主力加一个次主力。启用该选项时，relay 会先用 `query_cont_quotes()` 获取
+全市场主力标的，再对候选在市期货做一次批量 quote 快照订阅，按 `product_id`
+分组后以主力优先，其余按 `open_interest` 降序、`volume` 降序补足前 N。
+
 只订阅指定产品代码时：
 
 ```bash
@@ -103,11 +117,12 @@ cargo run -p tqsdk-relay
 dry-run 会向 stdout 输出一行 JSON，例如：
 
 ```json
-{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
+{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"futures_active_contracts_per_product":null,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
 ```
 
 如果 dry-run 使用 `TQSDK_RELAY_FUTURES_PRODUCTS`，它会执行一次 metadata 查询来得到当前
-活跃合约集合；它仍不会绑定监听地址，也不会连接上游行情 websocket。
+活跃合约集合；如果设置了每品种活跃合约数，还会短暂订阅候选 quote 来计算活跃度。
+它仍不会绑定监听地址，也不会连接上游 tick websocket。
 
 让 SDK 客户端连接 relay：
 
@@ -153,6 +168,7 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
+| `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` | 空 | 产品发现模式的可选活跃度限制。设置为 `1` 表示每品种只保留主力，`2` 表示主力和次主力；其余合约按 `open_interest`、`volume` 排名补足前 N。必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 单个上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误；默认不启用硬失败。 |
 | `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给每个上游 tick chart 的 `view_width`。调小可减少启动 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
@@ -171,6 +187,7 @@ cargo run -p tqsdk-relay
 - `futures_product_filter`：动态产品发现过滤器，可选全部期货或产品代码列表。
 - `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新，也可设置兼容 interval。
 - `futures_metadata_batch_size`：默认 `500`，控制产品发现时 metadata 查询分批大小。
+- `futures_active_contracts_per_product`：默认 `None`，设置后限制产品发现结果为每品种活跃度排名前 N。
 - `upstream_tick_view_width`：默认 `10_000`，控制每个上游 tick chart 的 `view_width`。
 - `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭；检查口径是单个上游 tick chart 的 `ins_list` 长度。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。

@@ -29,6 +29,7 @@ fn default_config_is_memory_only_and_local() {
     assert_eq!(config.kline_ring_capacity, 10_000);
     assert_eq!(config.upstream_tick_view_width, 10_000);
     assert_eq!(config.futures_metadata_batch_size, 500);
+    assert_eq!(config.futures_active_contracts_per_product, None);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
     assert_eq!(
         config.bootstrap.min_remote_request_interval,
@@ -130,6 +131,17 @@ fn config_loads_futures_product_codes_from_env() {
             FuturesProductCode::new(None, "MA").unwrap(),
         ])
     );
+}
+
+#[test]
+fn config_loads_active_contracts_per_product_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.futures_active_contracts_per_product, Some(2));
 }
 
 #[test]
@@ -359,6 +371,20 @@ fn config_loads_futures_metadata_batch_size_from_env() {
     .unwrap();
 
     assert_eq!(config.futures_metadata_batch_size, 123);
+}
+
+#[test]
+fn config_rejects_zero_active_contracts_per_product_from_env() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("0".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT must be greater than zero"
+    );
 }
 
 #[test]

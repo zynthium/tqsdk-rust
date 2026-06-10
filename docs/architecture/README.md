@@ -174,6 +174,8 @@ V1 是：
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
   - relay 内部可用 metadata 查询动态发现当前活跃期货合约集合，使用轻量
     `multi_symbol_info` typed 字段过滤产品和过期状态，但不向下游代理 query/auth
+  - 产品发现可选择每品种活跃度前 N 合约：主力来自 `query_cont_quotes`，其余按
+    quote `open_interest` / `volume` 排名补足
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
   - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
     长度阈值；上游 tick 源按一合约一 chart 发送，检查口径是单个 tick chart 的最大
