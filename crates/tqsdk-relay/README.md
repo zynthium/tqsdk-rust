@@ -36,9 +36,9 @@ relay 不改变 SDK 运行时模型：
 | --- | --- |
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
-| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，并发送 duration 为 `0` 的 `set_chart`。 |
-| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合；产品发现模式下按本地每日固定时间重建上游 tick chart，默认 `08:30:00`。 |
-| 订阅长度防线 | 在连接上游前统计 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
+| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，并为每个合约发送一个 duration 为 `0` 的 tick `set_chart`。 |
+| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合；产品发现模式下按本地每日固定时间重建上游 tick chart 集合，默认 `08:30:00`。 |
+| 订阅长度防线 | 在连接上游前统计单个上游 tick chart 的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
 | 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
 | 缓存 | 保留内存 tick ring 和 quote 快照。当前二进制程序尚未启用磁盘持久化。 |
@@ -83,7 +83,7 @@ cargo run -p tqsdk-relay
 `SHFE.au` 表示交易所限定的产品代码；`MA` 表示不限定交易所的产品代码。relay 会在
 启动时通过天勤 metadata 查询当前未过期合约，再用轻量 `multi_symbol_info` 查询返回的
 `exchange_id`、`product_id` 和 `expired` 等 typed metadata 过滤，最后把结果组成一个
-上游 tick chart。
+上游 tick chart 集合。
 
 默认情况下，进程会在 `127.0.0.1:7788` 监听 SDK 行情 websocket 客户端，并连接
 上游 `wss://openmd.shinnytech.com/t/md/front/mobile`。
@@ -103,7 +103,7 @@ cargo run -p tqsdk-relay
 dry-run 会向 stdout 输出一行 JSON，例如：
 
 ```json
-{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":21,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
+{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
 ```
 
 如果 dry-run 使用 `TQSDK_RELAY_FUTURES_PRODUCTS`，它会执行一次 metadata 查询来得到当前
@@ -153,12 +153,12 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
-| `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 上游 tick chart `ins_list` 字符串长度告警阈值。超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
-| `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误，并提示至少需要拆成几个 relay 实例；默认不启用硬失败。 |
-| `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给上游 tick chart 的 `view_width`。调小可减少启动 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
+| `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
+| `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 单个上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误；默认不启用硬失败。 |
+| `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给每个上游 tick chart 的 `view_width`。调小可减少启动 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
 | `TQSDK_RELAY_TICK_RING_CAPACITY` | `200000` | 每个合约保留的内存 tick ring 行数；必须大于 `0`。全品种持久运行建议调低到 `10000` / `20000` 级别。 |
 | `TQSDK_RELAY_KLINE_RING_CAPACITY` | `10000` | relay 内部 K 线 ring 容量配置；必须大于 `0`。当前二进制主要用于保留配置边界，K 线合成热状态仍按订阅 source 保存当前 bar。 |
-| `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。单个上游 tick chart 使用的逗号分隔完整期货合约列表。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
+| `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。逗号分隔完整期货合约列表；relay 会为每个合约创建一个上游 tick chart。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
 | `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` | 空 | 兼容入口。完整合约文件路径；文件可用换行或逗号分隔。长期部署不推荐依赖静态文件。 |
 | `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | 上游天勤行情 websocket URL。 |
 | `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | 下游 SDK websocket 监听地址。 |
@@ -171,8 +171,8 @@ cargo run -p tqsdk-relay
 - `futures_product_filter`：动态产品发现过滤器，可选全部期货或产品代码列表。
 - `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新，也可设置兼容 interval。
 - `futures_metadata_batch_size`：默认 `500`，控制产品发现时 metadata 查询分批大小。
-- `upstream_tick_view_width`：默认 `10_000`，控制上游 tick chart `view_width`。
-- `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭。
+- `upstream_tick_view_width`：默认 `10_000`，控制每个上游 tick chart 的 `view_width`。
+- `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭；检查口径是单个上游 tick chart 的 `ins_list` 长度。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。
 - `bootstrap.min_remote_request_interval`：默认 `250ms`。
 - `bootstrap.per_series_cooldown`：默认 `30s`。
@@ -181,33 +181,34 @@ cargo run -p tqsdk-relay
 
 ### 上游订阅
 
-对于动态发现或显式配置得到的期货合约集合，relay 会创建一个上游 chart：
+对于动态发现或显式配置得到的期货合约集合，relay 会在同一个上游 websocket 上为每个
+合约创建一个 duration 为 `0` 的 tick chart。多合约单 chart 属于对齐 K 线用法，不用于
+relay 的上游 tick 源：
 
 ```json
 {
   "aid": "set_chart",
-  "chart_id": "relay-upstream-all-futures-ticks",
-  "ins_list": "DCE.m2609,SHFE.au2602",
+  "chart_id": "relay-upstream-tick-DCE_m2609-10000",
+  "ins_list": "DCE.m2609",
   "duration": 0,
   "view_width": 10000
 }
 ```
 
-其中 `view_width` 来自 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` / `RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay 本地保留多少 tick，不影响上游补历史窗口。
+每个 `set_chart` 后 relay 会发送一次 `{"aid":"peek_message"}`，与直连 `tick(symbol, width)`
+路径保持一致。其中 `view_width` 来自 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` /
+`RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay
+本地保留多少 tick，不影响上游补历史窗口。
 
-随后它会发送 `{"aid":"peek_message"}`，并从上游 websocket 解码 `rtn_data` tick
-片段。
-
-发送前 relay 会计算最终 `ins_list` 长度。超过 `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS`
-时不会连接上游，并在错误里提示按当前长度和阈值至少需要拆成几个 relay 实例；超过
-warn threshold 时连接仍会继续，但启动诊断和 metrics 会暴露当前长度、告警状态和
-建议拆分数量，便于你判断是否需要拆分 relay 实例或收窄产品列表。
+发送前 relay 会计算单个上游 tick chart 的最大 `ins_list` 长度。超过
+`TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` 时不会连接上游；超过 warn threshold 时连接
+仍会继续，但启动诊断和 metrics 会暴露当前最大长度和告警状态。
 
 ### 启动日志与 HTTP 观测
 
 正常启动会向 stderr 输出一行 `relay_startup` JSON。静态完整合约入口会直接包含
 `upstream_symbols` 和 `upstream_ins_list_chars`；产品发现入口在正常启动日志中先记录配置
-视角，首次 metadata 刷新成功后的实际合约数和 `ins_list` 长度以 `/metrics` 为准。需要在
+视角，首次 metadata 刷新成功后的实际合约数和最大单 chart `ins_list` 长度以 `/metrics` 为准。需要在
 真正启动服务前得到精确订阅规模时，使用 `TQSDK_RELAY_DRY_RUN=1`。
 
 二进制程序会在 `TQSDK_RELAY_METRICS_LISTEN` 绑定一个极简 HTTP JSON 服务：
@@ -259,7 +260,7 @@ open http://127.0.0.1:7789/dashboard
 - `upstream_stage`：更细的上游阶段，可能为 `connecting`、`subscribing`、`backfilling`、`live`、`degraded` 或 `down`。`backfilling` 表示订阅命令已发送，relay 正在等待 tick chart bootstrap / 历史补齐产出可用 tick 或 quote；首个上游 frame 到达前 `upstream_frames_received` 仍可能为 0。
 - `upstream_stage_started_unix_secs`：当前上游阶段开始时间。dashboard 用它计算 backfilling 已持续多久；由于上游不暴露补历史总量，这不是百分比进度。
 - `upstream_transport_connected`：上游 websocket transport 已建立。
-- `upstream_subscription_sent`：relay 已向上游发送 `subscribe_quote`、`set_chart` 和初始 `peek_message`。
+- `upstream_subscription_sent`：relay 已向上游发送每合约 `set_chart` 和对应 `peek_message`。
 - `upstream_frames_received` / `upstream_events_decoded`：已收到的上游 frame 数和解出的 tick / quote event 数，可用于区分“未建连”和“正在补历史但尚无可用行情”。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的 relay 本地 Unix 秒时间。
 - `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
@@ -294,7 +295,7 @@ transport 连接、订阅发送、frame 接收数、解码事件数、backfillin
 - `upstream_frames_received` / `upstream_events_decoded`：上游 frame 与有效 tick / quote event 计数。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的本地 Unix 秒时间。
 - `upstream_symbols`：当前上游 tick chart 合约数。
-- `upstream_ins_list_chars`：当前上游 `ins_list` 字符串长度。
+- `upstream_ins_list_chars`：当前单个上游 tick chart 的最大 `ins_list` 字符串长度。
 - `upstream_ins_list_warn_chars` / `upstream_ins_list_max_chars`：配置阈值。
 - `upstream_ins_list_over_warn`：当前长度是否超过 warn threshold。
 - `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：上游 tick row
@@ -329,11 +330,10 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
   客户端。
 - 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL`，让 relay 在启动和
   每日本地固定刷新时间动态查询当前活跃合约。
-- relay 的目标是通过共享一个上游 tick chart 降低订阅字符串膨胀；不要把它当成通用
+- relay 的目标是通过共享一个上游 websocket 和本地 tick/quote/K 线缓存降低多进程订阅压力；不要把它当成通用
   天勤代理。
-- 如果 metrics 显示 `upstream_ins_list_over_warn=true`，说明当前订阅字符串已经接近你设定的
-  风险区间；可以设置 hard max 让进程 fail fast，并按错误或启动诊断里的
-  `suggested_relay_instances` 拆分多个 relay。
+- 如果 metrics 显示 `upstream_ins_list_over_warn=true`，说明单个上游 tick chart 的
+  `ins_list` 长度已经接近你设定的风险区间；可以设置 hard max 让进程 fail fast。
 - 上游连接失败会将 source 标记为 degraded 并重试。仅因上游临时不可用，已有下游
   连接不会被主动断开。
 - 产品发现模式依赖 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 做 relay 内部 metadata 查询；这些

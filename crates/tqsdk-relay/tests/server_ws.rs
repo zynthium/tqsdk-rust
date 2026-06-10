@@ -23,12 +23,6 @@ fn recv_text_json(
     serde_json::from_str(&text).unwrap()
 }
 
-fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
-    let subscribe_quote = recv_text_json(socket, "subscribe_quote");
-    assert_eq!(subscribe_quote["aid"], "subscribe_quote");
-    assert_eq!(subscribe_quote["ins_list"], ins_list);
-}
-
 fn expect_set_chart(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
     let set_chart = recv_text_json(socket, "set_chart");
     assert_eq!(set_chart["aid"], "set_chart");
@@ -247,7 +241,6 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
 
     let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         send_tick_rx.recv().unwrap();

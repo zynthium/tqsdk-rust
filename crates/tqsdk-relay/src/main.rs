@@ -8,7 +8,7 @@ use tqsdk_relay::{
     RelayConfig, RelayEngine, RelayError, RelayServer, RelayStartupReport, serve_metrics_until,
 };
 #[cfg(feature = "server")]
-use tqsdk_relay::{resolve_configured_upstream_tick_chart, spawn_configured_upstream_pump};
+use tqsdk_relay::{resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -23,12 +23,12 @@ async fn run() -> Result<(), RelayError> {
 
     if config.dry_run {
         #[cfg(feature = "server")]
-        let chart = resolve_configured_upstream_tick_chart(&config).await?;
+        let charts = resolve_configured_upstream_tick_charts(&config).await?;
         #[cfg(not(feature = "server"))]
-        let chart = config.upstream_tick_chart()?;
+        let charts = config.upstream_tick_charts()?;
         println!(
             "{}",
-            RelayStartupReport::from_config_and_chart(&config, chart.as_ref()).log_line()
+            RelayStartupReport::from_config_and_charts(&config, &charts).log_line()
         );
         return Ok(());
     }
@@ -37,14 +37,14 @@ async fn run() -> Result<(), RelayError> {
         config.tick_ring_capacity,
         config.kline_ring_capacity,
     )));
-    let startup_chart = if !config.futures_symbols.is_empty() {
-        config.upstream_tick_chart()?
+    let startup_charts = if !config.futures_symbols.is_empty() {
+        config.upstream_tick_charts()?
     } else {
-        None
+        Vec::new()
     };
     eprintln!(
         "{}",
-        RelayStartupReport::from_config_and_chart(&config, startup_chart.as_ref()).log_line()
+        RelayStartupReport::from_config_and_charts(&config, &startup_charts).log_line()
     );
     let server = RelayServer::new(engine.clone());
     let listener = TcpListener::bind(&config.downstream_listen)
@@ -59,7 +59,7 @@ async fn run() -> Result<(), RelayError> {
     let upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone()).await?;
     #[cfg(not(feature = "server"))]
     let upstream_shutdown = {
-        if config.upstream_tick_chart()?.is_some() {
+        if !config.upstream_tick_charts()?.is_empty() {
             return Err(RelayError::invalid_config(
                 "tqsdk-relay server feature is required for upstream websocket",
             ));

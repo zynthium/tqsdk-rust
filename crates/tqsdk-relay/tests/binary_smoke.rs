@@ -30,13 +30,12 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         assert_eq!(socket.request().path, "/market");
 
-        let subscribe_quote = recv_text_json(&mut socket, "subscribe_quote");
-        assert_eq!(subscribe_quote["aid"], "subscribe_quote");
-        assert_eq!(subscribe_quote["ins_list"], "SHFE.au2602");
-
         let set_chart = recv_text_json(&mut socket, "set_chart");
         assert_eq!(set_chart["aid"], "set_chart");
-        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        assert_eq!(
+            set_chart["chart_id"],
+            "relay-upstream-tick-SHFE_au2602-10000"
+        );
         assert_eq!(set_chart["ins_list"], "SHFE.au2602");
         assert_eq!(set_chart["duration"], 0);
 

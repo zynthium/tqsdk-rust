@@ -274,9 +274,9 @@ impl UpstreamTickChart {
             .collect();
         symbols.sort();
         symbols.dedup();
-        if symbols.is_empty() {
+        if symbols.len() != 1 {
             return Err(RelayError::invalid_config(
-                "upstream tick chart requires at least one symbol",
+                "upstream tick chart requires exactly one symbol",
             ));
         }
         Ok(Self {
@@ -294,6 +294,11 @@ impl UpstreamTickChart {
     #[must_use]
     pub fn symbols(&self) -> &[String] {
         &self.symbols
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        self.symbols[0].as_str()
     }
 
     #[must_use]
@@ -381,27 +386,36 @@ impl WebSocketUpstreamTickSource {
         url: impl Into<String>,
         chart: UpstreamTickChart,
     ) -> RelayResult<Self> {
+        Self::connect_with_tick_charts(url, [chart]).await
+    }
+
+    pub async fn connect_with_tick_charts<I>(url: impl Into<String>, charts: I) -> RelayResult<Self>
+    where
+        I: IntoIterator<Item = UpstreamTickChart>,
+    {
         let mut source = Self::connect(url).await?;
-        source.subscribe_tick_chart(&chart).await?;
+        let charts: Vec<UpstreamTickChart> = charts.into_iter().collect();
+        source.subscribe_tick_charts(&charts).await?;
         Ok(source)
     }
 
-    async fn subscribe_tick_chart(&mut self, chart: &UpstreamTickChart) -> RelayResult<()> {
-        self.send_json(serde_json::json!({
-            "aid": "subscribe_quote",
-            "ins_list": chart.ins_list(),
-        }))
-        .await?;
-        self.send_json(serde_json::json!({
-            "aid": "set_chart",
-            "chart_id": chart.chart_id(),
-            "ins_list": chart.ins_list(),
-            "duration": chart.duration_ns(),
-            "view_width": chart.view_width(),
-        }))
-        .await?;
-        self.send_json(serde_json::json!({"aid": "peek_message"}))
+    async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
+        if charts.is_empty() {
+            return Err(RelayError::invalid_config(
+                "upstream tick charts require at least one chart",
+            ));
+        }
+        for chart in charts {
+            self.send_json(serde_json::json!({
+                "aid": "set_chart",
+                "chart_id": chart.chart_id(),
+                "ins_list": chart.ins_list(),
+                "duration": chart.duration_ns(),
+                "view_width": chart.view_width(),
+            }))
             .await?;
+            self.send_peek_message().await?;
+        }
         self.record_subscription_sent();
         Ok(())
     }
