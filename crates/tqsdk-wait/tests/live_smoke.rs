@@ -77,7 +77,7 @@ async fn live_quote_wait_with_session_query_smoke() {
     let instrument = metadata
         .first()
         .expect("query_symbol_info should return at least one row");
-    assert!(!instrument.instrument_id.is_empty());
+    assert!(!instrument.instrument_id.as_str().is_empty());
 
     let quote = api
         .quote(symbol.as_str())

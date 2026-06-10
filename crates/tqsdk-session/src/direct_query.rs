@@ -1,9 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use serde_json::Value;
-use tqsdk_core::{
-    CommandId, EdbIndexData, Quote, SymbolRanking, SymbolSettlement, TradingCalendarDay,
-};
+use tqsdk_core::{CommandId, EdbIndexData, SymbolRanking, SymbolSettlement, TradingCalendarDay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Ranking dimension accepted by the symbol ranking service.
@@ -182,7 +180,10 @@ pub trait SessionRawQuery {
     reason = "session query traits are intended for static dispatch without async-trait boxing"
 )]
 pub trait SessionMetadataQuery {
-    async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>>;
+    async fn query_symbol_info(
+        &self,
+        symbols: &[&str],
+    ) -> crate::error::Result<Vec<crate::SymbolInfo>>;
 
     async fn query_instrument_specs(
         &self,

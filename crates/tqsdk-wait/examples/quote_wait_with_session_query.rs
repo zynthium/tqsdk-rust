@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .ok_or("query_symbol_info returned no rows")?;
     println!(
-        "metadata {} {} tick={}",
+        "metadata {} {} tick={:?}",
         instrument.instrument_id, instrument.ins_class, instrument.price_tick
     );
 

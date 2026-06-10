@@ -64,6 +64,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `AllLevelOptionQuery`
 - `FinanceOptionLevelQuery`
 - `OptionLevelQuotes`
+- `SymbolInfo`
 - `InstrumentSpec`
 - `InstrumentClass`
 - `SessionRawQuery`
@@ -232,9 +233,11 @@ helper 仍是底层 escape hatch。
 
 这些接口仍然属于 `tqsdk-session`，因为它们只是一次性 request/response：
 
-- `query_symbol_info(...)` 已实现
+- `query_symbol_info(...)` 已实现，返回 typed `SymbolInfo`；它对齐官方
+  `query_symbol_info` 合约信息表字段，包括 `trading_time.day/night`、涨跌停、
+  昨结算、开仓限额、到期/行权字段、标的合约和期权方向
 - `query_instrument_specs(...)` 已实现，用 `InstrumentSpec` 表达合约规格，
-  避免用户把 live `Quote` 当作 metadata 对象
+  只保留 tick size、合约乘数、交易所、品种、到期和标的等下单校验常用字段
 - `query_quotes(...)` 已实现
 - `query_cont_quotes(...)` 已实现
 - `query_options(...)` 已实现

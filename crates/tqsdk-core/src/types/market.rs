@@ -15,7 +15,7 @@ pub struct CategoryInfo {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TradingTime {
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]

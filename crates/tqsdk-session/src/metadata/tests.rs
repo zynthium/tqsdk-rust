@@ -6,7 +6,7 @@ use super::{
     helpers::{
         BisectPriority, OptionNode, bisect_value_index, filter_option_nodes,
         parse_query_cont_quotes_result, parse_query_options_result, parse_query_quotes_result,
-        parse_query_symbol_info_quotes, sort_options_and_get_atm_index, timestamp_nano_to_datetime,
+        parse_query_symbol_infos, sort_options_and_get_atm_index, timestamp_nano_to_datetime,
         validate_finance_nearbys, validate_finance_underlying, validate_price_levels,
     },
 };
@@ -153,7 +153,7 @@ fn parse_options_filters_requested_dimensions() {
 }
 
 #[test]
-fn parse_symbol_info_maps_graphql_payload_to_quote_schema() {
+fn parse_symbol_info_maps_graphql_payload_to_symbol_info_schema() {
     let expire_ts = 1_831_801_600_i64 * 1_000_000_000;
     let exercise_ts = 1_814_492_800_i64 * 1_000_000_000;
     let payload = json!({
@@ -170,6 +170,8 @@ fn parse_symbol_info_maps_graphql_payload_to_quote_schema() {
                     "delivery_year": 2026,
                     "delivery_month": 5,
                     "expire_datetime": expire_ts,
+                    "settlement_price": 72_000.0,
+                    "open_limit": 2_000,
                     "max_limit_order_volume": 100,
                     "max_market_order_volume": 50,
                     "min_limit_order_volume": 2,
@@ -212,25 +214,38 @@ fn parse_symbol_info_maps_graphql_payload_to_quote_schema() {
         }
     });
 
-    let quotes = parse_query_symbol_info_quotes(
+    let infos = parse_query_symbol_infos(
         &payload,
         &["SHFE.cu2605".to_string(), "SHFE.cu2605C3000".to_string()],
         1_700_000_000,
     )
     .unwrap();
 
-    assert_eq!(quotes.len(), 2);
-    assert_eq!(quotes[0].instrument_id, "SHFE.cu2605");
-    assert_eq!(quotes[0].ins_class, "FUTURE");
-    assert_eq!(quotes[0].trading_time.day[0][0], "09:00:00");
-    assert_eq!(quotes[1].instrument_id, "SHFE.cu2605C3000");
-    assert_eq!(quotes[1].option_class, "CALL");
-    assert_eq!(quotes[1].underlying_symbol, "SHFE.cu2605");
-    assert_eq!(quotes[1].delivery_year, 2026);
-    assert_eq!(quotes[1].delivery_month, 5);
-    assert_eq!(quotes[1].exercise_year, 2027);
-    assert_eq!(quotes[1].exercise_month, 7);
-    assert!(quotes[1].expire_rest_days.is_some());
+    assert_eq!(infos.len(), 2);
+    assert_eq!(infos[0].instrument_id.as_str(), "SHFE.cu2605");
+    assert_eq!(infos[0].class, crate::InstrumentClass::Future);
+    assert_eq!(infos[0].price_tick, Some(10.0));
+    assert_eq!(infos[0].volume_multiple, Some(5));
+    assert_eq!(infos[0].open_limit, Some(2_000));
+    assert_eq!(infos[0].pre_settlement, Some(72_000.0));
+    assert_eq!(infos[0].expire_datetime_secs, Some(1_831_801_600));
+    assert_eq!(infos[0].trading_time.day[0][0], "09:00:00");
+    assert_eq!(infos[0].trading_time.night[0][0], "21:00:00");
+    assert_eq!(infos[1].instrument_id.as_str(), "SHFE.cu2605C3000");
+    assert_eq!(infos[1].option_class.as_deref(), Some("CALL"));
+    assert_eq!(
+        infos[1]
+            .underlying_symbol
+            .as_ref()
+            .map(|symbol| symbol.as_str()),
+        Some("SHFE.cu2605")
+    );
+    assert_eq!(infos[1].delivery_year, Some(2026));
+    assert_eq!(infos[1].delivery_month, Some(5));
+    assert_eq!(infos[1].last_exercise_datetime_secs, Some(1_814_492_800));
+    assert_eq!(infos[1].exercise_year, Some(2027));
+    assert_eq!(infos[1].exercise_month, Some(7));
+    assert!(infos[1].expire_rest_days.is_some());
 }
 
 #[test]

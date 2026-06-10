@@ -199,7 +199,17 @@ let session = tqsdk_session::SessionClientBuilder::new(user, pass)
     .enable_query()
     .build()?;
 let rows = session.query_symbol_info(&["SHFE.au2602"]).await?;
+let info = &rows[0];
+println!(
+    "{} day={:?} night={:?}",
+    info.instrument_id, info.trading_time.day, info.trading_time.night
+);
 ```
+
+`query_symbol_info(...)` 返回 typed `SymbolInfo`，用于官方合约信息表字段：
+交易时间段、涨跌停、昨结算、开仓限额、到期/行权字段等。只需要 tick size、
+合约乘数、交易所和品种等下单校验字段时，用更窄的
+`query_instrument_specs(...)`。
 
 ### 历史数据与研究工作流
 

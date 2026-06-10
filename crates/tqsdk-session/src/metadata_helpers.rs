@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::SymbolInfo;
 use chrono::{Datelike, FixedOffset, TimeZone, Utc};
 use serde_json::{Map, Value, json};
-use tqsdk_core::Quote;
 
 use crate::error::{Result, SessionFacadeError};
 
@@ -350,11 +350,11 @@ pub(super) fn sort_options_and_get_atm_index(
         .ok_or_else(|| validation("failed to locate ATM option index"))
 }
 
-pub(super) fn parse_query_symbol_info_quotes(
+pub(super) fn parse_query_symbol_infos(
     payload: &Value,
     symbol_list: &[String],
     current_ts: i64,
-) -> Result<Vec<Quote>> {
+) -> Result<Vec<SymbolInfo>> {
     let mut quotes: HashMap<String, Map<String, Value>> = HashMap::new();
     let mut combine_leg1: HashMap<String, String> = HashMap::new();
 
@@ -499,12 +499,12 @@ pub(super) fn parse_query_symbol_info_quotes(
             missing
         }));
         strip_null_object_fields(&mut quote);
-        let parsed = serde_json::from_value::<Quote>(quote).map_err(|error| {
-            validation(format!(
-                "failed to parse symbol info for `{symbol}`: {error}"
-            ))
-        })?;
-        result.push(parsed);
+        let Some(map) = quote.as_object() else {
+            return Err(validation(format!(
+                "failed to parse symbol info for `{symbol}`: expected object"
+            )));
+        };
+        result.push(SymbolInfo::from_metadata_map(symbol, map)?);
     }
     Ok(result)
 }
@@ -516,7 +516,6 @@ fn update_symbol_info_map(target: &mut Map<String, Value>, symbol: &Map<String, 
     copy_string(target, symbol, "exchange_id", "exchange_id");
     copy_string(target, symbol, "product_id", "product_id");
     copy_string(target, symbol, "product_short_name", "product_short_name");
-    copy_string(target, symbol, "exercise_type", "exercise_type");
     copy_value(target, symbol, "price_tick", "price_tick");
     copy_value(target, symbol, "volume_multiple", "volume_multiple");
     copy_value(target, symbol, "index_multiple", "volume_multiple");
@@ -572,9 +571,10 @@ fn update_symbol_info_map(target: &mut Map<String, Value>, symbol: &Map<String, 
     copy_value(target, symbol, "expired", "expired");
     copy_value(target, symbol, "upper_limit", "upper_limit");
     copy_value(target, symbol, "lower_limit", "lower_limit");
+    copy_value(target, symbol, "settlement_price", "pre_settlement");
     copy_value(target, symbol, "pre_open_interest", "pre_open_interest");
     copy_value(target, symbol, "pre_close", "pre_close");
-    copy_value(target, symbol, "price_decs", "price_decs");
+    copy_value(target, symbol, "open_limit", "open_limit");
     copy_value(target, symbol, "delivery_year", "delivery_year");
     copy_value(target, symbol, "delivery_month", "delivery_month");
     if let Some(expire_datetime) = symbol

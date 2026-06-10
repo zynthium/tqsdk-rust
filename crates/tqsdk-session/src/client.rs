@@ -18,7 +18,7 @@ use tqsdk_core::internal::DefaultRouteConnector;
 use tqsdk_core::internal::{DynAuthProvider, SessionBootstrap};
 use tqsdk_core::internal::{RouteRequestExecutor, SessionRun, SessionRuntime};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, CommandId, OutboundDispatch, OutboundFrame, Quote, RuntimeHandle,
+    AdapterRegistry, AuthContext, CommandId, OutboundDispatch, OutboundFrame, RuntimeHandle,
     RuntimeReader, SessionConfig, SessionRouteConnector, SessionRouteEndpoint,
     SessionTopologyResolver, TradeSessionTarget,
 };
@@ -499,7 +499,10 @@ impl SessionRawQuery for SessionClient {
 }
 
 impl SessionMetadataQuery for SessionClient {
-    async fn query_symbol_info(&self, symbols: &[&str]) -> crate::error::Result<Vec<Quote>> {
+    async fn query_symbol_info(
+        &self,
+        symbols: &[&str],
+    ) -> crate::error::Result<Vec<crate::SymbolInfo>> {
         SessionClient::query_symbol_info(self, symbols).await
     }
 

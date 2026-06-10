@@ -763,7 +763,7 @@ fn risk_engine_rejects_limit_price_not_aligned_to_instrument_tick() {
         class: tqsdk_session::InstrumentClass::Future,
         price_tick: 0.2,
         volume_multiple: 10,
-        expire_datetime_ns: None,
+        expire_datetime_secs: None,
         underlying_symbol: None,
     };
     let intent = TaskOrderIntent {
@@ -801,7 +801,7 @@ fn risk_projection_uses_instrument_volume_multiple_for_notional() {
         class: tqsdk_session::InstrumentClass::Future,
         price_tick: 1.0,
         volume_multiple: 10,
-        expire_datetime_ns: None,
+        expire_datetime_secs: None,
         underlying_symbol: None,
     };
     let intent = TaskOrderIntent {
