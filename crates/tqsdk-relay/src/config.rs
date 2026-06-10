@@ -9,7 +9,7 @@ use crate::universe::{FuturesProductCode, FuturesProductFilter};
 use crate::upstream::UpstreamTickChart;
 
 const SECONDS_PER_DAY: u64 = 86_400;
-const UPSTREAM_TICK_CHART_ID: &str = "relay-upstream-all-futures-ticks";
+const UPSTREAM_TICK_CHART_ID_PREFIX: &str = "relay-upstream-tick";
 pub const DEFAULT_UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
 const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
 const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
@@ -156,9 +156,8 @@ impl UpstreamInsListLimits {
         if let Some(max_chars) = self.max_chars
             && chars > max_chars
         {
-            let suggested = self.suggested_shards(chars).unwrap_or(1);
             return Err(RelayError::invalid_config(format!(
-                "upstream ins_list length {chars} exceeds hard limit {max_chars} chars; suggest splitting into at least {suggested} relay instances"
+                "upstream tick chart ins_list length {chars} exceeds hard limit {max_chars} chars"
             )));
         }
         Ok(())
@@ -383,28 +382,51 @@ impl RelayConfig {
     }
 
     pub fn upstream_tick_chart(&self) -> RelayResult<Option<UpstreamTickChart>> {
-        self.upstream_tick_chart_for_symbols(self.futures_symbols.iter().map(String::as_str))
+        let mut charts = self.upstream_tick_charts()?;
+        match charts.len() {
+            0 => Ok(None),
+            1 => Ok(charts.pop()),
+            _ => Err(RelayError::invalid_config(
+                "upstream_tick_chart is only available for a single symbol; use upstream_tick_charts",
+            )),
+        }
     }
 
-    pub fn upstream_tick_chart_for_symbols<'a, I>(
+    pub fn upstream_tick_charts(&self) -> RelayResult<Vec<UpstreamTickChart>> {
+        self.upstream_tick_charts_for_symbols(self.futures_symbols.iter().map(String::as_str))
+    }
+
+    pub fn upstream_tick_charts_for_symbols<'a, I>(
         &self,
         symbols: I,
-    ) -> RelayResult<Option<UpstreamTickChart>>
+    ) -> RelayResult<Vec<UpstreamTickChart>>
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let symbols: Vec<&str> = symbols.into_iter().collect();
+        let mut symbols: Vec<String> = symbols
+            .into_iter()
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        symbols.sort();
+        symbols.dedup();
         if symbols.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let chart = UpstreamTickChart::new(
-            UPSTREAM_TICK_CHART_ID,
-            symbols,
-            self.upstream_tick_view_width,
-        )?;
-        self.upstream_ins_list_limits
-            .validate_ins_list_chars(chart.ins_list_chars())?;
-        Ok(Some(chart))
+        symbols
+            .iter()
+            .map(|symbol| {
+                let chart = UpstreamTickChart::new(
+                    upstream_tick_chart_id(symbol, self.upstream_tick_view_width),
+                    [symbol.as_str()],
+                    self.upstream_tick_view_width,
+                )?;
+                self.upstream_ins_list_limits
+                    .validate_ins_list_chars(chart.ins_list_chars())?;
+                Ok(chart)
+            })
+            .collect()
     }
 
     #[must_use]
@@ -489,6 +511,20 @@ fn parse_futures_symbols(value: &str) -> Vec<String> {
         .lines()
         .flat_map(|line| line.split(','))
         .map(|symbol| symbol.trim().to_string())
+        .collect()
+}
+
+fn upstream_tick_chart_id(symbol: &str, view_width: usize) -> String {
+    format!(
+        "{UPSTREAM_TICK_CHART_ID_PREFIX}-{}-{view_width}",
+        sanitize_chart_token(symbol)
+    )
+}
+
+fn sanitize_chart_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
 }
 

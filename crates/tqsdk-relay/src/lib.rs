@@ -45,7 +45,8 @@ pub use pump::{pump_available, pump_once};
 #[cfg(feature = "server")]
 pub use runtime::{
     connect_configured_upstream, resolve_configured_upstream_tick_chart,
-    spawn_configured_upstream_pump, spawn_configured_upstream_pump_with_retry_interval,
+    resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump,
+    spawn_configured_upstream_pump_with_retry_interval,
 };
 pub use server::RelayServer;
 pub use symbol_metrics::{

@@ -21,12 +21,6 @@ fn recv_text_json(
     serde_json::from_str(&text).unwrap()
 }
 
-fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
-    let subscribe_quote = recv_text_json(socket, "subscribe_quote");
-    assert_eq!(subscribe_quote["aid"], "subscribe_quote");
-    assert_eq!(subscribe_quote["ins_list"], ins_list);
-}
-
 fn expect_set_chart(
     socket: &mut websocket_support::TestWebSocketConnection,
     ins_list: &str,
@@ -71,37 +65,55 @@ fn config_rejects_empty_futures_symbol() {
 }
 
 #[test]
-fn upstream_tick_chart_uses_duration_zero_and_sorted_symbols() {
-    let chart = UpstreamTickChart::new(
-        "relay-upstream-all-futures-ticks",
-        ["DCE.m2609", "SHFE.au2602"],
-        10_000,
-    )
-    .unwrap();
+fn upstream_tick_chart_uses_duration_zero_and_single_symbol() {
+    let chart =
+        UpstreamTickChart::new("relay-upstream-tick-DCE_m2609-10000", ["DCE.m2609"], 10_000)
+            .unwrap();
 
-    assert_eq!(chart.chart_id(), "relay-upstream-all-futures-ticks");
+    assert_eq!(chart.chart_id(), "relay-upstream-tick-DCE_m2609-10000");
     assert_eq!(chart.duration_ns(), 0);
     assert_eq!(chart.view_width(), 10_000);
-    assert_eq!(
-        chart.symbols(),
-        &["DCE.m2609".to_string(), "SHFE.au2602".to_string()]
-    );
-    assert_eq!(chart.ins_list_chars(), "DCE.m2609,SHFE.au2602".len());
+    assert_eq!(chart.symbol(), "DCE.m2609");
+    assert_eq!(chart.symbols(), &["DCE.m2609".to_string()]);
+    assert_eq!(chart.ins_list_chars(), "DCE.m2609".len());
 }
 
 #[test]
-fn config_builds_upstream_tick_chart_from_futures_symbols() {
+fn upstream_tick_chart_rejects_multiple_symbols() {
+    let err = UpstreamTickChart::new(
+        "relay-upstream-tick-multi-10000",
+        ["DCE.m2609", "SHFE.au2602"],
+        10_000,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: upstream tick chart requires exactly one symbol"
+    );
+}
+
+#[test]
+fn config_builds_upstream_tick_charts_from_futures_symbols() {
     let config = RelayConfig {
         futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
         ..RelayConfig::default()
     };
 
-    let chart = config.upstream_tick_chart().unwrap().unwrap();
+    let charts = config.upstream_tick_charts().unwrap();
 
-    assert_eq!(chart.chart_id(), "relay-upstream-all-futures-ticks");
-    assert_eq!(chart.symbols(), &["DCE.m2609", "SHFE.au2602"]);
-    assert_eq!(chart.duration_ns(), 0);
-    assert_eq!(chart.view_width(), 10_000);
+    assert_eq!(charts.len(), 2);
+    assert_eq!(charts[0].chart_id(), "relay-upstream-tick-DCE_m2609-10000");
+    assert_eq!(charts[0].symbol(), "DCE.m2609");
+    assert_eq!(charts[0].duration_ns(), 0);
+    assert_eq!(charts[0].view_width(), 10_000);
+    assert_eq!(
+        charts[1].chart_id(),
+        "relay-upstream-tick-SHFE_au2602-10000"
+    );
+    assert_eq!(charts[1].symbol(), "SHFE.au2602");
+    assert_eq!(charts[1].duration_ns(), 0);
+    assert_eq!(charts[1].view_width(), 10_000);
 }
 
 #[test]
@@ -112,16 +124,16 @@ fn config_uses_configured_upstream_tick_view_width() {
         ..RelayConfig::default()
     };
 
-    let chart = config.upstream_tick_chart().unwrap().unwrap();
+    let charts = config.upstream_tick_charts().unwrap();
 
-    assert_eq!(chart.view_width(), 1);
+    assert_eq!(charts[0].view_width(), 1);
 }
 
 #[test]
-fn config_omits_upstream_tick_chart_without_futures_symbols() {
+fn config_omits_upstream_tick_charts_without_futures_symbols() {
     let config = RelayConfig::default();
 
-    assert!(config.upstream_tick_chart().unwrap().is_none());
+    assert!(config.upstream_tick_charts().unwrap().is_empty());
 }
 
 #[test]
@@ -492,25 +504,36 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
-        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
-        let set_chart = expect_set_chart(&mut socket, "DCE.m2609,SHFE.au2602");
-        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        let set_chart = expect_set_chart(&mut socket, "DCE.m2609");
+        assert_eq!(set_chart["chart_id"], "relay-upstream-tick-DCE_m2609-10000");
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
+        expect_peek_message(&mut socket);
 
+        let set_chart = expect_set_chart(&mut socket, "SHFE.au2602");
+        assert_eq!(
+            set_chart["chart_id"],
+            "relay-upstream-tick-SHFE_au2602-10000"
+        );
+        assert_eq!(set_chart["duration"], 0);
+        assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
     .unwrap();
-    let chart = UpstreamTickChart::new(
-        "relay-upstream-all-futures-ticks",
-        ["SHFE.au2602", "DCE.m2609"],
-        10_000,
-    )
-    .unwrap();
+    let charts = vec![
+        UpstreamTickChart::new("relay-upstream-tick-DCE_m2609-10000", ["DCE.m2609"], 10_000)
+            .unwrap(),
+        UpstreamTickChart::new(
+            "relay-upstream-tick-SHFE_au2602-10000",
+            ["SHFE.au2602"],
+            10_000,
+        )
+        .unwrap(),
+    ];
 
     let _source =
-        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+        WebSocketUpstreamTickSource::connect_with_tick_charts(server.url("/market"), charts)
             .await
             .unwrap();
     server.join();
@@ -527,7 +550,6 @@ async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket
@@ -537,8 +559,12 @@ async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
         socket.send_close().unwrap();
     })
     .unwrap();
-    let chart = UpstreamTickChart::new("relay-upstream-all-futures-ticks", ["SHFE.au2602"], 10_000)
-        .unwrap();
+    let chart = UpstreamTickChart::new(
+        "relay-upstream-tick-SHFE_au2602-10000",
+        ["SHFE.au2602"],
+        10_000,
+    )
+    .unwrap();
 
     let mut source =
         WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
@@ -566,7 +592,6 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket
@@ -624,8 +649,12 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
         socket.send_close().unwrap();
     })
     .unwrap();
-    let chart = UpstreamTickChart::new("relay-upstream-all-futures-ticks", ["SHFE.au2602"], 10_000)
-        .unwrap();
+    let chart = UpstreamTickChart::new(
+        "relay-upstream-tick-SHFE_au2602-10000",
+        ["SHFE.au2602"],
+        10_000,
+    )
+    .unwrap();
 
     let mut source =
         WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
@@ -645,12 +674,19 @@ async fn configured_upstream_source_subscribes_configured_futures_symbols() {
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
-        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
-        let set_chart = expect_set_chart(&mut socket, "DCE.m2609,SHFE.au2602");
-        assert_eq!(set_chart["chart_id"], "relay-upstream-all-futures-ticks");
+        let set_chart = expect_set_chart(&mut socket, "DCE.m2609");
+        assert_eq!(set_chart["chart_id"], "relay-upstream-tick-DCE_m2609-10000");
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
+        expect_peek_message(&mut socket);
 
+        let set_chart = expect_set_chart(&mut socket, "SHFE.au2602");
+        assert_eq!(
+            set_chart["chart_id"],
+            "relay-upstream-tick-SHFE_au2602-10000"
+        );
+        assert_eq!(set_chart["duration"], 0);
+        assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
@@ -703,7 +739,6 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
     use websocket_support::TestWebSocketServer;
 
     let upstream = TestWebSocketServer::spawn(|mut socket| {
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket
@@ -813,7 +848,6 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     wait_for_upstream_status(&engine, RelaySourceStatus::Degraded).await;
 
     let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket

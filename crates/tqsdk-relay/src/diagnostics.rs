@@ -28,7 +28,19 @@ pub struct RelayStartupReport {
 impl RelayStartupReport {
     #[must_use]
     pub fn from_config_and_chart(config: &RelayConfig, chart: Option<&UpstreamTickChart>) -> Self {
-        let upstream_ins_list_chars = chart.map_or(0, UpstreamTickChart::ins_list_chars);
+        match chart {
+            Some(chart) => Self::from_config_and_charts(config, std::slice::from_ref(chart)),
+            None => Self::from_config_and_charts(config, &[]),
+        }
+    }
+
+    #[must_use]
+    pub fn from_config_and_charts(config: &RelayConfig, charts: &[UpstreamTickChart]) -> Self {
+        let upstream_ins_list_chars = charts
+            .iter()
+            .map(UpstreamTickChart::ins_list_chars)
+            .max()
+            .unwrap_or(0);
         Self {
             event: "relay_startup",
             dry_run: config.dry_run,
@@ -37,8 +49,8 @@ impl RelayStartupReport {
             metrics_listen: config.metrics_listen.clone(),
             refresh_schedule: refresh_schedule(config.futures_universe_refresh),
             futures_metadata_batch_size: config.futures_metadata_batch_size,
-            upstream_symbols: chart.map_or(0, |chart| chart.symbols().len()),
-            upstream_tick_view_width: chart.map_or(
+            upstream_symbols: charts.iter().map(|chart| chart.symbols().len()).sum(),
+            upstream_tick_view_width: charts.first().map_or(
                 config.upstream_tick_view_width,
                 UpstreamTickChart::view_width,
             ),

@@ -411,11 +411,11 @@ fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
         ..RelayConfig::default()
     };
 
-    let err = config.upstream_tick_chart().unwrap_err();
+    let err = config.upstream_tick_charts().unwrap_err();
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: upstream ins_list length 11 exceeds hard limit 10 chars; suggest splitting into at least 2 relay instances"
+        "invalid relay config: upstream tick chart ins_list length 11 exceeds hard limit 10 chars"
     );
 }
 
