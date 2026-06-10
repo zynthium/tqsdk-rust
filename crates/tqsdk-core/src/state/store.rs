@@ -233,9 +233,7 @@ impl StateStore {
     where
         F: FnOnce(Vec<AppliedChange>) -> T,
     {
-        let Some(first) = mutations.first() else {
-            return None;
-        };
+        let first = mutations.first()?;
         let first_root = partition_path(first).0;
         if mutations
             .iter()
