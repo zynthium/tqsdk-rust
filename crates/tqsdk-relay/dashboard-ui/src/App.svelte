@@ -1,0 +1,112 @@
+<script lang="ts">
+  import AttentionList from './components/AttentionList.svelte';
+  import ContinuityTimeline from './components/ContinuityTimeline.svelte';
+  import DashboardControls from './components/DashboardControls.svelte';
+  import IncidentTable from './components/IncidentTable.svelte';
+  import IntegrityHero from './components/IntegrityHero.svelte';
+  import IntegrityTrend from './components/IntegrityTrend.svelte';
+  import MetricCard from './components/MetricCard.svelte';
+  import MonitorHeader from './components/MonitorHeader.svelte';
+  import RelayPipeline from './components/RelayPipeline.svelte';
+  import SymbolHealthTable from './components/SymbolHealthTable.svelte';
+  import { untrack } from 'svelte';
+  import { fetchRelaySnapshot } from './lib/api';
+  import { createHistory, pushHistorySample } from './lib/history';
+  import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
+  import { deriveIntegrity } from './lib/integrity-model';
+  import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
+  import type { DashboardViewState, IntegrityModel, RelaySnapshot } from './lib/types';
+
+  const POLL_INTERVAL_MS = 2_000;
+
+  let snapshot = $state<RelaySnapshot | null>(null);
+  let model = $state<IntegrityModel | null>(null);
+  let history = $state(createHistory());
+  let timeline = $state(createTimelineHistory());
+  let incidents = $state(createIncidentLedger());
+  let error = $state<string | null>(null);
+  let sequence = $state(0);
+  let view = $state<DashboardViewState>({
+    paused: false,
+    fullscreen: false,
+    selectedExchange: null,
+    selectedSymbol: null,
+    filters: {
+      statuses: [],
+      subscribedOnly: false,
+      q: '',
+      sort: 'receive_gap_ms_desc',
+      limit: 200,
+    },
+  });
+
+  let buckets = $derived(timelineBuckets(timeline, snapshot?.receivedAt ?? Date.now(), 60));
+  let filterKey = $derived(JSON.stringify(view.filters));
+
+  async function load(signal?: AbortSignal) {
+    const requestId = sequence + 1;
+    sequence = requestId;
+    const next = await fetchRelaySnapshot(view.filters, signal);
+    if (requestId !== sequence) return;
+    snapshot = next;
+    const nextModel = deriveIntegrity(next.metrics, next.symbols, next.receivedAt, model);
+    pushHistorySample(history, nextModel);
+    pushTimelineSample(timeline, nextModel);
+    updateIncidentLedger(incidents, nextModel);
+    model = nextModel;
+    error = null;
+  }
+
+  function refreshNow() {
+    return load();
+  }
+
+  $effect(() => {
+    filterKey;
+    if (view.paused) return;
+    const controller = new AbortController();
+    void untrack(() => load(controller.signal)).catch((reason) => {
+      if (!controller.signal.aborted) error = reason instanceof Error ? reason.message : String(reason);
+    });
+    const timer = window.setInterval(() => {
+      void load(controller.signal).catch((reason) => {
+        if (!controller.signal.aborted) error = reason instanceof Error ? reason.message : String(reason);
+      });
+    }, POLL_INTERVAL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  });
+</script>
+
+<main class="dashboard-shell" data-fullscreen={view.fullscreen}>
+  <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen} />
+  <DashboardControls bind:filters={view.filters} disabled={view.paused} onrefresh={refreshNow} />
+
+  {#if model}
+    <IntegrityHero {model} />
+    <section class="kpi-grid" aria-label="relay metrics">
+      <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" />
+      <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" />
+      <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" />
+      <MetricCard label="完整性异常" value={model.issueCount} tone={model.issueCount > 0 ? 'warn' : 'live'} />
+      <MetricCard label="上游静默" value={model.upstreamIdleMs} format="duration" tone="info" />
+      <MetricCard label="解码坏行" value={model.invalidRowCount} tone={model.invalidRowCount > 0 ? 'bad' : 'live'} />
+    </section>
+    <RelayPipeline {model} />
+    <section class="dashboard-main">
+      <AttentionList rows={model.problems} />
+      <ContinuityTimeline {buckets} rows={model.rows} />
+      <IncidentTable incidents={incidents.incidents} />
+    </section>
+    <section class="dashboard-bottom">
+      <SymbolHealthTable rows={model.rows} bind:selectedSymbol={view.selectedSymbol} />
+      <IntegrityTrend {history} {model} />
+    </section>
+  {:else}
+    <section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">
+      正在读取 relay 观测数据
+    </section>
+  {/if}
+</main>

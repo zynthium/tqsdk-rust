@@ -215,28 +215,29 @@ fn relay_binary_serves_embedded_dashboard_assets() {
             .stderr(Stdio::null()),
     );
 
-    let html = wait_for_http_response(metrics_addr, "/dashboard", &mut child);
+    let html = wait_for_http_response(metrics_addr, "/dashboard/", &mut child);
     assert!(html.starts_with("HTTP/1.1 200"));
-    assert!(html.contains("行情中继合约监控"));
-    assert!(html.contains("/dashboard/app.js"));
-    assert!(html.contains("id=\"health\""));
-    assert!(html.contains("id=\"diagnostics\""));
-    assert!(html.contains("问题合约"));
-    assert!(html.contains("中文名称"));
-    assert!(html.contains("休盘"));
+    assert!(html.contains("tqsdk-relay 行情完整性监控中心"));
+    assert!(html.contains("/dashboard/assets/app.js"));
+    assert!(html.contains("/dashboard/assets/app.css"));
 
-    let js = wait_for_http_response(metrics_addr, "/dashboard/app.js", &mut child);
+    let js = wait_for_http_response(metrics_addr, "/dashboard/assets/app.js", &mut child);
     assert!(js.starts_with("HTTP/1.1 200"));
     assert!(js.contains("/symbol-metrics"));
     assert!(js.contains("/metrics"));
     assert!(js.contains("instrument_name"));
     assert!(js.contains("closed"));
     assert!(js.contains("upstream_stage"));
-    assert!(js.contains("upstream_stage_started_unix_secs"));
-    assert!(js.contains("backfillProgress"));
-    assert!(js.contains("AbortController"));
-    assert!(js.contains("renderHealth"));
-    assert!(js.contains("renderDiagnostics"));
+
+    let css = wait_for_http_response(metrics_addr, "/dashboard/assets/app.css", &mut child);
+    assert!(css.starts_with("HTTP/1.1 200"));
+    assert!(css.contains("--relay-bg"));
+
+    let dashboard_alias = wait_for_http_response(metrics_addr, "/dashboard", &mut child);
+    assert!(dashboard_alias.starts_with("HTTP/1.1 200"));
+
+    let missing = wait_for_http_response(metrics_addr, "/dashboard/assets/missing.js", &mut child);
+    assert!(missing.starts_with("HTTP/1.1 404"));
 }
 
 struct ChildGuard {
