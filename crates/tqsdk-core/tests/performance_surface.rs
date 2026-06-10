@@ -111,3 +111,12 @@ fn state_apply_records_changed_field_names_without_value_clone() {
         "commit metadata should be built from applied-change records, not cloned mutations"
     );
 }
+
+#[test]
+fn state_store_apply_has_single_root_fast_path_before_btreeset_classification() {
+    let source = include_str!("../src/state/store.rs");
+    assert!(
+        source.contains("apply_single_root"),
+        "StateStore::apply_with should have a single-root fast path for common quote batches"
+    );
+}

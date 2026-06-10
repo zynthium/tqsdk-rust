@@ -233,6 +233,17 @@ impl StateStore {
     where
         F: FnOnce(Vec<AppliedChange>) -> T,
     {
+        let Some(first) = mutations.first() else {
+            return None;
+        };
+        let first_root = partition_path(first).0;
+        if mutations
+            .iter()
+            .all(|mutation| partition_path(mutation).0 == first_root)
+        {
+            return self.apply_single_root(revision, first_root, mutations, on_applied);
+        }
+
         let mut roots = BTreeSet::new();
         for mutation in mutations {
             roots.insert(partition_path(mutation).0);
@@ -264,6 +275,35 @@ impl StateStore {
             Some(on_applied(applied))
         } else {
             None
+        }
+    }
+
+    fn apply_single_root<T, F>(
+        &self,
+        revision: Revision,
+        root: StateRoot,
+        mutations: &[NormalizedMutation],
+        on_applied: F,
+    ) -> Option<T>
+    where
+        F: FnOnce(Vec<AppliedChange>) -> T,
+    {
+        let mut partition = rwlock_write(root.partition(self));
+        let mut applied = Vec::new();
+        for (mutation_index, mutation) in mutations.iter().enumerate() {
+            let (_, path) = partition_path(mutation);
+            if let Some(changed) =
+                apply_mutation_at_partition(&mut partition, path, mutation_index, mutation)
+            {
+                applied.push(changed);
+            }
+        }
+
+        if applied.is_empty() {
+            None
+        } else {
+            self.revision.store(revision.get(), Ordering::SeqCst);
+            Some(on_applied(applied))
         }
     }
 
