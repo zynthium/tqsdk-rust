@@ -80,10 +80,21 @@ TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
-`TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=1` 表示只保留每个品种的主力合约；
-`2` 表示主力加一个次主力。启用该选项时，relay 会先用 `query_cont_quotes()` 获取
-全市场主力标的，再对候选在市期货做一次批量 quote 快照订阅，按 `product_id`
-分组后以主力优先，其余按 `open_interest` 降序、`volume` 降序补足前 N。
+只订阅每个品种的主力合约时，可以使用更直接的快捷方式：
+
+```bash
+TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
+TQSDK_RELAY_FUTURES_MAIN_ONLY=true \
+TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
+cargo run -p tqsdk-relay
+```
+
+`TQSDK_RELAY_FUTURES_MAIN_ONLY=true` 等价于
+`TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=1`，只走合约服务
+`query_cont_quotes()` 获取主力标的，不订阅 quote，也不发送 `set_chart`。`2` 或更大的
+N 表示主力加活跃度排名补足；此时 relay 会先用 `query_cont_quotes()` 获取全市场主力标的，
+再对候选在市期货做一次批量 quote 快照订阅，按 `product_id` 分组后以主力优先，其余按
+`open_interest` 降序、`volume` 降序补足前 N。
 
 只订阅指定产品代码时：
 
@@ -168,6 +179,7 @@ cargo run -p tqsdk-relay
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时轻量 `multi_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
+| `TQSDK_RELAY_FUTURES_MAIN_ONLY` | `false` | 产品发现模式的快捷入口。设置为 `1` / `true` / `yes` / `on` 时只保留每品种主力合约；与 `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` 互斥。 |
 | `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` | 空 | 产品发现模式的可选活跃度限制。设置为 `1` 表示每品种只保留主力，`2` 表示主力和次主力；其余合约按 `open_interest`、`volume` 排名补足前 N。必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 单个上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误；默认不启用硬失败。 |

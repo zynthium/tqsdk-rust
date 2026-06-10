@@ -145,6 +145,32 @@ fn config_loads_active_contracts_per_product_from_env() {
 }
 
 #[test]
+fn config_loads_main_only_shortcut_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.futures_active_contracts_per_product, Some(1));
+}
+
+#[test]
+fn config_rejects_main_only_and_active_contracts_per_product_together() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
+        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: set only one of TQSDK_RELAY_FUTURES_MAIN_ONLY or TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT"
+    );
+}
+
+#[test]
 fn config_loads_auth_and_daily_futures_universe_refresh_from_env() {
     let config = RelayConfig::from_env_vars(|key| match key {
         "TQ_AUTH_USER" => Some(" demo-user ".to_string()),
