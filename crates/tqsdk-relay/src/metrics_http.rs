@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-use crate::dashboard::{DASHBOARD_HTML, DASHBOARD_JS};
+use crate::dashboard::dashboard_asset;
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::symbol_metrics::SymbolMetricsQuery;
@@ -75,18 +75,15 @@ async fn serve_metrics_stream(
                 RelayError::Internal(format!("symbol metrics JSON encode failed: {err}"))
             })?
         }
-        "/dashboard" => {
-            write_text_response(stream, 200, "text/html; charset=utf-8", DASHBOARD_HTML).await?;
-            return Ok(());
-        }
-        "/dashboard/app.js" => {
-            write_text_response(
-                stream,
-                200,
-                "application/javascript; charset=utf-8",
-                DASHBOARD_JS,
-            )
-            .await?;
+        path if path == "/dashboard"
+            || path == "/dashboard/"
+            || path.starts_with("/dashboard/") =>
+        {
+            let Some(asset) = dashboard_asset(path) else {
+                write_response(stream, 404, json!({"error": "not found"})).await?;
+                return Ok(());
+            };
+            write_bytes_response(stream, 200, asset.content_type, asset.bytes).await?;
             return Ok(());
         }
         _ => {
@@ -167,26 +164,29 @@ Connection: close\r\n\
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
 }
 
-async fn write_text_response(
+async fn write_bytes_response(
     stream: &mut TcpStream,
     status: u16,
     content_type: &str,
-    body: &str,
+    body: &[u8],
 ) -> RelayResult<()> {
-    let response = format!(
+    let header = format!(
         "HTTP/1.1 {status} {}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
 Cache-Control: no-store\r\n\
 X-Content-Type-Options: nosniff\r\n\
 Connection: close\r\n\
-\r\n\
-{body}",
+\r\n",
         status_reason(status),
         body.len(),
     );
     stream
-        .write_all(response.as_bytes())
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))?;
+    stream
+        .write_all(body)
         .await
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
 }

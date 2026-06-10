@@ -17,6 +17,7 @@ server = ["dep:yawc"]
 [dependencies]
 chrono.workspace = true
 futures.workspace = true
+include_dir.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true

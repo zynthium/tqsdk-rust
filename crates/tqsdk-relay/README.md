@@ -314,10 +314,14 @@ dashboard 关注列表、风险排序、数据解码告警和完整性异常计�
 tick row，用于区分 quote-only 远月合约。
 
 `/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics` 和 `/metrics`。它不连接 relay
-market websocket，不创建下游订阅，也不会触发额外行情命令。页面顶部会展示上游阶段、
-transport 连接、订阅发送、frame 接收数、解码事件数、backfilling 已持续时间、frame 速率、最近 frame idle 和最近 frame 时间；tick / quote ingest 热
-路径只更新当前合约的轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot
-请求侧。backfilling 进度只基于 relay 已观测到的时间和 frame/event 计数，不推断上游补历史百分比。
+market websocket，不创建下游订阅，也不会触发额外行情命令。页面由
+`crates/tqsdk-relay/dashboard-ui/` 的 Svelte 5 + Vite + Tailwind CSS 4 工程构建，
+生产产物提交在 `crates/tqsdk-relay/src/dashboard-dist/`，Rust 侧将该目录嵌入到
+relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。页面顶部会展示上游阶段、
+transport 连接、订阅发送、frame 接收数、解码事件数、backfilling 已持续时间、frame
+速率、最近 frame idle 和最近 frame 时间；tick / quote ingest 热路径只更新当前合约的
+轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot 请求侧。backfilling 进度
+只基于 relay 已观测到的时间和 frame/event 计数，不推断上游补历史百分比。
 
 ### 观测字段
 
@@ -386,3 +390,24 @@ cargo check -p tqsdk-relay --no-default-features
 ```
 
 websocket 测试使用 loopback 测试服务；不需要天勤凭证或实时行情访问。
+
+开发 dashboard UI：
+
+```bash
+cd crates/tqsdk-relay/dashboard-ui
+pnpm install
+pnpm run dev
+```
+
+开发服务器会把 `/metrics` 和 `/symbol-metrics` 代理到 `127.0.0.1:7789`。提交前需要刷新
+嵌入式静态产物并运行 UI / Rust 双侧检查：
+
+```bash
+cd crates/tqsdk-relay/dashboard-ui
+pnpm run test
+pnpm run check
+pnpm run build
+pnpm run test:e2e
+cd ../../..
+cargo test -p tqsdk-relay --test binary_smoke relay_binary_serves_embedded_dashboard_assets
+```

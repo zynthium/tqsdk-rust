@@ -1,0 +1,17 @@
+:root {
+  --relay-bg: #061016;
+  --relay-panel: #101b1f;
+  --relay-panel-strong: #13282c;
+  --relay-panel-soft: #0c171b;
+  --relay-line: #2b7266;
+  --relay-line-soft: #25504a;
+  --relay-text: #eef8f2;
+  --relay-muted: #97afa9;
+  --relay-live: #48cf8e;
+  --relay-closed: #74878a;
+  --relay-warn: #efbd54;
+  --relay-bad: #ef6574;
+  --relay-info: #5db8d7;
+  --relay-accent: #b891e8;
+  --relay-shadow: 0 16px 34px rgb(0 0 0 / 34%);
+}
