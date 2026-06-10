@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 #[cfg(feature = "server")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,6 +106,28 @@ impl UpstreamMarketDecodeReport {
 
 pub type UpstreamTickDecodeReport = UpstreamMarketDecodeReport;
 
+type TickRowCache = BTreeMap<String, BTreeMap<i64, CachedTickRow>>;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CachedTickRow {
+    datetime: Option<i64>,
+    last_price: Option<f64>,
+    volume: Option<i64>,
+    open_interest: Option<i64>,
+}
+
+impl CachedTickRow {
+    fn complete(self, id: i64) -> Option<RelayTickRow> {
+        Some(RelayTickRow {
+            id,
+            datetime: self.datetime?,
+            last_price: self.last_price?,
+            volume: self.volume?,
+            open_interest: self.open_interest?,
+        })
+    }
+}
+
 pub trait UpstreamTickSource {
     fn next_tick(&mut self) -> impl std::future::Future<Output = Option<UpstreamTick>> + Send + '_;
 
@@ -149,6 +171,20 @@ pub fn decode_upstream_tick_report(frame: Value) -> RelayResult<UpstreamTickDeco
 }
 
 pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarketDecodeReport> {
+    decode_upstream_market_report_inner(frame, None)
+}
+
+fn decode_upstream_market_report_with_cache(
+    frame: Value,
+    tick_row_cache: &mut TickRowCache,
+) -> RelayResult<UpstreamMarketDecodeReport> {
+    decode_upstream_market_report_inner(frame, Some(tick_row_cache))
+}
+
+fn decode_upstream_market_report_inner(
+    frame: Value,
+    mut tick_row_cache: Option<&mut TickRowCache>,
+) -> RelayResult<UpstreamMarketDecodeReport> {
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
         return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
@@ -176,11 +212,16 @@ pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarket
                     continue;
                 };
                 for (row_id, row) in rows {
-                    match decode_tick_row(row_id, row) {
-                        Ok(row) => ticks.push(UpstreamTick {
+                    let decoded = match &mut tick_row_cache {
+                        Some(cache) => decode_tick_row_with_cache(cache, symbol, row_id, row),
+                        None => decode_tick_row(row_id, row).map(Some),
+                    };
+                    match decoded {
+                        Ok(Some(row)) => ticks.push(UpstreamTick {
                             symbol: symbol.clone(),
                             row,
                         }),
+                        Ok(None) => {}
                         Err(error) => {
                             invalid_rows = invalid_rows.saturating_add(1);
                             last_invalid_row_error =
@@ -214,17 +255,52 @@ pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarket
 }
 
 fn decode_tick_row(row_id: &str, row: &Value) -> RelayResult<RelayTickRow> {
+    let id = tick_row_id(row_id, row)?;
     Ok(RelayTickRow {
-        id: row
-            .get("id")
-            .and_then(Value::as_i64)
-            .or_else(|| row_id.parse::<i64>().ok())
-            .ok_or_else(|| RelayError::invalid_protocol("upstream tick row missing id"))?,
+        id,
         datetime: required_i64(row, "datetime")?,
         last_price: required_f64(row, "last_price")?,
         volume: required_i64(row, "volume")?,
         open_interest: required_i64(row, "open_interest")?,
     })
+}
+
+fn decode_tick_row_with_cache(
+    cache: &mut TickRowCache,
+    symbol: &str,
+    row_id: &str,
+    row: &Value,
+) -> RelayResult<Option<RelayTickRow>> {
+    let id = tick_row_id(row_id, row)?;
+    let symbol_cache = cache.entry(symbol.to_string()).or_default();
+    let mut cached = symbol_cache.get(&id).copied().unwrap_or_default();
+    merge_i64_patch(&mut cached.datetime, row, "datetime")?;
+    merge_f64_patch(&mut cached.last_price, row, "last_price")?;
+    merge_i64_patch(&mut cached.volume, row, "volume")?;
+    merge_i64_patch(&mut cached.open_interest, row, "open_interest")?;
+    symbol_cache.insert(id, cached);
+    Ok(cached.complete(id))
+}
+
+fn tick_row_id(row_id: &str, row: &Value) -> RelayResult<i64> {
+    row.get("id")
+        .and_then(Value::as_i64)
+        .or_else(|| row_id.parse::<i64>().ok())
+        .ok_or_else(|| RelayError::invalid_protocol("upstream tick row missing id"))
+}
+
+fn merge_i64_patch(cached: &mut Option<i64>, row: &Value, field: &'static str) -> RelayResult<()> {
+    if row.get(field).is_some() {
+        *cached = Some(required_i64(row, field)?);
+    }
+    Ok(())
+}
+
+fn merge_f64_patch(cached: &mut Option<f64>, row: &Value, field: &'static str) -> RelayResult<()> {
+    if row.get(field).is_some() {
+        *cached = Some(required_f64(row, field)?);
+    }
+    Ok(())
 }
 
 fn required_i64(row: &Value, field: &'static str) -> RelayResult<i64> {
@@ -357,6 +433,7 @@ impl UpstreamTickSource for FakeUpstreamTickSource {
 pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
+    tick_row_cache: TickRowCache,
     closed: bool,
     invalid_tick_rows: u64,
     last_invalid_tick_row_error: Option<String>,
@@ -373,6 +450,7 @@ impl WebSocketUpstreamTickSource {
         let mut source = Self {
             transport,
             buffered: VecDeque::new(),
+            tick_row_cache: TickRowCache::default(),
             closed: false,
             invalid_tick_rows: 0,
             last_invalid_tick_row_error: None,
@@ -438,7 +516,7 @@ impl WebSocketUpstreamTickSource {
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let report = decode_upstream_market_report(value)?;
+                let report = self.decode_market_report(value)?;
                 self.record_decode_report(&report);
                 let events = report.into_events();
                 self.record_frame_received(events.len());
@@ -449,7 +527,7 @@ impl WebSocketUpstreamTickSource {
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
-                let report = decode_upstream_market_report(value)?;
+                let report = self.decode_market_report(value)?;
                 self.record_decode_report(&report);
                 let events = report.into_events();
                 self.record_frame_received(events.len());
@@ -473,6 +551,10 @@ impl WebSocketUpstreamTickSource {
         if let Some(error) = report.last_invalid_row_error() {
             self.last_invalid_tick_row_error = Some(error.to_owned());
         }
+    }
+
+    fn decode_market_report(&mut self, value: Value) -> RelayResult<UpstreamMarketDecodeReport> {
+        decode_upstream_market_report_with_cache(value, &mut self.tick_row_cache)
     }
 
     fn record_transport_connected(&mut self) {
