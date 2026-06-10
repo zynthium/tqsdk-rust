@@ -452,6 +452,158 @@ async fn websocket_upstream_tick_source_buffers_multiple_ticks_from_one_frame() 
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_merges_sparse_tick_row_patches() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "last_price": 611.0,
+                                            "volume": 180
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    let first = source.next_tick().await.unwrap();
+    let second = source.next_tick().await.unwrap();
+
+    assert_eq!(first.row.id, 17);
+    assert_eq!(first.row.datetime, 1_000);
+    assert_eq!(first.row.last_price, 610.0);
+    assert_eq!(first.row.volume, 170);
+    assert_eq!(first.row.open_interest, 1007);
+    assert_eq!(second.row.id, 17);
+    assert_eq!(second.row.datetime, 1_000);
+    assert_eq!(second.row.last_price, 611.0);
+    assert_eq!(second.row.volume, 180);
+    assert_eq!(second.row.open_interest, 1007);
+    assert_eq!(source.take_invalid_tick_rows(), 0);
+    assert!(source.next_tick().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
+async fn websocket_upstream_tick_source_buffers_incomplete_sparse_tick_rows_until_complete() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "volume": 170
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "last_price": 611.0,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    let tick = source.next_tick().await.unwrap();
+
+    assert_eq!(tick.row.id, 17);
+    assert_eq!(tick.row.datetime, 1_000);
+    assert_eq!(tick.row.last_price, 611.0);
+    assert_eq!(tick.row.volume, 170);
+    assert_eq!(tick.row.open_interest, 1007);
+    assert_eq!(source.take_invalid_tick_rows(), 0);
+    assert!(source.next_tick().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
 async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
     use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
     use websocket_support::TestWebSocketServer;
@@ -468,6 +620,7 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
                                     "data": {
                                         "17": {
                                             "datetime": 1_000,
+                                            "last_price": "",
                                             "volume": 170,
                                             "open_interest": 1007
                                         }
