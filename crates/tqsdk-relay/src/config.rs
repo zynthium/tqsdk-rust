@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
-use crate::universe::{FuturesProductCode, FuturesProductFilter};
+use crate::universe::{FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection};
 use crate::upstream::UpstreamTickChart;
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -17,6 +17,8 @@ const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
 const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
 const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
 const ENV_FUTURES_PRODUCTS: &str = "TQSDK_RELAY_FUTURES_PRODUCTS";
+const ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT: &str =
+    "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT";
 const ENV_FUTURES_UNIVERSE_REFRESH_AT: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT";
 const ENV_FUTURES_UNIVERSE_REFRESH_SECS: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS";
 const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
@@ -187,6 +189,7 @@ pub struct RelayConfig {
     pub metrics_listen: String,
     pub futures_universe_refresh: FuturesUniverseRefreshSchedule,
     pub futures_metadata_batch_size: usize,
+    pub futures_active_contracts_per_product: Option<usize>,
     pub futures_symbols: Vec<String>,
     pub futures_product_filter: FuturesProductFilter,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
@@ -213,6 +216,10 @@ impl fmt::Debug for RelayConfig {
             .field(
                 "futures_metadata_batch_size",
                 &self.futures_metadata_batch_size,
+            )
+            .field(
+                "futures_active_contracts_per_product",
+                &self.futures_active_contracts_per_product,
             )
             .field("futures_symbols", &self.futures_symbols)
             .field("futures_product_filter", &self.futures_product_filter)
@@ -245,6 +252,7 @@ impl Default for RelayConfig {
             metrics_listen: "127.0.0.1:7789".to_string(),
             futures_universe_refresh: FuturesUniverseRefreshSchedule::default(),
             futures_metadata_batch_size: DEFAULT_FUTURES_METADATA_BATCH_SIZE,
+            futures_active_contracts_per_product: None,
             futures_symbols: Vec::new(),
             futures_product_filter: FuturesProductFilter::None,
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
@@ -321,6 +329,12 @@ impl RelayConfig {
         if let Some(value) = get(ENV_FUTURES_METADATA_BATCH_SIZE) {
             config.futures_metadata_batch_size =
                 parse_positive_usize_env(ENV_FUTURES_METADATA_BATCH_SIZE, &value)?;
+        }
+        if let Some(value) = get(ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT) {
+            config.futures_active_contracts_per_product = Some(parse_positive_usize_env(
+                ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT,
+                &value,
+            )?);
         }
         if let Some(value) = get(ENV_UPSTREAM_INS_LIST_WARN_CHARS) {
             config.upstream_ins_list_limits.warn_chars = Some(parse_positive_usize_env(
@@ -440,6 +454,13 @@ impl RelayConfig {
         self.futures_product_filter != FuturesProductFilter::None
     }
 
+    #[must_use]
+    pub fn futures_universe_selection(&self) -> FuturesUniverseSelection {
+        FuturesUniverseSelection {
+            active_contracts_per_product: self.futures_active_contracts_per_product,
+        }
+    }
+
     pub fn validate(&self) -> RelayResult<()> {
         if self.upstream_market_url.trim().is_empty() {
             return Err(RelayError::invalid_config(
@@ -461,6 +482,11 @@ impl RelayConfig {
         if self.futures_metadata_batch_size == 0 {
             return Err(RelayError::invalid_config(
                 "futures_metadata_batch_size must be greater than zero",
+            ));
+        }
+        if self.futures_active_contracts_per_product == Some(0) {
+            return Err(RelayError::invalid_config(
+                "futures_active_contracts_per_product must be greater than zero",
             ));
         }
         if self.upstream_tick_view_width == 0 {

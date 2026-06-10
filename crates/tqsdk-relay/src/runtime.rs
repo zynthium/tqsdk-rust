@@ -8,7 +8,7 @@ use crate::error::RelayError;
 use crate::error::RelayResult;
 use crate::server::RelayServer;
 #[cfg(feature = "metadata")]
-use crate::universe::{SessionFuturesUniverseResolver, resolve_futures_symbols};
+use crate::universe::SessionFuturesUniverseResolver;
 use crate::upstream::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
 use chrono::Timelike;
 use tokio::sync::oneshot;
@@ -87,8 +87,12 @@ async fn configured_upstream_tick_charts(
     #[cfg(feature = "metadata")]
     {
         let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
-        let symbols =
-            resolve_futures_symbols(&config.futures_product_filter, &mut resolver).await?;
+        let symbols = crate::universe::resolve_futures_symbols_with_selection(
+            &config.futures_product_filter,
+            config.futures_universe_selection(),
+            &mut resolver,
+        )
+        .await?;
         if symbols.is_empty() {
             return Err(RelayError::invalid_config(
                 "futures product discovery returned no active contracts",

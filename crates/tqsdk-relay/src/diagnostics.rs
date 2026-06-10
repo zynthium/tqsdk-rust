@@ -15,6 +15,7 @@ pub struct RelayStartupReport {
     pub metrics_listen: String,
     pub refresh_schedule: String,
     pub futures_metadata_batch_size: usize,
+    pub futures_active_contracts_per_product: Option<usize>,
     pub upstream_symbols: usize,
     pub upstream_tick_view_width: usize,
     pub upstream_ins_list_chars: usize,
@@ -49,6 +50,7 @@ impl RelayStartupReport {
             metrics_listen: config.metrics_listen.clone(),
             refresh_schedule: refresh_schedule(config.futures_universe_refresh),
             futures_metadata_batch_size: config.futures_metadata_batch_size,
+            futures_active_contracts_per_product: config.futures_active_contracts_per_product,
             upstream_symbols: charts.iter().map(|chart| chart.symbols().len()).sum(),
             upstream_tick_view_width: charts.first().map_or(
                 config.upstream_tick_view_width,

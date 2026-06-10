@@ -56,8 +56,9 @@ pub use symbol_metrics::{
 #[cfg(feature = "metadata")]
 pub use universe::SessionFuturesUniverseResolver;
 pub use universe::{
-    FuturesContract, FuturesProductCode, FuturesProductFilter, StaticFuturesUniverseResolver,
-    futures_metadata_symbol_batches, resolve_futures_symbols,
+    FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
+    StaticFuturesUniverseResolver, futures_metadata_symbol_batches, resolve_futures_symbols,
+    resolve_futures_symbols_with_selection,
 };
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;

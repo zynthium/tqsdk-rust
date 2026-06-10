@@ -87,6 +87,10 @@ fn relay_binary_dry_run_prints_diagnostic_without_connecting_upstream() {
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["upstream_symbols"], 2);
     assert_eq!(report["upstream_tick_view_width"], 10_000);
+    assert_eq!(
+        report["futures_active_contracts_per_product"],
+        serde_json::Value::Null
+    );
     assert_eq!(report["upstream_source"], "static-symbols");
     fs::remove_file(symbols_file).unwrap();
 }
