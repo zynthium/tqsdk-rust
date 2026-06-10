@@ -62,10 +62,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         batch_iters,
         &batch_symbols,
     )?);
+    print_result(run_decode_case(
+        "decode_prebuilt_quote_batch",
+        quote_inputs(batch_iters, &batch_symbols),
+        batch_symbols.len(),
+    )?);
+    print_result(run_text_decode_case(
+        "decode_text_quote_batch",
+        quote_texts(batch_iters, &batch_symbols),
+        batch_symbols.len(),
+    )?);
     print_result(run_ingest_case(
         "ingest_quote_batch",
         batch_iters,
         &batch_symbols,
+    )?);
+    print_result(run_ingest_case(
+        "ingest_prebuilt_quote_batch",
+        batch_iters,
+        &batch_symbols,
+    )?);
+    print_result(run_text_ingest_case(
+        "ingest_text_quote_batch",
+        quote_texts(batch_iters, &batch_symbols),
+        batch_symbols.len(),
     )?);
 
     let large_batch_symbols = bench_symbols(large_batch_symbols);
@@ -73,6 +93,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         "ingest_large_quote_batch",
         batch_iters.saturating_div(4).max(1),
         &large_batch_symbols,
+    )?);
+    print_result(run_ingest_case(
+        "ingest_prebuilt_large_quote_batch",
+        batch_iters.saturating_div(4).max(1),
+        &large_batch_symbols,
+    )?);
+    print_result(run_sparse_ingest_case(
+        "ingest_sparse_quote_batch_1000x10x3",
+        batch_iters,
+        &large_batch_symbols,
+        10,
     )?);
     print_result(run_typed_read_case(
         "read_market_quote_typed",
@@ -108,11 +139,34 @@ fn run_ingest_case(
     iterations: u64,
     symbols: &[String],
 ) -> tqsdk_core::Result<BenchResult> {
+    let inputs = quote_inputs(iterations, symbols);
+    run_ingest_inputs_case(name, inputs, symbols.len())
+}
+
+fn run_sparse_ingest_case(
+    name: &'static str,
+    iterations: u64,
+    symbols: &[String],
+    changed_per_iter: usize,
+) -> tqsdk_core::Result<BenchResult> {
     let handle = runtime_handle();
+    seed_quotes(&handle, symbols)?;
+    let items_per_iter = changed_per_iter.min(symbols.len());
+    let inputs = sparse_quote_inputs(iterations, symbols, changed_per_iter);
+    run_ingest_inputs_with_handle(name, handle, inputs, items_per_iter)
+}
+
+fn run_text_ingest_case(
+    name: &'static str,
+    texts: Vec<String>,
+    items_per_iter: usize,
+) -> Result<BenchResult, Box<dyn Error>> {
+    let handle = runtime_handle();
+    let iterations = texts.len() as u64;
     let start = Instant::now();
     let mut commits = 0_u64;
-    for sequence in 0..iterations {
-        let input = market_input(quote_rtn_data(symbols, sequence));
+    for text in &texts {
+        let input = market_input(serde_json::from_str(text)?);
         if let Some(commit) = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)? {
             commits += 1;
             black_box(commit.revision);
@@ -121,8 +175,85 @@ fn run_ingest_case(
     Ok(BenchResult {
         name,
         iterations,
-        items_per_iter: symbols.len(),
+        items_per_iter,
         commits,
+        elapsed: start.elapsed(),
+    })
+}
+
+fn run_ingest_inputs_case(
+    name: &'static str,
+    inputs: Vec<RuntimeInput>,
+    items_per_iter: usize,
+) -> tqsdk_core::Result<BenchResult> {
+    run_ingest_inputs_with_handle(name, runtime_handle(), inputs, items_per_iter)
+}
+
+fn run_ingest_inputs_with_handle(
+    name: &'static str,
+    handle: RuntimeHandle,
+    inputs: Vec<RuntimeInput>,
+    items_per_iter: usize,
+) -> tqsdk_core::Result<BenchResult> {
+    let iterations = inputs.len() as u64;
+    let start = Instant::now();
+    let mut commits = 0_u64;
+    for input in inputs {
+        if let Some(commit) = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)? {
+            commits += 1;
+            black_box(commit.revision);
+        }
+    }
+    Ok(BenchResult {
+        name,
+        iterations,
+        items_per_iter,
+        commits,
+        elapsed: start.elapsed(),
+    })
+}
+
+fn run_decode_case(
+    name: &'static str,
+    inputs: Vec<RuntimeInput>,
+    items_per_iter: usize,
+) -> tqsdk_core::Result<BenchResult> {
+    let iterations = inputs.len() as u64;
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+    let start = Instant::now();
+    for input in &inputs {
+        let mutations = adapters.decode_input(input)?;
+        black_box(mutations.len());
+    }
+    Ok(BenchResult {
+        name,
+        iterations,
+        items_per_iter,
+        commits: 0,
+        elapsed: start.elapsed(),
+    })
+}
+
+fn run_text_decode_case(
+    name: &'static str,
+    texts: Vec<String>,
+    items_per_iter: usize,
+) -> Result<BenchResult, Box<dyn Error>> {
+    let iterations = texts.len() as u64;
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+    let start = Instant::now();
+    for text in &texts {
+        let input = market_input(serde_json::from_str(text)?);
+        let mutations = adapters.decode_input(&input)?;
+        black_box(mutations.len());
+    }
+    Ok(BenchResult {
+        name,
+        iterations,
+        items_per_iter,
+        commits: 0,
         elapsed: start.elapsed(),
     })
 }
@@ -141,14 +272,11 @@ fn run_noop_case(
     )?;
     black_box(first_commit);
 
+    let inputs = noop_inputs(iterations, payload);
     let start = Instant::now();
     let mut commits = 0_u64;
-    for _ in 0..iterations {
-        let commit = handle.ingest(
-            market_input(payload.clone()),
-            Vec::new(),
-            CommitScope::RealtimeUpdate,
-        )?;
+    for input in inputs {
+        let commit = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)?;
         if commit.is_some() {
             commits += 1;
         }
@@ -223,10 +351,82 @@ fn market_input(payload: Value) -> RuntimeInput {
     })
 }
 
+fn quote_inputs(iterations: u64, symbols: &[String]) -> Vec<RuntimeInput> {
+    (0..iterations)
+        .map(|sequence| market_input(quote_rtn_data(symbols, sequence)))
+        .collect()
+}
+
+fn quote_texts(iterations: u64, symbols: &[String]) -> Vec<String> {
+    (0..iterations)
+        .map(|sequence| quote_rtn_data(symbols, sequence).to_string())
+        .collect()
+}
+
+fn noop_inputs(iterations: u64, payload: Value) -> Vec<RuntimeInput> {
+    (0..iterations)
+        .map(|_| market_input(payload.clone()))
+        .collect()
+}
+
+fn sparse_quote_inputs(
+    iterations: u64,
+    universe: &[String],
+    changed_per_iter: usize,
+) -> Vec<RuntimeInput> {
+    (0..iterations)
+        .map(|sequence| {
+            let start = sequence as usize % universe.len().max(1);
+            market_input(sparse_quote_rtn_data(
+                universe,
+                start,
+                changed_per_iter,
+                sequence,
+            ))
+        })
+        .collect()
+}
+
 fn quote_rtn_data(symbols: &[String], sequence: u64) -> Value {
     let mut quotes = Map::with_capacity(symbols.len());
     for (index, symbol) in symbols.iter().enumerate() {
         quotes.insert(symbol.clone(), quote_fields(sequence, index));
+    }
+
+    let mut root = Map::new();
+    root.insert("quotes".to_string(), Value::Object(quotes));
+
+    let mut envelope = Map::new();
+    envelope.insert("aid".to_string(), Value::String("rtn_data".to_string()));
+    envelope.insert("data".to_string(), Value::Array(vec![Value::Object(root)]));
+    Value::Object(envelope)
+}
+
+fn sparse_quote_rtn_data(
+    universe: &[String],
+    start: usize,
+    changed_count: usize,
+    sequence: u64,
+) -> Value {
+    let count = changed_count.min(universe.len());
+    let mut quotes = Map::with_capacity(count);
+    for offset in 0..count {
+        let index = (start + offset) % universe.len();
+        let symbol = &universe[index];
+        let mut fields = Map::new();
+        fields.insert(
+            "datetime".to_string(),
+            Value::String(format!("202606101001{sequence:08}")),
+        );
+        fields.insert(
+            "last_price".to_string(),
+            number(600.0 + index as f64 * 0.01 + sequence as f64 * 0.001),
+        );
+        fields.insert(
+            "volume".to_string(),
+            Value::from(sequence as i64 + index as i64),
+        );
+        quotes.insert(symbol.clone(), Value::Object(fields));
     }
 
     let mut root = Map::new();
