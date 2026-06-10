@@ -248,7 +248,7 @@ fn decode_upstream_market_report_extracts_quote_updates() {
 }
 
 #[test]
-fn decode_upstream_ticks_skips_invalid_rows_and_keeps_valid_rows() {
+fn decode_upstream_ticks_decodes_python_default_last_price_rows() {
     let ticks = decode_upstream_ticks(json!({
         "aid": "rtn_data",
         "data": [
@@ -263,6 +263,18 @@ fn decode_upstream_ticks_skips_invalid_rows_and_keeps_valid_rows() {
                                 "open_interest": 660
                             },
                             "3299419": {
+                                "datetime": 1_780_569_600_000_000_000i64,
+                                "last_price": null,
+                                "volume": 20,
+                                "open_interest": 660
+                            },
+                            "3299420": {
+                                "datetime": 1_780_569_600_250_000_000i64,
+                                "last_price": "not-a-number",
+                                "volume": 25,
+                                "open_interest": 660
+                            },
+                            "3299421": {
                                 "datetime": 1_780_569_600_500_000_000i64,
                                 "last_price": 3094.0,
                                 "volume": 30,
@@ -276,14 +288,20 @@ fn decode_upstream_ticks_skips_invalid_rows_and_keeps_valid_rows() {
     }))
     .unwrap();
 
-    assert_eq!(ticks.len(), 1);
+    assert_eq!(ticks.len(), 4);
     assert_eq!(ticks[0].symbol, "SHFE.rb2606");
-    assert_eq!(ticks[0].row.id, 3_299_419);
-    assert_eq!(ticks[0].row.last_price, 3094.0);
+    assert_eq!(ticks[0].row.id, 3_299_418);
+    assert!(ticks[0].row.last_price.is_nan());
+    assert_eq!(ticks[1].row.id, 3_299_419);
+    assert!(ticks[1].row.last_price.is_nan());
+    assert_eq!(ticks[2].row.id, 3_299_420);
+    assert!(ticks[2].row.last_price.is_nan());
+    assert_eq!(ticks[3].row.id, 3_299_421);
+    assert_eq!(ticks[3].row.last_price, 3094.0);
 }
 
 #[test]
-fn decode_upstream_tick_report_counts_invalid_rows_and_keeps_valid_rows() {
+fn decode_upstream_tick_report_counts_invalid_required_fields_and_keeps_valid_rows() {
     let report = decode_upstream_tick_report(json!({
         "aid": "rtn_data",
         "data": [
@@ -298,6 +316,12 @@ fn decode_upstream_tick_report_counts_invalid_rows_and_keeps_valid_rows() {
                                 "open_interest": 660
                             },
                             "3299419": {
+                                "datetime": 1_780_569_600_250_000_000i64,
+                                "last_price": 3093.0,
+                                "volume": "",
+                                "open_interest": 660
+                            },
+                            "3299420": {
                                 "datetime": 1_780_569_600_500_000_000i64,
                                 "last_price": 3094.0,
                                 "volume": 30,
@@ -320,16 +344,13 @@ fn decode_upstream_tick_report_counts_invalid_rows_and_keeps_valid_rows() {
         report
             .last_invalid_row_error()
             .unwrap()
-            .contains("SHFE.rb2606 row 3299418")
+            .contains("SHFE.rb2606 row 3299419")
     );
-    assert!(
-        report
-            .last_invalid_row_error()
-            .unwrap()
-            .contains("last_price")
-    );
-    assert_eq!(report.ticks().len(), 1);
-    assert_eq!(report.ticks()[0].row.id, 3_299_419);
+    assert!(report.last_invalid_row_error().unwrap().contains("volume"));
+    assert_eq!(report.ticks().len(), 2);
+    assert_eq!(report.ticks()[0].row.id, 3_299_418);
+    assert!(report.ticks()[0].row.last_price.is_nan());
+    assert_eq!(report.ticks()[1].row.id, 3_299_420);
 }
 
 #[test]
@@ -608,6 +629,54 @@ async fn websocket_upstream_tick_source_buffers_incomplete_sparse_tick_rows_unti
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_decodes_string_last_price_as_nan() {
+    use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": "not-a-number",
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect(server.url("/market"))
+        .await
+        .unwrap();
+
+    let tick = source.next_tick().await.unwrap();
+    assert_eq!(tick.row.id, 17);
+    assert!(tick.row.last_price.is_nan());
+    assert_eq!(source.take_invalid_tick_rows(), 0);
+    assert!(source.take_invalid_tick_rows_by_symbol().is_empty());
+    assert!(source.take_last_invalid_tick_row_error().is_none());
+    assert!(source.next_tick().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
 async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
     use tqsdk_relay::{UpstreamTickSource, WebSocketUpstreamTickSource};
     use websocket_support::TestWebSocketServer;
@@ -624,8 +693,8 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
                                     "data": {
                                         "17": {
                                             "datetime": 1_000,
-                                            "last_price": "",
-                                            "volume": 170,
+                                            "last_price": 610.0,
+                                            "volume": "",
                                             "open_interest": 1007
                                         }
                                     }
@@ -656,7 +725,7 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
     );
     let error = source.take_last_invalid_tick_row_error().unwrap();
     assert!(error.contains("SHFE.au2602 row 17"));
-    assert!(error.contains("last_price"));
+    assert!(error.contains("volume"));
     assert_eq!(source.take_invalid_tick_rows(), 0);
     assert!(source.take_invalid_tick_rows_by_symbol().is_empty());
     assert!(source.take_last_invalid_tick_row_error().is_none());

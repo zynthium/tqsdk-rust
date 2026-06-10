@@ -325,9 +325,15 @@ fn required_i64(row: &Value, field: &'static str) -> RelayResult<i64> {
 }
 
 fn required_f64(row: &Value, field: &'static str) -> RelayResult<f64> {
-    row.get(field)
-        .and_then(Value::as_f64)
-        .ok_or_else(|| RelayError::invalid_protocol(format!("upstream tick row missing {field}")))
+    match row.get(field) {
+        Some(Value::Number(number)) => number.as_f64().ok_or_else(|| {
+            RelayError::invalid_protocol(format!("upstream tick row invalid {field}"))
+        }),
+        Some(Value::String(_)) | Some(Value::Null) => Ok(f64::NAN),
+        Some(_) | None => Err(RelayError::invalid_protocol(format!(
+            "upstream tick row missing {field}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
