@@ -131,8 +131,11 @@ async fn pump_available_drains_ready_upstream_ticks() {
 #[tokio::test]
 async fn pump_once_records_invalid_tick_rows_even_without_a_tick() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
+    let mut invalid_rows_by_symbol = std::collections::BTreeMap::new();
+    invalid_rows_by_symbol.insert("SHFE.au2602".to_string(), 1);
     let mut upstream = InvalidOnlySource {
         invalid_rows: 1,
+        invalid_rows_by_symbol,
         last_error: Some(
             "SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price"
                 .to_string(),
@@ -148,10 +151,18 @@ async fn pump_once_records_invalid_tick_rows_even_without_a_tick() {
         metrics.last_upstream_invalid_tick_row_error.as_deref(),
         Some("SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price")
     );
+    let symbol_metrics = engine.symbol_metrics_snapshot_at(1_700_000_010_000, &Default::default());
+    assert_eq!(symbol_metrics.symbols[0].symbol, "SHFE.au2602");
+    assert_eq!(symbol_metrics.symbols[0].invalid_rows, 1);
+    assert_eq!(
+        symbol_metrics.symbols[0].last_invalid_row_error.as_deref(),
+        Some("SHFE.au2602 row 17: invalid relay protocol: upstream tick row missing last_price")
+    );
 }
 
 struct InvalidOnlySource {
     invalid_rows: u64,
+    invalid_rows_by_symbol: std::collections::BTreeMap<String, u64>,
     last_error: Option<String>,
 }
 
@@ -162,6 +173,10 @@ impl tqsdk_relay::UpstreamTickSource for InvalidOnlySource {
 
     fn take_invalid_tick_rows(&mut self) -> u64 {
         std::mem::take(&mut self.invalid_rows)
+    }
+
+    fn take_invalid_tick_rows_by_symbol(&mut self) -> std::collections::BTreeMap<String, u64> {
+        std::mem::take(&mut self.invalid_rows_by_symbol)
     }
 
     fn take_last_invalid_tick_row_error(&mut self) -> Option<String> {
