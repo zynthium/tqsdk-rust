@@ -381,7 +381,11 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
-        let mutations = normalize_order_lifecycle_mutations(&self.state, mutations)?;
+        let mutations = if domains_are_pure_market(&domains) {
+            mutations
+        } else {
+            normalize_order_lifecycle_mutations(&self.state, mutations)?
+        };
         validate_mutation_domains(&mutations)?;
         let commit = CommitEngine::apply(
             &self.state,
@@ -461,6 +465,10 @@ fn batch_input_domains(inputs: &[RuntimeInput]) -> Vec<ProtocolDomain> {
     }
 
     domains
+}
+
+fn domains_are_pure_market(domains: &[ProtocolDomain]) -> bool {
+    domains.len() == 1 && domains[0] == ProtocolDomain::Market
 }
 
 fn command_domain_from_runtime(

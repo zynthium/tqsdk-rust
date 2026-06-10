@@ -129,3 +129,12 @@ fn ensure_child_object_looks_up_existing_child_before_cloning_segment() {
         "existing state path children should be looked up by borrowed segment before allocating a key"
     );
 }
+
+#[test]
+fn pure_market_mutations_skip_trade_order_lifecycle_scan_by_domain() {
+    let source = include_str!("../src/runtime/handle.rs");
+    assert!(
+        source.contains("domains_are_pure_market"),
+        "pure market batches should skip trade order lifecycle scanning before iterating every mutation"
+    );
+}
