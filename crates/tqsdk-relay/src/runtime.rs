@@ -7,6 +7,7 @@ use crate::config::RelayConfig;
 use crate::error::RelayError;
 use crate::error::RelayResult;
 use crate::server::RelayServer;
+use crate::universe::FuturesContract;
 #[cfg(feature = "metadata")]
 use crate::universe::SessionFuturesUniverseResolver;
 use crate::upstream::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
@@ -53,22 +54,27 @@ struct ConfiguredUpstream {
     source: WebSocketUpstreamTickSource,
 }
 
+struct ConfiguredTickCharts {
+    charts: Vec<UpstreamTickChart>,
+    contracts: Vec<FuturesContract>,
+}
+
 async fn connect_configured_upstream_for_pump(
     config: &RelayConfig,
     server: &RelayServer,
 ) -> RelayResult<Option<ConfiguredUpstream>> {
-    let charts = match configured_upstream_tick_charts(config).await {
-        Ok(charts) if charts.is_empty() => return Ok(None),
-        Ok(charts) => charts,
+    let configured = match configured_upstream_tick_charts_with_contracts(config).await {
+        Ok(configured) if configured.charts.is_empty() => return Ok(None),
+        Ok(configured) => configured,
         Err(err) => {
             record_universe_refresh_error(server, err.to_string());
             return Err(err);
         }
     };
-    record_universe_refresh_success(server, config, &charts);
+    record_universe_refresh_success(server, config, &configured.charts, &configured.contracts);
     let mut source = WebSocketUpstreamTickSource::connect_with_tick_charts(
         config.upstream_market_url.clone(),
-        charts,
+        configured.charts,
     )
     .await?;
     record_upstream_progress(server, source.take_progress());
@@ -78,27 +84,46 @@ async fn connect_configured_upstream_for_pump(
 async fn configured_upstream_tick_charts(
     config: &RelayConfig,
 ) -> RelayResult<Vec<crate::upstream::UpstreamTickChart>> {
+    Ok(configured_upstream_tick_charts_with_contracts(config)
+        .await?
+        .charts)
+}
+
+async fn configured_upstream_tick_charts_with_contracts(
+    config: &RelayConfig,
+) -> RelayResult<ConfiguredTickCharts> {
     if !config.futures_symbols.is_empty() {
-        return config.upstream_tick_charts();
+        let charts = config.upstream_tick_charts()?;
+        let contracts = charts
+            .iter()
+            .map(|chart| FuturesContract::from_symbol(chart.symbol(), false))
+            .collect::<RelayResult<Vec<_>>>()?;
+        return Ok(ConfiguredTickCharts { charts, contracts });
     }
     if config.futures_product_filter == crate::FuturesProductFilter::None {
-        return Ok(Vec::new());
+        return Ok(ConfiguredTickCharts {
+            charts: Vec::new(),
+            contracts: Vec::new(),
+        });
     }
     #[cfg(feature = "metadata")]
     {
         let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
-        let symbols = crate::universe::resolve_futures_symbols_with_selection(
+        let contracts = crate::universe::resolve_futures_contracts_with_selection(
             &config.futures_product_filter,
             config.futures_universe_selection(),
             &mut resolver,
         )
         .await?;
-        if symbols.is_empty() {
+        if contracts.is_empty() {
             return Err(RelayError::invalid_config(
                 "futures product discovery returned no active contracts",
             ));
         }
-        config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))
+        let charts = config.upstream_tick_charts_for_symbols(
+            contracts.iter().map(|contract| contract.symbol.as_str()),
+        )?;
+        Ok(ConfiguredTickCharts { charts, contracts })
     }
     #[cfg(not(feature = "metadata"))]
     {
@@ -212,16 +237,26 @@ fn record_universe_refresh_success(
     server: &RelayServer,
     config: &RelayConfig,
     charts: &[UpstreamTickChart],
+    contracts: &[FuturesContract],
 ) {
     let engine = server.engine();
     let upstream_ins_list_chars = max_ins_list_chars(charts);
+    let unix_secs = current_unix_secs();
     match engine.lock() {
-        Ok(mut engine) => engine.record_universe_refresh_success_for_symbols(
-            charts.iter().map(UpstreamTickChart::symbol),
+        Ok(mut engine) if contracts.is_empty() => engine
+            .record_universe_refresh_success_for_symbols(
+                charts.iter().map(UpstreamTickChart::symbol),
+                upstream_ins_list_chars,
+                config.upstream_ins_list_limits.warn_chars,
+                config.upstream_ins_list_limits.max_chars,
+                unix_secs,
+            ),
+        Ok(mut engine) => engine.record_universe_refresh_success_for_contracts(
+            contracts,
             upstream_ins_list_chars,
             config.upstream_ins_list_limits.warn_chars,
             config.upstream_ins_list_limits.max_chars,
-            current_unix_secs(),
+            unix_secs,
         ),
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }

@@ -6,33 +6,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 #[cfg(feature = "metadata")]
-use serde_json::{Value, json};
-#[cfg(feature = "metadata")]
 use tokio::time::Instant;
-use tqsdk_core::Quote;
 #[cfg(feature = "metadata")]
 use tqsdk_core::RuntimeReader;
+use tqsdk_core::{Quote, TradingTime};
 #[cfg(feature = "metadata")]
-use tqsdk_session::{SessionClient, SessionClientBuilder};
+use tqsdk_session::{InstrumentClass, SessionClient, SessionClientBuilder, SymbolInfo};
 
 #[cfg(feature = "metadata")]
 use crate::config::{DEFAULT_FUTURES_METADATA_BATCH_SIZE, RelayConfig};
 use crate::error::{RelayError, RelayResult};
 
-#[cfg(feature = "metadata")]
-const FUTURES_DISCOVERY_SYMBOL_INFO_QUERY: &str = r#"query($instrument_id:[String]){
-  multi_symbol_info(instrument_id: $instrument_id){
-    ... on basic {
-      instrument_id
-      exchange_id
-      class
-    }
-    ... on future {
-      expired
-      product_id
-    }
-  }
-}"#;
 #[cfg(feature = "metadata")]
 const FUTURES_ACTIVITY_QUOTE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "metadata")]
@@ -86,12 +70,13 @@ impl FuturesProductCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FuturesContract {
     pub symbol: String,
     pub exchange_id: String,
     pub product_id: String,
     pub expired: bool,
+    pub trading_time: TradingTime,
 }
 
 impl FuturesContract {
@@ -100,6 +85,22 @@ impl FuturesContract {
         exchange_id: impl Into<String>,
         product_id: impl Into<String>,
         expired: bool,
+    ) -> RelayResult<Self> {
+        Self::new_with_trading_time(
+            symbol,
+            exchange_id,
+            product_id,
+            expired,
+            TradingTime::default(),
+        )
+    }
+
+    pub fn new_with_trading_time(
+        symbol: impl Into<String>,
+        exchange_id: impl Into<String>,
+        product_id: impl Into<String>,
+        expired: bool,
+        trading_time: TradingTime,
     ) -> RelayResult<Self> {
         let symbol = symbol.into().trim().to_string();
         let exchange_id = exchange_id.into().trim().to_string();
@@ -124,6 +125,7 @@ impl FuturesContract {
             exchange_id,
             product_id,
             expired,
+            trading_time,
         })
     }
 
@@ -140,11 +142,23 @@ impl FuturesContract {
     }
 
     pub fn from_quote(quote: &Quote) -> RelayResult<Self> {
-        Self::new(
+        Self::new_with_trading_time(
             quote.instrument_id.clone(),
             quote.exchange_id.clone(),
             quote.product_id.clone(),
             quote.expired,
+            quote.trading_time.clone(),
+        )
+    }
+
+    #[cfg(feature = "metadata")]
+    pub fn from_symbol_info(info: SymbolInfo) -> RelayResult<Self> {
+        Self::new_with_trading_time(
+            info.instrument_id.to_string(),
+            info.exchange_id,
+            info.product_id,
+            info.expired,
+            info.trading_time,
         )
     }
 
@@ -313,17 +327,11 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
         }
         let mut contracts = Vec::new();
         for batch in futures_metadata_symbol_batches(&symbols, self.metadata_batch_size)? {
-            let symbol_list: Vec<String> =
-                batch.iter().map(|symbol| (*symbol).to_string()).collect();
-            let payload = self
-                .client
-                .query_graphql_value(
-                    FUTURES_DISCOVERY_SYMBOL_INFO_QUERY,
-                    Some(json!({ "instrument_id": symbol_list })),
-                )
-                .await
-                .map_err(|err| RelayError::Transport(format!("futures metadata failed: {err}")))?;
-            contracts.extend(parse_futures_discovery_contracts(&payload)?);
+            let infos =
+                self.client.query_symbol_info(&batch).await.map_err(|err| {
+                    RelayError::Transport(format!("futures metadata failed: {err}"))
+                })?;
+            contracts.extend(futures_contracts_from_symbol_info(infos)?);
         }
         Ok(contracts)
     }
@@ -360,44 +368,12 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
 }
 
 #[cfg(feature = "metadata")]
-fn parse_futures_discovery_contracts(payload: &Value) -> RelayResult<Vec<FuturesContract>> {
-    let Some(symbols) = payload
-        .get("result")
-        .and_then(|result| result.get("multi_symbol_info"))
-        .and_then(Value::as_array)
-    else {
-        return Ok(Vec::new());
-    };
-
-    let mut contracts = Vec::new();
-    for symbol in symbols {
-        let Some(node) = symbol.as_object() else {
-            continue;
-        };
-        if node.get("class").and_then(Value::as_str) != Some("FUTURE") {
-            continue;
-        }
-        let Some(instrument_id) = node.get("instrument_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(exchange_id) = node.get("exchange_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(product_id) = node.get("product_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let expired = node
-            .get("expired")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        contracts.push(FuturesContract::new(
-            instrument_id,
-            exchange_id,
-            product_id,
-            expired,
-        )?);
-    }
-    Ok(contracts)
+fn futures_contracts_from_symbol_info(infos: Vec<SymbolInfo>) -> RelayResult<Vec<FuturesContract>> {
+    infos
+        .into_iter()
+        .filter(|info| info.class == InstrumentClass::Future)
+        .map(FuturesContract::from_symbol_info)
+        .collect()
 }
 
 pub fn futures_metadata_symbol_batches(
@@ -434,6 +410,21 @@ pub async fn resolve_futures_symbols_with_selection<R>(
 where
     R: FuturesUniverseResolver + Send,
 {
+    let contracts = resolve_futures_contracts_with_selection(filter, selection, resolver).await?;
+    Ok(contracts
+        .into_iter()
+        .map(|contract| contract.symbol)
+        .collect())
+}
+
+pub async fn resolve_futures_contracts_with_selection<R>(
+    filter: &FuturesProductFilter,
+    selection: FuturesUniverseSelection,
+    resolver: &mut R,
+) -> RelayResult<Vec<FuturesContract>>
+where
+    R: FuturesUniverseResolver + Send,
+{
     if selection.active_contracts_per_product == Some(0) {
         return Err(RelayError::invalid_config(
             "active_contracts_per_product must be greater than zero",
@@ -443,7 +434,7 @@ where
         FuturesProductFilter::None => Ok(Vec::new()),
         FuturesProductFilter::All => {
             let contracts = resolver.active_futures().await?;
-            resolve_active_symbols(contracts, |_| true, selection, resolver).await
+            resolve_active_contracts(contracts, |_| true, selection, resolver).await
         }
         FuturesProductFilter::Products(products) => {
             if products.is_empty() {
@@ -453,7 +444,7 @@ where
             }
             let products = products.clone();
             let contracts = resolver.active_futures().await?;
-            resolve_active_symbols(
+            resolve_active_contracts(
                 contracts,
                 |contract| {
                     products
@@ -468,17 +459,17 @@ where
     }
 }
 
-async fn resolve_active_symbols<R>(
+async fn resolve_active_contracts<R>(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
     selection: FuturesUniverseSelection,
     resolver: &mut R,
-) -> RelayResult<Vec<String>>
+) -> RelayResult<Vec<FuturesContract>>
 where
     R: FuturesUniverseResolver + Send,
 {
     let Some(active_contracts_per_product) = selection.active_contracts_per_product else {
-        return active_symbols(contracts, matches);
+        return active_contracts(contracts, matches);
     };
     let main_symbols = resolver
         .main_futures()
@@ -486,7 +477,7 @@ where
         .into_iter()
         .collect::<BTreeSet<_>>();
     if active_contracts_per_product == 1 {
-        return main_active_symbols(contracts, matches, &main_symbols);
+        return main_active_contracts(contracts, matches, &main_symbols);
     }
     let candidate_symbols = contracts
         .iter()
@@ -494,7 +485,7 @@ where
         .map(|contract| contract.symbol.clone())
         .collect::<Vec<_>>();
     let quote_snapshots = resolver.quote_snapshots(&candidate_symbols).await?;
-    active_symbols_by_activity(
+    active_contracts_by_activity(
         contracts,
         matches,
         active_contracts_per_product,
@@ -503,31 +494,31 @@ where
     )
 }
 
-fn active_symbols(
+fn active_contracts(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
-) -> RelayResult<Vec<String>> {
-    let mut symbols = BTreeSet::new();
+) -> RelayResult<Vec<FuturesContract>> {
+    let mut selected = BTreeMap::new();
     for contract in contracts {
         if !contract.expired && matches(&contract) {
-            symbols.insert(contract.symbol);
+            selected.insert(contract.symbol.clone(), contract);
         }
     }
-    Ok(symbols.into_iter().collect())
+    Ok(selected.into_values().collect())
 }
 
-fn main_active_symbols(
+fn main_active_contracts(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
     main_symbols: &BTreeSet<String>,
-) -> RelayResult<Vec<String>> {
-    let mut symbols = BTreeSet::new();
+) -> RelayResult<Vec<FuturesContract>> {
+    let mut selected = BTreeMap::new();
     for contract in contracts {
         if !contract.expired && matches(&contract) && main_symbols.contains(&contract.symbol) {
-            symbols.insert(contract.symbol);
+            selected.insert(contract.symbol.clone(), contract);
         }
     }
-    Ok(symbols.into_iter().collect())
+    Ok(selected.into_values().collect())
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -536,13 +527,13 @@ struct ActivityMetrics {
     volume: i64,
 }
 
-fn active_symbols_by_activity(
+fn active_contracts_by_activity(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
     active_contracts_per_product: usize,
     main_symbols: &BTreeSet<String>,
     quote_snapshots: &[Quote],
-) -> RelayResult<Vec<String>> {
+) -> RelayResult<Vec<FuturesContract>> {
     if active_contracts_per_product == 0 {
         return Err(RelayError::invalid_config(
             "active_contracts_per_product must be greater than zero",
@@ -570,30 +561,33 @@ fn active_symbols_by_activity(
         }
     }
 
-    let mut symbols = BTreeSet::new();
+    let mut selected_by_symbol = BTreeMap::new();
     for contracts in groups.values_mut() {
         contracts.sort_by(|left, right| compare_activity(left, right, &quote_metrics));
-        let main_symbol = contracts
+        let main_contract = contracts
             .iter()
             .find(|contract| main_symbols.contains(&contract.symbol))
-            .map(|contract| contract.symbol.clone());
+            .cloned();
         let mut selected = 0usize;
-        if let Some(symbol) = main_symbol.as_ref() {
-            symbols.insert(symbol.clone());
+        if let Some(contract) = main_contract.as_ref() {
+            selected_by_symbol.insert(contract.symbol.clone(), contract.clone());
             selected += 1;
         }
         for contract in contracts {
             if selected >= active_contracts_per_product {
                 break;
             }
-            if main_symbol.as_deref() == Some(contract.symbol.as_str()) {
+            if main_contract
+                .as_ref()
+                .is_some_and(|main| main.symbol == contract.symbol)
+            {
                 continue;
             }
-            symbols.insert(contract.symbol.clone());
+            selected_by_symbol.insert(contract.symbol.clone(), contract.clone());
             selected += 1;
         }
     }
-    Ok(symbols.into_iter().collect())
+    Ok(selected_by_symbol.into_values().collect())
 }
 
 fn compare_activity(
@@ -674,10 +668,11 @@ fn collect_available_quotes(
 
 #[cfg(all(test, feature = "metadata"))]
 mod tests {
-    use serde_json::json;
     use tqsdk_core::MarketSessionTarget;
+    use tqsdk_core::{Symbol, TradingTime};
+    use tqsdk_session::{InstrumentClass, SymbolInfo};
 
-    use super::{parse_futures_discovery_contracts, session_client_builder_for_futures_discovery};
+    use super::{futures_contracts_from_symbol_info, session_client_builder_for_futures_discovery};
 
     #[test]
     fn futures_discovery_uses_stock_query_market_target() {
@@ -691,45 +686,105 @@ mod tests {
     }
 
     #[test]
-    fn parses_minimal_futures_discovery_metadata() {
-        let payload = json!({
-            "result": {
-                "multi_symbol_info": [
-                    {
-                        "instrument_id": "SHFE.au2602",
-                        "exchange_id": "SHFE",
-                        "class": "FUTURE",
-                        "expired": false,
-                        "product_id": "au"
-                    },
-                    {
-                        "instrument_id": "SSE.600000",
-                        "exchange_id": "SSE",
-                        "class": "STOCK",
-                        "expired": false,
-                        "product_id": "600000"
-                    },
-                    {
-                        "instrument_id": "DCE.m2609",
-                        "exchange_id": "DCE",
-                        "class": "FUTURE",
-                        "expired": true,
-                        "product_id": "m"
-                    }
-                ]
-            }
-        });
-
-        let contracts = parse_futures_discovery_contracts(&payload).unwrap();
+    fn maps_symbol_info_to_futures_contracts_with_trading_time() {
+        let contracts = futures_contracts_from_symbol_info(vec![
+            symbol_info(
+                "SHFE.au2602",
+                InstrumentClass::Future,
+                false,
+                trading_time(&[("09:00:00", "10:15:00")], &[("21:00:00", "02:30:00")]),
+            ),
+            symbol_info(
+                "SSE.600000",
+                InstrumentClass::Stock,
+                false,
+                TradingTime::default(),
+            ),
+            symbol_info(
+                "DCE.m2609",
+                InstrumentClass::Future,
+                true,
+                trading_time(&[("09:00:00", "10:15:00")], &[]),
+            ),
+        ])
+        .unwrap();
 
         assert_eq!(contracts.len(), 2);
         assert_eq!(contracts[0].symbol, "SHFE.au2602");
         assert_eq!(contracts[0].exchange_id, "SHFE");
         assert_eq!(contracts[0].product_id, "au");
         assert!(!contracts[0].expired);
+        assert_eq!(contracts[0].trading_time.night[0][1], "02:30:00");
         assert_eq!(contracts[1].symbol, "DCE.m2609");
         assert_eq!(contracts[1].exchange_id, "DCE");
         assert_eq!(contracts[1].product_id, "m");
         assert!(contracts[1].expired);
+    }
+
+    fn symbol_info(
+        symbol: &str,
+        class: InstrumentClass,
+        expired: bool,
+        trading_time: TradingTime,
+    ) -> SymbolInfo {
+        let (exchange_id, product_id) = symbol
+            .split_once('.')
+            .map(|(exchange_id, instrument_id)| {
+                let product_id = instrument_id
+                    .chars()
+                    .take_while(|ch| !ch.is_ascii_digit())
+                    .collect::<String>();
+                (exchange_id.to_string(), product_id)
+            })
+            .unwrap();
+        SymbolInfo {
+            instrument_id: Symbol::new(symbol),
+            instrument_name: String::new(),
+            exchange_id,
+            product_id,
+            ins_class: String::new(),
+            class,
+            price_tick: None,
+            volume_multiple: None,
+            open_limit: None,
+            max_limit_order_volume: None,
+            max_market_order_volume: None,
+            min_limit_order_volume: None,
+            min_market_order_volume: None,
+            open_max_market_order_volume: None,
+            open_max_limit_order_volume: None,
+            open_min_market_order_volume: None,
+            open_min_limit_order_volume: None,
+            underlying_symbol: None,
+            strike_price: None,
+            expired,
+            expire_datetime_secs: None,
+            expire_rest_days: None,
+            delivery_year: None,
+            delivery_month: None,
+            last_exercise_datetime_secs: None,
+            exercise_year: None,
+            exercise_month: None,
+            option_class: None,
+            upper_limit: None,
+            lower_limit: None,
+            pre_settlement: None,
+            pre_open_interest: None,
+            pre_close: None,
+            trading_time,
+        }
+    }
+
+    fn trading_time(day: &[(&str, &str)], night: &[(&str, &str)]) -> TradingTime {
+        TradingTime {
+            day: day
+                .iter()
+                .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+                .collect(),
+            night: night
+                .iter()
+                .map(|(start, end)| vec![(*start).to_string(), (*end).to_string()])
+                .collect(),
+        }
     }
 }

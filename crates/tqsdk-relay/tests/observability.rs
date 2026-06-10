@@ -1,7 +1,8 @@
 use chrono::{Datelike, Local, TimeZone};
+use tqsdk_core::TradingTime;
 use tqsdk_relay::{
-    ClientId, DownstreamCommand, RelayConfig, RelayEngine, RelaySourceStage, RelaySourceStatus,
-    RelayStartupReport, RelayTickRow, SetChartCommand,
+    ClientId, DownstreamCommand, FuturesContract, RelayConfig, RelayEngine, RelaySourceStage,
+    RelaySourceStatus, RelayStartupReport, RelayTickRow, SetChartCommand,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -203,6 +204,40 @@ fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
         .find(|symbol| symbol.symbol == "SHFE.au2602")
         .unwrap();
     assert_eq!(au.status, tqsdk_relay::SymbolStatus::Stale);
+}
+
+#[test]
+fn engine_records_query_symbol_info_trading_time_on_universe_refresh() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(14, 0, 0);
+    let contract = FuturesContract::new_with_trading_time(
+        "DCE.m2609",
+        "DCE",
+        "m",
+        false,
+        TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "10:15:00".to_string()]],
+            night: Vec::new(),
+        },
+    )
+    .unwrap();
+    engine.record_universe_refresh_success_for_contracts(&[contract], 9, None, None, now / 1_000);
+    engine
+        .ingest_tick_at_for_test("DCE.m2609", tick(1), now - 90_000)
+        .unwrap();
+
+    let snapshot =
+        engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+    let symbol = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "DCE.m2609")
+        .unwrap();
+
+    assert_eq!(symbol.status, tqsdk_relay::SymbolStatus::Closed);
+    assert!(!symbol.problem);
+    assert_eq!(snapshot.summary.closed, 1);
+    assert_eq!(snapshot.summary.stale, 0);
 }
 
 #[test]

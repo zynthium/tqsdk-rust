@@ -174,8 +174,10 @@ V1 是：
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
-  - relay 内部可用 metadata 查询动态发现当前活跃期货合约集合，使用轻量
-    `multi_symbol_info` typed 字段过滤产品和过期状态，但不向下游代理 query/auth
+  - relay 内部可用 metadata 查询动态发现当前活跃期货合约集合，按批调用
+    `query_symbol_info` 获取 typed 字段，使用 `exchange_id`、`product_id`、
+    `expired` 过滤合约，并使用 `trading_time` 判断合约交易时间段；不向下游代理
+    query/auth
   - 产品发现可选择只保留每品种主力合约，或每品种活跃度前 N 合约：主力来自
     `query_cont_quotes`，N 大于 1 时其余按 quote `open_interest` / `volume` 排名补足
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
