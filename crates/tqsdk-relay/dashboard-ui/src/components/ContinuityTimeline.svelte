@@ -318,12 +318,11 @@
     height: 20px;
     width: 100%;
     filter: drop-shadow(0 0 3px currentColor);
-    transition: filter 0.2s ease, transform 0.2s ease;
+    transition: filter 0.15s ease;
   }
 
   .sparkline-container:hover svg {
-    filter: drop-shadow(0 0 6px currentColor) brightness(1.3);
-    transform: scaleY(1.2);
+    filter: drop-shadow(0 0 6px currentColor) brightness(1.4) saturate(1.5);
   }
 
   .timeline {
@@ -449,14 +448,11 @@
     height: 9px;
     border-radius: 1px;
     background: #1b3343;
-    transition: transform 0.1s ease, filter 0.1s ease;
-    position: relative;
+    transition: filter 0.15s ease;
   }
 
   .cell:hover {
-    transform: scale(1.5);
-    z-index: 10;
-    filter: brightness(1.3);
+    filter: brightness(1.5) saturate(1.5) contrast(1.2);
   }
 
   .live {
