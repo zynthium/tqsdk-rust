@@ -1,8 +1,14 @@
 <script lang="ts">
   import { EXCHANGES, exchangeOf } from '../lib/timeline';
+  import { formatDuration, formatNumber } from '../lib/format';
+  import { statusLabel } from '../lib/integrity-model';
   import type { SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
 
-  let { buckets, rows }: { buckets: Array<TimelineSample | null>; rows: SymbolRow[] } = $props();
+  let { buckets, rows, selectedSymbol = $bindable(null) }: {
+    buckets: Array<TimelineSample | null>;
+    rows: SymbolRow[];
+    selectedSymbol?: string | null;
+  } = $props();
   let expandedExchanges = $state<string[]>([]);
 
   type TimelineDefinition =
@@ -30,11 +36,13 @@
         label: string;
         detail: string;
         symbol: string;
+        row: SymbolRow;
         emptySeverity?: TimelineSeverity;
         severity: (sample: TimelineSample) => TimelineSeverity;
       };
 
   let exchangeRows = $derived(EXCHANGES.filter((exchange) => rows.some((row) => exchangeOf(row.symbol) === exchange)));
+  let selected = $derived(rows.find((row) => row.symbol === selectedSymbol) ?? null);
   let definitions = $derived<TimelineDefinition[]>([
     { kind: 'summary', key: 'global', label: '全局', severity: (sample: TimelineSample) => sample.globalSeverity },
     { kind: 'summary', key: 'subscribed', label: '订阅', severity: (sample: TimelineSample) => sample.subscribedSeverity },
@@ -62,6 +70,7 @@
           label: row.instrument_name ?? row.symbol,
           detail: row.subscribed ? '订阅' : '',
           symbol: row.symbol,
+          row,
           emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
           severity: (sample: TimelineSample) => sample.symbolSeverity[row.symbol] ?? 'closed',
         })),
@@ -86,6 +95,10 @@
     if (row.subscribed) return 2;
     if (row.problem_severity === 'closed') return 4;
     return 3;
+  }
+
+  function subscriberCount(row: SymbolRow): number {
+    return row.quote_subscriber_count + row.chart_subscriber_count;
   }
 
   function toggleExchange(exchange: string) {
@@ -122,10 +135,23 @@
           <em>{definition.issueCount}/{definition.totalCount}</em>
         </button>
       {:else if definition.kind === 'symbol'}
-        <div class="row-label symbol-row" title={definition.symbol}>
-          <span>{definition.label}</span>
-          <em>{definition.detail}</em>
-        </div>
+        <button
+          type="button"
+          data-testid="timeline-symbol-row"
+          class:selected={definition.symbol === selectedSymbol}
+          class="row-label symbol-row"
+          title={definition.symbol}
+          aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${formatDuration(definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
+          onclick={() => (selectedSymbol = definition.symbol)}
+        >
+          <span class="symbol-name">{definition.label}</span>
+          <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
+          <em>距 {formatDuration(definition.row.receive_gap_ms)}</em>
+          <em>延 {formatDuration(definition.row.market_time_lag_ms)}</em>
+          <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
+          <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
+          <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
+        </button>
       {:else}
         <div class="row-label">{definition.label}</div>
       {/if}
@@ -135,6 +161,18 @@
     {/each}
     <div class="axis"><span>-5m</span><span>now</span></div>
   </div>
+  {#if selected}
+    <div class="health-detail">
+      <span title={selected.symbol}>{selected.instrument_name ?? selected.symbol}</span>
+      <span>last price <b>{formatNumber(selected.last_price)}</b></span>
+      <span>volume <b>{formatNumber(selected.last_volume)}</b></span>
+      <span>open interest <b>{formatNumber(selected.last_open_interest)}</b></span>
+      <span>invalid rows <b>{formatNumber(selected.invalid_rows)}</b></span>
+      {#if selected.last_invalid_row_error}
+        <span class="error" title={selected.last_invalid_row_error}>{selected.last_invalid_row_error}</span>
+      {/if}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -169,7 +207,7 @@
   }
 
   .timeline {
-    --timeline-label-width: clamp(80px, 13vw, 112px);
+    --timeline-label-width: clamp(280px, 31vw, 520px);
 
     position: relative;
     z-index: 1;
@@ -206,9 +244,18 @@
   .exchange-row,
   .symbol-row {
     display: grid;
-    grid-template-columns: auto 1fr auto;
     align-items: center;
     gap: 4px;
+  }
+
+  .exchange-row {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .symbol-row {
+    grid-template-columns: minmax(72px, 1fr) 44px 58px 58px 70px 54px 50px;
+    padding-left: 12px;
+    color: #9fc4d5;
   }
 
   .caret {
@@ -226,16 +273,56 @@
     white-space: nowrap;
   }
 
-  .symbol-row {
-    padding-left: 16px;
-    color: #9fc4d5;
-  }
-
   .exchange-row span:nth-child(2),
-  .symbol-row span {
+  .symbol-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .symbol-row.selected {
+    color: var(--relay-info);
+  }
+
+  .badge {
+    justify-self: start;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--relay-live);
+    font-size: 9px;
+    line-height: 1.2;
+  }
+
+  .badge.closed {
+    color: var(--relay-closed);
+  }
+
+  .badge.stale,
+  .badge.missing {
+    color: var(--relay-warn);
+  }
+
+  .badge.inactive {
+    color: var(--relay-muted);
+  }
+
+  .risk {
+    color: var(--relay-live);
+    font-size: 9px;
+    font-weight: 850;
+  }
+
+  .risk.warn {
+    color: var(--relay-warn);
+  }
+
+  .risk.bad {
+    color: var(--relay-bad);
+  }
+
+  .risk.closed {
+    color: var(--relay-closed);
   }
 
   .cell {
@@ -279,5 +366,49 @@
     padding-top: 2px;
     color: #66889a;
     font-size: 9px;
+  }
+
+  .health-detail {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: var(--relay-muted);
+    font-size: 11px;
+  }
+
+  .health-detail span {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 4px;
+    padding: 5px 7px;
+    background: #071929;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .health-detail b {
+    color: var(--relay-text);
+  }
+
+  .health-detail .error {
+    max-width: 300px;
+    color: var(--relay-bad);
+  }
+
+  @media (max-width: 900px) {
+    .timeline {
+      --timeline-label-width: 260px;
+    }
+
+    .symbol-row {
+      grid-template-columns: minmax(72px, 1fr) 42px 52px 52px;
+    }
+
+    .symbol-row em:nth-of-type(n + 3),
+    .symbol-row .risk {
+      display: none;
+    }
   }
 </style>
