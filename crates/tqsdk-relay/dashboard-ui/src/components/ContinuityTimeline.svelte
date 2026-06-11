@@ -235,9 +235,7 @@
       <div class="tooltip-body">
         <div><span>接收延迟</span><b>{formatDuration(hoveredSymbolRow.receive_gap_ms)}</b></div>
         <div><span>行情延时</span><b>{formatDuration(hoveredSymbolRow.market_time_lag_ms)}</b></div>
-        <div><span>最新价</span><b>{formatNumber(hoveredSymbolRow.last_price)}</b></div>
-        <div><span>成交量</span><b>{formatNumber(hoveredSymbolRow.last_volume)}</b></div>
-        <div><span>持仓量</span><b>{formatNumber(hoveredSymbolRow.last_open_interest)}</b></div>
+
         <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
         {#if hoveredSymbolRow.last_invalid_row_error}
           <div class="error" title={hoveredSymbolRow.last_invalid_row_error}>{hoveredSymbolRow.last_invalid_row_error}</div>
@@ -320,6 +318,12 @@
     height: 20px;
     width: 100%;
     filter: drop-shadow(0 0 3px currentColor);
+    transition: filter 0.2s ease, transform 0.2s ease;
+  }
+
+  .sparkline-container:hover svg {
+    filter: drop-shadow(0 0 6px currentColor) brightness(1.3);
+    transform: scaleY(1.2);
   }
 
   .timeline {
@@ -445,6 +449,14 @@
     height: 9px;
     border-radius: 1px;
     background: #1b3343;
+    transition: transform 0.1s ease, filter 0.1s ease;
+    position: relative;
+  }
+
+  .cell:hover {
+    transform: scale(1.5);
+    z-index: 10;
+    filter: brightness(1.3);
   }
 
   .live {
