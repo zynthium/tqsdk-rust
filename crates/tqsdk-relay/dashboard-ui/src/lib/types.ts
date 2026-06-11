@@ -178,6 +178,7 @@ export type IntegrityModel = {
   invalidRowCount: number;
   activeInvalidRowCount: number;
   confirmedIntegrityIssueCount: number;
+  outOfOrderRowCount: number;
   estimatedMissingRows: number;
   upstreamIdleMs: number | null;
   eventIdleMs: number | null;
