@@ -136,6 +136,7 @@ export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad';
 export type TimelineSample = {
   sampledAt: number;
   exchangeSeverity: Record<string, TimelineSeverity>;
+  symbolSeverity: Record<string, TimelineSeverity>;
   subscribedSeverity: TimelineSeverity;
   globalSeverity: TimelineSeverity;
 };
@@ -148,6 +149,7 @@ export type LocalIncident = {
   id: string;
   at: number;
   scope: string;
+  scope_symbol: string;
   type: string;
   detail: string;
   impact: string;

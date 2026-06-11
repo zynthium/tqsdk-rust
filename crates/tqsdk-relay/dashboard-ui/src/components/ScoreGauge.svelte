@@ -1,12 +1,12 @@
 <script lang="ts">
   import { formatNumber } from '../lib/format';
 
-  let { score }: { score: number } = $props();
+  let { score, compact = false }: { score: number; compact?: boolean } = $props();
   let clamped = $derived(Math.max(0, Math.min(100, score)));
   let tone = $derived(clamped < 60 ? 'bad' : clamped < 85 ? 'warn' : 'live');
 </script>
 
-<div class={`gauge ${tone}`} style={`--angle:${clamped * 3.6}deg`} data-testid="score-gauge">
+<div class={`gauge ${tone} ${compact ? 'compact' : ''}`} style={`--angle:${clamped * 3.6}deg`} data-testid="score-gauge">
   <div class="inner">
     <span>连续性评分</span>
     <b>{formatNumber(Math.round(clamped))}</b>
@@ -33,6 +33,11 @@
     background: conic-gradient(var(--relay-bad) var(--angle), #143346 0);
   }
 
+  .gauge.compact {
+    width: 112px;
+    height: 112px;
+  }
+
   .inner {
     width: 108px;
     height: 108px;
@@ -44,6 +49,11 @@
     text-align: center;
   }
 
+  .compact .inner {
+    width: 86px;
+    height: 86px;
+  }
+
   span {
     color: var(--relay-muted);
     font-size: 11px;
@@ -53,6 +63,10 @@
     color: var(--relay-text);
     font-size: 26px;
     line-height: 1.1;
+  }
+
+  .compact b {
+    font-size: 22px;
   }
 
   em {

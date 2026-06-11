@@ -321,6 +321,10 @@ impl RelayEngine {
             unix_secs.saturating_mul(1_000),
         );
         for contract in contracts {
+            if let Some(instrument_name) = contract.instrument_name.as_deref() {
+                self.symbol_metrics
+                    .record_symbol_instrument_name(&contract.symbol, instrument_name);
+            }
             self.symbol_metrics
                 .record_symbol_trading_time(&contract.symbol, &contract.trading_time);
         }

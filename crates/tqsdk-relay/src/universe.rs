@@ -73,6 +73,7 @@ impl FuturesProductCode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuturesContract {
     pub symbol: String,
+    pub instrument_name: Option<String>,
     pub exchange_id: String,
     pub product_id: String,
     pub expired: bool,
@@ -122,6 +123,7 @@ impl FuturesContract {
         }
         Ok(Self {
             symbol,
+            instrument_name: None,
             exchange_id,
             product_id,
             expired,
@@ -142,24 +144,34 @@ impl FuturesContract {
     }
 
     pub fn from_quote(quote: &Quote) -> RelayResult<Self> {
-        Self::new_with_trading_time(
+        let mut contract = Self::new_with_trading_time(
             quote.instrument_id.clone(),
             quote.exchange_id.clone(),
             quote.product_id.clone(),
             quote.expired,
             quote.trading_time.clone(),
-        )
+        )?;
+        let instrument_name = quote.instrument_name.trim();
+        if !instrument_name.is_empty() {
+            contract.instrument_name = Some(instrument_name.to_string());
+        }
+        Ok(contract)
     }
 
     #[cfg(feature = "metadata")]
     pub fn from_symbol_info(info: SymbolInfo) -> RelayResult<Self> {
-        Self::new_with_trading_time(
+        let mut contract = Self::new_with_trading_time(
             info.instrument_id.to_string(),
             info.exchange_id,
             info.product_id,
             info.expired,
             info.trading_time,
-        )
+        )?;
+        let instrument_name = info.instrument_name.trim();
+        if !instrument_name.is_empty() {
+            contract.instrument_name = Some(instrument_name.to_string());
+        }
+        Ok(contract)
     }
 
     fn matches_product(&self, product: &FuturesProductCode) -> bool {
@@ -308,7 +320,10 @@ impl SessionFuturesUniverseResolver {
 }
 
 #[cfg(feature = "metadata")]
-fn session_client_builder_for_futures_discovery(user: &str, pass: &str) -> SessionClientBuilder {
+pub(crate) fn session_client_builder_for_futures_discovery(
+    user: &str,
+    pass: &str,
+) -> SessionClientBuilder {
     SessionClientBuilder::new(user, pass)
         .enable_query()
         .stock_market()
@@ -368,7 +383,9 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
 }
 
 #[cfg(feature = "metadata")]
-fn futures_contracts_from_symbol_info(infos: Vec<SymbolInfo>) -> RelayResult<Vec<FuturesContract>> {
+pub(crate) fn futures_contracts_from_symbol_info(
+    infos: Vec<SymbolInfo>,
+) -> RelayResult<Vec<FuturesContract>> {
     infos
         .into_iter()
         .filter(|info| info.class == InstrumentClass::Future)
@@ -690,18 +707,21 @@ mod tests {
         let contracts = futures_contracts_from_symbol_info(vec![
             symbol_info(
                 "SHFE.au2602",
+                "沪金2602",
                 InstrumentClass::Future,
                 false,
                 trading_time(&[("09:00:00", "10:15:00")], &[("21:00:00", "02:30:00")]),
             ),
             symbol_info(
                 "SSE.600000",
+                "浦发银行",
                 InstrumentClass::Stock,
                 false,
                 TradingTime::default(),
             ),
             symbol_info(
                 "DCE.m2609",
+                "豆粕2609",
                 InstrumentClass::Future,
                 true,
                 trading_time(&[("09:00:00", "10:15:00")], &[]),
@@ -713,16 +733,19 @@ mod tests {
         assert_eq!(contracts[0].symbol, "SHFE.au2602");
         assert_eq!(contracts[0].exchange_id, "SHFE");
         assert_eq!(contracts[0].product_id, "au");
+        assert_eq!(contracts[0].instrument_name.as_deref(), Some("沪金2602"));
         assert!(!contracts[0].expired);
         assert_eq!(contracts[0].trading_time.night[0][1], "02:30:00");
         assert_eq!(contracts[1].symbol, "DCE.m2609");
         assert_eq!(contracts[1].exchange_id, "DCE");
         assert_eq!(contracts[1].product_id, "m");
+        assert_eq!(contracts[1].instrument_name.as_deref(), Some("豆粕2609"));
         assert!(contracts[1].expired);
     }
 
     fn symbol_info(
         symbol: &str,
+        instrument_name: &str,
         class: InstrumentClass,
         expired: bool,
         trading_time: TradingTime,
@@ -739,7 +762,7 @@ mod tests {
             .unwrap();
         SymbolInfo {
             instrument_id: Symbol::new(symbol),
-            instrument_name: String::new(),
+            instrument_name: instrument_name.to_string(),
             exchange_id,
             product_id,
             ins_class: String::new(),

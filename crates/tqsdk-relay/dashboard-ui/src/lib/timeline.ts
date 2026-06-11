@@ -19,15 +19,24 @@ export function timelineSeverityForRows(rows: SymbolRow[]): TimelineSeverity {
 
 export function pushTimelineSample(history: TimelineHistory, model: IntegrityModel): TimelineHistory {
   const exchangeSeverity: Record<string, TimelineSeverity> = {};
+  const symbolSeverity: Record<string, TimelineSeverity> = {};
   for (const exchange of EXCHANGES) {
     exchangeSeverity[exchange] = timelineSeverityForRows(
       model.rows.filter((row) => exchangeOf(row.symbol) === exchange),
     );
   }
+  for (const row of model.rows) {
+    symbolSeverity[row.symbol] = row.problem_severity === 'bad' || row.problem_severity === 'warn'
+      ? row.problem_severity
+      : row.status === 'closed'
+        ? 'closed'
+        : 'live';
+  }
   const subscribedRows = model.rows.filter((row) => row.subscribed);
   const sample: TimelineSample = {
     sampledAt: model.sampledAt,
     exchangeSeverity,
+    symbolSeverity,
     subscribedSeverity: timelineSeverityForRows(subscribedRows),
     globalSeverity:
       model.overall === 'critical'

@@ -55,11 +55,10 @@ select {
   display: grid;
   grid-template-rows:
     44px
-    minmax(92px, 104px)
+    minmax(122px, 132px)
     minmax(76px, 84px)
     76px
-    minmax(0, 1fr)
-    minmax(150px, 210px);
+    minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
   padding: 8px 12px 10px;
@@ -192,42 +191,52 @@ select {
   overflow: hidden;
 }
 
-.dashboard-bottom {
-  display: grid;
-  grid-template-columns: 0.9fr 1.1fr;
-  gap: 8px;
-  min-height: 0;
-  overflow: hidden;
-}
+.dashboard-main > .panel {
+  --relay-card-header-height: 38px;
+  --relay-table-sticky-top: var(--relay-card-header-height);
+  --relay-card-padding-y: 10px;
+  --relay-card-padding-x: 12px;
 
-.dashboard-main > .panel,
-.dashboard-bottom > .panel {
   min-height: 0;
   overflow: auto;
   scrollbar-color: #2ad0ff66 #04111e;
   scrollbar-width: thin;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar,
-.dashboard-bottom > .panel::-webkit-scrollbar {
+.dashboard-main > .panel > .panel-title,
+.dashboard-main > .panel > .head {
+  position: sticky;
+  top: calc(-1 * var(--relay-card-padding-y));
+  z-index: 7;
+  box-sizing: border-box;
+  min-height: var(--relay-card-header-height);
+  margin: calc(-1 * var(--relay-card-padding-y)) calc(-1 * var(--relay-card-padding-x)) 0;
+  padding: var(--relay-card-padding-y) var(--relay-card-padding-x) 8px;
+  background: linear-gradient(180deg, #081b2df7, #061525f0);
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 1px 0 #24445a66,
+    0 3px 8px #0208128c;
+}
+
+.dashboard-main > .panel::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar-track,
-.dashboard-bottom > .panel::-webkit-scrollbar-track {
+.dashboard-main > .panel::-webkit-scrollbar-track {
   background: #04111e;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar-thumb,
-.dashboard-bottom > .panel::-webkit-scrollbar-thumb {
+.dashboard-main > .panel::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: #2ad0ff66;
 }
 
 .table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
 }
 
@@ -243,9 +252,14 @@ select {
 }
 
 .table th {
+  position: sticky;
+  top: var(--relay-table-sticky-top, 0);
+  z-index: 6;
   background: #0a2135aa;
   color: #83a9ba;
   font-weight: 650;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 1px 0 #24445a66;
 }
 
 .table td {

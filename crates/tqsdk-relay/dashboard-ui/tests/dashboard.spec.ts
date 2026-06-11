@@ -31,10 +31,27 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   await page.goto('/dashboard/');
 
   await expect(page.getByText('tqsdk-relay 行情完整性监控中心')).toBeVisible();
-  await expect(page.getByRole('cell', { name: '沪金2602' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: '豆粕2609' })).toBeVisible();
-  await expect(page.getByTestId('continuity-timeline')).toBeVisible();
+  await expect(page.getByTestId('integrity-hero')).toBeVisible();
   await expect(page.getByTestId('score-gauge')).toBeVisible();
+  await expect(page.getByText('豆粕2609')).toBeVisible();
+  await expect(page.getByText('DCE.m2609')).toHaveCount(0);
+  await expect(page.getByTestId('continuity-timeline')).toBeVisible();
+  const pipelineTextLayout = await page.getByTestId('relay-pipeline').evaluate((element) =>
+    Array.from(element.querySelectorAll<HTMLElement>('.node')).map((node) => {
+      const nodeRect = node.getBoundingClientRect();
+      const textRects = Array.from(node.querySelectorAll<HTMLElement>('.name, .state, .meta')).map((text) =>
+        text.getBoundingClientRect(),
+      );
+      return {
+        nodeHeight: nodeRect.height,
+        textInsideNode: textRects.every((textRect) => textRect.top >= nodeRect.top && textRect.bottom <= nodeRect.bottom),
+      };
+    }),
+  );
+  expect(pipelineTextLayout.every((node) => node.nodeHeight <= 64)).toBe(true);
+  expect(pipelineTextLayout.every((node) => node.textInsideNode)).toBe(true);
+  await expect(page.getByText('活跃合约健康排行')).toHaveCount(0);
+  await expect(page.getByText('完整性趋势')).toHaveCount(0);
 });
 
 test('dashboard keeps document fixed and scrolls overflowing panels internally', async ({ page }) => {
@@ -60,7 +77,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   });
 
   await page.goto('/dashboard/');
-  await expect(page.getByTestId('symbol-health-table')).toBeVisible();
+  await expect(page.getByTestId('attention-list')).toBeVisible();
 
   const viewport = await page.evaluate(() => ({
     documentClientHeight: document.documentElement.clientHeight,
@@ -74,8 +91,8 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   await page.mouse.wheel(0, 1200);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 
-  const tablePanel = page.getByTestId('symbol-health-table');
-  const panelMetrics = await tablePanel.evaluate((element) => ({
+  const attentionPanel = page.getByTestId('attention-list');
+  const panelMetrics = await attentionPanel.evaluate((element) => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
     overflowY: getComputedStyle(element).overflowY,
@@ -83,9 +100,70 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   expect(panelMetrics.overflowY).toBe('auto');
   expect(panelMetrics.scrollHeight).toBeGreaterThan(panelMetrics.clientHeight);
 
-  const scrollTop = await tablePanel.evaluate((element) => {
+  const scrollTop = await attentionPanel.evaluate((element) => {
     element.scrollTop = 120;
     return element.scrollTop;
   });
   expect(scrollTop).toBeGreaterThan(0);
+
+  const sticky = await attentionPanel.evaluate((element) => {
+    const panelTop = element.getBoundingClientRect().top;
+    const cardHeader = element.querySelector('.panel-title')?.getBoundingClientRect();
+    return {
+      cardHeaderTop: cardHeader ? Math.abs(cardHeader.top - panelTop) : Number.NaN,
+    };
+  });
+  expect(sticky.cardHeaderTop).toBeLessThanOrEqual(12);
+
+  const tableHeader = await page.getByTestId('incident-table').locator('thead th').first().evaluate((element) => ({
+    position: getComputedStyle(element).position,
+    top: getComputedStyle(element).top,
+  }));
+  expect(tableHeader.position).toBe('sticky');
+  expect(tableHeader.top).toBe('38px');
+});
+
+test('continuity timeline expands an exchange into prioritized symbol rows', async ({ page }) => {
+  await page.route('**/metrics', async (route) => {
+    await route.fulfill({ json: metrics({ upstream_frames_received: 20, upstream_events_decoded: 40 }) });
+  });
+  await page.route('**/symbol-metrics?*', async (route) => {
+    await route.fulfill({
+      json: symbolSnapshot([
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 90_000,
+        }),
+        row({
+          symbol: 'DCE.i2609',
+          instrument_name: '铁矿2609',
+          status: 'live',
+          problem: false,
+          problem_severity: 'live',
+          receive_gap_ms: 900,
+        }),
+        row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
+      ]),
+    });
+  });
+
+  await page.goto('/dashboard/');
+  const dceRow = page.getByRole('button', { name: /DCE.*1\/2/ });
+  await expect(dceRow).toBeVisible();
+  await dceRow.click();
+
+  const timeline = page.getByTestId('continuity-timeline');
+  await expect(timeline.getByText('豆粕2609')).toBeVisible();
+  await expect(timeline.getByText('铁矿2609')).toBeVisible();
+  const labelColumnWidth = await timeline.locator('.timeline').evaluate((element) => {
+    const firstColumn = getComputedStyle(element).gridTemplateColumns.split(' ')[0];
+    return Number.parseFloat(firstColumn);
+  });
+  expect(labelColumnWidth).toBeGreaterThanOrEqual(112);
+  await expect(timeline.getByText('DCE.m2609')).toHaveCount(0);
+  await expect(timeline.getByText('DCE.i2609')).toHaveCount(0);
 });

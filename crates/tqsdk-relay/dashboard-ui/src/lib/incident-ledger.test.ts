@@ -6,11 +6,21 @@ import { metrics, NOW, row, symbolSnapshot } from '../test/fixtures';
 describe('incident-ledger', () => {
   it('records status transitions once per symbol transition', () => {
     const ledger = createIncidentLedger(10);
-    const live = deriveIntegrity(metrics(), symbolSnapshot([row({ symbol: 'DCE.m2609', status: 'live' })]), NOW);
+    const live = deriveIntegrity(
+      metrics(),
+      symbolSnapshot([row({ symbol: 'DCE.m2609', instrument_name: '豆粕2609', status: 'live' })]),
+      NOW,
+    );
     const stale = deriveIntegrity(
       metrics(),
       symbolSnapshot([
-        row({ symbol: 'DCE.m2609', status: 'stale', problem: true, problem_severity: 'warn' }),
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+        }),
       ]),
       NOW + 2_000,
     );
@@ -21,7 +31,8 @@ describe('incident-ledger', () => {
 
     expect(ledger.incidents).toHaveLength(1);
     expect(ledger.incidents[0]).toMatchObject({
-      scope: 'DCE.m2609',
+      scope: '豆粕2609',
+      scope_symbol: 'DCE.m2609',
       type: '静默',
       impact: '未订阅',
       severity: 'warn',

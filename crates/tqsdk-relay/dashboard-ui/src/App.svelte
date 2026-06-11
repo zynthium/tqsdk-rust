@@ -4,14 +4,11 @@
   import DashboardControls from './components/DashboardControls.svelte';
   import IncidentTable from './components/IncidentTable.svelte';
   import IntegrityHero from './components/IntegrityHero.svelte';
-  import IntegrityTrend from './components/IntegrityTrend.svelte';
   import MetricCard from './components/MetricCard.svelte';
   import MonitorHeader from './components/MonitorHeader.svelte';
   import RelayPipeline from './components/RelayPipeline.svelte';
-  import SymbolHealthTable from './components/SymbolHealthTable.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
-  import { createHistory, pushHistorySample } from './lib/history';
   import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
   import { deriveIntegrity } from './lib/integrity-model';
   import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
@@ -21,7 +18,6 @@
 
   let snapshot = $state<RelaySnapshot | null>(null);
   let model = $state<IntegrityModel | null>(null);
-  let history = $state(createHistory());
   let timeline = $state(createTimelineHistory());
   let incidents = $state(createIncidentLedger());
   let error = $state<string | null>(null);
@@ -50,7 +46,6 @@
     if (requestId !== sequence) return;
     snapshot = next;
     const nextModel = deriveIntegrity(next.metrics, next.symbols, next.receivedAt, model);
-    pushHistorySample(history, nextModel);
     pushTimelineSample(timeline, nextModel);
     updateIncidentLedger(incidents, nextModel);
     model = nextModel;
@@ -99,10 +94,6 @@
       <AttentionList rows={model.problems} />
       <ContinuityTimeline {buckets} rows={model.rows} />
       <IncidentTable incidents={incidents.incidents} />
-    </section>
-    <section class="dashboard-bottom">
-      <SymbolHealthTable rows={model.rows} bind:selectedSymbol={view.selectedSymbol} />
-      <IntegrityTrend {history} {model} />
     </section>
   {:else}
     <section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">

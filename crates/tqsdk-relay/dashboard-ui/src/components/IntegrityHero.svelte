@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatDuration, formatNumber, formatPercent } from '../lib/format';
   import type { IntegrityModel } from '../lib/types';
+  import ScoreGauge from './ScoreGauge.svelte';
 
   let { model }: { model: IntegrityModel } = $props();
   let title = $derived(
@@ -38,17 +39,21 @@
       <polyline points="0,31 72,31 82,24 90,38 98,8 106,50 115,20 124,31 190,31"></polyline>
     </svg>
   </div>
+  <div class="score">
+    <ScoreGauge score={model.continuityScore} compact />
+  </div>
 </section>
 
 <style>
   .hero {
-    width: min(1080px, 72vw);
-    min-height: 104px;
-    justify-self: center;
+    width: 100%;
+    min-height: 132px;
+    justify-self: stretch;
     display: grid;
-    grid-template-columns: 130px 1fr 180px;
+    grid-template-columns: 112px minmax(0, 1fr) minmax(170px, 220px) 128px;
     align-items: center;
-    padding: 10px 24px;
+    gap: 18px;
+    padding: 10px 22px;
     border-color: #45ff9a8c;
     background: linear-gradient(90deg, #062d26f5, #061e1df5);
     box-shadow:
@@ -184,5 +189,12 @@
 
   .hero.standby .ecg polyline {
     stroke: var(--relay-blue);
+  }
+
+  .score {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    place-items: center;
   }
 </style>

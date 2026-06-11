@@ -55,7 +55,7 @@
   {#each nodes as node, index}
     <div class="node">
       <div class="node-icon">{node.icon}</div>
-      <div>
+      <div class="node-copy">
         <div class="name">{node.name}</div>
         <div class={`state ${node.severity}`}>{node.state}</div>
         <div class="meta">{node.meta}</div>
@@ -79,7 +79,8 @@
   }
 
   .node {
-    height: 61px;
+    box-sizing: border-box;
+    height: 64px;
     min-width: 0;
     display: grid;
     grid-template-columns: 34px 1fr 8px;
@@ -87,7 +88,7 @@
     gap: 9px;
     border: 1px solid var(--relay-line-soft);
     border-radius: 10px;
-    padding: 8px 12px;
+    padding: 6px 12px;
     background: #061a2be6;
     box-shadow:
       inset 0 0 20px #20d8ff0b,
@@ -105,16 +106,29 @@
     font-size: 15px;
   }
 
+  .node-copy {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+
   .name {
+    overflow: hidden;
     color: #c6dbe5;
     font-size: 12px;
+    line-height: 1.05;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .state {
-    margin-top: 1px;
+    overflow: hidden;
     color: var(--relay-live);
     font-size: 14px;
     font-weight: 850;
+    line-height: 1.12;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .state.warn {
@@ -126,8 +140,12 @@
   }
 
   .meta {
+    overflow: hidden;
     color: color-mix(in srgb, var(--relay-muted) 78%, transparent);
     font-size: 10px;
+    line-height: 1.05;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .arrow {

@@ -31,15 +31,14 @@
   <div class="head">
     <div class="panel-title">活跃合约健康排行</div>
     {#if selected}
-      <div class="selected">{selected.symbol} · {selected.instrument_name ?? '未命名'}</div>
+      <div class="selected" title={selected.symbol}>{selected.instrument_name ?? selected.symbol}</div>
     {/if}
   </div>
   <table class="table">
     <thead>
       <tr>
         <th>状态</th>
-        <th>合约</th>
-        <th>中文名称</th>
+        <th>名称</th>
         <th>距上次更新</th>
         <th>行情延迟</th>
         <th>Tick</th>
@@ -49,13 +48,12 @@
     </thead>
     <tbody>
       {#if ordered.length === 0}
-        <tr><td colspan="8" class="empty-cell">等待合约数据</td></tr>
+        <tr><td colspan="7" class="empty-cell">等待合约数据</td></tr>
       {:else}
         {#each ordered as row}
           <tr class:selected={row.symbol === selectedSymbol} onclick={() => (selectedSymbol = row.symbol)}>
             <td><span class={`badge ${row.status}`}>{statusLabel(row.status)}</span></td>
-            <td title={row.symbol}>{row.symbol}</td>
-            <td title={row.instrument_name ?? ''}>{row.instrument_name ?? '--'}</td>
+            <td title={row.symbol}>{row.instrument_name ?? row.symbol}</td>
             <td>{formatDuration(row.receive_gap_ms)}</td>
             <td>{formatDuration(row.market_time_lag_ms)}</td>
             <td>{formatNumber(row.ticks_ingested)}</td>
@@ -101,11 +99,7 @@
   }
 
   th:nth-child(2) {
-    width: 16%;
-  }
-
-  th:nth-child(3) {
-    width: 17%;
+    width: 25%;
   }
 
   th:nth-child(6),
