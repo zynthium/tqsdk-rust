@@ -30,23 +30,37 @@
     {
       name: '数据解码',
       icon: '⌘',
-      state: model.invalidRowCount > 0 ? '坏行' : '正常',
-      meta: `${formatNumber(model.invalidRowCount)} 行`,
-      severity: model.invalidRowCount > 0 ? 'bad' : 'live',
+      state: model.decodeHealth === 'degraded' ? '近期坏行' : '正常',
+      meta: `${formatNumber(model.metrics.recent_invalid_rows_1m)} 近期 / ${formatNumber(model.invalidRowCount)} 累计`,
+      severity: model.decodeHealth === 'degraded' ? 'warn' : 'live',
     },
     {
       name: '行情缓存',
       icon: '◫',
-      state: model.problems.length > 0 ? '需关注' : '活跃',
-      meta: `静默 ${formatDuration(model.upstreamIdleMs)}`,
-      severity: model.issueCount > 0 ? 'warn' : 'live',
+      state:
+        model.frameFlowHealth === 'critical'
+          ? '帧流中断'
+          : model.confirmedIntegrityIssueCount > 0
+            ? 'Tick异常'
+            : model.issueCount > 0 || model.frameFlowHealth === 'warn'
+              ? '需关注'
+              : '活跃',
+      meta: model.confirmedIntegrityIssueCount > 0
+        ? `${formatNumber(model.confirmedIntegrityIssueCount)} 次 / 缺 ${formatNumber(model.estimatedMissingRows)}`
+        : `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`,
+      severity:
+        model.frameFlowHealth === 'critical' || model.confirmedIntegrityIssueCount > 0
+          ? 'bad'
+          : model.issueCount > 0 || model.frameFlowHealth === 'warn' || model.eventFlowHealth === 'warn'
+            ? 'warn'
+            : 'live',
     },
     {
       name: '下游服务',
       icon: '▤',
-      state: model.subscribedProblems.length > 0 ? '影响订阅' : '正常',
+      state: model.subscribedProblemCount > 0 ? '影响订阅' : '正常',
       meta: `${formatNumber(model.metrics.downstream_clients)} 客户端`,
-      severity: model.subscribedProblems.length > 0 ? 'bad' : 'live',
+      severity: model.subscribedProblemCount > 0 ? 'bad' : 'live',
     },
   ]);
 </script>

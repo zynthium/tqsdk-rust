@@ -1,30 +1,35 @@
 import { expect, test } from '@playwright/test';
-import { metrics, row, symbolSnapshot } from '../src/test/fixtures';
+import { dashboardSnapshot, row } from '../src/test/fixtures';
 
 test('dashboard renders relay integrity view from intercepted snapshots', async ({ page }) => {
-  await page.route('**/metrics', async (route) => {
-    await route.fulfill({ json: metrics({ upstream_frames_received: 20, upstream_events_decoded: 40 }) });
-  });
-  await page.route('**/symbol-metrics?*', async (route) => {
+  await page.route('**/dashboard-snapshot?*', async (route) => {
     await route.fulfill({
-      json: symbolSnapshot([
-        row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602', subscribed: true, quote_subscriber_count: 1 }),
-        row({
-          symbol: 'DCE.m2609',
-          instrument_name: '豆粕2609',
-          status: 'stale',
-          problem: true,
-          problem_severity: 'warn',
-          receive_gap_ms: 90_000,
-        }),
-        row({
-          symbol: 'CZCE.AP610',
-          instrument_name: '苹果610',
-          status: 'closed',
-          problem: false,
-          problem_severity: 'closed',
-        }),
-      ]),
+      json: dashboardSnapshot(
+        [
+          row({
+            symbol: 'SHFE.au2602',
+            instrument_name: '沪金2602',
+            subscribed: true,
+            quote_subscriber_count: 1,
+          }),
+          row({
+            symbol: 'DCE.m2609',
+            instrument_name: '豆粕2609',
+            status: 'stale',
+            problem: true,
+            problem_severity: 'warn',
+            receive_gap_ms: 90_000,
+          }),
+          row({
+            symbol: 'CZCE.AP610',
+            instrument_name: '苹果610',
+            status: 'closed',
+            problem: false,
+            problem_severity: 'closed',
+          }),
+        ],
+        { upstream_frames_received: 20, upstream_events_decoded: 40 },
+      ),
     });
   });
 
@@ -33,7 +38,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   await expect(page.getByText('tqsdk-relay 行情完整性监控中心')).toBeVisible();
   await expect(page.getByTestId('integrity-hero')).toBeVisible();
   await expect(page.getByTestId('score-gauge')).toBeVisible();
-  await expect(page.getByText('豆粕2609')).toBeVisible();
+  await expect(page.getByTestId('attention-list').getByText('豆粕2609')).toBeVisible();
   await expect(page.getByText('DCE.m2609')).toHaveCount(0);
   await expect(page.getByTestId('continuity-timeline')).toBeVisible();
   const pipelineTextLayout = await page.getByTestId('relay-pipeline').evaluate((element) =>
@@ -50,7 +55,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   );
   expect(pipelineTextLayout.every((node) => node.nodeHeight <= 64)).toBe(true);
   expect(pipelineTextLayout.every((node) => node.textInsideNode)).toBe(true);
-  await expect(page.getByText('活跃合约健康排行')).toHaveCount(0);
+  await expect(page.getByText('活跃合约健康排行')).toBeVisible();
   await expect(page.getByText('完整性趋势')).toHaveCount(0);
 });
 
@@ -69,15 +74,16 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
     });
   });
 
-  await page.route('**/metrics', async (route) => {
-    await route.fulfill({ json: metrics({ upstream_frames_received: 20, upstream_events_decoded: 40 }) });
-  });
-  await page.route('**/symbol-metrics?*', async (route) => {
-    await route.fulfill({ json: symbolSnapshot(rows) });
+  await page.route('**/dashboard-snapshot?*', async (route) => {
+    await route.fulfill({
+      json: dashboardSnapshot(rows, { upstream_frames_received: 20, upstream_events_decoded: 40 }),
+    });
   });
 
   await page.goto('/dashboard/');
   await expect(page.getByTestId('attention-list')).toBeVisible();
+  await expect(page.getByTestId('symbol-health-table')).toBeVisible();
+  await expect(page.getByTestId('symbol-health-table').locator('tbody tr')).toHaveCount(120);
 
   const viewport = await page.evaluate(() => ({
     documentClientHeight: document.documentElement.clientHeight,
@@ -124,30 +130,30 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
 });
 
 test('continuity timeline expands an exchange into prioritized symbol rows', async ({ page }) => {
-  await page.route('**/metrics', async (route) => {
-    await route.fulfill({ json: metrics({ upstream_frames_received: 20, upstream_events_decoded: 40 }) });
-  });
-  await page.route('**/symbol-metrics?*', async (route) => {
+  await page.route('**/dashboard-snapshot?*', async (route) => {
     await route.fulfill({
-      json: symbolSnapshot([
-        row({
-          symbol: 'DCE.m2609',
-          instrument_name: '豆粕2609',
-          status: 'stale',
-          problem: true,
-          problem_severity: 'warn',
-          receive_gap_ms: 90_000,
-        }),
-        row({
-          symbol: 'DCE.i2609',
-          instrument_name: '铁矿2609',
-          status: 'live',
-          problem: false,
-          problem_severity: 'live',
-          receive_gap_ms: 900,
-        }),
-        row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
-      ]),
+      json: dashboardSnapshot(
+        [
+          row({
+            symbol: 'DCE.m2609',
+            instrument_name: '豆粕2609',
+            status: 'stale',
+            problem: true,
+            problem_severity: 'warn',
+            receive_gap_ms: 90_000,
+          }),
+          row({
+            symbol: 'DCE.i2609',
+            instrument_name: '铁矿2609',
+            status: 'live',
+            problem: false,
+            problem_severity: 'live',
+            receive_gap_ms: 900,
+          }),
+          row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
+        ],
+        { upstream_frames_received: 20, upstream_events_decoded: 40 },
+      ),
     });
   });
 

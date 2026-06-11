@@ -1,7 +1,9 @@
 import type {
   IntegrityModel,
+  FlowIdleHealth,
   ProblemSeverity,
   RelayMetrics,
+  SymbolMetricsSummary,
   SymbolMetricsSnapshot,
   SymbolRow,
   SymbolStatus,
@@ -24,8 +26,22 @@ export function severityForRow(row: SymbolRow): ProblemSeverity {
 }
 
 export function frameIdleMs(metrics: RelayMetrics, nowMillis: number): number | null {
+  if (metrics.upstream_frame_idle_ms != null) return Number(metrics.upstream_frame_idle_ms);
   if (metrics.last_upstream_frame_unix_secs == null) return null;
   return Math.max(0, nowMillis - metrics.last_upstream_frame_unix_secs * 1_000);
+}
+
+function eventIdleMs(metrics: RelayMetrics, nowMillis: number): number | null {
+  if (metrics.upstream_event_idle_ms != null) return Number(metrics.upstream_event_idle_ms);
+  if (metrics.last_decoded_event_unix_secs == null) return null;
+  return Math.max(0, nowMillis - metrics.last_decoded_event_unix_secs * 1_000);
+}
+
+function flowHealthFor(idleMs: number | null, warnAfterMs: number, criticalAfterMs: number): FlowIdleHealth {
+  if (idleMs == null) return 'no_sample';
+  if (idleMs > criticalAfterMs) return 'critical';
+  if (idleMs > warnAfterMs) return 'warn';
+  return 'live';
 }
 
 export function deriveIntegrity(
@@ -33,23 +49,47 @@ export function deriveIntegrity(
   snapshot: SymbolMetricsSnapshot,
   sampledAt: number,
   previous?: IntegrityModel | null,
+  global: SymbolMetricsSummary = snapshot.summary,
+  globalRowsInput?: SymbolRow[],
 ): IntegrityModel {
   const rows = Array.isArray(snapshot.symbols) ? snapshot.symbols : [];
-  const universeRows = rows.filter((row) => row.in_universe);
-  const observedUniverse = universeRows.filter((row) => row.last_receive_unix_millis != null).length;
-  const totalUniverse = universeRows.length || Number(metrics.upstream_symbols || snapshot.summary.total || 0);
+  const globalRows = Array.isArray(globalRowsInput) ? globalRowsInput : rows;
+  const visibleProblems = rows.filter((row) => row.problem);
+  const globalProblems = globalRows.filter((row) => row.problem);
+  const observedUniverse = Number(global.universe_observed ?? 0);
+  const totalUniverse = Number(global.universe_total || metrics.upstream_symbols || global.total || 0);
   const coverageRatio = totalUniverse > 0 ? observedUniverse / totalUniverse : 0;
-  const problems = rows.filter((row) => row.problem);
-  const subscribedProblems = problems.filter((row) => row.subscribed);
+  const subscribedProblems = globalProblems.filter((row) => row.subscribed);
   const invalidRowCount = Number(metrics.upstream_invalid_tick_rows || 0);
-  const activeInvalidRowCount = rows.reduce(
-    (sum, row) => sum + (row.problem ? Number(row.invalid_rows || 0) : 0),
-    0,
+  const activeInvalidRowCount = Number(
+    global.active_invalid_rows || globalProblems.reduce((sum, row) => sum + Number(row.invalid_rows || 0), 0),
   );
+  const confirmedIntegrityIssueCount =
+    Number(global.gap_event_count || 0) +
+    Number(global.duplicate_rows || 0) +
+    Number(global.out_of_order_rows || 0);
+  const estimatedMissingRows = Number(global.estimated_missing_rows || 0);
   const upstreamIdleMs = frameIdleMs(metrics, sampledAt);
-  const staleAfterMs = Number(snapshot.data_stale_after_millis || metrics.data_stale_after_secs * 1_000 || 30_000);
+  const eventIdle = eventIdleMs(metrics, sampledAt);
+  const frameFlowHealth =
+    metrics.upstream_frame_idle_health ??
+    flowHealthFor(
+      upstreamIdleMs,
+      Number(metrics.upstream_frame_idle_warn_after_ms || 2_000),
+      Number(metrics.upstream_frame_idle_critical_after_ms || 5_000),
+    );
+  const eventFlowHealth =
+    metrics.upstream_event_idle_health ??
+    flowHealthFor(
+      eventIdle,
+      Number(metrics.upstream_event_idle_warn_after_ms || 3_000),
+      Number(metrics.upstream_event_idle_critical_after_ms || 8_000),
+    );
+  const decodeHealth = metrics.current_decode_health ?? 'healthy';
   const sourceCritical = metrics.upstream_stage === 'down' || metrics.upstream_stage === 'degraded';
-  const idleCritical = upstreamIdleMs != null && upstreamIdleMs > staleAfterMs;
+  const idleCritical = frameFlowHealth === 'critical' || eventFlowHealth === 'critical';
+  const idleWarn = frameFlowHealth === 'warn' || eventFlowHealth === 'warn';
+  const decodeWarn = decodeHealth === 'degraded';
   const warming = WARMING_STAGES.has(metrics.upstream_stage);
   const elapsedSeconds = previous ? Math.max(0.001, (sampledAt - previous.sampledAt) / 1_000) : null;
   const frameRate =
@@ -60,20 +100,26 @@ export function deriveIntegrity(
     elapsedSeconds && previous
       ? Math.max(0, (metrics.upstream_events_decoded - previous.metrics.upstream_events_decoded) / elapsedSeconds)
       : null;
-  const issueCount = problems.length + activeInvalidRowCount;
+  const issueCount = Number(global.problem ?? globalProblems.length);
+  const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
+  const continuityPenalty = Math.min(
+    30,
+    confirmedIntegrityIssueCount * 10 + Math.min(10, estimatedMissingRows * 2),
+  );
   const continuityScore = Math.max(
     0,
     100 -
       Math.min(55, issueCount * 9) -
+      continuityPenalty -
       Math.min(25, (1 - coverageRatio) * 25) -
       (sourceCritical || idleCritical ? 20 : 0),
   );
   const overall =
-    sourceCritical || idleCritical || subscribedProblems.length > 0
+    sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0
       ? 'critical'
-      : warming && rows.length === 0
+      : warming && globalRows.length === 0
         ? 'warming'
-        : issueCount > 0 || coverageRatio < 0.98
+        : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < 0.98
           ? 'warning'
           : 'healthy';
 
@@ -82,13 +128,23 @@ export function deriveIntegrity(
     sampledAt,
     metrics,
     snapshot,
+    global,
     rows,
-    problems,
+    globalRows,
+    problems: visibleProblems,
+    globalProblems,
     subscribedProblems,
     issueCount,
+    subscribedProblemCount,
     invalidRowCount,
     activeInvalidRowCount,
+    confirmedIntegrityIssueCount,
+    estimatedMissingRows,
     upstreamIdleMs,
+    eventIdleMs: eventIdle,
+    frameFlowHealth,
+    eventFlowHealth,
+    decodeHealth,
     coverageRatio,
     observedUniverse,
     totalUniverse,

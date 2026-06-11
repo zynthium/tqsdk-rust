@@ -8,13 +8,11 @@
     selectedSymbol: string | null;
   } = $props();
   let ordered = $derived(
-    [...rows]
-      .sort((left, right) => {
-        const leftRank = severityRank(left);
-        const rightRank = severityRank(right);
-        return leftRank - rightRank || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1);
-      })
-      .slice(0, 80),
+    [...rows].sort((left, right) => {
+      const leftRank = severityRank(left);
+      const rightRank = severityRank(right);
+      return leftRank - rightRank || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1);
+    }),
   );
   let selected = $derived(rows.find((row) => row.symbol === selectedSymbol) ?? ordered[0] ?? null);
 
@@ -30,6 +28,7 @@
 <section class="panel table-panel" data-testid="symbol-health-table">
   <div class="head">
     <div class="panel-title">活跃合约健康排行</div>
+    <div class="count">{ordered.length} 条</div>
     {#if selected}
       <div class="selected" title={selected.symbol}>{selected.instrument_name ?? selected.symbol}</div>
     {/if}
@@ -90,6 +89,12 @@
   }
 
   .selected {
+    color: var(--relay-muted);
+    font-size: 12px;
+  }
+
+  .count {
+    margin-left: auto;
     color: var(--relay-muted);
     font-size: 12px;
   }

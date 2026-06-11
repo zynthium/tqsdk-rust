@@ -24,6 +24,7 @@
   ];
 
   let { filters = $bindable(), disabled, onrefresh }: Props = $props();
+  let search = $state(filters.q);
 
   function toggleStatus(status: SymbolStatus, checked: boolean) {
     filters.statuses = checked
@@ -34,6 +35,19 @@
   function checkboxValue(event: Event): boolean {
     return (event.currentTarget as HTMLInputElement).checked;
   }
+
+  function refresh() {
+    filters.q = search;
+    return onrefresh();
+  }
+
+  $effect(() => {
+    const value = search;
+    const timer = window.setTimeout(() => {
+      if (filters.q !== value) filters.q = value;
+    }, 300);
+    return () => window.clearTimeout(timer);
+  });
 </script>
 
 <details class="panel controls" data-testid="dashboard-controls">
@@ -56,7 +70,7 @@
       <input type="checkbox" bind:checked={filters.subscribedOnly} disabled={disabled} />
       <span>只看订阅</span>
     </label>
-    <input class="search" bind:value={filters.q} disabled={disabled} placeholder="搜索合约或中文名" />
+    <input class="search" bind:value={search} disabled={disabled} placeholder="搜索合约或中文名" />
     <select bind:value={filters.sort} disabled={disabled}>
       {#each sorts as sort}
         <option value={sort.value}>{sort.label}</option>
@@ -67,7 +81,7 @@
         <option value={limit}>{limit}</option>
       {/each}
     </select>
-    <button type="button" disabled={disabled} onclick={() => onrefresh()}>刷新</button>
+    <button type="button" disabled={disabled} onclick={refresh}>刷新</button>
   </div>
 </details>
 

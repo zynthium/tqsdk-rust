@@ -108,7 +108,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
 | 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、resolved TQKQ target-position helper、`TargetPos` intent API 和 curated `advanced::*` 下钻命名空间 |
-| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
+| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、frame/event idle 秒级告警、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
 
 修改 relay dashboard、dashboard UI 或 symbol telemetry 时，补充运行：
@@ -117,11 +117,20 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 cargo test -p tqsdk-relay --test symbol_metrics
 cargo test -p tqsdk-relay --test binary_smoke relay_binary_serves_embedded_dashboard_assets
 cd crates/tqsdk-relay/dashboard-ui
-pnpm run test
+pnpm install --frozen-lockfile
 pnpm run check
+pnpm run test
 pnpm run build
+git diff --exit-code ../src/dashboard-dist
 pnpm run test:e2e
 ```
+
+dashboard UI 依赖必须固定到明确版本，不能使用 `"latest"`。Svelte source 改动后必须重新
+生成并提交 `crates/tqsdk-relay/src/dashboard-dist/**`；CI 的 dashboard job 用
+`git diff --exit-code ../src/dashboard-dist` 防止源码和内嵌静态产物漂移。dashboard 页面
+不得展示会被误认为真实 telemetry 的静态 trend/sparkline；全屏控制必须使用浏览器
+fullscreen API 并在不支持时禁用；完整合约表应展示当前过滤页内全部行，不再额外截断到
+关注列表或时间带行数。
 
 推荐的 V1 回归入口：
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { formatTime } from '../lib/format';
   import type { IntegrityModel } from '../lib/types';
 
@@ -11,8 +12,19 @@
 
   let { model, error, paused = $bindable(false), fullscreen = $bindable(false) }: Props = $props();
   let now = $state(Date.now());
+  let fullscreenSupported = $state(true);
   let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : '实时监控中');
   let stateClass = $derived(error ? 'bad' : paused ? 'closed' : 'live');
+
+  onMount(() => {
+    fullscreenSupported = typeof document.documentElement.requestFullscreen === 'function';
+    const syncFullscreen = () => {
+      fullscreen = document.fullscreenElement != null;
+    };
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    syncFullscreen();
+    return () => document.removeEventListener('fullscreenchange', syncFullscreen);
+  });
 
   $effect(() => {
     const timer = window.setInterval(() => {
@@ -20,6 +32,20 @@
     }, 1_000);
     return () => window.clearInterval(timer);
   });
+
+  async function toggleFullscreen() {
+    if (!fullscreenSupported) return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+      fullscreen = document.fullscreenElement != null;
+    } catch {
+      fullscreen = document.fullscreenElement != null;
+    }
+  }
 </script>
 
 <header class="header" data-testid="monitor-header">
@@ -38,7 +64,9 @@
       <span>{stateLabel}</span>
     </span>
     <button type="button" onclick={() => (paused = !paused)}>{paused ? '继续' : '暂停'}</button>
-    <button type="button" onclick={() => (fullscreen = !fullscreen)}>{fullscreen ? '退出' : '全屏'}</button>
+    <button type="button" disabled={!fullscreenSupported} title={fullscreenSupported ? '切换全屏' : '当前浏览器不支持全屏'} onclick={toggleFullscreen}>
+      {fullscreen ? '退出' : '全屏'}
+    </button>
   </div>
 </header>
 
@@ -138,6 +166,11 @@
 
   button:hover {
     border-color: var(--relay-info);
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
   }
 
   .muted {

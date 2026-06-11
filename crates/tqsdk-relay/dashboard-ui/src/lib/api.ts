@@ -1,4 +1,4 @@
-import type { DashboardFilters, RelayMetrics, SymbolMetricsSnapshot } from './types';
+import type { DashboardFilters, DashboardSnapshot, RelaySnapshot } from './types';
 
 export class DashboardApiError extends Error {
   constructor(
@@ -35,9 +35,9 @@ async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 export async function fetchRelaySnapshot(filters: DashboardFilters, signal?: AbortSignal) {
   const query = symbolQueryString(filters);
-  const [metrics, symbols] = await Promise.all([
-    fetchJson<RelayMetrics>('/metrics', signal),
-    fetchJson<SymbolMetricsSnapshot>(`/symbol-metrics?${query}`, signal),
-  ]);
-  return { metrics, symbols, receivedAt: Date.now() };
+  const snapshot = await fetchJson<DashboardSnapshot>(`/dashboard-snapshot?${query}`, signal);
+  return {
+    ...snapshot,
+    receivedAt: snapshot.received_at_unix_millis || Date.now(),
+  } satisfies RelaySnapshot;
 }

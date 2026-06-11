@@ -12,18 +12,18 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
-    "@playwright/test": "latest",
-    "@sveltejs/vite-plugin-svelte": "latest",
-    "@tailwindcss/vite": "latest",
-    "@testing-library/svelte": "latest",
-    "@tsconfig/svelte": "latest",
-    "@types/node": "latest",
-    "jsdom": "latest",
-    "svelte": "latest",
-    "svelte-check": "latest",
-    "tailwindcss": "latest",
-    "typescript": "latest",
-    "vite": "latest",
-    "vitest": "latest"
+    "@playwright/test": "1.60.0",
+    "@sveltejs/vite-plugin-svelte": "7.1.2",
+    "@tailwindcss/vite": "4.3.0",
+    "@testing-library/svelte": "5.3.1",
+    "@tsconfig/svelte": "5.0.8",
+    "@types/node": "25.9.2",
+    "jsdom": "29.1.1",
+    "svelte": "5.56.3",
+    "svelte-check": "4.6.0",
+    "tailwindcss": "4.3.0",
+    "typescript": "6.0.3",
+    "vite": "8.0.16",
+    "vitest": "4.1.8"
   }
 }

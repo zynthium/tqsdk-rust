@@ -14,6 +14,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     proxy: {
+      '/dashboard-snapshot': 'http://127.0.0.1:7789',
       '/metrics': 'http://127.0.0.1:7789',
       '/symbol-metrics': 'http://127.0.0.1:7789',
     },
