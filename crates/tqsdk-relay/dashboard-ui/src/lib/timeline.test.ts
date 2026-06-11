@@ -62,4 +62,29 @@ describe('timeline', () => {
     expect(buckets.at(-1)?.exchangeSeverity.SHFE).toBe('unknown');
     expect(buckets.at(-1)?.symbolSeverity['DCE.m2609']).toBe('bad');
   });
+
+  it('lets closed sessions override stale flow coloring', () => {
+    const history = createTimelineHistory();
+    const model = deriveIntegrity(
+      metrics(),
+      symbolSnapshot([
+        row({
+          symbol: 'SHFE.al2608',
+          status: 'closed',
+          session: 'closed',
+          flow: 'silent',
+          integrity: 'suspected',
+          problem: false,
+          problem_severity: 'closed',
+        }),
+      ]),
+      NOW,
+    );
+
+    pushTimelineSample(history, model);
+    const buckets = timelineBuckets(history, NOW + 1, 60);
+
+    expect(buckets.at(-1)?.exchangeSeverity.SHFE).toBe('closed');
+    expect(buckets.at(-1)?.symbolSeverity['SHFE.al2608']).toBe('closed');
+  });
 });
