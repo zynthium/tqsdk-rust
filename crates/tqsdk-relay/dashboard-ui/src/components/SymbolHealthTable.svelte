@@ -60,7 +60,7 @@
             <td>{formatDuration(row.market_time_lag_ms)}</td>
             <td>{formatNumber(row.ticks_ingested)}</td>
             <td>{formatNumber(row.quote_subscriber_count + row.chart_subscriber_count)}</td>
-            <td><span class={`risk ${row.problem_severity}`}>{row.problem_severity}</span></td>
+            <td><span class={`risk ${row.problem_severity}`}><i></i>{row.problem_severity}</span></td>
           </tr>
         {/each}
       {/if}
@@ -123,20 +123,46 @@
   }
 
   .risk {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     color: var(--relay-live);
     font-weight: 800;
+  }
+
+  .risk i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--relay-live);
+    box-shadow: 0 0 7px var(--relay-live);
   }
 
   .risk.warn {
     color: var(--relay-warn);
   }
 
+  .risk.warn i {
+    background: var(--relay-warn);
+    box-shadow: 0 0 7px var(--relay-warn);
+  }
+
   .risk.bad {
     color: var(--relay-bad);
   }
 
+  .risk.bad i {
+    background: var(--relay-bad);
+    box-shadow: 0 0 7px var(--relay-bad);
+  }
+
   .risk.closed {
     color: var(--relay-closed);
+  }
+
+  .risk.closed i {
+    background: var(--relay-closed);
+    box-shadow: none;
   }
 
   .empty-cell {
@@ -156,9 +182,9 @@
 
   .detail span {
     border: 1px solid var(--relay-line-soft);
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 5px 7px;
-    background: rgb(255 255 255 / 3%);
+    background: #071929;
   }
 
   .detail b {

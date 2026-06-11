@@ -5559,7 +5559,7 @@ function timelineBuckets(history, now, bucketCount = 60) {
 //#region src/components/ContinuityTimeline.svelte
 var root$10 = /* @__PURE__ */ from_html(`<span></span>`);
 var root_1$7 = /* @__PURE__ */ from_html(`<div class="row-label svelte-1vieygf"> </div> <!>`, 1);
-var root_2$6 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="closed svelte-1vieygf"></i>休盘</span></div></div> <div class="timeline svelte-1vieygf"></div></section>`);
+var root_2$6 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="closed svelte-1vieygf"></i>休盘</span></div></div> <div class="timeline svelte-1vieygf"><!> <div class="axis svelte-1vieygf"><span>-5m</span><span>now</span></div></div></section>`);
 function ContinuityTimeline($$anchor, $$props) {
 	push($$props, true);
 	let exchangeRows = /* @__PURE__ */ user_derived(() => EXCHANGES.filter((exchange) => $$props.rows.some((row) => exchangeOf(row.symbol) === exchange)).slice(0, 4));
@@ -5582,7 +5582,7 @@ function ContinuityTimeline($$anchor, $$props) {
 	}
 	var section = root_2$6();
 	var div = sibling(child(section), 2);
-	each(div, 21, () => get(definitions), index, ($$anchor, definition) => {
+	each(child(div), 17, () => get(definitions), index, ($$anchor, definition) => {
 		var fragment = root_1$7();
 		var div_1 = first_child(fragment);
 		var text = child(div_1, true);
@@ -5595,6 +5595,7 @@ function ContinuityTimeline($$anchor, $$props) {
 		template_effect(() => set_text(text, get(definition).label));
 		append($$anchor, fragment);
 	});
+	next(2);
 	reset(div);
 	reset(section);
 	template_effect(() => set_style(div, `--bucket-count:${$$props.buckets.length}`));
@@ -5605,7 +5606,7 @@ function ContinuityTimeline($$anchor, $$props) {
 //#region src/components/DashboardControls.svelte
 var root$9 = /* @__PURE__ */ from_html(`<label class="svelte-jyijee"><input type="checkbox" class="svelte-jyijee"/> <span> </span></label>`);
 var root_1$6 = /* @__PURE__ */ from_html(`<option> </option>`);
-var root_2$5 = /* @__PURE__ */ from_html(`<section class="panel controls svelte-jyijee" data-testid="dashboard-controls"><div class="status-set svelte-jyijee" aria-label="status filters"></div> <label class="toggle svelte-jyijee"><input type="checkbox" class="svelte-jyijee"/> <span>只看订阅</span></label> <input class="search svelte-jyijee" placeholder="搜索合约或中文名"/> <select class="svelte-jyijee"></select> <select class="svelte-jyijee"></select> <button type="button" class="svelte-jyijee">刷新</button></section>`);
+var root_2$5 = /* @__PURE__ */ from_html(`<details class="panel controls svelte-jyijee" data-testid="dashboard-controls"><summary class="svelte-jyijee">筛选</summary> <div class="control-grid svelte-jyijee"><div class="status-set svelte-jyijee" aria-label="status filters"></div> <label class="toggle svelte-jyijee"><input type="checkbox" class="svelte-jyijee"/> <span>只看订阅</span></label> <input class="search svelte-jyijee" placeholder="搜索合约或中文名"/> <select class="svelte-jyijee"></select> <select class="svelte-jyijee"></select> <button type="button" class="svelte-jyijee">刷新</button></div></details>`);
 function DashboardControls($$anchor, $$props) {
 	push($$props, true);
 	const statuses = [
@@ -5659,9 +5660,10 @@ function DashboardControls($$anchor, $$props) {
 	function checkboxValue(event) {
 		return event.currentTarget.checked;
 	}
-	var section = root_2$5();
-	var div = child(section);
-	each(div, 21, () => statuses, index, ($$anchor, status) => {
+	var details = root_2$5();
+	var div = sibling(child(details), 2);
+	var div_1 = child(div);
+	each(div_1, 21, () => statuses, index, ($$anchor, status) => {
 		var label = root$9();
 		var input = child(label);
 		remove_input_defaults(input);
@@ -5677,8 +5679,8 @@ function DashboardControls($$anchor, $$props) {
 		delegated("change", input, (event) => toggleStatus(get(status).value, checkboxValue(event)));
 		append($$anchor, label);
 	});
-	reset(div);
-	var label_1 = sibling(div, 2);
+	reset(div_1);
+	var label_1 = sibling(div_1, 2);
 	var input_1 = child(label_1);
 	remove_input_defaults(input_1);
 	next(2);
@@ -5717,7 +5719,8 @@ function DashboardControls($$anchor, $$props) {
 	});
 	reset(select_1);
 	var button = sibling(select_1, 2);
-	reset(section);
+	reset(div);
+	reset(details);
 	template_effect(() => {
 		input_1.disabled = $$props.disabled;
 		input_2.disabled = $$props.disabled;
@@ -5730,7 +5733,7 @@ function DashboardControls($$anchor, $$props) {
 	bind_select_value(select, () => filters().sort, ($$value) => filters(filters().sort = $$value, true));
 	bind_select_value(select_1, () => filters().limit, ($$value) => filters(filters().limit = $$value, true));
 	delegated("click", button, () => $$props.onrefresh());
-	append($$anchor, section);
+	append($$anchor, details);
 	pop();
 }
 delegate(["change", "click"]);
@@ -5796,56 +5799,39 @@ function IncidentTable($$anchor, $$props) {
 }
 //#endregion
 //#region src/components/IntegrityHero.svelte
-var root$7 = /* @__PURE__ */ from_html(`<section data-testid="integrity-hero"><div><span></span> <h2 class="svelte-4y4rc7"> </h2> <p class="svelte-4y4rc7"> </p></div> <div class="summary svelte-4y4rc7"><span class="svelte-4y4rc7"><b class="svelte-4y4rc7"> </b>异常</span> <span class="svelte-4y4rc7"><b class="svelte-4y4rc7"> </b>影响订阅</span> <span class="svelte-4y4rc7"><b class="svelte-4y4rc7"> </b>休盘</span></div></section>`);
+var root$7 = /* @__PURE__ */ from_html(`<section data-testid="integrity-hero"><div class="orb svelte-4y4rc7"><span class="shield svelte-4y4rc7"> </span></div> <div class="copy"><h2 class="svelte-4y4rc7"> </h2> <p class="svelte-4y4rc7"><b class="svelte-4y4rc7"> </b> </p></div> <div class="ecg svelte-4y4rc7" aria-hidden="true"><svg viewBox="0 0 190 58" class="svelte-4y4rc7"><polyline points="0,31 72,31 82,24 90,38 98,8 106,50 115,20 124,31 190,31" class="svelte-4y4rc7"></polyline></svg></div></section>`);
 function IntegrityHero($$anchor, $$props) {
 	push($$props, true);
-	let title = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "订阅受影响" : $$props.model.overall === "warning" ? "需要关注" : $$props.model.overall === "warming" ? "启动观测中" : "行情完整");
-	let tone = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "bad" : $$props.model.overall === "warning" ? "warn" : "live");
+	let title = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "订阅链路告警" : $$props.model.overall === "warning" ? "行情静默预警" : $$props.model.overall === "warming" ? "启动观测中" : "行情链路连续");
+	let tone = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "error" : $$props.model.overall === "warning" ? "warning" : $$props.model.overall === "warming" ? "standby" : "live");
+	let icon = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "!" : $$props.model.overall === "warning" ? "!" : $$props.model.overall === "warming" ? "…" : "✓");
 	let subtitle = /* @__PURE__ */ user_derived(() => `${formatNumber($$props.model.observedUniverse)}/${formatNumber($$props.model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent($$props.model.coverageRatio * 100)}%，上游静默 ${formatDuration($$props.model.upstreamIdleMs)}`);
 	var section = root$7();
 	var div = child(section);
 	var span = child(div);
-	var h2 = sibling(span, 2);
-	var text = child(h2, true);
-	reset(h2);
-	var p = sibling(h2, 2);
-	var text_1 = child(p, true);
-	reset(p);
+	var text = child(span, true);
+	reset(span);
 	reset(div);
 	var div_1 = sibling(div, 2);
-	var span_1 = child(div_1);
-	var b = child(span_1);
+	var h2 = child(div_1);
+	var text_1 = child(h2, true);
+	reset(h2);
+	var p = sibling(h2, 2);
+	var b = child(p);
 	var text_2 = child(b, true);
 	reset(b);
-	next();
-	reset(span_1);
-	var span_2 = sibling(span_1, 2);
-	var b_1 = child(span_2);
-	var text_3 = child(b_1, true);
-	reset(b_1);
-	next();
-	reset(span_2);
-	var span_3 = sibling(span_2, 2);
-	var b_2 = child(span_3);
-	var text_4 = child(b_2, true);
-	reset(b_2);
-	next();
-	reset(span_3);
+	var text_3 = sibling(b);
+	reset(p);
 	reset(div_1);
+	next(2);
 	reset(section);
-	template_effect(($0, $1, $2) => {
+	template_effect(($0) => {
 		set_class(section, 1, `panel hero ${get(tone)}`, "svelte-4y4rc7");
-		set_class(span, 1, `status-dot ${get(tone)}`, "svelte-4y4rc7");
-		set_text(text, get(title));
-		set_text(text_1, get(subtitle));
+		set_text(text, get(icon));
+		set_text(text_1, get(title));
 		set_text(text_2, $0);
-		set_text(text_3, $1);
-		set_text(text_4, $2);
-	}, [
-		() => formatNumber($$props.model.issueCount),
-		() => formatNumber($$props.model.subscribedProblems.length),
-		() => formatNumber($$props.model.snapshot.summary.closed)
-	]);
+		set_text(text_3, ` 个异常 · ${get(subtitle) ?? ""}`);
+	}, [() => formatNumber($$props.model.issueCount)]);
 	append($$anchor, section);
 	pop();
 }
@@ -5885,7 +5871,7 @@ function sparkPoints(values, width = 160, height = 20) {
 }
 //#endregion
 //#region src/components/ScoreGauge.svelte
-var root$6 = /* @__PURE__ */ from_html(`<div data-testid="score-gauge"><div class="inner svelte-1n5qzgf"><span class="svelte-1n5qzgf">连续性评分</span> <b class="svelte-1n5qzgf"> </b></div></div>`);
+var root$6 = /* @__PURE__ */ from_html(`<div data-testid="score-gauge"><div class="inner svelte-1n5qzgf"><span class="svelte-1n5qzgf">连续性评分</span> <b class="svelte-1n5qzgf"> </b> <em class="svelte-1n5qzgf"> </em></div></div>`);
 function ScoreGauge($$anchor, $$props) {
 	push($$props, true);
 	let clamped = /* @__PURE__ */ user_derived(() => Math.max(0, Math.min(100, $$props.score)));
@@ -5895,12 +5881,16 @@ function ScoreGauge($$anchor, $$props) {
 	var b = sibling(child(div_1), 2);
 	var text = child(b, true);
 	reset(b);
+	var em = sibling(b, 2);
+	var text_1 = child(em, true);
+	reset(em);
 	reset(div_1);
 	reset(div);
 	template_effect(($0) => {
 		set_class(div, 1, `gauge ${get(tone)}`, "svelte-1n5qzgf");
 		set_style(div, `--angle:${get(clamped) * 3.6}deg`);
 		set_text(text, $0);
+		set_text(text_1, get(tone) === "bad" ? "告警" : get(tone) === "warn" ? "关注" : "连续");
 	}, [() => formatNumber(Math.round(get(clamped)))]);
 	append($$anchor, div);
 	pop();
@@ -5957,7 +5947,7 @@ function IntegrityTrend($$anchor, $$props) {
 }
 //#endregion
 //#region src/components/MetricCard.svelte
-var root$4 = /* @__PURE__ */ from_html(`<article><div class="label svelte-1iu5zja"> </div> <div class="value svelte-1iu5zja"> <span class="svelte-1iu5zja"> </span></div></article>`);
+var root$4 = /* @__PURE__ */ from_html(`<article><div class="icon svelte-1iu5zja"> </div> <div class="body"><div class="label svelte-1iu5zja"> </div> <div class="value svelte-1iu5zja"> <span class="svelte-1iu5zja"> </span></div> <svg class="spark svelte-1iu5zja" viewBox="0 0 160 20" aria-hidden="true"><polyline points="0,14 22,12 44,15 68,7 92,11 118,5 140,10 160,6" class="svelte-1iu5zja"></polyline></svg></div></article>`);
 function MetricCard($$anchor, $$props) {
 	push($$props, true);
 	let unit = prop($$props, "unit", 3, ""), tone = prop($$props, "tone", 3, "info"), format = prop($$props, "format", 3, "number");
@@ -5967,17 +5957,24 @@ function MetricCard($$anchor, $$props) {
 	var text = child(div, true);
 	reset(div);
 	var div_1 = sibling(div, 2);
-	var text_1 = child(div_1, true);
-	var span = sibling(text_1);
-	var text_2 = child(span, true);
+	var div_2 = child(div_1);
+	var text_1 = child(div_2, true);
+	reset(div_2);
+	var div_3 = sibling(div_2, 2);
+	var text_2 = child(div_3, true);
+	var span = sibling(text_2);
+	var text_3 = child(span, true);
 	reset(span);
+	reset(div_3);
+	next(2);
 	reset(div_1);
 	reset(article);
 	template_effect(() => {
 		set_class(article, 1, `panel metric ${tone()}`, "svelte-1iu5zja");
-		set_text(text, $$props.label);
-		set_text(text_1, get(display));
-		set_text(text_2, unit());
+		set_text(text, $$props.icon);
+		set_text(text_1, $$props.label);
+		set_text(text_2, get(display));
+		set_text(text_3, unit());
 	});
 	append($$anchor, article);
 	pop();
@@ -5986,7 +5983,7 @@ function MetricCard($$anchor, $$props) {
 //#region src/components/MonitorHeader.svelte
 var root$3 = /* @__PURE__ */ from_html(`<span class="muted svelte-f1m687"> </span>`);
 var root_1$3 = /* @__PURE__ */ from_html(`<div class="panel error-banner svelte-f1m687"> </div>`);
-var root_2$3 = /* @__PURE__ */ from_html(`<header class="panel header svelte-f1m687" data-testid="monitor-header"><div class="left svelte-f1m687"><span class="env svelte-f1m687">RELAY</span> <span>Asia/Shanghai</span> <span> </span></div> <h1 class="svelte-f1m687">tqsdk-relay 行情完整性监控中心</h1> <div class="right svelte-f1m687"><!> <span></span> <span> </span> <button type="button" class="svelte-f1m687"> </button> <button type="button" class="svelte-f1m687"> </button></div></header> <!>`, 1);
+var root_2$3 = /* @__PURE__ */ from_html(`<header class="header svelte-f1m687" data-testid="monitor-header"><div class="left svelte-f1m687"><span class="env svelte-f1m687">RELAY</span> <span>◉ Asia/Shanghai</span> <span> </span></div> <h1 class="brand svelte-f1m687">tqsdk-relay 行情完整性监控中心</h1> <div class="right svelte-f1m687"><!> <span><span></span> <span> </span></span> <button type="button" class="svelte-f1m687"> </button> <button type="button" class="svelte-f1m687"> </button></div></header> <!>`, 1);
 function MonitorHeader($$anchor, $$props) {
 	push($$props, true);
 	let paused = prop($$props, "paused", 15, false), fullscreen = prop($$props, "fullscreen", 15, false);
@@ -6019,10 +6016,12 @@ function MonitorHeader($$anchor, $$props) {
 		if ($$props.model) $$render(consequent);
 	});
 	var span_2 = sibling(node, 2);
-	var span_3 = sibling(span_2, 2);
-	var text_2 = child(span_3, true);
-	reset(span_3);
-	var button = sibling(span_3, 2);
+	var span_3 = child(span_2);
+	var span_4 = sibling(span_3, 2);
+	var text_2 = child(span_4, true);
+	reset(span_4);
+	reset(span_2);
+	var button = sibling(span_2, 2);
 	var text_3 = child(button, true);
 	reset(button);
 	var button_1 = sibling(button, 2);
@@ -6043,10 +6042,11 @@ function MonitorHeader($$anchor, $$props) {
 	});
 	template_effect(($0) => {
 		set_text(text, $0);
-		set_class(span_2, 1, `status-dot ${get(stateClass)}`, "svelte-f1m687");
+		set_class(span_2, 1, `live-chip ${get(stateClass) === "bad" ? "offline" : ""}`, "svelte-f1m687");
+		set_class(span_3, 1, `status-dot ${get(stateClass)}`, "svelte-f1m687");
 		set_text(text_2, get(stateLabel));
 		set_text(text_3, paused() ? "继续" : "暂停");
-		set_text(text_4, fullscreen() ? "退出全屏" : "全屏");
+		set_text(text_4, fullscreen() ? "退出" : "全屏");
 	}, [() => formatTime(get(now))]);
 	delegated("click", button, () => paused(!paused()));
 	delegated("click", button_1, () => fullscreen(!fullscreen()));
@@ -6057,37 +6057,42 @@ delegate(["click"]);
 //#endregion
 //#region src/components/RelayPipeline.svelte
 var root$2 = /* @__PURE__ */ from_html(`<div class="arrow svelte-dg2yd7"></div>`);
-var root_1$2 = /* @__PURE__ */ from_html(`<div class="node svelte-dg2yd7"><span></span> <div><div class="name svelte-dg2yd7"> </div> <div> </div> <div class="meta svelte-dg2yd7"> </div></div></div> <!>`, 1);
+var root_1$2 = /* @__PURE__ */ from_html(`<div class="node svelte-dg2yd7"><div class="node-icon svelte-dg2yd7"> </div> <div><div class="name svelte-dg2yd7"> </div> <div> </div> <div class="meta svelte-dg2yd7"> </div></div> <span></span></div> <!>`, 1);
 var root_2$2 = /* @__PURE__ */ from_html(`<section class="panel pipeline svelte-dg2yd7" data-testid="relay-pipeline"></section>`);
 function RelayPipeline($$anchor, $$props) {
 	push($$props, true);
 	let nodes = /* @__PURE__ */ user_derived(() => [
 		{
 			name: "上游连接",
+			icon: "☁",
 			state: $$props.model.metrics.upstream_stage,
 			meta: `frame ${formatNumber($$props.model.metrics.upstream_frames_received)}`,
 			severity: $$props.model.metrics.upstream_stage === "live" ? "live" : $$props.model.metrics.upstream_stage === "down" || $$props.model.metrics.upstream_stage === "degraded" ? "bad" : "warn"
 		},
 		{
 			name: "合约集合",
+			icon: "▦",
 			state: `${formatNumber($$props.model.totalUniverse)} 合约`,
 			meta: `覆盖 ${formatNumber($$props.model.observedUniverse)}`,
 			severity: $$props.model.coverageRatio >= .98 ? "live" : $$props.model.coverageRatio >= .9 ? "warn" : "bad"
 		},
 		{
 			name: "数据解码",
+			icon: "⌘",
 			state: $$props.model.invalidRowCount > 0 ? "坏行" : "正常",
 			meta: `${formatNumber($$props.model.invalidRowCount)} 行`,
 			severity: $$props.model.invalidRowCount > 0 ? "bad" : "live"
 		},
 		{
 			name: "行情缓存",
+			icon: "◫",
 			state: $$props.model.problems.length > 0 ? "需关注" : "活跃",
 			meta: `静默 ${formatDuration($$props.model.upstreamIdleMs)}`,
 			severity: $$props.model.issueCount > 0 ? "warn" : "live"
 		},
 		{
 			name: "下游服务",
+			icon: "▤",
 			state: $$props.model.subscribedProblems.length > 0 ? "影响订阅" : "正常",
 			meta: `${formatNumber($$props.model.metrics.downstream_clients)} 客户端`,
 			severity: $$props.model.subscribedProblems.length > 0 ? "bad" : "live"
@@ -6097,18 +6102,21 @@ function RelayPipeline($$anchor, $$props) {
 	each(section, 21, () => get(nodes), index, ($$anchor, node, index) => {
 		var fragment = root_1$2();
 		var div = first_child(fragment);
-		var span = child(div);
-		var div_1 = sibling(span, 2);
-		var div_2 = child(div_1);
-		var text = child(div_2, true);
-		reset(div_2);
-		var div_3 = sibling(div_2, 2);
+		var div_1 = child(div);
+		var text = child(div_1, true);
+		reset(div_1);
+		var div_2 = sibling(div_1, 2);
+		var div_3 = child(div_2);
 		var text_1 = child(div_3, true);
 		reset(div_3);
 		var div_4 = sibling(div_3, 2);
 		var text_2 = child(div_4, true);
 		reset(div_4);
-		reset(div_1);
+		var div_5 = sibling(div_4, 2);
+		var text_3 = child(div_5, true);
+		reset(div_5);
+		reset(div_2);
+		var span = sibling(div_2, 2);
 		reset(div);
 		var node_1 = sibling(div, 2);
 		var consequent = ($$anchor) => {
@@ -6118,11 +6126,12 @@ function RelayPipeline($$anchor, $$props) {
 			if (index < get(nodes).length - 1) $$render(consequent);
 		});
 		template_effect(() => {
+			set_text(text, get(node).icon);
+			set_text(text_1, get(node).name);
+			set_class(div_4, 1, `state ${get(node).severity}`, "svelte-dg2yd7");
+			set_text(text_2, get(node).state);
+			set_text(text_3, get(node).meta);
 			set_class(span, 1, `status-dot ${get(node).severity}`, "svelte-dg2yd7");
-			set_text(text, get(node).name);
-			set_class(div_3, 1, `state ${get(node).severity}`, "svelte-dg2yd7");
-			set_text(text_1, get(node).state);
-			set_text(text_2, get(node).meta);
 		});
 		append($$anchor, fragment);
 	});
@@ -6134,7 +6143,7 @@ function RelayPipeline($$anchor, $$props) {
 //#region src/components/SymbolHealthTable.svelte
 var root$1 = /* @__PURE__ */ from_html(`<div class="selected svelte-1bcfi66"> </div>`);
 var root_1$1 = /* @__PURE__ */ from_html(`<tr class="svelte-1bcfi66"><td colspan="8" class="empty-cell svelte-1bcfi66">等待合约数据</td></tr>`);
-var root_2$1 = /* @__PURE__ */ from_html(`<tr><td class="svelte-1bcfi66"><span> </span></td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"><span> </span></td></tr>`);
+var root_2$1 = /* @__PURE__ */ from_html(`<tr><td class="svelte-1bcfi66"><span> </span></td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"> </td><td class="svelte-1bcfi66"><span><i class="svelte-1bcfi66"></i> </span></td></tr>`);
 var root_3 = /* @__PURE__ */ from_html(`<span class="error svelte-1bcfi66"> </span>`);
 var root_4 = /* @__PURE__ */ from_html(`<div class="detail svelte-1bcfi66"><span class="svelte-1bcfi66">last price <b class="svelte-1bcfi66"> </b></span> <span class="svelte-1bcfi66">volume <b class="svelte-1bcfi66"> </b></span> <span class="svelte-1bcfi66">open interest <b class="svelte-1bcfi66"> </b></span> <span class="svelte-1bcfi66">invalid rows <b class="svelte-1bcfi66"> </b></span> <!></div>`);
 var root_5 = /* @__PURE__ */ from_html(`<section class="panel table-panel svelte-1bcfi66" data-testid="symbol-health-table"><div class="head svelte-1bcfi66"><div class="panel-title">活跃合约健康排行</div> <!></div> <table class="table"><thead><tr class="svelte-1bcfi66"><th class="svelte-1bcfi66">状态</th><th class="svelte-1bcfi66">合约</th><th class="svelte-1bcfi66">中文名称</th><th class="svelte-1bcfi66">距上次更新</th><th class="svelte-1bcfi66">行情延迟</th><th class="svelte-1bcfi66">Tick</th><th class="svelte-1bcfi66">订阅</th><th class="svelte-1bcfi66">风险</th></tr></thead><tbody><!></tbody></table> <!></section>`);
@@ -6202,7 +6211,7 @@ function SymbolHealthTable($$anchor, $$props) {
 			reset(td_6);
 			var td_7 = sibling(td_6);
 			var span_1 = child(td_7);
-			var text_8 = child(span_1, true);
+			var text_8 = sibling(child(span_1), 1, true);
 			reset(span_1);
 			reset(td_7);
 			reset(tr_1);
@@ -6487,7 +6496,8 @@ function App($$anchor, $$props) {
 			},
 			unit: "/s",
 			tone: "info",
-			format: "rate"
+			format: "rate",
+			icon: "⌁"
 		});
 		var node_5 = sibling(node_4, 2);
 		MetricCard(node_5, {
@@ -6497,7 +6507,8 @@ function App($$anchor, $$props) {
 			},
 			unit: "/s",
 			tone: "accent",
-			format: "rate"
+			format: "rate",
+			icon: "▥"
 		});
 		var node_6 = sibling(node_5, 2);
 		{
@@ -6509,7 +6520,8 @@ function App($$anchor, $$props) {
 				},
 				unit: "%",
 				tone: "live",
-				format: "percent"
+				format: "percent",
+				icon: "◎"
 			});
 		}
 		var node_7 = sibling(node_6, 2);
@@ -6522,7 +6534,8 @@ function App($$anchor, $$props) {
 				},
 				get tone() {
 					return get($0);
-				}
+				},
+				icon: "◇"
 			});
 		}
 		var node_8 = sibling(node_7, 2);
@@ -6532,7 +6545,8 @@ function App($$anchor, $$props) {
 				return get(model).upstreamIdleMs;
 			},
 			format: "duration",
-			tone: "info"
+			tone: "info",
+			icon: "↻"
 		});
 		var node_9 = sibling(node_8, 2);
 		{
@@ -6544,7 +6558,8 @@ function App($$anchor, $$props) {
 				},
 				get tone() {
 					return get($0);
-				}
+				},
+				icon: "!"
 			});
 		}
 		reset(section);

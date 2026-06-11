@@ -1,17 +1,18 @@
 :root {
-  --relay-bg: #061016;
-  --relay-panel: #101b1f;
-  --relay-panel-strong: #13282c;
-  --relay-panel-soft: #0c171b;
-  --relay-line: #2b7266;
-  --relay-line-soft: #25504a;
-  --relay-text: #eef8f2;
-  --relay-muted: #97afa9;
-  --relay-live: #48cf8e;
-  --relay-closed: #74878a;
-  --relay-warn: #efbd54;
-  --relay-bad: #ef6574;
-  --relay-info: #5db8d7;
-  --relay-accent: #b891e8;
-  --relay-shadow: 0 16px 34px rgb(0 0 0 / 34%);
+  --relay-bg: #020812;
+  --relay-panel: #071727ed;
+  --relay-panel-strong: #0a2035f7;
+  --relay-panel-soft: #040f1bf0;
+  --relay-line: #278cc44d;
+  --relay-line-soft: #2ad0ff6b;
+  --relay-text: #e9f8ff;
+  --relay-muted: #779cb0;
+  --relay-live: #45ff9a;
+  --relay-closed: #526779;
+  --relay-warn: #ffc447;
+  --relay-bad: #ff536a;
+  --relay-info: #20d8ff;
+  --relay-accent: #b06cff;
+  --relay-blue: #42a7ff;
+  --relay-shadow: 0 0 0 1px #20d8ff10, 0 16px 40px #0007, inset 0 0 28px #134c6e18;
 }
