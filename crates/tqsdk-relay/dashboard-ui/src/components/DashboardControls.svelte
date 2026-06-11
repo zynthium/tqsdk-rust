@@ -87,40 +87,30 @@
 
 <style>
   .controls {
-    position: absolute;
-    top: 52px;
-    right: 12px;
-    z-index: 6;
-    width: 84px;
-    min-height: 34px;
-    overflow: visible;
-    border-color: #45ff9a66;
-    border-radius: 999px;
-    background: #061a2be6;
-  }
-
-  .controls[open] {
-    width: min(760px, calc(100vw - 24px));
-    max-height: calc(100dvh - 64px);
-    overflow: auto;
-    border-radius: 10px;
-    background: linear-gradient(180deg, #081b2df7, #040f1bf7);
-    scrollbar-color: #2ad0ff66 #04111e;
-    scrollbar-width: thin;
+    position: relative;
+    z-index: 100;
   }
 
   summary {
     position: relative;
-    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 32px;
+    min-width: 58px;
+    padding: 5px 9px;
     cursor: pointer;
-    color: #ccffe1;
+    color: #aeeaff;
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 750;
+    border: 1px solid #2ad0ff55;
+    border-radius: 7px;
+    background: #061a2b99;
     list-style: none;
+    transition: all 0.2s;
+  }
+
+  summary:hover {
+    border-color: var(--relay-info);
   }
 
   summary::-webkit-details-marker {
@@ -129,23 +119,34 @@
 
   summary::before {
     content: "";
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     margin-right: 6px;
     display: inline-block;
     border-radius: 50%;
     background: var(--relay-live);
-    box-shadow: 0 0 12px var(--relay-live);
+    box-shadow: 0 0 10px var(--relay-live);
   }
 
   .control-grid {
-    position: relative;
-    z-index: 1;
+    display: none;
+  }
+
+  .controls[open] .control-grid {
     display: grid;
+    position: absolute;
+    top: calc(100% + 12px);
+    right: 0;
+    width: max-content;
+    max-width: min(760px, calc(100vw - 24px));
     grid-template-columns: auto auto minmax(180px, 1fr) 150px 90px 72px;
     align-items: center;
     gap: 8px;
-    padding: 0 10px 9px;
+    padding: 10px 12px;
+    background: linear-gradient(180deg, #081b2df7, #040f1bf7);
+    border: 1px solid #45ff9a66;
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   }
 
   .status-set {
