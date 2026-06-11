@@ -1010,6 +1010,40 @@ fn night_session_wraps_midnight_for_status_classification() {
 }
 
 #[test]
+fn official_night_session_end_after_24_keeps_session_open() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(0, 30, 0);
+    store.record_universe(["SHFE.au2608"], now - 90_000);
+    store.record_symbol_trading_time(
+        "SHFE.au2608",
+        &TradingTime {
+            day: vec![
+                vec!["09:00:00".to_string(), "10:15:00".to_string()],
+                vec!["10:30:00".to_string(), "11:30:00".to_string()],
+                vec!["13:30:00".to_string(), "15:00:00".to_string()],
+            ],
+            night: vec![vec!["21:00:00".to_string(), "26:30:00".to_string()]],
+        },
+    );
+    store.record_tick_at(
+        "SHFE.au2608",
+        &tick(1, i64::try_from((now - 90_000) * 1_000_000).unwrap(), 800.0),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.symbols[0].session, SymbolSession::Open);
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Stale);
+    assert!(snapshot.symbols[0].problem);
+}
+
+#[test]
 fn symbol_metrics_query_accepts_closed_status_filter() {
     assert!(SymbolMetricsQuery::from_query_string("status=closed").is_ok());
 }
