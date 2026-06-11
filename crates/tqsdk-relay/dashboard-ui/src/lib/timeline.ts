@@ -12,20 +12,20 @@ export function exchangeOf(symbol: string): string {
 
 export function timelineSeverityForRows(rows: SymbolRow[]): TimelineSeverity {
   if (rows.length === 0) return 'unknown';
+  if (rows.every((row) => row.session === 'closed')) return 'closed';
   if (rows.some((row) => row.problem_severity === 'bad')) return 'bad';
   if (rows.some((row) => row.problem_severity === 'warn')) return 'warn';
   if (rows.every((row) => row.flow === 'no_sample')) return 'no_sample';
   if (rows.every((row) => row.session === 'unknown')) return 'unknown';
-  if (rows.every((row) => row.session === 'closed')) return 'closed';
   return 'live';
 }
 
 function timelineSeverityForRow(row: SymbolRow): TimelineSeverity {
+  if (row.session === 'closed') return 'closed';
   if (row.problem_severity === 'bad' || row.integrity === 'confirmed_gap') return 'bad';
   if (row.problem_severity === 'warn' || row.integrity === 'suspected' || row.flow === 'silent') return 'warn';
   if (row.flow === 'no_sample') return 'no_sample';
   if (row.session === 'unknown') return 'unknown';
-  if (row.session === 'closed') return 'closed';
   return 'live';
 }
 

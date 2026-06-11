@@ -5612,19 +5612,19 @@ function exchangeOf(symbol) {
 }
 function timelineSeverityForRows(rows) {
 	if (rows.length === 0) return "unknown";
+	if (rows.every((row) => row.session === "closed")) return "closed";
 	if (rows.some((row) => row.problem_severity === "bad")) return "bad";
 	if (rows.some((row) => row.problem_severity === "warn")) return "warn";
 	if (rows.every((row) => row.flow === "no_sample")) return "no_sample";
 	if (rows.every((row) => row.session === "unknown")) return "unknown";
-	if (rows.every((row) => row.session === "closed")) return "closed";
 	return "live";
 }
 function timelineSeverityForRow(row) {
+	if (row.session === "closed") return "closed";
 	if (row.problem_severity === "bad" || row.integrity === "confirmed_gap") return "bad";
 	if (row.problem_severity === "warn" || row.integrity === "suspected" || row.flow === "silent") return "warn";
 	if (row.flow === "no_sample") return "no_sample";
 	if (row.session === "unknown") return "unknown";
-	if (row.session === "closed") return "closed";
 	return "live";
 }
 function pushTimelineSample(history, model) {
@@ -5694,6 +5694,7 @@ function ContinuityTimeline($$anchor, $$props) {
 				issueCount,
 				totalCount: exchangeSymbols.length,
 				expanded,
+				emptySeverity: exchangeSymbols.every((row) => row.session === "closed") ? "closed" : "no_sample",
 				severity: (sample) => sample.exchangeSeverity[exchange] ?? "closed"
 			};
 			if (!expanded) return [exchangeDefinition];
@@ -5703,13 +5704,13 @@ function ContinuityTimeline($$anchor, $$props) {
 				label: row.instrument_name ?? row.symbol,
 				detail: row.subscribed ? "订阅" : "",
 				symbol: row.symbol,
+				emptySeverity: row.session === "closed" ? "closed" : "no_sample",
 				severity: (sample) => sample.symbolSeverity[row.symbol] ?? "closed"
 			}))];
 		})
 	]);
-	function cellClass(sample, accessor) {
-		if (!sample) return "no_sample";
-		const severity = accessor(sample);
+	function cellClass(definition, sample) {
+		const severity = sample ? definition.severity(sample) : definition.emptySeverity ?? "no_sample";
 		return severity === "closed" ? "closed_unmarked" : severity;
 	}
 	function orderedSymbolRows(exchangeSymbols) {
@@ -5782,7 +5783,7 @@ function ContinuityTimeline($$anchor, $$props) {
 		});
 		each(sibling(node_1, 2), 17, () => $$props.buckets, index, ($$anchor, bucket) => {
 			var span_3 = root_3$1();
-			template_effect(($0) => set_class(span_3, 1, $0, "svelte-1vieygf"), [() => `cell ${cellClass(get(bucket), get(definition).severity)}`]);
+			template_effect(($0) => set_class(span_3, 1, $0, "svelte-1vieygf"), [() => `cell ${cellClass(get(definition), get(bucket))}`]);
 			append($$anchor, span_3);
 		});
 		append($$anchor, fragment);

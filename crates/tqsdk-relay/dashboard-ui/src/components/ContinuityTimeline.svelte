@@ -10,6 +10,7 @@
         kind: 'summary';
         key: string;
         label: string;
+        emptySeverity?: TimelineSeverity;
         severity: (sample: TimelineSample) => TimelineSeverity;
       }
     | {
@@ -20,6 +21,7 @@
         issueCount: number;
         totalCount: number;
         expanded: boolean;
+        emptySeverity?: TimelineSeverity;
         severity: (sample: TimelineSample) => TimelineSeverity;
       }
     | {
@@ -28,6 +30,7 @@
         label: string;
         detail: string;
         symbol: string;
+        emptySeverity?: TimelineSeverity;
         severity: (sample: TimelineSample) => TimelineSeverity;
       };
 
@@ -47,6 +50,7 @@
         issueCount,
         totalCount: exchangeSymbols.length,
         expanded,
+        emptySeverity: exchangeSymbols.every((row) => row.session === 'closed') ? 'closed' : 'no_sample',
         severity: (sample: TimelineSample) => sample.exchangeSeverity[exchange] ?? 'closed',
       };
       if (!expanded) return [exchangeDefinition];
@@ -58,15 +62,15 @@
           label: row.instrument_name ?? row.symbol,
           detail: row.subscribed ? '订阅' : '',
           symbol: row.symbol,
+          emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
           severity: (sample: TimelineSample) => sample.symbolSeverity[row.symbol] ?? 'closed',
         })),
       ];
     }),
   ]);
 
-  function cellClass(sample: TimelineSample | null, accessor: (sample: TimelineSample) => TimelineSeverity) {
-    if (!sample) return 'no_sample';
-    const severity = accessor(sample);
+  function cellClass(definition: TimelineDefinition, sample: TimelineSample | null) {
+    const severity = sample ? definition.severity(sample) : (definition.emptySeverity ?? 'no_sample');
     return severity === 'closed' ? 'closed_unmarked' : severity;
   }
 
@@ -126,7 +130,7 @@
         <div class="row-label">{definition.label}</div>
       {/if}
       {#each buckets as bucket}
-        <span class={`cell ${cellClass(bucket, definition.severity)}`}></span>
+        <span class={`cell ${cellClass(definition, bucket)}`}></span>
       {/each}
     {/each}
     <div class="axis"><span>-5m</span><span>now</span></div>
