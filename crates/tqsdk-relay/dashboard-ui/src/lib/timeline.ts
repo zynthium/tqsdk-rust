@@ -33,13 +33,16 @@ export function pushTimelineSample(history: TimelineHistory, model: IntegrityMod
   const rows = model.globalRows;
   const exchangeSeverity: Record<string, TimelineSeverity> = {};
   const symbolSeverity: Record<string, TimelineSeverity> = {};
+  const exchangeLatency: Record<string, number> = {};
+  const symbolLatency: Record<string, number> = {};
   for (const exchange of EXCHANGES) {
-    exchangeSeverity[exchange] = timelineSeverityForRows(
-      rows.filter((row) => exchangeOf(row.symbol) === exchange),
-    );
+    const exchangeSymbols = rows.filter((row) => exchangeOf(row.symbol) === exchange);
+    exchangeSeverity[exchange] = timelineSeverityForRows(exchangeSymbols);
+    exchangeLatency[exchange] = Math.max(0, ...exchangeSymbols.map((r) => r.receive_gap_ms ?? 0));
   }
   for (const row of rows) {
     symbolSeverity[row.symbol] = timelineSeverityForRow(row);
+    symbolLatency[row.symbol] = row.receive_gap_ms ?? 0;
   }
   const subscribedRows = rows.filter((row) => row.subscribed);
   const sample: TimelineSample = {
@@ -47,6 +50,9 @@ export function pushTimelineSample(history: TimelineHistory, model: IntegrityMod
     exchangeSeverity,
     symbolSeverity,
     subscribedSeverity: timelineSeverityForRows(subscribedRows),
+    exchangeLatency,
+    symbolLatency,
+    subscribedLatency: Math.max(0, ...subscribedRows.map((r) => r.receive_gap_ms ?? 0)),
     globalSeverity:
       model.overall === 'critical'
         ? 'bad'
@@ -57,6 +63,7 @@ export function pushTimelineSample(history: TimelineHistory, model: IntegrityMod
             : model.overall === 'closed'
               ? 'closed'
               : 'live',
+    globalLatency: Math.max(0, ...rows.map((r) => r.receive_gap_ms ?? 0)),
   };
   history.samples.push(sample);
   history.samples = history.samples.filter((item) => item.sampledAt >= model.sampledAt - 300_000);

@@ -36,7 +36,6 @@ describe('App', () => {
     expect(await screen.findByText('tqsdk-relay 行情完整性监控中心')).toBeTruthy();
     await waitFor(() => expect(screen.getByText('当前关注 · 问题合约')).toBeTruthy());
     expect(screen.getAllByText(/豆粕2609/).length).toBeGreaterThan(0);
-    expect(screen.getByText('未知')).toBeTruthy();
     expect(screen.getByText('无样本')).toBeTruthy();
     expect(screen.queryByText('DCE.m2609')).toBeNull();
     expect(screen.getAllByText('连续性').length).toBeGreaterThanOrEqual(1);

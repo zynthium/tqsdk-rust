@@ -220,6 +220,10 @@ export type TimelineSample = {
   symbolSeverity: Record<string, TimelineSeverity>;
   subscribedSeverity: TimelineSeverity;
   globalSeverity: TimelineSeverity;
+  exchangeLatency: Record<string, number>;
+  symbolLatency: Record<string, number>;
+  subscribedLatency: number;
+  globalLatency: number;
 };
 
 export type TimelineHistory = {
