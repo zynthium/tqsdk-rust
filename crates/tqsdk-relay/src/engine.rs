@@ -1,9 +1,10 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use tqsdk_core::Quote;
 
@@ -13,12 +14,120 @@ use crate::error::RelayResult;
 use crate::interest::{ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
 use crate::observability::{
-    DEFAULT_DATA_STALE_AFTER_SECS, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
+    DECODE_HEALTH_WINDOW_SECS, DEFAULT_DATA_STALE_AFTER_SECS, DecodeHealth,
+    EVENT_IDLE_CRITICAL_AFTER_MS, EVENT_IDLE_WARN_AFTER_MS, FRAME_IDLE_CRITICAL_AFTER_MS,
+    FRAME_IDLE_WARN_AFTER_MS, FlowIdleHealth, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
     RelaySourceStatus,
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
-use crate::symbol_metrics::{SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolTelemetryStore};
+use crate::symbol_metrics::{
+    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolSubscriptionCounts,
+    SymbolTelemetryReadModel, SymbolTelemetrySnapshot, SymbolTelemetryStore,
+};
 use crate::universe::FuturesContract;
+
+const DEFAULT_RELAY_EVENT_LEDGER_LIMIT: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardSnapshot {
+    pub received_at_unix_millis: u64,
+    pub metrics: MetricsSnapshot,
+    pub global: SymbolMetricsSummary,
+    pub global_symbols: Vec<SymbolTelemetrySnapshot>,
+    pub page: SymbolMetricsSnapshot,
+    pub events: Vec<RelayEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardSnapshotInputs {
+    pub received_at_unix_millis: u64,
+    pub metrics: MetricsSnapshot,
+    pub symbols: SymbolTelemetryReadModel,
+    pub subscriptions: BTreeMap<String, SymbolSubscriptionCounts>,
+    pub events: Vec<RelayEvent>,
+}
+
+impl DashboardSnapshotInputs {
+    #[must_use]
+    pub fn symbol_metrics_snapshot(&self, query: &SymbolMetricsQuery) -> SymbolMetricsSnapshot {
+        self.symbols.snapshot_at(
+            self.received_at_unix_millis,
+            DEFAULT_DATA_STALE_AFTER_SECS.saturating_mul(1_000),
+            &self.subscriptions,
+            query,
+        )
+    }
+
+    #[must_use]
+    pub fn into_dashboard_snapshot(self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
+        let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
+        let page = self.symbol_metrics_snapshot(query);
+        DashboardSnapshot {
+            received_at_unix_millis: self.received_at_unix_millis,
+            metrics: self.metrics,
+            global: global_page.summary,
+            global_symbols: global_page.symbols,
+            page,
+            events: self.events,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayEventKind {
+    UniverseRefreshed,
+    UniverseRefreshFailed,
+    FlowIncident,
+    DecodeIncident,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelayEvent {
+    pub sequence: u64,
+    pub at_unix_secs: u64,
+    pub kind: RelayEventKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+struct RelayEventLedger {
+    limit: usize,
+    next_sequence: u64,
+    events: VecDeque<RelayEvent>,
+}
+
+impl Default for RelayEventLedger {
+    fn default() -> Self {
+        Self {
+            limit: DEFAULT_RELAY_EVENT_LEDGER_LIMIT,
+            next_sequence: 1,
+            events: VecDeque::with_capacity(DEFAULT_RELAY_EVENT_LEDGER_LIMIT),
+        }
+    }
+}
+
+impl RelayEventLedger {
+    fn push(&mut self, at_unix_secs: u64, kind: RelayEventKind, detail: impl Into<String>) {
+        if self.limit == 0 {
+            return;
+        }
+        while self.events.len() >= self.limit {
+            self.events.pop_front();
+        }
+        self.events.push_back(RelayEvent {
+            sequence: self.next_sequence,
+            at_unix_secs,
+            kind,
+            detail: detail.into(),
+        });
+        self.next_sequence = self.next_sequence.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> Vec<RelayEvent> {
+        self.events.iter().cloned().collect()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownstreamFrame {
@@ -41,6 +150,7 @@ pub struct RelayEngine {
     upstream_frames_received: u64,
     upstream_events_decoded: u64,
     last_upstream_frame_unix_secs: Option<u64>,
+    last_decoded_event_unix_secs: Option<u64>,
     ticks_ingested: u64,
     upstream_symbols: usize,
     upstream_ins_list_chars: usize,
@@ -51,7 +161,10 @@ pub struct RelayEngine {
     last_universe_refresh_error: Option<String>,
     last_tick_unix_secs: Option<u64>,
     upstream_invalid_tick_rows: u64,
+    invalid_tick_row_events: VecDeque<(u64, u64)>,
+    last_invalid_row_unix_secs: Option<u64>,
     last_upstream_invalid_tick_row_error: Option<String>,
+    event_ledger: RelayEventLedger,
 }
 
 impl RelayEngine {
@@ -71,6 +184,7 @@ impl RelayEngine {
             upstream_frames_received: 0,
             upstream_events_decoded: 0,
             last_upstream_frame_unix_secs: None,
+            last_decoded_event_unix_secs: None,
             ticks_ingested: 0,
             upstream_symbols: 0,
             upstream_ins_list_chars: 0,
@@ -81,7 +195,10 @@ impl RelayEngine {
             last_universe_refresh_error: None,
             last_tick_unix_secs: None,
             upstream_invalid_tick_rows: 0,
+            invalid_tick_row_events: VecDeque::new(),
+            last_invalid_row_unix_secs: None,
             last_upstream_invalid_tick_row_error: None,
+            event_ledger: RelayEventLedger::default(),
         }
     }
 
@@ -177,6 +294,11 @@ impl RelayEngine {
     pub fn mark_upstream_degraded(&mut self) {
         self.upstream_status = RelaySourceStatus::Degraded;
         self.set_upstream_stage(RelaySourceStage::Degraded, None);
+        self.event_ledger.push(
+            current_unix_secs(),
+            RelayEventKind::FlowIncident,
+            "upstream source marked degraded",
+        );
     }
 
     pub fn record_upstream_transport_connected_at(&mut self, unix_secs: u64) {
@@ -189,6 +311,7 @@ impl RelayEngine {
     pub fn record_upstream_subscription_sent_at(&mut self, unix_secs: u64) {
         self.upstream_transport_connected = true;
         self.upstream_subscription_sent = true;
+        self.symbol_metrics.advance_source_epoch();
         if matches!(
             self.upstream_stage,
             RelaySourceStage::Connecting | RelaySourceStage::Subscribing
@@ -204,6 +327,9 @@ impl RelayEngine {
             .upstream_events_decoded
             .saturating_add(u64::try_from(decoded_events).unwrap_or(u64::MAX));
         self.last_upstream_frame_unix_secs = Some(unix_secs);
+        if decoded_events > 0 {
+            self.last_decoded_event_unix_secs = Some(unix_secs);
+        }
         if decoded_events == 0
             && matches!(
                 self.upstream_stage,
@@ -230,6 +356,9 @@ impl RelayEngine {
                 .upstream_events_decoded
                 .saturating_add(progress.events_decoded);
             self.last_upstream_frame_unix_secs = Some(progress.unix_secs);
+            if progress.events_decoded > 0 {
+                self.last_decoded_event_unix_secs = Some(progress.unix_secs);
+            }
             if progress.events_decoded == 0
                 && matches!(
                     self.upstream_stage,
@@ -273,6 +402,13 @@ impl RelayEngine {
             warn_chars.is_some_and(|warn_chars| upstream_ins_list_chars > warn_chars);
         self.last_universe_refresh_unix_secs = Some(unix_secs);
         self.last_universe_refresh_error = None;
+        self.event_ledger.push(
+            unix_secs,
+            RelayEventKind::UniverseRefreshed,
+            format!(
+                "universe refreshed: symbols={upstream_symbols}, ins_list_chars={upstream_ins_list_chars}"
+            ),
+        );
     }
 
     pub fn record_universe_refresh_success_for_symbols<I, S>(
@@ -331,8 +467,14 @@ impl RelayEngine {
     }
 
     pub fn record_universe_refresh_error(&mut self, message: impl Into<String>, unix_secs: u64) {
+        let message = message.into();
         self.last_universe_refresh_unix_secs = Some(unix_secs);
-        self.last_universe_refresh_error = Some(message.into());
+        self.last_universe_refresh_error = Some(message.clone());
+        self.event_ledger.push(
+            unix_secs,
+            RelayEventKind::UniverseRefreshFailed,
+            format!("universe refresh failed: {message}"),
+        );
     }
 
     pub fn record_data_activity_at(&mut self, unix_secs: u64) {
@@ -340,10 +482,28 @@ impl RelayEngine {
     }
 
     pub fn record_upstream_invalid_tick_rows(&mut self, count: u64, last_error: Option<String>) {
+        self.record_upstream_invalid_tick_rows_at(count, last_error, current_unix_secs());
+    }
+
+    pub fn record_upstream_invalid_tick_rows_at(
+        &mut self,
+        count: u64,
+        last_error: Option<String>,
+        unix_secs: u64,
+    ) {
         if count == 0 {
             return;
         }
         self.upstream_invalid_tick_rows = self.upstream_invalid_tick_rows.saturating_add(count);
+        self.invalid_tick_row_events.push_back((unix_secs, count));
+        self.last_invalid_row_unix_secs = Some(unix_secs);
+        self.prune_invalid_tick_row_events(unix_secs);
+        let detail = match &last_error {
+            Some(error) => format!("invalid upstream tick rows: count={count}, error={error}"),
+            None => format!("invalid upstream tick rows: count={count}"),
+        };
+        self.event_ledger
+            .push(unix_secs, RelayEventKind::DecodeIncident, detail);
         if let Some(error) = last_error {
             self.last_upstream_invalid_tick_row_error = Some(error);
         }
@@ -355,7 +515,22 @@ impl RelayEngine {
         invalid_rows_by_symbol: BTreeMap<String, u64>,
         last_error: Option<String>,
     ) {
-        self.record_upstream_invalid_tick_rows(count, last_error.clone());
+        self.record_upstream_invalid_tick_rows_by_symbol_at(
+            count,
+            invalid_rows_by_symbol,
+            last_error,
+            current_unix_secs(),
+        );
+    }
+
+    pub fn record_upstream_invalid_tick_rows_by_symbol_at(
+        &mut self,
+        count: u64,
+        invalid_rows_by_symbol: BTreeMap<String, u64>,
+        last_error: Option<String>,
+        unix_secs: u64,
+    ) {
+        self.record_upstream_invalid_tick_rows_at(count, last_error.clone(), unix_secs);
         if invalid_rows_by_symbol.is_empty() {
             return;
         }
@@ -367,6 +542,25 @@ impl RelayEngine {
             self.symbol_metrics
                 .record_invalid_rows(&symbol, count, message);
         }
+    }
+
+    fn prune_invalid_tick_row_events(&mut self, now_unix_secs: u64) {
+        let cutoff = now_unix_secs.saturating_sub(DECODE_HEALTH_WINDOW_SECS.saturating_mul(5));
+        while self
+            .invalid_tick_row_events
+            .front()
+            .is_some_and(|(unix_secs, _)| *unix_secs < cutoff)
+        {
+            self.invalid_tick_row_events.pop_front();
+        }
+    }
+
+    fn recent_invalid_rows_at(&self, now_unix_secs: u64) -> u64 {
+        let cutoff = now_unix_secs.saturating_sub(DECODE_HEALTH_WINDOW_SECS);
+        self.invalid_tick_row_events
+            .iter()
+            .filter(|(unix_secs, _)| *unix_secs >= cutoff && *unix_secs <= now_unix_secs)
+            .fold(0_u64, |sum, (_, count)| sum.saturating_add(*count))
     }
 
     #[must_use]
@@ -394,6 +588,11 @@ impl RelayEngine {
         let data_fresh = self.last_tick_unix_secs.is_some_and(|last_tick_unix_secs| {
             now_unix_secs.saturating_sub(last_tick_unix_secs) <= DEFAULT_DATA_STALE_AFTER_SECS
         });
+        let recent_invalid_rows_1m = self.recent_invalid_rows_at(now_unix_secs);
+        let upstream_frame_idle_ms =
+            idle_millis_since(now_unix_secs, self.last_upstream_frame_unix_secs);
+        let upstream_event_idle_ms =
+            idle_millis_since(now_unix_secs, self.last_decoded_event_unix_secs);
         let market_data_ready = upstream_connected && universe_ready && data_fresh;
         HealthSnapshot {
             ready: process_started && downstream_listening,
@@ -414,17 +613,44 @@ impl RelayEngine {
             upstream_frames_received: self.upstream_frames_received,
             upstream_events_decoded: self.upstream_events_decoded,
             upstream_invalid_tick_rows: self.upstream_invalid_tick_rows,
+            lifetime_invalid_rows: self.upstream_invalid_tick_rows,
+            recent_invalid_rows_1m,
+            current_decode_health: decode_health_for(recent_invalid_rows_1m),
             last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
+            last_invalid_row_unix_secs: self.last_invalid_row_unix_secs,
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
             last_upstream_frame_unix_secs: self.last_upstream_frame_unix_secs,
+            last_decoded_event_unix_secs: self.last_decoded_event_unix_secs,
+            upstream_frame_idle_ms,
+            upstream_frame_idle_health: flow_idle_health_for(
+                upstream_frame_idle_ms,
+                FRAME_IDLE_WARN_AFTER_MS,
+                FRAME_IDLE_CRITICAL_AFTER_MS,
+            ),
+            upstream_event_idle_ms,
+            upstream_event_idle_health: flow_idle_health_for(
+                upstream_event_idle_ms,
+                EVENT_IDLE_WARN_AFTER_MS,
+                EVENT_IDLE_CRITICAL_AFTER_MS,
+            ),
             data_stale_after_secs: DEFAULT_DATA_STALE_AFTER_SECS,
         }
     }
 
     #[must_use]
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.metrics_snapshot_at(current_unix_secs())
+    }
+
+    #[must_use]
+    pub fn metrics_snapshot_at(&self, now_unix_secs: u64) -> MetricsSnapshot {
+        let recent_invalid_rows_1m = self.recent_invalid_rows_at(now_unix_secs);
+        let upstream_frame_idle_ms =
+            idle_millis_since(now_unix_secs, self.last_upstream_frame_unix_secs);
+        let upstream_event_idle_ms =
+            idle_millis_since(now_unix_secs, self.last_decoded_event_unix_secs);
         MetricsSnapshot {
             downstream_clients: self.interests.client_count(),
             quote_subscriptions: self.interests.total_quote_subscriptions(),
@@ -438,18 +664,55 @@ impl RelayEngine {
             upstream_subscription_sent: self.upstream_subscription_sent,
             upstream_frames_received: self.upstream_frames_received,
             upstream_events_decoded: self.upstream_events_decoded,
+            last_decoded_event_unix_secs: self.last_decoded_event_unix_secs,
+            upstream_frame_idle_ms,
+            upstream_frame_idle_health: flow_idle_health_for(
+                upstream_frame_idle_ms,
+                FRAME_IDLE_WARN_AFTER_MS,
+                FRAME_IDLE_CRITICAL_AFTER_MS,
+            ),
+            upstream_frame_idle_warn_after_ms: FRAME_IDLE_WARN_AFTER_MS,
+            upstream_frame_idle_critical_after_ms: FRAME_IDLE_CRITICAL_AFTER_MS,
+            upstream_event_idle_ms,
+            upstream_event_idle_health: flow_idle_health_for(
+                upstream_event_idle_ms,
+                EVENT_IDLE_WARN_AFTER_MS,
+                EVENT_IDLE_CRITICAL_AFTER_MS,
+            ),
+            upstream_event_idle_warn_after_ms: EVENT_IDLE_WARN_AFTER_MS,
+            upstream_event_idle_critical_after_ms: EVENT_IDLE_CRITICAL_AFTER_MS,
             upstream_symbols: self.upstream_symbols,
             upstream_ins_list_chars: self.upstream_ins_list_chars,
             upstream_ins_list_warn_chars: self.upstream_ins_list_warn_chars,
             upstream_ins_list_max_chars: self.upstream_ins_list_max_chars,
             upstream_ins_list_over_warn: self.upstream_ins_list_over_warn,
             upstream_invalid_tick_rows: self.upstream_invalid_tick_rows,
+            lifetime_invalid_rows: self.upstream_invalid_tick_rows,
+            recent_invalid_rows_1m,
+            current_decode_health: decode_health_for(recent_invalid_rows_1m),
             last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
+            last_invalid_row_unix_secs: self.last_invalid_row_unix_secs,
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
             last_universe_refresh_error: self.last_universe_refresh_error.clone(),
             last_tick_unix_secs: self.last_tick_unix_secs,
             last_upstream_frame_unix_secs: self.last_upstream_frame_unix_secs,
         }
+    }
+
+    #[must_use]
+    pub fn dashboard_snapshot_inputs_at(&self, now_unix_millis: u64) -> DashboardSnapshotInputs {
+        DashboardSnapshotInputs {
+            received_at_unix_millis: now_unix_millis,
+            metrics: self.metrics_snapshot_at(now_unix_millis / 1_000),
+            symbols: self.symbol_metrics.read_model(),
+            subscriptions: self.interests.symbol_subscription_counts(),
+            events: self.event_ledger.snapshot(),
+        }
+    }
+
+    #[must_use]
+    pub fn event_ledger_snapshot(&self) -> Vec<RelayEvent> {
+        self.event_ledger.snapshot()
     }
 
     #[must_use]
@@ -469,6 +732,21 @@ impl RelayEngine {
     #[must_use]
     pub fn symbol_metrics_snapshot(&self, query: &SymbolMetricsQuery) -> SymbolMetricsSnapshot {
         self.symbol_metrics_snapshot_at(current_unix_millis(), query)
+    }
+
+    #[must_use]
+    pub fn dashboard_snapshot_at(
+        &self,
+        now_unix_millis: u64,
+        query: &SymbolMetricsQuery,
+    ) -> DashboardSnapshot {
+        self.dashboard_snapshot_inputs_at(now_unix_millis)
+            .into_dashboard_snapshot(query)
+    }
+
+    #[must_use]
+    pub fn dashboard_snapshot(&self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
+        self.dashboard_snapshot_at(current_unix_millis(), query)
     }
 
     fn quote_frames(&self, symbol: &str) -> Vec<DownstreamFrame> {
@@ -626,6 +904,31 @@ fn quote_payload(symbol: &str, quote: Quote) -> Value {
 
 fn invalid_row_error_symbol(message: &str) -> Option<&str> {
     message.split_once(" row ").map(|(symbol, _)| symbol)
+}
+
+fn idle_millis_since(now_unix_secs: u64, last_unix_secs: Option<u64>) -> Option<u64> {
+    last_unix_secs.map(|last_unix_secs| now_unix_secs.saturating_sub(last_unix_secs) * 1_000)
+}
+
+fn flow_idle_health_for(
+    idle_ms: Option<u64>,
+    warn_after_ms: u64,
+    critical_after_ms: u64,
+) -> FlowIdleHealth {
+    match idle_ms {
+        None => FlowIdleHealth::NoSample,
+        Some(idle_ms) if idle_ms > critical_after_ms => FlowIdleHealth::Critical,
+        Some(idle_ms) if idle_ms > warn_after_ms => FlowIdleHealth::Warn,
+        Some(_) => FlowIdleHealth::Live,
+    }
+}
+
+fn decode_health_for(recent_invalid_rows: u64) -> DecodeHealth {
+    if recent_invalid_rows > 0 {
+        DecodeHealth::Degraded
+    } else {
+        DecodeHealth::Healthy
+    }
 }
 
 fn current_unix_secs() -> u64 {

@@ -131,6 +131,14 @@ async fn pump_available_drains_ready_upstream_ticks() {
 #[tokio::test]
 async fn pump_once_records_invalid_tick_rows_even_without_a_tick() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
+    engine
+        .handle_command(
+            ClientId::new(1),
+            DownstreamCommand::SubscribeQuote {
+                symbols: vec!["SHFE.au2602".to_string()],
+            },
+        )
+        .unwrap();
     let mut invalid_rows_by_symbol = std::collections::BTreeMap::new();
     invalid_rows_by_symbol.insert("SHFE.au2602".to_string(), 1);
     let mut upstream = InvalidOnlySource {

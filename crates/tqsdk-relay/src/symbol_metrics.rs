@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use chrono::{NaiveTime, TimeZone, Timelike};
+use chrono::{NaiveTime, Timelike};
 use serde::Serialize;
 use tqsdk_core::{
     Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
@@ -28,6 +28,37 @@ pub enum SymbolProblemSeverity {
     Closed,
     Warn,
     Bad,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolCoverage {
+    Covered,
+    Uncovered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolSession {
+    Open,
+    Closed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolFlow {
+    Flowing,
+    Silent,
+    NoSample,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolIntegrity {
+    Intact,
+    Suspected,
+    ConfirmedGap,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,6 +121,13 @@ pub struct SymbolTelemetry {
     instrument_name: Option<String>,
     trading_segments: Option<Vec<TradingSessionSegment>>,
     ticks_ingested: u64,
+    source_epoch: u64,
+    last_tick_id: Option<i64>,
+    gap_event_count: u64,
+    estimated_missing_rows: u64,
+    duplicate_rows: u64,
+    out_of_order_rows: u64,
+    last_gap_unix_millis: Option<u64>,
     last_receive_unix_millis: Option<u64>,
     last_tick_datetime_ns: Option<i64>,
     last_price: Option<f64>,
@@ -103,7 +141,14 @@ pub struct SymbolTelemetry {
 pub struct SymbolTelemetryStore {
     universe: BTreeSet<String>,
     telemetry: BTreeMap<String, SymbolTelemetry>,
+    source_epoch: u64,
     last_universe_refresh_unix_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SymbolTelemetryReadModel {
+    universe: BTreeSet<String>,
+    telemetry: BTreeMap<String, SymbolTelemetry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -111,6 +156,7 @@ pub struct SymbolMetricsSnapshot {
     pub now_unix_millis: u64,
     pub data_stale_after_millis: u64,
     pub summary: SymbolMetricsSummary,
+    pub filtered_total: usize,
     pub symbols: Vec<SymbolTelemetrySnapshot>,
 }
 
@@ -123,6 +169,15 @@ pub struct SymbolMetricsSummary {
     pub missing: usize,
     pub inactive: usize,
     pub subscribed: usize,
+    pub problem: usize,
+    pub subscribed_problem: usize,
+    pub universe_total: usize,
+    pub universe_observed: usize,
+    pub active_invalid_rows: u64,
+    pub gap_event_count: u64,
+    pub estimated_missing_rows: u64,
+    pub duplicate_rows: u64,
+    pub out_of_order_rows: u64,
     pub p95_receive_gap_ms: Option<u64>,
 }
 
@@ -131,6 +186,10 @@ pub struct SymbolTelemetrySnapshot {
     pub symbol: String,
     pub instrument_name: Option<String>,
     pub status: SymbolStatus,
+    pub coverage: SymbolCoverage,
+    pub session: SymbolSession,
+    pub flow: SymbolFlow,
+    pub integrity: SymbolIntegrity,
     pub problem: bool,
     pub problem_severity: SymbolProblemSeverity,
     pub in_universe: bool,
@@ -138,6 +197,13 @@ pub struct SymbolTelemetrySnapshot {
     pub quote_subscriber_count: usize,
     pub chart_subscriber_count: usize,
     pub ticks_ingested: u64,
+    pub source_epoch: u64,
+    pub last_tick_id: Option<i64>,
+    pub gap_event_count: u64,
+    pub estimated_missing_rows: u64,
+    pub duplicate_rows: u64,
+    pub out_of_order_rows: u64,
+    pub last_gap_unix_millis: Option<u64>,
     pub receive_gap_ms: Option<u64>,
     pub market_time_lag_ms: Option<u64>,
     pub last_receive_unix_millis: Option<u64>,
@@ -183,8 +249,21 @@ impl SymbolTelemetryStore {
             .instrument_name = Some(instrument_name.to_string());
     }
 
+    pub fn advance_source_epoch(&mut self) {
+        self.source_epoch = self.source_epoch.saturating_add(1);
+        for telemetry in self.telemetry.values_mut() {
+            telemetry.source_epoch = self.source_epoch;
+            telemetry.last_tick_id = None;
+        }
+    }
+
     pub fn record_tick_at(&mut self, symbol: &str, row: &RelayTickRow, receive_unix_millis: u64) {
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
+        if telemetry.source_epoch != self.source_epoch {
+            telemetry.source_epoch = self.source_epoch;
+            telemetry.last_tick_id = None;
+        }
+        record_tick_continuity(telemetry, row.id, receive_unix_millis);
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = Some(row.datetime);
@@ -195,6 +274,10 @@ impl SymbolTelemetryStore {
 
     pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
+        if telemetry.source_epoch != self.source_epoch {
+            telemetry.source_epoch = self.source_epoch;
+            telemetry.last_tick_id = None;
+        }
         let instrument_name = quote.instrument_name.trim();
         if !instrument_name.is_empty() {
             telemetry.instrument_name = Some(instrument_name.to_string());
@@ -224,6 +307,27 @@ impl SymbolTelemetryStore {
         }
     }
 
+    #[must_use]
+    pub fn read_model(&self) -> SymbolTelemetryReadModel {
+        SymbolTelemetryReadModel {
+            universe: self.universe.clone(),
+            telemetry: self.telemetry.clone(),
+        }
+    }
+
+    pub fn snapshot_at(
+        &self,
+        now_unix_millis: u64,
+        stale_after_millis: u64,
+        subscriptions: &BTreeMap<String, SymbolSubscriptionCounts>,
+        query: &SymbolMetricsQuery,
+    ) -> SymbolMetricsSnapshot {
+        self.read_model()
+            .snapshot_at(now_unix_millis, stale_after_millis, subscriptions, query)
+    }
+}
+
+impl SymbolTelemetryReadModel {
     pub fn snapshot_at(
         &self,
         now_unix_millis: u64,
@@ -233,7 +337,6 @@ impl SymbolTelemetryStore {
     ) -> SymbolMetricsSnapshot {
         let mut symbols = BTreeSet::new();
         symbols.extend(self.universe.iter().cloned());
-        symbols.extend(self.telemetry.keys().cloned());
         symbols.extend(subscriptions.keys().cloned());
 
         let mut unfiltered = Vec::new();
@@ -251,7 +354,10 @@ impl SymbolTelemetryStore {
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
                 .map(|tick_millis| now_unix_millis.saturating_sub(tick_millis));
-            let trading_phase = trading_phase_for_symbol(&symbol, telemetry, local_day_offset);
+            let trading_phase = receive_gap_ms
+                .is_some()
+                .then(|| trading_phase_for_symbol(&symbol, telemetry, local_day_offset))
+                .flatten();
             let status = classify_symbol(
                 in_universe,
                 receive_gap_ms,
@@ -259,11 +365,31 @@ impl SymbolTelemetryStore {
                 trading_phase,
             );
             let telemetry = telemetry.cloned().unwrap_or_default();
-            let problem_severity = problem_severity_for(status, telemetry.invalid_rows);
+            let coverage = coverage_for(in_universe);
+            let session = session_for(trading_phase);
+            let flow = flow_for(receive_gap_ms, stale_after_millis);
+            let integrity = integrity_for(
+                telemetry.gap_event_count,
+                telemetry.duplicate_rows,
+                telemetry.out_of_order_rows,
+                status,
+            );
+            let problem_severity = problem_severity_for(
+                status,
+                coverage,
+                telemetry.invalid_rows,
+                telemetry.gap_event_count,
+                telemetry.duplicate_rows,
+                telemetry.out_of_order_rows,
+            );
             unfiltered.push(SymbolTelemetrySnapshot {
                 symbol,
                 instrument_name: telemetry.instrument_name,
                 status,
+                coverage,
+                session,
+                flow,
+                integrity,
                 problem: is_problem_severity(problem_severity),
                 problem_severity,
                 in_universe,
@@ -271,6 +397,13 @@ impl SymbolTelemetryStore {
                 quote_subscriber_count: subscriptions.quote_subscriber_count,
                 chart_subscriber_count: subscriptions.chart_subscriber_count,
                 ticks_ingested: telemetry.ticks_ingested,
+                source_epoch: telemetry.source_epoch,
+                last_tick_id: telemetry.last_tick_id,
+                gap_event_count: telemetry.gap_event_count,
+                estimated_missing_rows: telemetry.estimated_missing_rows,
+                duplicate_rows: telemetry.duplicate_rows,
+                out_of_order_rows: telemetry.out_of_order_rows,
+                last_gap_unix_millis: telemetry.last_gap_unix_millis,
                 receive_gap_ms,
                 market_time_lag_ms,
                 last_receive_unix_millis: telemetry.last_receive_unix_millis,
@@ -300,6 +433,7 @@ impl SymbolTelemetryStore {
             })
             .collect::<Vec<_>>();
         sort_symbols(&mut symbols, query.sort);
+        let filtered_total = symbols.len();
         if let Some(limit) = query.limit {
             symbols.truncate(limit);
         }
@@ -308,12 +442,53 @@ impl SymbolTelemetryStore {
             now_unix_millis,
             data_stale_after_millis: stale_after_millis,
             summary,
+            filtered_total,
             symbols,
         }
     }
 }
 
-fn problem_severity_for(status: SymbolStatus, invalid_rows: u64) -> SymbolProblemSeverity {
+fn record_tick_continuity(telemetry: &mut SymbolTelemetry, tick_id: i64, receive_unix_millis: u64) {
+    match telemetry.last_tick_id {
+        None => {
+            telemetry.last_tick_id = Some(tick_id);
+        }
+        Some(last_tick_id) if tick_id == last_tick_id => {
+            telemetry.duplicate_rows = telemetry.duplicate_rows.saturating_add(1);
+        }
+        Some(last_tick_id) if tick_id < last_tick_id => {
+            telemetry.out_of_order_rows = telemetry.out_of_order_rows.saturating_add(1);
+        }
+        Some(last_tick_id) => {
+            if tick_id > last_tick_id.saturating_add(1) {
+                let missing_rows =
+                    u64::try_from(tick_id.saturating_sub(last_tick_id).saturating_sub(1))
+                        .unwrap_or(u64::MAX);
+                telemetry.gap_event_count = telemetry.gap_event_count.saturating_add(1);
+                telemetry.estimated_missing_rows = telemetry
+                    .estimated_missing_rows
+                    .saturating_add(missing_rows);
+                telemetry.last_gap_unix_millis = Some(receive_unix_millis);
+            }
+            telemetry.last_tick_id = Some(tick_id);
+        }
+    }
+}
+
+fn problem_severity_for(
+    status: SymbolStatus,
+    coverage: SymbolCoverage,
+    invalid_rows: u64,
+    gap_event_count: u64,
+    duplicate_rows: u64,
+    out_of_order_rows: u64,
+) -> SymbolProblemSeverity {
+    if coverage == SymbolCoverage::Uncovered {
+        return SymbolProblemSeverity::Bad;
+    }
+    if gap_event_count > 0 || duplicate_rows > 0 || out_of_order_rows > 0 {
+        return SymbolProblemSeverity::Bad;
+    }
     match status {
         SymbolStatus::Closed => SymbolProblemSeverity::Closed,
         SymbolStatus::Missing | SymbolStatus::Inactive => SymbolProblemSeverity::Bad,
@@ -321,6 +496,45 @@ fn problem_severity_for(status: SymbolStatus, invalid_rows: u64) -> SymbolProble
         SymbolStatus::Live if invalid_rows > 0 => SymbolProblemSeverity::Bad,
         SymbolStatus::Live => SymbolProblemSeverity::Live,
     }
+}
+
+fn coverage_for(in_universe: bool) -> SymbolCoverage {
+    if in_universe {
+        SymbolCoverage::Covered
+    } else {
+        SymbolCoverage::Uncovered
+    }
+}
+
+fn session_for(trading_phase: Option<TradingSessionPhase>) -> SymbolSession {
+    match trading_phase {
+        Some(TradingSessionPhase::Open | TradingSessionPhase::PreClose) => SymbolSession::Open,
+        Some(TradingSessionPhase::Closed) => SymbolSession::Closed,
+        None => SymbolSession::Unknown,
+    }
+}
+
+fn flow_for(receive_gap_ms: Option<u64>, stale_after_millis: u64) -> SymbolFlow {
+    match receive_gap_ms {
+        Some(gap) if gap <= stale_after_millis => SymbolFlow::Flowing,
+        Some(_) => SymbolFlow::Silent,
+        None => SymbolFlow::NoSample,
+    }
+}
+
+fn integrity_for(
+    gap_event_count: u64,
+    duplicate_rows: u64,
+    out_of_order_rows: u64,
+    status: SymbolStatus,
+) -> SymbolIntegrity {
+    if gap_event_count > 0 || duplicate_rows > 0 || out_of_order_rows > 0 {
+        return SymbolIntegrity::ConfirmedGap;
+    }
+    if matches!(status, SymbolStatus::Stale | SymbolStatus::Missing) {
+        return SymbolIntegrity::Suspected;
+    }
+    SymbolIntegrity::Intact
 }
 
 fn is_problem_severity(severity: SymbolProblemSeverity) -> bool {
@@ -336,6 +550,12 @@ fn classify_symbol(
     stale_after_millis: u64,
     trading_phase: Option<TradingSessionPhase>,
 ) -> SymbolStatus {
+    if !in_universe && receive_gap_ms.is_none() {
+        return SymbolStatus::Inactive;
+    }
+    if receive_gap_ms.is_none() {
+        return SymbolStatus::Missing;
+    }
     if matches!(trading_phase, Some(TradingSessionPhase::Closed)) {
         return SymbolStatus::Closed;
     }
@@ -357,6 +577,15 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
         missing: 0,
         inactive: 0,
         subscribed: 0,
+        problem: 0,
+        subscribed_problem: 0,
+        universe_total: 0,
+        universe_observed: 0,
+        active_invalid_rows: 0,
+        gap_event_count: 0,
+        estimated_missing_rows: 0,
+        duplicate_rows: 0,
+        out_of_order_rows: 0,
         p95_receive_gap_ms: None,
     };
     for symbol in symbols {
@@ -370,6 +599,31 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
         if symbol.subscribed {
             summary.subscribed += 1;
         }
+        if symbol.problem {
+            summary.problem += 1;
+            summary.active_invalid_rows = summary
+                .active_invalid_rows
+                .saturating_add(symbol.invalid_rows);
+            if symbol.subscribed {
+                summary.subscribed_problem += 1;
+            }
+        }
+        if symbol.in_universe {
+            summary.universe_total += 1;
+            if symbol.last_receive_unix_millis.is_some() {
+                summary.universe_observed += 1;
+            }
+        }
+        summary.gap_event_count = summary
+            .gap_event_count
+            .saturating_add(symbol.gap_event_count);
+        summary.estimated_missing_rows = summary
+            .estimated_missing_rows
+            .saturating_add(symbol.estimated_missing_rows);
+        summary.duplicate_rows = summary.duplicate_rows.saturating_add(symbol.duplicate_rows);
+        summary.out_of_order_rows = summary
+            .out_of_order_rows
+            .saturating_add(symbol.out_of_order_rows);
         if let Some(gap) = symbol.receive_gap_ms {
             receive_gaps.push(gap);
         }
@@ -563,14 +817,9 @@ fn parse_hms_seconds(value: &str) -> Option<u64> {
 }
 
 fn local_day_offset_from_unix_millis(now_unix_millis: u64) -> Duration {
-    let Ok(now_unix_millis) = i64::try_from(now_unix_millis) else {
-        return Duration::ZERO;
-    };
-    chrono::Local
-        .timestamp_millis_opt(now_unix_millis)
-        .single()
-        .map(|datetime| Duration::from_secs(u64::from(datetime.num_seconds_from_midnight())))
-        .unwrap_or(Duration::ZERO)
+    const CHINA_OFFSET_MILLIS: u64 = 8 * 60 * 60 * 1_000;
+    const DAY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+    Duration::from_millis((now_unix_millis.saturating_add(CHINA_OFFSET_MILLIS)) % DAY_MILLIS)
 }
 
 fn trading_phase_at(

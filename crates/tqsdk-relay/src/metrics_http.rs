@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -67,12 +68,30 @@ async fn serve_metrics_stream(
                     return Ok(());
                 }
             };
-            let symbol_metrics = engine
+            let inputs = engine
                 .lock()
                 .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
-                .symbol_metrics_snapshot(&query);
+                .dashboard_snapshot_inputs_at(current_unix_millis());
+            let symbol_metrics = inputs.symbol_metrics_snapshot(&query);
             serde_json::to_value(symbol_metrics).map_err(|err| {
                 RelayError::Internal(format!("symbol metrics JSON encode failed: {err}"))
+            })?
+        }
+        "/dashboard-snapshot" => {
+            let query = match SymbolMetricsQuery::from_query_string(target.query) {
+                Ok(query) => query,
+                Err(error) => {
+                    write_response(stream, 400, json!({ "error": error })).await?;
+                    return Ok(());
+                }
+            };
+            let inputs = engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
+                .dashboard_snapshot_inputs_at(current_unix_millis());
+            let dashboard = inputs.into_dashboard_snapshot(&query);
+            serde_json::to_value(dashboard).map_err(|err| {
+                RelayError::Internal(format!("dashboard snapshot JSON encode failed: {err}"))
             })?
         }
         path if path == "/dashboard"
@@ -199,4 +218,13 @@ fn status_reason(status: u16) -> &'static str {
         500 => "Internal Server Error",
         _ => "OK",
     }
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

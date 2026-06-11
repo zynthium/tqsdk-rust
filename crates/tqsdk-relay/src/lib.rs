@@ -32,12 +32,18 @@ pub use config::{
     UpstreamInsListLimits, next_daily_refresh_delay,
 };
 pub use diagnostics::RelayStartupReport;
-pub use engine::{DownstreamFrame, RelayEngine};
+pub use engine::{
+    DashboardSnapshot, DashboardSnapshotInputs, DownstreamFrame, RelayEngine, RelayEvent,
+    RelayEventKind,
+};
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;
 pub use metrics_http::serve_metrics_until;
-pub use observability::{HealthSnapshot, MetricsSnapshot, RelaySourceStage, RelaySourceStatus};
+pub use observability::{
+    DecodeHealth, FlowIdleHealth, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
+    RelaySourceStatus,
+};
 pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
@@ -50,8 +56,9 @@ pub use runtime::{
 };
 pub use server::RelayServer;
 pub use symbol_metrics::{
-    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolProblemSeverity,
-    SymbolSort, SymbolStatus, SymbolSubscriptionCounts, SymbolTelemetrySnapshot,
+    SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsQuery, SymbolMetricsSnapshot,
+    SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSort, SymbolStatus,
+    SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
     SymbolTelemetryStore,
 };
 #[cfg(feature = "metadata")]

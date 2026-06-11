@@ -241,6 +241,22 @@ market DIFF，但语义不同：
 
 低频字段长期不变不代表行情断流。
 
+relay dashboard 的监控口径进一步拆成四类，不再把所有异常压缩进一个 `status`：
+
+- `coverage`：合约是否属于当前上游 universe。下游仍在订阅但已退出 universe 的合约是
+  `uncovered`，即使当前交易时段休盘也仍是覆盖问题。
+- `session`：基于官方 `trading_time`、quote trading time 或内置期货时段推导的
+  `open` / `closed` / `unknown`。计算固定使用 Asia/Shanghai 时区，不受 host 本地时区影响。
+- `flow`：基于 relay 接收时间的 `flowing` / `silent` / `no_sample`。没有接收样本时是
+  `no_sample`，不得把它误判为 `closed`。
+- `integrity`：基于 tick row id 连续性的 `intact` / `suspected` / `confirmed_gap`。
+  `gap_event_count`、`duplicate_rows`、`out_of_order_rows` 是确认的 tick 完整性问题；
+  仅长时间未收到数据属于 suspected silence。
+
+dashboard 的当前健康集合只能是“当前上游 universe ∪ 当前下游订阅”。旧 telemetry 如果既
+不在当前 universe、也没有当前订阅，不进入当前健康和默认列表；需要追溯时应进入事件 /
+历史账本，而不是污染当前断流判断。
+
 ## 订阅历史窗口与 quote-only
 
 `quote` / `quotes` 只表达最新 quote interest，不需要 tick 历史窗口。它走：
@@ -285,7 +301,8 @@ tick chart。
 
 - 上游只发送 `subscribe_quote`，不发送 `set_chart`。
 - `/health` 和 `/metrics` 的 market-data readiness 可以由 quote event 推进。
-- `/symbol-metrics` 的 freshness 应继续以 quote 接收时间和 quote `datetime` 为准。
+- `/symbol-metrics` 的 freshness 应继续以 quote 接收时间和 quote `datetime` 为准，并继续输出
+  `coverage`、`session`、`flow`、`integrity` 四个正交状态字段。
 - `ticks_ingested` 在 quote-only 模式下可以长期为 `0`，不能用它单独判断断流。
 - 下游 tick serial 和 tick-derived K 线必须返回明确不支持，或切换到 synthetic source。
 - dashboard 应把 quote freshness 和 tick serial 状态拆开展示，避免把 quote-only 误判为
