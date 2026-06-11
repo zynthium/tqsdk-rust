@@ -33,8 +33,11 @@ describe('App', () => {
     render(App);
 
     expect(await screen.findByText('tqsdk-relay 行情完整性监控中心')).toBeTruthy();
-    await waitFor(() => expect(screen.getByText('沪金2602')).toBeTruthy());
-    expect(screen.getByText('豆粕2609')).toBeTruthy();
-    expect(screen.getByText('完整性趋势')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('当前关注 · 问题合约')).toBeTruthy());
+    expect(screen.getByText(/豆粕2609/)).toBeTruthy();
+    expect(screen.queryByText('DCE.m2609')).toBeNull();
+    expect(screen.getByText('连续性评分')).toBeTruthy();
+    expect(screen.queryByText('活跃合约健康排行')).toBeNull();
+    expect(screen.queryByText('完整性趋势')).toBeNull();
   });
 });

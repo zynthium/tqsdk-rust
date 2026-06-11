@@ -24,7 +24,7 @@
         {#each incidents.slice(0, 8) as incident}
           <tr>
             <td>{formatTime(incident.at)}</td>
-            <td title={incident.scope}>{incident.scope}</td>
+            <td title={incident.scope_symbol}>{incident.scope}</td>
             <td><span class={`badge ${incident.severity}`}>{incident.type}</span></td>
             <td title={incident.detail}>{incident.detail}</td>
             <td>{incident.impact}</td>

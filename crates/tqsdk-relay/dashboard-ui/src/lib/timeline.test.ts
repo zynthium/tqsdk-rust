@@ -27,5 +27,6 @@ describe('timeline', () => {
     expect(buckets.at(-1)?.exchangeSeverity.SHFE).toBe('closed');
     expect(buckets.at(-1)?.exchangeSeverity.DCE).toBe('warn');
     expect(buckets.at(-1)?.subscribedSeverity).toBe('warn');
+    expect(buckets.at(-1)?.symbolSeverity['DCE.m2609']).toBe('warn');
   });
 });

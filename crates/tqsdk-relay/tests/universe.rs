@@ -172,6 +172,7 @@ fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
     let trading_time = trading_time(&[("09:00:00", "10:15:00")], &[]);
     let quote = Quote {
         instrument_id: "CZCE.MA609".to_string(),
+        instrument_name: "甲醇609".to_string(),
         exchange_id: "CZCE".to_string(),
         product_id: "typed-product".to_string(),
         expired: true,
@@ -184,6 +185,7 @@ fn futures_contract_uses_typed_quote_metadata_not_symbol_parser() {
     assert_eq!(contract.symbol, "CZCE.MA609");
     assert_eq!(contract.exchange_id, "CZCE");
     assert_eq!(contract.product_id, "typed-product");
+    assert_eq!(contract.instrument_name.as_deref(), Some("甲醇609"));
     assert!(contract.expired);
     assert_eq!(contract.trading_time, trading_time);
 }

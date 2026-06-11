@@ -11,7 +11,7 @@
         const rightRank = (right.subscribed ? 0 : 10) + (right.problem_severity === 'bad' ? 0 : 1);
         return leftRank - rightRank || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1);
       })
-      .slice(0, 8),
+      .slice(0, 24),
   );
 </script>
 
@@ -23,9 +23,9 @@
     {:else}
       {#each ordered as row}
         <article class={`item ${row.problem_severity}`}>
-          <div class="symbol">{row.symbol}</div>
+          <div class="symbol" title={row.symbol}>{row.instrument_name ?? row.symbol}</div>
           <div class="desc">
-            {row.instrument_name ?? '未命名'} · {statusLabel(row.status)} · {formatDuration(row.receive_gap_ms)}
+            {statusLabel(row.status)} · {formatDuration(row.receive_gap_ms)}
           </div>
           <div class="foot">{row.subscribed ? '下游正在使用' : '未订阅'}</div>
         </article>

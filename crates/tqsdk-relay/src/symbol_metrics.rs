@@ -172,6 +172,17 @@ impl SymbolTelemetryStore {
         }
     }
 
+    pub fn record_symbol_instrument_name(&mut self, symbol: &str, instrument_name: &str) {
+        let instrument_name = instrument_name.trim();
+        if instrument_name.is_empty() {
+            return;
+        }
+        self.telemetry
+            .entry(symbol.to_string())
+            .or_default()
+            .instrument_name = Some(instrument_name.to_string());
+    }
+
     pub fn record_tick_at(&mut self, symbol: &str, row: &RelayTickRow, receive_unix_millis: u64) {
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);

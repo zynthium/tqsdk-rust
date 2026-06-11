@@ -19,7 +19,8 @@ export function updateIncidentLedger(ledger: IncidentLedger, model: IntegrityMod
       const incident: LocalIncident = {
         id: `${model.sampledAt}:${row.symbol}:${before}:${row.status}`,
         at: model.sampledAt,
-        scope: row.symbol,
+        scope: row.instrument_name ?? row.symbol,
+        scope_symbol: row.symbol,
         type: statusLabel(row.status),
         detail: `${statusLabel(before)} -> ${statusLabel(row.status)}`,
         impact: row.subscribed ? '影响订阅' : '未订阅',

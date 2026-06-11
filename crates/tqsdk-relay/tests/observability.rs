@@ -241,6 +241,39 @@ fn engine_records_query_symbol_info_trading_time_on_universe_refresh() {
 }
 
 #[test]
+fn engine_records_query_symbol_info_name_on_universe_refresh() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(14, 0, 0);
+    let mut contract = FuturesContract::new_with_trading_time(
+        "DCE.m2609",
+        "DCE",
+        "m",
+        false,
+        TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "10:15:00".to_string()]],
+            night: Vec::new(),
+        },
+    )
+    .unwrap();
+    contract.instrument_name = Some("豆粕2609".to_string());
+
+    engine.record_universe_refresh_success_for_contracts(&[contract], 9, None, None, now / 1_000);
+    engine
+        .ingest_tick_at_for_test("DCE.m2609", tick(1), now - 90_000)
+        .unwrap();
+
+    let snapshot =
+        engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+    let symbol = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "DCE.m2609")
+        .unwrap();
+
+    assert_eq!(symbol.instrument_name.as_deref(), Some("豆粕2609"));
+}
+
+#[test]
 fn engine_symbol_metrics_include_quote_and_chart_subscriptions() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);
