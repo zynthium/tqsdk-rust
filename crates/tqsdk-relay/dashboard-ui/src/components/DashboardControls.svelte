@@ -36,46 +36,98 @@
   }
 </script>
 
-<section class="panel controls" data-testid="dashboard-controls">
-  <div class="status-set" aria-label="status filters">
-    {#each statuses as status}
-      <label>
-        <input
-          type="checkbox"
-          checked={filters.statuses.includes(status.value)}
-          disabled={disabled}
-          onchange={(event) => toggleStatus(status.value, checkboxValue(event))}
-        />
-        <span>{status.label}</span>
-      </label>
-    {/each}
+<details class="panel controls" data-testid="dashboard-controls">
+  <summary>筛选</summary>
+  <div class="control-grid">
+    <div class="status-set" aria-label="status filters">
+      {#each statuses as status}
+        <label>
+          <input
+            type="checkbox"
+            checked={filters.statuses.includes(status.value)}
+            disabled={disabled}
+            onchange={(event) => toggleStatus(status.value, checkboxValue(event))}
+          />
+          <span>{status.label}</span>
+        </label>
+      {/each}
+    </div>
+    <label class="toggle">
+      <input type="checkbox" bind:checked={filters.subscribedOnly} disabled={disabled} />
+      <span>只看订阅</span>
+    </label>
+    <input class="search" bind:value={filters.q} disabled={disabled} placeholder="搜索合约或中文名" />
+    <select bind:value={filters.sort} disabled={disabled}>
+      {#each sorts as sort}
+        <option value={sort.value}>{sort.label}</option>
+      {/each}
+    </select>
+    <select bind:value={filters.limit} disabled={disabled}>
+      {#each [50, 100, 200, 500] as limit}
+        <option value={limit}>{limit}</option>
+      {/each}
+    </select>
+    <button type="button" disabled={disabled} onclick={() => onrefresh()}>刷新</button>
   </div>
-  <label class="toggle">
-    <input type="checkbox" bind:checked={filters.subscribedOnly} disabled={disabled} />
-    <span>只看订阅</span>
-  </label>
-  <input class="search" bind:value={filters.q} disabled={disabled} placeholder="搜索合约或中文名" />
-  <select bind:value={filters.sort} disabled={disabled}>
-    {#each sorts as sort}
-      <option value={sort.value}>{sort.label}</option>
-    {/each}
-  </select>
-  <select bind:value={filters.limit} disabled={disabled}>
-    {#each [50, 100, 200, 500] as limit}
-      <option value={limit}>{limit}</option>
-    {/each}
-  </select>
-  <button type="button" disabled={disabled} onclick={() => onrefresh()}>刷新</button>
-</section>
+</details>
 
 <style>
   .controls {
-    min-height: 42px;
+    position: absolute;
+    top: 52px;
+    right: 12px;
+    z-index: 6;
+    width: 84px;
+    min-height: 34px;
+    overflow: visible;
+    border-color: #45ff9a66;
+    border-radius: 999px;
+    background: #061a2be6;
+  }
+
+  .controls[open] {
+    width: min(760px, calc(100vw - 24px));
+    border-radius: 10px;
+    background: linear-gradient(180deg, #081b2df7, #040f1bf7);
+  }
+
+  summary {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 32px;
+    cursor: pointer;
+    color: #ccffe1;
+    font-size: 12px;
+    font-weight: 800;
+    list-style: none;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  summary::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    margin-right: 6px;
+    display: inline-block;
+    border-radius: 50%;
+    background: var(--relay-live);
+    box-shadow: 0 0 12px var(--relay-live);
+  }
+
+  .control-grid {
+    position: relative;
+    z-index: 1;
     display: grid;
     grid-template-columns: auto auto minmax(180px, 1fr) 150px 90px 72px;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 0 10px 9px;
   }
 
   .status-set {
@@ -88,7 +140,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    color: var(--relay-muted);
+    color: #a7c0ce;
     font-size: 12px;
     white-space: nowrap;
   }
@@ -97,9 +149,9 @@
   select,
   button {
     height: 28px;
-    border: 1px solid var(--relay-line-soft);
+    border: 1px solid #2ad0ff6b;
     border-radius: 6px;
-    background: rgb(255 255 255 / 4%);
+    background: #071929;
     color: var(--relay-text);
   }
 

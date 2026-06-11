@@ -37,6 +37,7 @@
         <span class={`cell ${cellClass(bucket, definition.severity)}`}></span>
       {/each}
     {/each}
+    <div class="axis"><span>-5m</span><span>now</span></div>
   </div>
 </section>
 
@@ -72,38 +73,52 @@
   }
 
   .timeline {
+    position: relative;
+    z-index: 1;
     margin-top: 12px;
     display: grid;
     grid-template-columns: 72px repeat(var(--bucket-count), minmax(3px, 1fr));
-    grid-auto-rows: 30px;
+    grid-auto-rows: 27px;
     align-items: center;
     column-gap: 2px;
   }
 
   .row-label {
-    color: var(--relay-muted);
+    color: #c3dbe6;
     font-size: 11px;
   }
 
   .cell {
-    height: 10px;
-    border-radius: 2px;
-    background: var(--relay-closed);
+    height: 9px;
+    border-radius: 1px;
+    background: #1b3343;
   }
 
   .live {
-    background: var(--relay-live);
+    background: linear-gradient(180deg, #52ffae, #23d786);
+    box-shadow: 0 0 5px #45ff9a44;
   }
 
   .warn {
     background: var(--relay-warn);
+    box-shadow: 0 0 8px #ffc44780;
   }
 
   .bad {
     background: var(--relay-bad);
+    box-shadow: 0 0 8px #ff536a8c;
   }
 
   .closed {
-    background: var(--relay-closed);
+    background: #354d60;
+  }
+
+  .axis {
+    grid-column: 2 / -1;
+    display: flex;
+    justify-content: space-between;
+    padding-top: 2px;
+    color: #66889a;
+    font-size: 9px;
   }
 </style>

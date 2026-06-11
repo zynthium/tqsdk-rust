@@ -10,12 +10,14 @@
     unit = '',
     tone = 'info',
     format = 'number',
+    icon,
   }: {
     label: string;
     value: number | null;
     unit?: string;
     tone?: Tone;
     format?: Format;
+    icon: string;
   } = $props();
 
   let display = $derived(
@@ -30,51 +32,60 @@
 </script>
 
 <article class={`panel metric ${tone}`}>
-  <div class="label">{label}</div>
-  <div class="value">{display}<span>{unit}</span></div>
+  <div class="icon">{icon}</div>
+  <div class="body">
+    <div class="label">{label}</div>
+    <div class="value">{display}<span>{unit}</span></div>
+    <svg class="spark" viewBox="0 0 160 20" aria-hidden="true">
+      <polyline points="0,14 22,12 44,15 68,7 92,11 118,5 140,10 160,6"></polyline>
+    </svg>
+  </div>
 </article>
 
 <style>
   .metric {
     min-height: 78px;
     display: grid;
-    align-content: center;
-    gap: 5px;
-    padding: 11px 12px;
+    grid-template-columns: 42px 1fr;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 11px;
   }
 
-  .metric::before {
-    content: "";
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 3px;
-    background: var(--relay-info);
+  .icon {
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+    background: #20d8ff0d;
+    box-shadow: 0 0 16px currentColor;
+    color: var(--relay-info);
+    font-size: 17px;
   }
 
-  .metric.live::before {
-    background: var(--relay-live);
+  .metric.live .icon {
+    color: var(--relay-live);
   }
 
-  .metric.warn::before {
-    background: var(--relay-warn);
+  .metric.warn .icon {
+    color: var(--relay-warn);
   }
 
-  .metric.bad::before {
-    background: var(--relay-bad);
-  }
-
-  .metric.accent::before {
-    background: var(--relay-accent);
+  .metric.bad .icon,
+  .metric.accent .icon {
+    color: var(--relay-accent);
   }
 
   .label {
-    color: var(--relay-muted);
+    color: #a7c0ce;
     font-size: 12px;
   }
 
   .value {
     color: var(--relay-text);
-    font-size: clamp(20px, 2vw, 28px);
+    font-size: 23px;
     font-weight: 850;
     line-height: 1;
   }
@@ -83,5 +94,30 @@
     margin-left: 3px;
     color: var(--relay-muted);
     font-size: 12px;
+  }
+
+  .spark {
+    width: 100%;
+    height: 19px;
+    margin-top: 5px;
+  }
+
+  .spark polyline {
+    fill: none;
+    stroke: var(--relay-info);
+    stroke-width: 1.4;
+  }
+
+  .metric.live .spark polyline {
+    stroke: var(--relay-live);
+  }
+
+  .metric.warn .spark polyline {
+    stroke: var(--relay-warn);
+  }
+
+  .metric.bad .spark polyline,
+  .metric.accent .spark polyline {
+    stroke: var(--relay-accent);
   }
 </style>

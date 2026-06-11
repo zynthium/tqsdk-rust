@@ -10,6 +10,7 @@
   <div class="inner">
     <span>连续性评分</span>
     <b>{formatNumber(Math.round(clamped))}</b>
+    <em>{tone === 'bad' ? '告警' : tone === 'warn' ? '关注' : '连续'}</em>
   </div>
 </div>
 
@@ -20,15 +21,16 @@
     display: grid;
     place-items: center;
     border-radius: 50%;
-    background: conic-gradient(var(--relay-live) var(--angle), rgb(255 255 255 / 8%) 0);
+    background: conic-gradient(var(--relay-live) var(--angle), #143346 0);
+    box-shadow: 0 0 24px #45ff9a2e;
   }
 
   .gauge.warn {
-    background: conic-gradient(var(--relay-warn) var(--angle), rgb(255 255 255 / 8%) 0);
+    background: conic-gradient(var(--relay-warn) var(--angle), #143346 0);
   }
 
   .gauge.bad {
-    background: conic-gradient(var(--relay-bad) var(--angle), rgb(255 255 255 / 8%) 0);
+    background: conic-gradient(var(--relay-bad) var(--angle), #143346 0);
   }
 
   .inner {
@@ -37,7 +39,8 @@
     display: grid;
     place-content: center;
     border-radius: 50%;
-    background: var(--relay-panel-soft);
+    background: #061523;
+    box-shadow: inset 0 0 20px #0008;
     text-align: center;
   }
 
@@ -48,7 +51,22 @@
 
   b {
     color: var(--relay-text);
-    font-size: 28px;
+    font-size: 26px;
     line-height: 1.1;
+  }
+
+  em {
+    color: var(--relay-live);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 800;
+  }
+
+  .gauge.warn em {
+    color: var(--relay-warn);
+  }
+
+  .gauge.bad em {
+    color: var(--relay-bad);
   }
 </style>

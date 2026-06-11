@@ -87,12 +87,12 @@
   {#if model}
     <IntegrityHero {model} />
     <section class="kpi-grid" aria-label="relay metrics">
-      <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" />
-      <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" />
-      <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" />
-      <MetricCard label="完整性异常" value={model.issueCount} tone={model.issueCount > 0 ? 'warn' : 'live'} />
-      <MetricCard label="上游静默" value={model.upstreamIdleMs} format="duration" tone="info" />
-      <MetricCard label="解码坏行" value={model.invalidRowCount} tone={model.invalidRowCount > 0 ? 'bad' : 'live'} />
+      <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
+      <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
+      <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" icon="◎" />
+      <MetricCard label="完整性异常" value={model.issueCount} tone={model.issueCount > 0 ? 'warn' : 'live'} icon="◇" />
+      <MetricCard label="上游静默" value={model.upstreamIdleMs} format="duration" tone="info" icon="↻" />
+      <MetricCard label="解码坏行" value={model.invalidRowCount} tone={model.invalidRowCount > 0 ? 'bad' : 'live'} icon="!" />
     </section>
     <RelayPipeline {model} />
     <section class="dashboard-main">
