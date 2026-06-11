@@ -24,6 +24,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
             symbol: 'CZCE.AP610',
             instrument_name: '苹果610',
             status: 'closed',
+            session: 'closed',
             problem: false,
             problem_severity: 'closed',
           }),
