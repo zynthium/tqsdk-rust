@@ -954,8 +954,9 @@ button, input, select {
     box-shadow: 0 0 8px #ff536a8c;
   }
 
-  .closed.svelte-1vieygf {
-    background: #354d60;
+  .closed_unmarked.svelte-1vieygf {
+    background: transparent;
+    box-shadow: none;
   }
 
   .unknown.svelte-1vieygf {

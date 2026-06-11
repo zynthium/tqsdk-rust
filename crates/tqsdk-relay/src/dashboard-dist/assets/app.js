@@ -5663,7 +5663,7 @@ var root_1$6 = /* @__PURE__ */ from_html(`<div class="row-label symbol-row svelt
 var root_2$6 = /* @__PURE__ */ from_html(`<div class="row-label svelte-1vieygf"> </div>`);
 var root_3$1 = /* @__PURE__ */ from_html(`<span></span>`);
 var root_4$1 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
-var root_5$1 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="closed svelte-1vieygf"></i>休盘</span> <span class="svelte-1vieygf"><i class="unknown svelte-1vieygf"></i>未知</span> <span class="svelte-1vieygf"><i class="no_sample svelte-1vieygf"></i>无样本</span></div></div> <div class="timeline svelte-1vieygf"><!> <div class="axis svelte-1vieygf"><span>-5m</span><span>now</span></div></div></section>`);
+var root_5$1 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="closed_unmarked svelte-1vieygf"></i>休盘</span> <span class="svelte-1vieygf"><i class="unknown svelte-1vieygf"></i>未知</span> <span class="svelte-1vieygf"><i class="no_sample svelte-1vieygf"></i>无样本</span></div></div> <div class="timeline svelte-1vieygf"><!> <div class="axis svelte-1vieygf"><span>-5m</span><span>now</span></div></div></section>`);
 function ContinuityTimeline($$anchor, $$props) {
 	push($$props, true);
 	let expandedExchanges = /* @__PURE__ */ state(proxy([]));
@@ -5707,7 +5707,9 @@ function ContinuityTimeline($$anchor, $$props) {
 		})
 	]);
 	function cellClass(sample, accessor) {
-		return sample ? accessor(sample) : "no_sample";
+		if (!sample) return "no_sample";
+		const severity = accessor(sample);
+		return severity === "closed" ? "closed_unmarked" : severity;
 	}
 	function orderedSymbolRows(exchangeSymbols) {
 		return [...exchangeSymbols].sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1)).slice(0, 30);
