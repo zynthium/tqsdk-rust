@@ -54,7 +54,9 @@ export function pushTimelineSample(history: TimelineHistory, model: IntegrityMod
           ? 'warn'
           : model.overall === 'warming'
             ? 'unknown'
-            : 'live',
+            : model.overall === 'closed'
+              ? 'closed'
+              : 'live',
   };
   history.samples.push(sample);
   history.samples = history.samples.filter((item) => item.sampledAt >= model.sampledAt - 300_000);

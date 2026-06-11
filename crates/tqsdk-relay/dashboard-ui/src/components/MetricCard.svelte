@@ -41,25 +41,25 @@
 
 <style>
   .metric {
-    min-height: 78px;
+    min-width: 120px;
     display: grid;
-    grid-template-columns: 42px 1fr;
+    grid-template-columns: 34px 1fr;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     padding: 8px 11px;
   }
 
   .icon {
-    width: 38px;
-    height: 38px;
+    width: 32px;
+    height: 32px;
     display: grid;
     place-items: center;
     border: 1px solid currentColor;
     border-radius: 50%;
     background: #20d8ff0d;
-    box-shadow: 0 0 16px currentColor;
+    box-shadow: 0 0 14px currentColor;
     color: var(--relay-info);
-    font-size: 17px;
+    font-size: 15px;
   }
 
   .metric.live .icon {
@@ -77,19 +77,21 @@
 
   .label {
     color: #a7c0ce;
-    font-size: 12px;
+    font-size: 11px;
+    white-space: nowrap;
   }
 
   .value {
     color: var(--relay-text);
-    font-size: 23px;
+    font-size: 20px;
     font-weight: 850;
     line-height: 1;
+    white-space: nowrap;
   }
 
   .value span {
     margin-left: 3px;
     color: var(--relay-muted);
-    font-size: 12px;
+    font-size: 11px;
   }
 </style>

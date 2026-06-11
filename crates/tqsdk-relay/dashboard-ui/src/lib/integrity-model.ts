@@ -88,8 +88,10 @@ export function deriveIntegrity(
     );
   const decodeHealth = metrics.current_decode_health ?? 'healthy';
   const sourceCritical = metrics.upstream_stage === 'down' || metrics.upstream_stage === 'degraded';
-  const idleCritical = frameFlowHealth === 'critical' || eventFlowHealth === 'critical';
-  const idleWarn = frameFlowHealth === 'warn' || eventFlowHealth === 'warn';
+  const isMarketClosed =
+    totalUniverse > 0 && (global.live || 0) === 0 && (global.stale || 0) === 0 && (global.closed || 0) > 0;
+  const idleCritical = !isMarketClosed && (frameFlowHealth === 'critical' || eventFlowHealth === 'critical');
+  const idleWarn = !isMarketClosed && (frameFlowHealth === 'warn' || eventFlowHealth === 'warn');
   const decodeWarn = decodeHealth === 'degraded';
   const warming = WARMING_STAGES.has(metrics.upstream_stage);
   const elapsedSeconds = previous ? Math.max(0.001, (sampledAt - previous.sampledAt) / 1_000) : null;
@@ -110,8 +112,9 @@ export function deriveIntegrity(
       Math.min(25, (1 - coverageRatio) * 25) -
       (sourceCritical || idleCritical ? 20 : 0),
   );
-  const overall =
-    sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0
+  const overall = isMarketClosed
+    ? 'closed'
+    : sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0
       ? 'critical'
       : warming && globalRows.length === 0
         ? 'warming'
@@ -121,6 +124,7 @@ export function deriveIntegrity(
 
   return {
     overall,
+    isMarketClosed,
     sampledAt,
     metrics,
     snapshot,

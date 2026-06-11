@@ -8,7 +8,7 @@
 
 <div class={`gauge ${tone} ${compact ? 'compact' : ''}`} style={`--angle:${clamped * 3.6}deg`} data-testid="score-gauge">
   <div class="inner">
-    <span>连续性评分</span>
+    <span>连续性</span>
     <b>{formatNumber(Math.round(clamped))}</b>
     <em>{tone === 'bad' ? '告警' : tone === 'warn' ? '关注' : '连续'}</em>
   </div>
@@ -16,8 +16,8 @@
 
 <style>
   .gauge {
-    width: 136px;
-    height: 136px;
+    width: 130px;
+    height: 130px;
     display: grid;
     place-items: center;
     border-radius: 50%;
@@ -34,13 +34,13 @@
   }
 
   .gauge.compact {
-    width: 112px;
-    height: 112px;
+    width: 96px;
+    height: 96px;
   }
 
   .inner {
-    width: 108px;
-    height: 108px;
+    width: 102px;
+    height: 102px;
     display: grid;
     place-content: center;
     border-radius: 50%;
@@ -50,28 +50,28 @@
   }
 
   .compact .inner {
-    width: 86px;
-    height: 86px;
+    width: 74px;
+    height: 74px;
   }
 
   span {
     color: var(--relay-muted);
-    font-size: 11px;
+    font-size: 10px;
   }
 
   b {
     color: var(--relay-text);
-    font-size: 26px;
+    font-size: 24px;
     line-height: 1.1;
   }
 
   .compact b {
-    font-size: 22px;
+    font-size: 20px;
   }
 
   em {
     color: var(--relay-live);
-    font-size: 12px;
+    font-size: 11px;
     font-style: normal;
     font-weight: 800;
   }

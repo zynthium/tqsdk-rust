@@ -1,15 +1,15 @@
 import type { DashboardSnapshot, RelayMetrics, SymbolMetricsSnapshot, SymbolRow } from '../lib/types';
 
-export const NOW = 1_700_000_100_000;
+export const NOW = 1_700_013_600_000;
 
 export function metrics(overrides: Partial<RelayMetrics> = {}): RelayMetrics {
   return {
     upstream_stage: 'live',
-    upstream_stage_started_unix_secs: 1_700_000_000,
+    upstream_stage_started_unix_secs: Math.floor(NOW / 1000) - 100,
     upstream_transport_connected: true,
     upstream_subscription_sent: true,
-    last_upstream_frame_unix_secs: 1_700_000_099,
-    last_decoded_event_unix_secs: 1_700_000_099,
+    last_upstream_frame_unix_secs: Math.floor(NOW / 1000) - 1,
+    last_decoded_event_unix_secs: Math.floor(NOW / 1000) - 1,
     upstream_frame_idle_ms: 1_000,
     upstream_frame_idle_health: 'live',
     upstream_frame_idle_warn_after_ms: 2_000,
