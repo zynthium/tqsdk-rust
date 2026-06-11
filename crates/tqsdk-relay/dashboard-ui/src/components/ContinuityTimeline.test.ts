@@ -12,6 +12,10 @@ describe('ContinuityTimeline', () => {
       symbolSeverity: { 'SHFE.au2602': 'closed' },
       subscribedSeverity: 'unknown',
       globalSeverity: 'live',
+      exchangeLatency: {},
+      symbolLatency: {},
+      subscribedLatency: 0,
+      globalLatency: 0,
     };
 
     const view = render(ContinuityTimeline, {
@@ -29,7 +33,7 @@ describe('ContinuityTimeline', () => {
 
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
 
-    const closedCells = view.baseElement.querySelectorAll('.cell.closed_unmarked');
+    const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
     expect(view.baseElement.querySelector('.cell.closed')).toBeNull();
@@ -51,7 +55,7 @@ describe('ContinuityTimeline', () => {
 
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
 
-    const closedCells = view.baseElement.querySelectorAll('.cell.closed_unmarked');
+    const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
   });
@@ -63,6 +67,10 @@ describe('ContinuityTimeline', () => {
       symbolSeverity: { 'SHFE.au2602': 'warn' },
       subscribedSeverity: 'warn',
       globalSeverity: 'warn',
+      exchangeLatency: {},
+      symbolLatency: {},
+      subscribedLatency: 0,
+      globalLatency: 0,
     };
     const view = render(ContinuityTimeline, {
       buckets: [sample],
@@ -85,15 +93,16 @@ describe('ContinuityTimeline', () => {
     });
 
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
-    await fireEvent.click(view.getByRole('button', { name: /沪金2602/ }));
+    const cells = view.baseElement.querySelectorAll('.cell');
+    await fireEvent.mouseMove(cells[cells.length - 1]);
 
-    expect(view.getAllByText('静默').length).toBeGreaterThanOrEqual(2);
-    expect(view.getByText('距 31.0s')).toBeTruthy();
-    expect(view.getByText('延 45.0s')).toBeTruthy();
+    expect(view.getAllByText('静默').length).toBeGreaterThanOrEqual(1);
+    expect(view.getByText('31.0s')).toBeTruthy();
+    expect(view.getByText('45.0s')).toBeTruthy();
     expect(view.getByText('Tick 1,234')).toBeTruthy();
     expect(view.getByText('订阅 3')).toBeTruthy();
     expect(view.getByText('warn')).toBeTruthy();
-    expect(view.getByText(/invalid rows/)).toBeTruthy();
+    expect(view.getByText(/异常记录数/)).toBeTruthy();
     expect(view.getByText('7')).toBeTruthy();
   });
 });
