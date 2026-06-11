@@ -129,9 +129,7 @@ pub struct SymbolTelemetry {
     last_gap_unix_millis: Option<u64>,
     last_receive_unix_millis: Option<u64>,
     last_tick_datetime_ns: Option<i64>,
-    last_price: Option<f64>,
-    last_volume: Option<i64>,
-    last_open_interest: Option<i64>,
+
     invalid_rows: u64,
     last_invalid_row_error: Option<String>,
 }
@@ -211,9 +209,7 @@ pub struct SymbolTelemetrySnapshot {
     pub market_time_lag_ms: Option<u64>,
     pub last_receive_unix_millis: Option<u64>,
     pub last_tick_datetime_ns: Option<i64>,
-    pub last_price: Option<f64>,
-    pub last_volume: Option<i64>,
-    pub last_open_interest: Option<i64>,
+
     pub invalid_rows: u64,
     pub last_invalid_row_error: Option<String>,
 }
@@ -270,9 +266,7 @@ impl SymbolTelemetryStore {
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = Some(row.datetime);
-        telemetry.last_price = Some(row.last_price);
-        telemetry.last_volume = Some(row.volume);
-        telemetry.last_open_interest = Some(row.open_interest);
+
     }
 
     pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
@@ -290,9 +284,7 @@ impl SymbolTelemetryStore {
         }
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
-        telemetry.last_price = Some(quote.last_price);
-        telemetry.last_volume = Some(quote.volume);
-        telemetry.last_open_interest = Some(quote.open_interest);
+
     }
 
     pub fn record_invalid_row(&mut self, symbol: &str, message: impl Into<String>) {
@@ -399,9 +391,7 @@ impl SymbolTelemetryReadModel {
                 market_time_lag_ms,
                 last_receive_unix_millis: telemetry.last_receive_unix_millis,
                 last_tick_datetime_ns: telemetry.last_tick_datetime_ns,
-                last_price: telemetry.last_price,
-                last_volume: telemetry.last_volume,
-                last_open_interest: telemetry.last_open_interest,
+
                 invalid_rows: telemetry.invalid_rows,
                 last_invalid_row_error: telemetry.last_invalid_row_error,
             });

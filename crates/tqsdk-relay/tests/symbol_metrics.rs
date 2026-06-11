@@ -320,7 +320,7 @@ fn quote_only_symbol_transitions_from_live_to_stale_without_tick_count() {
     );
     assert_eq!(live.symbols[0].status, SymbolStatus::Live);
     assert_eq!(live.symbols[0].ticks_ingested, 0);
-    assert_eq!(live.symbols[0].last_price, Some(16666.0));
+
     assert_eq!(live.symbols[0].receive_gap_ms, Some(300));
     assert_eq!(live.symbols[0].market_time_lag_ms, Some(500));
 
