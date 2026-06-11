@@ -86,8 +86,9 @@
 </script>
 
 <main class="dashboard-shell" data-fullscreen={view.fullscreen}>
-  <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen} />
-  <DashboardControls bind:filters={view.filters} disabled={view.paused} onrefresh={refreshNow} />
+  <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen}>
+    <DashboardControls bind:filters={view.filters} disabled={view.paused} onrefresh={refreshNow} />
+  </MonitorHeader>
 
   {#if model}
     <IntegrityHero {model} />

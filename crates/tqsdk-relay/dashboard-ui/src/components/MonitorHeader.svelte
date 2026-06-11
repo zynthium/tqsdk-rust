@@ -2,15 +2,17 @@
   import { onMount } from 'svelte';
   import { formatTime } from '../lib/format';
   import type { IntegrityModel } from '../lib/types';
+  import type { Snippet } from 'svelte';
 
   type Props = {
     model: IntegrityModel | null;
     error: string | null;
     paused: boolean;
     fullscreen: boolean;
+    children?: Snippet;
   };
 
-  let { model, error, paused = $bindable(false), fullscreen = $bindable(false) }: Props = $props();
+  let { model, error, paused = $bindable(false), fullscreen = $bindable(false), children }: Props = $props();
   let now = $state(Date.now());
   let fullscreenSupported = $state(true);
   let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : model?.overall === 'closed' ? '休盘中' : '实时监控中');
@@ -63,6 +65,7 @@
       <span class={`status-dot ${stateClass}`}></span>
       <span>{stateLabel}</span>
     </span>
+    {@render children?.()}
     <button type="button" onclick={() => (paused = !paused)}>{paused ? '继续' : '暂停'}</button>
     <button type="button" disabled={!fullscreenSupported} title={fullscreenSupported ? '切换全屏' : '当前浏览器不支持全屏'} onclick={toggleFullscreen}>
       {fullscreen ? '退出' : '全屏'}
