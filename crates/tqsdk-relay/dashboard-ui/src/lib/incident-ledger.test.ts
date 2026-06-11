@@ -39,7 +39,7 @@ describe('incident-ledger', () => {
     });
   });
 
-  it('records tick continuity incidents when counters increase', () => {
+  it('does not record incidents for diff row id diagnostics', () => {
     const ledger = createIncidentLedger(10);
     const clean = deriveIntegrity(
       metrics(),
@@ -53,8 +53,6 @@ describe('incident-ledger', () => {
           symbol: 'SHFE.au2602',
           gap_event_count: 1,
           estimated_missing_rows: 2,
-          problem: true,
-          problem_severity: 'bad',
         }),
       ]),
       NOW + 2_000,
@@ -64,12 +62,6 @@ describe('incident-ledger', () => {
     updateIncidentLedger(ledger, gapped);
     updateIncidentLedger(ledger, gapped);
 
-    expect(ledger.incidents).toHaveLength(1);
-    expect(ledger.incidents[0]).toMatchObject({
-      scope_symbol: 'SHFE.au2602',
-      type: 'SymbolGapDetected',
-      detail: 'gap 1 / duplicate 0 / out-of-order 0',
-      severity: 'bad',
-    });
+    expect(ledger.incidents).toHaveLength(0);
   });
 });

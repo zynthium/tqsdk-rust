@@ -14,29 +14,17 @@
 
   function cacheState(model: IntegrityModel): string {
     if (model.frameFlowHealth === 'critical') return '帧流中断';
-    if (model.confirmedIntegrityIssueCount > 0) return 'Tick缺口';
-    if (model.outOfOrderRowCount > 0) return 'Tick乱序';
     if (model.issueCount > 0 || model.frameFlowHealth === 'warn') return '需关注';
     return '活跃';
   }
 
   function cacheMeta(model: IntegrityModel): string {
-    if (model.confirmedIntegrityIssueCount > 0) {
-      const gap = `缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
-      return model.outOfOrderRowCount > 0
-        ? `${gap} / 乱序 ${formatNumber(model.outOfOrderRowCount)}`
-        : gap;
-    }
-    if (model.outOfOrderRowCount > 0) {
-      return `乱序 ${formatNumber(model.outOfOrderRowCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
-    }
     return `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`;
   }
 
   function cacheSeverity(model: IntegrityModel): TimelineSeverity {
-    if (model.frameFlowHealth === 'critical' || model.confirmedIntegrityIssueCount > 0) return 'bad';
+    if (model.frameFlowHealth === 'critical') return 'bad';
     if (
-      model.outOfOrderRowCount > 0 ||
       model.issueCount > 0 ||
       model.frameFlowHealth === 'warn' ||
       model.eventFlowHealth === 'warn'
@@ -64,7 +52,7 @@
     {
       name: '数据解码',
       icon: '⌘',
-      state: model.decodeHealth === 'degraded' ? '近期坏行' : '正常',
+      state: model.decodeHealth === 'degraded' ? '解析诊断' : '正常',
       meta: `${formatNumber(model.metrics.recent_invalid_rows_1m)} 近期 / ${formatNumber(model.invalidRowCount)} 累计`,
       severity: model.decodeHealth === 'degraded' ? 'warn' : 'live',
     },

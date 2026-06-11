@@ -331,8 +331,10 @@ open http://127.0.0.1:7789/dashboard
 判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
 远月合约。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
 `last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
-`out_of_order_rows` 和 `last_gap_unix_millis`；上游重新发送 tick chart 订阅时会推进
-source epoch，避免重连后首条 row id 跳变被误报为缺口。
+`out_of_order_rows` 和 `last_gap_unix_millis`。这些是原始 TQ DIFF row-id 诊断字段：
+DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不单独证明市场数据缺失，
+也不进入 `problem`、`problem_severity` 或 `integrity=confirmed_gap`。上游重新发送 tick
+chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污染诊断计数。
 
 `/dashboard-snapshot` 返回 dashboard 使用的原子 JSON 快照：同一次响应内包含
 `metrics`、未过滤的 `global` 汇总、未过滤的 `global_symbols` 事件/时间带输入，以及
@@ -352,8 +354,8 @@ transport 连接、订阅发送、frame 接收数、解码事件数、backfillin
 metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
 排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
 未过滤 global 数据，搜索/状态筛选只影响可见列表，不会把异常过滤成健康。dashboard 会把
-tick gap、重复 row 和乱序 row 作为确认的完整性异常展示，区别于仅由接收间隔推断出的
-行情静默。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，不支持时
+tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的行情完整性异常、事件账本
+告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响和解码健康为主。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，不支持时
 禁用；完整合约表展示当前过滤页内全部行。backfilling 进度只基于 relay 已观测到的时间
 和 frame/event 计数，不推断上游补历史百分比。
 

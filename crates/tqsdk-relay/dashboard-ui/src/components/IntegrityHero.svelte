@@ -6,8 +6,6 @@
   let { model }: { model: IntegrityModel } = $props();
 
   function heroTitle(model: IntegrityModel): string {
-    if (model.confirmedIntegrityIssueCount > 0) return 'Tick缺口告警';
-    if (model.outOfOrderRowCount > 0) return 'Tick乱序预警';
     if (model.overall === 'critical') return '订阅链路告警';
     if (model.overall === 'warning') return '行情静默预警';
     if (model.overall === 'warming') return '启动观测中';
@@ -28,7 +26,7 @@
     model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : '✓',
   );
   let subtitle = $derived(
-    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} 次，估缺 ${formatNumber(model.estimatedMissingRows)} 行，乱序 ${formatNumber(model.outOfOrderRowCount)} 行，帧静默 ${formatDuration(model.upstreamIdleMs)}，事件静默 ${formatDuration(model.eventIdleMs)}`,
+    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，Diff行号诊断 ${formatNumber(model.diffRowDiscontinuityCount)} 次，跳号估算 ${formatNumber(model.estimatedMissingRows)} 行，倒序 ${formatNumber(model.outOfOrderRowCount)} 行，帧静默 ${formatDuration(model.upstreamIdleMs)}，事件静默 ${formatDuration(model.eventIdleMs)}`,
   );
 </script>
 

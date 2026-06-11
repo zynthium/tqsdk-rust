@@ -173,6 +173,8 @@ pub struct SymbolMetricsSummary {
     pub universe_total: usize,
     pub universe_observed: usize,
     pub active_invalid_rows: u64,
+    /// Diff row-id diagnostics only. TQ diff may patch or refill sparse rows later,
+    /// so these counters are not confirmed market-data integrity failures.
     pub gap_event_count: u64,
     pub estimated_missing_rows: u64,
     pub duplicate_rows: u64,
@@ -197,6 +199,8 @@ pub struct SymbolTelemetrySnapshot {
     pub chart_subscriber_count: usize,
     pub ticks_ingested: u64,
     pub source_epoch: u64,
+    /// Raw TQ diff row-id diagnostics. Skips, repeats, or older row ids can appear
+    /// during sparse diff patches and are not treated as confirmed tick loss.
     pub last_tick_id: Option<i64>,
     pub gap_event_count: u64,
     pub estimated_missing_rows: u64,
@@ -367,20 +371,8 @@ impl SymbolTelemetryReadModel {
             let coverage = coverage_for(in_universe);
             let session = session_for(trading_phase);
             let flow = flow_for(receive_gap_ms, stale_after_millis);
-            let integrity = integrity_for(
-                telemetry.gap_event_count,
-                telemetry.duplicate_rows,
-                telemetry.out_of_order_rows,
-                status,
-            );
-            let problem_severity = problem_severity_for(
-                status,
-                coverage,
-                telemetry.invalid_rows,
-                telemetry.gap_event_count,
-                telemetry.duplicate_rows,
-                telemetry.out_of_order_rows,
-            );
+            let integrity = integrity_for(status);
+            let problem_severity = problem_severity_for(status, coverage, telemetry.invalid_rows);
             unfiltered.push(SymbolTelemetrySnapshot {
                 symbol,
                 instrument_name: telemetry.instrument_name,
@@ -478,14 +470,8 @@ fn problem_severity_for(
     status: SymbolStatus,
     coverage: SymbolCoverage,
     invalid_rows: u64,
-    gap_event_count: u64,
-    duplicate_rows: u64,
-    out_of_order_rows: u64,
 ) -> SymbolProblemSeverity {
     if coverage == SymbolCoverage::Uncovered {
-        return SymbolProblemSeverity::Bad;
-    }
-    if gap_event_count > 0 || duplicate_rows > 0 || out_of_order_rows > 0 {
         return SymbolProblemSeverity::Bad;
     }
     match status {
@@ -521,15 +507,7 @@ fn flow_for(receive_gap_ms: Option<u64>, stale_after_millis: u64) -> SymbolFlow 
     }
 }
 
-fn integrity_for(
-    gap_event_count: u64,
-    duplicate_rows: u64,
-    out_of_order_rows: u64,
-    status: SymbolStatus,
-) -> SymbolIntegrity {
-    if gap_event_count > 0 || duplicate_rows > 0 || out_of_order_rows > 0 {
-        return SymbolIntegrity::ConfirmedGap;
-    }
+fn integrity_for(status: SymbolStatus) -> SymbolIntegrity {
     if matches!(status, SymbolStatus::Stale | SymbolStatus::Missing) {
         return SymbolIntegrity::Suspected;
     }

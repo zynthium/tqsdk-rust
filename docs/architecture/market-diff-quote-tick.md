@@ -249,9 +249,9 @@ relay dashboard 的监控口径进一步拆成四类，不再把所有异常压�
   `open` / `closed` / `unknown`。计算固定使用 Asia/Shanghai 时区，不受 host 本地时区影响。
 - `flow`：基于 relay 接收时间的 `flowing` / `silent` / `no_sample`。没有接收样本时是
   `no_sample`，不得把它误判为 `closed`。
-- `integrity`：基于 tick row id 连续性的 `intact` / `suspected` / `confirmed_gap`。
-  `gap_event_count`、`duplicate_rows`、`out_of_order_rows` 是确认的 tick 完整性问题；
-  仅长时间未收到数据属于 suspected silence。
+- `integrity`：当前只把长时间未收到数据标成 `suspected`；row id 跳号、重复和倒序
+  保留为 diff 行号诊断。天勤 DIFF 协议可以后续 patch / refill 稀疏 row，
+  `gap_event_count`、`duplicate_rows`、`out_of_order_rows` 不能单独证明市场数据缺失。
 
 dashboard 的当前健康集合只能是“当前上游 universe ∪ 当前下游订阅”。旧 telemetry 如果既
 不在当前 universe、也没有当前订阅，不进入当前健康和默认列表；需要追溯时应进入事件 /

@@ -163,7 +163,7 @@ fn sequential_tick_ids_do_not_create_continuity_problems() {
 }
 
 #[test]
-fn missing_tick_ids_create_gap_telemetry() {
+fn skipped_tick_row_ids_are_diff_diagnostics_not_confirmed_gaps() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);
     store.record_universe(["SHFE.au2602"], now - 2_000);
@@ -190,8 +190,9 @@ fn missing_tick_ids_create_gap_telemetry() {
     assert_eq!(symbol.gap_event_count, 1);
     assert_eq!(symbol.estimated_missing_rows, 2);
     assert_eq!(symbol.last_gap_unix_millis, Some(now - 1_000));
-    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
-    assert!(symbol.problem);
+    assert_eq!(symbol.integrity, SymbolIntegrity::Intact);
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Live);
+    assert!(!symbol.problem);
     assert_eq!(snapshot.summary.gap_event_count, 1);
     assert_eq!(snapshot.summary.estimated_missing_rows, 2);
 }
@@ -223,7 +224,8 @@ fn duplicate_tick_ids_are_counted_without_advancing_last_id() {
     assert_eq!(symbol.last_tick_id, Some(4));
     assert_eq!(symbol.duplicate_rows, 1);
     assert_eq!(symbol.out_of_order_rows, 0);
-    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Live);
+    assert!(!symbol.problem);
     assert_eq!(snapshot.summary.duplicate_rows, 1);
 }
 
@@ -254,7 +256,8 @@ fn out_of_order_tick_ids_are_counted_without_advancing_last_id() {
     assert_eq!(symbol.last_tick_id, Some(4));
     assert_eq!(symbol.out_of_order_rows, 1);
     assert_eq!(symbol.duplicate_rows, 0);
-    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Live);
+    assert!(!symbol.problem);
     assert_eq!(snapshot.summary.out_of_order_rows, 1);
 }
 
