@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use chrono::{Datelike, Local, TimeZone};
 use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::{
-    RelayTickRow, SymbolMetricsQuery, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
+    RelayTickRow, SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsQuery,
+    SymbolProblemSeverity, SymbolSession, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
     SymbolTelemetryStore,
 };
 
@@ -91,6 +92,9 @@ fn universe_symbol_without_tick_is_missing() {
     assert_eq!(snapshot.summary.missing, 1);
     assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
     assert_eq!(snapshot.symbols[0].status, SymbolStatus::Missing);
+    assert_eq!(snapshot.symbols[0].session, SymbolSession::Unknown);
+    assert_eq!(snapshot.symbols[0].flow, SymbolFlow::NoSample);
+    assert_eq!(snapshot.symbols[0].integrity, SymbolIntegrity::Suspected);
     assert!(snapshot.symbols[0].receive_gap_ms.is_none());
 }
 
@@ -123,6 +127,171 @@ fn ticked_symbol_transitions_from_live_to_stale() {
     );
     assert_eq!(stale.symbols[0].status, SymbolStatus::Stale);
     assert_eq!(stale.summary.stale, 1);
+}
+
+#[test]
+fn sequential_tick_ids_do_not_create_continuity_problems() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 610.0),
+        now - 2_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(2, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 611.0),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.last_tick_id, Some(2));
+    assert_eq!(symbol.gap_event_count, 0);
+    assert_eq!(symbol.estimated_missing_rows, 0);
+    assert_eq!(symbol.duplicate_rows, 0);
+    assert_eq!(symbol.out_of_order_rows, 0);
+    assert!(!symbol.problem);
+    assert_eq!(snapshot.summary.gap_event_count, 0);
+}
+
+#[test]
+fn missing_tick_ids_create_gap_telemetry() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 610.0),
+        now - 2_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(4, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 613.0),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.last_tick_id, Some(4));
+    assert_eq!(symbol.gap_event_count, 1);
+    assert_eq!(symbol.estimated_missing_rows, 2);
+    assert_eq!(symbol.last_gap_unix_millis, Some(now - 1_000));
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
+    assert!(symbol.problem);
+    assert_eq!(snapshot.summary.gap_event_count, 1);
+    assert_eq!(snapshot.summary.estimated_missing_rows, 2);
+}
+
+#[test]
+fn duplicate_tick_ids_are_counted_without_advancing_last_id() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(4, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 613.0),
+        now - 2_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(4, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 613.0),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.last_tick_id, Some(4));
+    assert_eq!(symbol.duplicate_rows, 1);
+    assert_eq!(symbol.out_of_order_rows, 0);
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
+    assert_eq!(snapshot.summary.duplicate_rows, 1);
+}
+
+#[test]
+fn out_of_order_tick_ids_are_counted_without_advancing_last_id() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(4, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 613.0),
+        now - 2_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(3, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 612.0),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.last_tick_id, Some(4));
+    assert_eq!(symbol.out_of_order_rows, 1);
+    assert_eq!(symbol.duplicate_rows, 0);
+    assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Bad);
+    assert_eq!(snapshot.summary.out_of_order_rows, 1);
+}
+
+#[test]
+fn source_epoch_reset_prevents_false_gap_from_new_source_start_id() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 610.0),
+        now - 2_000,
+    );
+    store.advance_source_epoch();
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(
+            100,
+            i64::try_from((now - 1_000) * 1_000_000).unwrap(),
+            700.0,
+        ),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.source_epoch, 1);
+    assert_eq!(symbol.last_tick_id, Some(100));
+    assert_eq!(symbol.gap_event_count, 0);
+    assert_eq!(symbol.estimated_missing_rows, 0);
+    assert_eq!(snapshot.summary.gap_event_count, 0);
 }
 
 #[test]
@@ -233,6 +402,32 @@ fn subscribed_symbol_outside_universe_is_inactive() {
 }
 
 #[test]
+fn subscribed_uncovered_symbol_stays_inactive_during_closed_session() {
+    let store = SymbolTelemetryStore::default();
+    let now = local_millis_at(11, 0, 0);
+    let mut subscriptions: BTreeMap<String, SymbolSubscriptionCounts> = Default::default();
+    subscriptions.insert(
+        "DCE.m2609".to_string(),
+        SymbolSubscriptionCounts {
+            quote_subscriber_count: 1,
+            chart_subscriber_count: 0,
+        },
+    );
+
+    let snapshot = store.snapshot_at(now, 30_000, &subscriptions, &SymbolMetricsQuery::default());
+
+    assert_eq!(snapshot.summary.total, 1);
+    assert_eq!(snapshot.summary.inactive, 1);
+    assert_eq!(snapshot.summary.subscribed_problem, 1);
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Inactive);
+    assert_eq!(snapshot.symbols[0].coverage, SymbolCoverage::Uncovered);
+    assert_eq!(snapshot.symbols[0].session, SymbolSession::Unknown);
+    assert_eq!(snapshot.symbols[0].flow, SymbolFlow::NoSample);
+    assert_eq!(snapshot.symbols[0].integrity, SymbolIntegrity::Intact);
+    assert!(snapshot.symbols[0].problem);
+}
+
+#[test]
 fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);
@@ -263,6 +458,126 @@ fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
     assert_eq!(snapshot.summary.p95_receive_gap_ms, Some(1_500));
     assert_eq!(snapshot.symbols.len(), 1);
     assert_eq!(snapshot.symbols[0].symbol, "DCE.m2609");
+}
+
+#[test]
+fn snapshot_summary_stays_global_when_query_filters_and_limits_rows() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602", "DCE.m2609", "CZCE.AP610"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 610.0),
+        now - 1_000,
+    );
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(
+            2,
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        now - 90_000,
+    );
+
+    let query = SymbolMetricsQuery {
+        statuses: vec![SymbolStatus::Live],
+        sort: SymbolSort::SymbolAsc,
+        limit: Some(1),
+        ..SymbolMetricsQuery::default()
+    };
+    let snapshot = store.snapshot_at(now, 30_000, &Default::default(), &query);
+
+    assert_eq!(snapshot.summary.total, 3);
+    assert_eq!(snapshot.summary.live, 1);
+    assert_eq!(snapshot.summary.stale, 1);
+    assert_eq!(snapshot.summary.missing, 1);
+    assert_eq!(snapshot.summary.problem, 2);
+    assert_eq!(snapshot.summary.universe_total, 3);
+    assert_eq!(snapshot.summary.universe_observed, 2);
+    assert_eq!(snapshot.filtered_total, 1);
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
+}
+
+#[test]
+fn historical_telemetry_outside_current_universe_is_omitted_when_unsubscribed() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], now - 10_000);
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(1, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 3100.0),
+        now - 1_000,
+    );
+    store.record_universe(["SHFE.au2602"], now - 1_000);
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.total, 1);
+    assert_eq!(snapshot.summary.universe_total, 1);
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
+}
+
+#[test]
+fn historical_telemetry_outside_current_universe_stays_visible_when_subscribed() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], now - 10_000);
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(1, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 3100.0),
+        now - 1_000,
+    );
+    store.record_universe(["SHFE.au2602"], now - 1_000);
+
+    let mut subscriptions: BTreeMap<String, SymbolSubscriptionCounts> = Default::default();
+    subscriptions.insert(
+        "DCE.m2609".to_string(),
+        SymbolSubscriptionCounts {
+            quote_subscriber_count: 1,
+            chart_subscriber_count: 0,
+        },
+    );
+
+    let snapshot = store.snapshot_at(now, 30_000, &subscriptions, &SymbolMetricsQuery::default());
+    let dce = snapshot
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "DCE.m2609")
+        .unwrap();
+
+    assert_eq!(snapshot.summary.total, 2);
+    assert_eq!(snapshot.summary.universe_total, 1);
+    assert!(dce.subscribed);
+    assert_eq!(dce.coverage, SymbolCoverage::Uncovered);
+    assert_eq!(dce.problem_severity, SymbolProblemSeverity::Bad);
+}
+
+#[test]
+fn read_model_snapshot_is_detached_from_store_mutation() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 10_000);
+    let read_model = store.read_model();
+
+    store.record_universe(["DCE.m2609"], now - 1_000);
+
+    let snapshot = read_model.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.total, 1);
+    assert_eq!(snapshot.symbols[0].symbol, "SHFE.au2602");
 }
 
 #[test]
@@ -337,6 +652,33 @@ fn stale_quote_inside_day_rest_session_is_closed_not_problematic() {
     assert_eq!(json["symbols"][0]["status"], "closed");
     assert_eq!(json["summary"]["closed"], 1);
     assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
+fn china_futures_session_uses_shanghai_time_not_host_timezone() {
+    let mut store = SymbolTelemetryStore::default();
+    let china_09_30 = 1_787_967_000_000;
+    store.record_universe(["DCE.m2609"], china_09_30 - 90_000);
+    store.record_tick_at(
+        "DCE.m2609",
+        &tick(
+            1,
+            i64::try_from((china_09_30 - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        china_09_30 - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        china_09_30,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.symbols[0].session, SymbolSession::Open);
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Stale);
+    assert!(snapshot.symbols[0].problem);
 }
 
 #[test]

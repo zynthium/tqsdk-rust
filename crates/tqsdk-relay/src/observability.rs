@@ -3,6 +3,11 @@
 use serde::Serialize;
 
 pub const DEFAULT_DATA_STALE_AFTER_SECS: u64 = 30;
+pub const FRAME_IDLE_WARN_AFTER_MS: u64 = 2_000;
+pub const FRAME_IDLE_CRITICAL_AFTER_MS: u64 = 5_000;
+pub const EVENT_IDLE_WARN_AFTER_MS: u64 = 3_000;
+pub const EVENT_IDLE_CRITICAL_AFTER_MS: u64 = 8_000;
+pub const DECODE_HEALTH_WINDOW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +27,22 @@ pub enum RelaySourceStage {
     Live,
     Degraded,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowIdleHealth {
+    NoSample,
+    Live,
+    Warn,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeHealth {
+    Healthy,
+    Degraded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -44,11 +65,20 @@ pub struct HealthSnapshot {
     pub upstream_frames_received: u64,
     pub upstream_events_decoded: u64,
     pub upstream_invalid_tick_rows: u64,
+    pub lifetime_invalid_rows: u64,
+    pub recent_invalid_rows_1m: u64,
+    pub current_decode_health: DecodeHealth,
     pub last_upstream_invalid_tick_row_error: Option<String>,
+    pub last_invalid_row_unix_secs: Option<u64>,
     pub last_universe_refresh_unix_secs: Option<u64>,
     pub last_universe_refresh_error: Option<String>,
     pub last_tick_unix_secs: Option<u64>,
     pub last_upstream_frame_unix_secs: Option<u64>,
+    pub last_decoded_event_unix_secs: Option<u64>,
+    pub upstream_frame_idle_ms: Option<u64>,
+    pub upstream_frame_idle_health: FlowIdleHealth,
+    pub upstream_event_idle_ms: Option<u64>,
+    pub upstream_event_idle_health: FlowIdleHealth,
     pub data_stale_after_secs: u64,
 }
 
@@ -66,13 +96,26 @@ pub struct MetricsSnapshot {
     pub upstream_subscription_sent: bool,
     pub upstream_frames_received: u64,
     pub upstream_events_decoded: u64,
+    pub last_decoded_event_unix_secs: Option<u64>,
+    pub upstream_frame_idle_ms: Option<u64>,
+    pub upstream_frame_idle_health: FlowIdleHealth,
+    pub upstream_frame_idle_warn_after_ms: u64,
+    pub upstream_frame_idle_critical_after_ms: u64,
+    pub upstream_event_idle_ms: Option<u64>,
+    pub upstream_event_idle_health: FlowIdleHealth,
+    pub upstream_event_idle_warn_after_ms: u64,
+    pub upstream_event_idle_critical_after_ms: u64,
     pub upstream_symbols: usize,
     pub upstream_ins_list_chars: usize,
     pub upstream_ins_list_warn_chars: Option<usize>,
     pub upstream_ins_list_max_chars: Option<usize>,
     pub upstream_ins_list_over_warn: bool,
     pub upstream_invalid_tick_rows: u64,
+    pub lifetime_invalid_rows: u64,
+    pub recent_invalid_rows_1m: u64,
+    pub current_decode_health: DecodeHealth,
     pub last_upstream_invalid_tick_row_error: Option<String>,
+    pub last_invalid_row_unix_secs: Option<u64>,
     pub last_universe_refresh_unix_secs: Option<u64>,
     pub last_universe_refresh_error: Option<String>,
     pub last_tick_unix_secs: Option<u64>,

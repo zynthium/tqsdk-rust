@@ -125,6 +125,10 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(health["upstream_subscription_sent"], false);
     assert_eq!(health["upstream_frames_received"], 0);
     assert_eq!(health["upstream_events_decoded"], 0);
+    assert_eq!(health["upstream_frame_idle_health"], "no_sample");
+    assert_eq!(health["upstream_event_idle_health"], "no_sample");
+    assert_eq!(health["current_decode_health"], "healthy");
+    assert_eq!(health["recent_invalid_rows_1m"], 0);
     assert_eq!(
         health["last_upstream_frame_unix_secs"],
         serde_json::Value::Null
@@ -145,6 +149,10 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(metrics["upstream_subscription_sent"], false);
     assert_eq!(metrics["upstream_frames_received"], 0);
     assert_eq!(metrics["upstream_events_decoded"], 0);
+    assert_eq!(metrics["upstream_frame_idle_health"], "no_sample");
+    assert_eq!(metrics["upstream_event_idle_health"], "no_sample");
+    assert_eq!(metrics["current_decode_health"], "healthy");
+    assert_eq!(metrics["recent_invalid_rows_1m"], 0);
     assert_eq!(
         metrics["last_upstream_frame_unix_secs"],
         serde_json::Value::Null
@@ -155,7 +163,16 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert!(symbol_metrics["now_unix_millis"].is_number());
     assert_eq!(symbol_metrics["data_stale_after_millis"], 30_000);
     assert_eq!(symbol_metrics["summary"]["total"], 0);
+    assert_eq!(symbol_metrics["filtered_total"], 0);
     assert_eq!(symbol_metrics["symbols"].as_array().unwrap().len(), 0);
+
+    let dashboard = wait_for_http_json(metrics_addr, "/dashboard-snapshot", &mut child);
+    assert!(dashboard["received_at_unix_millis"].is_number());
+    assert_eq!(dashboard["metrics"]["upstream_stage"], "connecting");
+    assert_eq!(dashboard["global"]["total"], 0);
+    assert_eq!(dashboard["global_symbols"].as_array().unwrap().len(), 0);
+    assert_eq!(dashboard["page"]["summary"]["total"], 0);
+    assert_eq!(dashboard["page"]["symbols"].as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -178,6 +195,10 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
     let (_, body) = response.split_once("\r\n\r\n").unwrap();
     let error: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(error["error"], "invalid sort");
+
+    let dashboard_response =
+        wait_for_http_response(metrics_addr, "/dashboard-snapshot?sort=bad", &mut child);
+    assert!(dashboard_response.starts_with("HTTP/1.1 400"));
 }
 
 #[test]
@@ -223,8 +244,7 @@ fn relay_binary_serves_embedded_dashboard_assets() {
 
     let js = wait_for_http_response(metrics_addr, "/dashboard/assets/app.js", &mut child);
     assert!(js.starts_with("HTTP/1.1 200"));
-    assert!(js.contains("/symbol-metrics"));
-    assert!(js.contains("/metrics"));
+    assert!(js.contains("/dashboard-snapshot"));
     assert!(js.contains("instrument_name"));
     assert!(js.contains("closed"));
     assert!(js.contains("upstream_stage"));
