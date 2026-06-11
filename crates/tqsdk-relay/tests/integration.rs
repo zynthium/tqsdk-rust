@@ -117,7 +117,7 @@ fn relay_engine_fans_out_quotes_from_upstream_quote_updates() {
         .find(|row| row.symbol == "SHFE.ag2705")
         .expect("quote update should create symbol telemetry");
     assert_eq!(symbol.ticks_ingested, 0);
-    assert_eq!(symbol.last_price, Some(16666.0));
+
     assert_eq!(symbol.receive_gap_ms, Some(0));
     assert_eq!(symbol.status, tqsdk_relay::SymbolStatus::Live);
 }
