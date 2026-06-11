@@ -4,17 +4,17 @@
   import ScoreGauge from './ScoreGauge.svelte';
 
   let { model }: { model: IntegrityModel } = $props();
-  let title = $derived(
-    model.confirmedIntegrityIssueCount > 0
-      ? 'Tick完整性告警'
-      : model.overall === 'critical'
-        ? '订阅链路告警'
-        : model.overall === 'warning'
-          ? '行情静默预警'
-          : model.overall === 'warming'
-            ? '启动观测中'
-            : '行情链路连续',
-  );
+
+  function heroTitle(model: IntegrityModel): string {
+    if (model.confirmedIntegrityIssueCount > 0) return 'Tick缺口告警';
+    if (model.outOfOrderRowCount > 0) return 'Tick乱序预警';
+    if (model.overall === 'critical') return '订阅链路告警';
+    if (model.overall === 'warning') return '行情静默预警';
+    if (model.overall === 'warming') return '启动观测中';
+    return '行情链路连续';
+  }
+
+  let title = $derived(heroTitle(model));
   let tone = $derived(
     model.overall === 'critical'
       ? 'error'
@@ -28,7 +28,7 @@
     model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : '✓',
   );
   let subtitle = $derived(
-    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，确认 tick 异常 ${formatNumber(model.confirmedIntegrityIssueCount)} 次，帧静默 ${formatDuration(model.upstreamIdleMs)}，事件静默 ${formatDuration(model.eventIdleMs)}`,
+    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} 次，估缺 ${formatNumber(model.estimatedMissingRows)} 行，乱序 ${formatNumber(model.outOfOrderRowCount)} 行，帧静默 ${formatDuration(model.upstreamIdleMs)}，事件静默 ${formatDuration(model.eventIdleMs)}`,
   );
 </script>
 

@@ -5490,7 +5490,10 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 	const subscribedProblems = globalProblems.filter((row) => row.subscribed);
 	const invalidRowCount = Number(metrics.upstream_invalid_tick_rows || 0);
 	const activeInvalidRowCount = Number(global.active_invalid_rows || globalProblems.reduce((sum, row) => sum + Number(row.invalid_rows || 0), 0));
-	const confirmedIntegrityIssueCount = Number(global.gap_event_count || 0) + Number(global.duplicate_rows || 0) + Number(global.out_of_order_rows || 0);
+	const gapEventCount = Number(global.gap_event_count || 0);
+	const duplicateRowCount = Number(global.duplicate_rows || 0);
+	const outOfOrderRowCount = Number(global.out_of_order_rows || 0);
+	const confirmedIntegrityIssueCount = gapEventCount + duplicateRowCount;
 	const estimatedMissingRows = Number(global.estimated_missing_rows || 0);
 	const upstreamIdleMs = frameIdleMs(metrics, sampledAt);
 	const eventIdle = eventIdleMs(metrics, sampledAt);
@@ -5507,10 +5510,10 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 	const eventRate = elapsedSeconds && previous ? Math.max(0, (metrics.upstream_events_decoded - previous.metrics.upstream_events_decoded) / elapsedSeconds) : null;
 	const issueCount = Number(global.problem ?? globalProblems.length);
 	const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
-	const continuityPenalty = Math.min(30, confirmedIntegrityIssueCount * 10 + Math.min(10, estimatedMissingRows * 2));
+	const continuityPenalty = Math.min(30, confirmedIntegrityIssueCount * 10 + Math.min(10, estimatedMissingRows * 2) + (outOfOrderRowCount > 0 ? 5 : 0));
 	const continuityScore = Math.max(0, 100 - Math.min(55, issueCount * 9) - continuityPenalty - Math.min(25, (1 - coverageRatio) * 25) - (sourceCritical || idleCritical ? 20 : 0));
 	return {
-		overall: sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0 ? "critical" : warming && globalRows.length === 0 ? "warming" : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
+		overall: sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0 ? "critical" : warming && globalRows.length === 0 ? "warming" : idleWarn || decodeWarn || outOfOrderRowCount > 0 || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
 		sampledAt,
 		metrics,
 		snapshot,
@@ -5525,6 +5528,7 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 		invalidRowCount,
 		activeInvalidRowCount,
 		confirmedIntegrityIssueCount,
+		outOfOrderRowCount,
 		estimatedMissingRows,
 		upstreamIdleMs,
 		eventIdleMs: eventIdle,
@@ -6027,10 +6031,18 @@ function ScoreGauge($$anchor, $$props) {
 var root$5 = /* @__PURE__ */ from_html(`<section data-testid="integrity-hero"><div class="orb svelte-4y4rc7"><span class="shield svelte-4y4rc7"> </span></div> <div class="copy"><h2 class="svelte-4y4rc7"> </h2> <p class="svelte-4y4rc7"><b class="svelte-4y4rc7"> </b> </p></div> <div class="ecg svelte-4y4rc7" aria-hidden="true"><svg viewBox="0 0 190 58" class="svelte-4y4rc7"><polyline points="0,31 72,31 82,24 90,38 98,8 106,50 115,20 124,31 190,31" class="svelte-4y4rc7"></polyline></svg></div> <div class="score svelte-4y4rc7"><!></div></section>`);
 function IntegrityHero($$anchor, $$props) {
 	push($$props, true);
-	let title = /* @__PURE__ */ user_derived(() => $$props.model.confirmedIntegrityIssueCount > 0 ? "Tick完整性告警" : $$props.model.overall === "critical" ? "订阅链路告警" : $$props.model.overall === "warning" ? "行情静默预警" : $$props.model.overall === "warming" ? "启动观测中" : "行情链路连续");
+	function heroTitle(model) {
+		if (model.confirmedIntegrityIssueCount > 0) return "Tick缺口告警";
+		if (model.outOfOrderRowCount > 0) return "Tick乱序预警";
+		if (model.overall === "critical") return "订阅链路告警";
+		if (model.overall === "warning") return "行情静默预警";
+		if (model.overall === "warming") return "启动观测中";
+		return "行情链路连续";
+	}
+	let title = /* @__PURE__ */ user_derived(() => heroTitle($$props.model));
 	let tone = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "error" : $$props.model.overall === "warning" ? "warning" : $$props.model.overall === "warming" ? "standby" : "live");
 	let icon = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "!" : $$props.model.overall === "warning" ? "!" : $$props.model.overall === "warming" ? "…" : "✓");
-	let subtitle = /* @__PURE__ */ user_derived(() => `${formatNumber($$props.model.observedUniverse)}/${formatNumber($$props.model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent($$props.model.coverageRatio * 100)}%，确认 tick 异常 ${formatNumber($$props.model.confirmedIntegrityIssueCount)} 次，帧静默 ${formatDuration($$props.model.upstreamIdleMs)}，事件静默 ${formatDuration($$props.model.eventIdleMs)}`);
+	let subtitle = /* @__PURE__ */ user_derived(() => `${formatNumber($$props.model.observedUniverse)}/${formatNumber($$props.model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent($$props.model.coverageRatio * 100)}%，缺口 ${formatNumber($$props.model.confirmedIntegrityIssueCount)} 次，估缺 ${formatNumber($$props.model.estimatedMissingRows)} 行，乱序 ${formatNumber($$props.model.outOfOrderRowCount)} 行，帧静默 ${formatDuration($$props.model.upstreamIdleMs)}，事件静默 ${formatDuration($$props.model.eventIdleMs)}`);
 	var section = root$5();
 	var div = child(section);
 	var span = child(div);
@@ -6204,6 +6216,26 @@ var root_1$2 = /* @__PURE__ */ from_html(`<div class="node svelte-dg2yd7"><div c
 var root_2$2 = /* @__PURE__ */ from_html(`<section class="panel pipeline svelte-dg2yd7" data-testid="relay-pipeline"></section>`);
 function RelayPipeline($$anchor, $$props) {
 	push($$props, true);
+	function cacheState(model) {
+		if (model.frameFlowHealth === "critical") return "帧流中断";
+		if (model.confirmedIntegrityIssueCount > 0) return "Tick缺口";
+		if (model.outOfOrderRowCount > 0) return "Tick乱序";
+		if (model.issueCount > 0 || model.frameFlowHealth === "warn") return "需关注";
+		return "活跃";
+	}
+	function cacheMeta(model) {
+		if (model.confirmedIntegrityIssueCount > 0) {
+			const gap = `缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
+			return model.outOfOrderRowCount > 0 ? `${gap} / 乱序 ${formatNumber(model.outOfOrderRowCount)}` : gap;
+		}
+		if (model.outOfOrderRowCount > 0) return `乱序 ${formatNumber(model.outOfOrderRowCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
+		return `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`;
+	}
+	function cacheSeverity(model) {
+		if (model.frameFlowHealth === "critical" || model.confirmedIntegrityIssueCount > 0) return "bad";
+		if (model.outOfOrderRowCount > 0 || model.issueCount > 0 || model.frameFlowHealth === "warn" || model.eventFlowHealth === "warn") return "warn";
+		return "live";
+	}
 	let nodes = /* @__PURE__ */ user_derived(() => [
 		{
 			name: "上游连接",
@@ -6229,9 +6261,9 @@ function RelayPipeline($$anchor, $$props) {
 		{
 			name: "行情缓存",
 			icon: "◫",
-			state: $$props.model.frameFlowHealth === "critical" ? "帧流中断" : $$props.model.confirmedIntegrityIssueCount > 0 ? "Tick异常" : $$props.model.issueCount > 0 || $$props.model.frameFlowHealth === "warn" ? "需关注" : "活跃",
-			meta: $$props.model.confirmedIntegrityIssueCount > 0 ? `${formatNumber($$props.model.confirmedIntegrityIssueCount)} 次 / 缺 ${formatNumber($$props.model.estimatedMissingRows)}` : `帧 ${formatDuration($$props.model.upstreamIdleMs)} / 事件 ${formatDuration($$props.model.eventIdleMs)}`,
-			severity: $$props.model.frameFlowHealth === "critical" || $$props.model.confirmedIntegrityIssueCount > 0 ? "bad" : $$props.model.issueCount > 0 || $$props.model.frameFlowHealth === "warn" || $$props.model.eventFlowHealth === "warn" ? "warn" : "live"
+			state: cacheState($$props.model),
+			meta: cacheMeta($$props.model),
+			severity: cacheSeverity($$props.model)
 		},
 		{
 			name: "下游服务",
@@ -6690,7 +6722,7 @@ function App($$anchor, $$props) {
 		{
 			let $0 = /* @__PURE__ */ user_derived(() => get(model).confirmedIntegrityIssueCount > 0 ? "bad" : "live");
 			MetricCard(node_7, {
-				label: "Tick异常",
+				label: "Tick缺口",
 				get value() {
 					return get(model).confirmedIntegrityIssueCount;
 				},

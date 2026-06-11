@@ -12,6 +12,40 @@
     severity: TimelineSeverity;
   };
 
+  function cacheState(model: IntegrityModel): string {
+    if (model.frameFlowHealth === 'critical') return '帧流中断';
+    if (model.confirmedIntegrityIssueCount > 0) return 'Tick缺口';
+    if (model.outOfOrderRowCount > 0) return 'Tick乱序';
+    if (model.issueCount > 0 || model.frameFlowHealth === 'warn') return '需关注';
+    return '活跃';
+  }
+
+  function cacheMeta(model: IntegrityModel): string {
+    if (model.confirmedIntegrityIssueCount > 0) {
+      const gap = `缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
+      return model.outOfOrderRowCount > 0
+        ? `${gap} / 乱序 ${formatNumber(model.outOfOrderRowCount)}`
+        : gap;
+    }
+    if (model.outOfOrderRowCount > 0) {
+      return `乱序 ${formatNumber(model.outOfOrderRowCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
+    }
+    return `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`;
+  }
+
+  function cacheSeverity(model: IntegrityModel): TimelineSeverity {
+    if (model.frameFlowHealth === 'critical' || model.confirmedIntegrityIssueCount > 0) return 'bad';
+    if (
+      model.outOfOrderRowCount > 0 ||
+      model.issueCount > 0 ||
+      model.frameFlowHealth === 'warn' ||
+      model.eventFlowHealth === 'warn'
+    ) {
+      return 'warn';
+    }
+    return 'live';
+  }
+
   let nodes = $derived<Node[]>([
     {
       name: '上游连接',
@@ -37,23 +71,9 @@
     {
       name: '行情缓存',
       icon: '◫',
-      state:
-        model.frameFlowHealth === 'critical'
-          ? '帧流中断'
-          : model.confirmedIntegrityIssueCount > 0
-            ? 'Tick异常'
-            : model.issueCount > 0 || model.frameFlowHealth === 'warn'
-              ? '需关注'
-              : '活跃',
-      meta: model.confirmedIntegrityIssueCount > 0
-        ? `${formatNumber(model.confirmedIntegrityIssueCount)} 次 / 缺 ${formatNumber(model.estimatedMissingRows)}`
-        : `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`,
-      severity:
-        model.frameFlowHealth === 'critical' || model.confirmedIntegrityIssueCount > 0
-          ? 'bad'
-          : model.issueCount > 0 || model.frameFlowHealth === 'warn' || model.eventFlowHealth === 'warn'
-            ? 'warn'
-            : 'live',
+      state: cacheState(model),
+      meta: cacheMeta(model),
+      severity: cacheSeverity(model),
     },
     {
       name: '下游服务',

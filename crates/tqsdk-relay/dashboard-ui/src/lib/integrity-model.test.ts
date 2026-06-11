@@ -151,6 +151,39 @@ describe('deriveIntegrity', () => {
     expect(model.continuityScore).toBeLessThan(90);
   });
 
+  it('keeps out-of-order tick rows separate from confirmed missing gaps', () => {
+    const lateRows = row({
+      out_of_order_rows: 1_532,
+      problem: true,
+      problem_severity: 'bad',
+    });
+
+    const model = deriveIntegrity(metrics(), symbolSnapshot([lateRows]), NOW);
+
+    expect(model.confirmedIntegrityIssueCount).toBe(0);
+    expect(model.outOfOrderRowCount).toBe(1_532);
+    expect(model.estimatedMissingRows).toBe(0);
+    expect(model.overall).toBe('warning');
+  });
+
+  it('counts gaps and duplicates as confirmed continuity issues while tracking late rows', () => {
+    const mixed = row({
+      gap_event_count: 2,
+      duplicate_rows: 3,
+      out_of_order_rows: 5,
+      estimated_missing_rows: 44,
+      problem: true,
+      problem_severity: 'bad',
+    });
+
+    const model = deriveIntegrity(metrics(), symbolSnapshot([mixed]), NOW);
+
+    expect(model.confirmedIntegrityIssueCount).toBe(5);
+    expect(model.outOfOrderRowCount).toBe(5);
+    expect(model.estimatedMissingRows).toBe(44);
+    expect(model.overall).toBe('critical');
+  });
+
   it('uses global frame-flow thresholds instead of the 30s symbol stale threshold', () => {
     const model = deriveIntegrity(
       metrics({

@@ -64,10 +64,10 @@ export function deriveIntegrity(
   const activeInvalidRowCount = Number(
     global.active_invalid_rows || globalProblems.reduce((sum, row) => sum + Number(row.invalid_rows || 0), 0),
   );
-  const confirmedIntegrityIssueCount =
-    Number(global.gap_event_count || 0) +
-    Number(global.duplicate_rows || 0) +
-    Number(global.out_of_order_rows || 0);
+  const gapEventCount = Number(global.gap_event_count || 0);
+  const duplicateRowCount = Number(global.duplicate_rows || 0);
+  const outOfOrderRowCount = Number(global.out_of_order_rows || 0);
+  const confirmedIntegrityIssueCount = gapEventCount + duplicateRowCount;
   const estimatedMissingRows = Number(global.estimated_missing_rows || 0);
   const upstreamIdleMs = frameIdleMs(metrics, sampledAt);
   const eventIdle = eventIdleMs(metrics, sampledAt);
@@ -104,7 +104,9 @@ export function deriveIntegrity(
   const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
   const continuityPenalty = Math.min(
     30,
-    confirmedIntegrityIssueCount * 10 + Math.min(10, estimatedMissingRows * 2),
+    confirmedIntegrityIssueCount * 10 +
+      Math.min(10, estimatedMissingRows * 2) +
+      (outOfOrderRowCount > 0 ? 5 : 0),
   );
   const continuityScore = Math.max(
     0,
@@ -119,7 +121,7 @@ export function deriveIntegrity(
       ? 'critical'
       : warming && globalRows.length === 0
         ? 'warming'
-        : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < 0.98
+        : idleWarn || decodeWarn || outOfOrderRowCount > 0 || issueCount > 0 || coverageRatio < 0.98
           ? 'warning'
           : 'healthy';
 
@@ -139,6 +141,7 @@ export function deriveIntegrity(
     invalidRowCount,
     activeInvalidRowCount,
     confirmedIntegrityIssueCount,
+    outOfOrderRowCount,
     estimatedMissingRows,
     upstreamIdleMs,
     eventIdleMs: eventIdle,
