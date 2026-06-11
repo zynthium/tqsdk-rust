@@ -50,7 +50,7 @@
   });
 </script>
 
-<details class="panel controls" data-testid="dashboard-controls">
+<details class="controls" data-testid="dashboard-controls">
   <summary>筛选</summary>
   <div class="control-grid">
     <div class="status-set" aria-label="status filters">
@@ -97,6 +97,7 @@
     align-items: center;
     justify-content: center;
     min-width: 58px;
+    height: 28px; /* sync height with other inputs if needed, or rely on padding */
     padding: 5px 9px;
     cursor: pointer;
     color: #aeeaff;
@@ -107,6 +108,7 @@
     background: #061a2b99;
     list-style: none;
     transition: all 0.2s;
+    box-sizing: border-box;
   }
 
   summary:hover {
@@ -135,7 +137,7 @@
   .controls[open] .control-grid {
     display: grid;
     position: absolute;
-    top: calc(100% + 12px);
+    top: calc(100% + 8px);
     right: 0;
     width: max-content;
     max-width: min(760px, calc(100vw - 24px));
