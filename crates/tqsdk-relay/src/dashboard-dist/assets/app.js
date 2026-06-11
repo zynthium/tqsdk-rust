@@ -5493,7 +5493,8 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 	const gapEventCount = Number(global.gap_event_count || 0);
 	const duplicateRowCount = Number(global.duplicate_rows || 0);
 	const outOfOrderRowCount = Number(global.out_of_order_rows || 0);
-	const confirmedIntegrityIssueCount = gapEventCount + duplicateRowCount;
+	const confirmedIntegrityIssueCount = 0;
+	const diffRowDiscontinuityCount = gapEventCount + duplicateRowCount + outOfOrderRowCount;
 	const estimatedMissingRows = Number(global.estimated_missing_rows || 0);
 	const upstreamIdleMs = frameIdleMs(metrics, sampledAt);
 	const eventIdle = eventIdleMs(metrics, sampledAt);
@@ -5510,10 +5511,9 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 	const eventRate = elapsedSeconds && previous ? Math.max(0, (metrics.upstream_events_decoded - previous.metrics.upstream_events_decoded) / elapsedSeconds) : null;
 	const issueCount = Number(global.problem ?? globalProblems.length);
 	const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
-	const continuityPenalty = Math.min(30, confirmedIntegrityIssueCount * 10 + Math.min(10, estimatedMissingRows * 2) + (outOfOrderRowCount > 0 ? 5 : 0));
-	const continuityScore = Math.max(0, 100 - Math.min(55, issueCount * 9) - continuityPenalty - Math.min(25, (1 - coverageRatio) * 25) - (sourceCritical || idleCritical ? 20 : 0));
+	const continuityScore = Math.max(0, 100 - Math.min(55, issueCount * 9) - Math.min(25, (1 - coverageRatio) * 25) - (sourceCritical || idleCritical ? 20 : 0));
 	return {
-		overall: sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0 ? "critical" : warming && globalRows.length === 0 ? "warming" : idleWarn || decodeWarn || outOfOrderRowCount > 0 || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
+		overall: sourceCritical || idleCritical || subscribedProblemCount > 0 || false ? "critical" : warming && globalRows.length === 0 ? "warming" : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
 		sampledAt,
 		metrics,
 		snapshot,
@@ -5528,6 +5528,7 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 		invalidRowCount,
 		activeInvalidRowCount,
 		confirmedIntegrityIssueCount,
+		diffRowDiscontinuityCount,
 		outOfOrderRowCount,
 		estimatedMissingRows,
 		upstreamIdleMs,
@@ -6034,8 +6035,6 @@ var root$5 = /* @__PURE__ */ from_html(`<section data-testid="integrity-hero"><d
 function IntegrityHero($$anchor, $$props) {
 	push($$props, true);
 	function heroTitle(model) {
-		if (model.confirmedIntegrityIssueCount > 0) return "Tick缺口告警";
-		if (model.outOfOrderRowCount > 0) return "Tick乱序预警";
 		if (model.overall === "critical") return "订阅链路告警";
 		if (model.overall === "warning") return "行情静默预警";
 		if (model.overall === "warming") return "启动观测中";
@@ -6044,7 +6043,7 @@ function IntegrityHero($$anchor, $$props) {
 	let title = /* @__PURE__ */ user_derived(() => heroTitle($$props.model));
 	let tone = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "error" : $$props.model.overall === "warning" ? "warning" : $$props.model.overall === "warming" ? "standby" : "live");
 	let icon = /* @__PURE__ */ user_derived(() => $$props.model.overall === "critical" ? "!" : $$props.model.overall === "warning" ? "!" : $$props.model.overall === "warming" ? "…" : "✓");
-	let subtitle = /* @__PURE__ */ user_derived(() => `${formatNumber($$props.model.observedUniverse)}/${formatNumber($$props.model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent($$props.model.coverageRatio * 100)}%，缺口 ${formatNumber($$props.model.confirmedIntegrityIssueCount)} 次，估缺 ${formatNumber($$props.model.estimatedMissingRows)} 行，乱序 ${formatNumber($$props.model.outOfOrderRowCount)} 行，帧静默 ${formatDuration($$props.model.upstreamIdleMs)}，事件静默 ${formatDuration($$props.model.eventIdleMs)}`);
+	let subtitle = /* @__PURE__ */ user_derived(() => `${formatNumber($$props.model.observedUniverse)}/${formatNumber($$props.model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent($$props.model.coverageRatio * 100)}%，Diff行号诊断 ${formatNumber($$props.model.diffRowDiscontinuityCount)} 次，跳号估算 ${formatNumber($$props.model.estimatedMissingRows)} 行，倒序 ${formatNumber($$props.model.outOfOrderRowCount)} 行，帧静默 ${formatDuration($$props.model.upstreamIdleMs)}，事件静默 ${formatDuration($$props.model.eventIdleMs)}`);
 	var section = root$5();
 	var div = child(section);
 	var span = child(div);
@@ -6220,22 +6219,15 @@ function RelayPipeline($$anchor, $$props) {
 	push($$props, true);
 	function cacheState(model) {
 		if (model.frameFlowHealth === "critical") return "帧流中断";
-		if (model.confirmedIntegrityIssueCount > 0) return "Tick缺口";
-		if (model.outOfOrderRowCount > 0) return "Tick乱序";
 		if (model.issueCount > 0 || model.frameFlowHealth === "warn") return "需关注";
 		return "活跃";
 	}
 	function cacheMeta(model) {
-		if (model.confirmedIntegrityIssueCount > 0) {
-			const gap = `缺口 ${formatNumber(model.confirmedIntegrityIssueCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
-			return model.outOfOrderRowCount > 0 ? `${gap} / 乱序 ${formatNumber(model.outOfOrderRowCount)}` : gap;
-		}
-		if (model.outOfOrderRowCount > 0) return `乱序 ${formatNumber(model.outOfOrderRowCount)} / 估缺 ${formatNumber(model.estimatedMissingRows)}`;
 		return `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`;
 	}
 	function cacheSeverity(model) {
-		if (model.frameFlowHealth === "critical" || model.confirmedIntegrityIssueCount > 0) return "bad";
-		if (model.outOfOrderRowCount > 0 || model.issueCount > 0 || model.frameFlowHealth === "warn" || model.eventFlowHealth === "warn") return "warn";
+		if (model.frameFlowHealth === "critical") return "bad";
+		if (model.issueCount > 0 || model.frameFlowHealth === "warn" || model.eventFlowHealth === "warn") return "warn";
 		return "live";
 	}
 	let nodes = /* @__PURE__ */ user_derived(() => [
@@ -6256,7 +6248,7 @@ function RelayPipeline($$anchor, $$props) {
 		{
 			name: "数据解码",
 			icon: "⌘",
-			state: $$props.model.decodeHealth === "degraded" ? "近期坏行" : "正常",
+			state: $$props.model.decodeHealth === "degraded" ? "解析诊断" : "正常",
 			meta: `${formatNumber($$props.model.metrics.recent_invalid_rows_1m)} 近期 / ${formatNumber($$props.model.invalidRowCount)} 累计`,
 			severity: $$props.model.decodeHealth === "degraded" ? "warn" : "live"
 		},
@@ -6530,7 +6522,6 @@ function createIncidentLedger(limit = 80) {
 	return {
 		limit,
 		knownStatuses: /* @__PURE__ */ new Map(),
-		knownContinuity: /* @__PURE__ */ new Map(),
 		incidents: []
 	};
 }
@@ -6542,21 +6533,6 @@ function severityForIncident(row) {
 }
 function updateIncidentLedger(ledger, model) {
 	for (const row of model.globalRows) {
-		const continuityEvents = Number(row.gap_event_count || 0) + Number(row.duplicate_rows || 0) + Number(row.out_of_order_rows || 0);
-		if (continuityEvents > (ledger.knownContinuity.get(row.symbol) ?? 0)) {
-			const incident = {
-				id: `${model.sampledAt}:${row.symbol}:SymbolGapDetected:${continuityEvents}`,
-				at: model.sampledAt,
-				scope: row.instrument_name ?? row.symbol,
-				scope_symbol: row.symbol,
-				type: "SymbolGapDetected",
-				detail: `gap ${row.gap_event_count} / duplicate ${row.duplicate_rows} / out-of-order ${row.out_of_order_rows}`,
-				impact: row.subscribed ? "影响订阅" : "未订阅",
-				severity: "bad"
-			};
-			if (!ledger.incidents.some((item) => item.id === incident.id)) ledger.incidents.unshift(incident);
-		}
-		ledger.knownContinuity.set(row.symbol, continuityEvents);
 		const before = ledger.knownStatuses.get(row.symbol);
 		if (before && before !== row.status) {
 			const incident = {
@@ -6578,7 +6554,7 @@ function updateIncidentLedger(ledger, model) {
 }
 //#endregion
 //#region src/App.svelte
-var root = /* @__PURE__ */ from_html(`<!> <section class="kpi-grid" aria-label="relay metrics"><!> <!> <!> <!> <!> <!></section> <!> <section class="dashboard-main"><!> <!> <!></section> <!>`, 1);
+var root = /* @__PURE__ */ from_html(`<!> <section class="kpi-grid" aria-label="relay metrics"><!> <!> <!> <!> <!></section> <!> <section class="dashboard-main"><!> <!> <!></section> <!>`, 1);
 var root_1 = /* @__PURE__ */ from_html(`<section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">正在读取 relay 观测数据</section>`);
 var root_2 = /* @__PURE__ */ from_html(`<main class="dashboard-shell"><!> <!> <!></main>`);
 function App($$anchor, $$props) {
@@ -6721,19 +6697,14 @@ function App($$anchor, $$props) {
 			});
 		}
 		var node_7 = sibling(node_6, 2);
-		{
-			let $0 = /* @__PURE__ */ user_derived(() => get(model).confirmedIntegrityIssueCount > 0 ? "bad" : "live");
-			MetricCard(node_7, {
-				label: "Tick缺口",
-				get value() {
-					return get(model).confirmedIntegrityIssueCount;
-				},
-				get tone() {
-					return get($0);
-				},
-				icon: "!"
-			});
-		}
+		MetricCard(node_7, {
+			label: "Diff行号",
+			get value() {
+				return get(model).diffRowDiscontinuityCount;
+			},
+			tone: "info",
+			icon: "⌁"
+		});
 		var node_8 = sibling(node_7, 2);
 		{
 			let $0 = /* @__PURE__ */ user_derived(() => get(model).frameFlowHealth === "critical" ? "bad" : get(model).frameFlowHealth === "warn" ? "warn" : "info");
@@ -6749,32 +6720,18 @@ function App($$anchor, $$props) {
 				icon: "↻"
 			});
 		}
-		var node_9 = sibling(node_8, 2);
-		{
-			let $0 = /* @__PURE__ */ user_derived(() => get(model).decodeHealth === "degraded" ? "bad" : "live");
-			MetricCard(node_9, {
-				label: "近期坏行",
-				get value() {
-					return get(model).metrics.recent_invalid_rows_1m;
-				},
-				get tone() {
-					return get($0);
-				},
-				icon: "!"
-			});
-		}
 		reset(section);
-		var node_10 = sibling(section, 2);
-		RelayPipeline(node_10, { get model() {
+		var node_9 = sibling(section, 2);
+		RelayPipeline(node_9, { get model() {
 			return get(model);
 		} });
-		var section_1 = sibling(node_10, 2);
-		var node_11 = child(section_1);
-		AttentionList(node_11, { get rows() {
+		var section_1 = sibling(node_9, 2);
+		var node_10 = child(section_1);
+		AttentionList(node_10, { get rows() {
 			return get(model).problems;
 		} });
-		var node_12 = sibling(node_11, 2);
-		ContinuityTimeline(node_12, {
+		var node_11 = sibling(node_10, 2);
+		ContinuityTimeline(node_11, {
 			get buckets() {
 				return get(buckets);
 			},
@@ -6782,7 +6739,7 @@ function App($$anchor, $$props) {
 				return get(model).globalRows;
 			}
 		});
-		IncidentTable(sibling(node_12, 2), { get incidents() {
+		IncidentTable(sibling(node_11, 2), { get incidents() {
 			return incidents.incidents;
 		} });
 		reset(section_1);

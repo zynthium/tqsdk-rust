@@ -66,6 +66,7 @@ export type SymbolMetricsSummary = {
   universe_total: number;
   universe_observed: number;
   active_invalid_rows: number;
+  // Raw TQ diff row-id diagnostics; not confirmed market-data integrity failures.
   gap_event_count: number;
   estimated_missing_rows: number;
   duplicate_rows: number;
@@ -89,6 +90,7 @@ export type SymbolRow = {
   chart_subscriber_count: number;
   ticks_ingested: number;
   source_epoch: number;
+  // Raw TQ diff row-id diagnostics. Diff patches may skip, repeat, or backfill row ids.
   last_tick_id: number | null;
   gap_event_count: number;
   estimated_missing_rows: number;
@@ -178,6 +180,7 @@ export type IntegrityModel = {
   invalidRowCount: number;
   activeInvalidRowCount: number;
   confirmedIntegrityIssueCount: number;
+  diffRowDiscontinuityCount: number;
   outOfOrderRowCount: number;
   estimatedMissingRows: number;
   upstreamIdleMs: number | null;
@@ -236,6 +239,5 @@ export type LocalIncident = {
 export type IncidentLedger = {
   limit: number;
   knownStatuses: Map<string, SymbolStatus>;
-  knownContinuity: Map<string, number>;
   incidents: LocalIncident[];
 };

@@ -44,7 +44,7 @@ describe('App', () => {
     expect(screen.queryByText('完整性趋势')).toBeNull();
   });
 
-  it('labels out-of-order tick rows separately from missing gaps', async () => {
+  it('does not present diff row id diagnostics as tick errors', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string | URL | Request) => {
@@ -53,9 +53,10 @@ describe('App', () => {
           return Response.json(
             dashboardSnapshot([
               row({
+                gap_event_count: 2,
+                duplicate_rows: 3,
                 out_of_order_rows: 1_532,
-                problem: true,
-                problem_severity: 'bad',
+                estimated_missing_rows: 44,
               }),
             ]),
           );
@@ -66,10 +67,11 @@ describe('App', () => {
 
     render(App);
 
-    expect(await screen.findByText('Tick乱序')).toBeTruthy();
-    expect(screen.getByText('乱序 1,532 / 估缺 0')).toBeTruthy();
-    expect(screen.getByText('Tick缺口')).toBeTruthy();
+    expect(await screen.findByText('行情链路连续')).toBeTruthy();
+    expect(screen.queryByText('Tick乱序')).toBeNull();
+    expect(screen.queryByText('Tick缺口')).toBeNull();
     expect(screen.queryByText('Tick异常')).toBeNull();
-    expect(screen.queryByText('1,532 次 / 缺 0')).toBeNull();
+    expect(screen.queryByText('近期坏行')).toBeNull();
+    expect(screen.queryByText(/缺口/)).toBeNull();
   });
 });

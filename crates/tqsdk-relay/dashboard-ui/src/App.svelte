@@ -92,9 +92,8 @@
       <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
       <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
       <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" icon="◎" />
-      <MetricCard label="Tick缺口" value={model.confirmedIntegrityIssueCount} tone={model.confirmedIntegrityIssueCount > 0 ? 'bad' : 'live'} icon="!" />
+      <MetricCard label="Diff行号" value={model.diffRowDiscontinuityCount} tone="info" icon="⌁" />
       <MetricCard label="上游帧静默" value={model.upstreamIdleMs} format="duration" tone={model.frameFlowHealth === 'critical' ? 'bad' : model.frameFlowHealth === 'warn' ? 'warn' : 'info'} icon="↻" />
-      <MetricCard label="近期坏行" value={model.metrics.recent_invalid_rows_1m} tone={model.decodeHealth === 'degraded' ? 'bad' : 'live'} icon="!" />
     </section>
     <RelayPipeline {model} />
     <section class="dashboard-main">

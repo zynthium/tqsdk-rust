@@ -134,54 +134,48 @@ describe('deriveIntegrity', () => {
     expect(model.activeInvalidRowCount).toBe(100);
   });
 
-  it('treats confirmed tick continuity failures as critical integrity issues', () => {
+  it('treats diff row id skips as diagnostics instead of confirmed integrity failures', () => {
     const gapped = row({
       gap_event_count: 1,
       estimated_missing_rows: 2,
       last_gap_unix_millis: NOW - 1_000,
-      problem: true,
-      problem_severity: 'bad',
     });
 
     const model = deriveIntegrity(metrics(), symbolSnapshot([gapped]), NOW);
 
-    expect(model.confirmedIntegrityIssueCount).toBe(1);
+    expect(model.diffRowDiscontinuityCount).toBe(1);
     expect(model.estimatedMissingRows).toBe(2);
-    expect(model.overall).toBe('critical');
-    expect(model.continuityScore).toBeLessThan(90);
+    expect(model.overall).toBe('healthy');
+    expect(model.continuityScore).toBe(100);
   });
 
-  it('keeps out-of-order tick rows separate from confirmed missing gaps', () => {
+  it('keeps out-of-order tick rows as diff diagnostics without warning', () => {
     const lateRows = row({
       out_of_order_rows: 1_532,
-      problem: true,
-      problem_severity: 'bad',
     });
 
     const model = deriveIntegrity(metrics(), symbolSnapshot([lateRows]), NOW);
 
-    expect(model.confirmedIntegrityIssueCount).toBe(0);
+    expect(model.diffRowDiscontinuityCount).toBe(1_532);
     expect(model.outOfOrderRowCount).toBe(1_532);
     expect(model.estimatedMissingRows).toBe(0);
-    expect(model.overall).toBe('warning');
+    expect(model.overall).toBe('healthy');
   });
 
-  it('counts gaps and duplicates as confirmed continuity issues while tracking late rows', () => {
+  it('counts diff row discontinuities without making the relay critical', () => {
     const mixed = row({
       gap_event_count: 2,
       duplicate_rows: 3,
       out_of_order_rows: 5,
       estimated_missing_rows: 44,
-      problem: true,
-      problem_severity: 'bad',
     });
 
     const model = deriveIntegrity(metrics(), symbolSnapshot([mixed]), NOW);
 
-    expect(model.confirmedIntegrityIssueCount).toBe(5);
+    expect(model.diffRowDiscontinuityCount).toBe(10);
     expect(model.outOfOrderRowCount).toBe(5);
     expect(model.estimatedMissingRows).toBe(44);
-    expect(model.overall).toBe('critical');
+    expect(model.overall).toBe('healthy');
   });
 
   it('uses global frame-flow thresholds instead of the 30s symbol stale threshold', () => {
