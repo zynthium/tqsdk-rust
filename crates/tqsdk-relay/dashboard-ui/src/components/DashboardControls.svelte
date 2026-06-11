@@ -87,8 +87,12 @@
 
   .controls[open] {
     width: min(760px, calc(100vw - 24px));
+    max-height: calc(100dvh - 64px);
+    overflow: auto;
     border-radius: 10px;
     background: linear-gradient(180deg, #081b2df7, #040f1bf7);
+    scrollbar-color: #2ad0ff66 #04111e;
+    scrollbar-width: thin;
   }
 
   summary {
