@@ -7,7 +7,6 @@
   import MetricCard from './components/MetricCard.svelte';
   import MonitorHeader from './components/MonitorHeader.svelte';
   import RelayPipeline from './components/RelayPipeline.svelte';
-  import SymbolHealthTable from './components/SymbolHealthTable.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
   import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
@@ -98,10 +97,9 @@
     <RelayPipeline {model} />
     <section class="dashboard-main">
       <AttentionList rows={model.problems} />
-      <ContinuityTimeline {buckets} rows={model.globalRows} />
+      <ContinuityTimeline {buckets} rows={model.globalRows} bind:selectedSymbol={view.selectedSymbol} />
       <IncidentTable incidents={incidents.incidents} />
     </section>
-    <SymbolHealthTable rows={model.rows} bind:selectedSymbol={view.selectedSymbol} />
   {:else}
     <section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">
       正在读取 relay 观测数据

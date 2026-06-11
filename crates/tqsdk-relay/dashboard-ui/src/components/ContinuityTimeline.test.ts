@@ -55,4 +55,45 @@ describe('ContinuityTimeline', () => {
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
   });
+
+  it('shows symbol health details inside expanded heatmap rows', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      exchangeSeverity: { SHFE: 'warn' },
+      symbolSeverity: { 'SHFE.au2602': 'warn' },
+      subscribedSeverity: 'warn',
+      globalSeverity: 'warn',
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'SHFE.au2602',
+          instrument_name: '沪金2602',
+          status: 'stale',
+          session: 'open',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+          market_time_lag_ms: 45_000,
+          ticks_ingested: 1_234,
+          quote_subscriber_count: 1,
+          chart_subscriber_count: 2,
+          invalid_rows: 7,
+        }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
+    await fireEvent.click(view.getByRole('button', { name: /沪金2602/ }));
+
+    expect(view.getAllByText('静默').length).toBeGreaterThanOrEqual(2);
+    expect(view.getByText('距 31.0s')).toBeTruthy();
+    expect(view.getByText('延 45.0s')).toBeTruthy();
+    expect(view.getByText('Tick 1,234')).toBeTruthy();
+    expect(view.getByText('订阅 3')).toBeTruthy();
+    expect(view.getByText('warn')).toBeTruthy();
+    expect(view.getByText(/invalid rows/)).toBeTruthy();
+    expect(view.getByText('7')).toBeTruthy();
+  });
 });

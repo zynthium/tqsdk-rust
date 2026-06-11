@@ -40,7 +40,7 @@ describe('App', () => {
     expect(screen.getByText('无样本')).toBeTruthy();
     expect(screen.queryByText('DCE.m2609')).toBeNull();
     expect(screen.getByText('连续性评分')).toBeTruthy();
-    expect(screen.getByText('活跃合约健康排行')).toBeTruthy();
+    expect(screen.queryByText('活跃合约健康排行')).toBeNull();
     expect(screen.queryByText('完整性趋势')).toBeNull();
   });
 

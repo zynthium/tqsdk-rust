@@ -355,9 +355,12 @@ metrics、symbol read model、订阅快照和事件账本，随后在锁外完�
 排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
 未过滤 global 数据，搜索/状态筛选只影响可见列表，不会把异常过滤成健康。dashboard 会把
 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的行情完整性异常、事件账本
-告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响和解码健康为主。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，不支持时
-禁用；完整合约表展示当前过滤页内全部行。backfilling 进度只基于 relay 已观测到的时间
-和 frame/event 计数，不推断上游补历史百分比。
+告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响和解码健康为主。连续性
+热力图展开交易所后会按健康排行顺序展示合约，并在行内合并状态、接收延迟、行情延迟、
+tick 数、订阅数和风险等级；点击合约行会显示 last price、volume、open interest、
+invalid rows 等详情。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，
+不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和 frame/event 计数，
+不推断上游补历史百分比。
 
 ### 观测字段
 

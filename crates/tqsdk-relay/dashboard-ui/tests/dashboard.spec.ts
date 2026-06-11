@@ -56,7 +56,13 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   );
   expect(pipelineTextLayout.every((node) => node.nodeHeight <= 64)).toBe(true);
   expect(pipelineTextLayout.every((node) => node.textInsideNode)).toBe(true);
-  await expect(page.getByText('活跃合约健康排行')).toBeVisible();
+  await expect(page.getByText('活跃合约健康排行')).toHaveCount(0);
+  const dceRow = page.getByRole('button', { name: /DCE.*1\/1/ });
+  await dceRow.click();
+  const timeline = page.getByTestId('continuity-timeline');
+  await expect(timeline.getByText('豆粕2609')).toBeVisible();
+  await expect(timeline.getByText('距 1m30s')).toBeVisible();
+  await expect(timeline.getByText(/Tick/)).toBeVisible();
   await expect(page.getByText('完整性趋势')).toHaveCount(0);
 });
 
@@ -83,8 +89,9 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
 
   await page.goto('/dashboard/');
   await expect(page.getByTestId('attention-list')).toBeVisible();
-  await expect(page.getByTestId('symbol-health-table')).toBeVisible();
-  await expect(page.getByTestId('symbol-health-table').locator('tbody tr')).toHaveCount(120);
+  await expect(page.getByTestId('symbol-health-table')).toHaveCount(0);
+  await page.getByRole('button', { name: /DCE.*40\/120/ }).click();
+  await expect(page.getByTestId('continuity-timeline').getByTestId('timeline-symbol-row')).toHaveCount(30);
 
   const viewport = await page.evaluate(() => ({
     documentClientHeight: document.documentElement.clientHeight,
