@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { symbolQueryString } from './api';
+import { describe, expect, it, vi } from 'vitest';
+import { dashboardSnapshot, row } from '../test/fixtures';
+import { fetchRelaySnapshot, symbolQueryString } from './api';
 
 describe('symbolQueryString', () => {
   it('encodes dashboard filters using existing relay query contract', () => {
@@ -26,5 +27,23 @@ describe('symbolQueryString', () => {
         limit: 200,
       }),
     ).toBe('sort=symbol_asc&limit=200');
+  });
+
+  it('fetches one atomic dashboard snapshot endpoint', async () => {
+    const fetch = vi.fn(async (_input: string | URL | Request) => Response.json(dashboardSnapshot([row()])));
+    vi.stubGlobal('fetch', fetch);
+
+    const snapshot = await fetchRelaySnapshot({
+      statuses: [],
+      subscribedOnly: false,
+      q: '',
+      sort: 'symbol_asc',
+      limit: 200,
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).toBe('/dashboard-snapshot?sort=symbol_asc&limit=200');
+    expect(snapshot.global.total).toBe(1);
+    expect(snapshot.page.symbols).toHaveLength(1);
   });
 });

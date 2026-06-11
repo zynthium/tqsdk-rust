@@ -38,4 +38,38 @@ describe('incident-ledger', () => {
       severity: 'warn',
     });
   });
+
+  it('records tick continuity incidents when counters increase', () => {
+    const ledger = createIncidentLedger(10);
+    const clean = deriveIntegrity(
+      metrics(),
+      symbolSnapshot([row({ symbol: 'SHFE.au2602', gap_event_count: 0 })]),
+      NOW,
+    );
+    const gapped = deriveIntegrity(
+      metrics(),
+      symbolSnapshot([
+        row({
+          symbol: 'SHFE.au2602',
+          gap_event_count: 1,
+          estimated_missing_rows: 2,
+          problem: true,
+          problem_severity: 'bad',
+        }),
+      ]),
+      NOW + 2_000,
+    );
+
+    updateIncidentLedger(ledger, clean);
+    updateIncidentLedger(ledger, gapped);
+    updateIncidentLedger(ledger, gapped);
+
+    expect(ledger.incidents).toHaveLength(1);
+    expect(ledger.incidents[0]).toMatchObject({
+      scope_symbol: 'SHFE.au2602',
+      type: 'SymbolGapDetected',
+      detail: 'gap 1 / duplicate 0 / out-of-order 0',
+      severity: 'bad',
+    });
+  });
 });

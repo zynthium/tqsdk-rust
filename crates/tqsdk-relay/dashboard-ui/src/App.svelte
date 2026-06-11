@@ -7,6 +7,7 @@
   import MetricCard from './components/MetricCard.svelte';
   import MonitorHeader from './components/MonitorHeader.svelte';
   import RelayPipeline from './components/RelayPipeline.svelte';
+  import SymbolHealthTable from './components/SymbolHealthTable.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
   import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
@@ -45,7 +46,7 @@
     const next = await fetchRelaySnapshot(view.filters, signal);
     if (requestId !== sequence) return;
     snapshot = next;
-    const nextModel = deriveIntegrity(next.metrics, next.symbols, next.receivedAt, model);
+    const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global, next.global_symbols);
     pushTimelineSample(timeline, nextModel);
     updateIncidentLedger(incidents, nextModel);
     model = nextModel;
@@ -60,17 +61,23 @@
     filterKey;
     if (view.paused) return;
     const controller = new AbortController();
-    void untrack(() => load(controller.signal)).catch((reason) => {
-      if (!controller.signal.aborted) error = reason instanceof Error ? reason.message : String(reason);
-    });
-    const timer = window.setInterval(() => {
-      void load(controller.signal).catch((reason) => {
+    let disposed = false;
+    let timer: number | undefined;
+    async function poll() {
+      try {
+        await untrack(() => load(controller.signal));
+      } catch (reason) {
         if (!controller.signal.aborted) error = reason instanceof Error ? reason.message : String(reason);
-      });
-    }, POLL_INTERVAL_MS);
+      }
+      if (!disposed && !controller.signal.aborted) {
+        timer = window.setTimeout(poll, POLL_INTERVAL_MS);
+      }
+    }
+    void poll();
     return () => {
+      disposed = true;
       controller.abort();
-      window.clearInterval(timer);
+      if (timer != null) window.clearTimeout(timer);
     };
   });
 </script>
@@ -85,16 +92,17 @@
       <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
       <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
       <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" icon="◎" />
-      <MetricCard label="完整性异常" value={model.issueCount} tone={model.issueCount > 0 ? 'warn' : 'live'} icon="◇" />
-      <MetricCard label="上游静默" value={model.upstreamIdleMs} format="duration" tone="info" icon="↻" />
-      <MetricCard label="解码坏行" value={model.invalidRowCount} tone={model.invalidRowCount > 0 ? 'bad' : 'live'} icon="!" />
+      <MetricCard label="Tick异常" value={model.confirmedIntegrityIssueCount} tone={model.confirmedIntegrityIssueCount > 0 ? 'bad' : 'live'} icon="!" />
+      <MetricCard label="上游帧静默" value={model.upstreamIdleMs} format="duration" tone={model.frameFlowHealth === 'critical' ? 'bad' : model.frameFlowHealth === 'warn' ? 'warn' : 'info'} icon="↻" />
+      <MetricCard label="近期坏行" value={model.metrics.recent_invalid_rows_1m} tone={model.decodeHealth === 'degraded' ? 'bad' : 'live'} icon="!" />
     </section>
     <RelayPipeline {model} />
     <section class="dashboard-main">
       <AttentionList rows={model.problems} />
-      <ContinuityTimeline {buckets} rows={model.rows} />
+      <ContinuityTimeline {buckets} rows={model.globalRows} />
       <IncidentTable incidents={incidents.incidents} />
     </section>
+    <SymbolHealthTable rows={model.rows} bind:selectedSymbol={view.selectedSymbol} />
   {:else}
     <section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">
       正在读取 relay 观测数据

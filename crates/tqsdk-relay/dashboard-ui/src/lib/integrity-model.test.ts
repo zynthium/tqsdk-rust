@@ -57,6 +57,8 @@ describe('deriveIntegrity', () => {
       metrics({
         upstream_stage: 'backfilling',
         last_upstream_frame_unix_secs: null,
+        upstream_frame_idle_ms: null,
+        upstream_frame_idle_health: 'no_sample',
         upstream_frames_received: 0,
         upstream_events_decoded: 0,
       }),
@@ -84,6 +86,103 @@ describe('deriveIntegrity', () => {
 
     expect(next.frameRate).toBe(2);
     expect(next.eventRate).toBe(5);
+  });
+
+  it('keeps global health critical when the visible page is filtered to healthy rows', () => {
+    const healthy = row({ symbol: 'SHFE.au2602', problem: false, problem_severity: 'live' });
+    const subscribedInactive = row({
+      symbol: 'CZCE.AP610',
+      status: 'inactive',
+      problem: true,
+      problem_severity: 'bad',
+      in_universe: false,
+      subscribed: true,
+      quote_subscriber_count: 1,
+      last_receive_unix_millis: null,
+      receive_gap_ms: null,
+    });
+    const globalSnapshot = symbolSnapshot([healthy, subscribedInactive]);
+    const visiblePage = symbolSnapshot([healthy]);
+
+    const model = deriveIntegrity(
+      metrics(),
+      visiblePage,
+      NOW,
+      null,
+      globalSnapshot.summary,
+      globalSnapshot.symbols,
+    );
+
+    expect(model.rows.map((item) => item.symbol)).toEqual(['SHFE.au2602']);
+    expect(model.globalProblems.map((item) => item.symbol)).toEqual(['CZCE.AP610']);
+    expect(model.issueCount).toBe(1);
+    expect(model.subscribedProblemCount).toBe(1);
+    expect(model.overall).toBe('critical');
+  });
+
+  it('does not count every invalid row as a separate issue', () => {
+    const bad = row({
+      problem: true,
+      problem_severity: 'bad',
+      invalid_rows: 100,
+      last_invalid_row_error: 'decode failed',
+    });
+
+    const model = deriveIntegrity(metrics(), symbolSnapshot([bad]), NOW);
+
+    expect(model.issueCount).toBe(1);
+    expect(model.activeInvalidRowCount).toBe(100);
+  });
+
+  it('treats confirmed tick continuity failures as critical integrity issues', () => {
+    const gapped = row({
+      gap_event_count: 1,
+      estimated_missing_rows: 2,
+      last_gap_unix_millis: NOW - 1_000,
+      problem: true,
+      problem_severity: 'bad',
+    });
+
+    const model = deriveIntegrity(metrics(), symbolSnapshot([gapped]), NOW);
+
+    expect(model.confirmedIntegrityIssueCount).toBe(1);
+    expect(model.estimatedMissingRows).toBe(2);
+    expect(model.overall).toBe('critical');
+    expect(model.continuityScore).toBeLessThan(90);
+  });
+
+  it('uses global frame-flow thresholds instead of the 30s symbol stale threshold', () => {
+    const model = deriveIntegrity(
+      metrics({
+        upstream_frame_idle_ms: 5_001,
+        upstream_frame_idle_health: 'critical',
+        upstream_event_idle_ms: 1_000,
+        upstream_event_idle_health: 'live',
+      }),
+      symbolSnapshot([row({ receive_gap_ms: 5_001, problem: false, problem_severity: 'live' })]),
+      NOW,
+    );
+
+    expect(model.upstreamIdleMs).toBe(5_001);
+    expect(model.frameFlowHealth).toBe('critical');
+    expect(model.overall).toBe('critical');
+  });
+
+  it('allows decode health to recover while keeping lifetime invalid row count', () => {
+    const model = deriveIntegrity(
+      metrics({
+        upstream_invalid_tick_rows: 7,
+        lifetime_invalid_rows: 7,
+        recent_invalid_rows_1m: 0,
+        current_decode_health: 'healthy',
+      }),
+      symbolSnapshot([row()]),
+      NOW,
+    );
+
+    expect(model.invalidRowCount).toBe(7);
+    expect(model.decodeHealth).toBe('healthy');
+    expect(model.overall).toBe('healthy');
   });
 });
 

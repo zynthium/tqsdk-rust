@@ -5,13 +5,15 @@
 
   let { model }: { model: IntegrityModel } = $props();
   let title = $derived(
-    model.overall === 'critical'
-      ? '订阅链路告警'
-      : model.overall === 'warning'
-        ? '行情静默预警'
-        : model.overall === 'warming'
-          ? '启动观测中'
-          : '行情链路连续',
+    model.confirmedIntegrityIssueCount > 0
+      ? 'Tick完整性告警'
+      : model.overall === 'critical'
+        ? '订阅链路告警'
+        : model.overall === 'warning'
+          ? '行情静默预警'
+          : model.overall === 'warming'
+            ? '启动观测中'
+            : '行情链路连续',
   );
   let tone = $derived(
     model.overall === 'critical'
@@ -22,9 +24,11 @@
           ? 'standby'
           : 'live',
   );
-  let icon = $derived(model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : '✓');
+  let icon = $derived(
+    model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : '✓',
+  );
   let subtitle = $derived(
-    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，上游静默 ${formatDuration(model.upstreamIdleMs)}`,
+    `${formatNumber(model.observedUniverse)}/${formatNumber(model.totalUniverse)} 合约有接收记录，覆盖 ${formatPercent(model.coverageRatio * 100)}%，确认 tick 异常 ${formatNumber(model.confirmedIntegrityIssueCount)} 次，帧静默 ${formatDuration(model.upstreamIdleMs)}，事件静默 ${formatDuration(model.eventIdleMs)}`,
   );
 </script>
 

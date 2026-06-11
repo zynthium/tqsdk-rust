@@ -9,43 +9,43 @@ importers:
   .:
     devDependencies:
       '@playwright/test':
-        specifier: latest
+        specifier: 1.60.0
         version: 1.60.0
       '@sveltejs/vite-plugin-svelte':
-        specifier: latest
+        specifier: 7.1.2
         version: 7.1.2(svelte@5.56.3)(vite@8.0.16(@types/node@25.9.2)(jiti@2.7.0))
       '@tailwindcss/vite':
-        specifier: latest
+        specifier: 4.3.0
         version: 4.3.0(vite@8.0.16(@types/node@25.9.2)(jiti@2.7.0))
       '@testing-library/svelte':
-        specifier: latest
+        specifier: 5.3.1
         version: 5.3.1(svelte@5.56.3)(vite@8.0.16(@types/node@25.9.2)(jiti@2.7.0))(vitest@4.1.8(@types/node@25.9.2)(jsdom@29.1.1)(vite@8.0.16(@types/node@25.9.2)(jiti@2.7.0)))
       '@tsconfig/svelte':
-        specifier: latest
+        specifier: 5.0.8
         version: 5.0.8
       '@types/node':
-        specifier: latest
+        specifier: 25.9.2
         version: 25.9.2
       jsdom:
-        specifier: latest
+        specifier: 29.1.1
         version: 29.1.1
       svelte:
-        specifier: latest
+        specifier: 5.56.3
         version: 5.56.3
       svelte-check:
-        specifier: latest
+        specifier: 4.6.0
         version: 4.6.0(picomatch@4.0.4)(svelte@5.56.3)(typescript@6.0.3)
       tailwindcss:
-        specifier: latest
+        specifier: 4.3.0
         version: 4.3.0
       typescript:
-        specifier: latest
+        specifier: 6.0.3
         version: 6.0.3
       vite:
-        specifier: latest
+        specifier: 8.0.16
         version: 8.0.16(@types/node@25.9.2)(jiti@2.7.0)
       vitest:
-        specifier: latest
+        specifier: 4.1.8
         version: 4.1.8(@types/node@25.9.2)(jsdom@29.1.1)(vite@8.0.16(@types/node@25.9.2)(jiti@2.7.0))
 
 packages:

@@ -36,9 +36,6 @@
   <div class="body">
     <div class="label">{label}</div>
     <div class="value">{display}<span>{unit}</span></div>
-    <svg class="spark" viewBox="0 0 160 20" aria-hidden="true">
-      <polyline points="0,14 22,12 44,15 68,7 92,11 118,5 140,10 160,6"></polyline>
-    </svg>
   </div>
 </article>
 
@@ -94,30 +91,5 @@
     margin-left: 3px;
     color: var(--relay-muted);
     font-size: 12px;
-  }
-
-  .spark {
-    width: 100%;
-    height: 19px;
-    margin-top: 5px;
-  }
-
-  .spark polyline {
-    fill: none;
-    stroke: var(--relay-info);
-    stroke-width: 1.4;
-  }
-
-  .metric.live .spark polyline {
-    stroke: var(--relay-live);
-  }
-
-  .metric.warn .spark polyline {
-    stroke: var(--relay-warn);
-  }
-
-  .metric.bad .spark polyline,
-  .metric.accent .spark polyline {
-    stroke: var(--relay-accent);
   }
 </style>

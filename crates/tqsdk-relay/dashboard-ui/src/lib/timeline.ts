@@ -11,28 +11,37 @@ export function exchangeOf(symbol: string): string {
 }
 
 export function timelineSeverityForRows(rows: SymbolRow[]): TimelineSeverity {
+  if (rows.length === 0) return 'unknown';
   if (rows.some((row) => row.problem_severity === 'bad')) return 'bad';
   if (rows.some((row) => row.problem_severity === 'warn')) return 'warn';
-  if (rows.length > 0 && rows.every((row) => row.status === 'closed')) return 'closed';
+  if (rows.every((row) => row.flow === 'no_sample')) return 'no_sample';
+  if (rows.every((row) => row.session === 'unknown')) return 'unknown';
+  if (rows.every((row) => row.session === 'closed')) return 'closed';
+  return 'live';
+}
+
+function timelineSeverityForRow(row: SymbolRow): TimelineSeverity {
+  if (row.problem_severity === 'bad' || row.integrity === 'confirmed_gap') return 'bad';
+  if (row.problem_severity === 'warn' || row.integrity === 'suspected' || row.flow === 'silent') return 'warn';
+  if (row.flow === 'no_sample') return 'no_sample';
+  if (row.session === 'unknown') return 'unknown';
+  if (row.session === 'closed') return 'closed';
   return 'live';
 }
 
 export function pushTimelineSample(history: TimelineHistory, model: IntegrityModel): TimelineHistory {
+  const rows = model.globalRows;
   const exchangeSeverity: Record<string, TimelineSeverity> = {};
   const symbolSeverity: Record<string, TimelineSeverity> = {};
   for (const exchange of EXCHANGES) {
     exchangeSeverity[exchange] = timelineSeverityForRows(
-      model.rows.filter((row) => exchangeOf(row.symbol) === exchange),
+      rows.filter((row) => exchangeOf(row.symbol) === exchange),
     );
   }
-  for (const row of model.rows) {
-    symbolSeverity[row.symbol] = row.problem_severity === 'bad' || row.problem_severity === 'warn'
-      ? row.problem_severity
-      : row.status === 'closed'
-        ? 'closed'
-        : 'live';
+  for (const row of rows) {
+    symbolSeverity[row.symbol] = timelineSeverityForRow(row);
   }
-  const subscribedRows = model.rows.filter((row) => row.subscribed);
+  const subscribedRows = rows.filter((row) => row.subscribed);
   const sample: TimelineSample = {
     sampledAt: model.sampledAt,
     exchangeSeverity,
@@ -44,7 +53,7 @@ export function pushTimelineSample(history: TimelineHistory, model: IntegrityMod
         : model.overall === 'warning'
           ? 'warn'
           : model.overall === 'warming'
-            ? 'closed'
+            ? 'unknown'
             : 'live',
   };
   history.samples.push(sample);

@@ -271,11 +271,20 @@ open http://127.0.0.1:7789/dashboard
   "upstream_frames_received": 0,
   "upstream_events_decoded": 0,
   "upstream_invalid_tick_rows": 0,
+  "lifetime_invalid_rows": 0,
+  "recent_invalid_rows_1m": 0,
+  "current_decode_health": "healthy",
   "last_upstream_invalid_tick_row_error": null,
+  "last_invalid_row_unix_secs": null,
   "last_universe_refresh_unix_secs": null,
   "last_universe_refresh_error": null,
   "last_tick_unix_secs": null,
   "last_upstream_frame_unix_secs": null,
+  "last_decoded_event_unix_secs": null,
+  "upstream_frame_idle_ms": null,
+  "upstream_frame_idle_health": "no_sample",
+  "upstream_event_idle_ms": null,
+  "upstream_event_idle_health": "no_sample",
   "data_stale_after_secs": 30
 }
 ```
@@ -293,35 +302,60 @@ open http://127.0.0.1:7789/dashboard
 - `upstream_subscription_sent`：relay 已向上游发送每合约 `set_chart` 和对应 `peek_message`。
 - `upstream_frames_received` / `upstream_events_decoded`：已收到的上游 frame 数和解出的 tick / quote event 数，可用于区分“未建连”和“正在补历史但尚无可用行情”。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的 relay 本地 Unix 秒时间。
+- `last_decoded_event_unix_secs`：最近解出有效 tick / quote event 的 relay 本地 Unix 秒时间。
+- `upstream_frame_idle_ms` / `upstream_frame_idle_health`：最近上游 frame 静默时长和状态，阈值为 warning `2s`、critical `5s`。
+- `upstream_event_idle_ms` / `upstream_event_idle_health`：最近有效 event 静默时长和状态，阈值为 warning `3s`、critical `8s`。
 - `universe_ready`：合约集合刷新已成功，且最近一次刷新没有错误。
 - `data_fresh`：最近一次 tick 或 quote 活跃时间未超过 freshness 窗口。
 - `market_data_ready`：`upstream_connected && universe_ready && data_fresh`。
-- `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：已跳过的上游坏
-  tick row 数量和最近一条解码错误。
+- `upstream_invalid_tick_rows` / `lifetime_invalid_rows`：已跳过的上游坏 tick row 生命周期累计。
+- `recent_invalid_rows_1m` / `current_decode_health`：最近 1 分钟坏行数和可恢复的当前解码健康状态。
+- `last_upstream_invalid_tick_row_error` / `last_invalid_row_unix_secs`：最近一条解码错误和时间。
 
 `/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
 
-`/symbol-metrics` 返回合约级 telemetry 快照，覆盖当前上游 universe 和下游实际订阅
-合约。状态主口径是 relay 接收间隔延迟，并优先使用 `query_symbol_info` 返回的官方
-`trading_time`；若未配置产品发现或交易时段暂不可用，再考虑 quote 中的交易时间表，
-最后按期货交易所 / 品种代码使用内置交易时段兜底。`closed`
-表示当前不在该合约交易时间段内，不计入问题合约；`live` 表示最近 `30s` 内收到 tick
-或 quote，`stale` 表示交易时间内收过行情更新但超过 freshness 窗口，`missing` 表示
-交易时间内在上游 universe 中但从未收到 tick 或 quote，`inactive` 表示下游订阅了不在
-上游 universe 中的合约。每个合约还会返回 `problem` 和 `problem_severity`，作为
-dashboard 关注列表、风险排序、数据解码告警和完整性异常计数的统一口径；响应同时包含
-`market_time_lag_ms`，用于辅助判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计
-tick row，用于区分 quote-only 远月合约。
+`/symbol-metrics` 返回合约级 telemetry 快照，当前健康集合固定为“当前上游 universe ∪
+当前下游订阅”。已经退出 universe 且当前未被订阅的历史 telemetry 不再进入当前健康；
+仍被下游订阅的旧合约会以 `coverage=uncovered` 保留为覆盖问题。
 
-`/dashboard` 是内置只读运维页面，每 `2s` 轮询 `/symbol-metrics` 和 `/metrics`。它不连接 relay
+状态主口径是 relay 接收间隔延迟，并优先使用 `query_symbol_info` 返回的官方
+`trading_time`；若未配置产品发现或交易时段暂不可用，再考虑 quote 中的交易时间表，
+最后按期货交易所 / 品种代码使用内置交易时段兜底。交易时段按固定 Asia/Shanghai
+时区解释，不受 host 本地时区影响。无接收样本时 `session=unknown`、`flow=no_sample`，
+不会把未知样本误判为休盘。响应保留兼容 `status`，同时返回正交状态字段：
+`coverage=covered|uncovered`、`session=open|closed|unknown`、
+`flow=flowing|silent|no_sample`、`integrity=intact|suspected|confirmed_gap`。
+
+每个合约还会返回 `problem` 和 `problem_severity`，作为 dashboard 关注列表、风险排序、
+数据解码告警和完整性异常计数的统一口径；响应同时包含 `market_time_lag_ms`，用于辅助
+判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
+远月合约。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
+`last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
+`out_of_order_rows` 和 `last_gap_unix_millis`；上游重新发送 tick chart 订阅时会推进
+source epoch，避免重连后首条 row id 跳变被误报为缺口。
+
+`/dashboard-snapshot` 返回 dashboard 使用的原子 JSON 快照：同一次响应内包含
+`metrics`、未过滤的 `global` 汇总、未过滤的 `global_symbols` 事件/时间带输入，以及
+按当前筛选、排序、分页裁剪后的 `page` 列表，以及进程内固定容量 `events` 事件账本。
+事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow incident 和
+decode incident。`/symbol-metrics` 继续作为合约列表调试端点；它的 `summary` 仍是过滤
+前的全局汇总，`symbols` 只代表当前查询页。
+
+`/dashboard` 是内置只读运维页面，每 `2s` 串行轮询 `/dashboard-snapshot`。它不连接 relay
 market websocket，不创建下游订阅，也不会触发额外行情命令。页面由
 `crates/tqsdk-relay/dashboard-ui/` 的 Svelte 5 + Vite + Tailwind CSS 4 工程构建，
 生产产物提交在 `crates/tqsdk-relay/src/dashboard-dist/`，Rust 侧将该目录嵌入到
 relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。页面顶部会展示上游阶段、
 transport 连接、订阅发送、frame 接收数、解码事件数、backfilling 已持续时间、frame
-速率、最近 frame idle 和最近 frame 时间；tick / quote ingest 热路径只更新当前合约的
-轻量 telemetry，排序、过滤和 JSON 生成只发生在 HTTP snapshot 请求侧。backfilling 进度
-只基于 relay 已观测到的时间和 frame/event 计数，不推断上游补历史百分比。
+速率、最近 frame/event idle、decode health 和最近 frame 时间；tick / quote ingest 热路径
+只更新当前合约的轻量 telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
+metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
+排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
+未过滤 global 数据，搜索/状态筛选只影响可见列表，不会把异常过滤成健康。dashboard 会把
+tick gap、重复 row 和乱序 row 作为确认的完整性异常展示，区别于仅由接收间隔推断出的
+行情静默。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，不支持时
+禁用；完整合约表展示当前过滤页内全部行。backfilling 进度只基于 relay 已观测到的时间
+和 frame/event 计数，不推断上游补历史百分比。
 
 ### 观测字段
 
@@ -333,12 +367,16 @@ transport 连接、订阅发送、frame 接收数、解码事件数、backfillin
 - `upstream_transport_connected` / `upstream_subscription_sent`：上游 websocket 建连和订阅命令发送进度。
 - `upstream_frames_received` / `upstream_events_decoded`：上游 frame 与有效 tick / quote event 计数。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的本地 Unix 秒时间。
+- `last_decoded_event_unix_secs`：最近解出有效 tick / quote event 的本地 Unix 秒时间。
+- `upstream_frame_idle_ms` / `upstream_frame_idle_health`：frame 静默状态，阈值为 warning `2s`、critical `5s`。
+- `upstream_event_idle_ms` / `upstream_event_idle_health`：有效 event 静默状态，阈值为 warning `3s`、critical `8s`。
 - `upstream_symbols`：当前上游 tick chart 合约数。
 - `upstream_ins_list_chars`：当前单个上游 tick chart 的最大 `ins_list` 字符串长度。
 - `upstream_ins_list_warn_chars` / `upstream_ins_list_max_chars`：配置阈值。
 - `upstream_ins_list_over_warn`：当前长度是否超过 warn threshold。
-- `upstream_invalid_tick_rows` / `last_upstream_invalid_tick_row_error`：上游 tick row
-  解码失败后被跳过的数量和最近一条错误；有效 tick 仍会继续摄入。
+- `upstream_invalid_tick_rows` / `lifetime_invalid_rows`：上游 tick row 解码失败后被跳过的生命周期累计；有效 tick 仍会继续摄入。
+- `recent_invalid_rows_1m` / `current_decode_health`：最近窗口坏行数和当前 decode health；历史坏行不会永久锁死当前健康。
+- `last_upstream_invalid_tick_row_error` / `last_invalid_row_unix_secs`：最近一条解码错误和时间。
 - `last_universe_refresh_unix_secs` / `last_universe_refresh_error`：最近一次合约集合刷新尝试的时间和错误。
 - `last_tick_unix_secs`：最近一次摄入 tick 或 quote 的 relay 本地 Unix 秒时间。
 
@@ -399,7 +437,8 @@ pnpm install
 pnpm run dev
 ```
 
-开发服务器会把 `/metrics` 和 `/symbol-metrics` 代理到 `127.0.0.1:7789`。提交前需要刷新
+开发服务器会把 `/dashboard-snapshot`、`/metrics` 和 `/symbol-metrics` 代理到
+`127.0.0.1:7789`。提交前需要刷新
 嵌入式静态产物并运行 UI / Rust 双侧检查：
 
 ```bash

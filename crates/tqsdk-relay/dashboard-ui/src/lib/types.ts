@@ -7,8 +7,14 @@ export type UpstreamStage =
   | 'down';
 
 export type SymbolStatus = 'live' | 'closed' | 'stale' | 'missing' | 'inactive';
+export type SymbolCoverage = 'covered' | 'uncovered';
+export type SymbolSession = 'open' | 'closed' | 'unknown';
+export type SymbolFlow = 'flowing' | 'silent' | 'no_sample';
+export type SymbolIntegrity = 'intact' | 'suspected' | 'confirmed_gap';
 export type ProblemSeverity = 'live' | 'closed' | 'warn' | 'bad';
 export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming';
+export type FlowIdleHealth = 'no_sample' | 'live' | 'warn' | 'critical';
+export type DecodeHealth = 'healthy' | 'degraded';
 
 export type SymbolSort =
   | 'symbol_asc'
@@ -23,9 +29,22 @@ export type RelayMetrics = {
   upstream_transport_connected: boolean;
   upstream_subscription_sent: boolean;
   last_upstream_frame_unix_secs: number | null;
+  last_decoded_event_unix_secs: number | null;
+  upstream_frame_idle_ms: number | null;
+  upstream_frame_idle_health: FlowIdleHealth;
+  upstream_frame_idle_warn_after_ms: number;
+  upstream_frame_idle_critical_after_ms: number;
+  upstream_event_idle_ms: number | null;
+  upstream_event_idle_health: FlowIdleHealth;
+  upstream_event_idle_warn_after_ms: number;
+  upstream_event_idle_critical_after_ms: number;
   upstream_frames_received: number;
   upstream_events_decoded: number;
   upstream_invalid_tick_rows: number;
+  lifetime_invalid_rows: number;
+  recent_invalid_rows_1m: number;
+  current_decode_health: DecodeHealth;
+  last_invalid_row_unix_secs: number | null;
   upstream_symbols: number;
   downstream_clients: number;
   ticks_ingested: number;
@@ -42,6 +61,15 @@ export type SymbolMetricsSummary = {
   missing: number;
   inactive: number;
   subscribed: number;
+  problem: number;
+  subscribed_problem: number;
+  universe_total: number;
+  universe_observed: number;
+  active_invalid_rows: number;
+  gap_event_count: number;
+  estimated_missing_rows: number;
+  duplicate_rows: number;
+  out_of_order_rows: number;
   p95_receive_gap_ms: number | null;
 };
 
@@ -49,6 +77,10 @@ export type SymbolRow = {
   symbol: string;
   instrument_name: string | null;
   status: SymbolStatus;
+  coverage: SymbolCoverage;
+  session: SymbolSession;
+  flow: SymbolFlow;
+  integrity: SymbolIntegrity;
   problem: boolean;
   problem_severity: ProblemSeverity;
   in_universe: boolean;
@@ -56,6 +88,13 @@ export type SymbolRow = {
   quote_subscriber_count: number;
   chart_subscriber_count: number;
   ticks_ingested: number;
+  source_epoch: number;
+  last_tick_id: number | null;
+  gap_event_count: number;
+  estimated_missing_rows: number;
+  duplicate_rows: number;
+  out_of_order_rows: number;
+  last_gap_unix_millis: number | null;
   receive_gap_ms: number | null;
   market_time_lag_ms: number | null;
   last_receive_unix_millis: number | null;
@@ -71,12 +110,39 @@ export type SymbolMetricsSnapshot = {
   now_unix_millis: number;
   data_stale_after_millis: number;
   summary: SymbolMetricsSummary;
+  filtered_total: number;
   symbols: SymbolRow[];
 };
 
-export type RelaySnapshot = {
+export type RelayEventKind =
+  | 'universe_refreshed'
+  | 'universe_refresh_failed'
+  | 'flow_incident'
+  | 'decode_incident';
+
+export type RelayEvent = {
+  sequence: number;
+  at_unix_secs: number;
+  kind: RelayEventKind;
+  detail: string;
+};
+
+export type DashboardSnapshot = {
+  received_at_unix_millis: number;
   metrics: RelayMetrics;
-  symbols: SymbolMetricsSnapshot;
+  global: SymbolMetricsSummary;
+  global_symbols: SymbolRow[];
+  page: SymbolMetricsSnapshot;
+  events: RelayEvent[];
+};
+
+export type RelaySnapshot = {
+  received_at_unix_millis: number;
+  metrics: RelayMetrics;
+  global: SymbolMetricsSummary;
+  global_symbols: SymbolRow[];
+  page: SymbolMetricsSnapshot;
+  events: RelayEvent[];
   receivedAt: number;
 };
 
@@ -101,13 +167,23 @@ export type IntegrityModel = {
   sampledAt: number;
   metrics: RelayMetrics;
   snapshot: SymbolMetricsSnapshot;
+  global: SymbolMetricsSummary;
   rows: SymbolRow[];
+  globalRows: SymbolRow[];
   problems: SymbolRow[];
+  globalProblems: SymbolRow[];
   subscribedProblems: SymbolRow[];
   issueCount: number;
+  subscribedProblemCount: number;
   invalidRowCount: number;
   activeInvalidRowCount: number;
+  confirmedIntegrityIssueCount: number;
+  estimatedMissingRows: number;
   upstreamIdleMs: number | null;
+  eventIdleMs: number | null;
+  frameFlowHealth: FlowIdleHealth;
+  eventFlowHealth: FlowIdleHealth;
+  decodeHealth: DecodeHealth;
   coverageRatio: number;
   observedUniverse: number;
   totalUniverse: number;
@@ -131,7 +207,7 @@ export type RuntimeHistory = {
   samples: HistorySample[];
 };
 
-export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad';
+export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad' | 'unknown' | 'no_sample';
 
 export type TimelineSample = {
   sampledAt: number;
@@ -159,5 +235,6 @@ export type LocalIncident = {
 export type IncidentLedger = {
   limit: number;
   knownStatuses: Map<string, SymbolStatus>;
+  knownContinuity: Map<string, number>;
   incidents: LocalIncident[];
 };

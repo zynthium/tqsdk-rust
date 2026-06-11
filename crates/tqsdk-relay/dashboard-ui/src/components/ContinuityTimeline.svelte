@@ -65,7 +65,7 @@
   ]);
 
   function cellClass(sample: TimelineSample | null, accessor: (sample: TimelineSample) => TimelineSeverity) {
-    return sample ? accessor(sample) : 'closed';
+    return sample ? accessor(sample) : 'no_sample';
   }
 
   function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
@@ -97,6 +97,8 @@
       <span><i class="warn"></i>静默</span>
       <span><i class="bad"></i>异常</span>
       <span><i class="closed"></i>休盘</span>
+      <span><i class="unknown"></i>未知</span>
+      <span><i class="no_sample"></i>无样本</span>
     </div>
   </div>
   <div class="timeline" style={`--bucket-count:${buckets.length}`}>
@@ -253,6 +255,14 @@
 
   .closed {
     background: #354d60;
+  }
+
+  .unknown {
+    background: #566170;
+  }
+
+  .no_sample {
+    background: #172532;
   }
 
   .axis {
