@@ -18,8 +18,11 @@ pub struct CategoryInfo {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TradingTime {
+    /// Day-session windows as `[start, end]` time strings.
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub day: Vec<Vec<String>>,
+    /// Night-session windows as `[start, end]` time strings. Official metadata may encode
+    /// next-day close times with hours above 24, for example `25:00:00` or `26:30:00`.
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub night: Vec<Vec<String>>,
 }

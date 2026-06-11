@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use chrono::{NaiveTime, Timelike};
 use serde::Serialize;
 use tqsdk_core::{
     Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
@@ -800,8 +799,19 @@ fn parse_trading_segment(
     end: &str,
     allow_cross_midnight: bool,
 ) -> Option<TradingSessionSegment> {
+    const TRADING_DAY_SECONDS: u64 = 24 * 60 * 60;
+
     let start = parse_hms_seconds(start)?;
-    let end = parse_hms_seconds(end)?;
+    let mut end = parse_hms_seconds(end)?;
+    if start >= TRADING_DAY_SECONDS {
+        return None;
+    }
+    if end > TRADING_DAY_SECONDS {
+        if !allow_cross_midnight || end >= TRADING_DAY_SECONDS.saturating_mul(2) {
+            return None;
+        }
+        end -= TRADING_DAY_SECONDS;
+    }
     if start == end {
         return None;
     }
@@ -812,8 +822,14 @@ fn parse_trading_segment(
 }
 
 fn parse_hms_seconds(value: &str) -> Option<u64> {
-    let time = NaiveTime::parse_from_str(value, "%H:%M:%S").ok()?;
-    Some(u64::from(time.num_seconds_from_midnight()))
+    let mut parts = value.split(':');
+    let hour = parts.next()?.parse::<u64>().ok()?;
+    let minute = parts.next()?.parse::<u64>().ok()?;
+    let second = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() || minute >= 60 || second >= 60 {
+        return None;
+    }
+    Some(hour * 3600 + minute * 60 + second)
 }
 
 fn local_day_offset_from_unix_millis(now_unix_millis: u64) -> Duration {
