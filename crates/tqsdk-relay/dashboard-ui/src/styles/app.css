@@ -13,7 +13,7 @@ body,
   margin: 0;
   width: 100%;
   height: 100%;
-  min-width: 1180px;
+  min-width: 1100px;
   overflow: hidden;
 }
 
@@ -48,24 +48,24 @@ select {
   font: inherit;
 }
 
+/* ── Shell grid ── */
 .dashboard-shell {
   position: relative;
   height: 100dvh;
   min-height: 0;
   display: grid;
   grid-template-rows:
-    44px
-    minmax(122px, 132px)
-    minmax(76px, 84px)
-    76px
-    minmax(0, 1fr)
-    minmax(150px, 0.8fr);
+    44px            /* header */
+    auto            /* hero */
+    auto            /* pipeline + kpi strip */
+    minmax(0, 1fr); /* main area */
   gap: 8px;
   overflow: hidden;
   padding: 8px 12px 10px;
   color: var(--relay-text);
 }
 
+/* ── Panel glass card ── */
 .panel {
   position: relative;
   overflow: hidden;
@@ -101,20 +101,21 @@ select {
   align-items: center;
   gap: 8px;
   color: #bfeeff;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.6px;
 }
 
 .panel-title::before {
   content: "";
   width: 3px;
-  height: 14px;
+  height: 13px;
   border-radius: 2px;
   background: var(--relay-info);
   box-shadow: 0 0 10px var(--relay-info);
 }
 
+/* ── Status dots ── */
 .status-dot {
   width: 8px;
   height: 8px;
@@ -139,6 +140,7 @@ select {
   box-shadow: none;
 }
 
+/* ── Badges ── */
 .badge {
   display: inline-flex;
   min-width: 44px;
@@ -178,26 +180,59 @@ select {
   color: var(--relay-bad);
 }
 
-.kpi-grid {
+/* ── Pipeline + KPI horizontal band ── */
+.pipeline-kpi-row {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.kpi-strip {
+  display: flex;
   gap: 8px;
 }
 
+/* ── Main area: 2-column layout ── */
 .dashboard-main {
   display: grid;
-  grid-template-columns: 240px minmax(520px, 1fr) 400px;
+  grid-template-columns: minmax(520px, 1fr) 340px;
   gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
 
-.dashboard-main > .panel {
-  --relay-card-header-height: 38px;
+.main-left {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.main-right {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 8px;
+  scrollbar-color: #2ad0ff66 #04111e;
+  scrollbar-width: thin;
+}
+
+.dashboard-main .panel,
+.main-right > .panel {
+  --relay-card-header-height: 36px;
   --relay-table-sticky-top: var(--relay-card-header-height);
   --relay-card-padding-y: 10px;
   --relay-card-padding-x: 12px;
 
+  min-height: 0;
+  overflow: auto;
+  scrollbar-color: #2ad0ff66 #04111e;
+  scrollbar-width: thin;
+}
+
+.main-left > .panel {
   min-height: 0;
   overflow: auto;
   scrollbar-color: #2ad0ff66 #04111e;
@@ -205,7 +240,7 @@ select {
 }
 
 .dashboard-shell > .table-panel {
-  --relay-card-header-height: 38px;
+  --relay-card-header-height: 36px;
   --relay-table-sticky-top: var(--relay-card-header-height);
   --relay-card-padding-y: 10px;
   --relay-card-padding-x: 12px;
@@ -216,8 +251,8 @@ select {
   scrollbar-width: thin;
 }
 
-.dashboard-main > .panel > .panel-title,
-.dashboard-main > .panel > .head,
+.dashboard-main .panel > .panel-title,
+.dashboard-main .panel > .head,
 .dashboard-shell > .table-panel > .head {
   position: sticky;
   top: calc(-1 * var(--relay-card-padding-y));
@@ -233,23 +268,30 @@ select {
     0 3px 8px #0208128c;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar,
+.dashboard-main .panel::-webkit-scrollbar,
+.main-left .panel::-webkit-scrollbar,
+.main-right::-webkit-scrollbar,
 .dashboard-shell > .table-panel::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar-track,
+.dashboard-main .panel::-webkit-scrollbar-track,
+.main-left .panel::-webkit-scrollbar-track,
+.main-right::-webkit-scrollbar-track,
 .dashboard-shell > .table-panel::-webkit-scrollbar-track {
   background: #04111e;
 }
 
-.dashboard-main > .panel::-webkit-scrollbar-thumb,
+.dashboard-main .panel::-webkit-scrollbar-thumb,
+.main-left .panel::-webkit-scrollbar-thumb,
+.main-right::-webkit-scrollbar-thumb,
 .dashboard-shell > .table-panel::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: #2ad0ff66;
 }
 
+/* ── Tables ── */
 .table {
   width: 100%;
   border-collapse: separate;
@@ -283,8 +325,18 @@ select {
   color: #c5dce7;
 }
 
+/* ── Responsive ── */
 @media (max-width: 1320px) {
   .dashboard-main {
-    grid-template-columns: 220px minmax(460px, 1fr) 340px;
+    grid-template-columns: minmax(460px, 1fr) 300px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .pipeline-kpi-row {
+    grid-template-columns: 1fr;
+  }
+  .kpi-strip {
+    flex-wrap: wrap;
   }
 }

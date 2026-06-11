@@ -13,8 +13,8 @@
   let { model, error, paused = $bindable(false), fullscreen = $bindable(false) }: Props = $props();
   let now = $state(Date.now());
   let fullscreenSupported = $state(true);
-  let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : '实时监控中');
-  let stateClass = $derived(error ? 'bad' : paused ? 'closed' : 'live');
+  let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : model?.overall === 'closed' ? '休盘中' : '实时监控中');
+  let stateClass = $derived(error ? 'bad' : paused ? 'closed' : model?.overall === 'closed' ? 'closed' : 'live');
 
   onMount(() => {
     fullscreenSupported = typeof document.documentElement.requestFullscreen === 'function';
@@ -59,7 +59,7 @@
     {#if model}
       <span class="muted">采样 {formatTime(model.sampledAt)}</span>
     {/if}
-    <span class={`live-chip ${stateClass === 'bad' ? 'offline' : ''}`}>
+    <span class={`live-chip ${stateClass === 'bad' ? 'offline' : stateClass === 'closed' ? 'sleeping' : ''}`}>
       <span class={`status-dot ${stateClass}`}></span>
       <span>{stateLabel}</span>
     </span>
@@ -153,6 +153,12 @@
     border-color: #ff536a80;
     background: #ff536a14;
     color: #ffd2d8;
+  }
+
+  .live-chip.sleeping {
+    border-color: #58758a80;
+    background: #58758a14;
+    color: #9eb9ce;
   }
 
   button {

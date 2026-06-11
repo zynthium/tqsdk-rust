@@ -16,18 +16,25 @@
 </script>
 
 <aside class="panel attention" data-testid="attention-list">
-  <div class="panel-title">当前关注 · 问题合约</div>
+  <div class="head">
+    <div class="panel-title">当前关注 · 问题合约</div>
+    {#if rows.length > 0}
+      <span class="count">{rows.length}</span>
+    {/if}
+  </div>
   <div class="list">
     {#if ordered.length === 0}
       <div class="empty">当前无活动异常</div>
     {:else}
       {#each ordered as row}
         <article class={`item ${row.problem_severity}`}>
-          <div class="symbol" title={row.symbol}>{row.instrument_name ?? row.symbol}</div>
+          <div class="item-top">
+            <span class="symbol" title={row.symbol}>{row.instrument_name ?? row.symbol}</span>
+            <span class="sub-tag">{row.subscribed ? '订阅中' : ''}</span>
+          </div>
           <div class="desc">
             {statusLabel(row.status)} · {formatDuration(row.receive_gap_ms)}
           </div>
-          <div class="foot">{row.subscribed ? '下游正在使用' : '未订阅'}</div>
         </article>
       {/each}
     {/if}
@@ -39,38 +46,44 @@
     padding: 10px 12px;
   }
 
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 18px;
+    border-radius: 9px;
+    padding: 0 6px;
+    background: #ff536a22;
+    color: var(--relay-bad);
+    font-size: 11px;
+    font-weight: 850;
+  }
+
   .list {
     position: relative;
     z-index: 1;
-    margin-top: 9px;
+    margin-top: 8px;
     display: grid;
-    gap: 7px;
+    gap: 5px;
   }
 
   .item {
     position: relative;
     border: 1px solid #2a93c55e;
-    border-radius: 8px;
-    padding: 10px 9px 10px 34px;
+    border-radius: 7px;
+    padding: 7px 9px;
     background: #071929;
     color: #d5eaf3;
     font-size: 11px;
-    line-height: 1.45;
-  }
-
-  .item::before {
-    content: "i";
-    position: absolute;
-    top: 50%;
-    left: 9px;
-    width: 17px;
-    height: 17px;
-    display: grid;
-    place-items: center;
-    transform: translateY(-50%);
-    border: 1px solid currentColor;
-    border-radius: 50%;
-    font-weight: 900;
+    line-height: 1.35;
   }
 
   .item.warn {
@@ -94,32 +107,41 @@
     color: #91dcff;
   }
 
+  .item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+  }
+
   .symbol {
+    overflow: hidden;
     color: inherit;
     font-size: 12px;
     font-weight: 850;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .desc,
-  .foot,
-  .empty {
+  .sub-tag {
+    flex-shrink: 0;
+    color: #6e94a8;
+    font-size: 9px;
+    font-weight: 700;
+  }
+
+  .desc {
+    margin-top: 2px;
     color: inherit;
     opacity: 0.82;
     font-size: 11px;
   }
 
-  .desc {
-    margin-top: 3px;
-  }
-
-  .foot {
-    margin-top: 4px;
-    color: #6e94a8;
-    text-align: right;
-  }
-
   .empty {
-    padding: 26px 4px;
+    padding: 22px 4px;
+    color: inherit;
+    opacity: 0.82;
+    font-size: 11px;
     text-align: center;
   }
 </style>

@@ -14,6 +14,7 @@
 
   function cacheState(model: IntegrityModel): string {
     if (model.frameFlowHealth === 'critical') return '帧流中断';
+    if (model.overall === 'closed') return '休盘中';
     if (model.issueCount > 0 || model.frameFlowHealth === 'warn') return '需关注';
     return '活跃';
   }
@@ -24,6 +25,7 @@
 
   function cacheSeverity(model: IntegrityModel): TimelineSeverity {
     if (model.frameFlowHealth === 'critical') return 'bad';
+    if (model.overall === 'closed') return 'closed';
     if (
       model.issueCount > 0 ||
       model.frameFlowHealth === 'warn' ||
@@ -75,7 +77,7 @@
 
 <section class="panel pipeline" data-testid="relay-pipeline">
   {#each nodes as node, index}
-    <div class="node">
+    <div class={`node ${node.severity}`}>
       <div class="node-icon">{node.icon}</div>
       <div class="node-copy">
         <div class="name">{node.name}</div>
@@ -92,52 +94,65 @@
 
 <style>
   .pipeline {
-    min-height: 72px;
+    min-height: 68px;
     display: grid;
     grid-template-columns: repeat(9, minmax(0, 1fr));
     align-items: center;
-    gap: 6px;
-    padding: 6px 5%;
+    gap: 4px;
+    padding: 6px 3%;
   }
 
   .node {
     box-sizing: border-box;
-    height: 64px;
+    height: 60px;
     min-width: 0;
     display: grid;
-    grid-template-columns: 34px 1fr 8px;
+    grid-template-columns: 30px 1fr 8px;
     align-items: center;
-    gap: 9px;
+    gap: 7px;
     border: 1px solid var(--relay-line-soft);
-    border-radius: 10px;
-    padding: 6px 12px;
+    border-radius: 9px;
+    padding: 5px 10px;
     background: #061a2be6;
     box-shadow:
       inset 0 0 20px #20d8ff0b,
       0 0 18px #20d8ff0d;
+    transition: border-color 0.3s ease;
+  }
+
+  .node.warn {
+    border-color: #ffc44766;
+  }
+
+  .node.bad {
+    border-color: #ff536a66;
+  }
+
+  .node.closed {
+    border-color: #58758a66;
   }
 
   .node-icon {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     display: grid;
     place-items: center;
     border: 1px solid #2ad0ffaa;
     border-radius: 50%;
     color: #86ebff;
-    font-size: 15px;
+    font-size: 13px;
   }
 
   .node-copy {
     min-width: 0;
     display: grid;
-    gap: 2px;
+    gap: 1px;
   }
 
   .name {
     overflow: hidden;
     color: #c6dbe5;
-    font-size: 12px;
+    font-size: 10px;
     line-height: 1.05;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -146,7 +161,7 @@
   .state {
     overflow: hidden;
     color: var(--relay-live);
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 850;
     line-height: 1.12;
     text-overflow: ellipsis;
@@ -161,10 +176,14 @@
     color: var(--relay-bad);
   }
 
+  .state.closed {
+    color: var(--relay-closed);
+  }
+
   .meta {
     overflow: hidden;
     color: color-mix(in srgb, var(--relay-muted) 78%, transparent);
-    font-size: 10px;
+    font-size: 9px;
     line-height: 1.05;
     text-overflow: ellipsis;
     white-space: nowrap;

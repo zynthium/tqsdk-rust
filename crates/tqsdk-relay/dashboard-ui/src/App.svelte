@@ -4,12 +4,14 @@
   import DashboardControls from './components/DashboardControls.svelte';
   import IncidentTable from './components/IncidentTable.svelte';
   import IntegrityHero from './components/IntegrityHero.svelte';
+  import IntegrityTrend from './components/IntegrityTrend.svelte';
   import MetricCard from './components/MetricCard.svelte';
   import MonitorHeader from './components/MonitorHeader.svelte';
   import RelayPipeline from './components/RelayPipeline.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
   import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
+  import { createHistory, pushHistorySample } from './lib/history';
   import { deriveIntegrity } from './lib/integrity-model';
   import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
   import type { DashboardViewState, IntegrityModel, RelaySnapshot } from './lib/types';
@@ -19,6 +21,7 @@
   let snapshot = $state<RelaySnapshot | null>(null);
   let model = $state<IntegrityModel | null>(null);
   let timeline = $state(createTimelineHistory());
+  let history = $state(createHistory());
   let incidents = $state(createIncidentLedger());
   let error = $state<string | null>(null);
   let sequence = $state(0);
@@ -47,6 +50,7 @@
     snapshot = next;
     const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global, next.global_symbols);
     pushTimelineSample(timeline, nextModel);
+    pushHistorySample(history, nextModel);
     updateIncidentLedger(incidents, nextModel);
     model = nextModel;
     error = null;
@@ -87,18 +91,23 @@
 
   {#if model}
     <IntegrityHero {model} />
-    <section class="kpi-grid" aria-label="relay metrics">
-      <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
-      <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
-      <MetricCard label="合约覆盖" value={model.coverageRatio * 100} unit="%" tone="live" format="percent" icon="◎" />
-      <MetricCard label="Diff行号" value={model.diffRowDiscontinuityCount} tone="info" icon="⌁" />
-      <MetricCard label="上游帧静默" value={model.upstreamIdleMs} format="duration" tone={model.frameFlowHealth === 'critical' ? 'bad' : model.frameFlowHealth === 'warn' ? 'warn' : 'info'} icon="↻" />
+    <section class="pipeline-kpi-row">
+      <RelayPipeline {model} />
+      <div class="kpi-strip">
+        <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
+        <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
+        <MetricCard label="下游客户端" value={model.metrics.downstream_clients} tone="info" icon="▤" />
+      </div>
     </section>
-    <RelayPipeline {model} />
     <section class="dashboard-main">
-      <AttentionList rows={model.problems} />
-      <ContinuityTimeline {buckets} rows={model.globalRows} bind:selectedSymbol={view.selectedSymbol} />
-      <IncidentTable incidents={incidents.incidents} />
+      <div class="main-left">
+        <ContinuityTimeline {buckets} rows={model.globalRows} bind:selectedSymbol={view.selectedSymbol} />
+      </div>
+      <div class="main-right">
+        <AttentionList rows={model.problems} />
+        <IntegrityTrend {history} {model} />
+        <IncidentTable incidents={incidents.incidents} />
+      </div>
     </section>
   {:else}
     <section class="panel grid min-h-[280px] place-content-center text-center text-[var(--relay-muted)]">

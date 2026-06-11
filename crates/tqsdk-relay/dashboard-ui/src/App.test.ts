@@ -39,9 +39,9 @@ describe('App', () => {
     expect(screen.getByText('未知')).toBeTruthy();
     expect(screen.getByText('无样本')).toBeTruthy();
     expect(screen.queryByText('DCE.m2609')).toBeNull();
-    expect(screen.getByText('连续性评分')).toBeTruthy();
+    expect(screen.getAllByText('连续性').length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('活跃合约健康排行')).toBeNull();
-    expect(screen.queryByText('完整性趋势')).toBeNull();
+    expect(screen.getByText('完整性趋势')).toBeTruthy();
   });
 
   it('does not present diff row id diagnostics as tick errors', async () => {

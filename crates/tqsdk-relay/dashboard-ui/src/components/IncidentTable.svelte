@@ -6,33 +6,29 @@
 </script>
 
 <section class="panel incidents" data-testid="incident-table">
-  <div class="panel-title">断流 / 覆盖事件</div>
-  <table class="table">
-    <thead>
-      <tr>
-        <th>时间</th>
-        <th>范围</th>
-        <th>类型</th>
-        <th>详情</th>
-        <th>影响</th>
-      </tr>
-    </thead>
-    <tbody>
-      {#if incidents.length === 0}
-        <tr><td colspan="5" class="empty-cell">本页尚未观测到状态变化</td></tr>
-      {:else}
-        {#each incidents.slice(0, 8) as incident}
-          <tr>
-            <td>{formatTime(incident.at)}</td>
-            <td title={incident.scope_symbol}>{incident.scope}</td>
-            <td><span class={`badge ${incident.severity}`}>{incident.type}</span></td>
-            <td title={incident.detail}>{incident.detail}</td>
-            <td>{incident.impact}</td>
-          </tr>
-        {/each}
-      {/if}
-    </tbody>
-  </table>
+  <div class="head">
+    <div class="panel-title">状态变化事件</div>
+    {#if incidents.length > 0}
+      <span class="count">{incidents.length}</span>
+    {/if}
+  </div>
+  {#if incidents.length === 0}
+    <div class="empty-state">本页尚未观测到状态变化</div>
+  {:else}
+    <div class="event-list">
+      {#each incidents.slice(0, 12) as incident}
+        <div class={`event-item ${incident.severity}`}>
+          <div class="event-top">
+            <span class="event-time">{formatTime(incident.at)}</span>
+            <span class={`badge ${incident.severity}`}>{incident.type}</span>
+            <span class="event-impact">{incident.impact}</span>
+          </div>
+          <div class="event-scope" title={incident.scope_symbol}>{incident.scope}</div>
+          <div class="event-detail" title={incident.detail}>{incident.detail}</div>
+        </div>
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -40,25 +36,99 @@
     padding: 10px 12px;
   }
 
-  th:nth-child(1) {
-    width: 18%;
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
   }
 
-  th:nth-child(2) {
-    width: 22%;
+  .count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 18px;
+    border-radius: 9px;
+    padding: 0 6px;
+    background: #42a7ff22;
+    color: var(--relay-blue);
+    font-size: 11px;
+    font-weight: 850;
   }
 
-  th:nth-child(3) {
-    width: 16%;
-  }
-
-  th:nth-child(5) {
-    width: 16%;
-  }
-
-  .empty-cell {
-    padding: 30px 8px;
+  .empty-state {
+    position: relative;
+    z-index: 1;
+    padding: 20px 8px;
     color: var(--relay-muted);
+    font-size: 11px;
     text-align: center;
+  }
+
+  .event-list {
+    position: relative;
+    z-index: 1;
+    margin-top: 8px;
+    display: grid;
+    gap: 5px;
+  }
+
+  .event-item {
+    border: 1px solid #24445a66;
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: #071929;
+    font-size: 10px;
+    line-height: 1.4;
+  }
+
+  .event-item.bad {
+    border-color: #ff536a44;
+  }
+
+  .event-item.warn {
+    border-color: #ffc44744;
+  }
+
+  .event-item.live {
+    border-color: #45ff9a44;
+  }
+
+  .event-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .event-time {
+    color: var(--relay-muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .event-impact {
+    margin-left: auto;
+    flex-shrink: 0;
+    color: #6e94a8;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+
+  .event-scope {
+    margin-top: 2px;
+    overflow: hidden;
+    color: #c6dbe5;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .event-detail {
+    overflow: hidden;
+    color: var(--relay-muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

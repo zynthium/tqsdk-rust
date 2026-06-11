@@ -29,6 +29,22 @@ describe('deriveIntegrity', () => {
     expect(model.subscribedProblems).toHaveLength(0);
   });
 
+  it('detects global market closure and suppresses upstream idle alerts', () => {
+    const closedRow1 = row({ status: 'closed', problem: false, problem_severity: 'closed' });
+    const closedRow2 = row({ status: 'closed', problem: false, problem_severity: 'closed' });
+
+    const model = deriveIntegrity(
+      metrics({
+        upstream_event_idle_health: 'critical',
+      }),
+      symbolSnapshot([closedRow1, closedRow2]),
+      NOW,
+    );
+
+    expect(model.isMarketClosed).toBe(true);
+    expect(model.overall).toBe('closed');
+  });
+
   it('treats subscribed inactive rows as critical operational problems', () => {
     const inactive = row({
       symbol: 'CZCE.AP610',

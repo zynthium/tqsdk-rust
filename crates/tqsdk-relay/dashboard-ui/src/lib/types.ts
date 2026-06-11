@@ -12,7 +12,7 @@ export type SymbolSession = 'open' | 'closed' | 'unknown';
 export type SymbolFlow = 'flowing' | 'silent' | 'no_sample';
 export type SymbolIntegrity = 'intact' | 'suspected' | 'confirmed_gap';
 export type ProblemSeverity = 'live' | 'closed' | 'warn' | 'bad';
-export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming';
+export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming' | 'closed';
 export type FlowIdleHealth = 'no_sample' | 'live' | 'warn' | 'critical';
 export type DecodeHealth = 'healthy' | 'degraded';
 
@@ -166,6 +166,7 @@ export type DashboardViewState = {
 
 export type IntegrityModel = {
   overall: OverallSeverity;
+  isMarketClosed: boolean;
   sampledAt: number;
   metrics: RelayMetrics;
   snapshot: SymbolMetricsSnapshot;
