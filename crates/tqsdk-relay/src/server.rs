@@ -15,6 +15,7 @@ use crate::protocol::DownstreamCommand;
 use crate::upstream::{UpstreamMarketEvent, UpstreamSourceUpdate, UpstreamTickSource};
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const DEFAULT_OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 
 enum ClientWebSocketFrame {
     Text(String),
@@ -26,15 +27,26 @@ enum ClientWebSocketFrame {
 #[derive(Clone)]
 pub struct RelayServer {
     engine: Arc<Mutex<RelayEngine>>,
-    outbound: Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Value>>>>,
+    outbound: Arc<Mutex<HashMap<ClientId, mpsc::Sender<Value>>>>,
+    outbound_channel_capacity: usize,
 }
 
 impl RelayServer {
     #[must_use]
     pub fn new(engine: Arc<Mutex<RelayEngine>>) -> Self {
+        Self::with_outbound_capacity(engine, DEFAULT_OUTBOUND_CHANNEL_CAPACITY)
+    }
+
+    #[must_use]
+    pub fn with_outbound_capacity(
+        engine: Arc<Mutex<RelayEngine>>,
+        outbound_channel_capacity: usize,
+    ) -> Self {
+        let outbound_channel_capacity = outbound_channel_capacity.max(1);
         Self {
             engine,
             outbound: Arc::new(Mutex::new(HashMap::new())),
+            outbound_channel_capacity,
         }
     }
 
@@ -49,22 +61,37 @@ impl RelayServer {
     {
         let mut sent = 0_usize;
         let mut stale_clients = Vec::new();
-        let mut outbound = self
-            .outbound
-            .lock()
-            .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?;
-        for frame in frames {
-            let Some(sender) = outbound.get(&frame.client_id) else {
-                continue;
-            };
-            if sender.send(frame.payload).is_ok() {
-                sent = sent.saturating_add(1);
-            } else {
-                stale_clients.push(frame.client_id);
+        {
+            let mut outbound = self
+                .outbound
+                .lock()
+                .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?;
+            for frame in frames {
+                let Some(sender) = outbound.get(&frame.client_id) else {
+                    continue;
+                };
+                match sender.try_send(frame.payload) {
+                    Ok(()) => {
+                        sent = sent.saturating_add(1);
+                    }
+                    Err(mpsc::error::TrySendError::Full(_))
+                    | Err(mpsc::error::TrySendError::Closed(_)) => {
+                        stale_clients.push(frame.client_id);
+                    }
+                }
+            }
+            for client_id in &stale_clients {
+                outbound.remove(client_id);
             }
         }
-        for client_id in stale_clients {
-            outbound.remove(&client_id);
+        if !stale_clients.is_empty() {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            for client_id in stale_clients {
+                engine.remove_client(client_id);
+            }
         }
         Ok(sent)
     }
@@ -247,8 +274,8 @@ impl RelayServer {
         Ok(())
     }
 
-    fn register_client(&self, client_id: ClientId) -> RelayResult<mpsc::UnboundedReceiver<Value>> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+    fn register_client(&self, client_id: ClientId) -> RelayResult<mpsc::Receiver<Value>> {
+        let (sender, receiver) = mpsc::channel(self.outbound_channel_capacity);
         self.outbound
             .lock()
             .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
@@ -443,4 +470,37 @@ fn base64_standard(bytes: &[u8]) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn full_outbound_queue_evicts_slow_client() {
+        let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+        let server = RelayServer::with_outbound_capacity(engine, 1);
+        let client_id = ClientId::new(1);
+        let _receiver = server.register_client(client_id).unwrap();
+
+        let sent = server
+            .dispatch_frames([
+                DownstreamFrame {
+                    client_id,
+                    payload: json!({"seq": 1}),
+                },
+                DownstreamFrame {
+                    client_id,
+                    payload: json!({"seq": 2}),
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(sent, 1);
+        assert_eq!(server.outbound.lock().unwrap().len(), 0);
+    }
 }
