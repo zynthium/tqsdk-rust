@@ -21,8 +21,9 @@ use crate::observability::{
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
-    SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolSubscriptionCounts,
-    SymbolTelemetryReadModel, SymbolTelemetrySnapshot, SymbolTelemetryStore,
+    SymbolFlow, SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary,
+    SymbolProblemSeverity, SymbolSession, SymbolSubscriptionCounts, SymbolTelemetryReadModel,
+    SymbolTelemetrySnapshot, SymbolTelemetryStore,
 };
 use crate::universe::FuturesContract;
 
@@ -33,9 +34,35 @@ pub struct DashboardSnapshot {
     pub received_at_unix_millis: u64,
     pub metrics: MetricsSnapshot,
     pub global: SymbolMetricsSummary,
-    pub global_symbols: Vec<SymbolTelemetrySnapshot>,
+    pub timeline: DashboardTimelineSample,
     pub page: SymbolMetricsSnapshot,
     pub events: Vec<RelayEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardTimelineSeverity {
+    Live,
+    Closed,
+    Warn,
+    Bad,
+    Unknown,
+    NoSample,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardTimelineScope {
+    pub severity: DashboardTimelineSeverity,
+    pub total: usize,
+    pub problem: usize,
+    pub receive_gap_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardTimelineSample {
+    pub global: DashboardTimelineScope,
+    pub subscribed: DashboardTimelineScope,
+    pub exchanges: BTreeMap<String, DashboardTimelineScope>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,15 +88,89 @@ impl DashboardSnapshotInputs {
     #[must_use]
     pub fn into_dashboard_snapshot(self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
         let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
+        let timeline = dashboard_timeline(&global_page.symbols);
         let page = self.symbol_metrics_snapshot(query);
         DashboardSnapshot {
             received_at_unix_millis: self.received_at_unix_millis,
             metrics: self.metrics,
             global: global_page.summary,
-            global_symbols: global_page.symbols,
+            timeline,
             page,
             events: self.events,
         }
+    }
+}
+
+fn exchange_of(symbol: &str) -> String {
+    symbol
+        .split_once('.')
+        .map(|(exchange, _)| exchange.to_ascii_uppercase())
+        .unwrap_or_else(|| "UNKNOWN".to_string())
+}
+
+fn dashboard_scope_for<'a>(
+    rows: impl IntoIterator<Item = &'a SymbolTelemetrySnapshot>,
+) -> DashboardTimelineScope {
+    let mut total = 0;
+    let mut problem = 0;
+    let mut bad = false;
+    let mut warn = false;
+    let mut all_closed = true;
+    let mut all_no_sample = true;
+    let mut max_receive_gap_ms = None::<u64>;
+
+    for row in rows {
+        total += 1;
+        if row.problem {
+            problem += 1;
+        }
+        bad |= row.problem_severity == SymbolProblemSeverity::Bad;
+        warn |= row.problem_severity == SymbolProblemSeverity::Warn;
+        all_closed &= row.session == SymbolSession::Closed;
+        all_no_sample &= row.flow == SymbolFlow::NoSample;
+        if let Some(gap) = row.receive_gap_ms {
+            max_receive_gap_ms = Some(max_receive_gap_ms.map_or(gap, |current| current.max(gap)));
+        }
+    }
+
+    let severity = if total == 0 {
+        DashboardTimelineSeverity::Unknown
+    } else if all_closed {
+        DashboardTimelineSeverity::Closed
+    } else if bad {
+        DashboardTimelineSeverity::Bad
+    } else if warn {
+        DashboardTimelineSeverity::Warn
+    } else if all_no_sample {
+        DashboardTimelineSeverity::NoSample
+    } else {
+        DashboardTimelineSeverity::Live
+    };
+
+    DashboardTimelineScope {
+        severity,
+        total,
+        problem,
+        receive_gap_ms: max_receive_gap_ms,
+    }
+}
+
+fn dashboard_timeline(rows: &[SymbolTelemetrySnapshot]) -> DashboardTimelineSample {
+    let mut exchanges = BTreeMap::new();
+    for row in rows {
+        exchanges
+            .entry(exchange_of(&row.symbol))
+            .or_insert_with(Vec::new)
+            .push(row);
+    }
+
+    DashboardTimelineSample {
+        global: dashboard_scope_for(rows.iter()),
+        subscribed: dashboard_scope_for(rows.iter().filter(|row| row.subscribed)),
+        exchanges: exchanges
+            .into_iter()
+            .map(|(exchange, rows)| (exchange, dashboard_scope_for(rows.into_iter())))
+            .collect(),
     }
 }
 

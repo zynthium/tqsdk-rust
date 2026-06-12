@@ -272,10 +272,39 @@ fn engine_dashboard_snapshot_keeps_global_summary_when_page_is_filtered() {
     assert_eq!(dashboard.global.total, 2);
     assert_eq!(dashboard.global.live, 1);
     assert_eq!(dashboard.global.missing, 1);
-    assert_eq!(dashboard.global_symbols.len(), 2);
+    assert_eq!(dashboard.timeline.global.total, 2);
+    assert_eq!(dashboard.timeline.global.problem, 1);
     assert_eq!(dashboard.page.filtered_total, 1);
     assert_eq!(dashboard.page.symbols.len(), 1);
     assert_eq!(dashboard.page.symbols[0].symbol, "SHFE.au2602");
+}
+
+#[test]
+fn engine_dashboard_snapshot_exposes_aggregate_timeline_without_global_symbol_rows() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602", "DCE.m2609"],
+        21,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+    engine
+        .ingest_tick_at_for_test("SHFE.au2602", tick(1), now - 1_000)
+        .unwrap();
+
+    let query = tqsdk_relay::SymbolMetricsQuery {
+        limit: Some(1),
+        ..Default::default()
+    };
+    let dashboard = engine.dashboard_snapshot_at(now, &query);
+
+    assert_eq!(dashboard.global.total, 2);
+    assert_eq!(dashboard.page.symbols.len(), 1);
+    assert_eq!(dashboard.timeline.global.total, 2);
+    assert!(dashboard.timeline.exchanges.contains_key("SHFE"));
+    assert!(dashboard.timeline.exchanges.contains_key("DCE"));
 }
 
 #[test]
@@ -302,7 +331,8 @@ fn dashboard_snapshot_inputs_are_classified_after_detached_copy() {
     let dashboard = inputs.into_dashboard_snapshot(&tqsdk_relay::SymbolMetricsQuery::default());
 
     assert_eq!(dashboard.global.total, 1);
-    assert_eq!(dashboard.global_symbols[0].symbol, "SHFE.au2602");
+    assert_eq!(dashboard.timeline.global.total, 1);
+    assert!(dashboard.timeline.exchanges.contains_key("SHFE"));
 }
 
 #[test]
