@@ -62,9 +62,7 @@ export function row(overrides: Partial<SymbolRow> = {}): SymbolRow {
     market_time_lag_ms: 1200,
     last_receive_unix_millis: NOW - 900,
     last_tick_datetime_ns: (NOW - 1200) * 1_000_000,
-    last_price: 610.2,
-    last_volume: 100,
-    last_open_interest: 200,
+
     invalid_rows: 0,
     last_invalid_row_error: null,
     ...overrides,
