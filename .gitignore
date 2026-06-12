@@ -13,3 +13,5 @@ Cargo.lock
 .opencode.json
 skills-lock.json
 crates/tqsdk-relay/dashboard-ui/dist/
+.superpowers/
+docs/designs
