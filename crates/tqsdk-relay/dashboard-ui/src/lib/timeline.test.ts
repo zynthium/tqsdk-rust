@@ -73,4 +73,14 @@ describe('timeline', () => {
     expect(buckets.at(-1)?.sample.exchanges.SHFE.severity).toBe('closed');
     expect(buckets.at(-1)?.sample.global.severity).toBe('closed');
   });
+
+  it('includes a sample at the exact right edge of the latest bucket', () => {
+    const history = createTimelineHistory();
+    const sample = dashboardTimeline([row({ symbol: 'DCE.m2609' })]);
+
+    pushTimelineSample(history, sample, NOW);
+    const buckets = timelineBuckets(history, NOW, 60);
+
+    expect(buckets.at(-1)?.sample.exchanges.DCE.severity).toBe('live');
+  });
 });
