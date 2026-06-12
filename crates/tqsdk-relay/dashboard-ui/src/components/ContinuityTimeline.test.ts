@@ -1,4 +1,4 @@
-import { fireEvent, render } from '@testing-library/svelte';
+import { render } from '@testing-library/svelte';
 import { describe, expect, it } from 'vitest';
 import ContinuityTimeline from './ContinuityTimeline.svelte';
 import type { TimelineSample } from '../lib/types';
@@ -8,14 +8,13 @@ describe('ContinuityTimeline', () => {
   it('leaves closed-session heatmap cells uncolored', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
-      exchangeSeverity: { SHFE: 'closed' },
-      symbolSeverity: { 'SHFE.au2602': 'closed' },
-      subscribedSeverity: 'unknown',
-      globalSeverity: 'live',
-      exchangeLatency: {},
-      symbolLatency: {},
-      subscribedLatency: 0,
-      globalLatency: 0,
+      sample: {
+        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 0 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null },
+        exchanges: {
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
+        },
+      },
     };
 
     const view = render(ContinuityTimeline, {
@@ -31,17 +30,25 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
-    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
-
     const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
     expect(view.baseElement.querySelector('.cell.closed')).toBeNull();
   });
 
-  it('uses closed-session color for missing buckets when the current symbol is closed', async () => {
+  it('uses closed-session color for missing buckets when the latest exchange sample is closed', () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null },
+        exchanges: {
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
+        },
+      },
+    };
     const view = render(ContinuityTimeline, {
-      buckets: [null],
+      buckets: [sample, null],
       rows: [
         row({
           symbol: 'SHFE.al2608',
@@ -53,24 +60,21 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
-    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
-
     const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('shows symbol health details inside expanded heatmap rows', async () => {
+  it('shows aggregate exchange counts inside heatmap rows', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
-      exchangeSeverity: { SHFE: 'warn' },
-      symbolSeverity: { 'SHFE.au2602': 'warn' },
-      subscribedSeverity: 'warn',
-      globalSeverity: 'warn',
-      exchangeLatency: {},
-      symbolLatency: {},
-      subscribedLatency: 0,
-      globalLatency: 0,
+      sample: {
+        global: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
+        subscribed: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
+        exchanges: {
+          SHFE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
+        },
+      },
     };
     const view = render(ContinuityTimeline, {
       buckets: [sample],
@@ -92,17 +96,8 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
-    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
-    const cells = view.baseElement.querySelectorAll('.cell');
-    await fireEvent.mouseMove(cells[cells.length - 1]);
-
-    expect(view.getAllByText('静默').length).toBeGreaterThanOrEqual(1);
-    expect(view.getByText('31.0s')).toBeTruthy();
-    expect(view.getByText('45.0s')).toBeTruthy();
-    expect(view.getByText('Tick 1,234')).toBeTruthy();
-    expect(view.getByText('订阅 3')).toBeTruthy();
-    expect(view.getByText('warn')).toBeTruthy();
-    expect(view.getByText(/异常记录数/)).toBeTruthy();
-    expect(view.getByText('7')).toBeTruthy();
+    expect(view.getByText('SHFE')).toBeTruthy();
+    expect(view.getAllByText('1/1').length).toBeGreaterThanOrEqual(3);
+    expect(view.baseElement.querySelectorAll('.cell.warn')).toHaveLength(3);
   });
 });

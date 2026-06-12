@@ -3869,46 +3869,6 @@ var all_registered_events = /* @__PURE__ */ new Set();
 var root_event_handles = /* @__PURE__ */ new Set();
 /**
 * @param {string} event_name
-* @param {EventTarget} dom
-* @param {EventListener} [handler]
-* @param {AddEventListenerOptions} [options]
-*/
-function create_event(event_name, dom, handler, options = {}) {
-	/**
-	* @this {EventTarget}
-	*/
-	function target_handler(event) {
-		if (!options.capture) handle_event_propagation.call(dom, event);
-		if (!event.cancelBubble) return without_reactive_context(() => {
-			return handler?.call(this, event);
-		});
-	}
-	if (event_name.startsWith("pointer") || event_name.startsWith("touch") || event_name === "wheel") queue_micro_task(() => {
-		dom.addEventListener(event_name, target_handler, options);
-	});
-	else dom.addEventListener(event_name, target_handler, options);
-	return target_handler;
-}
-/**
-* @param {string} event_name
-* @param {Element} dom
-* @param {EventListener} [handler]
-* @param {boolean} [capture]
-* @param {boolean} [passive]
-* @returns {void}
-*/
-function event(event_name, dom, handler, capture, passive) {
-	var options = {
-		capture,
-		passive
-	};
-	var target_handler = create_event(event_name, dom, handler, options);
-	if (dom === document.body || dom === window || dom === document || dom instanceof HTMLMediaElement) teardown(() => {
-		dom.removeEventListener(event_name, target_handler, options);
-	});
-}
-/**
-* @param {string} event_name
 * @param {Element} element
 * @param {EventListener} [handler]
 * @returns {void}
@@ -5550,9 +5510,9 @@ function flowHealthFor(idleMs, warnAfterMs, criticalAfterMs) {
 	if (idleMs > warnAfterMs) return "warn";
 	return "live";
 }
-function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapshot.summary, globalRowsInput) {
+function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapshot.summary) {
 	const rows = Array.isArray(snapshot.symbols) ? snapshot.symbols : [];
-	const globalRows = Array.isArray(globalRowsInput) ? globalRowsInput : rows;
+	const globalRows = rows;
 	const visibleProblems = rows.filter((row) => row.problem);
 	const globalProblems = globalRows.filter((row) => row.problem);
 	const observedUniverse = Number(global.universe_observed ?? 0);
@@ -5585,7 +5545,7 @@ function deriveIntegrity(metrics, snapshot, sampledAt, previous, global = snapsh
 	const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
 	const continuityScore = Math.max(0, 100 - Math.min(55, issueCount * 9) - Math.min(25, (1 - coverageRatio) * 25) - (sourceCritical || idleCritical ? 20 : 0));
 	return {
-		overall: isMarketClosed ? "closed" : sourceCritical || idleCritical || subscribedProblemCount > 0 || false ? "critical" : warming && globalRows.length === 0 ? "warming" : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
+		overall: isMarketClosed ? "closed" : sourceCritical || idleCritical || subscribedProblemCount > 0 || false ? "critical" : warming && Number(global.total || 0) === 0 ? "warming" : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < .98 ? "warning" : "healthy",
 		isMarketClosed,
 		sampledAt,
 		metrics,
@@ -5696,55 +5656,12 @@ var EXCHANGES = [
 function createTimelineHistory() {
 	return { samples: [] };
 }
-function exchangeOf(symbol) {
-	return symbol.split(".")[0]?.toUpperCase() || "UNKNOWN";
-}
-function timelineSeverityForRows(rows) {
-	if (rows.length === 0) return "unknown";
-	if (rows.every((row) => row.session === "closed")) return "closed";
-	if (rows.some((row) => row.problem_severity === "bad")) return "bad";
-	if (rows.some((row) => row.problem_severity === "warn")) return "warn";
-	if (rows.every((row) => row.flow === "no_sample")) return "no_sample";
-	if (rows.every((row) => row.session === "unknown")) return "unknown";
-	return "live";
-}
-function timelineSeverityForRow(row) {
-	if (row.session === "closed") return "closed";
-	if (row.problem_severity === "bad" || row.integrity === "confirmed_gap") return "bad";
-	if (row.problem_severity === "warn" || row.integrity === "suspected" || row.flow === "silent") return "warn";
-	if (row.flow === "no_sample") return "no_sample";
-	if (row.session === "unknown") return "unknown";
-	return "live";
-}
-function pushTimelineSample(history, model) {
-	const rows = model.globalRows;
-	const exchangeSeverity = {};
-	const symbolSeverity = {};
-	const exchangeLatency = {};
-	const symbolLatency = {};
-	for (const exchange of EXCHANGES) {
-		const exchangeSymbols = rows.filter((row) => exchangeOf(row.symbol) === exchange);
-		exchangeSeverity[exchange] = timelineSeverityForRows(exchangeSymbols);
-		exchangeLatency[exchange] = Math.max(0, ...exchangeSymbols.map((r) => r.receive_gap_ms ?? 0));
-	}
-	for (const row of rows) {
-		symbolSeverity[row.symbol] = timelineSeverityForRow(row);
-		symbolLatency[row.symbol] = row.receive_gap_ms ?? 0;
-	}
-	const subscribedRows = rows.filter((row) => row.subscribed);
-	const sample = {
-		sampledAt: model.sampledAt,
-		exchangeSeverity,
-		symbolSeverity,
-		subscribedSeverity: timelineSeverityForRows(subscribedRows),
-		exchangeLatency,
-		symbolLatency,
-		subscribedLatency: Math.max(0, ...subscribedRows.map((r) => r.receive_gap_ms ?? 0)),
-		globalSeverity: model.overall === "critical" ? "bad" : model.overall === "warning" ? "warn" : model.overall === "warming" ? "unknown" : model.overall === "closed" ? "closed" : "live",
-		globalLatency: Math.max(0, ...rows.map((r) => r.receive_gap_ms ?? 0))
-	};
-	history.samples.push(sample);
-	history.samples = history.samples.filter((item) => item.sampledAt >= model.sampledAt - 3e5);
+function pushTimelineSample(history, sample, sampledAt) {
+	history.samples.push({
+		sampledAt,
+		sample
+	});
+	history.samples = history.samples.filter((item) => item.sampledAt >= sampledAt - 3e5);
 	return history;
 }
 function timelineBuckets(history, now, bucketCount = 60) {
@@ -5761,82 +5678,59 @@ function timelineBuckets(history, now, bucketCount = 60) {
 }
 //#endregion
 //#region src/components/ContinuityTimeline.svelte
-var root$9 = /* @__PURE__ */ from_html(`<button type="button" class="row-label exchange-row svelte-1vieygf"><span class="caret svelte-1vieygf"> </span> <span class="svelte-1vieygf"> </span> <em class="svelte-1vieygf"> </em></button>`);
-var root_1$6 = /* @__PURE__ */ from_html(`<div data-testid="timeline-symbol-row" class="row-label symbol-row svelte-1vieygf"><span class="symbol-name svelte-1vieygf"> </span> <span> </span> <em class="svelte-1vieygf"> </em> <em class="svelte-1vieygf"> </em> <span> </span></div>`);
-var root_2$5 = /* @__PURE__ */ from_html(`<div class="row-label svelte-1vieygf"> </div>`);
-var root_3$1 = /* @__PURE__ */ from_html(`<span></span>`);
-var root_4$1 = /* @__PURE__ */ from_html(`<div class="sparkline-container svelte-1vieygf" style="grid-column: 2 / -1;"><svg preserveAspectRatio="none" class="svelte-1vieygf"><path stroke-width="2" fill="none" vector-effect="non-scaling-stroke"></path></svg></div>`);
-var root_5 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
-var root_6 = /* @__PURE__ */ from_html(`<div class="error svelte-1vieygf"> </div>`);
-var root_7 = /* @__PURE__ */ from_html(`<div class="health-tooltip svelte-1vieygf"><div class="tooltip-title svelte-1vieygf"> </div> <div class="tooltip-body svelte-1vieygf"><div class="svelte-1vieygf"><span class="svelte-1vieygf">接收延迟</span><b class="svelte-1vieygf"> </b></div> <div class="svelte-1vieygf"><span class="svelte-1vieygf">行情延时</span><b class="svelte-1vieygf"> </b></div> <div class="svelte-1vieygf"><span class="svelte-1vieygf">异常记录数</span><b class="svelte-1vieygf"> </b></div> <!></div></div>`);
-var root_8 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="view-toggle svelte-1vieygf"><button>Blocks</button> <button>Sparkline</button></div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="unknown svelte-1vieygf"></i>休盘</span> <span class="svelte-1vieygf"><i class="no_sample svelte-1vieygf"></i>无样本</span></div></div> <div class="timeline svelte-1vieygf"><!> <div class="axis svelte-1vieygf"><span>-5m</span><span>now</span></div></div> <!></section>`);
+var root$9 = /* @__PURE__ */ from_html(`<span></span>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<div class="sparkline-container svelte-1vieygf" style="grid-column: 2 / -1;"><svg preserveAspectRatio="none" class="svelte-1vieygf"><path stroke-width="2" fill="none" vector-effect="non-scaling-stroke"></path></svg></div>`);
+var root_2$5 = /* @__PURE__ */ from_html(`<div class="row-label svelte-1vieygf"><span class="svelte-1vieygf"> </span> <em class="svelte-1vieygf"> </em></div> <!>`, 1);
+var root_3$1 = /* @__PURE__ */ from_html(`<section class="panel timeline-panel svelte-1vieygf" data-testid="continuity-timeline"><div class="head svelte-1vieygf"><div class="panel-title">最近 5 分钟连续性</div> <div class="view-toggle svelte-1vieygf"><button>Blocks</button> <button>Sparkline</button></div> <div class="legend svelte-1vieygf"><span class="svelte-1vieygf"><i class="live svelte-1vieygf"></i>正常</span> <span class="svelte-1vieygf"><i class="warn svelte-1vieygf"></i>静默</span> <span class="svelte-1vieygf"><i class="bad svelte-1vieygf"></i>异常</span> <span class="svelte-1vieygf"><i class="unknown svelte-1vieygf"></i>休盘</span> <span class="svelte-1vieygf"><i class="no_sample svelte-1vieygf"></i>无样本</span></div></div> <div class="timeline-meta svelte-1vieygf"> </div> <div class="timeline svelte-1vieygf"><!> <div class="axis svelte-1vieygf"><span>-5m</span><span>now</span></div></div></section>`);
 function ContinuityTimeline($$anchor, $$props) {
 	push($$props, true);
-	let expandedExchanges = /* @__PURE__ */ state(proxy([]));
+	let rows = prop($$props, "rows", 19, () => []);
 	let viewMode = /* @__PURE__ */ state("blocks");
-	let hoveredSymbol = /* @__PURE__ */ state(null);
-	let hoveredSymbolRow = /* @__PURE__ */ user_derived(() => $$props.rows.find((row) => row.symbol === get(hoveredSymbol)) ?? null);
-	let tooltipX = /* @__PURE__ */ state(0);
-	let tooltipY = /* @__PURE__ */ state(0);
-	function handleHover(definition, e) {
-		if (definition.kind === "symbol") {
-			set(hoveredSymbol, definition.symbol, true);
-			set(tooltipX, e.clientX + 15);
-			set(tooltipY, Math.min(e.clientY + 15, window.innerHeight - 160), true);
-		}
+	function latestTimelineSample(buckets) {
+		for (let index = buckets.length - 1; index >= 0; index -= 1) if (buckets[index]) return buckets[index];
+		return null;
 	}
-	function clearHover() {
-		set(hoveredSymbol, null);
+	function exchangeRank(exchange) {
+		const index = EXCHANGES.indexOf(exchange);
+		return index === -1 ? EXCHANGES.length : index;
 	}
-	let exchangeRows = /* @__PURE__ */ user_derived(() => EXCHANGES.filter((exchange) => $$props.rows.some((row) => exchangeOf(row.symbol) === exchange)));
+	let latestSample = /* @__PURE__ */ user_derived(() => latestTimelineSample($$props.buckets));
+	let exchangeRows = /* @__PURE__ */ user_derived(() => Object.keys(get(latestSample)?.sample.exchanges ?? {}).sort((left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right)));
 	let definitions = /* @__PURE__ */ user_derived(() => [
 		{
-			kind: "summary",
 			key: "global",
 			label: "全局",
-			severity: (sample) => sample.globalSeverity,
-			latency: (sample) => sample.globalLatency
+			scope: (sample) => sample.sample.global
 		},
 		{
-			kind: "summary",
 			key: "subscribed",
 			label: "订阅",
-			severity: (sample) => sample.subscribedSeverity,
-			latency: (sample) => sample.subscribedLatency
+			scope: (sample) => sample.sample.subscribed
 		},
-		...get(exchangeRows).flatMap((exchange) => {
-			const exchangeSymbols = $$props.rows.filter((row) => exchangeOf(row.symbol) === exchange);
-			const issueCount = exchangeSymbols.filter((row) => row.problem_severity === "bad" || row.problem_severity === "warn").length;
-			const expanded = get(expandedExchanges).includes(exchange);
-			const exchangeDefinition = {
-				kind: "exchange",
-				key: `exchange:${exchange}`,
-				label: exchange,
-				exchange,
-				issueCount,
-				totalCount: exchangeSymbols.length,
-				expanded,
-				emptySeverity: exchangeSymbols.every((row) => row.session === "closed") ? "closed" : "no_sample",
-				severity: (sample) => sample.exchangeSeverity[exchange] ?? "closed",
-				latency: (sample) => sample.exchangeLatency[exchange] ?? 0
-			};
-			if (!expanded) return [exchangeDefinition];
-			return [exchangeDefinition, ...orderedSymbolRows(exchangeSymbols).map((row) => ({
-				kind: "symbol",
-				key: `symbol:${row.symbol}`,
-				label: row.instrument_name ?? row.symbol,
-				detail: row.subscribed ? "订阅" : "",
-				symbol: row.symbol,
-				row,
-				emptySeverity: row.session === "closed" ? "closed" : "no_sample",
-				severity: (sample) => sample.symbolSeverity[row.symbol] ?? "closed",
-				latency: (sample) => sample.symbolLatency[row.symbol] ?? 0
-			}))];
-		})
+		...get(exchangeRows).map((exchange) => ({
+			key: `exchange:${exchange}`,
+			label: exchange,
+			scope: (sample) => sample.sample.exchanges[exchange],
+			emptySeverity: get(latestSample)?.sample.exchanges[exchange]?.severity ?? "no_sample"
+		}))
 	]);
+	let pageRowCount = /* @__PURE__ */ user_derived(() => rows().length);
+	function currentScope(definition) {
+		return get(latestSample) ? definition.scope(get(latestSample)) : void 0;
+	}
+	function scopeSummary(scope) {
+		if (!scope) return "0/0";
+		return `${formatNumber(scope.problem)}/${formatNumber(scope.total)}`;
+	}
+	function cellSeverity(definition, sample) {
+		return sample ? definition.scope(sample)?.severity ?? "unknown" : definition.emptySeverity ?? "no_sample";
+	}
 	function cellClass(definition, sample) {
-		const severity = sample ? definition.severity(sample) : definition.emptySeverity ?? "no_sample";
+		const severity = cellSeverity(definition, sample);
 		return severity === "closed" ? "unknown" : severity;
+	}
+	function latency(definition, sample) {
+		return definition.scope(sample)?.receive_gap_ms ?? 0;
 	}
 	function sparklinePath(definition, buckets) {
 		const coords = [];
@@ -5844,12 +5738,12 @@ function ContinuityTimeline($$anchor, $$props) {
 			const x = i * 10;
 			let y = 100;
 			if (bucket) {
-				const severity = definition.severity(bucket);
+				const severity = cellSeverity(definition, bucket);
 				if (severity === "bad") y = 10;
 				else if (severity === "warn") y = 40;
 				else {
-					const lat = definition.latency(bucket);
-					y = Math.max(70, 100 - lat / 1e3 * 30);
+					const lag = latency(definition, bucket);
+					y = Math.max(70, 100 - lag / 1e3 * 30);
 				}
 			} else if ((definition.emptySeverity ?? "no_sample") === "closed") y = 100;
 			coords.push(`${x},${y}`);
@@ -5857,34 +5751,20 @@ function ContinuityTimeline($$anchor, $$props) {
 		return coords.length ? `M ${coords.join(" L ")}` : "";
 	}
 	function sparklineColor(definition, buckets) {
-		let lastActive = buckets[buckets.length - 1];
-		for (let i = buckets.length - 1; i >= 0; i--) if (buckets[i]) {
-			lastActive = buckets[i];
-			break;
-		}
-		const severity = lastActive ? definition.severity(lastActive) : definition.emptySeverity ?? "no_sample";
+		const lastActive = latestTimelineSample(buckets);
+		const severity = lastActive ? cellSeverity(definition, lastActive) : definition.emptySeverity ?? "no_sample";
 		if (severity === "bad") return "var(--relay-bad)";
 		if (severity === "warn") return "var(--relay-warn)";
 		if (severity === "closed") return "#566170";
 		return "var(--relay-live)";
 	}
-	function orderedSymbolRows(exchangeSymbols) {
-		return [...exchangeSymbols].sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1)).slice(0, 30);
+	function cellTitle(definition, sample) {
+		if (!sample) return `${definition.label} 无样本`;
+		const scope = definition.scope(sample);
+		if (!scope) return `${definition.label} 未知`;
+		return `${definition.label} ${scope.severity} ${scopeSummary(scope)} ${formatDuration(scope.receive_gap_ms)}`;
 	}
-	function severityRank(row) {
-		if (row.problem_severity === "bad") return 0;
-		if (row.problem_severity === "warn") return 1;
-		if (row.subscribed) return 2;
-		if (row.problem_severity === "closed") return 4;
-		return 3;
-	}
-	function subscriberCount(row) {
-		return row.quote_subscriber_count + row.chart_subscriber_count;
-	}
-	function toggleExchange(exchange) {
-		set(expandedExchanges, get(expandedExchanges).includes(exchange) ? get(expandedExchanges).filter((item) => item !== exchange) : [...get(expandedExchanges), exchange], true);
-	}
-	var section = root_8();
+	var section = root_3$1();
 	var div = child(section);
 	var div_1 = sibling(child(div), 2);
 	var button = child(div_1);
@@ -5895,93 +5775,34 @@ function ContinuityTimeline($$anchor, $$props) {
 	next(2);
 	reset(div);
 	var div_2 = sibling(div, 2);
-	each(child(div_2), 17, () => get(definitions), index, ($$anchor, definition) => {
-		var fragment = root_5();
-		var node_1 = first_child(fragment);
+	var text = child(div_2);
+	reset(div_2);
+	var div_3 = sibling(div_2, 2);
+	each(child(div_3), 17, () => get(definitions), (definition) => definition.key, ($$anchor, definition) => {
+		var fragment = root_2$5();
+		var div_4 = first_child(fragment);
+		var span = child(div_4);
+		var text_1 = child(span, true);
+		reset(span);
+		var em = sibling(span, 2);
+		var text_2 = child(em, true);
+		reset(em);
+		reset(div_4);
+		var node_1 = sibling(div_4, 2);
 		var consequent = ($$anchor) => {
-			var button_2 = root$9();
-			var span = child(button_2);
-			var text = child(span, true);
-			reset(span);
-			var span_1 = sibling(span, 2);
-			var text_1 = child(span_1, true);
-			reset(span_1);
-			var em = sibling(span_1, 2);
-			var text_2 = child(em);
-			reset(em);
-			reset(button_2);
-			template_effect(() => {
-				set_attribute(button_2, "aria-expanded", get(definition).expanded);
-				set_attribute(button_2, "aria-label", `${get(definition).label} ${get(definition).issueCount}/${get(definition).totalCount} 异常`);
-				set_text(text, get(definition).expanded ? "−" : "+");
-				set_text(text_1, get(definition).label);
-				set_text(text_2, `${get(definition).issueCount ?? ""}/${get(definition).totalCount ?? ""}`);
-			});
-			delegated("click", button_2, () => toggleExchange(get(definition).exchange));
-			append($$anchor, button_2);
-		};
-		var consequent_1 = ($$anchor) => {
-			var div_3 = root_1$6();
-			var span_2 = child(div_3);
-			var text_3 = child(span_2, true);
-			reset(span_2);
-			var span_3 = sibling(span_2, 2);
-			var text_4 = child(span_3, true);
-			reset(span_3);
-			var em_1 = sibling(span_3, 2);
-			var text_5 = child(em_1);
-			reset(em_1);
-			var em_2 = sibling(em_1, 2);
-			var text_6 = child(em_2);
-			reset(em_2);
-			var span_4 = sibling(em_2, 2);
-			var text_7 = child(span_4, true);
-			reset(span_4);
-			reset(div_3);
-			template_effect(($0, $1, $2, $3) => {
-				set_attribute(div_3, "title", get(definition).symbol);
-				set_attribute(div_3, "aria-label", $0);
-				set_text(text_3, get(definition).label);
-				set_class(span_3, 1, `badge ${get(definition).row.status}`, "svelte-1vieygf");
-				set_text(text_4, $1);
-				set_text(text_5, `Tick ${$2 ?? ""}`);
-				set_text(text_6, `订阅 ${$3 ?? ""}`);
-				set_class(span_4, 1, `risk ${get(definition).row.problem_severity}`, "svelte-1vieygf");
-				set_text(text_7, get(definition).row.problem_severity);
-			}, [
-				() => `${get(definition).label} ${statusLabel(get(definition).row.status)} ${formatDuration(get(definition).row.receive_gap_ms)} ${get(definition).row.problem_severity}`,
-				() => statusLabel(get(definition).row.status),
-				() => formatNumber(get(definition).row.ticks_ingested),
-				() => formatNumber(subscriberCount(get(definition).row))
-			]);
-			append($$anchor, div_3);
-		};
-		var alternate = ($$anchor) => {
-			var div_4 = root_2$5();
-			var text_8 = child(div_4, true);
-			reset(div_4);
-			template_effect(() => set_text(text_8, get(definition).label));
-			append($$anchor, div_4);
-		};
-		if_block(node_1, ($$render) => {
-			if (get(definition).kind === "exchange") $$render(consequent);
-			else if (get(definition).kind === "symbol") $$render(consequent_1, 1);
-			else $$render(alternate, -1);
-		});
-		var node_2 = sibling(node_1, 2);
-		var consequent_2 = ($$anchor) => {
 			var fragment_1 = comment();
-			each(first_child(fragment_1), 17, () => $$props.buckets, index, ($$anchor, bucket) => {
-				var span_5 = root_3$1();
-				template_effect(($0) => set_class(span_5, 1, $0, "svelte-1vieygf"), [() => `cell ${cellClass(get(definition), get(bucket))}`]);
-				delegated("mousemove", span_5, (e) => handleHover(get(definition), e));
-				event("mouseleave", span_5, clearHover);
-				append($$anchor, span_5);
+			each(first_child(fragment_1), 19, () => $$props.buckets, (bucket, index) => `${get(definition).key}:${index}`, ($$anchor, bucket) => {
+				var span_1 = root$9();
+				template_effect(($0, $1) => {
+					set_class(span_1, 1, $0, "svelte-1vieygf");
+					set_attribute(span_1, "title", $1);
+				}, [() => `cell ${cellClass(get(definition), get(bucket))}`, () => cellTitle(get(definition), get(bucket))]);
+				append($$anchor, span_1);
 			});
 			append($$anchor, fragment_1);
 		};
-		var alternate_1 = ($$anchor) => {
-			var div_5 = root_4$1();
+		var alternate = ($$anchor) => {
+			var div_5 = root_1$6();
 			var svg = child(div_5);
 			var path = child(svg);
 			reset(svg);
@@ -5991,84 +5812,34 @@ function ContinuityTimeline($$anchor, $$props) {
 				set_attribute(path, "d", $0);
 				set_attribute(path, "stroke", $1);
 			}, [() => sparklinePath(get(definition), $$props.buckets), () => sparklineColor(get(definition), $$props.buckets)]);
-			delegated("mousemove", div_5, (e) => handleHover(get(definition), e));
-			event("mouseleave", div_5, clearHover);
 			append($$anchor, div_5);
 		};
-		if_block(node_2, ($$render) => {
-			if (get(viewMode) === "blocks") $$render(consequent_2);
-			else $$render(alternate_1, -1);
+		if_block(node_1, ($$render) => {
+			if (get(viewMode) === "blocks") $$render(consequent);
+			else $$render(alternate, -1);
 		});
+		template_effect(($0) => {
+			set_attribute(div_4, "title", get(definition).label);
+			set_text(text_1, get(definition).label);
+			set_text(text_2, $0);
+		}, [() => scopeSummary(currentScope(get(definition)))]);
 		append($$anchor, fragment);
 	});
 	next(2);
-	reset(div_2);
-	var node_4 = sibling(div_2, 2);
-	var consequent_4 = ($$anchor) => {
-		var div_6 = root_7();
-		var div_7 = child(div_6);
-		var text_9 = child(div_7, true);
-		reset(div_7);
-		var div_8 = sibling(div_7, 2);
-		var div_9 = child(div_8);
-		var b = sibling(child(div_9));
-		var text_10 = child(b, true);
-		reset(b);
-		reset(div_9);
-		var div_10 = sibling(div_9, 2);
-		var b_1 = sibling(child(div_10));
-		var text_11 = child(b_1, true);
-		reset(b_1);
-		reset(div_10);
-		var div_11 = sibling(div_10, 2);
-		var b_2 = sibling(child(div_11));
-		var text_12 = child(b_2, true);
-		reset(b_2);
-		reset(div_11);
-		var node_5 = sibling(div_11, 2);
-		var consequent_3 = ($$anchor) => {
-			var div_12 = root_6();
-			var text_13 = child(div_12, true);
-			reset(div_12);
-			template_effect(() => {
-				set_attribute(div_12, "title", get(hoveredSymbolRow).last_invalid_row_error);
-				set_text(text_13, get(hoveredSymbolRow).last_invalid_row_error);
-			});
-			append($$anchor, div_12);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(hoveredSymbolRow).last_invalid_row_error) $$render(consequent_3);
-		});
-		reset(div_8);
-		reset(div_6);
-		template_effect(($0, $1, $2) => {
-			set_style(div_6, `left: ${get(tooltipX)}px; top: ${get(tooltipY)}px;`);
-			set_text(text_9, get(hoveredSymbolRow).instrument_name ?? get(hoveredSymbolRow).symbol);
-			set_text(text_10, $0);
-			set_text(text_11, $1);
-			set_text(text_12, $2);
-		}, [
-			() => formatDuration(get(hoveredSymbolRow).receive_gap_ms),
-			() => formatDuration(get(hoveredSymbolRow).market_time_lag_ms),
-			() => formatNumber(get(hoveredSymbolRow).invalid_rows)
-		]);
-		append($$anchor, div_6);
-	};
-	if_block(node_4, ($$render) => {
-		if (get(hoveredSymbolRow)) $$render(consequent_4);
-	});
+	reset(div_3);
 	reset(section);
-	template_effect(() => {
+	template_effect(($0) => {
 		classes = set_class(button, 1, "svelte-1vieygf", null, classes, { active: get(viewMode) === "blocks" });
 		classes_1 = set_class(button_1, 1, "svelte-1vieygf", null, classes_1, { active: get(viewMode) === "sparkline" });
-		set_style(div_2, `--bucket-count:${$$props.buckets.length}`);
-	});
+		set_text(text, `当前页 ${$0 ?? ""} 行`);
+		set_style(div_3, `--bucket-count:${$$props.buckets.length}`);
+	}, [() => formatNumber(get(pageRowCount))]);
 	delegated("click", button, () => set(viewMode, "blocks"));
 	delegated("click", button_1, () => set(viewMode, "sparkline"));
 	append($$anchor, section);
 	pop();
 }
-delegate(["click", "mousemove"]);
+delegate(["click"]);
 //#endregion
 //#region src/components/DashboardControls.svelte
 var root$8 = /* @__PURE__ */ from_html(`<label class="svelte-jyijee"><input type="checkbox" class="svelte-jyijee"/> <span> </span></label>`);
@@ -6782,39 +6553,30 @@ async function fetchRelaySnapshot(filters, signal) {
 }
 //#endregion
 //#region src/lib/incident-ledger.ts
-function createIncidentLedger(limit = 80) {
-	return {
-		limit,
-		knownStatuses: /* @__PURE__ */ new Map(),
-		incidents: []
-	};
-}
-function severityForIncident(row) {
-	if (row.problem_severity === "bad") return "bad";
-	if (row.problem_severity === "warn") return "warn";
-	if (row.problem_severity === "closed") return "closed";
+function severityForRelayEvent(event) {
+	if (event.kind === "universe_refresh_failed" || event.kind === "decode_incident") return "bad";
+	if (event.kind === "flow_incident") return "warn";
 	return "live";
 }
-function updateIncidentLedger(ledger, model) {
-	for (const row of model.globalRows) {
-		const before = ledger.knownStatuses.get(row.symbol);
-		if (before && before !== row.status) {
-			const incident = {
-				id: `${model.sampledAt}:${row.symbol}:${before}:${row.status}`,
-				at: model.sampledAt,
-				scope: row.instrument_name ?? row.symbol,
-				scope_symbol: row.symbol,
-				type: statusLabel(row.status),
-				detail: `${statusLabel(before)} -> ${statusLabel(row.status)}`,
-				impact: row.subscribed ? "影响订阅" : "未订阅",
-				severity: severityForIncident(row)
-			};
-			if (!ledger.incidents.some((item) => item.id === incident.id)) ledger.incidents.unshift(incident);
-		}
-		ledger.knownStatuses.set(row.symbol, row.status);
-	}
-	if (ledger.incidents.length > ledger.limit) ledger.incidents.splice(ledger.limit);
-	return ledger;
+function typeForRelayEvent(event) {
+	return {
+		universe_refreshed: "Universe",
+		universe_refresh_failed: "Universe失败",
+		flow_incident: "流状态",
+		decode_incident: "解码"
+	}[event.kind];
+}
+function relayEventsToIncidents(events) {
+	return [...events].sort((left, right) => right.sequence - left.sequence).map((event) => ({
+		id: `relay:${event.sequence}`,
+		at: event.at_unix_secs * 1e3,
+		scope: typeForRelayEvent(event),
+		scope_symbol: event.kind,
+		type: typeForRelayEvent(event),
+		detail: event.detail,
+		impact: "后端事件",
+		severity: severityForRelayEvent(event)
+	}));
 }
 //#endregion
 //#region src/App.svelte
@@ -6828,7 +6590,7 @@ function App($$anchor, $$props) {
 	let model = /* @__PURE__ */ state(null);
 	let timeline = proxy(createTimelineHistory());
 	let history = proxy(createHistory());
-	let incidents = proxy(createIncidentLedger());
+	let incidents = /* @__PURE__ */ state(proxy([]));
 	let error = /* @__PURE__ */ state(null);
 	let sequence = /* @__PURE__ */ state(0);
 	let view = proxy({
@@ -6851,10 +6613,10 @@ function App($$anchor, $$props) {
 		const next = await fetchRelaySnapshot(view.filters, signal);
 		if (requestId !== get(sequence)) return;
 		set(snapshot, next, true);
-		const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, get(model), next.global, next.global_symbols);
-		pushTimelineSample(timeline, nextModel);
+		const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, get(model), next.global);
+		pushTimelineSample(timeline, next.timeline, next.receivedAt);
 		pushHistorySample(history, nextModel);
-		updateIncidentLedger(incidents, nextModel);
+		set(incidents, relayEventsToIncidents(next.events), true);
 		set(model, nextModel, true);
 		set(error, null);
 	}
@@ -6971,7 +6733,7 @@ function App($$anchor, $$props) {
 				return get(buckets);
 			},
 			get rows() {
-				return get(model).globalRows;
+				return get(model).rows;
 			}
 		});
 		reset(div_1);
@@ -6990,7 +6752,7 @@ function App($$anchor, $$props) {
 			}
 		});
 		IncidentTable(sibling(node_9, 2), { get incidents() {
-			return incidents.incidents;
+			return get(incidents);
 		} });
 		reset(div_2);
 		reset(section_1);

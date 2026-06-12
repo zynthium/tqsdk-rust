@@ -127,11 +127,26 @@ export type RelayEvent = {
   detail: string;
 };
 
+export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad' | 'unknown' | 'no_sample';
+
+export type DashboardTimelineScope = {
+  severity: TimelineSeverity;
+  total: number;
+  problem: number;
+  receive_gap_ms: number | null;
+};
+
+export type DashboardTimelineSample = {
+  global: DashboardTimelineScope;
+  subscribed: DashboardTimelineScope;
+  exchanges: Record<string, DashboardTimelineScope>;
+};
+
 export type DashboardSnapshot = {
   received_at_unix_millis: number;
   metrics: RelayMetrics;
   global: SymbolMetricsSummary;
-  global_symbols: SymbolRow[];
+  timeline: DashboardTimelineSample;
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
 };
@@ -140,7 +155,7 @@ export type RelaySnapshot = {
   received_at_unix_millis: number;
   metrics: RelayMetrics;
   global: SymbolMetricsSummary;
-  global_symbols: SymbolRow[];
+  timeline: DashboardTimelineSample;
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
   receivedAt: number;
@@ -209,18 +224,9 @@ export type RuntimeHistory = {
   samples: HistorySample[];
 };
 
-export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad' | 'unknown' | 'no_sample';
-
 export type TimelineSample = {
   sampledAt: number;
-  exchangeSeverity: Record<string, TimelineSeverity>;
-  symbolSeverity: Record<string, TimelineSeverity>;
-  subscribedSeverity: TimelineSeverity;
-  globalSeverity: TimelineSeverity;
-  exchangeLatency: Record<string, number>;
-  symbolLatency: Record<string, number>;
-  subscribedLatency: number;
-  globalLatency: number;
+  sample: DashboardTimelineSample;
 };
 
 export type TimelineHistory = {

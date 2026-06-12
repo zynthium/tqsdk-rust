@@ -1,5 +1,5 @@
 import { statusLabel } from './integrity-model';
-import type { IncidentLedger, IntegrityModel, LocalIncident, SymbolRow, TimelineSeverity } from './types';
+import type { IncidentLedger, IntegrityModel, LocalIncident, RelayEvent, SymbolRow, TimelineSeverity } from './types';
 
 export function createIncidentLedger(limit = 80): IncidentLedger {
   return { limit, knownStatuses: new Map(), incidents: [] };
@@ -36,4 +36,34 @@ export function updateIncidentLedger(ledger: IncidentLedger, model: IntegrityMod
     ledger.incidents.splice(ledger.limit);
   }
   return ledger;
+}
+
+function severityForRelayEvent(event: RelayEvent): TimelineSeverity {
+  if (event.kind === 'universe_refresh_failed' || event.kind === 'decode_incident') return 'bad';
+  if (event.kind === 'flow_incident') return 'warn';
+  return 'live';
+}
+
+function typeForRelayEvent(event: RelayEvent): string {
+  return {
+    universe_refreshed: 'Universe',
+    universe_refresh_failed: 'Universe失败',
+    flow_incident: '流状态',
+    decode_incident: '解码',
+  }[event.kind];
+}
+
+export function relayEventsToIncidents(events: RelayEvent[]): LocalIncident[] {
+  return [...events]
+    .sort((left, right) => right.sequence - left.sequence)
+    .map((event) => ({
+      id: `relay:${event.sequence}`,
+      at: event.at_unix_secs * 1_000,
+      scope: typeForRelayEvent(event),
+      scope_symbol: event.kind,
+      type: typeForRelayEvent(event),
+      detail: event.detail,
+      impact: '后端事件',
+      severity: severityForRelayEvent(event),
+    }));
 }

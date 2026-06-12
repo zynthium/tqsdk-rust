@@ -126,11 +126,10 @@ describe('deriveIntegrity', () => {
       NOW,
       null,
       globalSnapshot.summary,
-      globalSnapshot.symbols,
     );
 
     expect(model.rows.map((item) => item.symbol)).toEqual(['SHFE.au2602']);
-    expect(model.globalProblems.map((item) => item.symbol)).toEqual(['CZCE.AP610']);
+    expect(model.globalProblems).toHaveLength(0);
     expect(model.issueCount).toBe(1);
     expect(model.subscribedProblemCount).toBe(1);
     expect(model.overall).toBe('critical');
