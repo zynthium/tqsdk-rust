@@ -72,6 +72,7 @@
     z-index: 1;
     margin-top: 8px;
     display: grid;
+    align-content: start;
     gap: 5px;
     flex: 1;
     min-height: 0;
