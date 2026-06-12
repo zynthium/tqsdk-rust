@@ -73,6 +73,11 @@
     margin-top: 8px;
     display: grid;
     gap: 5px;
+    max-height: 36vh;
+    overflow-y: auto;
+    padding-right: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--relay-line) 80%, transparent) transparent;
   }
 
   .item {
