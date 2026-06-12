@@ -538,6 +538,7 @@ impl WebSocketUpstreamTickSource {
     async fn recv_events(&mut self) -> RelayResult<Option<Vec<UpstreamMarketEvent>>> {
         match self.transport.recv().await {
             Ok(RawFrame::Text(text)) => {
+                self.send_peek_message().await?;
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
@@ -545,10 +546,10 @@ impl WebSocketUpstreamTickSource {
                 self.record_decode_report(&report);
                 let events = report.into_events();
                 self.record_frame_received(events.len());
-                self.send_peek_message().await?;
                 Ok(Some(events))
             }
             Ok(RawFrame::Binary(bytes)) => {
+                self.send_peek_message().await?;
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
@@ -556,7 +557,6 @@ impl WebSocketUpstreamTickSource {
                 self.record_decode_report(&report);
                 let events = report.into_events();
                 self.record_frame_received(events.len());
-                self.send_peek_message().await?;
                 Ok(Some(events))
             }
             Ok(RawFrame::Ping | RawFrame::Pong) => {
