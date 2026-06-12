@@ -266,7 +266,6 @@ impl SymbolTelemetryStore {
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = Some(row.datetime);
-
     }
 
     pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
@@ -284,7 +283,6 @@ impl SymbolTelemetryStore {
         }
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
-
     }
 
     pub fn record_invalid_row(&mut self, symbol: &str, message: impl Into<String>) {

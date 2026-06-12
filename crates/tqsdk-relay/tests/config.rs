@@ -27,6 +27,7 @@ fn default_config_is_memory_only_and_local() {
     );
     assert_eq!(config.tick_ring_capacity, 200_000);
     assert_eq!(config.kline_ring_capacity, 10_000);
+    assert_eq!(config.outbound_channel_capacity, 1024);
     assert_eq!(config.upstream_tick_view_width, 10_000);
     assert_eq!(config.futures_metadata_batch_size, 500);
     assert_eq!(config.futures_active_contracts_per_product, None);
@@ -43,6 +44,17 @@ fn default_config_is_memory_only_and_local() {
     assert!(config.disk_cache_dir.is_none());
     assert!(config.best_effort_duration_tag);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn config_loads_outbound_channel_capacity_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_OUTBOUND_CHANNEL_CAPACITY" => Some("64".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(config.outbound_channel_capacity, 64);
 }
 
 #[test]

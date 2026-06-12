@@ -807,17 +807,15 @@ impl RelayEngine {
                         completed.clone(),
                     )])
                     .into_value();
-                for client_id in self.interests.chart_clients(&source) {
+                for (client_id, chart_id) in self.interests.chart_clients_with_ids(&source) {
                     frames.push(DownstreamFrame {
                         client_id,
                         payload: kline_payload.clone(),
                     });
-                    if let Some(chart_id) = self.interests.downstream_chart_id(client_id, &source) {
-                        frames.push(DownstreamFrame {
-                            client_id,
-                            payload: chart_payload(chart_id, completed.id),
-                        });
-                    }
+                    frames.push(DownstreamFrame {
+                        client_id,
+                        payload: chart_payload(&chart_id, completed.id),
+                    });
                 }
             }
         }

@@ -28,10 +28,12 @@ const ENV_UPSTREAM_INS_LIST_MAX_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX
 const ENV_UPSTREAM_TICK_VIEW_WIDTH: &str = "TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH";
 const ENV_TICK_RING_CAPACITY: &str = "TQSDK_RELAY_TICK_RING_CAPACITY";
 const ENV_KLINE_RING_CAPACITY: &str = "TQSDK_RELAY_KLINE_RING_CAPACITY";
+const ENV_OUTBOUND_CHANNEL_CAPACITY: &str = "TQSDK_RELAY_OUTBOUND_CHANNEL_CAPACITY";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
 const ENV_AUTH_USER: &str = "TQ_AUTH_USER";
 const ENV_AUTH_PASS: &str = "TQ_AUTH_PASS";
 pub const DEFAULT_FUTURES_METADATA_BATCH_SIZE: usize = 500;
+pub const DEFAULT_OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuturesUniverseRefreshSchedule {
@@ -197,6 +199,7 @@ pub struct RelayConfig {
     pub upstream_tick_view_width: usize,
     pub tick_ring_capacity: usize,
     pub kline_ring_capacity: usize,
+    pub outbound_channel_capacity: usize,
     pub disk_cache_dir: Option<PathBuf>,
     pub bootstrap: BootstrapConfig,
     pub best_effort_duration_tag: bool,
@@ -228,6 +231,7 @@ impl fmt::Debug for RelayConfig {
             .field("upstream_tick_view_width", &self.upstream_tick_view_width)
             .field("tick_ring_capacity", &self.tick_ring_capacity)
             .field("kline_ring_capacity", &self.kline_ring_capacity)
+            .field("outbound_channel_capacity", &self.outbound_channel_capacity)
             .field("disk_cache_dir", &self.disk_cache_dir)
             .field("bootstrap", &self.bootstrap)
             .field("best_effort_duration_tag", &self.best_effort_duration_tag)
@@ -260,6 +264,7 @@ impl Default for RelayConfig {
             upstream_tick_view_width: DEFAULT_UPSTREAM_TICK_VIEW_WIDTH,
             tick_ring_capacity: 200_000,
             kline_ring_capacity: 10_000,
+            outbound_channel_capacity: DEFAULT_OUTBOUND_CHANNEL_CAPACITY,
             disk_cache_dir: None,
             bootstrap: BootstrapConfig::default(),
             best_effort_duration_tag: true,
@@ -369,6 +374,10 @@ impl RelayConfig {
         }
         if let Some(value) = get(ENV_KLINE_RING_CAPACITY) {
             config.kline_ring_capacity = parse_positive_usize_env(ENV_KLINE_RING_CAPACITY, &value)?;
+        }
+        if let Some(value) = get(ENV_OUTBOUND_CHANNEL_CAPACITY) {
+            config.outbound_channel_capacity =
+                parse_positive_usize_env(ENV_OUTBOUND_CHANNEL_CAPACITY, &value)?;
         }
         let inline_futures_symbols = get(ENV_FUTURES_SYMBOLS);
         let futures_symbols_file = get(ENV_FUTURES_SYMBOLS_FILE);
@@ -514,6 +523,11 @@ impl RelayConfig {
         if self.kline_ring_capacity == 0 {
             return Err(RelayError::invalid_config(
                 "kline_ring_capacity must be greater than zero",
+            ));
+        }
+        if self.outbound_channel_capacity == 0 {
+            return Err(RelayError::invalid_config(
+                "outbound_channel_capacity must be greater than zero",
             ));
         }
         if self

@@ -46,7 +46,8 @@ async fn run() -> Result<(), RelayError> {
         "{}",
         RelayStartupReport::from_config_and_charts(&config, &startup_charts).log_line()
     );
-    let server = RelayServer::new(engine.clone());
+    let server =
+        RelayServer::with_outbound_capacity(engine.clone(), config.outbound_channel_capacity);
     let listener = TcpListener::bind(&config.downstream_listen)
         .await
         .map_err(|err| RelayError::Transport(format!("downstream bind failed: {err}")))?;
