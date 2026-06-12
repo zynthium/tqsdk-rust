@@ -222,7 +222,7 @@ select {
 .dashboard-main .panel,
 .main-right > .panel {
   --relay-card-header-height: 36px;
-  --relay-table-sticky-top: var(--relay-card-header-height);
+  --relay-table-sticky-top: calc(-1 * var(--relay-card-padding-y));
   --relay-card-padding-y: 10px;
   --relay-card-padding-x: 12px;
 
@@ -241,7 +241,7 @@ select {
 
 .dashboard-shell > .table-panel {
   --relay-card-header-height: 36px;
-  --relay-table-sticky-top: var(--relay-card-header-height);
+  --relay-table-sticky-top: calc(-1 * var(--relay-card-padding-y));
   --relay-card-padding-y: 10px;
   --relay-card-padding-x: 12px;
 
@@ -254,8 +254,7 @@ select {
 .dashboard-main .panel > .panel-title,
 .dashboard-main .panel > .head,
 .dashboard-shell > .table-panel > .head {
-  position: sticky;
-  top: calc(-1 * var(--relay-card-padding-y));
+  position: relative;
   z-index: 7;
   box-sizing: border-box;
   min-height: var(--relay-card-header-height);
