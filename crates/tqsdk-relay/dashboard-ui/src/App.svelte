@@ -29,7 +29,6 @@
     paused: false,
     fullscreen: false,
     selectedExchange: null,
-    selectedSymbol: null,
     filters: {
       statuses: [],
       subscribedOnly: false,
@@ -102,7 +101,7 @@
     </section>
     <section class="dashboard-main">
       <div class="main-left">
-        <ContinuityTimeline {buckets} rows={model.globalRows} bind:selectedSymbol={view.selectedSymbol} />
+        <ContinuityTimeline {buckets} rows={model.globalRows} />
       </div>
       <div class="main-right">
         <AttentionList rows={model.problems} />

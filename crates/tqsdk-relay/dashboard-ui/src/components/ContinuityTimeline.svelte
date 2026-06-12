@@ -4,10 +4,9 @@
   import { statusLabel } from '../lib/integrity-model';
   import type { SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
 
-  let { buckets, rows, selectedSymbol = $bindable(null) }: {
+  let { buckets, rows }: {
     buckets: Array<TimelineSample | null>;
     rows: SymbolRow[];
-    selectedSymbol?: string | null;
   } = $props();
   let expandedExchanges = $state<string[]>([]);
   let viewMode = $state<'blocks' | 'sparkline'>('blocks');
@@ -63,7 +62,6 @@
       };
 
   let exchangeRows = $derived(EXCHANGES.filter((exchange) => rows.some((row) => exchangeOf(row.symbol) === exchange)));
-  let selected = $derived(rows.find((row) => row.symbol === selectedSymbol) ?? null);
   let definitions = $derived<TimelineDefinition[]>([
     { kind: 'summary', key: 'global', label: '全局', severity: (sample: TimelineSample) => sample.globalSeverity, latency: (sample: TimelineSample) => sample.globalLatency },
     { kind: 'summary', key: 'subscribed', label: '订阅', severity: (sample: TimelineSample) => sample.subscribedSeverity, latency: (sample: TimelineSample) => sample.subscribedLatency },
@@ -195,21 +193,18 @@
           <em>{definition.issueCount}/{definition.totalCount}</em>
         </button>
       {:else if definition.kind === 'symbol'}
-        <button
-          type="button"
+        <div
           data-testid="timeline-symbol-row"
-          class:selected={definition.symbol === selectedSymbol}
           class="row-label symbol-row"
           title={definition.symbol}
           aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${formatDuration(definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
-          onclick={() => (selectedSymbol = definition.symbol)}
         >
           <span class="symbol-name">{definition.label}</span>
           <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
           <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
           <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
           <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
-        </button>
+        </div>
       {:else}
         <div class="row-label">{definition.label}</div>
       {/if}
