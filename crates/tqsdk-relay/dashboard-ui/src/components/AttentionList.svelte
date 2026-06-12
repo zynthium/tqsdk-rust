@@ -73,7 +73,6 @@
     margin-top: 8px;
     display: grid;
     gap: 5px;
-    max-height: 36vh;
     flex: 1;
     min-height: 0;
     overflow-y: auto;

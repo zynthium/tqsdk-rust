@@ -211,9 +211,9 @@ select {
 
 .main-right {
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: 1fr auto 1fr;
   gap: 8px;
   scrollbar-color: #2ad0ff66 #04111e;
   scrollbar-width: thin;
