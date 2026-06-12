@@ -1,7 +1,9 @@
 #[test]
 fn upstream_recv_events_sends_peek_before_json_decode() {
     let source = include_str!("../src/upstream.rs");
-    let start = source.find("async fn recv_events").expect("recv_events exists");
+    let start = source
+        .find("async fn recv_events")
+        .expect("recv_events exists");
     let end = source[start..]
         .find("fn record_decode_report")
         .map(|offset| start + offset)

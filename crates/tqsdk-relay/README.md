@@ -274,6 +274,8 @@ open http://127.0.0.1:7789/dashboard
   "lifetime_invalid_rows": 0,
   "recent_invalid_rows_1m": 0,
   "current_decode_health": "healthy",
+  "last_upstream_peek_delay_ms": null,
+  "last_upstream_decode_ms": null,
   "last_upstream_invalid_tick_row_error": null,
   "last_invalid_row_unix_secs": null,
   "last_universe_refresh_unix_secs": null,
@@ -301,6 +303,8 @@ open http://127.0.0.1:7789/dashboard
 - `upstream_transport_connected`：上游 websocket transport 已建立。
 - `upstream_subscription_sent`：relay 已向上游发送每合约 `set_chart` 和对应 `peek_message`。
 - `upstream_frames_received` / `upstream_events_decoded`：已收到的上游 frame 数和解出的 tick / quote event 数，可用于区分“未建连”和“正在补历史但尚无可用行情”。
+- `last_upstream_peek_delay_ms`：最近一次收到上游 raw frame 后完成 `peek_message` 发送的耗时；relay 会先发送 peek，再做 JSON decode。
+- `last_upstream_decode_ms`：最近一次成功解析上游 raw frame 并提取 tick / quote event 的本地耗时。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的 relay 本地 Unix 秒时间。
 - `last_decoded_event_unix_secs`：最近解出有效 tick / quote event 的 relay 本地 Unix 秒时间。
 - `upstream_frame_idle_ms` / `upstream_frame_idle_health`：最近上游 frame 静默时长和状态，阈值为 warning `2s`、critical `5s`。
@@ -383,6 +387,8 @@ frame/event 计数，不推断上游补历史百分比。
 - `upstream_stage_started_unix_secs`：当前阶段开始时间，主要用于 dashboard 计算 backfilling 已持续时间。
 - `upstream_transport_connected` / `upstream_subscription_sent`：上游 websocket 建连和订阅命令发送进度。
 - `upstream_frames_received` / `upstream_events_decoded`：上游 frame 与有效 tick / quote event 计数。
+- `last_upstream_peek_delay_ms`：最近一次收到上游 raw frame 后完成 `peek_message` 发送的耗时，用于确认 peek 是否被本地处理阻塞。
+- `last_upstream_decode_ms`：最近一次成功解析上游 raw frame 并提取 tick / quote event 的本地耗时，用于判断是否需要继续拆分 IO/decode 或引入更底层 JSON 优化。
 - `last_upstream_frame_unix_secs`：最近收到任意上游 frame 的本地 Unix 秒时间。
 - `last_decoded_event_unix_secs`：最近解出有效 tick / quote event 的本地 Unix 秒时间。
 - `upstream_frame_idle_ms` / `upstream_frame_idle_health`：frame 静默状态，阈值为 warning `2s`、critical `5s`。

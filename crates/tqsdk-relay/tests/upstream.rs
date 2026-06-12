@@ -920,8 +920,8 @@ async fn websocket_upstream_tick_source_peeks_before_json_decode() {
         expect_peek_message(&mut socket);
     })
     .unwrap();
-    let chart = UpstreamTickChart::new("relay-upstream-tick-SHFE_au2602-1", ["SHFE.au2602"], 1)
-        .unwrap();
+    let chart =
+        UpstreamTickChart::new("relay-upstream-tick-SHFE_au2602-1", ["SHFE.au2602"], 1).unwrap();
 
     let mut source =
         WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
