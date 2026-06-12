@@ -114,5 +114,13 @@ describe('ContinuityTimeline', () => {
     expect(view.getByText('订阅 3')).toBeTruthy();
     expect(view.getByText('warn')).toBeTruthy();
     expect(view.baseElement.querySelectorAll('.cell.warn')).toHaveLength(4);
+
+    const cells = view.baseElement.querySelectorAll('.cell');
+    await fireEvent.mouseMove(cells[cells.length - 1]);
+
+    expect(view.getByText('31.0s')).toBeTruthy();
+    expect(view.getByText('45.0s')).toBeTruthy();
+    expect(view.getByText(/异常记录数/)).toBeTruthy();
+    expect(view.getByText('7')).toBeTruthy();
   });
 });
