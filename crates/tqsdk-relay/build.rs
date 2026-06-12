@@ -17,7 +17,7 @@ fn main() {
     // In debug mode, if developers want hot reload, they should use npm run dev
     // However, the dashboard.rs still needs *some* dashboard-dist to compile.
     // If we require npm to be installed for *any* cargo run, we can just run it.
-    
+
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     // Only run build, assume dependencies are already installed.
     // Running `npm install` in a `pnpm` workspace can cause infinite hangs.
@@ -26,7 +26,7 @@ fn main() {
         .arg("build")
         .current_dir(&dashboard_ui_dir)
         .status();
-        
+
     if let Ok(b_status) = build_status {
         if !b_status.success() {
             println!("cargo:warning=Failed to build dashboard-ui with npm run build");

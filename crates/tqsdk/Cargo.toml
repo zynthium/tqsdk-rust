@@ -35,6 +35,9 @@ tqsdk-stream = { path = "../tqsdk-stream", version = "0.1.0", default-features =
 tqsdk-task = { path = "../tqsdk-task", version = "0.1.0", default-features = false }
 tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
 
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [[example]]
 name = "api_contract_s33_default_facade"
 required-features = ["live"]
@@ -51,3 +54,8 @@ name = "api_contract_s39_facade_same_body"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "trade_with_relay"
+required-features = ["live"]
+
