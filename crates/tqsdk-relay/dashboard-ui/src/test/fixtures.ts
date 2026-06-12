@@ -1,4 +1,12 @@
-import type { DashboardSnapshot, RelayMetrics, SymbolMetricsSnapshot, SymbolRow } from '../lib/types';
+import type {
+  DashboardSnapshot,
+  DashboardTimelineSample,
+  DashboardTimelineScope,
+  RelayMetrics,
+  SymbolMetricsSnapshot,
+  SymbolRow,
+  TimelineSeverity,
+} from '../lib/types';
 
 export const NOW = 1_700_013_600_000;
 
@@ -112,6 +120,43 @@ export function symbolSnapshot(rows: SymbolRow[]): SymbolMetricsSnapshot {
   };
 }
 
+function exchangeOf(symbol: string): string {
+  return symbol.split('.')[0]?.toUpperCase() || 'UNKNOWN';
+}
+
+function timelineScope(rows: SymbolRow[]): DashboardTimelineScope {
+  if (rows.length === 0) {
+    return { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null };
+  }
+  let severity: TimelineSeverity = 'live';
+  if (rows.every((item) => item.session === 'closed')) severity = 'closed';
+  else if (rows.some((item) => item.problem_severity === 'bad')) severity = 'bad';
+  else if (rows.some((item) => item.problem_severity === 'warn')) severity = 'warn';
+  else if (rows.every((item) => item.flow === 'no_sample')) severity = 'no_sample';
+  else if (rows.every((item) => item.session === 'unknown')) severity = 'unknown';
+  return {
+    severity,
+    total: rows.length,
+    problem: rows.filter((item) => item.problem).length,
+    receive_gap_ms: rows.reduce<number | null>((max, item) => {
+      if (item.receive_gap_ms == null) return max;
+      return max == null ? item.receive_gap_ms : Math.max(max, item.receive_gap_ms);
+    }, null),
+  };
+}
+
+export function dashboardTimeline(rows: SymbolRow[]): DashboardTimelineSample {
+  const exchanges: Record<string, DashboardTimelineScope> = {};
+  for (const exchange of [...new Set(rows.map((item) => exchangeOf(item.symbol)))]) {
+    exchanges[exchange] = timelineScope(rows.filter((item) => exchangeOf(item.symbol) === exchange));
+  }
+  return {
+    global: timelineScope(rows),
+    subscribed: timelineScope(rows.filter((item) => item.subscribed)),
+    exchanges,
+  };
+}
+
 export function dashboardSnapshot(
   rows: SymbolRow[],
   metricOverrides: Partial<RelayMetrics> = {},
@@ -121,7 +166,7 @@ export function dashboardSnapshot(
     received_at_unix_millis: NOW,
     metrics: metrics(metricOverrides),
     global: page.summary,
-    global_symbols: page.symbols,
+    timeline: dashboardTimeline(rows),
     page,
     events: [],
   };

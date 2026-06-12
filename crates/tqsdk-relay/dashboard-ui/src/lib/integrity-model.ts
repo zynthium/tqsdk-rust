@@ -50,10 +50,9 @@ export function deriveIntegrity(
   sampledAt: number,
   previous?: IntegrityModel | null,
   global: SymbolMetricsSummary = snapshot.summary,
-  globalRowsInput?: SymbolRow[],
 ): IntegrityModel {
   const rows = Array.isArray(snapshot.symbols) ? snapshot.symbols : [];
-  const globalRows = Array.isArray(globalRowsInput) ? globalRowsInput : rows;
+  const globalRows = rows;
   const visibleProblems = rows.filter((row) => row.problem);
   const globalProblems = globalRows.filter((row) => row.problem);
   const observedUniverse = Number(global.universe_observed ?? 0);
@@ -116,7 +115,7 @@ export function deriveIntegrity(
     ? 'closed'
     : sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0
       ? 'critical'
-      : warming && globalRows.length === 0
+      : warming && Number(global.total || 0) === 0
         ? 'warming'
         : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < 0.98
           ? 'warning'

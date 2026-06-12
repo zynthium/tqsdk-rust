@@ -10,11 +10,11 @@
   import RelayPipeline from './components/RelayPipeline.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
-  import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
+  import { relayEventsToIncidents } from './lib/incident-ledger';
   import { createHistory, pushHistorySample } from './lib/history';
   import { deriveIntegrity } from './lib/integrity-model';
   import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
-  import type { DashboardViewState, IntegrityModel, RelaySnapshot } from './lib/types';
+  import type { DashboardViewState, IntegrityModel, LocalIncident, RelaySnapshot } from './lib/types';
 
   const POLL_INTERVAL_MS = 2_000;
 
@@ -22,7 +22,7 @@
   let model = $state<IntegrityModel | null>(null);
   let timeline = $state(createTimelineHistory());
   let history = $state(createHistory());
-  let incidents = $state(createIncidentLedger());
+  let incidents = $state<LocalIncident[]>([]);
   let error = $state<string | null>(null);
   let sequence = $state(0);
   let view = $state<DashboardViewState>({
@@ -47,10 +47,10 @@
     const next = await fetchRelaySnapshot(view.filters, signal);
     if (requestId !== sequence) return;
     snapshot = next;
-    const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global, next.global_symbols);
-    pushTimelineSample(timeline, nextModel);
+    const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global);
+    pushTimelineSample(timeline, next.timeline, next.receivedAt);
     pushHistorySample(history, nextModel);
-    updateIncidentLedger(incidents, nextModel);
+    incidents = relayEventsToIncidents(next.events);
     model = nextModel;
     error = null;
   }
@@ -101,12 +101,12 @@
     </section>
     <section class="dashboard-main">
       <div class="main-left">
-        <ContinuityTimeline {buckets} rows={model.globalRows} />
+        <ContinuityTimeline {buckets} rows={model.rows} />
       </div>
       <div class="main-right">
         <AttentionList rows={model.problems} />
         <IntegrityTrend {history} {model} />
-        <IncidentTable incidents={incidents.incidents} />
+        <IncidentTable {incidents} />
       </div>
     </section>
   {:else}
