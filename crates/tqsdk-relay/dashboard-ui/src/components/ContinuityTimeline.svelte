@@ -450,31 +450,31 @@
     filter: brightness(1.5) saturate(1.5) contrast(1.2);
   }
 
-  .live {
+  .cell.live {
     background: linear-gradient(180deg, #52ffae, #23d786);
     box-shadow: 0 0 5px #45ff9a44;
   }
 
-  .warn {
+  .cell.warn {
     background: var(--relay-warn);
     box-shadow: 0 0 8px #ffc44780;
   }
 
-  .bad {
+  .cell.bad {
     background: var(--relay-bad);
     box-shadow: 0 0 8px #ff536a8c;
   }
 
-  .closed_unmarked {
+  .cell.closed_unmarked {
     background: transparent;
     box-shadow: none;
   }
 
-  .unknown {
+  .cell.unknown {
     background: #566170;
   }
 
-  .no_sample {
+  .cell.no_sample {
     background: #172532;
   }
 
