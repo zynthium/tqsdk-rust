@@ -337,30 +337,33 @@ DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不�
 chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污染诊断计数。
 
 `/dashboard-snapshot` 返回 dashboard 使用的原子 JSON 快照：同一次响应内包含
-`metrics`、未过滤的 `global` 汇总、未过滤的 `global_symbols` 事件/时间带输入，以及
-按当前筛选、排序、分页裁剪后的 `page` 列表，以及进程内固定容量 `events` 事件账本。
-事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow incident 和
-decode incident。`/symbol-metrics` 继续作为合约列表调试端点；它的 `summary` 仍是过滤
-前的全局汇总，`symbols` 只代表当前查询页。
+`metrics`、未过滤的 `global` 汇总、后端聚合的 `timeline` 时间带样本、按当前筛选、
+排序、分页裁剪后的 `page` 列表，以及进程内固定容量 `events` 事件账本。`timeline`
+包含 `global`、`subscribed` 和 `exchanges` 三层聚合，每层都有
+`severity`、`total`、`problem` 和 `receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
+全量合约行。事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow
+incident 和 decode incident。`/symbol-metrics` 继续作为合约列表调试端点；它的
+`summary` 仍是过滤前的全局汇总，`symbols` 只代表当前查询页。
 
 `/dashboard` 是内置只读运维页面，每 `2s` 串行轮询 `/dashboard-snapshot`。它不连接 relay
 market websocket，不创建下游订阅，也不会触发额外行情命令。页面由
 `crates/tqsdk-relay/dashboard-ui/` 的 Svelte 5 + Vite + Tailwind CSS 4 工程构建，
 生产产物提交在 `crates/tqsdk-relay/src/dashboard-dist/`，Rust 侧将该目录嵌入到
-relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。页面顶部会展示上游阶段、
-transport 连接、订阅发送、frame 接收数、解码事件数、backfilling 已持续时间、frame
-速率、最近 frame/event idle、decode health 和最近 frame 时间；tick / quote ingest 热路径
-只更新当前合约的轻量 telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
+relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。JSON 观测端点继续返回
+`Cache-Control: no-store`；内置静态资源返回 `Cache-Control: public, max-age=60`，允许
+浏览器复用已构建的 JS/CSS。页面顶部会展示上游阶段、transport 连接、订阅发送、frame
+接收数、解码事件数、backfilling 已持续时间、frame 速率、最近 frame/event idle、
+decode health 和最近 frame 时间；tick / quote ingest 热路径只更新当前合约的轻量
+telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
 metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
 排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
-未过滤 global 数据，搜索/状态筛选只影响可见列表，不会把异常过滤成健康。dashboard 会把
-tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的行情完整性异常、事件账本
-告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响和解码健康为主。连续性
-热力图展开交易所后会按健康排行顺序展示合约，并在行内合并状态、接收延迟、行情延迟、
-tick 数、订阅数和风险等级；点击合约行会显示 last price、volume、open interest、
-invalid rows 等详情。页面不展示静态假 sparkline；全屏按钮调用浏览器 fullscreen API，
-不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和 frame/event 计数，
-不推断上游补历史百分比。
+未过滤 `global` / `timeline` 聚合数据，搜索/状态筛选只影响可见列表，不会把异常过滤成
+健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
+行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
+和解码健康为主。连续性热力图只渲染全局、订阅和交易所聚合行；当前页合约行只用于关注
+列表，不再保存 5 分钟全量 symbol-level 历史。页面不展示静态假 sparkline；全屏按钮调用
+浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和
+frame/event 计数，不推断上游补历史百分比。
 
 ### 观测字段
 
@@ -451,6 +454,7 @@ cd crates/tqsdk-relay/dashboard-ui
 pnpm run test
 pnpm run check
 pnpm run build
+pnpm run size-check
 pnpm run test:e2e
 cd ../../..
 cargo test -p tqsdk-relay --test binary_smoke relay_binary_serves_embedded_dashboard_assets

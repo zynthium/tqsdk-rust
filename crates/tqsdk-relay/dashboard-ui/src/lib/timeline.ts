@@ -27,12 +27,15 @@ export function timelineBuckets(
 ): Array<TimelineSample | null> {
   const bucketMs = 300_000 / bucketCount;
   return Array.from({ length: bucketCount }, (_, index) => {
-    const start = now - 300_000 + index * bucketMs;
-    const end = start + bucketMs;
-    for (let sampleIndex = history.samples.length - 1; sampleIndex >= 0; sampleIndex -= 1) {
-      const sample = history.samples[sampleIndex];
-      if (sample.sampledAt >= start && sample.sampledAt < end) return sample;
-    }
+      const start = now - 300_000 + index * bucketMs;
+      const end = start + bucketMs;
+      for (let sampleIndex = history.samples.length - 1; sampleIndex >= 0; sampleIndex -= 1) {
+        const sample = history.samples[sampleIndex];
+        const insideBucket =
+          sample.sampledAt >= start &&
+          (sample.sampledAt < end || (index === bucketCount - 1 && sample.sampledAt <= end));
+        if (insideBucket) return sample;
+      }
     return null;
   });
 }
