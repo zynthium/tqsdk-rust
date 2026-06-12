@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(feature = "server")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
@@ -44,6 +44,8 @@ pub struct UpstreamSourceProgress {
     pub frames_received: u64,
     pub events_decoded: u64,
     pub unix_secs: u64,
+    pub last_peek_delay_ms: Option<u64>,
+    pub last_decode_ms: Option<u64>,
 }
 
 impl UpstreamSourceProgress {
@@ -53,6 +55,8 @@ impl UpstreamSourceProgress {
             && !self.subscription_sent
             && self.frames_received == 0
             && self.events_decoded == 0
+            && self.last_peek_delay_ms.is_none()
+            && self.last_decode_ms.is_none()
     }
 }
 
@@ -538,30 +542,40 @@ impl WebSocketUpstreamTickSource {
     async fn recv_events(&mut self) -> RelayResult<Option<Vec<UpstreamMarketEvent>>> {
         match self.transport.recv().await {
             Ok(RawFrame::Text(text)) => {
+                let frame_received_at = Instant::now();
                 self.send_peek_message().await?;
+                self.record_peek_sent(millis_u64(frame_received_at.elapsed()));
+                let decode_started_at = Instant::now();
                 let value = serde_json::from_str::<Value>(&text).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
                 let report = self.decode_market_report(value)?;
+                let decode_ms = millis_u64(decode_started_at.elapsed());
                 self.record_decode_report(&report);
                 let events = report.into_events();
-                self.record_frame_received(events.len());
+                self.record_frame_received(events.len(), Some(decode_ms));
                 Ok(Some(events))
             }
             Ok(RawFrame::Binary(bytes)) => {
+                let frame_received_at = Instant::now();
                 self.send_peek_message().await?;
+                self.record_peek_sent(millis_u64(frame_received_at.elapsed()));
+                let decode_started_at = Instant::now();
                 let value = serde_json::from_slice::<Value>(&bytes).map_err(|err| {
                     RelayError::invalid_protocol(format!("invalid upstream JSON frame: {err}"))
                 })?;
                 let report = self.decode_market_report(value)?;
+                let decode_ms = millis_u64(decode_started_at.elapsed());
                 self.record_decode_report(&report);
                 let events = report.into_events();
-                self.record_frame_received(events.len());
+                self.record_frame_received(events.len(), Some(decode_ms));
                 Ok(Some(events))
             }
             Ok(RawFrame::Ping | RawFrame::Pong) => {
-                self.record_frame_received(0);
+                let frame_received_at = Instant::now();
                 self.send_peek_message().await?;
+                self.record_peek_sent(millis_u64(frame_received_at.elapsed()));
+                self.record_frame_received(0, None);
                 Ok(Some(Vec::new()))
             }
             Ok(RawFrame::Close) => Ok(None),
@@ -599,12 +613,18 @@ impl WebSocketUpstreamTickSource {
         self.progress.unix_secs = current_unix_secs();
     }
 
-    fn record_frame_received(&mut self, events_decoded: usize) {
+    fn record_peek_sent(&mut self, peek_delay_ms: u64) {
+        self.progress.last_peek_delay_ms = Some(peek_delay_ms);
+        self.progress.unix_secs = current_unix_secs();
+    }
+
+    fn record_frame_received(&mut self, events_decoded: usize, decode_ms: Option<u64>) {
         self.progress.frames_received = self.progress.frames_received.saturating_add(1);
         self.progress.events_decoded = self
             .progress
             .events_decoded
             .saturating_add(u64::try_from(events_decoded).unwrap_or(u64::MAX));
+        self.progress.last_decode_ms = decode_ms;
         self.progress.unix_secs = current_unix_secs();
     }
 }
@@ -673,4 +693,9 @@ fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(feature = "server")]
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

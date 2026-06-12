@@ -3,7 +3,7 @@ use tqsdk_core::TradingTime;
 use tqsdk_relay::{
     ClientId, DecodeHealth, DownstreamCommand, FlowIdleHealth, FuturesContract, RelayConfig,
     RelayEngine, RelayEventKind, RelaySourceStage, RelaySourceStatus, RelayStartupReport,
-    RelayTickRow, SetChartCommand,
+    RelayTickRow, SetChartCommand, UpstreamSourceProgress,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -139,6 +139,28 @@ fn metrics_expose_upstream_bootstrap_progress_before_market_data_arrives() {
         metrics.upstream_stage_started_unix_secs,
         Some(1_700_000_001)
     );
+}
+
+#[test]
+fn metrics_expose_upstream_peek_and_decode_timing() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine.record_upstream_progress(UpstreamSourceProgress {
+        frames_received: 1,
+        events_decoded: 2,
+        unix_secs: 1_700_000_002,
+        last_peek_delay_ms: Some(1),
+        last_decode_ms: Some(7),
+        ..Default::default()
+    });
+
+    let health = engine.health_snapshot_at(1_700_000_003);
+    assert_eq!(health.last_upstream_peek_delay_ms, Some(1));
+    assert_eq!(health.last_upstream_decode_ms, Some(7));
+
+    let metrics = engine.metrics_snapshot_at(1_700_000_003);
+    assert_eq!(metrics.last_upstream_peek_delay_ms, Some(1));
+    assert_eq!(metrics.last_upstream_decode_ms, Some(7));
 }
 
 #[test]

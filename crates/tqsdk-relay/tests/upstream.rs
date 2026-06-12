@@ -813,6 +813,8 @@ async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
     let progress = source.take_progress();
     assert_eq!(progress.frames_received, 1);
     assert_eq!(progress.events_decoded, 0);
+    assert!(progress.last_peek_delay_ms.is_some());
+    assert!(progress.last_decode_ms.is_some());
     assert!(progress.unix_secs > 0);
     server.join();
 }
