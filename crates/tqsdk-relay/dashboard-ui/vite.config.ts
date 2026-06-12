@@ -23,7 +23,7 @@ export default defineConfig({
     outDir: '../src/dashboard-dist',
     emptyOutDir: true,
     cssCodeSplit: false,
-    minify: false,
+    minify: 'oxc',
     rollupOptions: {
       output: {
         entryFileNames: 'assets/app.js',
