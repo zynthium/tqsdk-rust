@@ -109,6 +109,7 @@ describe('ContinuityTimeline', () => {
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
     expect(view.getByText('SHFE')).toBeTruthy();
     expect(view.getAllByText('1/1').length).toBeGreaterThanOrEqual(3);
+    expect(view.getAllByText('均 31.0s').length).toBeGreaterThanOrEqual(3);
     expect(view.getByText('沪金2602')).toBeTruthy();
     expect(view.getByText('Tick 1,234')).toBeTruthy();
     expect(view.getByText('订阅 3')).toBeTruthy();

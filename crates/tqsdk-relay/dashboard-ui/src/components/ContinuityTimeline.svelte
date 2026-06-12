@@ -114,6 +114,24 @@
     return definition.latency(sample) ?? 0;
   }
 
+  function averageLatency(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): number | null {
+    let total = 0;
+    let count = 0;
+    for (const bucket of buckets) {
+      if (!bucket) continue;
+      const value = definition.latency(bucket);
+      if (value == null) continue;
+      total += value;
+      count += 1;
+    }
+    return count === 0 ? null : total / count;
+  }
+
+  function averageLatencyLabel(definition: TimelineDefinition): string {
+    const average = averageLatency(definition, buckets);
+    return average == null ? '均 --' : `均 ${formatDuration(average)}`;
+  }
+
   function sparklinePath(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): string {
     const coords: string[] = [];
     buckets.forEach((bucket, i) => {
@@ -215,6 +233,7 @@
           <span class="caret">{definition.expanded ? '-' : '+'}</span>
           <span>{definition.label}</span>
           <em>{definition.summary}</em>
+          <strong>{averageLatencyLabel(definition)}</strong>
         </button>
       {:else if definition.kind === 'symbol' && definition.row}
         <div
@@ -225,6 +244,7 @@
         >
           <span class="symbol-name">{definition.label}</span>
           <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
+          <em class="avg-latency">{averageLatencyLabel(definition)}</em>
           <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
           <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
           <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
@@ -233,6 +253,7 @@
         <div class="row-label" title={definition.label}>
           <span>{definition.label}</span>
           <em>{definition.summary}</em>
+          <strong>{averageLatencyLabel(definition)}</strong>
         </div>
       {/if}
       {#if viewMode === 'blocks'}
@@ -345,7 +366,7 @@
   }
 
   .timeline {
-    --timeline-label-width: clamp(320px, 22vw, 380px);
+    --timeline-label-width: clamp(380px, 26vw, 460px);
 
     position: relative;
     z-index: 1;
@@ -364,7 +385,7 @@
   .row-label {
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 8px;
     overflow: hidden;
@@ -385,11 +406,11 @@
   }
 
   .exchange-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
 
   .symbol-row {
-    grid-template-columns: minmax(72px, 1fr) 46px 80px 56px 50px;
+    grid-template-columns: minmax(72px, 1fr) 46px 64px 72px 56px 50px;
     padding-left: 12px;
     color: #9fc4d5;
   }
@@ -410,6 +431,13 @@
     color: var(--relay-muted);
     font-size: 10px;
     font-style: normal;
+    white-space: nowrap;
+  }
+
+  .row-label strong {
+    color: var(--relay-info);
+    font-size: 10px;
+    font-weight: 800;
     white-space: nowrap;
   }
 
@@ -544,14 +572,14 @@
 
   @media (max-width: 900px) {
     .timeline {
-      --timeline-label-width: 260px;
+      --timeline-label-width: 320px;
     }
 
     .symbol-row {
-      grid-template-columns: minmax(72px, 1fr) 44px 58px 58px;
+      grid-template-columns: minmax(72px, 1fr) 44px 64px;
     }
 
-    .symbol-row em:nth-of-type(n + 3),
+    .symbol-row em:nth-of-type(n + 2),
     .symbol-row .risk {
       display: none;
     }
