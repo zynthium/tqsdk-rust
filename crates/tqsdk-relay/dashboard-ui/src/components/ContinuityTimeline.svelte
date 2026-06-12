@@ -132,10 +132,10 @@
       if (buckets[i]) { lastActive = buckets[i]; break; }
     }
     const severity = lastActive ? definition.severity(lastActive) : (definition.emptySeverity ?? 'no_sample');
-    if (severity === 'bad') return 'var(--relay-error)';
-    if (severity === 'warn') return 'var(--relay-warning)';
+    if (severity === 'bad') return 'var(--relay-bad)';
+    if (severity === 'warn') return 'var(--relay-warn)';
     if (severity === 'closed') return '#566170'; // same as unknown
-    return 'var(--relay-success)';
+    return 'var(--relay-live)';
   }
 
   function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
@@ -454,31 +454,31 @@
     filter: brightness(1.5) saturate(1.5) contrast(1.2);
   }
 
-  .cell.live {
+  .cell.live, .legend .live {
     background: linear-gradient(180deg, #52ffae, #23d786);
     box-shadow: 0 0 5px #45ff9a44;
   }
 
-  .cell.warn {
+  .cell.warn, .legend .warn {
     background: var(--relay-warn);
     box-shadow: 0 0 8px #ffc44780;
   }
 
-  .cell.bad {
+  .cell.bad, .legend .bad {
     background: var(--relay-bad);
     box-shadow: 0 0 8px #ff536a8c;
   }
 
-  .cell.closed_unmarked {
+  .cell.closed_unmarked, .legend .closed_unmarked {
     background: transparent;
     box-shadow: none;
   }
 
-  .cell.unknown {
+  .cell.unknown, .legend .unknown {
     background: #566170;
   }
 
-  .cell.no_sample {
+  .cell.no_sample, .legend .no_sample {
     background: #172532;
   }
 
