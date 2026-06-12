@@ -21,13 +21,16 @@ use crate::observability::{
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
-    SymbolFlow, SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary,
+    SymbolFlow, SymbolIntegrity, SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary,
     SymbolProblemSeverity, SymbolSession, SymbolSubscriptionCounts, SymbolTelemetryReadModel,
     SymbolTelemetrySnapshot, SymbolTelemetryStore,
 };
 use crate::universe::FuturesContract;
 
 const DEFAULT_RELAY_EVENT_LEDGER_LIMIT: usize = 128;
+const DASHBOARD_TIMELINE_HISTORY_WINDOW_MILLIS: u64 = 300_000;
+const DASHBOARD_TIMELINE_HISTORY_MIN_SAMPLE_INTERVAL_MILLIS: u64 = 2_000;
+const DASHBOARD_TIMELINE_HISTORY_SAMPLE_LIMIT: usize = 180;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DashboardSnapshot {
@@ -35,6 +38,8 @@ pub struct DashboardSnapshot {
     pub metrics: MetricsSnapshot,
     pub global: SymbolMetricsSummary,
     pub timeline: DashboardTimelineSample,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_history: Option<DashboardTimelineHistory>,
     pub page: SymbolMetricsSnapshot,
     pub events: Vec<RelayEvent>,
 }
@@ -64,6 +69,78 @@ pub struct DashboardTimelineSample {
     pub global: DashboardTimelineScope,
     pub subscribed: DashboardTimelineScope,
     pub exchanges: BTreeMap<String, DashboardTimelineScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardTimelineSymbolSample {
+    pub severity: DashboardTimelineSeverity,
+    pub receive_gap_ms: Option<u64>,
+    pub avg_receive_gap_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardTimelineHistorySample {
+    pub sampled_at_unix_millis: u64,
+    pub sample: DashboardTimelineSample,
+    pub symbols: BTreeMap<String, DashboardTimelineSymbolSample>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DashboardTimelineHistory {
+    pub samples: Vec<DashboardTimelineHistorySample>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DashboardTimelineHistoryCache {
+    samples: VecDeque<DashboardTimelineHistorySample>,
+}
+
+impl Default for DashboardTimelineHistoryCache {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(DASHBOARD_TIMELINE_HISTORY_SAMPLE_LIMIT),
+        }
+    }
+}
+
+impl DashboardTimelineHistoryCache {
+    pub(crate) fn push(&mut self, sample: DashboardTimelineHistorySample) {
+        let sampled_at = sample.sampled_at_unix_millis;
+        self.prune(sampled_at);
+        if let Some(last) = self.samples.back_mut() {
+            if sampled_at
+                <= last
+                    .sampled_at_unix_millis
+                    .saturating_add(DASHBOARD_TIMELINE_HISTORY_MIN_SAMPLE_INTERVAL_MILLIS)
+            {
+                *last = sample;
+                self.prune(sampled_at);
+                return;
+            }
+        }
+        self.samples.push_back(sample);
+        self.prune(sampled_at);
+    }
+
+    pub(crate) fn snapshot(&self) -> DashboardTimelineHistory {
+        DashboardTimelineHistory {
+            samples: self.samples.iter().cloned().collect(),
+        }
+    }
+
+    fn prune(&mut self, now_unix_millis: u64) {
+        let cutoff = now_unix_millis.saturating_sub(DASHBOARD_TIMELINE_HISTORY_WINDOW_MILLIS);
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| sample.sampled_at_unix_millis < cutoff)
+        {
+            self.samples.pop_front();
+        }
+        while self.samples.len() > DASHBOARD_TIMELINE_HISTORY_SAMPLE_LIMIT {
+            self.samples.pop_front();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,9 +173,31 @@ impl DashboardSnapshotInputs {
             metrics: self.metrics,
             global: global_page.summary,
             timeline,
+            timeline_history: None,
             page,
             events: self.events,
         }
+    }
+
+    #[must_use]
+    pub fn into_dashboard_snapshot_and_timeline_sample(
+        self,
+        query: &SymbolMetricsQuery,
+    ) -> (DashboardSnapshot, DashboardTimelineHistorySample) {
+        let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
+        let timeline_sample =
+            dashboard_timeline_history_sample(self.received_at_unix_millis, &global_page.symbols);
+        let page = self.symbol_metrics_snapshot(query);
+        let dashboard = DashboardSnapshot {
+            received_at_unix_millis: self.received_at_unix_millis,
+            metrics: self.metrics,
+            global: global_page.summary,
+            timeline: timeline_sample.sample.clone(),
+            timeline_history: None,
+            page,
+            events: self.events,
+        };
+        (dashboard, timeline_sample)
     }
 }
 
@@ -183,6 +282,50 @@ fn dashboard_timeline(rows: &[SymbolTelemetrySnapshot]) -> DashboardTimelineSamp
             .into_iter()
             .map(|(exchange, rows)| (exchange, dashboard_scope_for(rows)))
             .collect(),
+    }
+}
+
+fn dashboard_timeline_history_sample(
+    sampled_at_unix_millis: u64,
+    rows: &[SymbolTelemetrySnapshot],
+) -> DashboardTimelineHistorySample {
+    DashboardTimelineHistorySample {
+        sampled_at_unix_millis,
+        sample: dashboard_timeline(rows),
+        symbols: rows
+            .iter()
+            .map(|row| {
+                (
+                    row.symbol.clone(),
+                    DashboardTimelineSymbolSample {
+                        severity: dashboard_symbol_severity(row),
+                        receive_gap_ms: row.receive_gap_ms,
+                        avg_receive_gap_ms: row.avg_receive_gap_ms,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn dashboard_symbol_severity(row: &SymbolTelemetrySnapshot) -> DashboardTimelineSeverity {
+    if row.session == SymbolSession::Closed {
+        DashboardTimelineSeverity::Closed
+    } else if row.problem_severity == SymbolProblemSeverity::Bad
+        || row.integrity == SymbolIntegrity::ConfirmedGap
+    {
+        DashboardTimelineSeverity::Bad
+    } else if row.problem_severity == SymbolProblemSeverity::Warn
+        || row.integrity == SymbolIntegrity::Suspected
+        || row.flow == SymbolFlow::Silent
+    {
+        DashboardTimelineSeverity::Warn
+    } else if row.flow == SymbolFlow::NoSample {
+        DashboardTimelineSeverity::NoSample
+    } else if row.session == SymbolSession::Unknown {
+        DashboardTimelineSeverity::Unknown
+    } else {
+        DashboardTimelineSeverity::Live
     }
 }
 

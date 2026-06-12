@@ -171,9 +171,37 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert_eq!(dashboard["metrics"]["upstream_stage"], "connecting");
     assert_eq!(dashboard["global"]["total"], 0);
     assert!(dashboard["timeline"]["global"]["total"].is_number());
+    assert!(dashboard.get("timeline_history").is_none());
     assert!(dashboard.get("global_symbols").is_none());
     assert_eq!(dashboard["page"]["summary"]["total"], 0);
     assert_eq!(dashboard["page"]["symbols"].as_array().unwrap().len(), 0);
+
+    let dashboard_with_history = wait_for_http_json(
+        metrics_addr,
+        "/dashboard-snapshot?timeline_history=1",
+        &mut child,
+    );
+    assert_eq!(
+        dashboard_with_history["timeline_history"]["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        dashboard_with_history["timeline_history"]["samples"][0]["sampled_at_unix_millis"]
+            .is_number()
+    );
+    assert_eq!(
+        dashboard_with_history["timeline_history"]["samples"][0]["sample"]["global"]["total"],
+        0
+    );
+    assert!(
+        dashboard_with_history["timeline_history"]["samples"][0]["symbols"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

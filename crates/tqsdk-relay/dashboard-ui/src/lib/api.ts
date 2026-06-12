@@ -1,4 +1,8 @@
-import type { DashboardSnapshot, RelaySnapshot } from './types';
+import type { DashboardSnapshot, DashboardTimelineHistory, RelaySnapshot, TimelineHistory } from './types';
+
+export type FetchRelaySnapshotOptions = {
+  includeTimelineHistory?: boolean;
+};
 
 export class DashboardApiError extends Error {
   constructor(
@@ -23,10 +27,30 @@ async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
-export async function fetchRelaySnapshot(signal?: AbortSignal) {
-  const snapshot = await fetchJson<DashboardSnapshot>('/dashboard-snapshot', signal);
-  return {
+export async function fetchRelaySnapshot(
+  signal?: AbortSignal,
+  options: FetchRelaySnapshotOptions = {},
+) {
+  const path = options.includeTimelineHistory
+    ? '/dashboard-snapshot?timeline_history=1'
+    : '/dashboard-snapshot';
+  const snapshot = await fetchJson<DashboardSnapshot>(path, signal);
+  const relaySnapshot: RelaySnapshot = {
     ...snapshot,
     receivedAt: snapshot.received_at_unix_millis || Date.now(),
-  } satisfies RelaySnapshot;
+  };
+  if (snapshot.timeline_history) {
+    relaySnapshot.timelineHistory = normalizeTimelineHistory(snapshot.timeline_history);
+  }
+  return relaySnapshot;
+}
+
+function normalizeTimelineHistory(history: DashboardTimelineHistory): TimelineHistory {
+  return {
+    samples: history.samples.map((sample) => ({
+      sampledAt: sample.sampled_at_unix_millis,
+      sample: sample.sample,
+      symbols: sample.symbols,
+    })),
+  };
 }

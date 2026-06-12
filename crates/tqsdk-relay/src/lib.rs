@@ -33,8 +33,10 @@ pub use config::{
 };
 pub use diagnostics::RelayStartupReport;
 pub use engine::{
-    DashboardSnapshot, DashboardSnapshotInputs, DownstreamFrame, RelayEngine, RelayEvent,
-    RelayEventKind,
+    DashboardSnapshot, DashboardSnapshotInputs, DashboardTimelineHistory,
+    DashboardTimelineHistorySample, DashboardTimelineSample, DashboardTimelineScope,
+    DashboardTimelineSeverity, DashboardTimelineSymbolSample, DownstreamFrame, RelayEngine,
+    RelayEvent, RelayEventKind,
 };
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
