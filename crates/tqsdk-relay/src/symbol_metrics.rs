@@ -449,11 +449,10 @@ fn record_tick_continuity(telemetry: &mut SymbolTelemetry, tick_id: i64, receive
             telemetry.duplicate_rows = telemetry.duplicate_rows.saturating_add(1);
         }
         Some(last_tick_id) if tick_id < last_tick_id => {
-            if tick_id == 0 || last_tick_id.saturating_sub(tick_id) > 100 {
-                telemetry.last_tick_id = Some(tick_id);
-            } else {
-                telemetry.out_of_order_rows = telemetry.out_of_order_rows.saturating_add(1);
-            }
+            // 忽略历史行更新或 diff null 删除。
+            // 协议层的 data dict 是稀疏的，旧 ID 的更新或删除是正常现象，
+            // 并非 head 倒序或流重置。由于 last_id 永远单调递增，
+            // 收到小于 last_tick_id 的 row id 不应触发乱序告警或重置游标。
         }
         Some(last_tick_id) => {
             if tick_id > last_tick_id.saturating_add(1) {

@@ -230,7 +230,7 @@ fn duplicate_tick_ids_are_counted_without_advancing_last_id() {
 }
 
 #[test]
-fn out_of_order_tick_ids_are_counted_without_advancing_last_id() {
+fn out_of_order_tick_ids_are_ignored_as_historical_updates() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);
     store.record_universe(["SHFE.au2602"], now - 2_000);
@@ -254,11 +254,11 @@ fn out_of_order_tick_ids_are_counted_without_advancing_last_id() {
     let symbol = &snapshot.symbols[0];
 
     assert_eq!(symbol.last_tick_id, Some(4));
-    assert_eq!(symbol.out_of_order_rows, 1);
+    assert_eq!(symbol.out_of_order_rows, 0);
     assert_eq!(symbol.duplicate_rows, 0);
     assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Live);
     assert!(!symbol.problem);
-    assert_eq!(snapshot.summary.out_of_order_rows, 1);
+    assert_eq!(snapshot.summary.out_of_order_rows, 0);
 }
 
 #[test]
