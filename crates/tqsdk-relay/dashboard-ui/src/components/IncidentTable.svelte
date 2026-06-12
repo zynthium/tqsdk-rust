@@ -64,6 +64,7 @@
     color: var(--relay-muted);
     font-size: 11px;
     text-align: center;
+    flex: 1;
   }
 
   .event-list {
@@ -72,6 +73,12 @@
     margin-top: 8px;
     display: grid;
     gap: 5px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--relay-line) 80%, transparent) transparent;
   }
 
   .event-item {

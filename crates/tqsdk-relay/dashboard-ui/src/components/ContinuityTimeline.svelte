@@ -331,6 +331,10 @@
     grid-auto-rows: 27px;
     align-items: center;
     column-gap: 2px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
   }
 
   .row-label {
