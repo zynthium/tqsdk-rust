@@ -223,9 +223,9 @@
           onclick={() => definition.exchange && toggleExchange(definition.exchange)}
         >
           <span class="caret">{definition.expanded ? '-' : '+'}</span>
-          <span>{definition.label}</span>
-          <em>{definition.summary}</em>
-          <strong>{averageLatencyLabel(definition)}</strong>
+          <span class="name">{definition.label}</span>
+          <em class="summary">{definition.summary}</em>
+          <strong class="latency">{averageLatencyLabel(definition)}</strong>
         </button>
       {:else if definition.kind === 'symbol' && definition.row}
         <div
@@ -236,16 +236,16 @@
         >
           <span class="symbol-name">{definition.label}</span>
           <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
-          <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
-          <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
+          <em class="tick">Tick {formatNumber(definition.row.ticks_ingested)}</em>
+          <em class="sub">订阅 {formatNumber(subscriberCount(definition.row))}</em>
           <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
-          <strong>{averageLatencyLabel(definition)}</strong>
+          <strong class="latency">{averageLatencyLabel(definition)}</strong>
         </div>
       {:else}
-        <div class="row-label" title={definition.label}>
-          <span>{definition.label}</span>
-          <em>{definition.summary}</em>
-          <strong>{averageLatencyLabel(definition)}</strong>
+        <div class="row-label summary-row" title={definition.label}>
+          <span class="name">{definition.label}</span>
+          <em class="summary">{definition.summary}</em>
+          <strong class="latency">{averageLatencyLabel(definition)}</strong>
         </div>
       {/if}
       {#if viewMode === 'blocks'}
@@ -378,9 +378,10 @@
   .row-label {
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    /* 1: caret, 2: name, 3: badge, 4: tick, 5: sub, 6: risk, 7: latency */
+    grid-template-columns: 12px minmax(0, 1fr) 42px 64px 50px 38px 46px;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     overflow: hidden;
     color: #c3dbe6;
     font-size: 11px;
@@ -398,15 +399,24 @@
     color: var(--relay-info);
   }
 
-  .exchange-row {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-  }
-
+  .summary-row .name { grid-column: 1 / 3; }
+  .summary-row .summary,
+  .exchange-row .summary { grid-column: 3 / 7; text-align: right; }
+  
+  .exchange-row .caret { grid-column: 1; }
+  .exchange-row .name { grid-column: 2; }
+  
   .symbol-row {
-    grid-template-columns: minmax(72px, 1fr) 44px 66px 52px 42px auto;
-    padding-left: 12px;
     color: #9fc4d5;
   }
+  
+  .symbol-row .symbol-name { grid-column: 2; }
+  .symbol-row .badge { grid-column: 3; }
+  .symbol-row .tick { grid-column: 4; text-align: right; }
+  .symbol-row .sub { grid-column: 5; text-align: right; }
+  .symbol-row .risk { grid-column: 6; text-align: center; }
+  
+  .row-label .latency { grid-column: 7; text-align: right; }
 
   .caret {
     width: 12px;
@@ -568,11 +578,21 @@
       --timeline-label-width: 320px;
     }
 
-    .symbol-row {
-      grid-template-columns: minmax(72px, 1fr) 44px 64px;
+    .row-label {
+      /* 1: caret, 2: name, 3: badge, 4: tick, 5: latency */
+      grid-template-columns: 12px minmax(0, 1fr) 42px 64px 46px;
     }
 
-    .symbol-row em:nth-of-type(n + 2),
+    .summary-row .summary,
+    .exchange-row .summary {
+      grid-column: 3 / 5;
+    }
+
+    .row-label .latency {
+      grid-column: 5;
+    }
+
+    .symbol-row .sub,
     .symbol-row .risk {
       display: none;
     }
