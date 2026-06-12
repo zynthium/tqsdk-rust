@@ -10,6 +10,10 @@
   } = $props();
   let viewMode = $state<'blocks' | 'sparkline'>('blocks');
   let expandedExchanges = $state<string[]>([]);
+  let hoveredSymbol = $state<string | null>(null);
+  let tooltipX = $state(0);
+  let tooltipY = $state(0);
+  let hoveredSymbolRow = $derived(rows.find((row) => row.symbol === hoveredSymbol) ?? null);
 
   type TimelineDefinition = {
     kind: 'summary' | 'exchange' | 'symbol';
@@ -145,6 +149,17 @@
     return `${definition.label} ${cellSeverity(definition, sample)} ${definition.summary} ${formatDuration(latency(definition, sample))}`;
   }
 
+  function handleHover(definition: TimelineDefinition, event: MouseEvent) {
+    if (definition.kind !== 'symbol' || !definition.row) return;
+    hoveredSymbol = definition.row.symbol;
+    tooltipX = event.clientX + 15;
+    tooltipY = Math.min(event.clientY + 15, window.innerHeight - 160);
+  }
+
+  function clearHover() {
+    hoveredSymbol = null;
+  }
+
   function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
     return [...exchangeSymbols]
       .sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1))
@@ -222,10 +237,12 @@
       {/if}
       {#if viewMode === 'blocks'}
         {#each buckets as bucket, index (`${definition.key}:${index}`)}
-          <span class={`cell ${cellClass(definition, bucket)}`} title={cellTitle(definition, bucket)}></span>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span class={`cell ${cellClass(definition, bucket)}`} title={cellTitle(definition, bucket)} onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}></span>
         {/each}
       {:else}
-        <div class="sparkline-container" style="grid-column: 2 / -1;">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="sparkline-container" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}>
           <svg viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
             <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="2" fill="none" vector-effect="non-scaling-stroke"/>
           </svg>
@@ -234,6 +251,19 @@
     {/each}
     <div class="axis"><span>-5m</span><span>now</span></div>
   </div>
+  {#if hoveredSymbolRow}
+    <div class="health-tooltip" style={`left: ${tooltipX}px; top: ${tooltipY}px;`}>
+      <div class="tooltip-title">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
+      <div class="tooltip-body">
+        <div><span>接收延迟</span><b>{formatDuration(hoveredSymbolRow.receive_gap_ms)}</b></div>
+        <div><span>行情延时</span><b>{formatDuration(hoveredSymbolRow.market_time_lag_ms)}</b></div>
+        <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
+        {#if hoveredSymbolRow.last_invalid_row_error}
+          <div class="error" title={hoveredSymbolRow.last_invalid_row_error}>{hoveredSymbolRow.last_invalid_row_error}</div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -315,7 +345,7 @@
   }
 
   .timeline {
-    --timeline-label-width: clamp(180px, 16vw, 240px);
+    --timeline-label-width: clamp(320px, 22vw, 380px);
 
     position: relative;
     z-index: 1;
@@ -465,9 +495,56 @@
     font-size: 9px;
   }
 
+  .health-tooltip {
+    position: fixed;
+    z-index: 10000;
+    pointer-events: none;
+    display: flex;
+    min-width: 200px;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 8px;
+    background: rgba(15, 33, 48, 0.95);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    color: var(--relay-text);
+    font-size: 11px;
+    padding: 10px 14px;
+  }
+
+  .tooltip-title {
+    margin-bottom: 2px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--relay-info);
+    font-weight: 700;
+    padding-bottom: 6px;
+  }
+
+  .tooltip-body div {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .tooltip-body span {
+    color: var(--relay-muted);
+  }
+
+  .tooltip-body b {
+    color: var(--relay-text);
+  }
+
+  .tooltip-body .error {
+    max-width: 250px;
+    margin-top: 4px;
+    color: var(--relay-bad);
+    white-space: normal;
+    word-break: break-all;
+  }
+
   @media (max-width: 900px) {
     .timeline {
-      --timeline-label-width: 120px;
+      --timeline-label-width: 260px;
     }
 
     .symbol-row {
