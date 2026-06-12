@@ -903,6 +903,34 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_peeks_before_json_decode() {
+    use tqsdk_relay::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+
+        socket.send_text("{not-json".to_string()).unwrap();
+        expect_peek_message(&mut socket);
+    })
+    .unwrap();
+    let chart = UpstreamTickChart::new("relay-upstream-tick-SHFE_au2602-1", ["SHFE.au2602"], 1)
+        .unwrap();
+
+    let mut source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+
+    assert!(source.next_update().await.is_none());
+    server.join();
+}
+
+#[tokio::test]
 async fn configured_upstream_source_subscribes_configured_futures_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
     use websocket_support::TestWebSocketServer;
