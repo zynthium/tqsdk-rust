@@ -16,13 +16,6 @@ export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming' | '
 export type FlowIdleHealth = 'no_sample' | 'live' | 'warn' | 'critical';
 export type DecodeHealth = 'healthy' | 'degraded';
 
-export type SymbolSort =
-  | 'symbol_asc'
-  | 'status_asc'
-  | 'receive_gap_ms_desc'
-  | 'market_time_lag_ms_desc'
-  | 'ticks_ingested_desc';
-
 export type RelayMetrics = {
   upstream_stage: UpstreamStage;
   upstream_stage_started_unix_secs: number | null;
@@ -161,22 +154,6 @@ export type RelaySnapshot = {
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
   receivedAt: number;
-};
-
-export type DashboardFilters = {
-  statuses: SymbolStatus[];
-  sessions: SymbolSession[];
-  subscribedOnly: boolean;
-  q: string;
-  sort: SymbolSort;
-  limit: number;
-};
-
-export type DashboardViewState = {
-  paused: boolean;
-  fullscreen: boolean;
-  selectedExchange: string | null;
-  filters: DashboardFilters;
 };
 
 export type IntegrityModel = {

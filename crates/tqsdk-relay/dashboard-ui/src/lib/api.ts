@@ -1,4 +1,4 @@
-import type { DashboardFilters, DashboardSnapshot, RelaySnapshot } from './types';
+import type { DashboardSnapshot, RelaySnapshot } from './types';
 
 export class DashboardApiError extends Error {
   constructor(
@@ -8,17 +8,6 @@ export class DashboardApiError extends Error {
   ) {
     super(message);
   }
-}
-
-export function symbolQueryString(filters: DashboardFilters): string {
-  const params = new URLSearchParams();
-  if (filters.statuses.length > 0) params.set('status', filters.statuses.join(','));
-  if (filters.sessions.length > 0) params.set('session', filters.sessions.join(','));
-  if (filters.subscribedOnly) params.set('subscribed', '1');
-  if (filters.q.trim()) params.set('q', filters.q.trim());
-  params.set('sort', filters.sort);
-  params.set('limit', String(filters.limit));
-  return params.toString();
 }
 
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -34,9 +23,8 @@ async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
-export async function fetchRelaySnapshot(filters: DashboardFilters, signal?: AbortSignal) {
-  const query = symbolQueryString(filters);
-  const snapshot = await fetchJson<DashboardSnapshot>(`/dashboard-snapshot?${query}`, signal);
+export async function fetchRelaySnapshot(signal?: AbortSignal) {
+  const snapshot = await fetchJson<DashboardSnapshot>('/dashboard-snapshot', signal);
   return {
     ...snapshot,
     receivedAt: snapshot.received_at_unix_millis || Date.now(),

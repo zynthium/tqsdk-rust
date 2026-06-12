@@ -330,7 +330,9 @@ open http://127.0.0.1:7789/dashboard
 数据解码告警和完整性异常计数的统一口径；响应同时包含 `market_time_lag_ms`，用于辅助
 判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
 远月合约；`avg_receive_gap_ms` 在服务端按每个合约的 tick 接收时间单独计算，用于
-dashboard 重点观察近期平均 tick 接收延迟。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
+dashboard 重点观察近期平均 tick 接收延迟。无官方名称的连续合约代码会做最小中文
+展示名兜底，例如 `KQ.m@SHFE.au` 显示为“黄金主连”、`KQ.i@SHFE.au` 显示为
+“黄金加权”。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
 `last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
 `out_of_order_rows` 和 `last_gap_unix_millis`。这些是原始 TQ DIFF row-id 诊断字段：
 DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不单独证明市场数据缺失，
@@ -338,8 +340,8 @@ DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不�
 chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污染诊断计数。
 
 `/dashboard-snapshot` 返回 dashboard 使用的原子 JSON 快照：同一次响应内包含
-`metrics`、未过滤的 `global` 汇总、后端聚合的 `timeline` 时间带样本、按当前筛选、
-排序、分页裁剪后的 `page` 列表，以及进程内固定容量 `events` 事件账本。`timeline`
+`metrics`、未过滤的 `global` 汇总、后端聚合的 `timeline` 时间带样本、可按 API query
+筛选、排序、分页裁剪的 `page` 列表，以及进程内固定容量 `events` 事件账本。`timeline`
 包含 `global`、`subscribed` 和 `exchanges` 三层聚合，每层都有
 `severity`、`total`、`problem`、`receive_gap_ms` 和 `avg_receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
 全量合约行。事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow
@@ -349,7 +351,7 @@ incident 和 decode incident。`/symbol-metrics` 继续作为合约列表调试�
 `/dashboard` 是内置只读运维页面，每 `2s` 串行轮询 `/dashboard-snapshot`。它不连接 relay
 market websocket，不创建下游订阅，也不会触发额外行情命令。页面由
 `crates/tqsdk-relay/dashboard-ui/` 的 Svelte 5 + Vite + Tailwind CSS 4 工程构建，
-生产产物提交在 `crates/tqsdk-relay/src/dashboard-dist/`，Rust 侧将该目录嵌入到
+生产产物生成在 `crates/tqsdk-relay/dashboard-ui/dist/`，Rust 侧将该目录嵌入到
 relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。JSON 观测端点继续返回
 `Cache-Control: no-store`；内置静态资源返回 `Cache-Control: public, max-age=60`，允许
 浏览器复用已构建的 JS/CSS。页面顶部会展示上游阶段、transport 连接、订阅发送、frame
@@ -358,8 +360,8 @@ decode health 和最近 frame 时间；tick / quote ingest 热路径只更新当
 telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
 metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
 排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
-未过滤 `global` / `timeline` 聚合数据，搜索/状态筛选只影响可见列表，不会把异常过滤成
-健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
+未过滤 `global` / `timeline` 聚合数据；连续性热力图内的合约搜索、只看开盘中品种、
+不分交易所和 Blocks / Sparkline 视图模式保存在浏览器本地，只影响展开后的当前 page 合约行，不会把异常过滤成健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
 和解码健康为主。连续性热力图的全局、订阅和交易所行使用后端聚合样本；展开交易所后仍可
 查看当前 page rows 中该交易所的品种，并只为这些当前页品种保存 5 分钟 bounded

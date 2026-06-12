@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 
-const distRoot = new URL('../../src/dashboard-dist/', import.meta.url);
+const distRoot = new URL('../dist/', import.meta.url);
 const budgets = [
   { label: 'app.js raw', file: 'assets/app.js', max: 100 * 1024, gzip: false },
   { label: 'app.js gzip', file: 'assets/app.js', max: 36 * 1024, gzip: true },
