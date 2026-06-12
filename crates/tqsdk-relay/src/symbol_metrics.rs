@@ -75,6 +75,7 @@ pub enum SymbolSort {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolMetricsQuery {
     pub statuses: Vec<SymbolStatus>,
+    pub sessions: Vec<SymbolSession>,
     pub subscribed_only: bool,
     pub q: Option<String>,
     pub sort: SymbolSort,
@@ -96,6 +97,7 @@ impl SymbolMetricsQuery {
             let value = decode_query_component(value)?;
             match key.as_str() {
                 "status" => parsed.statuses = parse_statuses(&value)?,
+                "session" => parsed.sessions = parse_sessions(&value)?,
                 "subscribed" => parsed.subscribed_only = parse_bool(&value)?,
                 "q" => {
                     if !value.is_empty() {
@@ -410,6 +412,7 @@ impl SymbolTelemetryReadModel {
         let mut symbols = unfiltered
             .into_iter()
             .filter(|symbol| query.statuses.is_empty() || query.statuses.contains(&symbol.status))
+            .filter(|symbol| query.sessions.is_empty() || query.sessions.contains(&symbol.session))
             .filter(|symbol| !query.subscribed_only || symbol.subscribed)
             .filter(|symbol| {
                 needle.as_ref().is_none_or(|needle| {
@@ -896,6 +899,22 @@ fn parse_statuses(value: &str) -> Result<Vec<SymbolStatus>, &'static str> {
         return Ok(Vec::new());
     }
     value.split(',').map(parse_status).collect()
+}
+
+fn parse_sessions(value: &str) -> Result<Vec<SymbolSession>, &'static str> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value.split(',').map(parse_session).collect()
+}
+
+fn parse_session(value: &str) -> Result<SymbolSession, &'static str> {
+    match value {
+        "open" => Ok(SymbolSession::Open),
+        "closed" => Ok(SymbolSession::Closed),
+        "unknown" => Ok(SymbolSession::Unknown),
+        _ => Err("invalid session"),
+    }
 }
 
 fn parse_status(value: &str) -> Result<SymbolStatus, &'static str> {
