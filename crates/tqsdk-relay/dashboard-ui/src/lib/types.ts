@@ -101,9 +101,7 @@ export type SymbolRow = {
   market_time_lag_ms: number | null;
   last_receive_unix_millis: number | null;
   last_tick_datetime_ns: number | null;
-  last_price: number | null;
-  last_volume: number | null;
-  last_open_interest: number | null;
+
   invalid_rows: number;
   last_invalid_row_error: string | null;
 };
@@ -160,7 +158,6 @@ export type DashboardViewState = {
   paused: boolean;
   fullscreen: boolean;
   selectedExchange: string | null;
-  selectedSymbol: string | null;
   filters: DashboardFilters;
 };
 
