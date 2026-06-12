@@ -146,14 +146,14 @@
   .node-copy {
     min-width: 0;
     display: grid;
-    gap: 1px;
+    gap: 3px;
   }
 
   .name {
     overflow: hidden;
     color: #c6dbe5;
     font-size: 10px;
-    line-height: 1.05;
+    line-height: 1.1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -163,7 +163,7 @@
     color: var(--relay-live);
     font-size: 13px;
     font-weight: 850;
-    line-height: 1.12;
+    line-height: 1.2;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -184,7 +184,7 @@
     overflow: hidden;
     color: color-mix(in srgb, var(--relay-muted) 78%, transparent);
     font-size: 9px;
-    line-height: 1.05;
+    line-height: 1.1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }

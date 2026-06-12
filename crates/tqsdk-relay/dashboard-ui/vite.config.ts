@@ -20,7 +20,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../src/dashboard-dist',
+    outDir: 'dist',
     emptyOutDir: true,
     cssCodeSplit: false,
     minify: 'oxc',

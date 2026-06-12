@@ -93,12 +93,12 @@
   {#if model}
     <IntegrityHero {model} />
     <section class="pipeline-kpi-row">
-      <RelayPipeline {model} />
       <div class="kpi-strip">
         <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
         <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
         <MetricCard label="下游客户端" value={model.metrics.downstream_clients} tone="info" icon="▤" />
       </div>
+      <RelayPipeline {model} />
     </section>
     <section class="dashboard-main">
       <div class="main-left">

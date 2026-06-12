@@ -2,7 +2,7 @@
 
 use include_dir::{Dir, include_dir};
 
-static DASHBOARD_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/dashboard-dist");
+static DASHBOARD_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/dashboard-ui/dist");
 
 #[derive(Debug, Clone, Copy)]
 pub struct DashboardAsset<'a> {
