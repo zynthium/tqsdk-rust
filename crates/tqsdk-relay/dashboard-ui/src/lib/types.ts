@@ -165,6 +165,7 @@ export type RelaySnapshot = {
 
 export type DashboardFilters = {
   statuses: SymbolStatus[];
+  sessions: SymbolSession[];
   subscribedOnly: boolean;
   q: string;
   sort: SymbolSort;

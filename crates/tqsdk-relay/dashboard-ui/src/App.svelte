@@ -31,6 +31,7 @@
     selectedExchange: null,
     filters: {
       statuses: [],
+      sessions: [],
       subscribedOnly: false,
       q: '',
       sort: 'receive_gap_ms_desc',

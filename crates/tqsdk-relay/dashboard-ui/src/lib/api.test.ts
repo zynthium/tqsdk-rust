@@ -7,6 +7,7 @@ describe('symbolQueryString', () => {
     expect(
       symbolQueryString({
         statuses: ['live', 'stale'],
+        sessions: [],
         subscribedOnly: true,
         q: '沪金 2602',
         sort: 'receive_gap_ms_desc',
@@ -21,6 +22,7 @@ describe('symbolQueryString', () => {
     expect(
       symbolQueryString({
         statuses: [],
+        sessions: [],
         subscribedOnly: false,
         q: '',
         sort: 'symbol_asc',
@@ -35,6 +37,7 @@ describe('symbolQueryString', () => {
 
     const snapshot = await fetchRelaySnapshot({
       statuses: [],
+      sessions: [],
       subscribedOnly: false,
       q: '',
       sort: 'symbol_asc',
