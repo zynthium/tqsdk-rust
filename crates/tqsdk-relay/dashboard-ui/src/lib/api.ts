@@ -13,6 +13,7 @@ export class DashboardApiError extends Error {
 export function symbolQueryString(filters: DashboardFilters): string {
   const params = new URLSearchParams();
   if (filters.statuses.length > 0) params.set('status', filters.statuses.join(','));
+  if (filters.sessions.length > 0) params.set('session', filters.sessions.join(','));
   if (filters.subscribedOnly) params.set('subscribed', '1');
   if (filters.q.trim()) params.set('q', filters.q.trim());
   params.set('sort', filters.sort);

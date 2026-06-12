@@ -15,6 +15,12 @@
     { value: 'inactive', label: '未纳入' },
   ];
 
+  const sessions: Array<{ value: SymbolSession; label: string }> = [
+    { value: 'open', label: '开盘' },
+    { value: 'closed', label: '未开盘' },
+    { value: 'unknown', label: '未知' },
+  ];
+
   const sorts: Array<{ value: SymbolSort; label: string }> = [
     { value: 'receive_gap_ms_desc', label: '接收延迟' },
     { value: 'market_time_lag_ms_desc', label: '行情时间延迟' },
@@ -30,6 +36,12 @@
     filters.statuses = checked
       ? [...new Set([...filters.statuses, status])]
       : filters.statuses.filter((item) => item !== status);
+  }
+
+  function toggleSession(session: SymbolSession, checked: boolean) {
+    filters.sessions = checked
+      ? [...new Set([...filters.sessions, session])]
+      : filters.sessions.filter((item) => item !== session);
   }
 
   function checkboxValue(event: Event): boolean {
@@ -63,6 +75,18 @@
             onchange={(event) => toggleStatus(status.value, checkboxValue(event))}
           />
           <span>{status.label}</span>
+        </label>
+      {/each}
+      <div class="divider"></div>
+      {#each sessions as session}
+        <label>
+          <input
+            type="checkbox"
+            checked={filters.sessions.includes(session.value)}
+            disabled={disabled}
+            onchange={(event) => toggleSession(session.value, checkboxValue(event))}
+          />
+          <span>{session.label}</span>
         </label>
       {/each}
     </div>
@@ -154,7 +178,16 @@
   .status-set {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 8px;
+  }
+
+  .divider {
+    width: 1px;
+    height: 14px;
+    background: var(--relay-line-soft);
+    margin: 0 4px;
+    opacity: 0.5;
   }
 
   label {
