@@ -464,6 +464,64 @@ fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
 }
 
 #[test]
+fn symbol_snapshot_exposes_server_side_average_receive_gap() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 10_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 3_000) * 1_000_000).unwrap(), 610.0),
+        now - 3_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(2, i64::try_from((now - 2_000) * 1_000_000).unwrap(), 611.0),
+        now - 2_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(3, i64::try_from((now - 500) * 1_000_000).unwrap(), 612.0),
+        now - 500,
+    );
+
+    let snapshot = store.snapshot_at(now, 30_000, &Default::default(), &Default::default());
+
+    assert_eq!(snapshot.symbols[0].receive_gap_ms, Some(500));
+    assert_eq!(snapshot.symbols[0].avg_receive_gap_ms, Some(1_250));
+}
+
+#[test]
+fn average_receive_gap_uses_tick_receive_times_not_quote_updates() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602"], now - 10_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 3_000) * 1_000_000).unwrap(), 610.0),
+        now - 3_000,
+    );
+    store.record_quote_at(
+        "SHFE.au2602",
+        &quote(
+            "SHFE.au2602",
+            i64::try_from((now - 2_500) * 1_000_000).unwrap(),
+            610.5,
+        ),
+        now - 2_500,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(2, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 611.0),
+        now - 1_000,
+    );
+
+    let snapshot = store.snapshot_at(now, 30_000, &Default::default(), &Default::default());
+
+    assert_eq!(snapshot.symbols[0].receive_gap_ms, Some(1_000));
+    assert_eq!(snapshot.symbols[0].avg_receive_gap_ms, Some(2_000));
+}
+
+#[test]
 fn snapshot_summary_stays_global_when_query_filters_and_limits_rows() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);

@@ -98,6 +98,7 @@ export type SymbolRow = {
   out_of_order_rows: number;
   last_gap_unix_millis: number | null;
   receive_gap_ms: number | null;
+  avg_receive_gap_ms: number | null;
   market_time_lag_ms: number | null;
   last_receive_unix_millis: number | null;
   last_tick_datetime_ns: number | null;
@@ -134,6 +135,7 @@ export type DashboardTimelineScope = {
   total: number;
   problem: number;
   receive_gap_ms: number | null;
+  avg_receive_gap_ms: number | null;
 };
 
 export type DashboardTimelineSample = {
@@ -233,6 +235,7 @@ export type TimelineSample = {
 export type TimelineSymbolSample = {
   severity: TimelineSeverity;
   receive_gap_ms: number | null;
+  avg_receive_gap_ms: number | null;
 };
 
 export type TimelineHistory = {
