@@ -236,10 +236,10 @@
         >
           <span class="symbol-name">{definition.label}</span>
           <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
-          <em class="avg-latency">{averageLatencyLabel(definition)}</em>
           <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
           <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
           <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
+          <strong>{averageLatencyLabel(definition)}</strong>
         </div>
       {:else}
         <div class="row-label" title={definition.label}>
@@ -403,7 +403,7 @@
   }
 
   .symbol-row {
-    grid-template-columns: minmax(72px, 1fr) 44px 62px 66px 52px 42px;
+    grid-template-columns: minmax(72px, 1fr) 44px 66px 52px 42px auto;
     padding-left: 12px;
     color: #9fc4d5;
   }
