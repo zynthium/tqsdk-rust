@@ -341,7 +341,10 @@ chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污�
 
 `/dashboard-snapshot` 返回 dashboard 使用的原子 JSON 快照：同一次响应内包含
 `metrics`、未过滤的 `global` 汇总、后端聚合的 `timeline` 时间带样本、可按 API query
-筛选、排序、分页裁剪的 `page` 列表，以及进程内固定容量 `events` 事件账本。`timeline`
+筛选、排序、分页裁剪的 `page` 列表，以及进程内固定容量 `events` 事件账本。传入
+`timeline_history=1` 时，响应会额外包含服务端进程内缓存的最近 5 分钟压缩
+`timeline_history`，供 dashboard 刷新页面后恢复热力图；普通轮询不携带该历史，避免
+每 2 秒重复传输完整窗口。`timeline`
 包含 `global`、`subscribed` 和 `exchanges` 三层聚合，每层都有
 `severity`、`total`、`problem`、`receive_gap_ms` 和 `avg_receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
 全量合约行。事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow
@@ -359,13 +362,14 @@ relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。JSON 观测�
 decode health 和最近 frame 时间；tick / quote ingest 热路径只更新当前合约的轻量
 telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
 metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
-排序、裁剪和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
+排序、裁剪、timeline history 更新和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
 未过滤 `global` / `timeline` 聚合数据；连续性热力图内的合约搜索、只看开盘中品种、
 不分交易所和 Blocks / Sparkline 视图模式保存在浏览器本地，只影响展开后的当前 page 合约行，不会把异常过滤成健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
 和解码健康为主。连续性热力图的全局、订阅和交易所行使用后端聚合样本；展开交易所后仍可
 查看当前 page rows 中该交易所的品种，并只为这些当前页品种保存 5 分钟 bounded
-symbol-level 历史，不恢复全量 `global_symbols` 轮询。近期平均 tick 接收延迟在服务端逐
+symbol-level 历史，不恢复全量 `global_symbols` 轮询。刷新页面时，首轮请求会用
+`timeline_history=1` 拉取服务端缓存的 5 分钟窗口，后续轮询只追加当前样本。近期平均 tick 接收延迟在服务端逐
 合约计算，dashboard 逐行显示 `avg_receive_gap_ms`，不在前端用时间桶反推平均值。页面不展示静态假 sparkline；全屏按钮调用
 浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和
 frame/event 计数，不推断上游补历史百分比。
@@ -428,7 +432,8 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
   连接不会被主动断开。
 - 产品发现模式依赖 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 做 relay 内部 metadata 查询；这些
   凭证不会下发给下游 SDK 客户端。
-- 当前缓存是内存态。重启 relay 会丢失 tick、quote 和 K 线物化状态。
+- 当前缓存是内存态。重启 relay 会丢失 tick、quote、K 线物化状态和 dashboard
+  5 分钟热力图历史。
 
 ## 开发
 

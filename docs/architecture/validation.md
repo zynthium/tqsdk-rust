@@ -108,7 +108,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
 | 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、resolved TQKQ target-position helper、`TargetPos` intent API 和 curated `advanced::*` 下钻命名空间 |
-| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、frame/event idle 秒级告警、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
+| 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、dashboard 5 分钟 `timeline_history` 服务端内存缓存、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、frame/event idle 秒级告警、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
 
 修改 relay dashboard、dashboard UI 或 symbol telemetry 时，补充运行：
@@ -131,9 +131,10 @@ dashboard job 用 `pnpm run build` 和 `pnpm run size-check` 防止源码、内�
 JS/CSS 预算回退。dashboard 页面不得展示会被误认为
 真实 telemetry 的静态 trend/sparkline；全屏控制必须使用浏览器 fullscreen API 并在不支持
 时禁用；完整合约表应展示当前过滤页内全部行，不再额外截断到关注列表或时间带行数。连续性
-热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本；交易所展开行只能维护当前
-page rows 的 bounded symbol history，不应恢复轮询全量 `global_symbols` 后再在前端重算全市场
-时间带。连续性面板里的近期平均 tick 接收延迟必须来自服务端逐合约计算的
+热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本；页面首轮可通过
+`/dashboard-snapshot?timeline_history=1` 恢复服务端缓存的 5 分钟压缩历史，后续普通轮询
+不得重复携带完整历史；交易所展开行只能维护当前 page rows 的 bounded symbol history，
+不应恢复轮询全量 `global_symbols` 后再在前端重算全市场时间带。连续性面板里的近期平均 tick 接收延迟必须来自服务端逐合约计算的
 `avg_receive_gap_ms`，UI 只负责逐品种同规格展示，不应从前端 bucket 再推导平均延迟。
 
 推荐的 V1 回归入口：

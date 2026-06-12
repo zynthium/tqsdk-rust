@@ -137,11 +137,22 @@ export type DashboardTimelineSample = {
   exchanges: Record<string, DashboardTimelineScope>;
 };
 
+export type DashboardTimelineHistorySample = {
+  sampled_at_unix_millis: number;
+  sample: DashboardTimelineSample;
+  symbols: Record<string, TimelineSymbolSample>;
+};
+
+export type DashboardTimelineHistory = {
+  samples: DashboardTimelineHistorySample[];
+};
+
 export type DashboardSnapshot = {
   received_at_unix_millis: number;
   metrics: RelayMetrics;
   global: SymbolMetricsSummary;
   timeline: DashboardTimelineSample;
+  timeline_history?: DashboardTimelineHistory;
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
 };
@@ -151,9 +162,11 @@ export type RelaySnapshot = {
   metrics: RelayMetrics;
   global: SymbolMetricsSummary;
   timeline: DashboardTimelineSample;
+  timeline_history?: DashboardTimelineHistory;
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
   receivedAt: number;
+  timelineHistory?: TimelineHistory;
 };
 
 export type IntegrityModel = {

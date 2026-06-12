@@ -24,6 +24,7 @@
   let incidents = $state(createIncidentLedger());
   let error = $state<string | null>(null);
   let sequence = $state(0);
+  let timelineHistoryLoaded = $state(false);
   let view = $state({
     paused: false,
     fullscreen: false,
@@ -34,11 +35,19 @@
   async function load(signal?: AbortSignal) {
     const requestId = sequence + 1;
     sequence = requestId;
-    const next = await fetchRelaySnapshot(signal);
+    const includeTimelineHistory = !timelineHistoryLoaded;
+    const next = await fetchRelaySnapshot(signal, { includeTimelineHistory });
     if (requestId !== sequence) return;
     snapshot = next;
     const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global);
-    pushTimelineSample(timeline, next.timeline, next.receivedAt, next.page.symbols);
+    if (includeTimelineHistory) {
+      timelineHistoryLoaded = true;
+    }
+    if (next.timelineHistory) {
+      timeline = next.timelineHistory;
+    } else {
+      pushTimelineSample(timeline, next.timeline, next.receivedAt, next.page.symbols);
+    }
     pushHistorySample(history, nextModel);
     updateIncidentLedger(incidents, nextModel);
     model = nextModel;
