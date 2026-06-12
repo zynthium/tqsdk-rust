@@ -132,8 +132,9 @@ dashboard UI 依赖必须固定到明确版本，不能使用 `"latest"`。Svelt
 `pnpm run size-check` 防止 dashboard JS/CSS 预算回退。dashboard 页面不得展示会被误认为
 真实 telemetry 的静态 trend/sparkline；全屏控制必须使用浏览器 fullscreen API 并在不支持
 时禁用；完整合约表应展示当前过滤页内全部行，不再额外截断到关注列表或时间带行数。连续性
-热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本，不应恢复轮询全量
-`global_symbols` 后再在前端重算全市场时间带。
+热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本；交易所展开行只能维护当前
+page rows 的 bounded symbol history，不应恢复轮询全量 `global_symbols` 后再在前端重算全市场
+时间带。
 
 推荐的 V1 回归入口：
 

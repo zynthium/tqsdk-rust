@@ -58,10 +58,11 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   expect(pipelineTextLayout.every((node) => node.textInsideNode)).toBe(true);
   await expect(page.getByText('活跃合约健康排行')).toHaveCount(0);
   const timeline = page.getByTestId('continuity-timeline');
-  await expect(timeline.getByText('DCE')).toBeVisible();
-  await expect(timeline.getByText('1/1')).toBeVisible();
-  await expect(timeline.getByText('豆粕2609')).toHaveCount(0);
-  await expect(timeline.getByText(/Tick/)).toHaveCount(0);
+  const dceRow = timeline.getByRole('button', { name: /DCE.*1\/1/ });
+  await expect(dceRow).toBeVisible();
+  await dceRow.click();
+  await expect(timeline.getByText('豆粕2609')).toBeVisible();
+  await expect(timeline.getByText(/Tick/)).toBeVisible();
   await expect(page.getByText('完整性趋势')).toBeVisible();
 });
 
@@ -90,9 +91,10 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   await expect(page.getByTestId('attention-list')).toBeVisible();
   await expect(page.getByTestId('symbol-health-table')).toHaveCount(0);
   const timeline = page.getByTestId('continuity-timeline');
-  await expect(timeline.getByText('DCE')).toBeVisible();
-  await expect(timeline.getByTitle('DCE', { exact: true }).getByText('40/120')).toBeVisible();
-  await expect(timeline.getByTestId('timeline-symbol-row')).toHaveCount(0);
+  const dceRow = timeline.getByRole('button', { name: /DCE.*40\/120/ });
+  await expect(dceRow).toBeVisible();
+  await dceRow.click();
+  await expect(timeline.getByTestId('timeline-symbol-row')).toHaveCount(30);
 
   const viewport = await page.evaluate(() => ({
     documentClientHeight: document.documentElement.clientHeight,
@@ -131,7 +133,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   expect(sticky.cardHeaderTop).toBeLessThanOrEqual(12);
 });
 
-test('continuity timeline renders aggregate exchange rows', async ({ page }) => {
+test('continuity timeline renders aggregate exchange rows and expands page symbols', async ({ page }) => {
   await page.route('**/dashboard-snapshot?*', async (route) => {
     await route.fulfill({
       json: dashboardSnapshot(
@@ -161,10 +163,11 @@ test('continuity timeline renders aggregate exchange rows', async ({ page }) => 
 
   await page.goto('/dashboard/');
   const timeline = page.getByTestId('continuity-timeline');
-  await expect(timeline.getByText('DCE')).toBeVisible();
-  await expect(timeline.getByText('1/2')).toBeVisible();
-  await expect(timeline.getByText('豆粕2609')).toHaveCount(0);
-  await expect(timeline.getByText('铁矿2609')).toHaveCount(0);
+  const dceRow = timeline.getByRole('button', { name: /DCE.*1\/2/ });
+  await expect(dceRow).toBeVisible();
+  await dceRow.click();
+  await expect(timeline.getByText('豆粕2609')).toBeVisible();
+  await expect(timeline.getByText('铁矿2609')).toBeVisible();
   const labelColumnWidth = await timeline.locator('.timeline').evaluate((element) => {
     const firstColumn = getComputedStyle(element).gridTemplateColumns.split(' ')[0];
     return Number.parseFloat(firstColumn);

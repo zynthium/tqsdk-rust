@@ -10,11 +10,11 @@
   import RelayPipeline from './components/RelayPipeline.svelte';
   import { untrack } from 'svelte';
   import { fetchRelaySnapshot } from './lib/api';
-  import { relayEventsToIncidents } from './lib/incident-ledger';
+  import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
   import { createHistory, pushHistorySample } from './lib/history';
   import { deriveIntegrity } from './lib/integrity-model';
   import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
-  import type { DashboardViewState, IntegrityModel, LocalIncident, RelaySnapshot } from './lib/types';
+  import type { DashboardViewState, IntegrityModel, RelaySnapshot } from './lib/types';
 
   const POLL_INTERVAL_MS = 2_000;
 
@@ -22,7 +22,7 @@
   let model = $state<IntegrityModel | null>(null);
   let timeline = $state(createTimelineHistory());
   let history = $state(createHistory());
-  let incidents = $state<LocalIncident[]>([]);
+  let incidents = $state(createIncidentLedger());
   let error = $state<string | null>(null);
   let sequence = $state(0);
   let view = $state<DashboardViewState>({
@@ -48,9 +48,9 @@
     if (requestId !== sequence) return;
     snapshot = next;
     const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global);
-    pushTimelineSample(timeline, next.timeline, next.receivedAt);
+    pushTimelineSample(timeline, next.timeline, next.receivedAt, next.page.symbols);
     pushHistorySample(history, nextModel);
-    incidents = relayEventsToIncidents(next.events);
+    updateIncidentLedger(incidents, nextModel);
     model = nextModel;
     error = null;
   }
@@ -106,7 +106,7 @@
       <div class="main-right">
         <AttentionList rows={model.problems} />
         <IntegrityTrend {history} {model} />
-        <IncidentTable {incidents} />
+        <IncidentTable incidents={incidents.incidents} />
       </div>
     </section>
   {:else}

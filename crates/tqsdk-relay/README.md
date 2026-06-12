@@ -360,8 +360,9 @@ metrics、symbol read model、订阅快照和事件账本，随后在锁外完�
 未过滤 `global` / `timeline` 聚合数据，搜索/状态筛选只影响可见列表，不会把异常过滤成
 健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
-和解码健康为主。连续性热力图只渲染全局、订阅和交易所聚合行；当前页合约行只用于关注
-列表，不再保存 5 分钟全量 symbol-level 历史。页面不展示静态假 sparkline；全屏按钮调用
+和解码健康为主。连续性热力图的全局、订阅和交易所行使用后端聚合样本；展开交易所后仍可
+查看当前 page rows 中该交易所的品种，并只为这些当前页品种保存 5 分钟 bounded
+symbol-level 历史，不恢复全量 `global_symbols` 轮询。页面不展示静态假 sparkline；全屏按钮调用
 浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和
 frame/event 计数，不推断上游补历史百分比。
 

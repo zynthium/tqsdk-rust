@@ -227,6 +227,12 @@ export type RuntimeHistory = {
 export type TimelineSample = {
   sampledAt: number;
   sample: DashboardTimelineSample;
+  symbols: Record<string, TimelineSymbolSample>;
+};
+
+export type TimelineSymbolSample = {
+  severity: TimelineSeverity;
+  receive_gap_ms: number | null;
 };
 
 export type TimelineHistory = {
