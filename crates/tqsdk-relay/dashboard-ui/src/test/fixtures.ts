@@ -67,6 +67,7 @@ export function row(overrides: Partial<SymbolRow> = {}): SymbolRow {
     out_of_order_rows: 0,
     last_gap_unix_millis: null,
     receive_gap_ms: 900,
+    avg_receive_gap_ms: 900,
     market_time_lag_ms: 1200,
     last_receive_unix_millis: NOW - 900,
     last_tick_datetime_ns: (NOW - 1200) * 1_000_000,
@@ -126,7 +127,13 @@ function exchangeOf(symbol: string): string {
 
 function timelineScope(rows: SymbolRow[]): DashboardTimelineScope {
   if (rows.length === 0) {
-    return { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null };
+    return {
+      severity: 'unknown',
+      total: 0,
+      problem: 0,
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+    };
   }
   let severity: TimelineSeverity = 'live';
   if (rows.every((item) => item.session === 'closed')) severity = 'closed';
@@ -142,6 +149,13 @@ function timelineScope(rows: SymbolRow[]): DashboardTimelineScope {
       if (item.receive_gap_ms == null) return max;
       return max == null ? item.receive_gap_ms : Math.max(max, item.receive_gap_ms);
     }, null),
+    avg_receive_gap_ms: (() => {
+      const gaps = rows
+        .map((item) => item.avg_receive_gap_ms)
+        .filter((gap): gap is number => gap != null);
+      if (gaps.length === 0) return null;
+      return Math.floor(gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length);
+    })(),
   };
 }
 

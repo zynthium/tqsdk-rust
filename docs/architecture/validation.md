@@ -134,7 +134,8 @@ dashboard UI 依赖必须固定到明确版本，不能使用 `"latest"`。Svelt
 时禁用；完整合约表应展示当前过滤页内全部行，不再额外截断到关注列表或时间带行数。连续性
 热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本；交易所展开行只能维护当前
 page rows 的 bounded symbol history，不应恢复轮询全量 `global_symbols` 后再在前端重算全市场
-时间带。
+时间带。连续性面板里的近期平均 tick 接收延迟必须来自服务端逐合约计算的
+`avg_receive_gap_ms`，UI 只负责逐品种同规格展示，不应从前端 bucket 再推导平均延迟。
 
 推荐的 V1 回归入口：
 

@@ -25,6 +25,7 @@
     expanded?: boolean;
     severity: (sample: TimelineSample) => TimelineSeverity | undefined;
     latency: (sample: TimelineSample) => number | null | undefined;
+    averageLatency: (sample: TimelineSample) => number | null | undefined;
     emptySeverity?: TimelineSeverity;
   };
 
@@ -54,6 +55,7 @@
       summary: scopeSummary(latestSample?.sample.global),
       severity: (sample) => sample.sample.global.severity,
       latency: (sample) => sample.sample.global.receive_gap_ms,
+      averageLatency: (sample) => sample.sample.global.avg_receive_gap_ms,
     },
     {
       kind: 'summary',
@@ -62,6 +64,7 @@
       summary: scopeSummary(latestSample?.sample.subscribed),
       severity: (sample) => sample.sample.subscribed.severity,
       latency: (sample) => sample.sample.subscribed.receive_gap_ms,
+      averageLatency: (sample) => sample.sample.subscribed.avg_receive_gap_ms,
     },
     ...exchangeRows.flatMap((exchange) => {
       const scope = latestSample?.sample.exchanges[exchange];
@@ -76,6 +79,7 @@
         expanded,
         severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
         latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
+        averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
         emptySeverity: scope?.severity ?? 'no_sample',
       };
       if (!expanded) return [exchangeDefinition];
@@ -89,6 +93,7 @@
           row,
           severity: (sample: TimelineSample) => sample.symbols[row.symbol]?.severity,
           latency: (sample: TimelineSample) => sample.symbols[row.symbol]?.receive_gap_ms,
+          averageLatency: (sample: TimelineSample) => sample.symbols[row.symbol]?.avg_receive_gap_ms,
           emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
         })),
       ];
@@ -114,22 +119,9 @@
     return definition.latency(sample) ?? 0;
   }
 
-  function averageLatency(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): number | null {
-    let total = 0;
-    let count = 0;
-    for (const bucket of buckets) {
-      if (!bucket) continue;
-      const value = definition.latency(bucket);
-      if (value == null) continue;
-      total += value;
-      count += 1;
-    }
-    return count === 0 ? null : total / count;
-  }
-
   function averageLatencyLabel(definition: TimelineDefinition): string {
-    const average = averageLatency(definition, buckets);
-    return average == null ? '均 --' : `均 ${formatDuration(average)}`;
+    const average = latestSample ? definition.averageLatency(latestSample) : null;
+    return average == null ? '⌁ --' : `⌁ ${formatDuration(average)}`;
   }
 
   function sparklinePath(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): string {
@@ -277,6 +269,7 @@
       <div class="tooltip-title">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
       <div class="tooltip-body">
         <div><span>接收延迟</span><b>{formatDuration(hoveredSymbolRow.receive_gap_ms)}</b></div>
+        <div><span>平均接收</span><b>{formatDuration(hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
         <div><span>行情延时</span><b>{formatDuration(hoveredSymbolRow.market_time_lag_ms)}</b></div>
         <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
         {#if hoveredSymbolRow.last_invalid_row_error}
@@ -366,7 +359,7 @@
   }
 
   .timeline {
-    --timeline-label-width: clamp(380px, 26vw, 460px);
+    --timeline-label-width: clamp(320px, 22vw, 380px);
 
     position: relative;
     z-index: 1;
@@ -410,7 +403,7 @@
   }
 
   .symbol-row {
-    grid-template-columns: minmax(72px, 1fr) 46px 64px 72px 56px 50px;
+    grid-template-columns: minmax(72px, 1fr) 44px 62px 66px 52px 42px;
     padding-left: 12px;
     color: #9fc4d5;
   }

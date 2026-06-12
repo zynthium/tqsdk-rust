@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -9,6 +9,8 @@ use tqsdk_core::{
 };
 
 use crate::protocol::RelayTickRow;
+
+const RECEIVE_GAP_SAMPLE_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,7 +130,9 @@ pub struct SymbolTelemetry {
     out_of_order_rows: u64,
     last_gap_unix_millis: Option<u64>,
     last_receive_unix_millis: Option<u64>,
+    last_tick_receive_unix_millis: Option<u64>,
     last_tick_datetime_ns: Option<i64>,
+    receive_gap_samples_ms: VecDeque<u64>,
 
     invalid_rows: u64,
     last_invalid_row_error: Option<String>,
@@ -206,6 +210,7 @@ pub struct SymbolTelemetrySnapshot {
     pub out_of_order_rows: u64,
     pub last_gap_unix_millis: Option<u64>,
     pub receive_gap_ms: Option<u64>,
+    pub avg_receive_gap_ms: Option<u64>,
     pub market_time_lag_ms: Option<u64>,
     pub last_receive_unix_millis: Option<u64>,
     pub last_tick_datetime_ns: Option<i64>,
@@ -262,9 +267,13 @@ impl SymbolTelemetryStore {
             telemetry.source_epoch = self.source_epoch;
             telemetry.last_tick_id = None;
         }
+        if let Some(last_receive) = telemetry.last_tick_receive_unix_millis {
+            record_receive_gap_sample(telemetry, receive_unix_millis.saturating_sub(last_receive));
+        }
         record_tick_continuity(telemetry, row.id, receive_unix_millis);
         telemetry.ticks_ingested = telemetry.ticks_ingested.saturating_add(1);
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
+        telemetry.last_tick_receive_unix_millis = Some(receive_unix_millis);
         telemetry.last_tick_datetime_ns = Some(row.datetime);
     }
 
@@ -386,6 +395,7 @@ impl SymbolTelemetryReadModel {
                 out_of_order_rows: telemetry.out_of_order_rows,
                 last_gap_unix_millis: telemetry.last_gap_unix_millis,
                 receive_gap_ms,
+                avg_receive_gap_ms: average_receive_gap_ms(&telemetry.receive_gap_samples_ms),
                 market_time_lag_ms,
                 last_receive_unix_millis: telemetry.last_receive_unix_millis,
                 last_tick_datetime_ns: telemetry.last_tick_datetime_ns,
@@ -452,6 +462,27 @@ fn record_tick_continuity(telemetry: &mut SymbolTelemetry, tick_id: i64, receive
             telemetry.last_tick_id = Some(tick_id);
         }
     }
+}
+
+fn record_receive_gap_sample(telemetry: &mut SymbolTelemetry, gap_ms: u64) {
+    if telemetry.receive_gap_samples_ms.len() >= RECEIVE_GAP_SAMPLE_LIMIT {
+        telemetry.receive_gap_samples_ms.pop_front();
+    }
+    telemetry.receive_gap_samples_ms.push_back(gap_ms);
+}
+
+fn average_receive_gap_ms(samples: &VecDeque<u64>) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let total = samples.iter().fold(0_u128, |total, sample| {
+        total.saturating_add(u128::from(*sample))
+    });
+    Some(
+        (total / samples.len() as u128)
+            .try_into()
+            .unwrap_or(u64::MAX),
+    )
 }
 
 fn problem_severity_for(

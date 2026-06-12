@@ -9,14 +9,14 @@ describe('ContinuityTimeline', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
-        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 0 },
-        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null },
+        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         exchanges: {
-          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
         },
       },
       symbols: {
-        'SHFE.au2602': { severity: 'closed', receive_gap_ms: 0 },
+        'SHFE.au2602': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
       },
     };
 
@@ -44,14 +44,14 @@ describe('ContinuityTimeline', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
-        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
-        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null },
+        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         exchanges: {
-          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
         },
       },
       symbols: {
-        'SHFE.al2608': { severity: 'closed', receive_gap_ms: 0 },
+        'SHFE.al2608': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
       },
     };
     const view = render(ContinuityTimeline, {
@@ -76,14 +76,14 @@ describe('ContinuityTimeline', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
-        global: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
-        subscribed: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
+        global: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
         exchanges: {
-          SHFE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
+          SHFE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
         },
       },
       symbols: {
-        'SHFE.au2602': { severity: 'warn', receive_gap_ms: 31_000 },
+        'SHFE.au2602': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
       },
     };
     const view = render(ContinuityTimeline, {
@@ -97,6 +97,7 @@ describe('ContinuityTimeline', () => {
           problem: true,
           problem_severity: 'warn',
           receive_gap_ms: 31_000,
+          avg_receive_gap_ms: 24_000,
           market_time_lag_ms: 45_000,
           ticks_ingested: 1_234,
           quote_subscriber_count: 1,
@@ -109,7 +110,7 @@ describe('ContinuityTimeline', () => {
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
     expect(view.getByText('SHFE')).toBeTruthy();
     expect(view.getAllByText('1/1').length).toBeGreaterThanOrEqual(3);
-    expect(view.getAllByText('均 31.0s').length).toBeGreaterThanOrEqual(3);
+    expect(view.getAllByText('⌁ 24.0s').length).toBeGreaterThanOrEqual(3);
     expect(view.getByText('沪金2602')).toBeTruthy();
     expect(view.getByText('Tick 1,234')).toBeTruthy();
     expect(view.getByText('订阅 3')).toBeTruthy();
@@ -120,6 +121,7 @@ describe('ContinuityTimeline', () => {
     await fireEvent.mouseMove(cells[cells.length - 1]);
 
     expect(view.getByText('31.0s')).toBeTruthy();
+    expect(view.getByText('24.0s')).toBeTruthy();
     expect(view.getByText('45.0s')).toBeTruthy();
     expect(view.getByText(/异常记录数/)).toBeTruthy();
     expect(view.getByText('7')).toBeTruthy();

@@ -34,6 +34,7 @@ export function pushTimelineSample(
         {
           severity: timelineSeverityForRow(row),
           receive_gap_ms: row.receive_gap_ms,
+          avg_receive_gap_ms: row.avg_receive_gap_ms,
         },
       ]),
     ),

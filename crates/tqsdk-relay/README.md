@@ -329,7 +329,8 @@ open http://127.0.0.1:7789/dashboard
 每个合约还会返回 `problem` 和 `problem_severity`，作为 dashboard 关注列表、风险排序、
 数据解码告警和完整性异常计数的统一口径；响应同时包含 `market_time_lag_ms`，用于辅助
 判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
-远月合约。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
+远月合约；`avg_receive_gap_ms` 在服务端按每个合约的 tick 接收时间单独计算，用于
+dashboard 重点观察近期平均 tick 接收延迟。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
 `last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
 `out_of_order_rows` 和 `last_gap_unix_millis`。这些是原始 TQ DIFF row-id 诊断字段：
 DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不单独证明市场数据缺失，
@@ -340,7 +341,7 @@ chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污�
 `metrics`、未过滤的 `global` 汇总、后端聚合的 `timeline` 时间带样本、按当前筛选、
 排序、分页裁剪后的 `page` 列表，以及进程内固定容量 `events` 事件账本。`timeline`
 包含 `global`、`subscribed` 和 `exchanges` 三层聚合，每层都有
-`severity`、`total`、`problem` 和 `receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
+`severity`、`total`、`problem`、`receive_gap_ms` 和 `avg_receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
 全量合约行。事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow
 incident 和 decode incident。`/symbol-metrics` 继续作为合约列表调试端点；它的
 `summary` 仍是过滤前的全局汇总，`symbols` 只代表当前查询页。
@@ -362,7 +363,8 @@ metrics、symbol read model、订阅快照和事件账本，随后在锁外完�
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
 和解码健康为主。连续性热力图的全局、订阅和交易所行使用后端聚合样本；展开交易所后仍可
 查看当前 page rows 中该交易所的品种，并只为这些当前页品种保存 5 分钟 bounded
-symbol-level 历史，不恢复全量 `global_symbols` 轮询。页面不展示静态假 sparkline；全屏按钮调用
+symbol-level 历史，不恢复全量 `global_symbols` 轮询。近期平均 tick 接收延迟在服务端逐
+合约计算，dashboard 逐行显示 `avg_receive_gap_ms`，不在前端用时间桶反推平均值。页面不展示静态假 sparkline；全屏按钮调用
 浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和
 frame/event 计数，不推断上游补历史百分比。
 

@@ -56,6 +56,7 @@ pub struct DashboardTimelineScope {
     pub total: usize,
     pub problem: usize,
     pub receive_gap_ms: Option<u64>,
+    pub avg_receive_gap_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -118,6 +119,8 @@ fn dashboard_scope_for<'a>(
     let mut all_closed = true;
     let mut all_no_sample = true;
     let mut max_receive_gap_ms = None::<u64>;
+    let mut avg_gap_total = 0_u128;
+    let mut avg_gap_count = 0_u128;
 
     for row in rows {
         total += 1;
@@ -130,6 +133,10 @@ fn dashboard_scope_for<'a>(
         all_no_sample &= row.flow == SymbolFlow::NoSample;
         if let Some(gap) = row.receive_gap_ms {
             max_receive_gap_ms = Some(max_receive_gap_ms.map_or(gap, |current| current.max(gap)));
+        }
+        if let Some(gap) = row.avg_receive_gap_ms {
+            avg_gap_total = avg_gap_total.saturating_add(u128::from(gap));
+            avg_gap_count = avg_gap_count.saturating_add(1);
         }
     }
 
@@ -152,6 +159,11 @@ fn dashboard_scope_for<'a>(
         total,
         problem,
         receive_gap_ms: max_receive_gap_ms,
+        avg_receive_gap_ms: (avg_gap_count > 0).then(|| {
+            (avg_gap_total / avg_gap_count)
+                .try_into()
+                .unwrap_or(u64::MAX)
+        }),
     }
 }
 
