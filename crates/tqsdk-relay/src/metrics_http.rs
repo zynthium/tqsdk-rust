@@ -193,7 +193,7 @@ async fn write_bytes_response(
         "HTTP/1.1 {status} {}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
-Cache-Control: no-store\r\n\
+Cache-Control: public, max-age=60\r\n\
 X-Content-Type-Options: nosniff\r\n\
 Connection: close\r\n\
 \r\n",

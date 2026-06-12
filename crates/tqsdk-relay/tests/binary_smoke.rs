@@ -170,7 +170,8 @@ fn relay_binary_serves_health_and_metrics_json() {
     assert!(dashboard["received_at_unix_millis"].is_number());
     assert_eq!(dashboard["metrics"]["upstream_stage"], "connecting");
     assert_eq!(dashboard["global"]["total"], 0);
-    assert_eq!(dashboard["global_symbols"].as_array().unwrap().len(), 0);
+    assert!(dashboard["timeline"]["global"]["total"].is_number());
+    assert!(dashboard.get("global_symbols").is_none());
     assert_eq!(dashboard["page"]["summary"]["total"], 0);
     assert_eq!(dashboard["page"]["symbols"].as_array().unwrap().len(), 0);
 }
@@ -244,10 +245,17 @@ fn relay_binary_serves_embedded_dashboard_assets() {
 
     let js = wait_for_http_response(metrics_addr, "/dashboard/assets/app.js", &mut child);
     assert!(js.starts_with("HTTP/1.1 200"));
+    assert!(js.contains("Content-Type: application/javascript; charset=utf-8"));
+    assert!(js.contains("Cache-Control: public, max-age=60"));
+    assert!(!js.contains("Cache-Control: no-store"));
     assert!(js.contains("/dashboard-snapshot"));
     assert!(js.contains("instrument_name"));
     assert!(js.contains("closed"));
     assert!(js.contains("upstream_stage"));
+
+    let dashboard = wait_for_http_response(metrics_addr, "/dashboard-snapshot", &mut child);
+    assert!(dashboard.starts_with("HTTP/1.1 200"));
+    assert!(dashboard.contains("Cache-Control: no-store"));
 
     let css = wait_for_http_response(metrics_addr, "/dashboard/assets/app.css", &mut child);
     assert!(css.starts_with("HTTP/1.1 200"));
