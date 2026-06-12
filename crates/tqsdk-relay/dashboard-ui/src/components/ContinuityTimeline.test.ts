@@ -1,4 +1,4 @@
-import { render } from '@testing-library/svelte';
+import { fireEvent, render } from '@testing-library/svelte';
 import { describe, expect, it } from 'vitest';
 import ContinuityTimeline from './ContinuityTimeline.svelte';
 import type { TimelineSample } from '../lib/types';
@@ -15,6 +15,9 @@ describe('ContinuityTimeline', () => {
           SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
         },
       },
+      symbols: {
+        'SHFE.au2602': { severity: 'closed', receive_gap_ms: 0 },
+      },
     };
 
     const view = render(ContinuityTimeline, {
@@ -30,6 +33,7 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
+    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
     const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
@@ -45,6 +49,9 @@ describe('ContinuityTimeline', () => {
         exchanges: {
           SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0 },
         },
+      },
+      symbols: {
+        'SHFE.al2608': { severity: 'closed', receive_gap_ms: 0 },
       },
     };
     const view = render(ContinuityTimeline, {
@@ -65,7 +72,7 @@ describe('ContinuityTimeline', () => {
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('shows aggregate exchange counts inside heatmap rows', () => {
+  it('shows aggregate exchange counts inside heatmap rows', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
@@ -74,6 +81,9 @@ describe('ContinuityTimeline', () => {
         exchanges: {
           SHFE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000 },
         },
+      },
+      symbols: {
+        'SHFE.au2602': { severity: 'warn', receive_gap_ms: 31_000 },
       },
     };
     const view = render(ContinuityTimeline, {
@@ -96,8 +106,13 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
+    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
     expect(view.getByText('SHFE')).toBeTruthy();
     expect(view.getAllByText('1/1').length).toBeGreaterThanOrEqual(3);
-    expect(view.baseElement.querySelectorAll('.cell.warn')).toHaveLength(3);
+    expect(view.getByText('沪金2602')).toBeTruthy();
+    expect(view.getByText('Tick 1,234')).toBeTruthy();
+    expect(view.getByText('订阅 3')).toBeTruthy();
+    expect(view.getByText('warn')).toBeTruthy();
+    expect(view.baseElement.querySelectorAll('.cell.warn')).toHaveLength(4);
   });
 });

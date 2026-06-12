@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { EXCHANGES } from '../lib/timeline';
+  import { EXCHANGES, exchangeOf } from '../lib/timeline';
   import { formatDuration, formatNumber } from '../lib/format';
+  import { statusLabel } from '../lib/integrity-model';
   import type { DashboardTimelineScope, SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
 
   let { buckets, rows = [] }: {
@@ -8,11 +9,18 @@
     rows?: SymbolRow[];
   } = $props();
   let viewMode = $state<'blocks' | 'sparkline'>('blocks');
+  let expandedExchanges = $state<string[]>([]);
 
   type TimelineDefinition = {
+    kind: 'summary' | 'exchange' | 'symbol';
     key: string;
     label: string;
-    scope: (sample: TimelineSample) => DashboardTimelineScope | undefined;
+    summary: string;
+    row?: SymbolRow;
+    exchange?: string;
+    expanded?: boolean;
+    severity: (sample: TimelineSample) => TimelineSeverity | undefined;
+    latency: (sample: TimelineSample) => number | null | undefined;
     emptySeverity?: TimelineSeverity;
   };
 
@@ -35,20 +43,54 @@
     ),
   );
   let definitions = $derived<TimelineDefinition[]>([
-    { key: 'global', label: '全局', scope: (sample) => sample.sample.global },
-    { key: 'subscribed', label: '订阅', scope: (sample) => sample.sample.subscribed },
-    ...exchangeRows.map((exchange) => ({
-      key: `exchange:${exchange}`,
-      label: exchange,
-      scope: (sample: TimelineSample) => sample.sample.exchanges[exchange],
-      emptySeverity: latestSample?.sample.exchanges[exchange]?.severity ?? 'no_sample',
-    })),
+    {
+      kind: 'summary',
+      key: 'global',
+      label: '全局',
+      summary: scopeSummary(latestSample?.sample.global),
+      severity: (sample) => sample.sample.global.severity,
+      latency: (sample) => sample.sample.global.receive_gap_ms,
+    },
+    {
+      kind: 'summary',
+      key: 'subscribed',
+      label: '订阅',
+      summary: scopeSummary(latestSample?.sample.subscribed),
+      severity: (sample) => sample.sample.subscribed.severity,
+      latency: (sample) => sample.sample.subscribed.receive_gap_ms,
+    },
+    ...exchangeRows.flatMap((exchange) => {
+      const scope = latestSample?.sample.exchanges[exchange];
+      const exchangeSymbols = orderedSymbolRows(rows.filter((row) => exchangeOf(row.symbol) === exchange));
+      const expanded = expandedExchanges.includes(exchange);
+      const exchangeDefinition: TimelineDefinition = {
+        kind: 'exchange',
+        key: `exchange:${exchange}`,
+        label: exchange,
+        summary: scopeSummary(scope),
+        exchange,
+        expanded,
+        severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
+        latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
+        emptySeverity: scope?.severity ?? 'no_sample',
+      };
+      if (!expanded) return [exchangeDefinition];
+      return [
+        exchangeDefinition,
+        ...exchangeSymbols.map((row): TimelineDefinition => ({
+          kind: 'symbol',
+          key: `symbol:${row.symbol}`,
+          label: row.instrument_name ?? row.symbol,
+          summary: row.subscribed ? '订阅' : '',
+          row,
+          severity: (sample: TimelineSample) => sample.symbols[row.symbol]?.severity,
+          latency: (sample: TimelineSample) => sample.symbols[row.symbol]?.receive_gap_ms,
+          emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
+        })),
+      ];
+    }),
   ]);
   let pageRowCount = $derived(rows.length);
-
-  function currentScope(definition: TimelineDefinition): DashboardTimelineScope | undefined {
-    return latestSample ? definition.scope(latestSample) : undefined;
-  }
 
   function scopeSummary(scope: DashboardTimelineScope | undefined): string {
     if (!scope) return '0/0';
@@ -56,7 +98,7 @@
   }
 
   function cellSeverity(definition: TimelineDefinition, sample: TimelineSample | null): TimelineSeverity {
-    return sample ? (definition.scope(sample)?.severity ?? 'unknown') : (definition.emptySeverity ?? 'no_sample');
+    return sample ? (definition.severity(sample) ?? 'unknown') : (definition.emptySeverity ?? 'no_sample');
   }
 
   function cellClass(definition: TimelineDefinition, sample: TimelineSample | null) {
@@ -65,7 +107,7 @@
   }
 
   function latency(definition: TimelineDefinition, sample: TimelineSample): number {
-    return definition.scope(sample)?.receive_gap_ms ?? 0;
+    return definition.latency(sample) ?? 0;
   }
 
   function sparklinePath(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): string {
@@ -100,9 +142,31 @@
 
   function cellTitle(definition: TimelineDefinition, sample: TimelineSample | null): string {
     if (!sample) return `${definition.label} 无样本`;
-    const scope = definition.scope(sample);
-    if (!scope) return `${definition.label} 未知`;
-    return `${definition.label} ${scope.severity} ${scopeSummary(scope)} ${formatDuration(scope.receive_gap_ms)}`;
+    return `${definition.label} ${cellSeverity(definition, sample)} ${definition.summary} ${formatDuration(latency(definition, sample))}`;
+  }
+
+  function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
+    return [...exchangeSymbols]
+      .sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1))
+      .slice(0, 30);
+  }
+
+  function severityRank(row: SymbolRow): number {
+    if (row.problem_severity === 'bad') return 0;
+    if (row.problem_severity === 'warn') return 1;
+    if (row.subscribed) return 2;
+    if (row.problem_severity === 'closed') return 4;
+    return 3;
+  }
+
+  function subscriberCount(row: SymbolRow): number {
+    return row.quote_subscriber_count + row.chart_subscriber_count;
+  }
+
+  function toggleExchange(exchange: string) {
+    expandedExchanges = expandedExchanges.includes(exchange)
+      ? expandedExchanges.filter((item) => item !== exchange)
+      : [...expandedExchanges, exchange];
   }
 </script>
 
@@ -124,10 +188,38 @@
   <div class="timeline-meta">当前页 {formatNumber(pageRowCount)} 行</div>
   <div class="timeline" style={`--bucket-count:${buckets.length}`}>
     {#each definitions as definition (definition.key)}
-      <div class="row-label" title={definition.label}>
-        <span>{definition.label}</span>
-        <em>{scopeSummary(currentScope(definition))}</em>
-      </div>
+      {#if definition.kind === 'exchange' && definition.exchange}
+        <button
+          type="button"
+          class="row-label exchange-row"
+          aria-expanded={definition.expanded}
+          aria-label={`${definition.label} ${definition.summary} 异常`}
+          title={definition.label}
+          onclick={() => definition.exchange && toggleExchange(definition.exchange)}
+        >
+          <span class="caret">{definition.expanded ? '-' : '+'}</span>
+          <span>{definition.label}</span>
+          <em>{definition.summary}</em>
+        </button>
+      {:else if definition.kind === 'symbol' && definition.row}
+        <div
+          data-testid="timeline-symbol-row"
+          class="row-label symbol-row"
+          title={definition.row.symbol}
+          aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${formatDuration(definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
+        >
+          <span class="symbol-name">{definition.label}</span>
+          <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
+          <em>Tick {formatNumber(definition.row.ticks_ingested)}</em>
+          <em>订阅 {formatNumber(subscriberCount(definition.row))}</em>
+          <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
+        </div>
+      {:else}
+        <div class="row-label" title={definition.label}>
+          <span>{definition.label}</span>
+          <em>{definition.summary}</em>
+        </div>
+      {/if}
       {#if viewMode === 'blocks'}
         {#each buckets as bucket, index (`${definition.key}:${index}`)}
           <span class={`cell ${cellClass(definition, bucket)}`} title={cellTitle(definition, bucket)}></span>
@@ -250,6 +342,34 @@
     font-size: 11px;
   }
 
+  button.row-label {
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  button.row-label:hover {
+    color: var(--relay-info);
+  }
+
+  .exchange-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .symbol-row {
+    grid-template-columns: minmax(72px, 1fr) 46px 80px 56px 50px;
+    padding-left: 12px;
+    color: #9fc4d5;
+  }
+
+  .caret {
+    width: 12px;
+    color: var(--relay-info);
+    font-weight: 900;
+  }
+
   .row-label span {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -261,6 +381,53 @@
     font-size: 10px;
     font-style: normal;
     white-space: nowrap;
+  }
+
+  .symbol-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .badge {
+    justify-self: start;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--relay-live);
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  .badge.closed {
+    color: var(--relay-closed);
+  }
+
+  .badge.stale,
+  .badge.missing {
+    color: var(--relay-warn);
+  }
+
+  .badge.inactive {
+    color: var(--relay-muted);
+  }
+
+  .risk {
+    color: var(--relay-live);
+    font-size: 11px;
+    font-weight: 850;
+  }
+
+  .risk.warn {
+    color: var(--relay-warn);
+  }
+
+  .risk.bad {
+    color: var(--relay-bad);
+  }
+
+  .risk.closed {
+    color: var(--relay-closed);
   }
 
   .cell {
@@ -301,6 +468,15 @@
   @media (max-width: 900px) {
     .timeline {
       --timeline-label-width: 120px;
+    }
+
+    .symbol-row {
+      grid-template-columns: minmax(72px, 1fr) 44px 58px 58px;
+    }
+
+    .symbol-row em:nth-of-type(n + 3),
+    .symbol-row .risk {
+      display: none;
     }
 
     .legend {
