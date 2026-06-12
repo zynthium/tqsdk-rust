@@ -224,7 +224,9 @@ fn decode_upstream_market_report_inner(
                 let Some(rows) = series.get("data").and_then(Value::as_object) else {
                     continue;
                 };
-                for (row_id, row) in rows {
+                let mut sorted_rows: Vec<_> = rows.iter().collect();
+                sorted_rows.sort_by_key(|(row_id, _)| row_id.parse::<i64>().unwrap_or(i64::MAX));
+                for (row_id, row) in sorted_rows {
                     let decoded = match &mut tick_row_cache {
                         Some(cache) => decode_tick_row_with_cache(cache, symbol, row_id, row),
                         None => decode_tick_row(row_id, row).map(Some),

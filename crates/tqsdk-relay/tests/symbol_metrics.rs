@@ -448,6 +448,7 @@ fn snapshot_filters_sorts_limits_and_computes_p95_receive_gap() {
 
     let query = SymbolMetricsQuery {
         statuses: vec![SymbolStatus::Live, SymbolStatus::Stale],
+        sessions: Vec::new(),
         subscribed_only: false,
         q: Some("260".to_string()),
         sort: SymbolSort::ReceiveGapDesc,

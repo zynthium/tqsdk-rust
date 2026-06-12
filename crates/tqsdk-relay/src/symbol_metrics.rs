@@ -449,7 +449,11 @@ fn record_tick_continuity(telemetry: &mut SymbolTelemetry, tick_id: i64, receive
             telemetry.duplicate_rows = telemetry.duplicate_rows.saturating_add(1);
         }
         Some(last_tick_id) if tick_id < last_tick_id => {
-            telemetry.out_of_order_rows = telemetry.out_of_order_rows.saturating_add(1);
+            if tick_id == 0 || last_tick_id.saturating_sub(tick_id) > 100 {
+                telemetry.last_tick_id = Some(tick_id);
+            } else {
+                telemetry.out_of_order_rows = telemetry.out_of_order_rows.saturating_add(1);
+            }
         }
         Some(last_tick_id) => {
             if tick_id > last_tick_id.saturating_add(1) {
