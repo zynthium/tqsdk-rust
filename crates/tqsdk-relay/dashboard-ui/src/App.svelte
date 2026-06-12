@@ -1,7 +1,6 @@
 <script lang="ts">
   import AttentionList from './components/AttentionList.svelte';
   import ContinuityTimeline from './components/ContinuityTimeline.svelte';
-  import DashboardControls from './components/DashboardControls.svelte';
   import IncidentTable from './components/IncidentTable.svelte';
   import IntegrityHero from './components/IntegrityHero.svelte';
   import IntegrityTrend from './components/IntegrityTrend.svelte';
@@ -14,7 +13,7 @@
   import { createHistory, pushHistorySample } from './lib/history';
   import { deriveIntegrity } from './lib/integrity-model';
   import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
-  import type { DashboardViewState, IntegrityModel, RelaySnapshot } from './lib/types';
+  import type { IntegrityModel, RelaySnapshot } from './lib/types';
 
   const POLL_INTERVAL_MS = 2_000;
 
@@ -25,27 +24,17 @@
   let incidents = $state(createIncidentLedger());
   let error = $state<string | null>(null);
   let sequence = $state(0);
-  let view = $state<DashboardViewState>({
+  let view = $state({
     paused: false,
     fullscreen: false,
-    selectedExchange: null,
-    filters: {
-      statuses: [],
-      sessions: [],
-      subscribedOnly: false,
-      q: '',
-      sort: 'receive_gap_ms_desc',
-      limit: 200,
-    },
   });
 
   let buckets = $derived(timelineBuckets(timeline, snapshot?.receivedAt ?? Date.now(), 60));
-  let filterKey = $derived(JSON.stringify(view.filters));
 
   async function load(signal?: AbortSignal) {
     const requestId = sequence + 1;
     sequence = requestId;
-    const next = await fetchRelaySnapshot(view.filters, signal);
+    const next = await fetchRelaySnapshot(signal);
     if (requestId !== sequence) return;
     snapshot = next;
     const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global);
@@ -56,12 +45,7 @@
     error = null;
   }
 
-  function refreshNow() {
-    return load();
-  }
-
   $effect(() => {
-    filterKey;
     if (view.paused) return;
     const controller = new AbortController();
     let disposed = false;
@@ -86,9 +70,7 @@
 </script>
 
 <main class="dashboard-shell" data-fullscreen={view.fullscreen}>
-  <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen}>
-    <DashboardControls bind:filters={view.filters} disabled={view.paused} onrefresh={refreshNow} />
-  </MonitorHeader>
+  <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen} />
 
   {#if model}
     <IntegrityHero {model} />

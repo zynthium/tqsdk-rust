@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tqsdk_core::Quote;
 
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
@@ -14,10 +14,10 @@ use crate::error::RelayResult;
 use crate::interest::{ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
 use crate::observability::{
-    DECODE_HEALTH_WINDOW_SECS, DEFAULT_DATA_STALE_AFTER_SECS, DecodeHealth,
+    DecodeHealth, FlowIdleHealth, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
+    RelaySourceStatus, DECODE_HEALTH_WINDOW_SECS, DEFAULT_DATA_STALE_AFTER_SECS,
     EVENT_IDLE_CRITICAL_AFTER_MS, EVENT_IDLE_WARN_AFTER_MS, FRAME_IDLE_CRITICAL_AFTER_MS,
-    FRAME_IDLE_WARN_AFTER_MS, FlowIdleHealth, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
-    RelaySourceStatus,
+    FRAME_IDLE_WARN_AFTER_MS,
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
@@ -181,7 +181,7 @@ fn dashboard_timeline(rows: &[SymbolTelemetrySnapshot]) -> DashboardTimelineSamp
         subscribed: dashboard_scope_for(rows.iter().filter(|row| row.subscribed)),
         exchanges: exchanges
             .into_iter()
-            .map(|(exchange, rows)| (exchange, dashboard_scope_for(rows.into_iter())))
+            .map(|(exchange, rows)| (exchange, dashboard_scope_for(rows)))
             .collect(),
     }
 }

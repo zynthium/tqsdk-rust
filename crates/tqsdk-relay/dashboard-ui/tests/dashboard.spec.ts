@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { dashboardSnapshot, row } from '../src/test/fixtures';
 
 test('dashboard renders relay integrity view from intercepted snapshots', async ({ page }) => {
-  await page.route('**/dashboard-snapshot?*', async (route) => {
+  await page.route('**/dashboard-snapshot*', async (route) => {
     await route.fulfill({
       json: dashboardSnapshot(
         [
@@ -37,6 +37,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   await page.goto('/dashboard/');
 
   await expect(page.getByText('tqsdk-relay 行情完整性监控中心')).toBeVisible();
+  await expect(page.getByTestId('dashboard-controls')).toHaveCount(0);
   await expect(page.getByTestId('integrity-hero')).toBeVisible();
   await expect(page.getByTestId('score-gauge')).toBeVisible();
   await expect(page.getByTestId('attention-list').getByText('豆粕2609')).toBeVisible();
@@ -58,6 +59,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
   expect(pipelineTextLayout.every((node) => node.textInsideNode)).toBe(true);
   await expect(page.getByText('活跃合约健康排行')).toHaveCount(0);
   const timeline = page.getByTestId('continuity-timeline');
+  await expect(timeline.getByPlaceholder('搜索合约或中文名')).toBeVisible();
   const dceRow = timeline.getByRole('button', { name: /DCE.*1\/1/ });
   await expect(dceRow).toBeVisible();
   await dceRow.click();
@@ -81,7 +83,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
     });
   });
 
-  await page.route('**/dashboard-snapshot?*', async (route) => {
+  await page.route('**/dashboard-snapshot*', async (route) => {
     await route.fulfill({
       json: dashboardSnapshot(rows, { upstream_frames_received: 20, upstream_events_decoded: 40 }),
     });
@@ -134,7 +136,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
 });
 
 test('continuity timeline renders aggregate exchange rows and expands page symbols', async ({ page }) => {
-  await page.route('**/dashboard-snapshot?*', async (route) => {
+  await page.route('**/dashboard-snapshot*', async (route) => {
     await route.fulfill({
       json: dashboardSnapshot(
         [
@@ -168,6 +170,9 @@ test('continuity timeline renders aggregate exchange rows and expands page symbo
   await dceRow.click();
   await expect(timeline.getByText('豆粕2609')).toBeVisible();
   await expect(timeline.getByText('铁矿2609')).toBeVisible();
+  await timeline.getByPlaceholder('搜索合约或中文名').fill('铁矿');
+  await expect(timeline.getByText('豆粕2609')).toHaveCount(0);
+  await expect(timeline.getByText('铁矿2609')).toBeVisible();
   const labelColumnWidth = await timeline.locator('.timeline').evaluate((element) => {
     const firstColumn = getComputedStyle(element).gridTemplateColumns.split(' ')[0];
     return Number.parseFloat(firstColumn);
@@ -175,4 +180,55 @@ test('continuity timeline renders aggregate exchange rows and expands page symbo
   expect(labelColumnWidth).toBeGreaterThanOrEqual(112);
   await expect(timeline.getByText('DCE.m2609')).toHaveCount(0);
   await expect(timeline.getByText('DCE.i2609')).toHaveCount(0);
+});
+
+test('continuity timeline keeps panel filters and view mode after reload', async ({ page }) => {
+  await page.route('**/dashboard-snapshot*', async (route) => {
+    await route.fulfill({
+      json: dashboardSnapshot(
+        [
+          row({
+            symbol: 'DCE.m2609',
+            instrument_name: '豆粕2609',
+            session: 'open',
+            status: 'stale',
+            problem: true,
+            problem_severity: 'warn',
+            receive_gap_ms: 90_000,
+          }),
+          row({
+            symbol: 'DCE.i2609',
+            instrument_name: '铁矿2609',
+            session: 'open',
+          }),
+          row({
+            symbol: 'CZCE.AP610',
+            instrument_name: '苹果610',
+            status: 'closed',
+            session: 'closed',
+            problem: false,
+            problem_severity: 'closed',
+          }),
+        ],
+        { upstream_frames_received: 20, upstream_events_decoded: 40 },
+      ),
+    });
+  });
+
+  await page.goto('/dashboard/');
+  const timeline = page.getByTestId('continuity-timeline');
+  await timeline.getByPlaceholder('搜索合约或中文名').fill('铁矿');
+  await timeline.getByLabel('只看开盘中品种').check();
+  await timeline.getByLabel('不分交易所').check();
+  await timeline.getByRole('button', { name: 'Sparkline' }).click();
+
+  await page.reload();
+
+  await expect(timeline.getByPlaceholder('搜索合约或中文名')).toHaveValue('铁矿');
+  await expect(timeline.getByLabel('只看开盘中品种')).toBeChecked();
+  await expect(timeline.getByLabel('不分交易所')).toBeChecked();
+  await expect(timeline.getByRole('button', { name: 'Sparkline' })).toHaveClass(/active/);
+  await expect(timeline.getByText('铁矿2609')).toBeVisible();
+  await expect(timeline.getByRole('button', { name: /DCE/ })).toHaveCount(0);
+  await expect(timeline.getByRole('button', { name: /CZCE/ })).toHaveCount(0);
 });

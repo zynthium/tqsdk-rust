@@ -374,9 +374,13 @@ impl SymbolTelemetryReadModel {
             let flow = flow_for(receive_gap_ms, stale_after_millis);
             let integrity = integrity_for(status);
             let problem_severity = problem_severity_for(status, coverage, telemetry.invalid_rows);
+            let instrument_name = telemetry
+                .instrument_name
+                .clone()
+                .or_else(|| continuous_contract_display_name(&symbol));
             unfiltered.push(SymbolTelemetrySnapshot {
                 symbol,
-                instrument_name: telemetry.instrument_name,
+                instrument_name,
                 status,
                 coverage,
                 session,
@@ -489,6 +493,28 @@ fn average_receive_gap_ms(samples: &VecDeque<u64>) -> Option<u64> {
             .try_into()
             .unwrap_or(u64::MAX),
     )
+}
+
+fn continuous_contract_display_name(symbol: &str) -> Option<String> {
+    let (prefix, underlying) = symbol.split_once('@')?;
+    let suffix = match prefix {
+        "KQ.m" => "主连",
+        "KQ.i" => "加权",
+        _ => return None,
+    };
+    let (exchange_id, product_id) = underlying.split_once('.')?;
+    let product_name = futures_product_chinese_name(exchange_id, product_id)?;
+    Some(format!("{product_name}{suffix}"))
+}
+
+fn futures_product_chinese_name(exchange_id: &str, product_id: &str) -> Option<&'static str> {
+    match (
+        exchange_id.to_ascii_uppercase().as_str(),
+        product_id.to_ascii_lowercase().as_str(),
+    ) {
+        ("SHFE", "au") => Some("黄金"),
+        _ => None,
+    }
 }
 
 fn problem_severity_for(

@@ -122,14 +122,13 @@ pnpm run check
 pnpm run test
 pnpm run build
 pnpm run size-check
-git diff --exit-code ../src/dashboard-dist
 pnpm run test:e2e
 ```
 
 dashboard UI 依赖必须固定到明确版本，不能使用 `"latest"`。Svelte source 改动后必须重新
-生成并提交 `crates/tqsdk-relay/src/dashboard-dist/**`；CI 的 dashboard job 用
-`git diff --exit-code ../src/dashboard-dist` 防止源码和内嵌静态产物漂移，并用
-`pnpm run size-check` 防止 dashboard JS/CSS 预算回退。dashboard 页面不得展示会被误认为
+生成 `crates/tqsdk-relay/dashboard-ui/dist/**`；Rust 侧通过 build script 构建并嵌入该目录，
+dashboard job 用 `pnpm run build` 和 `pnpm run size-check` 防止源码、内嵌静态产物和
+JS/CSS 预算回退。dashboard 页面不得展示会被误认为
 真实 telemetry 的静态 trend/sparkline；全屏控制必须使用浏览器 fullscreen API 并在不支持
 时禁用；完整合约表应展示当前过滤页内全部行，不再额外截断到关注列表或时间带行数。连续性
 热力图默认使用 `/dashboard-snapshot.timeline` 的后端聚合样本；交易所展开行只能维护当前

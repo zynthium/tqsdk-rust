@@ -383,6 +383,49 @@ fn query_matches_instrument_name() {
 }
 
 #[test]
+fn continuous_contract_symbols_get_chinese_display_names() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["KQ.m@SHFE.au", "KQ.i@SHFE.au"], 1_700_000_000_000);
+
+    let snapshot = store.snapshot_at(
+        1_700_000_002_000,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.symbols[0].symbol, "KQ.i@SHFE.au");
+    assert_eq!(
+        snapshot.symbols[0].instrument_name.as_deref(),
+        Some("黄金加权")
+    );
+    assert_eq!(snapshot.symbols[1].symbol, "KQ.m@SHFE.au");
+    assert_eq!(
+        snapshot.symbols[1].instrument_name.as_deref(),
+        Some("黄金主连")
+    );
+}
+
+#[test]
+fn symbol_query_matches_continuous_contract_chinese_display_name() {
+    let mut store = SymbolTelemetryStore::default();
+    store.record_universe(["KQ.m@SHFE.au", "DCE.m2609"], 1_700_000_000_000);
+
+    let query = SymbolMetricsQuery {
+        q: Some("黄金".to_string()),
+        ..SymbolMetricsQuery::default()
+    };
+    let snapshot = store.snapshot_at(1_700_000_002_000, 30_000, &Default::default(), &query);
+
+    assert_eq!(snapshot.symbols.len(), 1);
+    assert_eq!(snapshot.symbols[0].symbol, "KQ.m@SHFE.au");
+    assert_eq!(
+        snapshot.symbols[0].instrument_name.as_deref(),
+        Some("黄金主连")
+    );
+}
+
+#[test]
 fn subscribed_symbol_outside_universe_is_inactive() {
     let store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);

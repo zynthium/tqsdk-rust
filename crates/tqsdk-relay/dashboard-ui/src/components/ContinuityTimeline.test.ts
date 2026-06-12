@@ -1,10 +1,14 @@
 import { fireEvent, render } from '@testing-library/svelte';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import ContinuityTimeline from './ContinuityTimeline.svelte';
 import type { TimelineSample } from '../lib/types';
 import { NOW, row } from '../test/fixtures';
 
 describe('ContinuityTimeline', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it('leaves closed-session heatmap cells uncolored', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
@@ -125,5 +129,185 @@ describe('ContinuityTimeline', () => {
     expect(view.getByText('45.0s')).toBeTruthy();
     expect(view.getByText(/异常记录数/)).toBeTruthy();
     expect(view.getByText('7')).toBeTruthy();
+  });
+
+  it('filters expanded symbol rows with panel-local search', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        'DCE.i2609': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+        }),
+        row({ symbol: 'DCE.i2609', instrument_name: '铁矿2609' }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+    expect(view.getByText('豆粕2609')).toBeTruthy();
+    expect(view.getByText('铁矿2609')).toBeTruthy();
+
+    await fireEvent.input(view.getByPlaceholderText('搜索合约或中文名'), { target: { value: '铁矿' } });
+
+    expect(view.queryByText('豆粕2609')).toBeNull();
+    expect(view.getByText('铁矿2609')).toBeTruthy();
+  });
+
+  it('shows symbols directly when exchange grouping is disabled', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+          SHFE: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        'SHFE.au2602': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+        }),
+        row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
+      ],
+    });
+
+    await fireEvent.click(view.getByLabelText('不分交易所'));
+
+    expect(view.queryByRole('button', { name: /DCE/ })).toBeNull();
+    expect(view.queryByRole('button', { name: /SHFE/ })).toBeNull();
+    expect(view.getByText('豆粕2609')).toBeTruthy();
+    expect(view.getByText('沪金2602')).toBeTruthy();
+  });
+
+  it('shows every visible symbol when exchange grouping is disabled', async () => {
+    const rows = Array.from({ length: 35 }, (_, index) =>
+      row({
+        symbol: `DCE.m${2600 + index}`,
+        instrument_name: `豆粕${2600 + index}`,
+      }),
+    );
+    const symbols: TimelineSample['symbols'] = {};
+    for (const symbolRow of rows) {
+      symbols[symbolRow.symbol] = {
+        severity: 'live',
+        receive_gap_ms: 900,
+        avg_receive_gap_ms: 900,
+      };
+    }
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'live', total: rows.length, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'live', total: rows.length, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        },
+      },
+      symbols,
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows,
+    });
+
+    await fireEvent.click(view.getByLabelText('不分交易所'));
+
+    expect(view.queryByRole('button', { name: /DCE/ })).toBeNull();
+    expect(view.getAllByTestId('timeline-symbol-row')).toHaveLength(rows.length);
+  });
+
+  it('keeps open-session filter, search, and view mode across remounts', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 3, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+          CZCE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        'DCE.i2609': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        'CZCE.AP610': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+      },
+    };
+    const props = {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          session: 'open',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+        }),
+        row({
+          symbol: 'DCE.i2609',
+          instrument_name: '铁矿2609',
+          session: 'open',
+        }),
+        row({
+          symbol: 'CZCE.AP610',
+          instrument_name: '苹果610',
+          status: 'closed',
+          session: 'closed',
+          problem: false,
+          problem_severity: 'closed',
+        }),
+      ],
+    };
+
+    const first = render(ContinuityTimeline, props);
+    await fireEvent.click(first.getByLabelText('只看开盘中品种'));
+    await fireEvent.click(first.getByLabelText('不分交易所'));
+    await fireEvent.input(first.getByPlaceholderText('搜索合约或中文名'), { target: { value: '铁矿' } });
+    await fireEvent.click(first.getByRole('button', { name: 'Sparkline' }));
+    first.unmount();
+
+    const second = render(ContinuityTimeline, props);
+    expect((second.getByLabelText('只看开盘中品种') as HTMLInputElement).checked).toBe(true);
+    expect((second.getByLabelText('不分交易所') as HTMLInputElement).checked).toBe(true);
+    expect((second.getByPlaceholderText('搜索合约或中文名') as HTMLInputElement).value).toBe('铁矿');
+    expect(second.getByRole('button', { name: 'Sparkline' }).classList.contains('active')).toBe(true);
+
+    expect(second.queryByRole('button', { name: /DCE/ })).toBeNull();
+    expect(second.queryByRole('button', { name: /CZCE/ })).toBeNull();
+    expect(second.queryByText('豆粕2609')).toBeNull();
+    expect(second.getByText('铁矿2609')).toBeTruthy();
   });
 });

@@ -4,16 +4,33 @@
   import { statusLabel } from '../lib/integrity-model';
   import type { DashboardTimelineScope, SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
 
+  const PANEL_PREFS_KEY = 'tqsdk-relay.dashboard.continuity-panel';
+  type ViewMode = 'blocks' | 'sparkline';
+  type PanelPrefs = {
+    search?: string;
+    openOnly?: boolean;
+    viewMode?: ViewMode;
+    flatSymbols?: boolean;
+  };
+
   let { buckets, rows = [] }: {
     buckets: Array<TimelineSample | null>;
     rows?: SymbolRow[];
   } = $props();
-  let viewMode = $state<'blocks' | 'sparkline'>('blocks');
+  const initialPrefs = readPanelPrefs();
+  let viewMode = $state<ViewMode>(initialPrefs.viewMode ?? 'blocks');
+  let search = $state(initialPrefs.search ?? '');
+  let openOnly = $state(initialPrefs.openOnly ?? false);
+  let flatSymbols = $state(initialPrefs.flatSymbols ?? false);
   let expandedExchanges = $state<string[]>([]);
   let hoveredSymbol = $state<string | null>(null);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
-  let hoveredSymbolRow = $derived(rows.find((row) => row.symbol === hoveredSymbol) ?? null);
+  let searchNeedle = $derived(search.trim().toLowerCase());
+  let visibleRows = $derived(
+    rows.filter((row) => (!openOnly || row.session === 'open') && (!searchNeedle || matchesSymbolSearch(row, searchNeedle))),
+  );
+  let hoveredSymbolRow = $derived(visibleRows.find((row) => row.symbol === hoveredSymbol) ?? null);
 
   type TimelineDefinition = {
     kind: 'summary' | 'exchange' | 'symbol';
@@ -43,10 +60,11 @@
 
   let latestSample = $derived(latestTimelineSample(buckets));
   let exchangeRows = $derived(
-    Object.keys(latestSample?.sample.exchanges ?? {}).sort(
-      (left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right),
-    ),
+    Object.keys(latestSample?.sample.exchanges ?? {})
+      .filter((exchange) => visibleRows.some((row) => exchangeOf(row.symbol) === exchange))
+      .sort((left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right)),
   );
+  let flatRows = $derived(orderedSymbolRows(visibleRows, Number.POSITIVE_INFINITY));
   let definitions = $derived<TimelineDefinition[]>([
     {
       kind: 'summary',
@@ -66,40 +84,38 @@
       latency: (sample) => sample.sample.subscribed.receive_gap_ms,
       averageLatency: (sample) => sample.sample.subscribed.avg_receive_gap_ms,
     },
-    ...exchangeRows.flatMap((exchange) => {
-      const scope = latestSample?.sample.exchanges[exchange];
-      const exchangeSymbols = orderedSymbolRows(rows.filter((row) => exchangeOf(row.symbol) === exchange));
-      const expanded = expandedExchanges.includes(exchange);
-      const exchangeDefinition: TimelineDefinition = {
-        kind: 'exchange',
-        key: `exchange:${exchange}`,
-        label: exchange,
-        summary: scopeSummary(scope),
-        exchange,
-        expanded,
-        severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
-        latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
-        averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
-        emptySeverity: scope?.severity ?? 'no_sample',
-      };
-      if (!expanded) return [exchangeDefinition];
-      return [
-        exchangeDefinition,
-        ...exchangeSymbols.map((row): TimelineDefinition => ({
-          kind: 'symbol',
-          key: `symbol:${row.symbol}`,
-          label: row.instrument_name ?? row.symbol,
-          summary: row.subscribed ? '订阅' : '',
-          row,
-          severity: (sample: TimelineSample) => sample.symbols[row.symbol]?.severity,
-          latency: (sample: TimelineSample) => sample.symbols[row.symbol]?.receive_gap_ms,
-          averageLatency: (sample: TimelineSample) => sample.symbols[row.symbol]?.avg_receive_gap_ms,
-          emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
+    ...(flatSymbols
+      ? flatRows.map((row): TimelineDefinition => symbolDefinition(row))
+      : exchangeRows.flatMap((exchange) => {
+          const scope = latestSample?.sample.exchanges[exchange];
+          const exchangeSymbols = orderedSymbolRows(visibleRows.filter((row) => exchangeOf(row.symbol) === exchange));
+          const expanded = expandedExchanges.includes(exchange);
+          const exchangeDefinition: TimelineDefinition = {
+            kind: 'exchange',
+            key: `exchange:${exchange}`,
+            label: exchange,
+            summary: scopeSummary(scope),
+            exchange,
+            expanded,
+            severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
+            latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
+            averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
+            emptySeverity: scope?.severity ?? 'no_sample',
+          };
+          if (!expanded) return [exchangeDefinition];
+          return [
+            exchangeDefinition,
+            ...exchangeSymbols.map((row): TimelineDefinition => symbolDefinition(row)),
+          ];
         })),
-      ];
-    }),
   ]);
   let pageRowCount = $derived(rows.length);
+  let visibleRowCount = $derived(visibleRows.length);
+  let isFiltered = $derived(openOnly || searchNeedle.length > 0);
+
+  $effect(() => {
+    writePanelPrefs({ search, openOnly, viewMode, flatSymbols });
+  });
 
   function scopeSummary(scope: DashboardTimelineScope | undefined): string {
     if (!scope) return '0/0';
@@ -170,10 +186,54 @@
     hoveredSymbol = null;
   }
 
-  function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
-    return [...exchangeSymbols]
-      .sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1))
-      .slice(0, 30);
+  function readPanelPrefs(): PanelPrefs {
+    try {
+      const raw = localStorage.getItem(PANEL_PREFS_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as PanelPrefs;
+      return {
+        search: typeof parsed.search === 'string' ? parsed.search : undefined,
+        openOnly: typeof parsed.openOnly === 'boolean' ? parsed.openOnly : undefined,
+        viewMode: parsed.viewMode === 'sparkline' ? 'sparkline' : parsed.viewMode === 'blocks' ? 'blocks' : undefined,
+        flatSymbols: typeof parsed.flatSymbols === 'boolean' ? parsed.flatSymbols : undefined,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  function writePanelPrefs(prefs: PanelPrefs) {
+    try {
+      localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // Ignore storage failures; the dashboard should remain usable in private or locked-down contexts.
+    }
+  }
+
+  function matchesSymbolSearch(row: SymbolRow, needle: string): boolean {
+    return row.symbol.toLowerCase().includes(needle)
+      || row.instrument_name?.toLowerCase().includes(needle)
+      || false;
+  }
+
+  function orderedSymbolRows(exchangeSymbols: SymbolRow[], limit = 30): SymbolRow[] {
+    const sorted = [...exchangeSymbols]
+      .sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1));
+    return limit === Number.POSITIVE_INFINITY ? sorted : sorted.slice(0, limit);
+  }
+
+  function symbolDefinition(row: SymbolRow): TimelineDefinition {
+    return {
+      kind: 'symbol',
+      key: `symbol:${row.symbol}`,
+      label: row.instrument_name ?? row.symbol,
+      summary: row.subscribed ? '订阅' : '',
+      row,
+      severity: (sample: TimelineSample) => sample.symbols[row.symbol]?.severity,
+      latency: (sample: TimelineSample) => sample.symbols[row.symbol]?.receive_gap_ms,
+      averageLatency: (sample: TimelineSample) => sample.symbols[row.symbol]?.avg_receive_gap_ms,
+      emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
+    };
   }
 
   function severityRank(row: SymbolRow): number {
@@ -198,9 +258,20 @@
 <section class="panel timeline-panel" data-testid="continuity-timeline">
   <div class="head">
     <div class="panel-title">最近 5 分钟连续性</div>
-    <div class="view-toggle">
-      <button class:active={viewMode === 'blocks'} onclick={() => (viewMode = 'blocks')}>Blocks</button>
-      <button class:active={viewMode === 'sparkline'} onclick={() => (viewMode = 'sparkline')}>Sparkline</button>
+    <div class="panel-tools">
+      <label class="open-only-toggle">
+        <input type="checkbox" bind:checked={openOnly} aria-label="只看开盘中品种" />
+        <span>开盘中</span>
+      </label>
+      <label class="open-only-toggle">
+        <input type="checkbox" bind:checked={flatSymbols} aria-label="不分交易所" />
+        <span>不分交易所</span>
+      </label>
+      <input class="panel-search" bind:value={search} placeholder="搜索合约或中文名" aria-label="搜索合约或中文名" />
+      <div class="view-toggle">
+        <button class:active={viewMode === 'blocks'} onclick={() => (viewMode = 'blocks')}>Blocks</button>
+        <button class:active={viewMode === 'sparkline'} onclick={() => (viewMode = 'sparkline')}>Sparkline</button>
+      </div>
     </div>
     <div class="legend">
       <span><i class="live"></i>正常</span>
@@ -210,7 +281,9 @@
       <span><i class="no_sample"></i>无样本</span>
     </div>
   </div>
-  <div class="timeline-meta">当前页 {formatNumber(pageRowCount)} 行</div>
+  <div class="timeline-meta">
+    当前页 {formatNumber(pageRowCount)} 行{#if isFiltered} · 显示 {formatNumber(visibleRowCount)} 行{/if}
+  </div>
   <div class="timeline" style={`--bucket-count:${buckets.length}`}>
     {#each definitions as definition (definition.key)}
       {#if definition.kind === 'exchange' && definition.exchange}
@@ -299,6 +372,50 @@
     border-radius: 6px;
     background: #0f2130;
     padding: 3px;
+  }
+
+  .panel-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .panel-search {
+    width: clamp(150px, 14vw, 220px);
+    height: 26px;
+    min-width: 0;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 6px;
+    background: #071929;
+    color: var(--relay-text);
+    font-size: 11px;
+    padding: 0 9px;
+  }
+
+  .panel-search::placeholder {
+    color: var(--relay-muted);
+  }
+
+  .open-only-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    border: 1px solid var(--relay-line-soft);
+    border-radius: 6px;
+    background: #071929;
+    color: var(--relay-muted);
+    font-size: 11px;
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+
+  .open-only-toggle input {
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    accent-color: var(--relay-live);
   }
 
   .view-toggle button {
