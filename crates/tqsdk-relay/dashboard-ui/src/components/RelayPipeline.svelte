@@ -96,7 +96,7 @@
   .pipeline {
     min-height: 68px;
     display: grid;
-    grid-template-columns: repeat(9, minmax(0, 1fr));
+    grid-template-columns: 1fr 28px 1fr 28px 1fr 28px 1fr 28px 1fr;
     align-items: center;
     gap: 4px;
     padding: 6px 3%;
