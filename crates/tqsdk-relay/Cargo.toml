@@ -8,6 +8,7 @@ documentation = "https://docs.rs/tqsdk-relay"
 readme = "README.md"
 license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
+build = "build.rs"
 
 [features]
 default = ["server", "metadata"]

@@ -12,3 +12,4 @@ Cargo.lock
 .mcp.json
 .opencode.json
 skills-lock.json
+crates/tqsdk-relay/dashboard-ui/dist/
