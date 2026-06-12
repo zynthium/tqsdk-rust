@@ -407,6 +407,8 @@ pub struct RelayEngine {
     upstream_events_decoded: u64,
     last_upstream_frame_unix_secs: Option<u64>,
     last_decoded_event_unix_secs: Option<u64>,
+    last_upstream_peek_delay_ms: Option<u64>,
+    last_upstream_decode_ms: Option<u64>,
     ticks_ingested: u64,
     upstream_symbols: usize,
     upstream_ins_list_chars: usize,
@@ -441,6 +443,8 @@ impl RelayEngine {
             upstream_events_decoded: 0,
             last_upstream_frame_unix_secs: None,
             last_decoded_event_unix_secs: None,
+            last_upstream_peek_delay_ms: None,
+            last_upstream_decode_ms: None,
             ticks_ingested: 0,
             upstream_symbols: 0,
             upstream_ins_list_chars: 0,
@@ -597,6 +601,12 @@ impl RelayEngine {
     }
 
     pub fn record_upstream_progress(&mut self, progress: crate::upstream::UpstreamSourceProgress) {
+        if progress.last_peek_delay_ms.is_some() {
+            self.last_upstream_peek_delay_ms = progress.last_peek_delay_ms;
+        }
+        if progress.last_decode_ms.is_some() {
+            self.last_upstream_decode_ms = progress.last_decode_ms;
+        }
         if progress.transport_connected {
             self.record_upstream_transport_connected_at(progress.unix_secs);
         }
@@ -872,6 +882,8 @@ impl RelayEngine {
             lifetime_invalid_rows: self.upstream_invalid_tick_rows,
             recent_invalid_rows_1m,
             current_decode_health: decode_health_for(recent_invalid_rows_1m),
+            last_upstream_peek_delay_ms: self.last_upstream_peek_delay_ms,
+            last_upstream_decode_ms: self.last_upstream_decode_ms,
             last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
             last_invalid_row_unix_secs: self.last_invalid_row_unix_secs,
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
@@ -946,6 +958,8 @@ impl RelayEngine {
             lifetime_invalid_rows: self.upstream_invalid_tick_rows,
             recent_invalid_rows_1m,
             current_decode_health: decode_health_for(recent_invalid_rows_1m),
+            last_upstream_peek_delay_ms: self.last_upstream_peek_delay_ms,
+            last_upstream_decode_ms: self.last_upstream_decode_ms,
             last_upstream_invalid_tick_row_error: self.last_upstream_invalid_tick_row_error.clone(),
             last_invalid_row_unix_secs: self.last_invalid_row_unix_secs,
             last_universe_refresh_unix_secs: self.last_universe_refresh_unix_secs,
