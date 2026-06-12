@@ -227,14 +227,18 @@ select {
   --relay-card-padding-x: 12px;
 
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   scrollbar-color: #2ad0ff66 #04111e;
   scrollbar-width: thin;
 }
 
 .main-left > .panel {
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   scrollbar-color: #2ad0ff66 #04111e;
   scrollbar-width: thin;
 }
@@ -246,7 +250,9 @@ select {
   --relay-card-padding-x: 12px;
 
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   scrollbar-color: #2ad0ff66 #04111e;
   scrollbar-width: thin;
 }
@@ -257,6 +263,7 @@ select {
   position: relative;
   z-index: 7;
   box-sizing: border-box;
+  flex-shrink: 0;
   min-height: var(--relay-card-header-height);
   margin: calc(-1 * var(--relay-card-padding-y)) calc(-1 * var(--relay-card-padding-x)) 0;
   padding: var(--relay-card-padding-y) var(--relay-card-padding-x) 8px;
