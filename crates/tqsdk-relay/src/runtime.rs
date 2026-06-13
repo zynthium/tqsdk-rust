@@ -63,6 +63,7 @@ struct ConfiguredUpstream {
 struct ConfiguredTickCharts {
     charts: Vec<UpstreamTickChart>,
     contracts: Vec<FuturesContract>,
+    calendar: Option<Vec<tqsdk_core::TradingCalendarDay>>,
 }
 
 async fn connect_configured_upstream_for_pump(
@@ -77,7 +78,13 @@ async fn connect_configured_upstream_for_pump(
             return Err(err);
         }
     };
-    record_universe_refresh_success(server, config, &configured.charts, &configured.contracts);
+    record_universe_refresh_success(
+        server,
+        config,
+        &configured.charts,
+        &configured.contracts,
+        configured.calendar.as_deref(),
+    );
     let mut source = WebSocketUpstreamTickSource::connect_with_tick_charts(
         config.upstream_market_url.clone(),
         configured.charts,
@@ -107,12 +114,27 @@ async fn configured_upstream_tick_charts_with_contracts(
         if let Err(err) = enrich_configured_symbol_contracts(config, &mut contracts).await {
             eprintln!("relay futures metadata unavailable for configured symbols: {err}");
         }
-        return Ok(ConfiguredTickCharts { charts, contracts });
+        #[cfg(feature = "metadata")]
+        let calendar = if let Ok(mut r) = SessionFuturesUniverseResolver::from_config(config) {
+            crate::universe::FuturesUniverseResolver::trading_calendar(&mut r)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        #[cfg(not(feature = "metadata"))]
+        let calendar = None;
+        return Ok(ConfiguredTickCharts {
+            charts,
+            contracts,
+            calendar,
+        });
     }
     if config.futures_product_filter == crate::FuturesProductFilter::None {
         return Ok(ConfiguredTickCharts {
             charts: Vec::new(),
             contracts: Vec::new(),
+            calendar: None,
         });
     }
     #[cfg(feature = "metadata")]
@@ -132,7 +154,14 @@ async fn configured_upstream_tick_charts_with_contracts(
         let charts = config.upstream_tick_charts_for_symbols(
             contracts.iter().map(|contract| contract.symbol.as_str()),
         )?;
-        Ok(ConfiguredTickCharts { charts, contracts })
+        let calendar = crate::universe::FuturesUniverseResolver::trading_calendar(&mut resolver)
+            .await
+            .ok();
+        Ok(ConfiguredTickCharts {
+            charts,
+            contracts,
+            calendar,
+        })
     }
     #[cfg(not(feature = "metadata"))]
     {
@@ -309,26 +338,36 @@ fn record_universe_refresh_success(
     config: &RelayConfig,
     charts: &[UpstreamTickChart],
     contracts: &[FuturesContract],
+    calendar: Option<&[tqsdk_core::TradingCalendarDay]>,
 ) {
     let engine = server.engine();
     let upstream_ins_list_chars = max_ins_list_chars(charts);
     let unix_secs = current_unix_secs();
     match engine.lock() {
-        Ok(mut engine) if contracts.is_empty() => engine
-            .record_universe_refresh_success_for_symbols(
+        Ok(mut engine) if contracts.is_empty() => {
+            engine.record_universe_refresh_success_for_symbols(
                 charts.iter().map(UpstreamTickChart::symbol),
                 upstream_ins_list_chars,
                 config.upstream_ins_list_limits.warn_chars,
                 config.upstream_ins_list_limits.max_chars,
                 unix_secs,
-            ),
-        Ok(mut engine) => engine.record_universe_refresh_success_for_contracts(
-            contracts,
-            upstream_ins_list_chars,
-            config.upstream_ins_list_limits.warn_chars,
-            config.upstream_ins_list_limits.max_chars,
-            unix_secs,
-        ),
+            );
+            if let Some(calendar) = calendar {
+                engine.record_trading_calendar(calendar);
+            }
+        }
+        Ok(mut engine) => {
+            engine.record_universe_refresh_success_for_contracts(
+                contracts,
+                upstream_ins_list_chars,
+                config.upstream_ins_list_limits.warn_chars,
+                config.upstream_ins_list_limits.max_chars,
+                unix_secs,
+            );
+            if let Some(calendar) = calendar {
+                engine.record_trading_calendar(calendar);
+            }
+        }
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }
 }

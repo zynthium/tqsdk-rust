@@ -200,6 +200,13 @@ pub trait FuturesUniverseResolver {
     ) -> impl std::future::Future<Output = RelayResult<Vec<Quote>>> + Send + 'a {
         std::future::ready(Ok(Vec::new()))
     }
+
+    fn trading_calendar(
+        &mut self,
+    ) -> impl std::future::Future<Output = RelayResult<Vec<tqsdk_core::TradingCalendarDay>>> + Send + '_
+    {
+        std::future::ready(Ok(Vec::new()))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +214,7 @@ pub struct StaticFuturesUniverseResolver {
     contracts: Vec<FuturesContract>,
     main_symbols: Vec<String>,
     quote_snapshots: Vec<Quote>,
+    trading_calendar: Vec<tqsdk_core::TradingCalendarDay>,
 }
 
 impl StaticFuturesUniverseResolver {
@@ -218,6 +226,7 @@ impl StaticFuturesUniverseResolver {
             contracts: contracts.into_iter().collect(),
             main_symbols: Vec::new(),
             quote_snapshots: Vec::new(),
+            trading_calendar: Vec::new(),
         }
     }
 
@@ -250,6 +259,10 @@ impl FuturesUniverseResolver for StaticFuturesUniverseResolver {
 
     async fn quote_snapshots(&mut self, _symbols: &[String]) -> RelayResult<Vec<Quote>> {
         Ok(self.quote_snapshots.clone())
+    }
+
+    async fn trading_calendar(&mut self) -> RelayResult<Vec<tqsdk_core::TradingCalendarDay>> {
+        Ok(self.trading_calendar.clone())
     }
 }
 
@@ -379,6 +392,18 @@ impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
             wait_for_quote_snapshots(client, symbols, self.activity_quote_timeout).await;
         let _ = lease.close().await;
         snapshots
+    }
+
+    async fn trading_calendar(&mut self) -> RelayResult<Vec<tqsdk_core::TradingCalendarDay>> {
+        let now = chrono::Utc::now()
+            .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .date_naive();
+        let start_dt = now - chrono::Days::new(14);
+        let end_dt = now + chrono::Days::new(14);
+        self.client
+            .get_trading_calendar(start_dt, end_dt)
+            .await
+            .map_err(|err| RelayError::Transport(format!("futures calendar query failed: {err}")))
     }
 }
 

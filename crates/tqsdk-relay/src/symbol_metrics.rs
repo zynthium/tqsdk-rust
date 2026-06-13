@@ -146,12 +146,14 @@ pub struct SymbolTelemetryStore {
     telemetry: BTreeMap<String, SymbolTelemetry>,
     source_epoch: u64,
     last_universe_refresh_unix_millis: Option<u64>,
+    trading_calendar_days: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SymbolTelemetryReadModel {
     universe: BTreeSet<String>,
     telemetry: BTreeMap<String, SymbolTelemetry>,
+    trading_calendar_days: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -316,6 +318,17 @@ impl SymbolTelemetryStore {
         SymbolTelemetryReadModel {
             universe: self.universe.clone(),
             telemetry: self.telemetry.clone(),
+            trading_calendar_days: self.trading_calendar_days.clone(),
+        }
+    }
+
+    pub fn record_trading_calendar(&mut self, calendar: &[tqsdk_core::TradingCalendarDay]) {
+        for day in calendar {
+            if day.trading {
+                self.trading_calendar_days.insert(day.date.clone());
+            } else {
+                self.trading_calendar_days.remove(&day.date);
+            }
         }
     }
 
@@ -360,7 +373,15 @@ impl SymbolTelemetryReadModel {
                 .map(|tick_millis| now_unix_millis.saturating_sub(tick_millis));
             let trading_phase = receive_gap_ms
                 .is_some()
-                .then(|| trading_phase_for_symbol(&symbol, telemetry, local_day_offset))
+                .then(|| {
+                    trading_phase_for_symbol(
+                        &symbol,
+                        telemetry,
+                        local_day_offset,
+                        now_unix_millis,
+                        &self.trading_calendar_days,
+                    )
+                })
                 .flatten();
             let status = classify_symbol(
                 in_universe,
@@ -708,7 +729,40 @@ fn trading_phase_for_symbol(
     symbol: &str,
     telemetry: Option<&SymbolTelemetry>,
     local_day_offset: Duration,
+    now_unix_millis: u64,
+    trading_calendar_days: &BTreeSet<String>,
 ) -> Option<TradingSessionPhase> {
+    if !trading_calendar_days.is_empty() {
+        let is_night_session = local_day_offset >= Duration::from_secs(18 * 3600);
+        let china_millis = now_unix_millis.saturating_add(8 * 60 * 60 * 1_000);
+        let days_since_epoch = (china_millis / (24 * 60 * 60 * 1_000)) as i64;
+        let mut naive_date = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+            + chrono::Duration::days(days_since_epoch);
+
+        if is_night_session {
+            naive_date += chrono::Duration::days(1);
+            // In Chinese futures, if the next day is a weekend/holiday, there's no night session for it.
+            // Also, Friday night belongs to Monday's trading day, so we need to find the NEXT trading day.
+            let mut found_trading_day = false;
+            for _ in 1..=5 {
+                let date_str = naive_date.format("%Y-%m-%d").to_string();
+                if trading_calendar_days.contains(&date_str) {
+                    found_trading_day = true;
+                    break;
+                }
+                naive_date += chrono::Duration::days(1);
+            }
+            if !found_trading_day {
+                return Some(TradingSessionPhase::Closed);
+            }
+        } else {
+            let date_str = naive_date.format("%Y-%m-%d").to_string();
+            if !trading_calendar_days.contains(&date_str) {
+                return Some(TradingSessionPhase::Closed);
+            }
+        }
+    }
+
     telemetry
         .and_then(|telemetry| {
             trading_phase_at(telemetry.trading_segments.as_deref(), local_day_offset)
