@@ -141,18 +141,57 @@ async fn resolver_selects_only_main_contracts_without_quote_snapshots_when_limit
 
 #[tokio::test]
 async fn expression_resolves_main_and_index_then_excludes_product() {
-    let mut resolver = StaticFuturesUniverseResolver::new([
-        FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
-        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
-    ])
-    .with_main_symbols(["SHFE.au2602", "DCE.m2609"]);
+    let mut au = FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap();
+    au.instrument_name = Some("沪金2602".to_string());
+    let mut meal = FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap();
+    meal.instrument_name = Some("豆粕2609".to_string());
+    let mut resolver = StaticFuturesUniverseResolver::new([au, meal])
+        .with_main_symbols(["SHFE.au2602", "DCE.m2609"]);
     let expression = UniverseExpression::parse("main:all;index:all;!SHFE.au").unwrap();
+
+    let contracts = tqsdk_relay::universe::resolve_futures_contracts_with_expression(
+        &expression,
+        &mut resolver,
+    )
+    .await
+    .unwrap();
+    let symbols = contracts
+        .iter()
+        .map(|contract| contract.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m"]);
+    assert_eq!(contracts[1].instrument_name.as_deref(), Some("豆粕加权"));
+}
+
+#[tokio::test]
+async fn expression_does_not_generate_index_contracts_for_kqd() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("KQD.S2609", "KQD", "S", false).unwrap(),
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+    ]);
+    let expression = UniverseExpression::parse("index:all").unwrap();
 
     let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
-    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m"]);
+    assert_eq!(symbols, vec!["KQ.i@DCE.m"]);
+}
+
+#[tokio::test]
+async fn expression_excludes_kqd_with_bare_exchange_token() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("KQD.S2609", "KQD", "S", false).unwrap(),
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+    ]);
+    let expression = UniverseExpression::parse("active:all;!KQD").unwrap();
+
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["DCE.m2609"]);
 }
 
 #[tokio::test]

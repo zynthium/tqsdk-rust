@@ -21,6 +21,7 @@ pub mod pump;
 #[cfg(feature = "server")]
 pub mod runtime;
 pub mod server;
+mod symbol_identity;
 pub mod symbol_metrics;
 pub mod universe;
 pub mod universe_expression;

@@ -75,7 +75,8 @@ cargo run -p tqsdk-relay
 
 - `active:all`：全部未过期真实期货合约。
 - `main:all`：全部真实主力合约，例如 `SHFE.au2602`。
-- `index:all`：全部加权指数连续合约，例如 `KQ.i@SHFE.au`。
+- `index:all`：全部加权指数连续合约，例如 `KQ.i@SHFE.au`；`KQD` 外盘行情不生成
+  `KQ.i@...`，因为天勤外盘行情没有对应加权 / 指数连续合约。
 - `cont:all`：全部主连连续合约，例如 `KQ.m@SHFE.au`。
 - `top:2:all`：每品种主力优先，再按 `open_interest` / `volume` 补足前 2。
 - `symbol:SHFE.au2602,KQ.i@DCE.m`：显式符号列表。
@@ -364,9 +365,9 @@ open http://127.0.0.1:7789/dashboard
 数据解码告警和完整性异常计数的统一口径；响应同时包含 `market_time_lag_ms`，用于辅助
 判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
 远月合约；`avg_receive_gap_ms` 在服务端按每个合约的 tick 接收时间单独计算，用于
-dashboard 重点观察近期平均 tick 接收延迟。无官方名称的连续合约代码会做最小中文
-展示名兜底，例如 `KQ.m@SHFE.au` 显示为“黄金主连”、`KQ.i@SHFE.au` 显示为
-“黄金加权”。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
+dashboard 重点观察近期平均 tick 接收延迟。连续合约会优先继承产品发现时拿到的官方
+产品名称；无官方名称时会做最小中文展示名兜底，例如 `KQ.m@SHFE.au` 显示为“沪金主连”、
+`KQ.i@DCE.m` 显示为“豆粕加权”。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
 `last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
 `out_of_order_rows` 和 `last_gap_unix_millis`。这些是原始 TQ DIFF row-id 诊断字段：
 DIFF 可以后续 patch / refill 稀疏 row，因此跳号、重复或倒序不单独证明市场数据缺失，
