@@ -171,6 +171,50 @@ describe('ContinuityTimeline', () => {
     expect(view.getByText('铁矿2609')).toBeTruthy();
   });
 
+  it('keeps expanded exchange symbols in stable contract-name order by product', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 4, problem: 1, receive_gap_ms: 60_000, avg_receive_gap_ms: 16_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 4, problem: 1, receive_gap_ms: 60_000, avg_receive_gap_ms: 16_000 },
+        },
+      },
+      symbols: {
+        'DCE.i2609': { severity: 'warn', receive_gap_ms: 60_000, avg_receive_gap_ms: 60_000 },
+        'KQ.i@DCE.m': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        'DCE.m2609': { severity: 'live', receive_gap_ms: 800, avg_receive_gap_ms: 800 },
+        'KQ.m@DCE.m': { severity: 'live', receive_gap_ms: 700, avg_receive_gap_ms: 700 },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.i2609',
+          instrument_name: '铁矿2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 60_000,
+        }),
+        row({ symbol: 'KQ.i@DCE.m', instrument_name: '豆粕加权' }),
+        row({ symbol: 'DCE.m2609', instrument_name: '豆粕2609' }),
+        row({ symbol: 'KQ.m@DCE.m', instrument_name: '豆粕主连' }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+
+    const symbolRows = view.getAllByTestId('timeline-symbol-row').map((item) => item.textContent ?? '');
+    expect(symbolRows).toHaveLength(4);
+    expect(symbolRows[0]).toContain('豆粕2609');
+    expect(symbolRows[1]).toContain('豆粕加权');
+    expect(symbolRows[2]).toContain('豆粕主连');
+    expect(symbolRows[3]).toContain('铁矿2609');
+  });
+
   it('shows symbols directly when exchange grouping is disabled', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
@@ -208,6 +252,48 @@ describe('ContinuityTimeline', () => {
     expect(view.queryByRole('button', { name: /SHFE/ })).toBeNull();
     expect(view.getByText('豆粕2609')).toBeTruthy();
     expect(view.getByText('沪金2602')).toBeTruthy();
+  });
+
+  it('keeps flat symbols in stable contract-name order', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 3, problem: 1, receive_gap_ms: 60_000, avg_receive_gap_ms: 16_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 60_000, avg_receive_gap_ms: 16_000 },
+          SHFE: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 800, avg_receive_gap_ms: 800 },
+        },
+      },
+      symbols: {
+        'DCE.i2609': { severity: 'warn', receive_gap_ms: 60_000, avg_receive_gap_ms: 60_000 },
+        'DCE.m2609': { severity: 'live', receive_gap_ms: 800, avg_receive_gap_ms: 800 },
+        'SHFE.au2602': { severity: 'live', receive_gap_ms: 700, avg_receive_gap_ms: 700 },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.i2609',
+          instrument_name: '铁矿2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 60_000,
+        }),
+        row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
+        row({ symbol: 'DCE.m2609', instrument_name: '豆粕2609' }),
+      ],
+    });
+
+    await fireEvent.click(view.getByLabelText('不分交易所'));
+
+    const symbolRows = view.getAllByTestId('timeline-symbol-row').map((item) => item.textContent ?? '');
+    expect(symbolRows).toHaveLength(3);
+    expect(symbolRows[0]).toContain('豆粕2609');
+    expect(symbolRows[1]).toContain('沪金2602');
+    expect(symbolRows[2]).toContain('铁矿2609');
   });
 
   it('shows every visible symbol when exchange grouping is disabled', async () => {

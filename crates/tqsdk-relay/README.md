@@ -403,8 +403,9 @@ metrics、symbol read model、订阅快照和事件账本，随后在锁外完�
 不分交易所和 Blocks / Sparkline 视图模式保存在浏览器本地，只影响展开后的当前 page 合约行，不会把异常过滤成健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响
 和解码健康为主。连续性热力图的全局、订阅和交易所行使用后端聚合样本；展开交易所后仍可
-查看当前 page rows 中该交易所的品种，并只为这些当前页品种保存 5 分钟 bounded
-symbol-level 历史，不恢复全量 `global_symbols` 轮询。刷新页面时，首轮请求会用
+查看当前 page rows 中该交易所的品种；展开行和不分交易所模式都按品种 / 合约名称稳定排序，
+同一品种的具体合约、主连和加权连续合约会聚在一起，避免实时健康变化导致行位置跳动；
+并只为这些当前页品种保存 5 分钟 bounded symbol-level 历史，不恢复全量 `global_symbols` 轮询。刷新页面时，首轮请求会用
 `timeline_history=1` 拉取服务端缓存的 5 分钟窗口，后续轮询只追加当前样本。近期平均 tick 接收延迟在服务端逐
 合约计算，dashboard 逐行显示 `avg_receive_gap_ms`，不在前端用时间桶反推平均值。页面不展示静态假 sparkline；全屏按钮调用
 浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和

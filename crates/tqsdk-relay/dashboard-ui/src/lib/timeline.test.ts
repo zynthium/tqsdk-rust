@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTimelineHistory, exchangeOf, pushTimelineSample, timelineBuckets } from './timeline';
+import { createTimelineHistory, exchangeOf, productGroupOf, pushTimelineSample, timelineBuckets } from './timeline';
 import { dashboardTimeline, NOW, row } from '../test/fixtures';
 
 describe('timeline', () => {
@@ -7,6 +7,13 @@ describe('timeline', () => {
     expect(exchangeOf('KQ.i@DCE.m')).toBe('DCE');
     expect(exchangeOf('KQ.m@SHFE.au')).toBe('SHFE');
     expect(exchangeOf('DCE.m2609')).toBe('DCE');
+  });
+
+  it('groups concrete and continuous contracts by underlying product', () => {
+    expect(productGroupOf('KQ.i@DCE.m')).toBe('DCE.m');
+    expect(productGroupOf('KQ.m@DCE.m')).toBe('DCE.m');
+    expect(productGroupOf('DCE.m2609')).toBe('DCE.m');
+    expect(productGroupOf('SHFE.au2602')).toBe('SHFE.au');
   });
 
   it('records exchange and subscribed continuity without treating closed as bad', () => {
