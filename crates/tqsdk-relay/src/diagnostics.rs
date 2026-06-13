@@ -3,7 +3,6 @@
 use serde::Serialize;
 
 use crate::config::{FuturesUniverseRefreshSchedule, RelayConfig};
-use crate::universe::FuturesProductFilter;
 use crate::upstream::UpstreamTickChart;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -15,7 +14,6 @@ pub struct RelayStartupReport {
     pub metrics_listen: String,
     pub refresh_schedule: String,
     pub futures_metadata_batch_size: usize,
-    pub futures_active_contracts_per_product: Option<usize>,
     pub futures_universe_expression: Option<String>,
     pub futures_universe_include_clauses: Option<usize>,
     pub futures_universe_exclude_clauses: Option<usize>,
@@ -54,7 +52,6 @@ impl RelayStartupReport {
             metrics_listen: config.metrics_listen.clone(),
             refresh_schedule: refresh_schedule(config.futures_universe_refresh),
             futures_metadata_batch_size: config.futures_metadata_batch_size,
-            futures_active_contracts_per_product: config.futures_active_contracts_per_product,
             futures_universe_expression: config
                 .futures_universe_expression
                 .as_ref()
@@ -102,29 +99,13 @@ fn upstream_source(config: &RelayConfig) -> String {
     if config.futures_universe_expression.is_some() {
         return "universe-expression".to_string();
     }
-    if !config.futures_symbols.is_empty() {
-        return "static-symbols".to_string();
-    }
-    match &config.futures_product_filter {
-        FuturesProductFilter::None => "none".to_string(),
-        FuturesProductFilter::All => "products:all".to_string(),
-        FuturesProductFilter::Products(products) => {
-            format!("products:{}", products.len())
-        }
-    }
+    "none".to_string()
 }
 
 fn refresh_schedule(schedule: FuturesUniverseRefreshSchedule) -> String {
-    match schedule {
-        FuturesUniverseRefreshSchedule::Daily(time) => {
-            let seconds = time.seconds_after_midnight();
-            let hour = seconds / 3600;
-            let minute = (seconds % 3600) / 60;
-            let second = seconds % 60;
-            format!("daily:{hour:02}:{minute:02}:{second:02}")
-        }
-        FuturesUniverseRefreshSchedule::Interval(interval) => {
-            format!("interval:{}s", interval.as_secs())
-        }
-    }
+    let seconds = schedule.refresh_at().seconds_after_midnight();
+    let hour = seconds / 3600;
+    let minute = (seconds % 3600) / 60;
+    let second = seconds % 60;
+    format!("daily:{hour:02}:{minute:02}:{second:02}")
 }

@@ -13,7 +13,7 @@
 
 - 在 relay 内置 `/dashboard` 页面，使用表格优先的运维排障界面展示每个合约的数据状态。
 - 同时覆盖上游合约全集和下游实际订阅合约：
-  - 上游全集来自 `TQSDK_RELAY_FUTURES_SYMBOLS`、`TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 或 `TQSDK_RELAY_FUTURES_PRODUCTS` 解析/发现出的合约集合。
+  - 上游全集来自 `TQSDK_RELAY_FUTURES_UNIVERSE` 解析出的最终合约集合。
   - 下游订阅来自当前 `InterestRegistry` 中的 quote/chart interest。
 - 同时展示两类延迟：
   - 接收间隔延迟：`now - relay_last_receive_time`，作为状态判定主口径。

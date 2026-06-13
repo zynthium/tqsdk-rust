@@ -25,7 +25,15 @@ async fn run() -> Result<(), RelayError> {
         #[cfg(feature = "server")]
         let charts = resolve_configured_upstream_tick_charts(&config).await?;
         #[cfg(not(feature = "server"))]
-        let charts = config.upstream_tick_charts()?;
+        let charts = {
+            if let Some(expression) = config.futures_universe_expression.as_ref() {
+                let symbols =
+                    tqsdk_relay::universe::resolve_static_symbols_with_expression(expression)?;
+                config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?
+            } else {
+                Vec::new()
+            }
+        };
         println!(
             "{}",
             RelayStartupReport::from_config_and_charts(&config, &charts).log_line()
@@ -37,11 +45,7 @@ async fn run() -> Result<(), RelayError> {
         config.tick_ring_capacity,
         config.kline_ring_capacity,
     )));
-    let startup_charts = if !config.futures_symbols.is_empty() {
-        config.upstream_tick_charts()?
-    } else {
-        Vec::new()
-    };
+    let startup_charts = Vec::new();
     eprintln!(
         "{}",
         RelayStartupReport::from_config_and_charts(&config, &startup_charts).log_line()
@@ -60,7 +64,7 @@ async fn run() -> Result<(), RelayError> {
     let upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone()).await?;
     #[cfg(not(feature = "server"))]
     let upstream_shutdown = {
-        if !config.upstream_tick_charts()?.is_empty() {
+        if config.has_upstream_futures_source() {
             return Err(RelayError::invalid_config(
                 "tqsdk-relay server feature is required for upstream websocket",
             ));

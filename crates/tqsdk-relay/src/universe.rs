@@ -25,16 +25,15 @@ const FUTURES_ACTIVITY_QUOTE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "metadata")]
 const FUTURES_ACTIVITY_QUOTE_POLL: Duration = Duration::from_millis(250);
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FuturesUniverseSelection {
-    pub active_contracts_per_product: Option<usize>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FuturesProductFilter {
-    None,
+enum ProductScope {
     All,
     Products(Vec<FuturesProductCode>),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProductSelection {
+    limit_per_product: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -322,8 +321,9 @@ impl SessionFuturesUniverseResolver {
         let mut resolver =
             Self::new_with_metadata_batch_size(client, config.futures_metadata_batch_size)?;
         if config
-            .futures_active_contracts_per_product
-            .is_some_and(|contracts| contracts > 1)
+            .futures_universe_expression
+            .as_ref()
+            .is_some_and(expression_requires_activity_quotes)
         {
             let activity_client = SessionClientBuilder::new(user, pass)
                 .futures_market()
@@ -436,33 +436,14 @@ pub fn futures_metadata_symbol_batches(
         .collect())
 }
 
-pub async fn resolve_futures_symbols<R>(
-    filter: &FuturesProductFilter,
-    resolver: &mut R,
-) -> RelayResult<Vec<String>>
-where
-    R: FuturesUniverseResolver + Send,
-{
-    resolve_futures_symbols_with_selection(filter, FuturesUniverseSelection::default(), resolver)
-        .await
+#[cfg(feature = "metadata")]
+fn expression_requires_activity_quotes(expression: &UniverseExpression) -> bool {
+    expression.clauses().iter().any(
+        |clause| matches!(clause.selector().kind(), UniverseSelectorKind::Top(limit) if limit > 1),
+    )
 }
 
-pub async fn resolve_futures_symbols_with_selection<R>(
-    filter: &FuturesProductFilter,
-    selection: FuturesUniverseSelection,
-    resolver: &mut R,
-) -> RelayResult<Vec<String>>
-where
-    R: FuturesUniverseResolver + Send,
-{
-    let contracts = resolve_futures_contracts_with_selection(filter, selection, resolver).await?;
-    Ok(contracts
-        .into_iter()
-        .map(|contract| contract.symbol)
-        .collect())
-}
-
-pub async fn resolve_futures_symbols_with_expression<R>(
+pub async fn resolve_futures_universe_symbols<R>(
     expression: &UniverseExpression,
     resolver: &mut R,
 ) -> RelayResult<Vec<String>>
@@ -479,6 +460,15 @@ where
 pub fn resolve_static_symbols_with_expression(
     expression: &UniverseExpression,
 ) -> RelayResult<Vec<String>> {
+    Ok(static_contracts_with_expression(expression)?
+        .into_iter()
+        .map(|contract| contract.symbol)
+        .collect())
+}
+
+pub(crate) fn static_contracts_with_expression(
+    expression: &UniverseExpression,
+) -> RelayResult<Vec<FuturesContract>> {
     let mut included = BTreeMap::<String, FuturesContract>::new();
     let mut exclusions = Vec::<UniverseMatch>::new();
     for clause in expression.clauses() {
@@ -509,7 +499,7 @@ pub fn resolve_static_symbols_with_expression(
     for exclusion in exclusions {
         included.retain(|_, contract| !exclusion.matches(contract));
     }
-    Ok(included.into_keys().collect())
+    Ok(included.into_values().collect())
 }
 
 pub async fn resolve_futures_contracts_with_expression<R>(
@@ -536,32 +526,30 @@ where
     Ok(included.into_values().collect())
 }
 
-pub async fn resolve_futures_contracts_with_selection<R>(
-    filter: &FuturesProductFilter,
-    selection: FuturesUniverseSelection,
+async fn contracts_for_product_scope<R>(
+    scope: ProductScope,
+    selection: ProductSelection,
     resolver: &mut R,
 ) -> RelayResult<Vec<FuturesContract>>
 where
     R: FuturesUniverseResolver + Send,
 {
-    if selection.active_contracts_per_product == Some(0) {
+    if selection.limit_per_product == Some(0) {
         return Err(RelayError::invalid_config(
-            "active_contracts_per_product must be greater than zero",
+            "top selector limit must be greater than zero",
         ));
     }
-    match filter {
-        FuturesProductFilter::None => Ok(Vec::new()),
-        FuturesProductFilter::All => {
+    match scope {
+        ProductScope::All => {
             let contracts = resolver.active_futures().await?;
             resolve_active_contracts(contracts, |_| true, selection, resolver).await
         }
-        FuturesProductFilter::Products(products) => {
+        ProductScope::Products(products) => {
             if products.is_empty() {
                 return Err(RelayError::invalid_config(
-                    "futures product filter must not be empty",
+                    "futures universe product selector must not be empty",
                 ));
             }
-            let products = products.clone();
             let contracts = resolver.active_futures().await?;
             resolve_active_contracts(
                 contracts,
@@ -587,31 +575,26 @@ where
 {
     match selector.kind() {
         UniverseSelectorKind::Active => {
-            let filter = product_filter_from_values(selector.values())?;
-            resolve_futures_contracts_with_selection(
-                &filter,
-                FuturesUniverseSelection::default(),
-                resolver,
-            )
-            .await
+            let scope = product_scope_from_values(selector.values())?;
+            contracts_for_product_scope(scope, ProductSelection::default(), resolver).await
         }
         UniverseSelectorKind::Main => {
-            let filter = product_filter_from_values(selector.values())?;
-            resolve_futures_contracts_with_selection(
-                &filter,
-                FuturesUniverseSelection {
-                    active_contracts_per_product: Some(1),
+            let scope = product_scope_from_values(selector.values())?;
+            contracts_for_product_scope(
+                scope,
+                ProductSelection {
+                    limit_per_product: Some(1),
                 },
                 resolver,
             )
             .await
         }
         UniverseSelectorKind::Top(limit) => {
-            let filter = product_filter_from_values(selector.values())?;
-            resolve_futures_contracts_with_selection(
-                &filter,
-                FuturesUniverseSelection {
-                    active_contracts_per_product: Some(limit),
+            let scope = product_scope_from_values(selector.values())?;
+            contracts_for_product_scope(
+                scope,
+                ProductSelection {
+                    limit_per_product: Some(limit),
                 },
                 resolver,
             )
@@ -633,13 +616,8 @@ where
             .map(|symbol| contract_from_configured_symbol(&symbol))
             .collect(),
         UniverseSelectorKind::Product => {
-            let filter = product_filter_from_values(selector.values())?;
-            resolve_futures_contracts_with_selection(
-                &filter,
-                FuturesUniverseSelection::default(),
-                resolver,
-            )
-            .await
+            let scope = product_scope_from_values(selector.values())?;
+            contracts_for_product_scope(scope, ProductSelection::default(), resolver).await
         }
         UniverseSelectorKind::Exchange => {
             let contracts = resolver.active_futures().await?;
@@ -659,10 +637,9 @@ where
                         selected.insert(contract.symbol.clone(), contract);
                     }
                     UniverseMatch::Product(product) => {
-                        let filter = FuturesProductFilter::Products(vec![product]);
-                        for contract in resolve_futures_contracts_with_selection(
-                            &filter,
-                            FuturesUniverseSelection::default(),
+                        for contract in contracts_for_product_scope(
+                            ProductScope::Products(vec![product]),
+                            ProductSelection::default(),
                             resolver,
                         )
                         .await?
@@ -694,13 +671,9 @@ async fn continuous_contracts_for_values<R>(
 where
     R: FuturesUniverseResolver + Send,
 {
-    let filter = product_filter_from_values(values)?;
-    let contracts = resolve_futures_contracts_with_selection(
-        &filter,
-        FuturesUniverseSelection::default(),
-        resolver,
-    )
-    .await?;
+    let scope = product_scope_from_values(values)?;
+    let contracts =
+        contracts_for_product_scope(scope, ProductSelection::default(), resolver).await?;
     let mut products = BTreeSet::<(String, String)>::new();
     for contract in contracts {
         products.insert((contract.exchange_id, contract.product_id));
@@ -718,15 +691,15 @@ where
         .collect()
 }
 
-fn product_filter_from_values(values: &[String]) -> RelayResult<FuturesProductFilter> {
+fn product_scope_from_values(values: &[String]) -> RelayResult<ProductScope> {
     if values.len() == 1 && values[0].eq_ignore_ascii_case("all") {
-        return Ok(FuturesProductFilter::All);
+        return Ok(ProductScope::All);
     }
     values
         .iter()
         .map(|value| FuturesProductCode::parse(value))
         .collect::<RelayResult<Vec<_>>>()
-        .map(FuturesProductFilter::Products)
+        .map(ProductScope::Products)
 }
 
 fn matches_for_clause(clause: &UniverseClause) -> RelayResult<Vec<UniverseMatch>> {
@@ -845,13 +818,13 @@ fn is_known_futures_exchange(value: &str) -> bool {
 async fn resolve_active_contracts<R>(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
-    selection: FuturesUniverseSelection,
+    selection: ProductSelection,
     resolver: &mut R,
 ) -> RelayResult<Vec<FuturesContract>>
 where
     R: FuturesUniverseResolver + Send,
 {
-    let Some(active_contracts_per_product) = selection.active_contracts_per_product else {
+    let Some(limit_per_product) = selection.limit_per_product else {
         return active_contracts(contracts, matches);
     };
     let main_symbols = resolver
@@ -859,7 +832,7 @@ where
         .await?
         .into_iter()
         .collect::<BTreeSet<_>>();
-    if active_contracts_per_product == 1 {
+    if limit_per_product == 1 {
         return main_active_contracts(contracts, matches, &main_symbols);
     }
     let candidate_symbols = contracts
@@ -871,7 +844,7 @@ where
     active_contracts_by_activity(
         contracts,
         matches,
-        active_contracts_per_product,
+        limit_per_product,
         &main_symbols,
         &quote_snapshots,
     )
@@ -913,13 +886,13 @@ struct ActivityMetrics {
 fn active_contracts_by_activity(
     contracts: Vec<FuturesContract>,
     matches: impl Fn(&FuturesContract) -> bool,
-    active_contracts_per_product: usize,
+    limit_per_product: usize,
     main_symbols: &BTreeSet<String>,
     quote_snapshots: &[Quote],
 ) -> RelayResult<Vec<FuturesContract>> {
-    if active_contracts_per_product == 0 {
+    if limit_per_product == 0 {
         return Err(RelayError::invalid_config(
-            "active_contracts_per_product must be greater than zero",
+            "top selector limit must be greater than zero",
         ));
     }
     let quote_metrics = quote_snapshots
@@ -957,7 +930,7 @@ fn active_contracts_by_activity(
             selected += 1;
         }
         for contract in contracts {
-            if selected >= active_contracts_per_product {
+            if selected >= limit_per_product {
                 break;
             }
             if main_contract

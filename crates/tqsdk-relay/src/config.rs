@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
-use crate::universe::{FuturesProductFilter, FuturesUniverseSelection};
 use crate::universe_expression::UniverseExpression;
 use crate::upstream::UpstreamTickChart;
 
@@ -15,15 +14,8 @@ pub const DEFAULT_UPSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
 const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
 const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
 const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
-const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
-const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
 const ENV_FUTURES_UNIVERSE: &str = "TQSDK_RELAY_FUTURES_UNIVERSE";
-const ENV_FUTURES_PRODUCTS: &str = "TQSDK_RELAY_FUTURES_PRODUCTS";
-const ENV_FUTURES_MAIN_ONLY: &str = "TQSDK_RELAY_FUTURES_MAIN_ONLY";
-const ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT: &str =
-    "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT";
 const ENV_FUTURES_UNIVERSE_REFRESH_AT: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT";
-const ENV_FUTURES_UNIVERSE_REFRESH_SECS: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS";
 const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
 const ENV_UPSTREAM_INS_LIST_WARN_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS";
 const ENV_UPSTREAM_INS_LIST_MAX_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS";
@@ -38,41 +30,37 @@ pub const DEFAULT_FUTURES_METADATA_BATCH_SIZE: usize = 500;
 pub const DEFAULT_OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FuturesUniverseRefreshSchedule {
-    Daily(DailyRefreshTime),
-    Interval(Duration),
+pub struct FuturesUniverseRefreshSchedule {
+    refresh_at: DailyRefreshTime,
 }
 
 impl Default for FuturesUniverseRefreshSchedule {
     fn default() -> Self {
-        Self::Daily(DailyRefreshTime::from_hms(8, 30, 0).expect("valid default refresh time"))
+        Self {
+            refresh_at: DailyRefreshTime::from_hms(8, 30, 0).expect("valid default refresh time"),
+        }
     }
 }
 
 impl FuturesUniverseRefreshSchedule {
+    pub fn daily(refresh_at: DailyRefreshTime) -> Self {
+        Self { refresh_at }
+    }
+
+    #[must_use]
+    pub const fn refresh_at(self) -> DailyRefreshTime {
+        self.refresh_at
+    }
+
     #[must_use]
     pub fn delay_from_seconds_after_midnight(
         self,
         current_seconds_after_midnight: u32,
     ) -> Duration {
-        match self {
-            Self::Daily(refresh_at) => {
-                next_daily_refresh_delay(current_seconds_after_midnight, refresh_at)
-            }
-            Self::Interval(interval) => interval,
-        }
+        next_daily_refresh_delay(current_seconds_after_midnight, self.refresh_at)
     }
 
-    fn validate(self) -> RelayResult<()> {
-        if let Self::Interval(interval) = self
-            && interval == Duration::ZERO
-        {
-            return Err(RelayError::invalid_config(
-                "futures_universe_refresh interval must be greater than zero",
-            ));
-        }
-        Ok(())
-    }
+    fn validate(self) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,9 +182,6 @@ pub struct RelayConfig {
     pub metrics_listen: String,
     pub futures_universe_refresh: FuturesUniverseRefreshSchedule,
     pub futures_metadata_batch_size: usize,
-    pub futures_active_contracts_per_product: Option<usize>,
-    pub futures_symbols: Vec<String>,
-    pub futures_product_filter: FuturesProductFilter,
     pub futures_universe_expression: Option<UniverseExpression>,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
     pub upstream_tick_view_width: usize,
@@ -224,12 +209,6 @@ impl fmt::Debug for RelayConfig {
                 "futures_metadata_batch_size",
                 &self.futures_metadata_batch_size,
             )
-            .field(
-                "futures_active_contracts_per_product",
-                &self.futures_active_contracts_per_product,
-            )
-            .field("futures_symbols", &self.futures_symbols)
-            .field("futures_product_filter", &self.futures_product_filter)
             .field(
                 "futures_universe_expression",
                 &self.futures_universe_expression,
@@ -264,9 +243,6 @@ impl Default for RelayConfig {
             metrics_listen: "127.0.0.1:7789".to_string(),
             futures_universe_refresh: FuturesUniverseRefreshSchedule::default(),
             futures_metadata_batch_size: DEFAULT_FUTURES_METADATA_BATCH_SIZE,
-            futures_active_contracts_per_product: None,
-            futures_symbols: Vec::new(),
-            futures_product_filter: FuturesProductFilter::None,
             futures_universe_expression: None,
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
             upstream_tick_view_width: DEFAULT_UPSTREAM_TICK_VIEW_WIDTH,
@@ -316,44 +292,18 @@ impl RelayConfig {
         if let Some(value) = get(ENV_DRY_RUN) {
             config.dry_run = parse_bool_env(ENV_DRY_RUN, &value)?;
         }
-        let refresh_at = get(ENV_FUTURES_UNIVERSE_REFRESH_AT);
-        let refresh_secs = get(ENV_FUTURES_UNIVERSE_REFRESH_SECS);
-        if refresh_at.is_some() && refresh_secs.is_some() {
-            return Err(RelayError::invalid_config(format!(
-                "set only one of {ENV_FUTURES_UNIVERSE_REFRESH_AT} or {ENV_FUTURES_UNIVERSE_REFRESH_SECS}"
-            )));
-        }
-        if let Some(value) = refresh_at {
+        if let Some(value) = get(ENV_FUTURES_UNIVERSE_REFRESH_AT) {
             let refresh_at = DailyRefreshTime::parse(&value).map_err(|_| {
                 RelayError::invalid_config(format!(
                     "{ENV_FUTURES_UNIVERSE_REFRESH_AT} must be HH:MM[:SS]"
                 ))
             })?;
-            config.futures_universe_refresh = FuturesUniverseRefreshSchedule::Daily(refresh_at);
-        }
-        if let Some(value) = refresh_secs {
-            let seconds = value.trim().parse::<u64>().map_err(|err| {
-                RelayError::invalid_config(format!(
-                    "{ENV_FUTURES_UNIVERSE_REFRESH_SECS} must be seconds: {err}"
-                ))
-            })?;
-            config.futures_universe_refresh =
-                FuturesUniverseRefreshSchedule::Interval(Duration::from_secs(seconds));
+            config.futures_universe_refresh = FuturesUniverseRefreshSchedule::daily(refresh_at);
         }
         if let Some(value) = get(ENV_FUTURES_METADATA_BATCH_SIZE) {
             config.futures_metadata_batch_size =
                 parse_positive_usize_env(ENV_FUTURES_METADATA_BATCH_SIZE, &value)?;
         }
-        reject_removed_universe_env(
-            &mut get,
-            ENV_FUTURES_MAIN_ONLY,
-            r#"TQSDK_RELAY_FUTURES_MAIN_ONLY was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="main:all""#,
-        )?;
-        reject_removed_universe_env(
-            &mut get,
-            ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT,
-            r#"TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="top:N:all""#,
-        )?;
         if let Some(value) = get(ENV_UPSTREAM_INS_LIST_WARN_CHARS) {
             config.upstream_ins_list_limits.warn_chars = Some(parse_positive_usize_env(
                 ENV_UPSTREAM_INS_LIST_WARN_CHARS,
@@ -380,42 +330,11 @@ impl RelayConfig {
             config.outbound_channel_capacity =
                 parse_positive_usize_env(ENV_OUTBOUND_CHANNEL_CAPACITY, &value)?;
         }
-        reject_removed_universe_env(
-            &mut get,
-            ENV_FUTURES_SYMBOLS,
-            r#"TQSDK_RELAY_FUTURES_SYMBOLS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="symbol:<symbols>""#,
-        )?;
-        reject_removed_universe_env(
-            &mut get,
-            ENV_FUTURES_SYMBOLS_FILE,
-            r#"TQSDK_RELAY_FUTURES_SYMBOLS_FILE was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="file:<path>""#,
-        )?;
-        reject_removed_universe_env(
-            &mut get,
-            ENV_FUTURES_PRODUCTS,
-            r#"TQSDK_RELAY_FUTURES_PRODUCTS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="active:all""#,
-        )?;
-        let futures_universe = get(ENV_FUTURES_UNIVERSE);
-        if let Some(value) = futures_universe {
+        if let Some(value) = get(ENV_FUTURES_UNIVERSE) {
             config.futures_universe_expression = Some(UniverseExpression::parse(&value)?);
         }
         config.validate()?;
         Ok(config)
-    }
-
-    pub fn upstream_tick_chart(&self) -> RelayResult<Option<UpstreamTickChart>> {
-        let mut charts = self.upstream_tick_charts()?;
-        match charts.len() {
-            0 => Ok(None),
-            1 => Ok(charts.pop()),
-            _ => Err(RelayError::invalid_config(
-                "upstream_tick_chart is only available for a single symbol; use upstream_tick_charts",
-            )),
-        }
-    }
-
-    pub fn upstream_tick_charts(&self) -> RelayResult<Vec<UpstreamTickChart>> {
-        self.upstream_tick_charts_for_symbols(self.futures_symbols.iter().map(String::as_str))
     }
 
     pub fn upstream_tick_charts_for_symbols<'a, I>(
@@ -453,22 +372,12 @@ impl RelayConfig {
 
     #[must_use]
     pub fn has_upstream_futures_source(&self) -> bool {
-        !self.futures_symbols.is_empty()
-            || self.futures_product_filter != FuturesProductFilter::None
-            || self.futures_universe_expression.is_some()
+        self.futures_universe_expression.is_some()
     }
 
     #[must_use]
     pub fn refreshes_futures_universe(&self) -> bool {
-        self.futures_product_filter != FuturesProductFilter::None
-            || self.futures_universe_expression.is_some()
-    }
-
-    #[must_use]
-    pub fn futures_universe_selection(&self) -> FuturesUniverseSelection {
-        FuturesUniverseSelection {
-            active_contracts_per_product: self.futures_active_contracts_per_product,
-        }
+        self.futures_universe_expression.is_some()
     }
 
     pub fn validate(&self) -> RelayResult<()> {
@@ -487,16 +396,11 @@ impl RelayConfig {
                 "metrics_listen must not be empty",
             ));
         }
-        self.futures_universe_refresh.validate()?;
+        self.futures_universe_refresh.validate();
         self.upstream_ins_list_limits.validate()?;
         if self.futures_metadata_batch_size == 0 {
             return Err(RelayError::invalid_config(
                 "futures_metadata_batch_size must be greater than zero",
-            ));
-        }
-        if self.futures_active_contracts_per_product == Some(0) {
-            return Err(RelayError::invalid_config(
-                "futures_active_contracts_per_product must be greater than zero",
             ));
         }
         if self.upstream_tick_view_width == 0 {
@@ -517,15 +421,6 @@ impl RelayConfig {
         if self.outbound_channel_capacity == 0 {
             return Err(RelayError::invalid_config(
                 "outbound_channel_capacity must be greater than zero",
-            ));
-        }
-        if self
-            .futures_symbols
-            .iter()
-            .any(|symbol| symbol.trim().is_empty())
-        {
-            return Err(RelayError::invalid_config(
-                "futures_symbols must not contain empty symbols",
             ));
         }
         if self.bootstrap.max_concurrent_remote_charts == 0 {
@@ -592,15 +487,4 @@ fn parse_bool_env(name: &str, value: &str) -> RelayResult<bool> {
             "{name} must be boolean: use true/false or 1/0"
         ))),
     }
-}
-
-fn reject_removed_universe_env(
-    get: &mut impl FnMut(&str) -> Option<String>,
-    name: &str,
-    message: &'static str,
-) -> RelayResult<()> {
-    if get(name).is_some() {
-        return Err(RelayError::invalid_config(message));
-    }
-    Ok(())
 }

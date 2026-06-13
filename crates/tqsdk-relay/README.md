@@ -159,7 +159,7 @@ cargo run -p tqsdk-relay
 dry-run 会向 stdout 输出一行 JSON，例如：
 
 ```json
-{"event":"relay_startup","dry_run":true,"upstream_source":"universe-expression","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"futures_active_contracts_per_product":null,"futures_universe_expression":"symbol:SHFE.au2602,DCE.m2609","futures_universe_include_clauses":1,"futures_universe_exclude_clauses":0,"futures_universe_final_symbols":2,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
+{"event":"relay_startup","dry_run":true,"upstream_source":"universe-expression","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"futures_universe_expression":"symbol:SHFE.au2602,DCE.m2609","futures_universe_include_clauses":1,"futures_universe_exclude_clauses":0,"futures_universe_final_symbols":2,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
 ```
 
 如果 dry-run 使用 `active` / `main` / `index` / `cont` / `top:N` 等动态 selector，它会执行一次
@@ -206,7 +206,6 @@ cargo run -p tqsdk-relay
 | `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。使用动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需；纯 `symbol:` / `file:` 静态表达式不需要。 |
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
-| `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时 `query_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 单个上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误；默认不启用硬失败。 |
@@ -222,9 +221,8 @@ cargo run -p tqsdk-relay
 - `tick_ring_capacity`：默认每个合约 `200_000` 行。
 - `kline_ring_capacity`：默认 `10_000` 行。
 - `futures_universe_expression`：组合式 universe 表达式，推荐作为二进制启动时的唯一合约集合入口。
-- `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新，也可设置兼容 interval。
+- `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新。
 - `futures_metadata_batch_size`：默认 `500`，控制产品发现时 metadata 查询分批大小。
-- `futures_active_contracts_per_product`：底层库配置，表达式中的 `main` / `top:N` 会复用同一套解析逻辑；二进制启动参数不再直接暴露该字段。
 - `upstream_tick_view_width`：默认 `10_000`，控制每个上游 tick chart 的 `view_width`。
 - `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭；检查口径是单个上游 tick chart 的 `ins_list` 长度。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。

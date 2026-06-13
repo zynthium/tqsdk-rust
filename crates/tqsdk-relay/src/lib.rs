@@ -67,9 +67,8 @@ pub use symbol_metrics::{
 #[cfg(feature = "metadata")]
 pub use universe::SessionFuturesUniverseResolver;
 pub use universe::{
-    FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
-    StaticFuturesUniverseResolver, futures_metadata_symbol_batches, resolve_futures_symbols,
-    resolve_futures_symbols_with_expression, resolve_futures_symbols_with_selection,
+    FuturesContract, FuturesProductCode, StaticFuturesUniverseResolver,
+    futures_metadata_symbol_batches, resolve_futures_universe_symbols,
 };
 pub use universe_expression::{
     UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
