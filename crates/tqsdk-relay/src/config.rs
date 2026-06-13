@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
 use crate::universe::{FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection};
+use crate::universe_expression::UniverseExpression;
 use crate::upstream::UpstreamTickChart;
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -16,6 +17,7 @@ const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
 const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
 const ENV_FUTURES_SYMBOLS: &str = "TQSDK_RELAY_FUTURES_SYMBOLS";
 const ENV_FUTURES_SYMBOLS_FILE: &str = "TQSDK_RELAY_FUTURES_SYMBOLS_FILE";
+const ENV_FUTURES_UNIVERSE: &str = "TQSDK_RELAY_FUTURES_UNIVERSE";
 const ENV_FUTURES_PRODUCTS: &str = "TQSDK_RELAY_FUTURES_PRODUCTS";
 const ENV_FUTURES_MAIN_ONLY: &str = "TQSDK_RELAY_FUTURES_MAIN_ONLY";
 const ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT: &str =
@@ -195,6 +197,7 @@ pub struct RelayConfig {
     pub futures_active_contracts_per_product: Option<usize>,
     pub futures_symbols: Vec<String>,
     pub futures_product_filter: FuturesProductFilter,
+    pub futures_universe_expression: Option<UniverseExpression>,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
     pub upstream_tick_view_width: usize,
     pub tick_ring_capacity: usize,
@@ -227,6 +230,10 @@ impl fmt::Debug for RelayConfig {
             )
             .field("futures_symbols", &self.futures_symbols)
             .field("futures_product_filter", &self.futures_product_filter)
+            .field(
+                "futures_universe_expression",
+                &self.futures_universe_expression,
+            )
             .field("upstream_ins_list_limits", &self.upstream_ins_list_limits)
             .field("upstream_tick_view_width", &self.upstream_tick_view_width)
             .field("tick_ring_capacity", &self.tick_ring_capacity)
@@ -260,6 +267,7 @@ impl Default for RelayConfig {
             futures_active_contracts_per_product: None,
             futures_symbols: Vec::new(),
             futures_product_filter: FuturesProductFilter::None,
+            futures_universe_expression: None,
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
             upstream_tick_view_width: DEFAULT_UPSTREAM_TICK_VIEW_WIDTH,
             tick_ring_capacity: 200_000,
@@ -382,12 +390,23 @@ impl RelayConfig {
         let inline_futures_symbols = get(ENV_FUTURES_SYMBOLS);
         let futures_symbols_file = get(ENV_FUTURES_SYMBOLS_FILE);
         let futures_products = get(ENV_FUTURES_PRODUCTS);
+        let futures_universe = get(ENV_FUTURES_UNIVERSE);
+        if futures_universe.is_some()
+            && (config.futures_active_contracts_per_product.is_some()
+                || futures_main_only.is_some())
+        {
+            return Err(RelayError::invalid_config(
+                "set only one futures universe source",
+            ));
+        }
         let configured_universe_sources = usize::from(inline_futures_symbols.is_some())
             + usize::from(futures_symbols_file.is_some())
-            + usize::from(futures_products.is_some());
+            + usize::from(futures_products.is_some())
+            + usize::from(futures_universe.is_some());
         if inline_futures_symbols.is_some()
             && futures_symbols_file.is_some()
             && futures_products.is_none()
+            && futures_universe.is_none()
         {
             return Err(RelayError::invalid_config(format!(
                 "set only one of {ENV_FUTURES_SYMBOLS} or {ENV_FUTURES_SYMBOLS_FILE}"
@@ -411,6 +430,9 @@ impl RelayConfig {
         }
         if let Some(value) = futures_products {
             config.futures_product_filter = parse_futures_product_filter(&value)?;
+        }
+        if let Some(value) = futures_universe {
+            config.futures_universe_expression = Some(UniverseExpression::parse(&value)?);
         }
         config.validate()?;
         Ok(config)
@@ -468,11 +490,13 @@ impl RelayConfig {
     pub fn has_upstream_futures_source(&self) -> bool {
         !self.futures_symbols.is_empty()
             || self.futures_product_filter != FuturesProductFilter::None
+            || self.futures_universe_expression.is_some()
     }
 
     #[must_use]
     pub fn refreshes_futures_universe(&self) -> bool {
         self.futures_product_filter != FuturesProductFilter::None
+            || self.futures_universe_expression.is_some()
     }
 
     #[must_use]

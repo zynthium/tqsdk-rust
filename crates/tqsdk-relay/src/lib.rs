@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod server;
 pub mod symbol_metrics;
 pub mod universe;
+pub mod universe_expression;
 pub mod upstream;
 
 pub use bootstrap::{BootstrapQueue, BootstrapRequest};
@@ -68,7 +69,10 @@ pub use universe::SessionFuturesUniverseResolver;
 pub use universe::{
     FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
     StaticFuturesUniverseResolver, futures_metadata_symbol_batches, resolve_futures_symbols,
-    resolve_futures_symbols_with_selection,
+    resolve_futures_symbols_with_expression, resolve_futures_symbols_with_selection,
+};
+pub use universe_expression::{
+    UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
 };
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;

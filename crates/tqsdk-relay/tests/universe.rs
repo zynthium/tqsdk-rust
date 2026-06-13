@@ -2,7 +2,8 @@ use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::universe::FuturesUniverseResolver;
 use tqsdk_relay::{
     FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
-    StaticFuturesUniverseResolver, futures_metadata_symbol_batches, resolve_futures_symbols,
+    StaticFuturesUniverseResolver, UniverseExpression, futures_metadata_symbol_batches,
+    resolve_futures_symbols, resolve_futures_symbols_with_expression,
     resolve_futures_symbols_with_selection,
 };
 
@@ -156,6 +157,58 @@ async fn resolver_selects_only_main_contracts_without_quote_snapshots_when_limit
     .unwrap();
 
     assert_eq!(symbols, vec!["DCE.m2605", "SHFE.au2602"]);
+}
+
+#[tokio::test]
+async fn expression_resolves_main_and_index_then_excludes_product() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+    ])
+    .with_main_symbols(["SHFE.au2602", "DCE.m2609"]);
+    let expression = UniverseExpression::parse("main:all;index:all;!SHFE.au").unwrap();
+
+    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m"]);
+}
+
+#[tokio::test]
+async fn expression_resolves_top_n_and_continuous_symbols() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
+        FuturesContract::new("SHFE.au2608", "SHFE", "au", false).unwrap(),
+    ])
+    .with_main_symbols(["SHFE.au2602"])
+    .with_quote_snapshots([
+        quote("SHFE.au2602", "SHFE", "au", 90, 10),
+        quote("SHFE.au2608", "SHFE", "au", 120, 8),
+    ]);
+    let expression = UniverseExpression::parse("top:2:all;cont:all").unwrap();
+
+    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["KQ.m@SHFE.au", "SHFE.au2602", "SHFE.au2608"]);
+}
+
+#[tokio::test]
+async fn expression_excludes_exact_symbol_and_exchange() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+        FuturesContract::new("CFFEX.IF2606", "CFFEX", "IF", false).unwrap(),
+    ]);
+    let expression = UniverseExpression::parse("active:all;index:all;!CFFEX;!KQ.i@DCE.m").unwrap();
+
+    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@SHFE.au", "SHFE.au2602"]);
 }
 
 #[test]

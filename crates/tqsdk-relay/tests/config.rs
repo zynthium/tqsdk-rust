@@ -4,8 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_relay::{
     BootstrapConfig, DailyRefreshTime, FuturesProductCode, FuturesProductFilter,
-    FuturesUniverseRefreshSchedule, RelayConfig, RelayError, UpstreamInsListLimits,
-    next_daily_refresh_delay,
+    FuturesUniverseRefreshSchedule, RelayConfig, RelayError, UniverseExpression,
+    UpstreamInsListLimits, next_daily_refresh_delay,
 };
 
 #[test]
@@ -125,6 +125,76 @@ fn config_loads_all_futures_products_from_env() {
 
     assert_eq!(config.futures_product_filter, FuturesProductFilter::All);
     assert!(config.futures_symbols.is_empty());
+}
+
+#[test]
+fn config_loads_futures_universe_expression_from_env() {
+    let config = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("main:all;index:all;!CFFEX".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        config
+            .futures_universe_expression
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "main:all;index:all;!CFFEX"
+    );
+    assert!(config.has_upstream_futures_source());
+    assert!(config.refreshes_futures_universe());
+}
+
+#[test]
+fn config_rejects_new_and_legacy_universe_sources_together() {
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("main:all".to_string()),
+        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: set only one futures universe source"
+    );
+}
+
+#[test]
+fn universe_expression_parses_layered_include_and_exclude_rules() {
+    let expression =
+        UniverseExpression::parse("main:all;index:SHFE.au,DCE.m;!CFFEX;~SHFE.au").unwrap();
+
+    assert_eq!(
+        expression.to_string(),
+        "main:all;index:SHFE.au,DCE.m;!CFFEX;!SHFE.au"
+    );
+    assert_eq!(expression.include_clause_count(), 2);
+    assert_eq!(expression.exclude_clause_count(), 2);
+}
+
+#[test]
+fn universe_expression_static_check_rejects_dynamic_excludes() {
+    let static_expression =
+        UniverseExpression::parse("symbol:SHFE.au2602,KQ.i@DCE.m;!SHFE.au").unwrap();
+    let dynamic_exclude = UniverseExpression::parse("symbol:SHFE.au2602;!active:all").unwrap();
+
+    assert!(static_expression.is_static_symbol_only());
+    assert!(!dynamic_exclude.is_static_symbol_only());
+}
+
+#[test]
+fn universe_expression_rejects_invalid_clauses() {
+    assert!(UniverseExpression::parse("").is_err());
+    assert!(UniverseExpression::parse("main:all;;index:all").is_err());
+    assert!(UniverseExpression::parse("unknown:all").is_err());
+    assert!(UniverseExpression::parse("top:0:all").is_err());
+    assert!(UniverseExpression::parse("top:x:all").is_err());
+    assert!(UniverseExpression::parse("main:").is_err());
+    assert!(UniverseExpression::parse("main:SHFE.au,,DCE.m").is_err());
+    assert!(UniverseExpression::parse("!").is_err());
 }
 
 #[test]

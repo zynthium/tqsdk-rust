@@ -16,6 +16,10 @@ pub struct RelayStartupReport {
     pub refresh_schedule: String,
     pub futures_metadata_batch_size: usize,
     pub futures_active_contracts_per_product: Option<usize>,
+    pub futures_universe_expression: Option<String>,
+    pub futures_universe_include_clauses: Option<usize>,
+    pub futures_universe_exclude_clauses: Option<usize>,
+    pub futures_universe_final_symbols: Option<usize>,
     pub upstream_symbols: usize,
     pub upstream_tick_view_width: usize,
     pub upstream_ins_list_chars: usize,
@@ -51,6 +55,22 @@ impl RelayStartupReport {
             refresh_schedule: refresh_schedule(config.futures_universe_refresh),
             futures_metadata_batch_size: config.futures_metadata_batch_size,
             futures_active_contracts_per_product: config.futures_active_contracts_per_product,
+            futures_universe_expression: config
+                .futures_universe_expression
+                .as_ref()
+                .map(ToString::to_string),
+            futures_universe_include_clauses: config
+                .futures_universe_expression
+                .as_ref()
+                .map(|expression| expression.include_clause_count()),
+            futures_universe_exclude_clauses: config
+                .futures_universe_expression
+                .as_ref()
+                .map(|expression| expression.exclude_clause_count()),
+            futures_universe_final_symbols: config
+                .futures_universe_expression
+                .as_ref()
+                .map(|_| charts.iter().map(|chart| chart.symbols().len()).sum()),
             upstream_symbols: charts.iter().map(|chart| chart.symbols().len()).sum(),
             upstream_tick_view_width: charts.first().map_or(
                 config.upstream_tick_view_width,
@@ -79,6 +99,9 @@ impl RelayStartupReport {
 }
 
 fn upstream_source(config: &RelayConfig) -> String {
+    if config.futures_universe_expression.is_some() {
+        return "universe-expression".to_string();
+    }
     if !config.futures_symbols.is_empty() {
         return "static-symbols".to_string();
     }

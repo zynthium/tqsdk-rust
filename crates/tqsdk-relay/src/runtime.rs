@@ -8,9 +8,11 @@ use crate::config::RelayConfig;
 use crate::error::RelayError;
 use crate::error::RelayResult;
 use crate::server::RelayServer;
-use crate::universe::FuturesContract;
 #[cfg(feature = "metadata")]
 use crate::universe::SessionFuturesUniverseResolver;
+use crate::universe::{
+    FuturesContract, contract_from_configured_symbol, resolve_futures_contracts_with_expression,
+};
 #[cfg(feature = "metadata")]
 use crate::universe::{
     futures_contracts_from_symbol_info, futures_metadata_symbol_batches,
@@ -105,6 +107,46 @@ async fn configured_upstream_tick_charts(
 async fn configured_upstream_tick_charts_with_contracts(
     config: &RelayConfig,
 ) -> RelayResult<ConfiguredTickCharts> {
+    if let Some(expression) = config.futures_universe_expression.as_ref() {
+        if expression.is_static_symbol_only() {
+            let symbols = crate::universe::resolve_static_symbols_with_expression(expression)?;
+            let charts =
+                config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
+            let contracts = charts
+                .iter()
+                .map(|chart| contract_from_configured_symbol(chart.symbol()))
+                .collect::<RelayResult<Vec<_>>>()?;
+            return Ok(ConfiguredTickCharts {
+                charts,
+                contracts,
+                calendar: None,
+            });
+        }
+        #[cfg(feature = "metadata")]
+        {
+            let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
+            let contracts =
+                resolve_futures_contracts_with_expression(expression, &mut resolver).await?;
+            let charts = config.upstream_tick_charts_for_symbols(
+                contracts.iter().map(|contract| contract.symbol.as_str()),
+            )?;
+            let calendar =
+                crate::universe::FuturesUniverseResolver::trading_calendar(&mut resolver)
+                    .await
+                    .ok();
+            return Ok(ConfiguredTickCharts {
+                charts,
+                contracts,
+                calendar,
+            });
+        }
+        #[cfg(not(feature = "metadata"))]
+        {
+            return Err(RelayError::invalid_config(
+                "tqsdk-relay metadata feature is required for dynamic futures universe expression",
+            ));
+        }
+    }
     if !config.futures_symbols.is_empty() {
         let charts = config.upstream_tick_charts()?;
         let mut contracts = charts

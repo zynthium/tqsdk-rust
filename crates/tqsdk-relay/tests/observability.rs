@@ -3,7 +3,7 @@ use tqsdk_core::TradingTime;
 use tqsdk_relay::{
     ClientId, DecodeHealth, DownstreamCommand, FlowIdleHealth, FuturesContract, RelayConfig,
     RelayEngine, RelayEventKind, RelaySourceStage, RelaySourceStatus, RelayStartupReport,
-    RelayTickRow, SetChartCommand, UpstreamSourceProgress,
+    RelayTickRow, SetChartCommand, UniverseExpression, UpstreamSourceProgress,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -676,4 +676,36 @@ fn startup_report_serializes_operational_summary() {
     assert!(line.contains("\"futures_active_contracts_per_product\":null"));
     assert!(line.contains("\"upstream_tick_view_width\":10000"));
     assert!(line.contains("\"metrics_listen\":\"127.0.0.1:7789\""));
+}
+
+#[test]
+fn startup_report_serializes_universe_expression_summary() {
+    let config = RelayConfig {
+        futures_universe_expression: Some(
+            UniverseExpression::parse("symbol:SHFE.au2602,KQ.i@DCE.m;!DCE.m2609").unwrap(),
+        ),
+        ..RelayConfig::default()
+    };
+    let charts = config
+        .upstream_tick_charts_for_symbols(["SHFE.au2602", "KQ.i@DCE.m"])
+        .unwrap();
+
+    let report = RelayStartupReport::from_config_and_charts(&config, &charts);
+    let line = report.log_line();
+
+    assert_eq!(report.upstream_source, "universe-expression");
+    assert_eq!(
+        report.futures_universe_expression.as_deref(),
+        Some("symbol:SHFE.au2602,KQ.i@DCE.m;!DCE.m2609")
+    );
+    assert_eq!(report.futures_universe_include_clauses, Some(1));
+    assert_eq!(report.futures_universe_exclude_clauses, Some(1));
+    assert_eq!(report.futures_universe_final_symbols, Some(2));
+    assert!(line.contains("\"upstream_source\":\"universe-expression\""));
+    assert!(
+        line.contains(
+            "\"futures_universe_expression\":\"symbol:SHFE.au2602,KQ.i@DCE.m;!DCE.m2609\""
+        )
+    );
+    assert!(line.contains("\"futures_universe_final_symbols\":2"));
 }
