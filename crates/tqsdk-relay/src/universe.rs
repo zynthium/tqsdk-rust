@@ -493,6 +493,12 @@ pub fn resolve_static_symbols_with_expression(
                     included.insert(contract.symbol.clone(), contract);
                 }
             }
+            UniverseSelectorKind::File => {
+                for symbol in symbols_from_files(clause.selector().values())? {
+                    let contract = contract_from_configured_symbol(&symbol)?;
+                    included.insert(contract.symbol.clone(), contract);
+                }
+            }
             _ => {
                 return Err(RelayError::invalid_config(
                     "dynamic futures universe expression requires metadata feature",
@@ -622,6 +628,10 @@ where
             .iter()
             .map(|symbol| contract_from_configured_symbol(symbol))
             .collect(),
+        UniverseSelectorKind::File => symbols_from_files(selector.values())?
+            .into_iter()
+            .map(|symbol| contract_from_configured_symbol(&symbol))
+            .collect(),
         UniverseSelectorKind::Product => {
             let filter = product_filter_from_values(selector.values())?;
             resolve_futures_contracts_with_selection(
@@ -727,6 +737,11 @@ fn matches_for_clause(clause: &UniverseClause) -> RelayResult<Vec<UniverseMatch>
             .iter()
             .map(|value| Ok(UniverseMatch::Symbol(value.clone())))
             .collect(),
+        UniverseSelectorKind::File => symbols_from_files(values)?
+            .into_iter()
+            .map(UniverseMatch::Symbol)
+            .map(Ok)
+            .collect(),
         UniverseSelectorKind::Product
         | UniverseSelectorKind::Active
         | UniverseSelectorKind::Main
@@ -780,6 +795,35 @@ fn classify_universe_token(value: &str) -> RelayResult<UniverseMatch> {
         return Ok(UniverseMatch::Exchange(value.to_string()));
     }
     FuturesProductCode::new(None, value).map(UniverseMatch::Product)
+}
+
+fn symbols_from_files(paths: &[String]) -> RelayResult<Vec<String>> {
+    let mut symbols = Vec::new();
+    for path in paths {
+        let contents = std::fs::read_to_string(path).map_err(|err| {
+            RelayError::invalid_config(format!(
+                "failed to read futures universe file {path}: {err}"
+            ))
+        })?;
+        symbols.extend(parse_configured_symbols(&contents)?);
+    }
+    Ok(symbols)
+}
+
+fn parse_configured_symbols(contents: &str) -> RelayResult<Vec<String>> {
+    contents
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .map(|symbol| {
+            if symbol.is_empty() {
+                return Err(RelayError::invalid_config(
+                    "futures universe file must not contain empty symbols",
+                ));
+            }
+            Ok(symbol.to_string())
+        })
+        .collect()
 }
 
 pub(crate) fn contract_from_configured_symbol(symbol: &str) -> RelayResult<FuturesContract> {

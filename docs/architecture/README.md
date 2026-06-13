@@ -180,8 +180,9 @@ V1 是：
     query/auth
   - 产品发现可选择只保留每品种主力合约，或每品种活跃度前 N 合约：主力来自
     `query_cont_quotes`，N 大于 1 时其余按 quote `open_interest` / `volume` 排名补足
-  - 组合式 universe 表达式可把真实活跃合约、真实主力、加权指数连续合约、主连连续合约、
-    top-N 和排除规则放进同一个订阅前置计划，例如 `main:all;index:all;!CFFEX`
+  - 二进制启动参数统一使用组合式 universe 表达式，把真实活跃合约、真实主力、加权指数连续合约、
+    主连连续合约、top-N、静态文件和排除规则放进同一个订阅前置计划，例如
+    `main:all;index:all;!CFFEX` 或 `file:./futures-symbols.txt`
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
   - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
     长度阈值；上游 tick 源按一合约一 chart 发送，检查口径是单个 tick chart 的最大

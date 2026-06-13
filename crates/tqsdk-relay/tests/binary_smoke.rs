@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +11,12 @@ use serde_json::json;
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
+
+static RELAY_BINARY_BIND_LOCK: Mutex<()> = Mutex::new(());
+
+fn relay_binary_bind_lock() -> MutexGuard<'static, ()> {
+    RELAY_BINARY_BIND_LOCK.lock().unwrap()
+}
 
 fn recv_text_json(
     socket: &mut websocket_support::TestWebSocketConnection,
@@ -25,6 +32,7 @@ fn recv_text_json(
 fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     use websocket_support::TestWebSocketServer;
 
+    let _bind_guard = relay_binary_bind_lock();
     let symbols_file = temp_symbols_file("binary-smoke-symbols");
     fs::write(&symbols_file, "SHFE.au2602\n").unwrap();
     let upstream = TestWebSocketServer::spawn(|mut socket| {
@@ -51,7 +59,10 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     let mut child = ChildGuard::spawn(
         Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
-            .env("TQSDK_RELAY_FUTURES_SYMBOLS_FILE", &symbols_file)
+            .env(
+                "TQSDK_RELAY_FUTURES_UNIVERSE",
+                format!("file:{}", symbols_file.display()),
+            )
             .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", upstream.url("/market"))
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
@@ -72,7 +83,10 @@ fn relay_binary_dry_run_prints_diagnostic_without_connecting_upstream() {
     let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
         .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
         .env("TQSDK_RELAY_DRY_RUN", "1")
-        .env("TQSDK_RELAY_FUTURES_SYMBOLS_FILE", &symbols_file)
+        .env(
+            "TQSDK_RELAY_FUTURES_UNIVERSE",
+            format!("file:{}", symbols_file.display()),
+        )
         .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", "ws://127.0.0.1:9/market")
         .output()
         .unwrap();
@@ -91,8 +105,24 @@ fn relay_binary_dry_run_prints_diagnostic_without_connecting_upstream() {
         report["futures_active_contracts_per_product"],
         serde_json::Value::Null
     );
-    assert_eq!(report["upstream_source"], "static-symbols");
+    assert_eq!(report["upstream_source"], "universe-expression");
     fs::remove_file(symbols_file).unwrap();
+}
+
+#[test]
+fn relay_binary_rejects_removed_legacy_universe_env() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+        .env("TQSDK_RELAY_DRY_RUN", "1")
+        .env("TQSDK_RELAY_FUTURES_PRODUCTS", "ALL")
+        .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", "ws://127.0.0.1:9/market")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_PRODUCTS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"active:all\""
+    );
 }
 
 #[test]
@@ -131,6 +161,7 @@ fn relay_binary_dry_run_supports_static_universe_expression() {
 
 #[test]
 fn relay_binary_serves_health_and_metrics_json() {
+    let _bind_guard = relay_binary_bind_lock();
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
@@ -138,6 +169,7 @@ fn relay_binary_serves_health_and_metrics_json() {
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
             .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())
@@ -240,6 +272,7 @@ fn relay_binary_serves_health_and_metrics_json() {
 
 #[test]
 fn relay_binary_rejects_invalid_symbol_metrics_query() {
+    let _bind_guard = relay_binary_bind_lock();
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
@@ -247,6 +280,7 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
             .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())
@@ -266,6 +300,7 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
 
 #[test]
 fn relay_binary_metrics_responses_are_not_cacheable() {
+    let _bind_guard = relay_binary_bind_lock();
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
@@ -273,6 +308,7 @@ fn relay_binary_metrics_responses_are_not_cacheable() {
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
             .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())
@@ -286,6 +322,7 @@ fn relay_binary_metrics_responses_are_not_cacheable() {
 
 #[test]
 fn relay_binary_serves_embedded_dashboard_assets() {
+    let _bind_guard = relay_binary_bind_lock();
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
@@ -293,6 +330,7 @@ fn relay_binary_serves_embedded_dashboard_assets() {
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
             .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
             .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+            .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())

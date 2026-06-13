@@ -54,7 +54,7 @@ impl UniverseExpression {
                         .is_some_and(|(_, rhs)| rhs.chars().any(|ch| ch.is_ascii_digit()))
             });
             match clause.selector.kind {
-                UniverseSelectorKind::Symbol => true,
+                UniverseSelectorKind::Symbol | UniverseSelectorKind::File => true,
                 UniverseSelectorKind::Product | UniverseSelectorKind::Exchange
                     if clause.exclude =>
                 {
@@ -169,6 +169,7 @@ impl UniverseSelector {
                 "index" => UniverseSelectorKind::Index,
                 "cont" => UniverseSelectorKind::Cont,
                 "symbol" => UniverseSelectorKind::Symbol,
+                "file" | "symbol-file" => UniverseSelectorKind::File,
                 "product" => UniverseSelectorKind::Product,
                 "exchange" => UniverseSelectorKind::Exchange,
                 other => {
@@ -207,6 +208,7 @@ impl fmt::Display for UniverseSelector {
             UniverseSelectorKind::Index => f.write_str("index:")?,
             UniverseSelectorKind::Cont => f.write_str("cont:")?,
             UniverseSelectorKind::Symbol => f.write_str("symbol:")?,
+            UniverseSelectorKind::File => f.write_str("file:")?,
             UniverseSelectorKind::Product => f.write_str("product:")?,
             UniverseSelectorKind::Exchange => f.write_str("exchange:")?,
             UniverseSelectorKind::Top(limit) => write!(f, "top:{limit}:")?,
@@ -230,6 +232,7 @@ pub enum UniverseSelectorKind {
     Cont,
     Top(usize),
     Symbol,
+    File,
     Product,
     Exchange,
     Auto,

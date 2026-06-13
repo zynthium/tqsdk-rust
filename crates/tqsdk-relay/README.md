@@ -37,7 +37,7 @@ relay 不改变 SDK 运行时模型：
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
 | 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，并为每个合约发送一个 duration 为 `0` 的 tick `set_chart`。 |
-| 合约集合刷新 | 支持按全部期货品种或产品代码列表生成当前活跃合约集合，也可限制为每品种活跃度排名前 N 的合约；产品发现模式下按本地每日固定时间重建上游 tick chart 集合，默认 `08:30:00`。 |
+| 合约集合刷新 | 使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 组合全部活跃、指定产品、主力、加权指数、主连、每品种活跃度前 N、静态符号文件和排除规则；动态发现模式下按本地每日固定时间重建上游 tick chart 集合，默认 `08:30:00`。 |
 | 订阅长度防线 | 在连接上游前统计单个上游 tick chart 的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
 | 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
@@ -57,7 +57,7 @@ duration 为 `0` 的下游 tick chart 兼容不是 V1 已完成的主要能力�
 ```bash
 export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
-TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
+TQSDK_RELAY_FUTURES_UNIVERSE="active:all" \
 cargo run -p tqsdk-relay
 ```
 
@@ -79,6 +79,7 @@ cargo run -p tqsdk-relay
 - `cont:all`：全部主连连续合约，例如 `KQ.m@SHFE.au`。
 - `top:2:all`：每品种主力优先，再按 `open_interest` / `volume` 补足前 2。
 - `symbol:SHFE.au2602,KQ.i@DCE.m`：显式符号列表。
+- `file:./futures-symbols.txt`：从文件读取显式符号列表，文件可用换行或逗号分隔。
 
 裸值会自动识别：`CFFEX` 表示交易所，`SHFE.au` 表示品种，
 `SHFE.au2602` / `KQ.i@SHFE.au` 表示精确符号。例如：
@@ -96,35 +97,32 @@ cargo run -p tqsdk-relay
 如果只想尽量减少启动时的上游 tick chart 历史补齐，可以把上游 `view_width` 调小：
 
 ```bash
-TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
+TQSDK_RELAY_FUTURES_UNIVERSE="active:all" \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
 `view_width=1` 仍会发送 tick chart 请求，但只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。
 
-如果只需要每个品种的主力和次主力，可以限制每个产品保留的活跃合约数：
+如果只需要每个品种的主力和次主力，用 `top:2:all`：
 
 ```bash
-TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
-TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=2 \
+TQSDK_RELAY_FUTURES_UNIVERSE="top:2:all" \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
-只订阅每个品种的主力合约时，可以使用更直接的快捷方式：
+只订阅每个品种的主力合约时，用 `main:all`：
 
 ```bash
-TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
-TQSDK_RELAY_FUTURES_MAIN_ONLY=true \
+TQSDK_RELAY_FUTURES_UNIVERSE="main:all" \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
-`TQSDK_RELAY_FUTURES_MAIN_ONLY=true` 等价于
-`TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=1`，只走合约服务
-`query_cont_quotes()` 获取主力标的，不订阅 quote，也不发送 `set_chart`。`2` 或更大的
-N 表示主力加活跃度排名补足；此时 relay 会先用 `query_cont_quotes()` 获取全市场主力标的，
+`main:all` 只走合约服务 `query_cont_quotes()` 获取主力标的，不订阅 quote，也不发送
+`set_chart`。`top:2:all` 或更大的 N 表示主力加活跃度排名补足；此时 relay 会先用
+`query_cont_quotes()` 获取全市场主力标的，
 再对候选在市期货做一次批量 quote 快照订阅，按 `product_id` 分组后以主力优先，其余按
 `open_interest` 降序、`volume` 降序补足前 N。
 
@@ -133,7 +131,7 @@ N 表示主力加活跃度排名补足；此时 relay 会先用 `query_cont_quot
 ```bash
 export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
-TQSDK_RELAY_FUTURES_PRODUCTS="SHFE.au,DCE.m,CZCE.MA" \
+TQSDK_RELAY_FUTURES_UNIVERSE="active:SHFE.au,DCE.m,CZCE.MA" \
 cargo run -p tqsdk-relay
 ```
 
@@ -154,19 +152,19 @@ metadata 查询默认每批 `500` 个合约；如果天勤服务或本地网络�
 
 ```bash
 TQSDK_RELAY_DRY_RUN=1 \
-TQSDK_RELAY_FUTURES_SYMBOLS="SHFE.au2602,DCE.m2609" \
+TQSDK_RELAY_FUTURES_UNIVERSE="symbol:SHFE.au2602,DCE.m2609" \
 cargo run -p tqsdk-relay
 ```
 
 dry-run 会向 stdout 输出一行 JSON，例如：
 
 ```json
-{"event":"relay_startup","dry_run":true,"upstream_source":"static-symbols","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"futures_active_contracts_per_product":null,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
+{"event":"relay_startup","dry_run":true,"upstream_source":"universe-expression","downstream_listen":"127.0.0.1:7788","metrics_listen":"127.0.0.1:7789","refresh_schedule":"daily:08:30:00","futures_metadata_batch_size":500,"futures_active_contracts_per_product":null,"futures_universe_expression":"symbol:SHFE.au2602,DCE.m2609","futures_universe_include_clauses":1,"futures_universe_exclude_clauses":0,"futures_universe_final_symbols":2,"upstream_symbols":2,"upstream_tick_view_width":10000,"upstream_ins_list_chars":11,"upstream_ins_list_warn_chars":32000,"upstream_ins_list_max_chars":null,"upstream_ins_list_over_warn":false,"upstream_ins_list_over_max":false,"suggested_relay_instances":null}
 ```
 
-如果 dry-run 使用 `TQSDK_RELAY_FUTURES_PRODUCTS`，它会执行一次 metadata 查询来得到当前
-活跃合约集合；如果设置了每品种活跃合约数，还会短暂订阅候选 quote 来计算活跃度。
-它仍不会绑定监听地址，也不会连接上游 tick websocket。
+如果 dry-run 使用 `active` / `main` / `index` / `cont` / `top:N` 等动态 selector，它会执行一次
+metadata 查询来得到当前活跃合约集合；如果使用 `top:N` 且 N 大于 1，还会短暂订阅候选 quote
+来计算活跃度。它仍不会绑定监听地址，也不会连接上游 tick websocket。
 
 让 SDK 客户端连接 relay：
 
@@ -183,21 +181,19 @@ let mut tq = tqsdk::Tq::futures()
 小规模冒烟测试或临时排查也可以直接用完整合约列表：
 
 ```bash
-TQSDK_RELAY_FUTURES_SYMBOLS="SHFE.au2602,DCE.m2609" \
+TQSDK_RELAY_FUTURES_UNIVERSE="symbol:SHFE.au2602,DCE.m2609" \
 cargo run -p tqsdk-relay
 ```
 
-完整合约文件仍保留为兼容入口，但不推荐作为长期部署方式，因为合约会随上市/退市
-变化：
+完整合约文件可以通过 `file:` selector 接入，但不推荐作为长期部署方式，因为合约会随上市/退市变化：
 
 ```bash
-TQSDK_RELAY_FUTURES_SYMBOLS_FILE="./futures-symbols.txt" \
+TQSDK_RELAY_FUTURES_UNIVERSE="file:./futures-symbols.txt" \
 cargo run -p tqsdk-relay
 ```
 
-如果既没有设置 `TQSDK_RELAY_FUTURES_PRODUCTS`，也没有设置完整合约覆盖入口，relay
-只会启动下游服务，不连接上游。这个模式适合做本地协议冒烟测试，但不会产生实时行情
-数据。
+如果没有设置 `TQSDK_RELAY_FUTURES_UNIVERSE`，relay 只会启动下游服务，不连接上游。
+这个模式适合做本地协议冒烟测试，但不会产生实时行情数据。
 
 ## 配置
 
@@ -205,23 +201,18 @@ cargo run -p tqsdk-relay
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TQSDK_RELAY_FUTURES_PRODUCTS` | 空 | 推荐入口。设置为 `ALL` / `all` / `*` 表示动态查询全部活跃期货合约；也可传逗号分隔产品代码，例如 `SHFE.au,DCE.m,CZCE.MA`。 |
-| `TQSDK_RELAY_FUTURES_UNIVERSE` | 空 | 组合式 universe 表达式。支持 `active` / `main` / `index` / `cont` / `top:N` / `symbol` / `product` / `exchange`，用 `;` 分层、`,` 分隔值、`!` 或 `~` 排除。设置后不能同时设置旧 universe 入口。 |
-| `TQ_AUTH_USER` | 空 | 产品发现需要的天勤账号。使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 或动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需。 |
-| `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 或动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需。 |
+| `TQSDK_RELAY_FUTURES_UNIVERSE` | 空 | 组合式 universe 表达式。支持 `active` / `main` / `index` / `cont` / `top:N` / `symbol` / `file` / `product` / `exchange`，用 `;` 分层、`,` 分隔值、`!` 或 `~` 排除。 |
+| `TQ_AUTH_USER` | 空 | 产品发现需要的天勤账号。使用动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需；纯 `symbol:` / `file:` 静态表达式不需要。 |
+| `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。使用动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需；纯 `symbol:` / `file:` 静态表达式不需要。 |
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |
 | `TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE` | `500` | 产品发现时 `query_symbol_info` metadata 查询的批大小；必须大于 `0`。 |
-| `TQSDK_RELAY_FUTURES_MAIN_ONLY` | `false` | 产品发现模式的快捷入口。设置为 `1` / `true` / `yes` / `on` 时只保留每品种主力合约；与 `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` 互斥。 |
-| `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT` | 空 | 产品发现模式的可选活跃度限制。设置为 `1` 表示每品种只保留主力，`2` 表示主力和次主力；其余合约按 `open_interest`、`volume` 排名补足前 N。必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS` | `32000` | 单个上游 tick chart `ins_list` 字符串长度告警阈值。当前 relay 按一合约一 tick chart 发送，通常等于最长合约代码长度；超过后不阻止连接，但 `MetricsSnapshot.upstream_ins_list_over_warn` 会变为 `true`。 |
 | `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` | 空 | 单个上游 tick chart `ins_list` 字符串硬上限。设置后超过上限会在连接上游前返回配置错误；默认不启用硬失败。 |
 | `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给每个上游 tick chart 的 `view_width`。调小可减少启动 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
 | `TQSDK_RELAY_TICK_RING_CAPACITY` | `200000` | 每个合约保留的内存 tick ring 行数；必须大于 `0`。全品种持久运行建议调低到 `10000` / `20000` 级别。 |
 | `TQSDK_RELAY_KLINE_RING_CAPACITY` | `10000` | relay 内部 K 线 ring 容量配置；必须大于 `0`。当前二进制主要用于保留配置边界，K 线合成热状态仍按订阅 source 保存当前 bar。 |
-| `TQSDK_RELAY_FUTURES_SYMBOLS` | 空 | 兼容入口。逗号分隔完整期货合约列表；relay 会为每个合约创建一个上游 tick chart。与 `TQSDK_RELAY_FUTURES_PRODUCTS` / `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 互斥。 |
-| `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` | 空 | 兼容入口。完整合约文件路径；文件可用换行或逗号分隔。长期部署不推荐依赖静态文件。 |
 | `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | 上游天勤行情 websocket URL。 |
 | `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | 下游 SDK websocket 监听地址。 |
 | `TQSDK_RELAY_METRICS_LISTEN` | `127.0.0.1:7789` | HTTP health / metrics 监听地址。 |
@@ -230,10 +221,10 @@ cargo run -p tqsdk-relay
 
 - `tick_ring_capacity`：默认每个合约 `200_000` 行。
 - `kline_ring_capacity`：默认 `10_000` 行。
-- `futures_product_filter`：动态产品发现过滤器，可选全部期货或产品代码列表。
+- `futures_universe_expression`：组合式 universe 表达式，推荐作为二进制启动时的唯一合约集合入口。
 - `futures_universe_refresh`：默认每日本地 `08:30:00` 刷新，也可设置兼容 interval。
 - `futures_metadata_batch_size`：默认 `500`，控制产品发现时 metadata 查询分批大小。
-- `futures_active_contracts_per_product`：默认 `None`，设置后限制产品发现结果为每品种活跃度排名前 N。
+- `futures_active_contracts_per_product`：底层库配置，表达式中的 `main` / `top:N` 会复用同一套解析逻辑；二进制启动参数不再直接暴露该字段。
 - `upstream_tick_view_width`：默认 `10_000`，控制每个上游 tick chart 的 `view_width`。
 - `upstream_ins_list_limits`：默认 warn threshold 为 `32_000` 字符，hard max 关闭；检查口径是单个上游 tick chart 的 `ins_list` 长度。
 - `bootstrap.max_concurrent_remote_charts`：默认 `4`。
@@ -461,7 +452,7 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
 
 - 将下游监听保持在 loopback、私有网络或你自己的访问控制之后。relay 不认证下游
   客户端。
-- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_PRODUCTS=ALL`，让 relay 在启动和
+- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_UNIVERSE="active:all"`，让 relay 在启动和
   每日本地固定刷新时间动态查询当前活跃合约。
 - relay 的目标是通过共享一个上游 websocket 和本地 tick/quote/K 线缓存降低多进程订阅压力；不要把它当成通用
   天勤代理。
