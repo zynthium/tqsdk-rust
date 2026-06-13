@@ -80,6 +80,34 @@ describe('timeline', () => {
     expect(buckets.at(-1)?.sample.global.severity).toBe('closed');
   });
 
+  it('keeps initializing symbol history neutral even after live stage starts', () => {
+    const history = createTimelineHistory();
+    const rows = [
+      row({ symbol: 'SHFE.au2602' }),
+      row({
+        symbol: 'DCE.m2609',
+        status: 'initializing',
+        problem: false,
+        problem_severity: 'initializing',
+        flow: 'no_sample',
+        integrity: 'suspected',
+        session: 'unknown',
+        receive_gap_ms: null,
+        avg_receive_gap_ms: null,
+        market_time_lag_ms: null,
+        last_receive_unix_millis: null,
+        last_tick_datetime_ns: null,
+      }),
+    ];
+    const sample = dashboardTimeline(rows);
+
+    pushTimelineSample(history, sample, NOW, rows);
+    const buckets = timelineBuckets(history, NOW + 1, 60);
+
+    expect(buckets.at(-1)?.sample.global.problem).toBe(0);
+    expect(buckets.at(-1)?.symbols['DCE.m2609'].severity).toBe('no_sample');
+  });
+
   it('includes a sample at the exact right edge of the latest bucket', () => {
     const history = createTimelineHistory();
     const sample = dashboardTimeline([row({ symbol: 'DCE.m2609' })]);

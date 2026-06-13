@@ -291,6 +291,7 @@ fn symbol_metrics_context_for_stage(stage: RelaySourceStage) -> SymbolMetricsCon
             stage,
             RelaySourceStage::Subscribing | RelaySourceStage::Backfilling
         ),
+        initializing_pending_samples: true,
     }
 }
 
@@ -320,6 +321,8 @@ fn dashboard_timeline_history_sample(
 fn dashboard_symbol_severity(row: &SymbolTelemetrySnapshot) -> DashboardTimelineSeverity {
     if row.session == SymbolSession::Closed {
         DashboardTimelineSeverity::Closed
+    } else if row.problem_severity == SymbolProblemSeverity::Initializing {
+        DashboardTimelineSeverity::NoSample
     } else if row.problem_severity == SymbolProblemSeverity::Bad
         || row.integrity == SymbolIntegrity::ConfirmedGap
     {

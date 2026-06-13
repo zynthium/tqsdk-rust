@@ -214,6 +214,54 @@ fn dashboard_marks_no_sample_universe_symbols_initializing_during_backfill() {
 }
 
 #[test]
+fn dashboard_keeps_unobserved_universe_symbols_initializing_after_live_tick() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602", "DCE.m2609"],
+        21,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+    engine.record_upstream_transport_connected_at(now / 1_000 - 1);
+    engine.record_upstream_subscription_sent_at(now / 1_000 - 1);
+    engine
+        .ingest_tick_at_for_test("SHFE.au2602", tick(1), now - 500)
+        .unwrap();
+
+    let inputs = engine.dashboard_snapshot_inputs_at(now);
+    let (dashboard, timeline_sample) = inputs
+        .into_dashboard_snapshot_and_timeline_sample(&tqsdk_relay::SymbolMetricsQuery::default());
+
+    assert_eq!(dashboard.metrics.upstream_stage, RelaySourceStage::Live);
+    assert_eq!(dashboard.global.live, 1);
+    assert_eq!(dashboard.global.initializing, 1);
+    assert_eq!(dashboard.global.missing, 0);
+    assert_eq!(dashboard.global.problem, 0);
+    assert_eq!(dashboard.timeline.global.problem, 0);
+    assert_eq!(
+        dashboard.timeline.exchanges["DCE"].severity,
+        tqsdk_relay::DashboardTimelineSeverity::NoSample
+    );
+    assert!(dashboard.page.symbols.iter().all(|symbol| !symbol.problem));
+    assert_eq!(
+        dashboard
+            .page
+            .symbols
+            .iter()
+            .find(|symbol| symbol.symbol == "DCE.m2609")
+            .unwrap()
+            .status,
+        tqsdk_relay::SymbolStatus::Initializing
+    );
+    assert_eq!(
+        timeline_sample.symbols["DCE.m2609"].severity,
+        tqsdk_relay::DashboardTimelineSeverity::NoSample
+    );
+}
+
+#[test]
 fn upstream_subscription_sent_advances_symbol_source_epoch() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);
@@ -288,7 +336,7 @@ fn metrics_include_clients_subscriptions_and_cache_events() {
 }
 
 #[test]
-fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
+fn engine_symbol_metrics_keep_pending_universe_symbols_initializing() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);
     engine.record_universe_refresh_success_for_symbols(
@@ -305,7 +353,9 @@ fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
     let live = engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
     assert_eq!(live.summary.total, 2);
     assert_eq!(live.summary.live, 1);
-    assert_eq!(live.summary.missing, 1);
+    assert_eq!(live.summary.initializing, 1);
+    assert_eq!(live.summary.missing, 0);
+    assert_eq!(live.summary.problem, 0);
 
     let stale = engine
         .symbol_metrics_snapshot_at(now + 30_001, &tqsdk_relay::SymbolMetricsQuery::default());
@@ -315,6 +365,8 @@ fn engine_symbol_metrics_include_universe_missing_live_and_stale_states() {
         .find(|symbol| symbol.symbol == "SHFE.au2602")
         .unwrap();
     assert_eq!(au.status, tqsdk_relay::SymbolStatus::Stale);
+    assert_eq!(stale.summary.initializing, 1);
+    assert_eq!(stale.summary.problem, 1);
 }
 
 #[test]
@@ -343,9 +395,10 @@ fn engine_dashboard_snapshot_keeps_global_summary_when_page_is_filtered() {
     assert_eq!(dashboard.metrics.upstream_symbols, 2);
     assert_eq!(dashboard.global.total, 2);
     assert_eq!(dashboard.global.live, 1);
-    assert_eq!(dashboard.global.missing, 1);
+    assert_eq!(dashboard.global.initializing, 1);
+    assert_eq!(dashboard.global.missing, 0);
     assert_eq!(dashboard.timeline.global.total, 2);
-    assert_eq!(dashboard.timeline.global.problem, 1);
+    assert_eq!(dashboard.timeline.global.problem, 0);
     assert_eq!(dashboard.page.filtered_total, 1);
     assert_eq!(dashboard.page.symbols.len(), 1);
     assert_eq!(dashboard.page.symbols[0].symbol, "SHFE.au2602");

@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use chrono::{Datelike, Local, TimeZone};
 use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::{
-    RelayTickRow, SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsQuery,
-    SymbolProblemSeverity, SymbolSession, SymbolSort, SymbolStatus, SymbolSubscriptionCounts,
-    SymbolTelemetryStore,
+    RelayTickRow, SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsContext,
+    SymbolMetricsQuery, SymbolProblemSeverity, SymbolSession, SymbolSort, SymbolStatus,
+    SymbolSubscriptionCounts, SymbolTelemetryStore,
 };
 
 fn tick(id: i64, datetime_ns: i64, price: f64) -> RelayTickRow {
@@ -96,6 +96,53 @@ fn universe_symbol_without_tick_is_missing() {
     assert_eq!(snapshot.symbols[0].flow, SymbolFlow::NoSample);
     assert_eq!(snapshot.symbols[0].integrity, SymbolIntegrity::Suspected);
     assert!(snapshot.symbols[0].receive_gap_ms.is_none());
+}
+
+#[test]
+fn pending_universe_symbol_can_remain_initializing_after_first_sample() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    store.record_universe(["SHFE.au2602", "DCE.m2609"], now - 10_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, i64::try_from((now - 1_000) * 1_000_000).unwrap(), 610.0),
+        now - 800,
+    );
+
+    let default = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    assert_eq!(default.summary.live, 1);
+    assert_eq!(default.summary.missing, 1);
+    assert_eq!(default.summary.problem, 1);
+
+    let initializing = store.snapshot_at_with_context(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+        SymbolMetricsContext {
+            initializing_pending_samples: true,
+            ..Default::default()
+        },
+    );
+
+    let dce = initializing
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "DCE.m2609")
+        .unwrap();
+    assert_eq!(initializing.summary.live, 1);
+    assert_eq!(initializing.summary.initializing, 1);
+    assert_eq!(initializing.summary.missing, 0);
+    assert_eq!(initializing.summary.problem, 0);
+    assert_eq!(dce.status, SymbolStatus::Initializing);
+    assert_eq!(dce.flow, SymbolFlow::NoSample);
+    assert_eq!(dce.problem_severity, SymbolProblemSeverity::Initializing);
+    assert!(!dce.problem);
 }
 
 #[test]

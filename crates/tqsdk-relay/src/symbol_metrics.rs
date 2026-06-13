@@ -88,6 +88,7 @@ pub struct SymbolMetricsQuery {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SymbolMetricsContext {
     pub initializing_universe: bool,
+    pub initializing_pending_samples: bool,
 }
 
 impl SymbolMetricsQuery {
@@ -151,6 +152,7 @@ pub struct SymbolTelemetry {
 #[derive(Debug, Default, Clone)]
 pub struct SymbolTelemetryStore {
     universe: BTreeSet<String>,
+    pending_initial_samples: BTreeSet<String>,
     telemetry: BTreeMap<String, SymbolTelemetry>,
     source_epoch: u64,
     last_universe_refresh_unix_millis: Option<u64>,
@@ -160,6 +162,7 @@ pub struct SymbolTelemetryStore {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SymbolTelemetryReadModel {
     universe: BTreeSet<String>,
+    pending_initial_samples: BTreeSet<String>,
     telemetry: BTreeMap<String, SymbolTelemetry>,
     trading_calendar_days: BTreeSet<String>,
 }
@@ -238,11 +241,26 @@ impl SymbolTelemetryStore {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.universe = symbols
+        let universe: BTreeSet<String> = symbols
             .into_iter()
             .map(|symbol| symbol.as_ref().trim().to_string())
             .filter(|symbol| !symbol.is_empty())
             .collect();
+        self.pending_initial_samples
+            .retain(|symbol| universe.contains(symbol));
+        for symbol in &universe {
+            if self
+                .telemetry
+                .get(symbol)
+                .and_then(|telemetry| telemetry.last_receive_unix_millis)
+                .is_some()
+            {
+                self.pending_initial_samples.remove(symbol);
+            } else {
+                self.pending_initial_samples.insert(symbol.clone());
+            }
+        }
+        self.universe = universe;
         self.last_universe_refresh_unix_millis = Some(unix_millis);
     }
 
@@ -275,6 +293,7 @@ impl SymbolTelemetryStore {
     }
 
     pub fn record_tick_at(&mut self, symbol: &str, row: &RelayTickRow, receive_unix_millis: u64) {
+        self.pending_initial_samples.remove(symbol);
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
         if telemetry.source_epoch != self.source_epoch {
             telemetry.source_epoch = self.source_epoch;
@@ -291,6 +310,7 @@ impl SymbolTelemetryStore {
     }
 
     pub fn record_quote_at(&mut self, symbol: &str, quote: &Quote, receive_unix_millis: u64) {
+        self.pending_initial_samples.remove(symbol);
         let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
         if telemetry.source_epoch != self.source_epoch {
             telemetry.source_epoch = self.source_epoch;
@@ -326,6 +346,7 @@ impl SymbolTelemetryStore {
     pub fn read_model(&self) -> SymbolTelemetryReadModel {
         SymbolTelemetryReadModel {
             universe: self.universe.clone(),
+            pending_initial_samples: self.pending_initial_samples.clone(),
             telemetry: self.telemetry.clone(),
             trading_calendar_days: self.trading_calendar_days.clone(),
         }
@@ -410,6 +431,7 @@ impl SymbolTelemetryReadModel {
             let receive_gap_ms = telemetry
                 .and_then(|telemetry| telemetry.last_receive_unix_millis)
                 .map(|last_receive| now_unix_millis.saturating_sub(last_receive));
+            let pending_initial_sample = self.pending_initial_samples.contains(&symbol);
             let market_time_lag_ms = telemetry
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
@@ -431,6 +453,7 @@ impl SymbolTelemetryReadModel {
                 receive_gap_ms,
                 stale_after_millis,
                 trading_phase,
+                pending_initial_sample,
                 context,
             );
             let telemetry = telemetry.cloned().unwrap_or_default();
@@ -621,12 +644,17 @@ fn classify_symbol(
     receive_gap_ms: Option<u64>,
     stale_after_millis: u64,
     trading_phase: Option<TradingSessionPhase>,
+    pending_initial_sample: bool,
     context: SymbolMetricsContext,
 ) -> SymbolStatus {
     if !in_universe && receive_gap_ms.is_none() {
         return SymbolStatus::Inactive;
     }
-    if in_universe && receive_gap_ms.is_none() && context.initializing_universe {
+    if in_universe
+        && receive_gap_ms.is_none()
+        && (context.initializing_universe
+            || (context.initializing_pending_samples && pending_initial_sample))
+    {
         return SymbolStatus::Initializing;
     }
     if receive_gap_ms.is_none() {

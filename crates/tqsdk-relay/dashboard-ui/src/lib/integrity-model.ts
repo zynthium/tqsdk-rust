@@ -47,11 +47,17 @@ function flowHealthFor(idleMs: number | null, warnAfterMs: number, criticalAfter
   return 'live';
 }
 
-function idleDisplayStateFor(metrics: RelayMetrics, sourceCritical: boolean, isMarketClosed: boolean): IdleDisplayState {
+function idleDisplayStateFor(
+  metrics: RelayMetrics,
+  sourceCritical: boolean,
+  isMarketClosed: boolean,
+  initializingWithoutProblems: boolean,
+): IdleDisplayState {
   if (sourceCritical) return 'normal';
   if (isMarketClosed) return 'closed';
   if (metrics.upstream_stage === 'subscribing') return 'subscribing';
   if (metrics.upstream_stage === 'backfilling') return 'backfilling';
+  if (initializingWithoutProblems) return 'backfilling';
   return 'normal';
 }
 
@@ -131,9 +137,15 @@ export function deriveIntegrity(
   const issueCount = Number(global.problem ?? globalProblems.length);
   const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
   const initializingCount = Number(global.initializing ?? 0);
+  const initializingWithoutProblems = issueCount === 0 && initializingCount > 0;
   const warmingWithoutProblems =
-    warming && issueCount === 0 && (observedUniverse === 0 || initializingCount > 0);
-  const idleDisplayState = idleDisplayStateFor(metrics, sourceCritical, isMarketClosed);
+    issueCount === 0 && (initializingWithoutProblems || (warming && observedUniverse === 0));
+  const idleDisplayState = idleDisplayStateFor(
+    metrics,
+    sourceCritical,
+    isMarketClosed,
+    initializingWithoutProblems,
+  );
   const effectiveFrameFlowHealth = effectiveFlowHealth(frameFlowHealth, idleDisplayState);
   const effectiveEventFlowHealth = effectiveFlowHealth(eventFlowHealth, idleDisplayState);
   const idleCritical = effectiveFrameFlowHealth === 'critical' || effectiveEventFlowHealth === 'critical';

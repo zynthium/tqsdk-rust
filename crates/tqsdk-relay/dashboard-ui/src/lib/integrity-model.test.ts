@@ -127,6 +127,43 @@ describe('deriveIntegrity', () => {
     expect(model.cacheHealth).toBe('backfilling');
   });
 
+  it('keeps live-stage pending initialization out of warning state', () => {
+    const initializing = row({
+      symbol: 'DCE.m2609',
+      instrument_name: '豆粕2609',
+      status: 'initializing',
+      flow: 'no_sample',
+      problem: false,
+      problem_severity: 'initializing',
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
+      last_receive_unix_millis: null,
+      last_tick_datetime_ns: null,
+    });
+
+    const model = deriveIntegrity(
+      metrics({
+        upstream_stage: 'live',
+        upstream_frame_idle_ms: 9_000,
+        upstream_frame_idle_health: 'critical',
+        upstream_event_idle_ms: 9_000,
+        upstream_event_idle_health: 'critical',
+      }),
+      symbolSnapshot([row(), initializing]),
+      NOW,
+    );
+
+    expect(model.overall).toBe('warming');
+    expect(model.issueCount).toBe(0);
+    expect(model.coverageRatio).toBe(0.5);
+    expect(model.continuityScore).toBe(100);
+    expect(model.frameFlowHealth).toBe('critical');
+    expect(model.effectiveFrameFlowHealth).toBe('no_sample');
+    expect(model.idleDisplayState).toBe('backfilling');
+    expect(model.cacheHealth).toBe('backfilling');
+  });
+
   it('keeps subscribing idle display out of warning state', () => {
     const model = deriveIntegrity(
       metrics({
