@@ -120,4 +120,52 @@ describe('App', () => {
     expect(screen.queryByText('链路异常')).toBeNull();
     expect(screen.queryByText('需关注')).toBeNull();
   });
+
+  it('keeps live-stage initialization cards neutral until all contracts have samples', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        if (path.includes('/dashboard-snapshot')) {
+          return Response.json(
+            dashboardSnapshot(
+              [
+                row({ symbol: 'SHFE.au2602', instrument_name: '沪金2602' }),
+                row({
+                  symbol: 'DCE.m2609',
+                  instrument_name: '豆粕2609',
+                  status: 'initializing',
+                  flow: 'no_sample',
+                  problem: false,
+                  problem_severity: 'initializing',
+                  receive_gap_ms: null,
+                  avg_receive_gap_ms: null,
+                  market_time_lag_ms: null,
+                  last_receive_unix_millis: null,
+                  last_tick_datetime_ns: null,
+                }),
+              ],
+              {
+                upstream_stage: 'live',
+                upstream_frame_idle_ms: 9_000,
+                upstream_frame_idle_health: 'critical',
+                upstream_event_idle_ms: 9_000,
+                upstream_event_idle_health: 'critical',
+              },
+            ),
+          );
+        }
+        return Response.json({ error: 'not found' }, { status: 404 });
+      }),
+    );
+
+    render(App);
+
+    expect(await screen.findByText('启动观测中')).toBeTruthy();
+    expect(screen.getAllByText('初始化 1').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('补历史').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText('行情静默预警')).toBeNull();
+    expect(screen.queryByText('链路异常')).toBeNull();
+    expect(screen.queryByText('需关注')).toBeNull();
+  });
 });
