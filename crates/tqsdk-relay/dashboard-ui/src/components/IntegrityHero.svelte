@@ -27,6 +27,13 @@
   let icon = $derived(
     model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : model.overall === 'closed' ? '☾' : '✓',
   );
+
+  function idleValue(model: IntegrityModel, idleMs: number | null): string {
+    if (model.idleDisplayState === 'closed') return '休市';
+    if (model.idleDisplayState === 'subscribing') return '订阅中';
+    if (model.idleDisplayState === 'backfilling') return '补历史';
+    return formatDuration(idleMs);
+  }
 </script>
 
 <section class={`panel hero ${tone}`} data-testid="integrity-hero">
@@ -45,11 +52,11 @@
     </div>
     <div class="chip">
       <span class="chip-label">帧静默</span>
-      <span class="chip-value {model.frameFlowHealth === 'critical' ? 'val-bad' : model.frameFlowHealth === 'warn' ? 'val-warn' : ''}">{formatDuration(model.upstreamIdleMs)}</span>
+      <span class="chip-value {model.effectiveFrameFlowHealth === 'critical' ? 'val-bad' : model.effectiveFrameFlowHealth === 'warn' ? 'val-warn' : ''}">{idleValue(model, model.upstreamIdleMs)}</span>
     </div>
     <div class="chip">
       <span class="chip-label">事件静默</span>
-      <span class="chip-value {model.eventFlowHealth === 'critical' ? 'val-bad' : model.eventFlowHealth === 'warn' ? 'val-warn' : ''}">{formatDuration(model.eventIdleMs)}</span>
+      <span class="chip-value {model.effectiveEventFlowHealth === 'critical' ? 'val-bad' : model.effectiveEventFlowHealth === 'warn' ? 'val-warn' : ''}">{idleValue(model, model.eventIdleMs)}</span>
     </div>
     <div class="chip">
       <span class="chip-label">Diff行号</span>

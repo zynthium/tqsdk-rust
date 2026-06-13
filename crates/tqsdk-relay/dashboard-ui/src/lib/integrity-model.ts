@@ -1,6 +1,8 @@
 import type {
   IntegrityModel,
   FlowIdleHealth,
+  IdleDisplayState,
+  CacheHealth,
   ProblemSeverity,
   RelayMetrics,
   SymbolMetricsSummary,
@@ -42,6 +44,41 @@ function flowHealthFor(idleMs: number | null, warnAfterMs: number, criticalAfter
   if (idleMs == null) return 'no_sample';
   if (idleMs > criticalAfterMs) return 'critical';
   if (idleMs > warnAfterMs) return 'warn';
+  return 'live';
+}
+
+function idleDisplayStateFor(metrics: RelayMetrics, sourceCritical: boolean, isMarketClosed: boolean): IdleDisplayState {
+  if (sourceCritical) return 'normal';
+  if (isMarketClosed) return 'closed';
+  if (metrics.upstream_stage === 'subscribing') return 'subscribing';
+  if (metrics.upstream_stage === 'backfilling') return 'backfilling';
+  return 'normal';
+}
+
+function effectiveFlowHealth(health: FlowIdleHealth, displayState: IdleDisplayState): FlowIdleHealth {
+  return displayState === 'normal' ? health : 'no_sample';
+}
+
+function cacheHealthFor(
+  sourceCritical: boolean,
+  frameHealth: FlowIdleHealth,
+  eventHealth: FlowIdleHealth,
+  displayState: IdleDisplayState,
+  issueCount: number,
+): CacheHealth {
+  if (sourceCritical || frameHealth === 'critical' || eventHealth === 'critical') return 'interrupted';
+  if (displayState === 'closed') return 'closed';
+  if (displayState === 'subscribing') return 'subscribing';
+  if (displayState === 'backfilling') return 'backfilling';
+  if (issueCount > 0 || frameHealth === 'warn' || eventHealth === 'warn') return 'attention';
+  return 'active';
+}
+
+function cacheSeverityFor(cacheHealth: CacheHealth) {
+  if (cacheHealth === 'interrupted') return 'bad';
+  if (cacheHealth === 'attention') return 'warn';
+  if (cacheHealth === 'closed') return 'closed';
+  if (cacheHealth === 'subscribing' || cacheHealth === 'backfilling') return 'no_sample';
   return 'live';
 }
 
@@ -90,15 +127,26 @@ export function deriveIntegrity(
   const sourceCritical = metrics.upstream_stage === 'down' || metrics.upstream_stage === 'degraded';
   const isMarketClosed =
     totalUniverse > 0 && (global.live || 0) === 0 && (global.stale || 0) === 0 && (global.closed || 0) > 0;
-  const idleCritical = !isMarketClosed && (frameFlowHealth === 'critical' || eventFlowHealth === 'critical');
-  const idleWarn = !isMarketClosed && (frameFlowHealth === 'warn' || eventFlowHealth === 'warn');
-  const decodeWarn = decodeHealth === 'degraded';
   const warming = WARMING_STAGES.has(metrics.upstream_stage);
   const issueCount = Number(global.problem ?? globalProblems.length);
   const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
   const initializingCount = Number(global.initializing ?? 0);
   const warmingWithoutProblems =
     warming && issueCount === 0 && (observedUniverse === 0 || initializingCount > 0);
+  const idleDisplayState = idleDisplayStateFor(metrics, sourceCritical, isMarketClosed);
+  const effectiveFrameFlowHealth = effectiveFlowHealth(frameFlowHealth, idleDisplayState);
+  const effectiveEventFlowHealth = effectiveFlowHealth(eventFlowHealth, idleDisplayState);
+  const idleCritical = effectiveFrameFlowHealth === 'critical' || effectiveEventFlowHealth === 'critical';
+  const idleWarn = effectiveFrameFlowHealth === 'warn' || effectiveEventFlowHealth === 'warn';
+  const decodeWarn = decodeHealth === 'degraded';
+  const cacheHealth = cacheHealthFor(
+    sourceCritical,
+    effectiveFrameFlowHealth,
+    effectiveEventFlowHealth,
+    idleDisplayState,
+    issueCount,
+  );
+  const cacheSeverity = cacheSeverityFor(cacheHealth);
   const elapsedSeconds = previous ? Math.max(0.001, (sampledAt - previous.sampledAt) / 1_000) : null;
   const frameRate =
     elapsedSeconds && previous
@@ -150,6 +198,11 @@ export function deriveIntegrity(
     eventIdleMs: eventIdle,
     frameFlowHealth,
     eventFlowHealth,
+    effectiveFrameFlowHealth,
+    effectiveEventFlowHealth,
+    idleDisplayState,
+    cacheHealth,
+    cacheSeverity,
     decodeHealth,
     coverageRatio,
     observedUniverse,

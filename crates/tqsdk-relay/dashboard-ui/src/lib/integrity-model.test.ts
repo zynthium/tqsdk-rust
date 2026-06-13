@@ -43,6 +43,11 @@ describe('deriveIntegrity', () => {
 
     expect(model.isMarketClosed).toBe(true);
     expect(model.overall).toBe('closed');
+    expect(model.eventFlowHealth).toBe('critical');
+    expect(model.effectiveEventFlowHealth).toBe('no_sample');
+    expect(model.idleDisplayState).toBe('closed');
+    expect(model.cacheHealth).toBe('closed');
+    expect(model.cacheSeverity).toBe('closed');
   });
 
   it('treats subscribed inactive rows as critical operational problems', () => {
@@ -85,6 +90,9 @@ describe('deriveIntegrity', () => {
     expect(model.overall).toBe('warming');
     expect(model.upstreamIdleMs).toBeNull();
     expect(model.issueCount).toBe(0);
+    expect(model.idleDisplayState).toBe('backfilling');
+    expect(model.cacheHealth).toBe('backfilling');
+    expect(model.cacheSeverity).toBe('no_sample');
   });
 
   it('keeps backfilling initializing rows in warming state', () => {
@@ -114,6 +122,30 @@ describe('deriveIntegrity', () => {
     expect(model.issueCount).toBe(0);
     expect(model.coverageRatio).toBe(0);
     expect(model.continuityScore).toBe(100);
+    expect(model.frameFlowHealth).toBe('no_sample');
+    expect(model.effectiveFrameFlowHealth).toBe('no_sample');
+    expect(model.cacheHealth).toBe('backfilling');
+  });
+
+  it('keeps subscribing idle display out of warning state', () => {
+    const model = deriveIntegrity(
+      metrics({
+        upstream_stage: 'subscribing',
+        upstream_frame_idle_ms: 9_000,
+        upstream_frame_idle_health: 'critical',
+        upstream_event_idle_ms: null,
+        upstream_event_idle_health: 'no_sample',
+      }),
+      symbolSnapshot([]),
+      NOW,
+    );
+
+    expect(model.overall).toBe('warming');
+    expect(model.frameFlowHealth).toBe('critical');
+    expect(model.effectiveFrameFlowHealth).toBe('no_sample');
+    expect(model.idleDisplayState).toBe('subscribing');
+    expect(model.cacheHealth).toBe('subscribing');
+    expect(model.cacheSeverity).toBe('no_sample');
   });
 
   it('computes rates from previous sample', () => {
@@ -236,7 +268,29 @@ describe('deriveIntegrity', () => {
 
     expect(model.upstreamIdleMs).toBe(5_001);
     expect(model.frameFlowHealth).toBe('critical');
+    expect(model.effectiveFrameFlowHealth).toBe('critical');
+    expect(model.cacheHealth).toBe('interrupted');
     expect(model.overall).toBe('critical');
+  });
+
+  it('keeps degraded upstream visible even when all symbols are closed', () => {
+    const closedRow = row({ status: 'closed', problem: false, problem_severity: 'closed' });
+
+    const model = deriveIntegrity(
+      metrics({
+        upstream_stage: 'degraded',
+        upstream_frame_idle_ms: 7_000,
+        upstream_frame_idle_health: 'critical',
+      }),
+      symbolSnapshot([closedRow]),
+      NOW,
+    );
+
+    expect(model.isMarketClosed).toBe(true);
+    expect(model.idleDisplayState).toBe('normal');
+    expect(model.effectiveFrameFlowHealth).toBe('critical');
+    expect(model.cacheHealth).toBe('interrupted');
+    expect(model.cacheSeverity).toBe('bad');
   });
 
   it('allows decode health to recover while keeping lifetime invalid row count', () => {
