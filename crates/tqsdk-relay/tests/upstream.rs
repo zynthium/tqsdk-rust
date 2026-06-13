@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tqsdk_relay::{
-    RelayConfig, RelayEngine, UpstreamTickChart, decode_upstream_market_report,
+    RelayConfig, RelayEngine, UniverseExpression, UpstreamTickChart, decode_upstream_market_report,
     decode_upstream_tick_report, decode_upstream_ticks,
 };
 
@@ -41,26 +41,23 @@ fn expect_peek_message(socket: &mut websocket_support::TestWebSocketConnection) 
 #[test]
 fn config_accepts_explicit_futures_universe() {
     let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        futures_universe_expression: Some(
+            UniverseExpression::parse("symbol:SHFE.au2602,DCE.m2609").unwrap(),
+        ),
         ..RelayConfig::default()
     };
 
     config.validate().unwrap();
-    assert_eq!(config.futures_symbols.len(), 2);
+    assert!(config.has_upstream_futures_source());
 }
 
 #[test]
-fn config_rejects_empty_futures_symbol() {
-    let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string(), " ".to_string()],
-        ..RelayConfig::default()
-    };
-
-    let err = config.validate().unwrap_err();
+fn universe_expression_rejects_empty_symbol_value() {
+    let err = UniverseExpression::parse("symbol:SHFE.au2602, ").unwrap_err();
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: futures_symbols must not contain empty symbols"
+        "invalid relay config: futures universe selector values must not contain empty value"
     );
 }
 
@@ -94,13 +91,12 @@ fn upstream_tick_chart_rejects_multiple_symbols() {
 }
 
 #[test]
-fn config_builds_upstream_tick_charts_from_futures_symbols() {
-    let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
-        ..RelayConfig::default()
-    };
+fn config_builds_upstream_tick_charts_from_symbols() {
+    let config = RelayConfig::default();
 
-    let charts = config.upstream_tick_charts().unwrap();
+    let charts = config
+        .upstream_tick_charts_for_symbols(["SHFE.au2602", "DCE.m2609"])
+        .unwrap();
 
     assert_eq!(charts.len(), 2);
     assert_eq!(charts[0].chart_id(), "relay-upstream-tick-DCE_m2609-10000");
@@ -119,21 +115,15 @@ fn config_builds_upstream_tick_charts_from_futures_symbols() {
 #[test]
 fn config_uses_configured_upstream_tick_view_width() {
     let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string()],
         upstream_tick_view_width: 1,
         ..RelayConfig::default()
     };
 
-    let charts = config.upstream_tick_charts().unwrap();
+    let charts = config
+        .upstream_tick_charts_for_symbols(["SHFE.au2602"])
+        .unwrap();
 
     assert_eq!(charts[0].view_width(), 1);
-}
-
-#[test]
-fn config_omits_upstream_tick_charts_without_futures_symbols() {
-    let config = RelayConfig::default();
-
-    assert!(config.upstream_tick_charts().unwrap().is_empty());
 }
 
 #[test]
@@ -933,7 +923,7 @@ async fn websocket_upstream_tick_source_peeks_before_json_decode() {
 }
 
 #[tokio::test]
-async fn configured_upstream_source_subscribes_configured_futures_symbols() {
+async fn configured_upstream_source_subscribes_universe_expression_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
     use websocket_support::TestWebSocketServer;
 
@@ -957,7 +947,9 @@ async fn configured_upstream_source_subscribes_configured_futures_symbols() {
     .unwrap();
     let config = RelayConfig {
         upstream_market_url: server.url("/market"),
-        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        futures_universe_expression: Some(
+            UniverseExpression::parse("symbol:SHFE.au2602,DCE.m2609").unwrap(),
+        ),
         ..RelayConfig::default()
     };
 
@@ -966,7 +958,7 @@ async fn configured_upstream_source_subscribes_configured_futures_symbols() {
 }
 
 #[tokio::test]
-async fn configured_upstream_source_is_absent_without_futures_symbols() {
+async fn configured_upstream_source_is_absent_without_universe_expression() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
 
     assert!(
@@ -979,10 +971,10 @@ async fn configured_upstream_source_is_absent_without_futures_symbols() {
 
 #[tokio::test]
 async fn configured_product_discovery_requires_auth_credentials() {
-    use tqsdk_relay::{FuturesProductFilter, RelayConfig, connect_configured_upstream};
+    use tqsdk_relay::{RelayConfig, connect_configured_upstream};
 
     let config = RelayConfig {
-        futures_product_filter: FuturesProductFilter::All,
+        futures_universe_expression: Some(UniverseExpression::parse("active:all").unwrap()),
         ..RelayConfig::default()
     };
 
@@ -1034,7 +1026,7 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
     .unwrap();
     let config = RelayConfig {
         upstream_market_url: upstream.url("/market"),
-        futures_symbols: vec!["SHFE.au2602".to_string()],
+        futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
         ..RelayConfig::default()
     };
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
@@ -1068,7 +1060,7 @@ async fn configured_upstream_pump_degrades_without_blocking_when_connect_fails()
     let server = RelayServer::new(engine.clone());
     let config = RelayConfig {
         upstream_market_url: "ws://127.0.0.1:9/market".to_string(),
-        futures_symbols: vec!["SHFE.au2602".to_string()],
+        futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
         ..RelayConfig::default()
     };
 
@@ -1097,7 +1089,7 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     let server = RelayServer::new(engine.clone());
     let config = RelayConfig {
         upstream_market_url: format!("ws://{addr}/market"),
-        futures_symbols: vec!["SHFE.au2602".to_string()],
+        futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
         ..RelayConfig::default()
     };
 

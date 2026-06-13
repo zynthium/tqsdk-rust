@@ -4,7 +4,7 @@
 
 **Goal:** Implement `TQSDK_RELAY_FUTURES_UNIVERSE` so relay startup can compose active, main, index, cont, top-N, symbol, product, and exchange rules with `!` / `~` exclusions.
 
-**Architecture:** Add a focused parser/planner module beside `universe.rs`, keep resolution in the existing pre-subscription universe layer, and feed final symbols into current `UpstreamTickChart` construction. Legacy env vars remain supported but are mutually exclusive with the new expression.
+**Architecture:** Add a focused parser/planner module beside `universe.rs`, keep resolution in the existing pre-subscription universe layer, and feed final symbols into current `UpstreamTickChart` construction. `TQSDK_RELAY_FUTURES_UNIVERSE` is the only futures universe startup entry.
 
 **Tech Stack:** Rust 2024, `tqsdk-relay`, existing `RelayConfig`, `FuturesUniverseResolver`, integration tests under `crates/tqsdk-relay/tests`.
 
@@ -40,21 +40,6 @@ fn config_loads_futures_universe_expression_from_env() {
             .unwrap()
             .to_string(),
         "main:all;index:all;!CFFEX"
-    );
-}
-
-#[test]
-fn config_rejects_new_and_legacy_universe_sources_together() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("main:all".to_string()),
-        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: set only one futures universe source"
     );
 }
 
@@ -108,7 +93,7 @@ async fn expression_resolves_main_and_index_then_excludes_product() {
     .with_main_symbols(["SHFE.au2602", "DCE.m2609"]);
 
     let expression = UniverseExpression::parse("main:all;index:all;!SHFE.au").unwrap();
-    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -128,7 +113,7 @@ async fn expression_resolves_top_n_and_continuous_symbols() {
     ]);
 
     let expression = UniverseExpression::parse("top:2:all;cont:all").unwrap();
-    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -177,7 +162,7 @@ Expected: field assertions fail/compile fail.
 
 - [ ] **Step 3: Implement diagnostics/docs**
 
-Extend `RelayStartupReport`, update binary dry-run assertions, and document the new syntax while marking old env vars as compatible legacy shortcuts.
+Extend `RelayStartupReport`, update binary dry-run assertions, and document the expression-only syntax.
 
 - [ ] **Step 4: Run tests to verify GREEN**
 

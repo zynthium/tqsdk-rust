@@ -884,9 +884,6 @@ fn relay_binary_rejects_invalid_symbol_metrics_query() {
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
         Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
-            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
-            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
-            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())
@@ -1145,9 +1142,6 @@ fn relay_binary_serves_embedded_dashboard_assets() {
     let metrics_addr = free_loopback_addr();
     let mut child = ChildGuard::spawn(
         Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
-            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
-            .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
-            .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
             .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream_addr.to_string())
             .env("TQSDK_RELAY_METRICS_LISTEN", metrics_addr.to_string())
             .stdout(Stdio::null())

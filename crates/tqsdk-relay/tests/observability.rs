@@ -658,22 +658,25 @@ fn decode_health_recovers_after_quiet_window() {
 #[test]
 fn startup_report_serializes_operational_summary() {
     let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()],
+        futures_universe_expression: Some(
+            UniverseExpression::parse("symbol:SHFE.au2602,DCE.m2609").unwrap(),
+        ),
         ..RelayConfig::default()
     };
-    let charts = config.upstream_tick_charts().unwrap();
+    let charts = config
+        .upstream_tick_charts_for_symbols(["SHFE.au2602", "DCE.m2609"])
+        .unwrap();
 
     let report = RelayStartupReport::from_config_and_charts(&config, &charts);
     let line = report.log_line();
 
     assert_eq!(report.upstream_symbols, 2);
     assert_eq!(report.upstream_tick_view_width, 10_000);
-    assert_eq!(report.futures_active_contracts_per_product, None);
     assert_eq!(report.upstream_ins_list_chars, "SHFE.au2602".len());
-    assert_eq!(report.upstream_source, "static-symbols");
+    assert_eq!(report.upstream_source, "universe-expression");
     assert!(line.contains("\"event\":\"relay_startup\""));
     assert!(line.contains("\"upstream_symbols\":2"));
-    assert!(line.contains("\"futures_active_contracts_per_product\":null"));
+    assert!(line.contains("\"futures_universe_expression\":\"symbol:SHFE.au2602,DCE.m2609\""));
     assert!(line.contains("\"upstream_tick_view_width\":10000"));
     assert!(line.contains("\"metrics_listen\":\"127.0.0.1:7789\""));
 }

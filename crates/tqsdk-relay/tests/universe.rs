@@ -1,21 +1,21 @@
 use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::universe::FuturesUniverseResolver;
 use tqsdk_relay::{
-    FuturesContract, FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection,
-    StaticFuturesUniverseResolver, UniverseExpression, futures_metadata_symbol_batches,
-    resolve_futures_symbols, resolve_futures_symbols_with_expression,
-    resolve_futures_symbols_with_selection,
+    FuturesContract, StaticFuturesUniverseResolver, UniverseExpression,
+    futures_metadata_symbol_batches, resolve_futures_universe_symbols,
 };
 
 #[tokio::test]
-async fn resolver_selects_all_non_expired_futures_symbols() {
+async fn resolver_selects_all_non_expired_universe_symbols() {
     let mut resolver = StaticFuturesUniverseResolver::new([
         FuturesContract::new("SHFE.au2602", "SHFE", "au", false).unwrap(),
         FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
         FuturesContract::new("SHFE.au2512", "SHFE", "au", true).unwrap(),
     ]);
 
-    let symbols = resolve_futures_symbols(&FuturesProductFilter::All, &mut resolver)
+    let expression = UniverseExpression::parse("active:all").unwrap();
+
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -29,12 +29,9 @@ async fn resolver_filters_by_exchange_scoped_product_codes() {
         FuturesContract::new("INE.au2602", "INE", "au", false).unwrap(),
         FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
     ]);
-    let filter = FuturesProductFilter::Products(vec![
-        FuturesProductCode::new(Some("SHFE"), "au").unwrap(),
-        FuturesProductCode::new(None, "m").unwrap(),
-    ]);
+    let expression = UniverseExpression::parse("active:SHFE.au,m").unwrap();
 
-    let symbols = resolve_futures_symbols(&filter, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -60,17 +57,11 @@ async fn resolver_selects_main_and_top_activity_contracts_per_product() {
         quote("DCE.m2609", "DCE", "m", 200, 5),
         quote("DCE.m2611", "DCE", "m", 100, 50),
     ]);
-    let selection = FuturesUniverseSelection {
-        active_contracts_per_product: Some(2),
-    };
+    let expression = UniverseExpression::parse("top:2:all").unwrap();
 
-    let symbols = resolve_futures_symbols_with_selection(
-        &FuturesProductFilter::All,
-        selection,
-        &mut resolver,
-    )
-    .await
-    .unwrap();
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
 
     assert_eq!(
         symbols,
@@ -93,9 +84,10 @@ async fn resolver_preserves_symbol_info_trading_time_in_selected_contracts() {
         FuturesContract::new("SHFE.au2512", "SHFE", "au", true).unwrap(),
     ]);
 
-    let contracts = tqsdk_relay::universe::resolve_futures_contracts_with_selection(
-        &FuturesProductFilter::All,
-        FuturesUniverseSelection::default(),
+    let expression = UniverseExpression::parse("active:all").unwrap();
+
+    let contracts = tqsdk_relay::universe::resolve_futures_contracts_with_expression(
+        &expression,
         &mut resolver,
     )
     .await
@@ -118,17 +110,11 @@ async fn resolver_falls_back_to_activity_when_main_symbol_is_unknown() {
         quote("SHFE.au2608", "SHFE", "au", 120, 8),
         quote("SHFE.au2612", "SHFE", "au", 120, 20),
     ]);
-    let selection = FuturesUniverseSelection {
-        active_contracts_per_product: Some(2),
-    };
+    let expression = UniverseExpression::parse("top:2:all").unwrap();
 
-    let symbols = resolve_futures_symbols_with_selection(
-        &FuturesProductFilter::All,
-        selection,
-        &mut resolver,
-    )
-    .await
-    .unwrap();
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
 
     assert_eq!(symbols, vec!["SHFE.au2608", "SHFE.au2612"]);
 }
@@ -144,17 +130,11 @@ async fn resolver_selects_only_main_contracts_without_quote_snapshots_when_limit
         ],
         main_symbols: vec!["SHFE.au2602".to_string(), "DCE.m2605".to_string()],
     };
-    let selection = FuturesUniverseSelection {
-        active_contracts_per_product: Some(1),
-    };
+    let expression = UniverseExpression::parse("main:all").unwrap();
 
-    let symbols = resolve_futures_symbols_with_selection(
-        &FuturesProductFilter::All,
-        selection,
-        &mut resolver,
-    )
-    .await
-    .unwrap();
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
 
     assert_eq!(symbols, vec!["DCE.m2605", "SHFE.au2602"]);
 }
@@ -168,7 +148,7 @@ async fn expression_resolves_main_and_index_then_excludes_product() {
     .with_main_symbols(["SHFE.au2602", "DCE.m2609"]);
     let expression = UniverseExpression::parse("main:all;index:all;!SHFE.au").unwrap();
 
-    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -188,7 +168,7 @@ async fn expression_resolves_top_n_and_continuous_symbols() {
     ]);
     let expression = UniverseExpression::parse("top:2:all;cont:all").unwrap();
 
-    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 
@@ -204,7 +184,7 @@ async fn expression_excludes_exact_symbol_and_exchange() {
     ]);
     let expression = UniverseExpression::parse("active:all;index:all;!CFFEX;!KQ.i@DCE.m").unwrap();
 
-    let symbols = resolve_futures_symbols_with_expression(&expression, &mut resolver)
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
         .await
         .unwrap();
 

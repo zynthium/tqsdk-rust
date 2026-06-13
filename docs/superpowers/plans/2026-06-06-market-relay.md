@@ -2914,15 +2914,16 @@ git commit -m "feat(relay): accept downstream websocket commands"
 Create `crates/tqsdk-relay/tests/upstream.rs`:
 
 ```rust
-use tqsdk_relay::{RelayConfig, UpstreamTickChart};
+use tqsdk_relay::{RelayConfig, UniverseExpression, UpstreamTickChart};
 
 #[test]
 fn config_accepts_explicit_futures_universe() {
     let mut config = RelayConfig::default();
-    config.futures_symbols = vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()];
+    config.futures_universe_expression =
+        Some(UniverseExpression::parse("symbol:SHFE.au2602,DCE.m2609").unwrap());
 
     config.validate().unwrap();
-    assert_eq!(config.futures_symbols.len(), 2);
+    assert!(config.has_upstream_futures_source());
 }
 
 #[test]
@@ -2947,29 +2948,27 @@ Run:
 cargo test -p tqsdk-relay --test upstream
 ```
 
-Expected: FAIL because `futures_symbols` and `UpstreamTickChart` do not exist.
+Expected: FAIL because `futures_universe_expression` and `UpstreamTickChart` do not exist.
 
 - [ ] **Step 2: Add explicit futures universe config**
 
 Modify `RelayConfig` in `crates/tqsdk-relay/src/config.rs`:
 
 ```rust
-pub futures_symbols: Vec<String>,
+pub futures_universe_expression: Option<UniverseExpression>,
 ```
 
 Initialize in `Default`:
 
 ```rust
-futures_symbols: Vec::new(),
+futures_universe_expression: None,
 ```
 
 Add to `validate()`:
 
 ```rust
-if self.futures_symbols.iter().any(|symbol| symbol.trim().is_empty()) {
-    return Err(RelayError::invalid_config(
-        "futures_symbols must not contain empty symbols",
-    ));
+if let Some(expression) = self.futures_universe_expression.as_ref() {
+    // Parsed expression already validates empty selector values.
 }
 ```
 

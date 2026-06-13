@@ -169,7 +169,7 @@ impl UniverseSelector {
                 "index" => UniverseSelectorKind::Index,
                 "cont" => UniverseSelectorKind::Cont,
                 "symbol" => UniverseSelectorKind::Symbol,
-                "file" | "symbol-file" => UniverseSelectorKind::File,
+                "file" => UniverseSelectorKind::File,
                 "product" => UniverseSelectorKind::Product,
                 "exchange" => UniverseSelectorKind::Exchange,
                 other => {

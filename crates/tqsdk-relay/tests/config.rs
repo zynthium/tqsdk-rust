@@ -13,7 +13,7 @@ fn default_config_is_memory_only_and_local() {
     assert_eq!(config.metrics_listen, "127.0.0.1:7789");
     assert_eq!(
         config.futures_universe_refresh,
-        FuturesUniverseRefreshSchedule::Daily(DailyRefreshTime::from_hms(8, 30, 0).unwrap())
+        FuturesUniverseRefreshSchedule::daily(DailyRefreshTime::from_hms(8, 30, 0).unwrap())
     );
     assert_eq!(
         config.upstream_ins_list_limits,
@@ -27,7 +27,6 @@ fn default_config_is_memory_only_and_local() {
     assert_eq!(config.outbound_channel_capacity, 1024);
     assert_eq!(config.upstream_tick_view_width, 10_000);
     assert_eq!(config.futures_metadata_batch_size, 500);
-    assert_eq!(config.futures_active_contracts_per_product, None);
     assert_eq!(config.bootstrap.max_concurrent_remote_charts, 4);
     assert_eq!(
         config.bootstrap.min_remote_request_interval,
@@ -37,7 +36,6 @@ fn default_config_is_memory_only_and_local() {
         config.bootstrap.per_series_cooldown,
         Duration::from_secs(30)
     );
-    assert!(config.futures_symbols.is_empty());
     assert!(config.disk_cache_dir.is_none());
     assert!(config.best_effort_duration_tag);
     assert!(config.validate().is_ok());
@@ -196,21 +194,7 @@ fn config_loads_auth_and_daily_futures_universe_refresh_from_env() {
     assert_eq!(config.upstream_auth_pass.as_deref(), Some("demo-pass"));
     assert_eq!(
         config.futures_universe_refresh,
-        FuturesUniverseRefreshSchedule::Daily(DailyRefreshTime::from_hms(8, 25, 30).unwrap())
-    );
-}
-
-#[test]
-fn config_keeps_legacy_interval_futures_universe_refresh_env() {
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS" => Some("3600".to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(
-        config.futures_universe_refresh,
-        FuturesUniverseRefreshSchedule::Interval(Duration::from_secs(3600))
+        FuturesUniverseRefreshSchedule::daily(DailyRefreshTime::from_hms(8, 25, 30).unwrap())
     );
 }
 
@@ -243,64 +227,6 @@ fn next_daily_refresh_delay_targets_next_local_wall_clock_time() {
     assert_eq!(
         next_daily_refresh_delay(23 * 3600, refresh_at),
         Duration::from_secs(9 * 3600 + 30 * 60)
-    );
-}
-
-#[test]
-fn config_rejects_removed_universe_env_sources() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_PRODUCTS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"active:all\""
-    );
-
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some("symbols.txt".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_SYMBOLS_FILE was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"file:<path>\""
-    );
-
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_SYMBOLS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"symbol:<symbols>\""
-    );
-
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_MAIN_ONLY was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"main:all\""
-    );
-
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"top:N:all\""
     );
 }
 
@@ -360,21 +286,6 @@ fn config_rejects_zero_upstream_tick_view_width_from_env() {
     assert_eq!(
         err.to_string(),
         "invalid relay config: TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH must be greater than zero"
-    );
-}
-
-#[test]
-fn config_rejects_zero_futures_universe_refresh() {
-    let config = RelayConfig {
-        futures_universe_refresh: FuturesUniverseRefreshSchedule::Interval(Duration::ZERO),
-        ..RelayConfig::default()
-    };
-
-    let err = config.validate().unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: futures_universe_refresh interval must be greater than zero"
     );
 }
 
@@ -449,7 +360,6 @@ fn config_rejects_zero_upstream_ins_list_limit() {
 #[test]
 fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
     let config = RelayConfig {
-        futures_symbols: vec!["SHFE.au2602".to_string()],
         upstream_ins_list_limits: UpstreamInsListLimits {
             warn_chars: Some(8),
             max_chars: Some(10),
@@ -457,7 +367,9 @@ fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
         ..RelayConfig::default()
     };
 
-    let err = config.upstream_tick_charts().unwrap_err();
+    let err = config
+        .upstream_tick_charts_for_symbols(["SHFE.au2602"])
+        .unwrap_err();
 
     assert_eq!(
         err.to_string(),

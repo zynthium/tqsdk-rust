@@ -275,7 +275,9 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
     let server = RelayServer::new(engine.clone());
     let config = RelayConfig {
         upstream_market_url: upstream.url("/market"),
-        futures_symbols: vec!["SHFE.au2602".to_string()],
+        futures_universe_expression: Some(
+            tqsdk_relay::UniverseExpression::parse("symbol:SHFE.au2602").unwrap(),
+        ),
         ..RelayConfig::default()
     };
     let _upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone())

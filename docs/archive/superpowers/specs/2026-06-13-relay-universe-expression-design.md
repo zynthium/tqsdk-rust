@@ -2,21 +2,15 @@
 
 ## 背景
 
-`tqsdk-relay` 当前用环境变量描述上游期货合约集合：
+`tqsdk-relay` 当前只用 `TQSDK_RELAY_FUTURES_UNIVERSE` 描述上游期货合约集合。
 
-- `TQSDK_RELAY_FUTURES_PRODUCTS` 表示动态产品发现入口。
-- `TQSDK_RELAY_FUTURES_MAIN_ONLY=true` 表示只保留每品种真实主力合约。
-- `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=N` 表示每品种主力优先，并按
-  `open_interest` / `volume` 补足活跃度前 N。
-- `TQSDK_RELAY_FUTURES_SYMBOLS` 和 `TQSDK_RELAY_FUTURES_SYMBOLS_FILE` 是静态完整合约
-  覆盖入口。
-
-这些入口能覆盖“全部活跃期货”“指定产品”“主力”“每品种前 N”几类场景，但组合能力弱：
+单一表达式入口需要覆盖“全部活跃期货”“指定产品”“主力”“每品种前 N”“静态符号
+文件”和排除规则：
 
 - 不能直接表达“所有主力合约 + 所有加权指数合约”。
 - 不能直接表达“全部加权指数合约”。
 - 不能在最终集合上排除某个品种、交易所或精确符号。
-- `main_only` 和 `active_contracts_per_product` 是全局选择器，难以作为多个 include 层中的某一层。
+- 单一全局选择方式难以作为多个 include 层中的某一层。
 
 ## 目标
 
@@ -32,8 +26,7 @@ TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!CFFEX"
 2. 支持订阅所有加权指数连续合约。
 3. 支持排除某些品种、交易所或精确合约。
 4. 支持分层 include 和统一 exclude，方便组合条件。
-5. 保留旧环境变量兼容路径，但新旧 universe 入口不能混用。
-6. 保持 relay 边界：universe resolution 仍是订阅前置模块；上游订阅仍只接收最终符号集合。
+5. 保持 relay 边界：universe resolution 仍是订阅前置模块；上游订阅仍只接收最终符号集合。
 
 ## 非目标
 
@@ -51,15 +44,7 @@ TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!CFFEX"
 TQSDK_RELAY_FUTURES_UNIVERSE
 ```
 
-一旦设置该变量，以下旧 universe 入口不能同时设置：
-
-- `TQSDK_RELAY_FUTURES_PRODUCTS`
-- `TQSDK_RELAY_FUTURES_MAIN_ONLY`
-- `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT`
-- `TQSDK_RELAY_FUTURES_SYMBOLS`
-- `TQSDK_RELAY_FUTURES_SYMBOLS_FILE`
-
-原因：新变量已经能表达旧入口语义；混用会让最终集合来源不透明。
+该变量是 relay 二进制启动时唯一的合约集合入口。
 
 ## 表达式语法
 
@@ -83,7 +68,7 @@ values   = value ("," value)*
 
 - 无操作符：include。
 - `!`：exclude，主推写法。
-- `~`：exclude 别名，主要用于用户偏好；文档示例优先使用 `!`。
+- `~`：exclude，与 `!` 等价；文档示例优先使用 `!`。
 
 求值语义：
 
@@ -118,7 +103,7 @@ TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!CFFEX"
 | `top:N` | `top:2:all` | 每品种主力优先，再按活跃度补足前 N 个真实合约。 |
 | `top:N` | `top:2:SHFE.au,DCE.m` | 指定产品每品种前 N 个真实合约。 |
 | `symbol` | `symbol:SHFE.au2602,KQ.i@DCE.m` | 精确符号。 |
-| `product` | `product:SHFE.au,DCE.m` | 产品匹配；主要用于 exclude，也允许 include 时作为 `active:` 的窄别名。 |
+| `product` | `product:SHFE.au,DCE.m` | 产品匹配；主要用于 exclude，include 时按该产品活跃合约解析。 |
 | `exchange` | `exchange:CFFEX` | 交易所匹配；主要用于 exclude。 |
 
 `main` 必须表示真实主力 underlying 合约，不表示 `KQ.m@...`。需要主连连续代码时用
@@ -286,20 +271,20 @@ TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!au"
 
 该写法允许，但 dry-run 应提示可能跨交易所匹配，推荐写成 `!SHFE.au`。
 
-## 旧配置兼容映射
+## 表达式入口
 
-| 旧配置 | 新表达式 |
+常见写法：
+
+| 场景 | 表达式 |
 | --- | --- |
-| `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` | `active:all` |
-| `TQSDK_RELAY_FUTURES_PRODUCTS=SHFE.au,DCE.m` | `active:SHFE.au,DCE.m` |
-| `TQSDK_RELAY_FUTURES_MAIN_ONLY=true` + `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` | `main:all` |
-| `TQSDK_RELAY_FUTURES_MAIN_ONLY=true` + `TQSDK_RELAY_FUTURES_PRODUCTS=SHFE.au` | `main:SHFE.au` |
-| `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=2` + `TQSDK_RELAY_FUTURES_PRODUCTS=ALL` | `top:2:all` |
-| `TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT=2` + `TQSDK_RELAY_FUTURES_PRODUCTS=SHFE.au` | `top:2:SHFE.au` |
-| `TQSDK_RELAY_FUTURES_SYMBOLS=SHFE.au2602,DCE.m2609` | `symbol:SHFE.au2602,DCE.m2609` |
-| `TQSDK_RELAY_FUTURES_SYMBOLS_FILE=./symbols.txt` | 首批继续保留旧入口，不强制映射到表达式。 |
-
-旧入口仍可用。新实现只新增更强的主路径，不强制迁移已有部署。
+| 全部活跃合约 | `active:all` |
+| 指定产品活跃合约 | `active:SHFE.au,DCE.m` |
+| 全部主力 | `main:all` |
+| 指定产品主力 | `main:SHFE.au` |
+| 每品种前 N | `top:2:all` |
+| 指定产品每品种前 N | `top:2:SHFE.au` |
+| 显式符号 | `symbol:SHFE.au2602,DCE.m2609` |
+| 文件符号 | `file:./symbols.txt` |
 
 ## Resolver 数据流
 
@@ -351,7 +336,7 @@ TQSDK_RELAY_FUTURES_UNIVERSE
 - `futures_universe_symbols_by_kind`：按 `active` / `main` / `index` / `cont` / `symbol` 统计。
 - `futures_universe_warnings`：裸 `product_id`、metadata join 失败等非致命告警。
 
-旧字段 `upstream_symbols` 继续表示最终订阅符号数。
+`upstream_symbols` 表示最终订阅符号数。
 
 ## 错误规则
 
@@ -364,7 +349,6 @@ TQSDK_RELAY_FUTURES_UNIVERSE
 - `top:x:all`。
 - 空 values，例如 `main:`。
 - 空 value，例如 `main:SHFE.au,,DCE.m`。
-- 新旧 universe env 混用。
 - `!` 或 `~` 后没有 selector。
 
 允许但 warning：
@@ -398,8 +382,6 @@ Resolver 单元测试：
 Config 测试：
 
 - 新 env 能加载为 universe expression。
-- 新 env 与旧 `FUTURES_PRODUCTS` 混用报错。
-- 旧 env 兼容路径不变。
 - dry-run report 包含新统计字段。
 
 Smoke 测试：
