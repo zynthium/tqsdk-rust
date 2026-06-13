@@ -19,7 +19,8 @@ async fn main() -> tqsdk::Result<()> {
     // 获取模拟交易的账号 ID
     let account_id = tq.tqkq_account_id().await?;
 
-    // 获取目标持仓管理器，以及账户和持仓状态
+    // 获取行情和目标持仓管理器，以及账户和持仓状态
+    let quote = tq.quote(symbol).await?;
     let target = tq.target_pos_tqkq(symbol).await?;
     let account = tq.account(&account_id);
     let position = tq.position(&account_id, symbol);
@@ -27,6 +28,8 @@ async fn main() -> tqsdk::Result<()> {
     let mut target_set = false;
     let mut closing = false;
     let mut initial_printed = false;
+    let mut last_datetime = String::new();
+    let mut quote_updated = false;
 
     // 事件循环
     while tq.next().await? {
@@ -41,12 +44,24 @@ async fn main() -> tqsdk::Result<()> {
             }
         }
 
-        // As a demonstration of trade execution, we don't wait for quotes.
-        // We will just place an order right away since the market might be closed right now.
-        if initial_printed && !target_set {
+        // 获取最新行情快照
+        let Ok(snapshot) = quote.load() else { continue };
+
+        if last_datetime.is_empty() && !snapshot.datetime.is_empty() {
+            last_datetime = snapshot.datetime.clone();
             println!(
-                "[{}] Executing test order. Opening a long position of 1 lot.",
-                symbol
+                "[{}] Initial quote snapshot received. Time: {}",
+                symbol, last_datetime
+            );
+        } else if !last_datetime.is_empty() && snapshot.datetime != last_datetime {
+            quote_updated = true;
+            last_datetime = snapshot.datetime.clone();
+        }
+
+        if initial_printed && !target_set && quote_updated && snapshot.last_price > 0.0 {
+            println!(
+                "[{}] Live quote ticking (time: {}, last_price: {}). Executing test order...",
+                symbol, snapshot.datetime, snapshot.last_price
             );
             target.set(1)?;
             target_set = true;
