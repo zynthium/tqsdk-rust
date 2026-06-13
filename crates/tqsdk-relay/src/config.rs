@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
-use crate::universe::{FuturesProductCode, FuturesProductFilter, FuturesUniverseSelection};
+use crate::universe::{FuturesProductFilter, FuturesUniverseSelection};
 use crate::universe_expression::UniverseExpression;
 use crate::upstream::UpstreamTickChart;
 
@@ -344,23 +344,16 @@ impl RelayConfig {
             config.futures_metadata_batch_size =
                 parse_positive_usize_env(ENV_FUTURES_METADATA_BATCH_SIZE, &value)?;
         }
-        let futures_main_only = get(ENV_FUTURES_MAIN_ONLY)
-            .map(|value| parse_bool_env(ENV_FUTURES_MAIN_ONLY, &value))
-            .transpose()?;
-        if let Some(value) = get(ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT) {
-            config.futures_active_contracts_per_product = Some(parse_positive_usize_env(
-                ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT,
-                &value,
-            )?);
-        }
-        if futures_main_only == Some(true) {
-            if config.futures_active_contracts_per_product.is_some() {
-                return Err(RelayError::invalid_config(format!(
-                    "set only one of {ENV_FUTURES_MAIN_ONLY} or {ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT}"
-                )));
-            }
-            config.futures_active_contracts_per_product = Some(1);
-        }
+        reject_removed_universe_env(
+            &mut get,
+            ENV_FUTURES_MAIN_ONLY,
+            r#"TQSDK_RELAY_FUTURES_MAIN_ONLY was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="main:all""#,
+        )?;
+        reject_removed_universe_env(
+            &mut get,
+            ENV_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT,
+            r#"TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="top:N:all""#,
+        )?;
         if let Some(value) = get(ENV_UPSTREAM_INS_LIST_WARN_CHARS) {
             config.upstream_ins_list_limits.warn_chars = Some(parse_positive_usize_env(
                 ENV_UPSTREAM_INS_LIST_WARN_CHARS,
@@ -387,50 +380,22 @@ impl RelayConfig {
             config.outbound_channel_capacity =
                 parse_positive_usize_env(ENV_OUTBOUND_CHANNEL_CAPACITY, &value)?;
         }
-        let inline_futures_symbols = get(ENV_FUTURES_SYMBOLS);
-        let futures_symbols_file = get(ENV_FUTURES_SYMBOLS_FILE);
-        let futures_products = get(ENV_FUTURES_PRODUCTS);
+        reject_removed_universe_env(
+            &mut get,
+            ENV_FUTURES_SYMBOLS,
+            r#"TQSDK_RELAY_FUTURES_SYMBOLS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="symbol:<symbols>""#,
+        )?;
+        reject_removed_universe_env(
+            &mut get,
+            ENV_FUTURES_SYMBOLS_FILE,
+            r#"TQSDK_RELAY_FUTURES_SYMBOLS_FILE was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="file:<path>""#,
+        )?;
+        reject_removed_universe_env(
+            &mut get,
+            ENV_FUTURES_PRODUCTS,
+            r#"TQSDK_RELAY_FUTURES_PRODUCTS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE="active:all""#,
+        )?;
         let futures_universe = get(ENV_FUTURES_UNIVERSE);
-        if futures_universe.is_some()
-            && (config.futures_active_contracts_per_product.is_some()
-                || futures_main_only.is_some())
-        {
-            return Err(RelayError::invalid_config(
-                "set only one futures universe source",
-            ));
-        }
-        let configured_universe_sources = usize::from(inline_futures_symbols.is_some())
-            + usize::from(futures_symbols_file.is_some())
-            + usize::from(futures_products.is_some())
-            + usize::from(futures_universe.is_some());
-        if inline_futures_symbols.is_some()
-            && futures_symbols_file.is_some()
-            && futures_products.is_none()
-            && futures_universe.is_none()
-        {
-            return Err(RelayError::invalid_config(format!(
-                "set only one of {ENV_FUTURES_SYMBOLS} or {ENV_FUTURES_SYMBOLS_FILE}"
-            )));
-        }
-        if configured_universe_sources > 1 {
-            return Err(RelayError::invalid_config(
-                "set only one futures universe source",
-            ));
-        }
-        if let Some(value) = inline_futures_symbols {
-            config.futures_symbols = parse_futures_symbols(&value);
-        }
-        if let Some(path) = futures_symbols_file {
-            let contents = std::fs::read_to_string(&path).map_err(|err| {
-                RelayError::invalid_config(format!(
-                    "failed to read {ENV_FUTURES_SYMBOLS_FILE} {path}: {err}"
-                ))
-            })?;
-            config.futures_symbols = parse_futures_symbols(&contents);
-        }
-        if let Some(value) = futures_products {
-            config.futures_product_filter = parse_futures_product_filter(&value)?;
-        }
         if let Some(value) = futures_universe {
             config.futures_universe_expression = Some(UniverseExpression::parse(&value)?);
         }
@@ -582,14 +547,6 @@ impl RelayConfig {
     }
 }
 
-fn parse_futures_symbols(value: &str) -> Vec<String> {
-    value
-        .lines()
-        .flat_map(|line| line.split(','))
-        .map(|symbol| symbol.trim().to_string())
-        .collect()
-}
-
 fn upstream_tick_chart_id(symbol: &str, view_width: usize) -> String {
     format!(
         "{UPSTREAM_TICK_CHART_ID_PREFIX}-{}-{view_width}",
@@ -637,23 +594,13 @@ fn parse_bool_env(name: &str, value: &str) -> RelayResult<bool> {
     }
 }
 
-fn parse_futures_product_filter(value: &str) -> RelayResult<FuturesProductFilter> {
-    let products: Vec<String> = value
-        .lines()
-        .flat_map(|line| line.split(','))
-        .map(|product| product.trim().to_string())
-        .collect();
-    if products.len() == 1 && (products[0] == "*" || products[0].eq_ignore_ascii_case("all")) {
-        return Ok(FuturesProductFilter::All);
+fn reject_removed_universe_env(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+    message: &'static str,
+) -> RelayResult<()> {
+    if get(name).is_some() {
+        return Err(RelayError::invalid_config(message));
     }
-    if products.iter().any(String::is_empty) {
-        return Err(RelayError::invalid_config(
-            "futures_products must not contain empty entries",
-        ));
-    }
-    products
-        .into_iter()
-        .map(|product| FuturesProductCode::parse(&product))
-        .collect::<RelayResult<Vec<_>>>()
-        .map(FuturesProductFilter::Products)
+    Ok(())
 }

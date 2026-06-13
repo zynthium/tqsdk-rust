@@ -1,11 +1,8 @@
-use std::fs;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tqsdk_relay::{
-    BootstrapConfig, DailyRefreshTime, FuturesProductCode, FuturesProductFilter,
-    FuturesUniverseRefreshSchedule, RelayConfig, RelayError, UniverseExpression,
-    UpstreamInsListLimits, next_daily_refresh_delay,
+    BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig, RelayError,
+    UniverseExpression, UpstreamInsListLimits, next_daily_refresh_delay,
 };
 
 #[test]
@@ -77,7 +74,7 @@ fn config_loads_env_overrides_without_touching_sdk_defaults() {
         "TQSDK_RELAY_UPSTREAM_MARKET_URL" => Some("ws://127.0.0.1:9001/market".to_string()),
         "TQSDK_RELAY_DOWNSTREAM_LISTEN" => Some("127.0.0.1:17788".to_string()),
         "TQSDK_RELAY_METRICS_LISTEN" => Some("127.0.0.1:17789".to_string()),
-        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some(" SHFE.au2602, DCE.m2609 ".to_string()),
+        "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("symbol:SHFE.au2602,DCE.m2609".to_string()),
         _ => None,
     })
     .unwrap();
@@ -86,8 +83,12 @@ fn config_loads_env_overrides_without_touching_sdk_defaults() {
     assert_eq!(config.downstream_listen, "127.0.0.1:17788");
     assert_eq!(config.metrics_listen, "127.0.0.1:17789");
     assert_eq!(
-        config.futures_symbols,
-        vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()]
+        config
+            .futures_universe_expression
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "symbol:SHFE.au2602,DCE.m2609"
     );
 }
 
@@ -116,18 +117,6 @@ fn config_loads_upstream_tick_view_width_from_env() {
 }
 
 #[test]
-fn config_loads_all_futures_products_from_env() {
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(config.futures_product_filter, FuturesProductFilter::All);
-    assert!(config.futures_symbols.is_empty());
-}
-
-#[test]
 fn config_loads_futures_universe_expression_from_env() {
     let config = RelayConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("main:all;index:all;!CFFEX".to_string()),
@@ -148,21 +137,6 @@ fn config_loads_futures_universe_expression_from_env() {
 }
 
 #[test]
-fn config_rejects_new_and_legacy_universe_sources_together() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("main:all".to_string()),
-        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: set only one futures universe source"
-    );
-}
-
-#[test]
 fn universe_expression_parses_layered_include_and_exclude_rules() {
     let expression =
         UniverseExpression::parse("main:all;index:SHFE.au,DCE.m;!CFFEX;~SHFE.au").unwrap();
@@ -173,6 +147,17 @@ fn universe_expression_parses_layered_include_and_exclude_rules() {
     );
     assert_eq!(expression.include_clause_count(), 2);
     assert_eq!(expression.exclude_clause_count(), 2);
+}
+
+#[test]
+fn universe_expression_parses_symbol_file_selector() {
+    let expression = UniverseExpression::parse("file:./futures-symbols.txt;!SHFE.au").unwrap();
+
+    assert_eq!(
+        expression.to_string(),
+        "file:./futures-symbols.txt;!SHFE.au"
+    );
+    assert!(expression.is_static_symbol_only());
 }
 
 #[test]
@@ -195,61 +180,6 @@ fn universe_expression_rejects_invalid_clauses() {
     assert!(UniverseExpression::parse("main:").is_err());
     assert!(UniverseExpression::parse("main:SHFE.au,,DCE.m").is_err());
     assert!(UniverseExpression::parse("!").is_err());
-}
-
-#[test]
-fn config_loads_futures_product_codes_from_env() {
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("SHFE.au,DCE.m,MA".to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(
-        config.futures_product_filter,
-        FuturesProductFilter::Products(vec![
-            FuturesProductCode::new(Some("SHFE"), "au").unwrap(),
-            FuturesProductCode::new(Some("DCE"), "m").unwrap(),
-            FuturesProductCode::new(None, "MA").unwrap(),
-        ])
-    );
-}
-
-#[test]
-fn config_loads_active_contracts_per_product_from_env() {
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(config.futures_active_contracts_per_product, Some(2));
-}
-
-#[test]
-fn config_loads_main_only_shortcut_from_env() {
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(config.futures_active_contracts_per_product, Some(1));
-}
-
-#[test]
-fn config_rejects_main_only_and_active_contracts_per_product_together() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
-        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: set only one of TQSDK_RELAY_FUTURES_MAIN_ONLY or TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT"
-    );
 }
 
 #[test]
@@ -317,56 +247,8 @@ fn next_daily_refresh_delay_targets_next_local_wall_clock_time() {
 }
 
 #[test]
-fn config_env_rejects_empty_futures_symbol_entries() {
+fn config_rejects_removed_universe_env_sources() {
     let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602, ,DCE.m2609".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: futures_symbols must not contain empty symbols"
-    );
-}
-
-#[test]
-fn config_loads_futures_symbols_from_file_env() {
-    let path = temp_symbols_file("futures-symbols");
-    fs::write(&path, "SHFE.au2602\nDCE.m2609\n").unwrap();
-
-    let config = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some(path.display().to_string()),
-        _ => None,
-    })
-    .unwrap();
-
-    assert_eq!(
-        config.futures_symbols,
-        vec!["SHFE.au2602".to_string(), "DCE.m2609".to_string()]
-    );
-    fs::remove_file(path).unwrap();
-}
-
-#[test]
-fn config_rejects_inline_and_file_futures_symbols_together() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
-        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some("symbols.txt".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: set only one of TQSDK_RELAY_FUTURES_SYMBOLS or TQSDK_RELAY_FUTURES_SYMBOLS_FILE"
-    );
-}
-
-#[test]
-fn config_rejects_futures_symbols_and_products_together() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
         "TQSDK_RELAY_FUTURES_PRODUCTS" => Some("ALL".to_string()),
         _ => None,
     })
@@ -374,7 +256,51 @@ fn config_rejects_futures_symbols_and_products_together() {
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: set only one futures universe source"
+        "invalid relay config: TQSDK_RELAY_FUTURES_PRODUCTS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"active:all\""
+    );
+
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS_FILE" => Some("symbols.txt".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_SYMBOLS_FILE was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"file:<path>\""
+    );
+
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_SYMBOLS" => Some("SHFE.au2602".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_SYMBOLS was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"symbol:<symbols>\""
+    );
+
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_MAIN_ONLY" => Some("true".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_MAIN_ONLY was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"main:all\""
+    );
+
+    let err = RelayConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("2".to_string()),
+        _ => None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "invalid relay config: TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT was removed; use TQSDK_RELAY_FUTURES_UNIVERSE=\"top:N:all\""
     );
 }
 
@@ -482,20 +408,6 @@ fn config_loads_futures_metadata_batch_size_from_env() {
 }
 
 #[test]
-fn config_rejects_zero_active_contracts_per_product_from_env() {
-    let err = RelayConfig::from_env_vars(|key| match key {
-        "TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT" => Some("0".to_string()),
-        _ => None,
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid relay config: TQSDK_RELAY_FUTURES_ACTIVE_CONTRACTS_PER_PRODUCT must be greater than zero"
-    );
-}
-
-#[test]
 fn config_loads_dry_run_from_env() {
     let config = RelayConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_DRY_RUN" => Some("true".to_string()),
@@ -587,15 +499,4 @@ fn config_rejects_zero_per_series_cooldown() {
         err.to_string(),
         "invalid relay config: bootstrap.per_series_cooldown must be greater than zero"
     );
-}
-
-fn temp_symbols_file(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "tqsdk-relay-{name}-{}-{nanos}.txt",
-        std::process::id()
-    ))
 }
