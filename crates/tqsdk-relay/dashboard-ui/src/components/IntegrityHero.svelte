@@ -34,6 +34,15 @@
     if (model.idleDisplayState === 'backfilling') return '补历史';
     return formatDuration(idleMs);
   }
+
+  function coverageSub(model: IntegrityModel): string {
+    if (model.idleDisplayState === 'subscribing') return '订阅中';
+    if (model.idleDisplayState === 'backfilling') {
+      const initializing = Number(model.global.initializing || 0);
+      return initializing > 0 ? `初始化 ${formatNumber(initializing)}` : '补历史';
+    }
+    return `${formatPercent(model.coverageRatio * 100)}%`;
+  }
 </script>
 
 <section class={`panel hero ${tone}`} data-testid="integrity-hero">
@@ -48,7 +57,7 @@
     <div class="chip">
       <span class="chip-label">合约覆盖</span>
       <span class="chip-value">{formatNumber(model.observedUniverse)}<em>/{formatNumber(model.totalUniverse)}</em></span>
-      <span class="chip-sub">{formatPercent(model.coverageRatio * 100)}%</span>
+      <span class="chip-sub">{coverageSub(model)}</span>
     </div>
     <div class="chip">
       <span class="chip-label">帧静默</span>

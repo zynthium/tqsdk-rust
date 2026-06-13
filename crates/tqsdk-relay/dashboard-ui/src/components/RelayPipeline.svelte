@@ -12,6 +12,39 @@
     severity: TimelineSeverity;
   };
 
+  function sourceState(model: IntegrityModel): string {
+    return {
+      connecting: '连接中',
+      subscribing: '订阅中',
+      backfilling: '补历史',
+      live: '在线',
+      degraded: '降级',
+      down: '断开',
+    }[model.metrics.upstream_stage];
+  }
+
+  function sourceSeverity(model: IntegrityModel): TimelineSeverity {
+    if (model.metrics.upstream_stage === 'down' || model.metrics.upstream_stage === 'degraded') return 'bad';
+    if (model.metrics.upstream_stage === 'live') return 'live';
+    return 'no_sample';
+  }
+
+  function universeMeta(model: IntegrityModel): string {
+    if (model.cacheHealth === 'subscribing') return '等待订阅';
+    if (model.cacheHealth === 'backfilling') {
+      const initializing = Number(model.global.initializing || 0);
+      return initializing > 0 ? `初始化 ${formatNumber(initializing)}` : '等待样本';
+    }
+    return `覆盖 ${formatNumber(model.observedUniverse)}`;
+  }
+
+  function universeSeverity(model: IntegrityModel): TimelineSeverity {
+    if (model.cacheHealth === 'subscribing' || model.cacheHealth === 'backfilling') return 'no_sample';
+    if (model.coverageRatio >= 0.98) return 'live';
+    if (model.coverageRatio >= 0.9) return 'warn';
+    return 'bad';
+  }
+
   function cacheState(model: IntegrityModel): string {
     return {
       active: '活跃',
@@ -35,16 +68,16 @@
     {
       name: '上游连接',
       icon: '☁',
-      state: model.metrics.upstream_stage,
+      state: sourceState(model),
       meta: `frame ${formatNumber(model.metrics.upstream_frames_received)}`,
-      severity: model.metrics.upstream_stage === 'live' ? 'live' : model.metrics.upstream_stage === 'down' || model.metrics.upstream_stage === 'degraded' ? 'bad' : 'warn',
+      severity: sourceSeverity(model),
     },
     {
       name: '合约集合',
       icon: '▦',
       state: `${formatNumber(model.totalUniverse)} 合约`,
-      meta: `覆盖 ${formatNumber(model.observedUniverse)}`,
-      severity: model.coverageRatio >= 0.98 ? 'live' : model.coverageRatio >= 0.9 ? 'warn' : 'bad',
+      meta: universeMeta(model),
+      severity: universeSeverity(model),
     },
     {
       name: '数据解码',
@@ -123,6 +156,10 @@
     border-color: #ff536a66;
   }
 
+  .node.no_sample {
+    border-color: #4d789066;
+  }
+
   .node.closed {
     border-color: #58758a66;
   }
@@ -169,6 +206,10 @@
 
   .state.bad {
     color: var(--relay-bad);
+  }
+
+  .state.no_sample {
+    color: var(--relay-muted);
   }
 
   .state.closed {

@@ -140,6 +140,11 @@ select {
   box-shadow: none;
 }
 
+.status-dot.no_sample {
+  background: var(--relay-muted);
+  box-shadow: none;
+}
+
 /* ── Badges ── */
 .badge {
   display: inline-flex;

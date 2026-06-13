@@ -1,16 +1,28 @@
 <script lang="ts">
   import { formatNumber } from '../lib/format';
+  import type { OverallSeverity } from '../lib/types';
 
-  let { score, compact = false }: { score: number; compact?: boolean } = $props();
+  let { score, state = 'healthy', compact = false }: { score: number; state?: OverallSeverity; compact?: boolean } = $props();
   let clamped = $derived(Math.max(0, Math.min(100, score)));
   let tone = $derived(clamped < 60 ? 'bad' : clamped < 85 ? 'warn' : 'live');
+  let stateLabel = $derived(
+    state === 'warming'
+      ? '观测'
+      : state === 'closed'
+        ? '休盘'
+        : tone === 'bad'
+          ? '告警'
+          : tone === 'warn'
+            ? '关注'
+            : '连续',
+  );
 </script>
 
 <div class={`gauge ${tone} ${compact ? 'compact' : ''}`} style={`--angle:${clamped * 3.6}deg`} data-testid="score-gauge">
   <div class="inner">
     <span>连续性</span>
     <b>{formatNumber(Math.round(clamped))}</b>
-    <em>{tone === 'bad' ? '告警' : tone === 'warn' ? '关注' : '连续'}</em>
+    <em>{stateLabel}</em>
   </div>
 </div>
 
