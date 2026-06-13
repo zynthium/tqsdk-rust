@@ -59,9 +59,9 @@ pub use runtime::{
 };
 pub use server::RelayServer;
 pub use symbol_metrics::{
-    SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsQuery, SymbolMetricsSnapshot,
-    SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSort, SymbolStatus,
-    SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
+    SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery,
+    SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSort,
+    SymbolStatus, SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
     SymbolTelemetryStore,
 };
 #[cfg(feature = "metadata")]

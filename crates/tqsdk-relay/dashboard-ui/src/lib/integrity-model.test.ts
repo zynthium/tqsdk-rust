@@ -87,6 +87,35 @@ describe('deriveIntegrity', () => {
     expect(model.issueCount).toBe(0);
   });
 
+  it('keeps backfilling initializing rows in warming state', () => {
+    const initializing = row({
+      status: 'initializing',
+      flow: 'no_sample',
+      problem: false,
+      problem_severity: 'initializing',
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
+      last_receive_unix_millis: null,
+      last_tick_datetime_ns: null,
+    });
+
+    const model = deriveIntegrity(
+      metrics({
+        upstream_stage: 'backfilling',
+        upstream_frame_idle_health: 'no_sample',
+        upstream_event_idle_health: 'no_sample',
+      }),
+      symbolSnapshot([initializing]),
+      NOW,
+    );
+
+    expect(model.overall).toBe('warming');
+    expect(model.issueCount).toBe(0);
+    expect(model.coverageRatio).toBe(0);
+    expect(model.continuityScore).toBe(100);
+  });
+
   it('computes rates from previous sample', () => {
     const previous = deriveIntegrity(
       metrics({ upstream_frames_received: 10, upstream_events_decoded: 20 }),
@@ -232,6 +261,7 @@ describe('statusLabel', () => {
   it('maps backend status to Chinese labels', () => {
     expect(statusLabel('live')).toBe('正常');
     expect(statusLabel('closed')).toBe('休盘');
+    expect(statusLabel('initializing')).toBe('初始化');
     expect(statusLabel('stale')).toBe('静默');
     expect(statusLabel('missing')).toBe('未收到');
     expect(statusLabel('inactive')).toBe('未纳入');

@@ -15,6 +15,7 @@ export function statusLabel(status: SymbolStatus): string {
   return {
     live: '正常',
     closed: '休盘',
+    initializing: '初始化',
     stale: '静默',
     missing: '未收到',
     inactive: '未纳入',
@@ -93,6 +94,11 @@ export function deriveIntegrity(
   const idleWarn = !isMarketClosed && (frameFlowHealth === 'warn' || eventFlowHealth === 'warn');
   const decodeWarn = decodeHealth === 'degraded';
   const warming = WARMING_STAGES.has(metrics.upstream_stage);
+  const issueCount = Number(global.problem ?? globalProblems.length);
+  const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
+  const initializingCount = Number(global.initializing ?? 0);
+  const warmingWithoutProblems =
+    warming && issueCount === 0 && (observedUniverse === 0 || initializingCount > 0);
   const elapsedSeconds = previous ? Math.max(0.001, (sampledAt - previous.sampledAt) / 1_000) : null;
   const frameRate =
     elapsedSeconds && previous
@@ -102,20 +108,19 @@ export function deriveIntegrity(
     elapsedSeconds && previous
       ? Math.max(0, (metrics.upstream_events_decoded - previous.metrics.upstream_events_decoded) / elapsedSeconds)
       : null;
-  const issueCount = Number(global.problem ?? globalProblems.length);
-  const subscribedProblemCount = Number(global.subscribed_problem ?? subscribedProblems.length);
+  const coveragePenalty = warmingWithoutProblems ? 0 : Math.min(25, (1 - coverageRatio) * 25);
   const continuityScore = Math.max(
     0,
     100 -
       Math.min(55, issueCount * 9) -
-      Math.min(25, (1 - coverageRatio) * 25) -
+      coveragePenalty -
       (sourceCritical || idleCritical ? 20 : 0),
   );
   const overall = isMarketClosed
     ? 'closed'
     : sourceCritical || idleCritical || subscribedProblemCount > 0 || confirmedIntegrityIssueCount > 0
       ? 'critical'
-      : warming && Number(global.total || 0) === 0
+      : warmingWithoutProblems
         ? 'warming'
         : idleWarn || decodeWarn || issueCount > 0 || coverageRatio < 0.98
           ? 'warning'

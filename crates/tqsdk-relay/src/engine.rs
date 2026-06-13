@@ -21,9 +21,9 @@ use crate::observability::{
 };
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
-    SymbolFlow, SymbolIntegrity, SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolMetricsSummary,
-    SymbolProblemSeverity, SymbolSession, SymbolSubscriptionCounts, SymbolTelemetryReadModel,
-    SymbolTelemetrySnapshot, SymbolTelemetryStore,
+    SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery, SymbolMetricsSnapshot,
+    SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSubscriptionCounts,
+    SymbolTelemetryReadModel, SymbolTelemetrySnapshot, SymbolTelemetryStore,
 };
 use crate::universe::FuturesContract;
 
@@ -155,11 +155,12 @@ pub struct DashboardSnapshotInputs {
 impl DashboardSnapshotInputs {
     #[must_use]
     pub fn symbol_metrics_snapshot(&self, query: &SymbolMetricsQuery) -> SymbolMetricsSnapshot {
-        self.symbols.snapshot_at(
+        self.symbols.snapshot_at_with_context(
             self.received_at_unix_millis,
             DEFAULT_DATA_STALE_AFTER_SECS.saturating_mul(1_000),
             &self.subscriptions,
             query,
+            symbol_metrics_context_for_stage(self.metrics.upstream_stage),
         )
     }
 
@@ -282,6 +283,15 @@ fn dashboard_timeline(rows: &[SymbolTelemetrySnapshot]) -> DashboardTimelineSamp
             .into_iter()
             .map(|(exchange, rows)| (exchange, dashboard_scope_for(rows)))
             .collect(),
+    }
+}
+
+fn symbol_metrics_context_for_stage(stage: RelaySourceStage) -> SymbolMetricsContext {
+    SymbolMetricsContext {
+        initializing_universe: matches!(
+            stage,
+            RelaySourceStage::Subscribing | RelaySourceStage::Backfilling
+        ),
     }
 }
 
@@ -995,11 +1005,12 @@ impl RelayEngine {
         now_unix_millis: u64,
         query: &SymbolMetricsQuery,
     ) -> SymbolMetricsSnapshot {
-        self.symbol_metrics.snapshot_at(
+        self.symbol_metrics.snapshot_at_with_context(
             now_unix_millis,
             DEFAULT_DATA_STALE_AFTER_SECS.saturating_mul(1_000),
             &self.interests.symbol_subscription_counts(),
             query,
+            symbol_metrics_context_for_stage(self.upstream_stage),
         )
     }
 

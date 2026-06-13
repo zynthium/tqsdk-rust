@@ -101,6 +101,7 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 也可用 `main:all;index:all;!CFFEX` 组合真实主力、加权指数、主连连续合约、top-N 和排除规则；
 可用 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 调小启动时的上游 tick 历史窗口；
 `/symbol-metrics` 可用于查看每个合约的数据接收状态与延迟；
+启动补历史阶段未出样本的合约会显示为 `initializing`，不计入问题数；
 静态完整合约文件通过 `file:<path>` selector 接入。
 
 ## 快速开始
