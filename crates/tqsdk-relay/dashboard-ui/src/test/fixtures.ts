@@ -87,6 +87,7 @@ export function symbolSnapshot(rows: SymbolRow[]): SymbolMetricsSnapshot {
       total: summaryRows.length,
       live: summaryRows.filter((item) => item.status === 'live').length,
       closed: summaryRows.filter((item) => item.status === 'closed').length,
+      initializing: summaryRows.filter((item) => item.status === 'initializing').length,
       stale: summaryRows.filter((item) => item.status === 'stale').length,
       missing: summaryRows.filter((item) => item.status === 'missing').length,
       inactive: summaryRows.filter((item) => item.status === 'inactive').length,

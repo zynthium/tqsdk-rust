@@ -348,7 +348,10 @@ open http://127.0.0.1:7789/dashboard
 `trading_time`；若未配置产品发现或交易时段暂不可用，再考虑 quote 中的交易时间表，
 最后按期货交易所 / 品种代码使用内置交易时段兜底。交易时段按固定 Asia/Shanghai
 时区解释，不受 host 本地时区影响。无接收样本时 `session=unknown`、`flow=no_sample`，
-不会把未知样本误判为休盘。响应保留兼容 `status`，同时返回正交状态字段：
+不会把未知样本误判为休盘。上游仍处于 `subscribing` / `backfilling` 时，当前 universe
+里尚未收到样本的合约会标为 `status=initializing`、`problem=false`，避免把启动期历史
+补齐误报为合约问题；上游进入 live 后仍未收到样本才按 `missing` 处理。响应保留兼容
+`status`，同时返回正交状态字段：
 `coverage=covered|uncovered`、`session=open|closed|unknown`、
 `flow=flowing|silent|no_sample`、`integrity=intact|suspected|confirmed_gap`。
 

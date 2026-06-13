@@ -17,6 +17,7 @@ const RECEIVE_GAP_SAMPLE_LIMIT: usize = 128;
 pub enum SymbolStatus {
     Live,
     Closed,
+    Initializing,
     Stale,
     Missing,
     Inactive,
@@ -27,6 +28,7 @@ pub enum SymbolStatus {
 pub enum SymbolProblemSeverity {
     Live,
     Closed,
+    Initializing,
     Warn,
     Bad,
 }
@@ -80,6 +82,11 @@ pub struct SymbolMetricsQuery {
     pub q: Option<String>,
     pub sort: SymbolSort,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SymbolMetricsContext {
+    pub initializing_universe: bool,
 }
 
 impl SymbolMetricsQuery {
@@ -170,6 +177,7 @@ pub struct SymbolMetricsSummary {
     pub total: usize,
     pub live: usize,
     pub closed: usize,
+    pub initializing: usize,
     pub stale: usize,
     pub missing: usize,
     pub inactive: usize,
@@ -342,6 +350,23 @@ impl SymbolTelemetryStore {
         self.read_model()
             .snapshot_at(now_unix_millis, stale_after_millis, subscriptions, query)
     }
+
+    pub fn snapshot_at_with_context(
+        &self,
+        now_unix_millis: u64,
+        stale_after_millis: u64,
+        subscriptions: &BTreeMap<String, SymbolSubscriptionCounts>,
+        query: &SymbolMetricsQuery,
+        context: SymbolMetricsContext,
+    ) -> SymbolMetricsSnapshot {
+        self.read_model().snapshot_at_with_context(
+            now_unix_millis,
+            stale_after_millis,
+            subscriptions,
+            query,
+            context,
+        )
+    }
 }
 
 impl SymbolTelemetryReadModel {
@@ -351,6 +376,23 @@ impl SymbolTelemetryReadModel {
         stale_after_millis: u64,
         subscriptions: &BTreeMap<String, SymbolSubscriptionCounts>,
         query: &SymbolMetricsQuery,
+    ) -> SymbolMetricsSnapshot {
+        self.snapshot_at_with_context(
+            now_unix_millis,
+            stale_after_millis,
+            subscriptions,
+            query,
+            SymbolMetricsContext::default(),
+        )
+    }
+
+    pub fn snapshot_at_with_context(
+        &self,
+        now_unix_millis: u64,
+        stale_after_millis: u64,
+        subscriptions: &BTreeMap<String, SymbolSubscriptionCounts>,
+        query: &SymbolMetricsQuery,
+        context: SymbolMetricsContext,
     ) -> SymbolMetricsSnapshot {
         let mut symbols = BTreeSet::new();
         symbols.extend(self.universe.iter().cloned());
@@ -388,6 +430,7 @@ impl SymbolTelemetryReadModel {
                 receive_gap_ms,
                 stale_after_millis,
                 trading_phase,
+                context,
             );
             let telemetry = telemetry.cloned().unwrap_or_default();
             let coverage = coverage_for(in_universe);
@@ -548,6 +591,7 @@ fn problem_severity_for(
     }
     match status {
         SymbolStatus::Closed => SymbolProblemSeverity::Closed,
+        SymbolStatus::Initializing => SymbolProblemSeverity::Initializing,
         SymbolStatus::Missing | SymbolStatus::Inactive => SymbolProblemSeverity::Bad,
         SymbolStatus::Stale => SymbolProblemSeverity::Warn,
         SymbolStatus::Live if invalid_rows > 0 => SymbolProblemSeverity::Bad,
@@ -598,9 +642,13 @@ fn classify_symbol(
     receive_gap_ms: Option<u64>,
     stale_after_millis: u64,
     trading_phase: Option<TradingSessionPhase>,
+    context: SymbolMetricsContext,
 ) -> SymbolStatus {
     if !in_universe && receive_gap_ms.is_none() {
         return SymbolStatus::Inactive;
+    }
+    if in_universe && receive_gap_ms.is_none() && context.initializing_universe {
+        return SymbolStatus::Initializing;
     }
     if receive_gap_ms.is_none() {
         return SymbolStatus::Missing;
@@ -623,6 +671,7 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
         live: 0,
         closed: 0,
         stale: 0,
+        initializing: 0,
         missing: 0,
         inactive: 0,
         subscribed: 0,
@@ -641,6 +690,7 @@ fn summarize(symbols: &[SymbolTelemetrySnapshot]) -> SymbolMetricsSummary {
         match symbol.status {
             SymbolStatus::Live => summary.live += 1,
             SymbolStatus::Closed => summary.closed += 1,
+            SymbolStatus::Initializing => summary.initializing += 1,
             SymbolStatus::Stale => summary.stale += 1,
             SymbolStatus::Missing => summary.missing += 1,
             SymbolStatus::Inactive => summary.inactive += 1,
@@ -1004,6 +1054,7 @@ fn parse_status(value: &str) -> Result<SymbolStatus, &'static str> {
     match value {
         "live" => Ok(SymbolStatus::Live),
         "closed" => Ok(SymbolStatus::Closed),
+        "initializing" => Ok(SymbolStatus::Initializing),
         "stale" => Ok(SymbolStatus::Stale),
         "missing" => Ok(SymbolStatus::Missing),
         "inactive" => Ok(SymbolStatus::Inactive),

@@ -6,12 +6,12 @@ export type UpstreamStage =
   | 'degraded'
   | 'down';
 
-export type SymbolStatus = 'live' | 'closed' | 'stale' | 'missing' | 'inactive';
+export type SymbolStatus = 'live' | 'closed' | 'initializing' | 'stale' | 'missing' | 'inactive';
 export type SymbolCoverage = 'covered' | 'uncovered';
 export type SymbolSession = 'open' | 'closed' | 'unknown';
 export type SymbolFlow = 'flowing' | 'silent' | 'no_sample';
 export type SymbolIntegrity = 'intact' | 'suspected' | 'confirmed_gap';
-export type ProblemSeverity = 'live' | 'closed' | 'warn' | 'bad';
+export type ProblemSeverity = 'live' | 'closed' | 'initializing' | 'warn' | 'bad';
 export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming' | 'closed';
 export type FlowIdleHealth = 'no_sample' | 'live' | 'warn' | 'critical';
 export type DecodeHealth = 'healthy' | 'degraded';
@@ -50,6 +50,7 @@ export type SymbolMetricsSummary = {
   total: number;
   live: number;
   closed: number;
+  initializing: number;
   stale: number;
   missing: number;
   inactive: number;

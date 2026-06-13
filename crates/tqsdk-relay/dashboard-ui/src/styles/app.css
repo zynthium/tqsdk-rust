@@ -165,6 +165,12 @@ select {
   color: #9eb9ce;
 }
 
+.badge.initializing {
+  border-color: #4d789066;
+  background: #4d78900f;
+  color: var(--relay-muted);
+}
+
 .badge.warn,
 .badge.stale {
   border-color: #ffc44766;

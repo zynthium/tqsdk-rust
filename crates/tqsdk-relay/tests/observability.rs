@@ -164,6 +164,56 @@ fn metrics_expose_upstream_peek_and_decode_timing() {
 }
 
 #[test]
+fn dashboard_marks_no_sample_universe_symbols_initializing_during_backfill() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602", "DCE.m2609"],
+        21,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+    engine.record_upstream_transport_connected_at(now / 1_000 - 1);
+    engine.record_upstream_subscription_sent_at(now / 1_000 - 1);
+
+    let symbols =
+        engine.symbol_metrics_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+    assert_eq!(symbols.summary.initializing, 2);
+    assert_eq!(symbols.summary.missing, 0);
+    assert_eq!(symbols.summary.problem, 0);
+    assert!(symbols.symbols.iter().all(|symbol| !symbol.problem));
+
+    let dashboard = engine.dashboard_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+
+    assert_eq!(
+        dashboard.metrics.upstream_stage,
+        RelaySourceStage::Backfilling
+    );
+    assert_eq!(dashboard.global.total, 2);
+    assert_eq!(dashboard.global.initializing, 2);
+    assert_eq!(dashboard.global.missing, 0);
+    assert_eq!(dashboard.global.problem, 0);
+    assert_eq!(
+        dashboard.timeline.global.severity,
+        tqsdk_relay::DashboardTimelineSeverity::NoSample
+    );
+    assert_eq!(dashboard.timeline.global.problem, 0);
+    assert!(dashboard.page.symbols.iter().all(|symbol| !symbol.problem));
+
+    let json = serde_json::to_value(&dashboard).unwrap();
+    assert_eq!(json["global"]["initializing"], 2);
+    assert_eq!(json["global"]["missing"], 0);
+    assert_eq!(json["global"]["problem"], 0);
+    assert_eq!(json["page"]["symbols"][0]["status"], "initializing");
+    assert_eq!(
+        json["page"]["symbols"][0]["problem_severity"],
+        "initializing"
+    );
+    assert_eq!(json["page"]["symbols"][0]["problem"], false);
+}
+
+#[test]
 fn upstream_subscription_sent_advances_symbol_source_epoch() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);

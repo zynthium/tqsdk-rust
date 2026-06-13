@@ -581,6 +581,10 @@
     color: var(--relay-closed);
   }
 
+  .badge.initializing {
+    color: var(--relay-muted);
+  }
+
   .badge.stale,
   .badge.missing {
     color: var(--relay-warn);
@@ -606,6 +610,10 @@
 
   .risk.closed {
     color: var(--relay-closed);
+  }
+
+  .risk.initializing {
+    color: var(--relay-muted);
   }
 
   .cell {
