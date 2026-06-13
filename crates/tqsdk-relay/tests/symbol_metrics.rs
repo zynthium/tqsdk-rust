@@ -385,7 +385,10 @@ fn query_matches_instrument_name() {
 #[test]
 fn continuous_contract_symbols_get_chinese_display_names() {
     let mut store = SymbolTelemetryStore::default();
-    store.record_universe(["KQ.m@SHFE.au", "KQ.i@SHFE.au"], 1_700_000_000_000);
+    store.record_universe(
+        ["KQ.m@SHFE.au", "KQ.i@SHFE.au", "KQ.i@DCE.m"],
+        1_700_000_000_000,
+    );
 
     let snapshot = store.snapshot_at(
         1_700_000_002_000,
@@ -394,15 +397,20 @@ fn continuous_contract_symbols_get_chinese_display_names() {
         &SymbolMetricsQuery::default(),
     );
 
-    assert_eq!(snapshot.symbols[0].symbol, "KQ.i@SHFE.au");
+    assert_eq!(snapshot.symbols[0].symbol, "KQ.i@DCE.m");
     assert_eq!(
         snapshot.symbols[0].instrument_name.as_deref(),
-        Some("黄金加权")
+        Some("豆粕加权")
     );
-    assert_eq!(snapshot.symbols[1].symbol, "KQ.m@SHFE.au");
+    assert_eq!(snapshot.symbols[1].symbol, "KQ.i@SHFE.au");
     assert_eq!(
         snapshot.symbols[1].instrument_name.as_deref(),
-        Some("黄金主连")
+        Some("沪金加权")
+    );
+    assert_eq!(snapshot.symbols[2].symbol, "KQ.m@SHFE.au");
+    assert_eq!(
+        snapshot.symbols[2].instrument_name.as_deref(),
+        Some("沪金主连")
     );
 }
 
@@ -412,7 +420,7 @@ fn symbol_query_matches_continuous_contract_chinese_display_name() {
     store.record_universe(["KQ.m@SHFE.au", "DCE.m2609"], 1_700_000_000_000);
 
     let query = SymbolMetricsQuery {
-        q: Some("黄金".to_string()),
+        q: Some("沪金".to_string()),
         ..SymbolMetricsQuery::default()
     };
     let snapshot = store.snapshot_at(1_700_000_002_000, 30_000, &Default::default(), &query);
@@ -421,7 +429,7 @@ fn symbol_query_matches_continuous_contract_chinese_display_name() {
     assert_eq!(snapshot.symbols[0].symbol, "KQ.m@SHFE.au");
     assert_eq!(
         snapshot.symbols[0].instrument_name.as_deref(),
-        Some("黄金主连")
+        Some("沪金主连")
     );
 }
 

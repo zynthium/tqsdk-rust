@@ -99,6 +99,8 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 可用 `main:all` 只订阅每品种主力合约；
 可用 `top:2:all` 将产品发现结果限制为每品种主力和次主力；
 也可用 `main:all;index:all;!CFFEX` 组合真实主力、加权指数、主连连续合约、top-N 和排除规则；
+`index` 只生成天勤支持的 `KQ.i@EX.product` 加权 / 指数连续代码，`KQD` 外盘行情不会生成
+不存在的加权 / 指数连续合约；
 可用 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 调小启动时的上游 tick 历史窗口；
 `/symbol-metrics` 可用于查看每个合约的数据接收状态与延迟；
 启动补历史阶段未出样本的合约会显示为 `initializing`，不计入问题数；

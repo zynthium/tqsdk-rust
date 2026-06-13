@@ -7,7 +7,8 @@ export function createTimelineHistory(): TimelineHistory {
 }
 
 export function exchangeOf(symbol: string): string {
-  return symbol.split('.')[0]?.toUpperCase() || 'UNKNOWN';
+  const normalized = symbol.includes('@') ? symbol.split('@')[1] : symbol;
+  return normalized?.split('.')[0]?.toUpperCase() || 'UNKNOWN';
 }
 
 function timelineSeverityForRow(row: SymbolRow): TimelineSeverity {

@@ -203,9 +203,8 @@ impl DashboardSnapshotInputs {
 }
 
 fn exchange_of(symbol: &str) -> String {
-    symbol
-        .split_once('.')
-        .map(|(exchange, _)| exchange.to_ascii_uppercase())
+    crate::symbol_identity::exchange_id_for_symbol(symbol)
+        .map(str::to_ascii_uppercase)
         .unwrap_or_else(|| "UNKNOWN".to_string())
 }
 

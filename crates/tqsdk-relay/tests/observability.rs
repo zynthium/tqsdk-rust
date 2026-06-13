@@ -380,6 +380,25 @@ fn engine_dashboard_snapshot_exposes_aggregate_timeline_without_global_symbol_ro
 }
 
 #[test]
+fn dashboard_timeline_groups_continuous_contracts_by_underlying_exchange() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["KQ.i@DCE.m", "KQ.m@SHFE.au"],
+        24,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+
+    let dashboard = engine.dashboard_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+
+    assert!(dashboard.timeline.exchanges.contains_key("DCE"));
+    assert!(dashboard.timeline.exchanges.contains_key("SHFE"));
+    assert!(!dashboard.timeline.exchanges.contains_key("KQ"));
+}
+
+#[test]
 fn dashboard_snapshot_inputs_are_classified_after_detached_copy() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);

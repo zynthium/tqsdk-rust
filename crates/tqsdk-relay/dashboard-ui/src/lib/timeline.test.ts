@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './timeline';
+import { createTimelineHistory, exchangeOf, pushTimelineSample, timelineBuckets } from './timeline';
 import { dashboardTimeline, NOW, row } from '../test/fixtures';
 
 describe('timeline', () => {
+  it('groups continuous contracts by underlying exchange', () => {
+    expect(exchangeOf('KQ.i@DCE.m')).toBe('DCE');
+    expect(exchangeOf('KQ.m@SHFE.au')).toBe('SHFE');
+    expect(exchangeOf('DCE.m2609')).toBe('DCE');
+  });
+
   it('records exchange and subscribed continuity without treating closed as bad', () => {
     const history = createTimelineHistory();
     const sample = dashboardTimeline([

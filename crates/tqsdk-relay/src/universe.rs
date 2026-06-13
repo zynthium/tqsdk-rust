@@ -16,6 +16,11 @@ use tqsdk_session::{InstrumentClass, SessionClient, SessionClientBuilder, Symbol
 #[cfg(feature = "metadata")]
 use crate::config::{DEFAULT_FUTURES_METADATA_BATCH_SIZE, RelayConfig};
 use crate::error::{RelayError, RelayResult};
+use crate::symbol_identity::{
+    continuous_contract_display_name, continuous_contract_display_name_from_product_name,
+    futures_product_chinese_name, product_name_from_instrument_name,
+    supports_index_continuous_contract,
+};
 use crate::universe_expression::{
     UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
 };
@@ -675,18 +680,38 @@ where
     let contracts =
         contracts_for_product_scope(scope, ProductSelection::default(), resolver).await?;
     let mut products = BTreeSet::<(String, String)>::new();
+    let mut product_names = BTreeMap::<(String, String), String>::new();
     for contract in contracts {
-        products.insert((contract.exchange_id, contract.product_id));
+        if prefix == "KQ.i" && !supports_index_continuous_contract(&contract.exchange_id) {
+            continue;
+        }
+        let key = (contract.exchange_id.clone(), contract.product_id.clone());
+        if let Some(product_name) = futures_product_chinese_name(&key.0, &key.1)
+            .map(str::to_string)
+            .or_else(|| {
+                contract
+                    .instrument_name
+                    .as_deref()
+                    .and_then(product_name_from_instrument_name)
+            })
+        {
+            product_names.entry(key.clone()).or_insert(product_name);
+        }
+        products.insert(key);
     }
     products
         .into_iter()
         .map(|(exchange_id, product_id)| {
-            FuturesContract::new(
-                format!("{prefix}@{exchange_id}.{product_id}"),
-                exchange_id,
-                product_id,
-                false,
-            )
+            let symbol = format!("{prefix}@{exchange_id}.{product_id}");
+            let mut contract =
+                FuturesContract::new(symbol.clone(), exchange_id, product_id, false)?;
+            contract.instrument_name = product_names
+                .get(&(contract.exchange_id.clone(), contract.product_id.clone()))
+                .and_then(|product_name| {
+                    continuous_contract_display_name_from_product_name(prefix, product_name)
+                })
+                .or_else(|| continuous_contract_display_name(&symbol));
+            Ok(contract)
         })
         .collect()
 }
@@ -806,13 +831,18 @@ pub(crate) fn contract_from_configured_symbol(symbol: &str) -> RelayResult<Futur
         let (exchange_id, product_id) = product.split_once('.').ok_or_else(|| {
             RelayError::invalid_config("continuous futures symbol must be KQ.*@EX.product")
         })?;
-        return FuturesContract::new(symbol, exchange_id, product_id, false);
+        let mut contract = FuturesContract::new(symbol, exchange_id, product_id, false)?;
+        contract.instrument_name = continuous_contract_display_name(symbol);
+        return Ok(contract);
     }
     FuturesContract::from_symbol(symbol, false)
 }
 
 fn is_known_futures_exchange(value: &str) -> bool {
-    matches!(value, "CFFEX" | "SHFE" | "DCE" | "CZCE" | "INE" | "GFEX")
+    matches!(
+        value,
+        "CFFEX" | "SHFE" | "DCE" | "CZCE" | "INE" | "GFEX" | "KQD"
+    )
 }
 
 async fn resolve_active_contracts<R>(
