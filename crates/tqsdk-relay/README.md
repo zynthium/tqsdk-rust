@@ -57,7 +57,7 @@ duration 为 `0` 的下游 tick chart 兼容不是 V1 已完成的主要能力�
 ```bash
 export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
-TQSDK_RELAY_FUTURES_UNIVERSE="active:all" \
+TQSDK_RELAY_FUTURES_UNIVERSE='active:all' \
 cargo run -p tqsdk-relay
 ```
 
@@ -67,7 +67,7 @@ cargo run -p tqsdk-relay
 ```bash
 export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
-TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!CFFEX" \
+TQSDK_RELAY_FUTURES_UNIVERSE='main:all;index:all;!CFFEX' \
 cargo run -p tqsdk-relay
 ```
 
@@ -83,22 +83,23 @@ cargo run -p tqsdk-relay
 - `file:./futures-symbols.txt`：从文件读取显式符号列表，文件可用换行或逗号分隔。
 
 裸值会自动识别：`CFFEX` 表示交易所，`SHFE.au` 表示品种，
-`SHFE.au2602` / `KQ.i@SHFE.au` 表示精确符号。例如：
+`SHFE.au2602` / `KQ.i@SHFE.au` 表示精确符号。shell 示例统一用单引号包住表达式，避免 zsh
+把 `!` 当作 history expansion。例如：
 
 ```bash
 # 只订指定品种的真实主力和加权指数
-TQSDK_RELAY_FUTURES_UNIVERSE="main:SHFE.au,DCE.m;index:SHFE.au,DCE.m" \
+TQSDK_RELAY_FUTURES_UNIVERSE='main:SHFE.au,DCE.m;index:SHFE.au,DCE.m' \
 cargo run -p tqsdk-relay
 
 # 每品种主力和次主力，再加全部加权指数，排除黄金
-TQSDK_RELAY_FUTURES_UNIVERSE="top:2:all;index:all;!SHFE.au" \
+TQSDK_RELAY_FUTURES_UNIVERSE='top:2:all;index:all;!SHFE.au' \
 cargo run -p tqsdk-relay
 ```
 
 如果只想尽量减少启动时的上游 tick chart 历史补齐，可以把上游 `view_width` 调小：
 
 ```bash
-TQSDK_RELAY_FUTURES_UNIVERSE="active:all" \
+TQSDK_RELAY_FUTURES_UNIVERSE='active:all' \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
@@ -108,7 +109,7 @@ cargo run -p tqsdk-relay
 如果只需要每个品种的主力和次主力，用 `top:2:all`：
 
 ```bash
-TQSDK_RELAY_FUTURES_UNIVERSE="top:2:all" \
+TQSDK_RELAY_FUTURES_UNIVERSE='top:2:all' \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
@@ -116,7 +117,7 @@ cargo run -p tqsdk-relay
 只订阅每个品种的主力合约时，用 `main:all`：
 
 ```bash
-TQSDK_RELAY_FUTURES_UNIVERSE="main:all" \
+TQSDK_RELAY_FUTURES_UNIVERSE='main:all' \
 TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
@@ -132,7 +133,7 @@ cargo run -p tqsdk-relay
 ```bash
 export TQ_AUTH_USER="your-account"
 export TQ_AUTH_PASS="your-password"
-TQSDK_RELAY_FUTURES_UNIVERSE="active:SHFE.au,DCE.m,CZCE.MA" \
+TQSDK_RELAY_FUTURES_UNIVERSE='active:SHFE.au,DCE.m,CZCE.MA' \
 cargo run -p tqsdk-relay
 ```
 
@@ -153,7 +154,7 @@ metadata 查询默认每批 `500` 个合约；如果天勤服务或本地网络�
 
 ```bash
 TQSDK_RELAY_DRY_RUN=1 \
-TQSDK_RELAY_FUTURES_UNIVERSE="symbol:SHFE.au2602,DCE.m2609" \
+TQSDK_RELAY_FUTURES_UNIVERSE='symbol:SHFE.au2602,DCE.m2609' \
 cargo run -p tqsdk-relay
 ```
 
@@ -182,14 +183,14 @@ let mut tq = tqsdk::Tq::futures()
 小规模冒烟测试或临时排查也可以直接用完整合约列表：
 
 ```bash
-TQSDK_RELAY_FUTURES_UNIVERSE="symbol:SHFE.au2602,DCE.m2609" \
+TQSDK_RELAY_FUTURES_UNIVERSE='symbol:SHFE.au2602,DCE.m2609' \
 cargo run -p tqsdk-relay
 ```
 
 完整合约文件可以通过 `file:` selector 接入，但不推荐作为长期部署方式，因为合约会随上市/退市变化：
 
 ```bash
-TQSDK_RELAY_FUTURES_UNIVERSE="file:./futures-symbols.txt" \
+TQSDK_RELAY_FUTURES_UNIVERSE='file:./futures-symbols.txt' \
 cargo run -p tqsdk-relay
 ```
 
@@ -459,7 +460,7 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
 
 - 将下游监听保持在 loopback、私有网络或你自己的访问控制之后。relay 不认证下游
   客户端。
-- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_UNIVERSE="active:all"`，让 relay 在启动和
+- 大规模合约集合推荐使用 `TQSDK_RELAY_FUTURES_UNIVERSE='active:all'`，让 relay 在启动和
   每日本地固定刷新时间动态查询当前活跃合约。
 - relay 的目标是通过共享一个上游 websocket 和本地 tick/quote/K 线缓存降低多进程订阅压力；不要把它当成通用
   天勤代理。
