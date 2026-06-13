@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -421,6 +421,8 @@ pub struct RelayEngine {
     last_upstream_decode_ms: Option<u64>,
     ticks_ingested: u64,
     upstream_symbols: usize,
+    upstream_subscribed_symbols: BTreeSet<String>,
+    pending_upstream_subscription_symbols: BTreeSet<String>,
     upstream_ins_list_chars: usize,
     upstream_ins_list_warn_chars: Option<usize>,
     upstream_ins_list_max_chars: Option<usize>,
@@ -457,6 +459,8 @@ impl RelayEngine {
             last_upstream_decode_ms: None,
             ticks_ingested: 0,
             upstream_symbols: 0,
+            upstream_subscribed_symbols: BTreeSet::new(),
+            pending_upstream_subscription_symbols: BTreeSet::new(),
             upstream_ins_list_chars: 0,
             upstream_ins_list_warn_chars: None,
             upstream_ins_list_max_chars: None,
@@ -481,6 +485,7 @@ impl RelayEngine {
             DownstreamCommand::SubscribeQuote { symbols } => {
                 let frames = self.cached_quote_frames_for_client(client_id, &symbols);
                 self.interests.set_quotes(client_id, symbols);
+                self.queue_missing_upstream_symbols_for_current_interests();
                 Ok(frames)
             }
             DownstreamCommand::SetChart(command) => {
@@ -490,6 +495,7 @@ impl RelayEngine {
                     start_id: i64::MIN,
                     end_id: i64::MAX,
                 });
+                self.queue_missing_upstream_symbols_for_source(&source);
                 self.replay_cached_kline_frames(client_id, &source)
             }
             DownstreamCommand::PeekMessage => Ok(Vec::new()),
@@ -709,8 +715,10 @@ impl RelayEngine {
             max_chars,
             unix_secs,
         );
+        self.upstream_subscribed_symbols = symbols.iter().cloned().collect();
         self.symbol_metrics
             .record_universe(symbols, unix_secs.saturating_mul(1_000));
+        self.queue_missing_upstream_symbols_for_current_interests();
     }
 
     pub fn record_universe_refresh_success_for_contracts(
@@ -728,6 +736,10 @@ impl RelayEngine {
             max_chars,
             unix_secs,
         );
+        self.upstream_subscribed_symbols = contracts
+            .iter()
+            .map(|contract| contract.symbol.clone())
+            .collect();
         self.symbol_metrics.record_universe(
             contracts.iter().map(|contract| contract.symbol.as_str()),
             unix_secs.saturating_mul(1_000),
@@ -740,6 +752,64 @@ impl RelayEngine {
             self.symbol_metrics
                 .record_symbol_trading_time(&contract.symbol, &contract.trading_time);
         }
+        self.queue_missing_upstream_symbols_for_current_interests();
+    }
+
+    pub fn record_dynamic_upstream_subscription_sent<I, S>(
+        &mut self,
+        symbols: I,
+        upstream_ins_list_chars: usize,
+        unix_secs: u64,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut changed = false;
+        for symbol in symbols {
+            let symbol = symbol.as_ref().trim();
+            if symbol.is_empty() {
+                continue;
+            }
+            changed |= self.upstream_subscribed_symbols.insert(symbol.to_string());
+            self.pending_upstream_subscription_symbols.remove(symbol);
+        }
+        self.upstream_symbols = self.upstream_subscribed_symbols.len();
+        self.upstream_ins_list_chars = self.upstream_ins_list_chars.max(upstream_ins_list_chars);
+        self.upstream_ins_list_over_warn = self
+            .upstream_ins_list_warn_chars
+            .is_some_and(|warn_chars| self.upstream_ins_list_chars > warn_chars);
+        if changed {
+            self.symbol_metrics.record_universe(
+                self.upstream_subscribed_symbols.iter().map(String::as_str),
+                unix_secs.saturating_mul(1_000),
+            );
+        }
+    }
+
+    pub fn retain_missing_upstream_subscription_symbols<I, S>(&self, symbols: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        symbols
+            .into_iter()
+            .map(|symbol| symbol.as_ref().trim().to_string())
+            .filter(|symbol| !symbol.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|symbol| !self.upstream_subscribed_symbols.contains(symbol))
+            .collect()
+    }
+
+    pub fn queue_missing_upstream_symbols_for_current_interests(&mut self) {
+        let symbols = self.interests.subscribed_symbols();
+        self.queue_missing_upstream_symbols(symbols);
+    }
+
+    pub fn drain_pending_upstream_subscription_symbols(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_upstream_subscription_symbols)
+            .into_iter()
+            .collect()
     }
 
     pub fn record_trading_calendar(&mut self, calendar: &[tqsdk_core::TradingCalendarDay]) {
@@ -755,6 +825,25 @@ impl RelayEngine {
             RelayEventKind::UniverseRefreshFailed,
             format!("universe refresh failed: {message}"),
         );
+    }
+
+    fn queue_missing_upstream_symbols_for_source(&mut self, source: &SourceKey) {
+        self.queue_missing_upstream_symbols(source.symbols.iter().map(String::as_str));
+    }
+
+    fn queue_missing_upstream_symbols<I, S>(&mut self, symbols: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for symbol in symbols {
+            let symbol = symbol.as_ref().trim();
+            if symbol.is_empty() || self.upstream_subscribed_symbols.contains(symbol) {
+                continue;
+            }
+            self.pending_upstream_subscription_symbols
+                .insert(symbol.to_string());
+        }
     }
 
     pub fn record_data_activity_at(&mut self, unix_secs: u64) {

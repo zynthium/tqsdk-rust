@@ -312,6 +312,96 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn relay_configured_upstream_adds_downstream_symbol_immediately() {
+    use websocket_support::TestWebSocketServer;
+
+    let (dynamic_seen_tx, dynamic_seen_rx) = std::sync::mpsc::channel();
+    let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
+    let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        expect_set_chart(&mut socket, "DCE.m2609");
+        expect_peek_message(&mut socket);
+        dynamic_seen_tx.send(()).unwrap();
+        send_tick_rx.recv().unwrap();
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "DCE.m2609": {
+                                    "data": {
+                                        "18": {
+                                            "datetime": 2_000,
+                                            "last_price": 3300.0,
+                                            "volume": 180,
+                                            "open_interest": 1008
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_universe_expression: Some(
+            tqsdk_relay::UniverseExpression::parse("symbol:SHFE.au2602").unwrap(),
+        ),
+        ..RelayConfig::default()
+    };
+    let _upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "DCE.m2609"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
+    wait_for_dynamic_subscription(dynamic_seen_rx).await;
+    send_tick_tx.send(()).unwrap();
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["quotes"]["DCE.m2609"]["last_price"],
+        3300.0
+    );
+    assert_eq!(
+        engine
+            .lock()
+            .unwrap()
+            .symbol_metrics_snapshot(&tqsdk_relay::SymbolMetricsQuery::default())
+            .summary
+            .universe_total,
+        2
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+    upstream.join();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn relay_pump_upstream_until_drains_source_to_downstream_client() {
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
@@ -425,6 +515,17 @@ async fn wait_for_quote_subscriptions(engine: &Arc<Mutex<RelayEngine>>, expected
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_dynamic_subscription(receiver: std::sync::mpsc::Receiver<()>) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if receiver.try_recv().is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("dynamic upstream subscription was not sent");
 }
 
 async fn connect_ws(addr: std::net::SocketAddr) -> TcpStream {

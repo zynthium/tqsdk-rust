@@ -506,7 +506,7 @@ impl WebSocketUpstreamTickSource {
         Ok(source)
     }
 
-    async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
+    pub async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
         if charts.is_empty() {
             return Err(RelayError::invalid_config(
                 "upstream tick charts require at least one chart",

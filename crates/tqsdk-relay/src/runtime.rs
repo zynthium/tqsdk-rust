@@ -193,7 +193,12 @@ async fn run_upstream_retry_loop(
                         let _ = pump_shutdown_tx.send(());
                         Duration::ZERO
                     }
-                    result = server.pump_upstream_until(&mut upstream.source, pump_shutdown_rx) => {
+                    result = pump_configured_upstream_until(
+                        &config,
+                        &server,
+                        &mut upstream.source,
+                        pump_shutdown_rx,
+                    ) => {
                         if let Err(err) = result {
                             mark_upstream_degraded(&server);
                             eprintln!("{err}");
@@ -222,6 +227,76 @@ async fn run_upstream_retry_loop(
             () = tokio::time::sleep(retry_interval) => {}
         }
     }
+}
+
+async fn pump_configured_upstream_until(
+    config: &RelayConfig,
+    server: &RelayServer,
+    source: &mut WebSocketUpstreamTickSource,
+    mut shutdown: oneshot::Receiver<()>,
+) -> RelayResult<usize> {
+    let mut sent = 0_usize;
+    server.request_pending_upstream_subscriptions()?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => return Ok(sent),
+            symbols = server.next_upstream_subscription_symbols() => {
+                let Some(symbols) = symbols else {
+                    continue;
+                };
+                subscribe_dynamic_upstream_symbols(config, server, source, symbols).await?;
+            }
+            update = source.next_update() => {
+                let progress = source.take_progress();
+                let invalid_rows = source.take_invalid_tick_rows();
+                let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
+                let last_error = source.take_last_invalid_tick_row_error();
+                let Some(dispatched) = server.process_upstream_update(
+                    update,
+                    progress,
+                    invalid_rows,
+                    invalid_rows_by_symbol,
+                    last_error,
+                )? else {
+                    return Ok(sent);
+                };
+                sent = sent.saturating_add(dispatched);
+            }
+        }
+    }
+}
+
+async fn subscribe_dynamic_upstream_symbols(
+    config: &RelayConfig,
+    server: &RelayServer,
+    source: &mut WebSocketUpstreamTickSource,
+    symbols: Vec<String>,
+) -> RelayResult<()> {
+    let missing_symbols = retain_missing_upstream_symbols(server, symbols)?;
+    if missing_symbols.is_empty() {
+        return Ok(());
+    }
+    let charts =
+        config.upstream_tick_charts_for_symbols(missing_symbols.iter().map(String::as_str))?;
+    if charts.is_empty() {
+        return Ok(());
+    }
+    source.subscribe_tick_charts(&charts).await?;
+    record_upstream_progress(server, source.take_progress());
+    record_dynamic_upstream_subscription_success(server, &charts);
+    Ok(())
+}
+
+fn retain_missing_upstream_symbols(
+    server: &RelayServer,
+    symbols: Vec<String>,
+) -> RelayResult<Vec<String>> {
+    let engine = server.engine();
+    let engine = engine
+        .lock()
+        .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+    Ok(engine.retain_missing_upstream_subscription_symbols(symbols))
 }
 
 fn record_upstream_progress(
@@ -278,6 +353,23 @@ fn record_universe_refresh_success(
                 engine.record_trading_calendar(calendar);
             }
         }
+        Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
+    }
+}
+
+fn record_dynamic_upstream_subscription_success(
+    server: &RelayServer,
+    charts: &[UpstreamTickChart],
+) {
+    let engine = server.engine();
+    let upstream_ins_list_chars = max_ins_list_chars(charts);
+    let unix_secs = current_unix_secs();
+    match engine.lock() {
+        Ok(mut engine) => engine.record_dynamic_upstream_subscription_sent(
+            charts.iter().map(UpstreamTickChart::symbol),
+            upstream_ins_list_chars,
+            unix_secs,
+        ),
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }
 }
