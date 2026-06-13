@@ -732,6 +732,10 @@ impl RelayEngine {
         }
     }
 
+    pub fn record_trading_calendar(&mut self, calendar: &[tqsdk_core::TradingCalendarDay]) {
+        self.symbol_metrics.record_trading_calendar(calendar);
+    }
+
     pub fn record_universe_refresh_error(&mut self, message: impl Into<String>, unix_secs: u64) {
         let message = message.into();
         self.last_universe_refresh_unix_secs = Some(unix_secs);
