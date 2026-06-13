@@ -61,6 +61,38 @@ TQSDK_RELAY_FUTURES_PRODUCTS="ALL" \
 cargo run -p tqsdk-relay
 ```
 
+如果需要组合主力、加权指数、主连连续合约和排除规则，推荐使用新的 universe 表达式。
+例如订阅所有真实主力和所有加权指数，但排除中金所：
+
+```bash
+export TQ_AUTH_USER="your-account"
+export TQ_AUTH_PASS="your-password"
+TQSDK_RELAY_FUTURES_UNIVERSE="main:all;index:all;!CFFEX" \
+cargo run -p tqsdk-relay
+```
+
+表达式中 `;` 分隔规则层，`,` 分隔同层多个值，`!` / `~` 表示排除。常用 selector：
+
+- `active:all`：全部未过期真实期货合约。
+- `main:all`：全部真实主力合约，例如 `SHFE.au2602`。
+- `index:all`：全部加权指数连续合约，例如 `KQ.i@SHFE.au`。
+- `cont:all`：全部主连连续合约，例如 `KQ.m@SHFE.au`。
+- `top:2:all`：每品种主力优先，再按 `open_interest` / `volume` 补足前 2。
+- `symbol:SHFE.au2602,KQ.i@DCE.m`：显式符号列表。
+
+裸值会自动识别：`CFFEX` 表示交易所，`SHFE.au` 表示品种，
+`SHFE.au2602` / `KQ.i@SHFE.au` 表示精确符号。例如：
+
+```bash
+# 只订指定品种的真实主力和加权指数
+TQSDK_RELAY_FUTURES_UNIVERSE="main:SHFE.au,DCE.m;index:SHFE.au,DCE.m" \
+cargo run -p tqsdk-relay
+
+# 每品种主力和次主力，再加全部加权指数，排除黄金
+TQSDK_RELAY_FUTURES_UNIVERSE="top:2:all;index:all;!SHFE.au" \
+cargo run -p tqsdk-relay
+```
+
 如果只想尽量减少启动时的上游 tick chart 历史补齐，可以把上游 `view_width` 调小：
 
 ```bash
@@ -174,8 +206,9 @@ cargo run -p tqsdk-relay
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `TQSDK_RELAY_FUTURES_PRODUCTS` | 空 | 推荐入口。设置为 `ALL` / `all` / `*` 表示动态查询全部活跃期货合约；也可传逗号分隔产品代码，例如 `SHFE.au,DCE.m,CZCE.MA`。 |
-| `TQ_AUTH_USER` | 空 | 产品发现需要的天勤账号。只有使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 时必需。 |
-| `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。只有使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 时必需。 |
+| `TQSDK_RELAY_FUTURES_UNIVERSE` | 空 | 组合式 universe 表达式。支持 `active` / `main` / `index` / `cont` / `top:N` / `symbol` / `product` / `exchange`，用 `;` 分层、`,` 分隔值、`!` 或 `~` 排除。设置后不能同时设置旧 universe 入口。 |
+| `TQ_AUTH_USER` | 空 | 产品发现需要的天勤账号。使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 或动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需。 |
+| `TQ_AUTH_PASS` | 空 | 产品发现需要的天勤密码。使用 `TQSDK_RELAY_FUTURES_PRODUCTS` 或动态 `TQSDK_RELAY_FUTURES_UNIVERSE` selector 时必需。 |
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` | `08:30:00` | 产品发现模式下每日重建上游合约集合的本地时间，格式为 `HH:MM[:SS]`。建议配置到开盘前。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_SECS` | 空 | 兼容入口。设置后使用固定秒数间隔刷新；不能和 `TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT` 同时设置。新部署优先使用每日固定时间。 |

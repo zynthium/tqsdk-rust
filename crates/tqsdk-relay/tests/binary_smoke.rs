@@ -96,6 +96,40 @@ fn relay_binary_dry_run_prints_diagnostic_without_connecting_upstream() {
 }
 
 #[test]
+fn relay_binary_dry_run_supports_static_universe_expression() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"))
+        .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS")
+        .env_remove("TQSDK_RELAY_FUTURES_SYMBOLS_FILE")
+        .env_remove("TQSDK_RELAY_FUTURES_PRODUCTS")
+        .env("TQSDK_RELAY_DRY_RUN", "1")
+        .env(
+            "TQSDK_RELAY_FUTURES_UNIVERSE",
+            "symbol:SHFE.au2602,KQ.i@DCE.m;!DCE.m2609",
+        )
+        .env("TQSDK_RELAY_UPSTREAM_MARKET_URL", "ws://127.0.0.1:9/market")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dry-run failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["event"], "relay_startup");
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["upstream_source"], "universe-expression");
+    assert_eq!(
+        report["futures_universe_expression"],
+        "symbol:SHFE.au2602,KQ.i@DCE.m;!DCE.m2609"
+    );
+    assert_eq!(report["futures_universe_include_clauses"], 1);
+    assert_eq!(report["futures_universe_exclude_clauses"], 1);
+    assert_eq!(report["futures_universe_final_symbols"], 2);
+    assert_eq!(report["upstream_symbols"], 2);
+}
+
+#[test]
 fn relay_binary_serves_health_and_metrics_json() {
     let downstream_addr = free_loopback_addr();
     let metrics_addr = free_loopback_addr();

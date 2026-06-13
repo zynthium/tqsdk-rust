@@ -16,6 +16,9 @@ use tqsdk_session::{InstrumentClass, SessionClient, SessionClientBuilder, Symbol
 #[cfg(feature = "metadata")]
 use crate::config::{DEFAULT_FUTURES_METADATA_BATCH_SIZE, RelayConfig};
 use crate::error::{RelayError, RelayResult};
+use crate::universe_expression::{
+    UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
+};
 
 #[cfg(feature = "metadata")]
 const FUTURES_ACTIVITY_QUOTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -459,6 +462,74 @@ where
         .collect())
 }
 
+pub async fn resolve_futures_symbols_with_expression<R>(
+    expression: &UniverseExpression,
+    resolver: &mut R,
+) -> RelayResult<Vec<String>>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    let contracts = resolve_futures_contracts_with_expression(expression, resolver).await?;
+    Ok(contracts
+        .into_iter()
+        .map(|contract| contract.symbol)
+        .collect())
+}
+
+pub fn resolve_static_symbols_with_expression(
+    expression: &UniverseExpression,
+) -> RelayResult<Vec<String>> {
+    let mut included = BTreeMap::<String, FuturesContract>::new();
+    let mut exclusions = Vec::<UniverseMatch>::new();
+    for clause in expression.clauses() {
+        if clause.exclude() {
+            exclusions.extend(matches_for_clause(clause)?);
+            continue;
+        }
+        match clause.selector().kind() {
+            UniverseSelectorKind::Symbol | UniverseSelectorKind::Auto => {
+                for value in clause.selector().values() {
+                    let contract = contract_from_configured_symbol(value)?;
+                    included.insert(contract.symbol.clone(), contract);
+                }
+            }
+            _ => {
+                return Err(RelayError::invalid_config(
+                    "dynamic futures universe expression requires metadata feature",
+                ));
+            }
+        }
+    }
+    for exclusion in exclusions {
+        included.retain(|_, contract| !exclusion.matches(contract));
+    }
+    Ok(included.into_keys().collect())
+}
+
+pub async fn resolve_futures_contracts_with_expression<R>(
+    expression: &UniverseExpression,
+    resolver: &mut R,
+) -> RelayResult<Vec<FuturesContract>>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    let mut included = BTreeMap::<String, FuturesContract>::new();
+    let mut exclusions = Vec::<UniverseMatch>::new();
+    for clause in expression.clauses() {
+        if clause.exclude() {
+            exclusions.extend(matches_for_clause(clause)?);
+            continue;
+        }
+        for contract in contracts_for_selector(clause.selector(), resolver).await? {
+            included.insert(contract.symbol.clone(), contract);
+        }
+    }
+    for exclusion in exclusions {
+        included.retain(|_, contract| !exclusion.matches(contract));
+    }
+    Ok(included.into_values().collect())
+}
+
 pub async fn resolve_futures_contracts_with_selection<R>(
     filter: &FuturesProductFilter,
     selection: FuturesUniverseSelection,
@@ -499,6 +570,232 @@ where
             .await
         }
     }
+}
+
+async fn contracts_for_selector<R>(
+    selector: &UniverseSelector,
+    resolver: &mut R,
+) -> RelayResult<Vec<FuturesContract>>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    match selector.kind() {
+        UniverseSelectorKind::Active => {
+            let filter = product_filter_from_values(selector.values())?;
+            resolve_futures_contracts_with_selection(
+                &filter,
+                FuturesUniverseSelection::default(),
+                resolver,
+            )
+            .await
+        }
+        UniverseSelectorKind::Main => {
+            let filter = product_filter_from_values(selector.values())?;
+            resolve_futures_contracts_with_selection(
+                &filter,
+                FuturesUniverseSelection {
+                    active_contracts_per_product: Some(1),
+                },
+                resolver,
+            )
+            .await
+        }
+        UniverseSelectorKind::Top(limit) => {
+            let filter = product_filter_from_values(selector.values())?;
+            resolve_futures_contracts_with_selection(
+                &filter,
+                FuturesUniverseSelection {
+                    active_contracts_per_product: Some(limit),
+                },
+                resolver,
+            )
+            .await
+        }
+        UniverseSelectorKind::Index => {
+            continuous_contracts_for_values("KQ.i", selector.values(), resolver).await
+        }
+        UniverseSelectorKind::Cont => {
+            continuous_contracts_for_values("KQ.m", selector.values(), resolver).await
+        }
+        UniverseSelectorKind::Symbol => selector
+            .values()
+            .iter()
+            .map(|symbol| contract_from_configured_symbol(symbol))
+            .collect(),
+        UniverseSelectorKind::Product => {
+            let filter = product_filter_from_values(selector.values())?;
+            resolve_futures_contracts_with_selection(
+                &filter,
+                FuturesUniverseSelection::default(),
+                resolver,
+            )
+            .await
+        }
+        UniverseSelectorKind::Exchange => {
+            let contracts = resolver.active_futures().await?;
+            active_contracts(contracts, |contract| {
+                selector
+                    .values()
+                    .iter()
+                    .any(|exchange| exchange == &contract.exchange_id)
+            })
+        }
+        UniverseSelectorKind::Auto => {
+            let mut selected = BTreeMap::new();
+            for value in selector.values() {
+                match classify_universe_token(value)? {
+                    UniverseMatch::Symbol(symbol) => {
+                        let contract = contract_from_configured_symbol(&symbol)?;
+                        selected.insert(contract.symbol.clone(), contract);
+                    }
+                    UniverseMatch::Product(product) => {
+                        let filter = FuturesProductFilter::Products(vec![product]);
+                        for contract in resolve_futures_contracts_with_selection(
+                            &filter,
+                            FuturesUniverseSelection::default(),
+                            resolver,
+                        )
+                        .await?
+                        {
+                            selected.insert(contract.symbol.clone(), contract);
+                        }
+                    }
+                    UniverseMatch::Exchange(exchange) => {
+                        for contract in
+                            active_contracts(resolver.active_futures().await?, |contract| {
+                                contract.exchange_id == exchange
+                            })?
+                        {
+                            selected.insert(contract.symbol.clone(), contract);
+                        }
+                    }
+                }
+            }
+            Ok(selected.into_values().collect())
+        }
+    }
+}
+
+async fn continuous_contracts_for_values<R>(
+    prefix: &str,
+    values: &[String],
+    resolver: &mut R,
+) -> RelayResult<Vec<FuturesContract>>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    let filter = product_filter_from_values(values)?;
+    let contracts = resolve_futures_contracts_with_selection(
+        &filter,
+        FuturesUniverseSelection::default(),
+        resolver,
+    )
+    .await?;
+    let mut products = BTreeSet::<(String, String)>::new();
+    for contract in contracts {
+        products.insert((contract.exchange_id, contract.product_id));
+    }
+    products
+        .into_iter()
+        .map(|(exchange_id, product_id)| {
+            FuturesContract::new(
+                format!("{prefix}@{exchange_id}.{product_id}"),
+                exchange_id,
+                product_id,
+                false,
+            )
+        })
+        .collect()
+}
+
+fn product_filter_from_values(values: &[String]) -> RelayResult<FuturesProductFilter> {
+    if values.len() == 1 && values[0].eq_ignore_ascii_case("all") {
+        return Ok(FuturesProductFilter::All);
+    }
+    values
+        .iter()
+        .map(|value| FuturesProductCode::parse(value))
+        .collect::<RelayResult<Vec<_>>>()
+        .map(FuturesProductFilter::Products)
+}
+
+fn matches_for_clause(clause: &UniverseClause) -> RelayResult<Vec<UniverseMatch>> {
+    let selector = clause.selector();
+    let values = selector.values();
+    match selector.kind() {
+        UniverseSelectorKind::Symbol => values
+            .iter()
+            .map(|value| Ok(UniverseMatch::Symbol(value.clone())))
+            .collect(),
+        UniverseSelectorKind::Product
+        | UniverseSelectorKind::Active
+        | UniverseSelectorKind::Main
+        | UniverseSelectorKind::Index
+        | UniverseSelectorKind::Cont
+        | UniverseSelectorKind::Top(_) => values
+            .iter()
+            .filter(|value| !value.eq_ignore_ascii_case("all"))
+            .map(|value| FuturesProductCode::parse(value).map(UniverseMatch::Product))
+            .collect(),
+        UniverseSelectorKind::Exchange => values
+            .iter()
+            .map(|value| Ok(UniverseMatch::Exchange(value.clone())))
+            .collect(),
+        UniverseSelectorKind::Auto => values
+            .iter()
+            .map(|value| classify_universe_token(value))
+            .collect(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UniverseMatch {
+    Symbol(String),
+    Product(FuturesProductCode),
+    Exchange(String),
+}
+
+impl UniverseMatch {
+    fn matches(&self, contract: &FuturesContract) -> bool {
+        match self {
+            Self::Symbol(symbol) => symbol == &contract.symbol,
+            Self::Product(product) => contract.matches_product(product),
+            Self::Exchange(exchange) => exchange == &contract.exchange_id,
+        }
+    }
+}
+
+fn classify_universe_token(value: &str) -> RelayResult<UniverseMatch> {
+    if value.starts_with("KQ.") && value.contains('@') {
+        return Ok(UniverseMatch::Symbol(value.to_string()));
+    }
+    if let Some((exchange_id, instrument_id)) = value.split_once('.') {
+        if instrument_id.chars().any(|ch| ch.is_ascii_digit()) {
+            return Ok(UniverseMatch::Symbol(value.to_string()));
+        }
+        return FuturesProductCode::new(Some(exchange_id), instrument_id)
+            .map(UniverseMatch::Product);
+    }
+    if is_known_futures_exchange(value) {
+        return Ok(UniverseMatch::Exchange(value.to_string()));
+    }
+    FuturesProductCode::new(None, value).map(UniverseMatch::Product)
+}
+
+pub(crate) fn contract_from_configured_symbol(symbol: &str) -> RelayResult<FuturesContract> {
+    if let Some((continuous_prefix, product)) = symbol.split_once('@')
+        && continuous_prefix.starts_with("KQ.")
+    {
+        let (exchange_id, product_id) = product.split_once('.').ok_or_else(|| {
+            RelayError::invalid_config("continuous futures symbol must be KQ.*@EX.product")
+        })?;
+        return FuturesContract::new(symbol, exchange_id, product_id, false);
+    }
+    FuturesContract::from_symbol(symbol, false)
+}
+
+fn is_known_futures_exchange(value: &str) -> bool {
+    matches!(value, "CFFEX" | "SHFE" | "DCE" | "CZCE" | "INE" | "GFEX")
 }
 
 async fn resolve_active_contracts<R>(
