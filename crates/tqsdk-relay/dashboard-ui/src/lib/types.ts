@@ -15,6 +15,8 @@ export type ProblemSeverity = 'live' | 'closed' | 'initializing' | 'warn' | 'bad
 export type OverallSeverity = 'healthy' | 'warning' | 'critical' | 'warming' | 'closed';
 export type FlowIdleHealth = 'no_sample' | 'live' | 'warn' | 'critical';
 export type DecodeHealth = 'healthy' | 'degraded';
+export type IdleDisplayState = 'normal' | 'subscribing' | 'backfilling' | 'closed';
+export type CacheHealth = 'active' | 'attention' | 'interrupted' | 'subscribing' | 'backfilling' | 'closed';
 
 export type RelayMetrics = {
   upstream_stage: UpstreamStage;
@@ -194,6 +196,11 @@ export type IntegrityModel = {
   eventIdleMs: number | null;
   frameFlowHealth: FlowIdleHealth;
   eventFlowHealth: FlowIdleHealth;
+  effectiveFrameFlowHealth: FlowIdleHealth;
+  effectiveEventFlowHealth: FlowIdleHealth;
+  idleDisplayState: IdleDisplayState;
+  cacheHealth: CacheHealth;
+  cacheSeverity: TimelineSeverity;
   decodeHealth: DecodeHealth;
   coverageRatio: number;
   observedUniverse: number;

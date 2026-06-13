@@ -13,10 +13,14 @@
   };
 
   function cacheState(model: IntegrityModel): string {
-    if (model.frameFlowHealth === 'critical') return '帧流中断';
-    if (model.overall === 'closed') return '休盘中';
-    if (model.issueCount > 0 || model.frameFlowHealth === 'warn') return '需关注';
-    return '活跃';
+    return {
+      active: '活跃',
+      attention: '需关注',
+      interrupted: '链路异常',
+      subscribing: '订阅中',
+      backfilling: '补历史',
+      closed: '休盘中',
+    }[model.cacheHealth];
   }
 
   function cacheMeta(model: IntegrityModel): string {
@@ -24,16 +28,7 @@
   }
 
   function cacheSeverity(model: IntegrityModel): TimelineSeverity {
-    if (model.frameFlowHealth === 'critical') return 'bad';
-    if (model.overall === 'closed') return 'closed';
-    if (
-      model.issueCount > 0 ||
-      model.frameFlowHealth === 'warn' ||
-      model.eventFlowHealth === 'warn'
-    ) {
-      return 'warn';
-    }
-    return 'live';
+    return model.cacheSeverity;
   }
 
   let nodes = $derived<Node[]>([
