@@ -37,7 +37,7 @@
       {/if}
     </div>
     <div class="score-box">
-      <ScoreGauge score={model.continuityScore} compact />
+      <ScoreGauge score={model.continuityScore} state={model.overall} compact />
       <div class="average">页均 <b>{Math.round(average)}</b></div>
     </div>
   </div>

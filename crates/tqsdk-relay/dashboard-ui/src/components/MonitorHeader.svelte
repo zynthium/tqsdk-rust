@@ -15,8 +15,28 @@
   let { model, error, paused = $bindable(false), fullscreen = $bindable(false), children }: Props = $props();
   let now = $state(Date.now());
   let fullscreenSupported = $state(true);
-  let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : model?.overall === 'closed' ? '休盘中' : '实时监控中');
-  let stateClass = $derived(error ? 'bad' : paused ? 'closed' : model?.overall === 'closed' ? 'closed' : 'live');
+  function monitorStateLabel(model: IntegrityModel | null): string {
+    if (!model) return '读取中';
+    if (model.cacheHealth === 'interrupted') return '链路异常';
+    if (model.idleDisplayState === 'closed') return '休盘中';
+    if (model.idleDisplayState === 'subscribing') return '订阅中';
+    if (model.idleDisplayState === 'backfilling') return '补历史';
+    if (model.overall === 'warming') return '启动观测中';
+    return '实时监控中';
+  }
+
+  function monitorStateClass(model: IntegrityModel | null): string {
+    if (!model) return 'no_sample';
+    if (model.cacheHealth === 'interrupted') return 'bad';
+    if (model.idleDisplayState === 'closed') return 'closed';
+    if (model.idleDisplayState === 'subscribing' || model.idleDisplayState === 'backfilling' || model.overall === 'warming') {
+      return 'no_sample';
+    }
+    return 'live';
+  }
+
+  let stateLabel = $derived(paused ? '已暂停' : error ? '读取异常' : monitorStateLabel(model));
+  let stateClass = $derived(error ? 'bad' : paused ? 'closed' : monitorStateClass(model));
 
   onMount(() => {
     fullscreenSupported = typeof document.documentElement.requestFullscreen === 'function';
@@ -61,7 +81,7 @@
     {#if model}
       <span class="muted">采样 {formatTime(model.sampledAt)}</span>
     {/if}
-    <span class={`live-chip ${stateClass === 'bad' ? 'offline' : stateClass === 'closed' ? 'sleeping' : ''}`}>
+    <span class={`live-chip ${stateClass === 'bad' ? 'offline' : stateClass === 'closed' ? 'sleeping' : stateClass === 'no_sample' ? 'standby' : ''}`}>
       <span class={`status-dot ${stateClass}`}></span>
       <span>{stateLabel}</span>
     </span>
@@ -162,6 +182,12 @@
     border-color: #58758a80;
     background: #58758a14;
     color: #9eb9ce;
+  }
+
+  .live-chip.standby {
+    border-color: #4d789080;
+    background: #4d789014;
+    color: #b8c8d3;
   }
 
   button {
