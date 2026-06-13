@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { EXCHANGES, exchangeOf } from '../lib/timeline';
+  import { EXCHANGES, exchangeOf, productGroupOf } from '../lib/timeline';
   import { formatDuration, formatNumber } from '../lib/format';
   import { statusLabel } from '../lib/integrity-model';
   import type { DashboardTimelineScope, SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
 
   const PANEL_PREFS_KEY = 'tqsdk-relay.dashboard.continuity-panel';
+  const NAME_COLLATOR = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
   type ViewMode = 'blocks' | 'sparkline';
   type PanelPrefs = {
     search?: string;
@@ -217,9 +218,44 @@
   }
 
   function orderedSymbolRows(exchangeSymbols: SymbolRow[], limit = 30): SymbolRow[] {
-    const sorted = [...exchangeSymbols]
-      .sort((left, right) => severityRank(left) - severityRank(right) || (right.receive_gap_ms ?? -1) - (left.receive_gap_ms ?? -1));
+    const productNames = productNamesByGroup(exchangeSymbols);
+    const sorted = [...exchangeSymbols].sort((left, right) => {
+      const leftGroup = productGroupOf(left.symbol);
+      const rightGroup = productGroupOf(right.symbol);
+      return compareText(productNames.get(leftGroup) ?? leftGroup, productNames.get(rightGroup) ?? rightGroup)
+        || leftGroup.localeCompare(rightGroup)
+        || compareText(contractName(left), contractName(right))
+        || left.symbol.localeCompare(right.symbol);
+    });
     return limit === Number.POSITIVE_INFINITY ? sorted : sorted.slice(0, limit);
+  }
+
+  function productNamesByGroup(rows: SymbolRow[]): Map<string, string> {
+    const names = new Map<string, string>();
+    for (const row of rows) {
+      const group = productGroupOf(row.symbol);
+      const name = productName(row);
+      const current = names.get(group);
+      if (!current || compareText(name, current) < 0) {
+        names.set(group, name);
+      }
+    }
+    return names;
+  }
+
+  function productName(row: SymbolRow): string {
+    return contractName(row)
+      .replace(/(?:主连|加权|指数)$/u, '')
+      .replace(/\d+$/u, '')
+      .trim() || productGroupOf(row.symbol);
+  }
+
+  function contractName(row: SymbolRow): string {
+    return row.instrument_name?.trim() || row.symbol;
+  }
+
+  function compareText(left: string, right: string): number {
+    return NAME_COLLATOR.compare(left, right) || left.localeCompare(right);
   }
 
   function symbolDefinition(row: SymbolRow): TimelineDefinition {
@@ -234,14 +270,6 @@
       averageLatency: (sample: TimelineSample) => sample.symbols[row.symbol]?.avg_receive_gap_ms,
       emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
     };
-  }
-
-  function severityRank(row: SymbolRow): number {
-    if (row.problem_severity === 'bad') return 0;
-    if (row.problem_severity === 'warn') return 1;
-    if (row.subscribed) return 2;
-    if (row.problem_severity === 'closed') return 4;
-    return 3;
   }
 
   function subscriberCount(row: SymbolRow): number {

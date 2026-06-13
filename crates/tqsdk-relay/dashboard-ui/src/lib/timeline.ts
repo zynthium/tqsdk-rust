@@ -11,6 +11,13 @@ export function exchangeOf(symbol: string): string {
   return normalized?.split('.')[0]?.toUpperCase() || 'UNKNOWN';
 }
 
+export function productGroupOf(symbol: string): string {
+  const normalized = symbol.includes('@') ? symbol.split('@')[1] : symbol;
+  const [exchange, instrument = ''] = normalized.split('.');
+  const product = instrument.replace(/\d+$/u, '').toLowerCase();
+  return `${exchange?.toUpperCase() || 'UNKNOWN'}.${product || instrument.toLowerCase() || normalized.toLowerCase()}`;
+}
+
 function timelineSeverityForRow(row: SymbolRow): TimelineSeverity {
   if (row.session === 'closed') return 'closed';
   if (row.status === 'initializing' || row.problem_severity === 'initializing') return 'no_sample';
