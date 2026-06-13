@@ -252,6 +252,11 @@ relay 的上游 tick 源：
 `RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay
 本地保留多少 tick，不影响上游补历史窗口。
 
+relay 启动后，如果下游 `subscribe_quote` 或 `set_chart` 请求了当前上游 tick chart 尚未覆盖的
+合约，relay 会在现有上游 websocket 上立即为缺失合约补发对应的 `set_chart` 和
+`peek_message`。补订成功后，该合约会加入当前上游观测集合，`upstream_symbols` 和
+`/symbol-metrics` 的覆盖判断会按补订后的集合计算。
+
 发送前 relay 会计算单个上游 tick chart 的最大 `ins_list` 长度。超过
 `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` 时不会连接上游；超过 warn threshold 时连接
 仍会继续，但启动诊断和 metrics 会暴露当前最大长度和告警状态。
@@ -432,9 +437,9 @@ frame/event 计数，不推断上游补历史百分比。
 
 | 命令 | relay 行为 |
 | --- | --- |
-| `subscribe_quote` | 为客户端注册 quote 订阅，并发送由最新 tick 派生的 quote update。 |
-| 正 `duration` 的 `set_chart` | 注册 K 线 chart 订阅，记录 bootstrap 请求；如果 tick ring 已有可完成窗口，会先回放冷启动 K 线，随后在 tick 跨入后续窗口时发送新完成的合成 K 线。 |
-| `duration <= 0` 的 `set_chart` | 会解析和注册，但 duration 为 `0` 的实时 tick chart 分发尚未在 V1 服务面完成。 |
+| `subscribe_quote` | 为客户端注册 quote 订阅，并发送由最新 tick 派生的 quote update；缺失合约会立即触发上游动态补订。 |
+| 正 `duration` 的 `set_chart` | 注册 K 线 chart 订阅，记录 bootstrap 请求；缺失合约会立即触发上游动态补订；如果 tick ring 已有可完成窗口，会先回放冷启动 K 线，随后在 tick 跨入后续窗口时发送新完成的合成 K 线。 |
+| `duration <= 0` 的 `set_chart` | 会解析和注册，缺失合约会立即触发上游动态补订，但 duration 为 `0` 的实时 tick chart 分发尚未在 V1 服务面完成。 |
 | `peek_message` | 作为兼容命令接受，不执行额外动作。 |
 
 ### K 线合成

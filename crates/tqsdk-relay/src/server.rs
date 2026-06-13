@@ -6,13 +6,15 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
 use crate::engine::{DownstreamFrame, RelayEngine};
 use crate::error::{RelayError, RelayResult};
 use crate::interest::ClientId;
 use crate::protocol::DownstreamCommand;
-use crate::upstream::{UpstreamMarketEvent, UpstreamSourceUpdate, UpstreamTickSource};
+use crate::upstream::{
+    UpstreamMarketEvent, UpstreamSourceProgress, UpstreamSourceUpdate, UpstreamTickSource,
+};
 
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const DEFAULT_OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
@@ -28,6 +30,8 @@ enum ClientWebSocketFrame {
 pub struct RelayServer {
     engine: Arc<Mutex<RelayEngine>>,
     outbound: Arc<Mutex<HashMap<ClientId, mpsc::Sender<Value>>>>,
+    upstream_subscription_tx: mpsc::UnboundedSender<Vec<String>>,
+    upstream_subscription_rx: Arc<AsyncMutex<mpsc::UnboundedReceiver<Vec<String>>>>,
     outbound_channel_capacity: usize,
 }
 
@@ -43,9 +47,12 @@ impl RelayServer {
         outbound_channel_capacity: usize,
     ) -> Self {
         let outbound_channel_capacity = outbound_channel_capacity.max(1);
+        let (upstream_subscription_tx, upstream_subscription_rx) = mpsc::unbounded_channel();
         Self {
             engine,
             outbound: Arc::new(Mutex::new(HashMap::new())),
+            upstream_subscription_tx,
+            upstream_subscription_rx: Arc::new(AsyncMutex::new(upstream_subscription_rx)),
             outbound_channel_capacity,
         }
     }
@@ -96,6 +103,22 @@ impl RelayServer {
         Ok(sent)
     }
 
+    pub fn request_pending_upstream_subscriptions(&self) -> RelayResult<()> {
+        let symbols = {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.queue_missing_upstream_symbols_for_current_interests();
+            engine.drain_pending_upstream_subscription_symbols()
+        };
+        self.enqueue_upstream_subscription_symbols(symbols)
+    }
+
+    pub async fn next_upstream_subscription_symbols(&self) -> Option<Vec<String>> {
+        self.upstream_subscription_rx.lock().await.recv().await
+    }
+
     pub async fn pump_upstream_once<S>(&self, source: &mut S) -> RelayResult<usize>
     where
         S: UpstreamTickSource + Send,
@@ -105,33 +128,14 @@ impl RelayServer {
         let invalid_rows = source.take_invalid_tick_rows();
         let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
         let last_error = source.take_last_invalid_tick_row_error();
-        let Some(update) = update else {
-            let mut engine = self
-                .engine
-                .lock()
-                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-            engine.record_upstream_progress(progress);
-            engine.record_upstream_invalid_tick_rows_by_symbol(
-                invalid_rows,
-                invalid_rows_by_symbol,
-                last_error,
-            );
-            return Ok(0);
-        };
-        let frames = {
-            let mut engine = self
-                .engine
-                .lock()
-                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-            engine.record_upstream_progress(progress);
-            engine.record_upstream_invalid_tick_rows_by_symbol(
-                invalid_rows,
-                invalid_rows_by_symbol,
-                last_error,
-            );
-            ingest_upstream_update(&mut engine, update)?
-        };
-        self.dispatch_frames(frames)
+        self.process_upstream_update(
+            update,
+            progress,
+            invalid_rows,
+            invalid_rows_by_symbol,
+            last_error,
+        )
+        .map(Option::unwrap_or_default)
     }
 
     pub async fn pump_upstream_until<S>(
@@ -153,24 +157,45 @@ impl RelayServer {
             let invalid_rows = source.take_invalid_tick_rows();
             let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
             let last_error = source.take_last_invalid_tick_row_error();
-            let frames = {
-                let mut engine = self
-                    .engine
-                    .lock()
-                    .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-                engine.record_upstream_progress(progress);
-                engine.record_upstream_invalid_tick_rows_by_symbol(
-                    invalid_rows,
-                    invalid_rows_by_symbol,
-                    last_error,
-                );
-                let Some(update) = update else {
-                    return Ok(sent);
-                };
-                ingest_upstream_update(&mut engine, update)?
+            let Some(dispatched) = self.process_upstream_update(
+                update,
+                progress,
+                invalid_rows,
+                invalid_rows_by_symbol,
+                last_error,
+            )?
+            else {
+                return Ok(sent);
             };
-            sent = sent.saturating_add(self.dispatch_frames(frames)?);
+            sent = sent.saturating_add(dispatched);
         }
+    }
+
+    pub fn process_upstream_update(
+        &self,
+        update: Option<UpstreamSourceUpdate>,
+        progress: UpstreamSourceProgress,
+        invalid_rows: u64,
+        invalid_rows_by_symbol: std::collections::BTreeMap<String, u64>,
+        last_error: Option<String>,
+    ) -> RelayResult<Option<usize>> {
+        let frames = {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            engine.record_upstream_progress(progress);
+            engine.record_upstream_invalid_tick_rows_by_symbol(
+                invalid_rows,
+                invalid_rows_by_symbol,
+                last_error,
+            );
+            let Some(update) = update else {
+                return Ok(None);
+            };
+            ingest_upstream_update(&mut engine, update)?
+        };
+        self.dispatch_frames(frames).map(Some)
     }
 
     pub async fn handle_text(
@@ -181,11 +206,17 @@ impl RelayServer {
         let value: Value = serde_json::from_str(&text)
             .map_err(|err| RelayError::invalid_protocol(format!("invalid JSON frame: {err}")))?;
         let command = DownstreamCommand::from_value(value)?;
-        let mut engine = self
-            .engine
-            .lock()
-            .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-        engine.handle_command(ClientId::new(raw_client_id), command)
+        let (frames, upstream_symbols) = {
+            let mut engine = self
+                .engine
+                .lock()
+                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
+            let frames = engine.handle_command(ClientId::new(raw_client_id), command)?;
+            let upstream_symbols = engine.drain_pending_upstream_subscription_symbols();
+            (frames, upstream_symbols)
+        };
+        self.enqueue_upstream_subscription_symbols(upstream_symbols)?;
+        Ok(frames)
     }
 
     pub async fn serve_once(&self, listener: TcpListener) -> RelayResult<()> {
@@ -281,6 +312,15 @@ impl RelayServer {
             .map_err(|_| RelayError::Internal("relay outbound lock poisoned".to_string()))?
             .insert(client_id, sender);
         Ok(receiver)
+    }
+
+    fn enqueue_upstream_subscription_symbols(&self, symbols: Vec<String>) -> RelayResult<()> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        self.upstream_subscription_tx.send(symbols).map_err(|_| {
+            RelayError::Internal("relay upstream subscription queue closed".to_string())
+        })
     }
 }
 
