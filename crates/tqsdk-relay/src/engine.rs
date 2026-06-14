@@ -284,24 +284,24 @@ impl DashboardSnapshotInputs {
     }
 
     #[must_use]
-    pub fn into_dashboard_snapshot(self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
+    pub fn dashboard_snapshot(&self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
         let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
         let timeline = dashboard_timeline(&global_page.symbols);
         let page = self.symbol_metrics_snapshot(query);
         DashboardSnapshot {
             received_at_unix_millis: self.received_at_unix_millis,
-            metrics: self.metrics,
+            metrics: self.metrics.clone(),
             global: global_page.summary,
             timeline,
             timeline_history: None,
             page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
-            events: self.events,
+            events: self.events.clone(),
         }
     }
 
     #[must_use]
-    pub fn into_dashboard_snapshot_and_timeline_sample(
-        self,
+    pub fn dashboard_snapshot_and_timeline_sample(
+        &self,
         query: &SymbolMetricsQuery,
     ) -> (DashboardSnapshot, DashboardTimelineHistorySample) {
         let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
@@ -310,14 +310,27 @@ impl DashboardSnapshotInputs {
         let page = self.symbol_metrics_snapshot(query);
         let dashboard = DashboardSnapshot {
             received_at_unix_millis: self.received_at_unix_millis,
-            metrics: self.metrics,
+            metrics: self.metrics.clone(),
             global: global_page.summary,
             timeline: timeline_sample.sample.clone(),
             timeline_history: None,
             page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
-            events: self.events,
+            events: self.events.clone(),
         };
         (dashboard, timeline_sample)
+    }
+
+    #[must_use]
+    pub fn into_dashboard_snapshot(self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
+        self.dashboard_snapshot(query)
+    }
+
+    #[must_use]
+    pub fn into_dashboard_snapshot_and_timeline_sample(
+        self,
+        query: &SymbolMetricsQuery,
+    ) -> (DashboardSnapshot, DashboardTimelineHistorySample) {
+        self.dashboard_snapshot_and_timeline_sample(query)
     }
 }
 
