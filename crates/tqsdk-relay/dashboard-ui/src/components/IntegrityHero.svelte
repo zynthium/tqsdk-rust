@@ -275,6 +275,7 @@
     font-size: 11px;
     font-style: normal;
     font-weight: 600;
+    margin-left: 0.28em;
   }
 
   .chip-value.val-warn {
