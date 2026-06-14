@@ -681,11 +681,17 @@ where
         contracts_for_product_scope(scope, ProductSelection::default(), resolver).await?;
     let mut products = BTreeSet::<(String, String)>::new();
     let mut product_names = BTreeMap::<(String, String), String>::new();
+    let mut product_trading_times = BTreeMap::<(String, String), TradingTime>::new();
     for contract in contracts {
         if prefix == "KQ.i" && !supports_index_continuous_contract(&contract.exchange_id) {
             continue;
         }
         let key = (contract.exchange_id.clone(), contract.product_id.clone());
+        if !trading_time_is_empty(&contract.trading_time) {
+            product_trading_times
+                .entry(key.clone())
+                .or_insert_with(|| contract.trading_time.clone());
+        }
         if let Some(product_name) = futures_product_chinese_name(&key.0, &key.1)
             .map(str::to_string)
             .or_else(|| {
@@ -703,8 +709,17 @@ where
         .into_iter()
         .map(|(exchange_id, product_id)| {
             let symbol = format!("{prefix}@{exchange_id}.{product_id}");
-            let mut contract =
-                FuturesContract::new(symbol.clone(), exchange_id, product_id, false)?;
+            let trading_time = product_trading_times
+                .get(&(exchange_id.clone(), product_id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let mut contract = FuturesContract::new_with_trading_time(
+                symbol.clone(),
+                exchange_id,
+                product_id,
+                false,
+                trading_time,
+            )?;
             contract.instrument_name = product_names
                 .get(&(contract.exchange_id.clone(), contract.product_id.clone()))
                 .and_then(|product_name| {
@@ -714,6 +729,10 @@ where
             Ok(contract)
         })
         .collect()
+}
+
+fn trading_time_is_empty(trading_time: &TradingTime) -> bool {
+    trading_time.day.is_empty() && trading_time.night.is_empty()
 }
 
 fn product_scope_from_values(values: &[String]) -> RelayResult<ProductScope> {

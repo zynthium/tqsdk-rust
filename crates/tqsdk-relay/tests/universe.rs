@@ -165,6 +165,38 @@ async fn expression_resolves_main_and_index_then_excludes_product() {
 }
 
 #[tokio::test]
+async fn expression_preserves_trading_time_for_continuous_contracts() {
+    let trading_time = trading_time(&[("09:00:00", "10:15:00")], &[("21:00:00", "25:00:00")]);
+    let mut au = FuturesContract::new_with_trading_time(
+        "SHFE.ao2609",
+        "SHFE",
+        "ao",
+        false,
+        trading_time.clone(),
+    )
+    .unwrap();
+    au.instrument_name = Some("氧化铝2609".to_string());
+    let mut resolver = StaticFuturesUniverseResolver::new([au]);
+    let expression = UniverseExpression::parse("index:all;cont:all").unwrap();
+
+    let contracts = tqsdk_relay::universe::resolve_futures_contracts_with_expression(
+        &expression,
+        &mut resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(contracts.len(), 2);
+    assert!(
+        contracts
+            .iter()
+            .all(|contract| contract.trading_time == trading_time)
+    );
+    assert_eq!(contracts[0].symbol, "KQ.i@SHFE.ao");
+    assert_eq!(contracts[1].symbol, "KQ.m@SHFE.ao");
+}
+
+#[tokio::test]
 async fn expression_does_not_generate_index_contracts_for_kqd() {
     let mut resolver = StaticFuturesUniverseResolver::new([
         FuturesContract::new("KQD.S2609", "KQD", "S", false).unwrap(),

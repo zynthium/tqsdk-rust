@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
+use chrono::{Datelike, Weekday};
 use serde::Serialize;
 use tqsdk_core::{
     Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
@@ -802,50 +803,94 @@ fn trading_phase_for_symbol(
     now_unix_millis: u64,
     trading_calendar_days: &BTreeSet<String>,
 ) -> Option<TradingSessionPhase> {
-    if !trading_calendar_days.is_empty() {
-        let is_night_session = local_day_offset >= Duration::from_secs(18 * 3600);
-        let china_millis = now_unix_millis.saturating_add(8 * 60 * 60 * 1_000);
-        let days_since_epoch = (china_millis / (24 * 60 * 60 * 1_000)) as i64;
-        let mut naive_date = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
-            + chrono::Duration::days(days_since_epoch);
-
-        if is_night_session {
-            naive_date += chrono::Duration::days(1);
-            // In Chinese futures, if the next day is a weekend/holiday, there's no night session for it.
-            // Also, Friday night belongs to Monday's trading day, so we need to find the NEXT trading day.
-            let mut found_trading_day = false;
-            for _ in 1..=5 {
-                let date_str = naive_date.format("%Y-%m-%d").to_string();
-                if trading_calendar_days.contains(&date_str) {
-                    found_trading_day = true;
-                    break;
-                }
-                naive_date += chrono::Duration::days(1);
-            }
-            if !found_trading_day {
-                return Some(TradingSessionPhase::Closed);
-            }
-        } else {
-            let date_str = naive_date.format("%Y-%m-%d").to_string();
-            if !trading_calendar_days.contains(&date_str) {
-                return Some(TradingSessionPhase::Closed);
-            }
-        }
+    let segments = telemetry
+        .and_then(|telemetry| telemetry.trading_segments.clone())
+        .or_else(|| fallback_trading_segments_for_symbol(symbol))?;
+    let phase = trading_phase_at(Some(&segments), local_day_offset)?;
+    if matches!(
+        phase,
+        TradingSessionPhase::Open | TradingSessionPhase::PreClose
+    ) && !trading_calendar_days.is_empty()
+        && !trading_calendar_allows_open(
+            &segments,
+            local_day_offset,
+            now_unix_millis,
+            trading_calendar_days,
+        )
+    {
+        return Some(TradingSessionPhase::Closed);
     }
-
-    telemetry
-        .and_then(|telemetry| {
-            trading_phase_at(telemetry.trading_segments.as_deref(), local_day_offset)
-        })
-        .or_else(|| fallback_trading_phase_for_symbol(symbol, local_day_offset))
+    Some(phase)
 }
 
-fn fallback_trading_phase_for_symbol(
-    symbol: &str,
+fn night_session_has_next_trading_day(
+    local_date: chrono::NaiveDate,
+    trading_calendar_days: &BTreeSet<String>,
+) -> bool {
+    for day_offset in 1..=5 {
+        let candidate = local_date + chrono::Duration::days(day_offset);
+        let date_str = candidate.format("%Y-%m-%d").to_string();
+        if !trading_calendar_days.contains(&date_str) {
+            continue;
+        }
+        return day_offset == 1
+            || (day_offset == 3
+                && local_date.weekday() == Weekday::Fri
+                && candidate.weekday() == Weekday::Mon);
+    }
+    false
+}
+
+fn trading_calendar_allows_open(
+    segments: &[TradingSessionSegment],
     local_day_offset: Duration,
-) -> Option<TradingSessionPhase> {
-    let segments = fallback_trading_segments_for_symbol(symbol)?;
-    trading_phase_at(Some(&segments), local_day_offset)
+    now_unix_millis: u64,
+    trading_calendar_days: &BTreeSet<String>,
+) -> bool {
+    let local_date = china_date_from_unix_millis(now_unix_millis);
+    if !trading_calendar_contains(local_date, trading_calendar_days) {
+        return false;
+    }
+    let Some(open_segment) = segments
+        .iter()
+        .find(|segment| segment_contains(**segment, local_day_offset))
+    else {
+        return true;
+    };
+    if !segment_wraps_midnight(*open_segment) {
+        return true;
+    }
+    if local_day_offset < open_segment.end() {
+        let previous_date = local_date - chrono::Duration::days(1);
+        return trading_calendar_contains(previous_date, trading_calendar_days);
+    }
+    night_session_has_next_trading_day(local_date, trading_calendar_days)
+}
+
+fn trading_calendar_contains(
+    local_date: chrono::NaiveDate,
+    trading_calendar_days: &BTreeSet<String>,
+) -> bool {
+    let date_str = local_date.format("%Y-%m-%d").to_string();
+    trading_calendar_days.contains(&date_str)
+}
+
+fn china_date_from_unix_millis(now_unix_millis: u64) -> chrono::NaiveDate {
+    let china_millis = now_unix_millis.saturating_add(8 * 60 * 60 * 1_000);
+    let days_since_epoch = (china_millis / (24 * 60 * 60 * 1_000)) as i64;
+    chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + chrono::Duration::days(days_since_epoch)
+}
+
+fn segment_contains(segment: TradingSessionSegment, local_day_offset: Duration) -> bool {
+    if segment_wraps_midnight(segment) {
+        local_day_offset >= segment.start() || local_day_offset < segment.end()
+    } else {
+        segment.start() <= local_day_offset && local_day_offset < segment.end()
+    }
+}
+
+fn segment_wraps_midnight(segment: TradingSessionSegment) -> bool {
+    segment.end() <= segment.start()
 }
 
 fn fallback_trading_segments_for_symbol(symbol: &str) -> Option<Vec<TradingSessionSegment>> {

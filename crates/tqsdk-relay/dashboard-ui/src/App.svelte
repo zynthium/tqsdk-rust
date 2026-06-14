@@ -12,13 +12,14 @@
   import { createIncidentLedger, updateIncidentLedger } from './lib/incident-ledger';
   import { createHistory, pushHistorySample } from './lib/history';
   import { deriveIntegrity } from './lib/integrity-model';
-  import { createTimelineHistory, pushTimelineSample, timelineBuckets } from './lib/timeline';
-  import type { IntegrityModel, RelaySnapshot } from './lib/types';
+  import { createTimelineHistory, pushTimelineSample, timelineBuckets, timelineRowsForSnapshot } from './lib/timeline';
+  import type { IntegrityModel, RelaySnapshot, SymbolRow } from './lib/types';
 
   const POLL_INTERVAL_MS = 2_000;
 
   let snapshot = $state<RelaySnapshot | null>(null);
   let model = $state<IntegrityModel | null>(null);
+  let timelineRows = $state<SymbolRow[]>([]);
   let timeline = $state(createTimelineHistory());
   let history = $state(createHistory());
   let incidents = $state(createIncidentLedger());
@@ -39,6 +40,7 @@
     const next = await fetchRelaySnapshot(signal, { includeTimelineHistory });
     if (requestId !== sequence) return;
     snapshot = next;
+    const nextTimelineRows = timelineRowsForSnapshot(next);
     const nextModel = deriveIntegrity(next.metrics, next.page, next.receivedAt, model, next.global);
     if (includeTimelineHistory) {
       timelineHistoryLoaded = true;
@@ -46,8 +48,9 @@
     if (next.timelineHistory) {
       timeline = next.timelineHistory;
     } else {
-      pushTimelineSample(timeline, next.timeline, next.receivedAt, next.page.symbols);
+      pushTimelineSample(timeline, next.timeline, next.receivedAt, nextTimelineRows);
     }
+    timelineRows = nextTimelineRows;
     pushHistorySample(history, nextModel);
     updateIncidentLedger(incidents, nextModel);
     model = nextModel;
@@ -93,7 +96,7 @@
     </section>
     <section class="dashboard-main">
       <div class="main-left">
-        <ContinuityTimeline {buckets} rows={model.rows} />
+        <ContinuityTimeline {buckets} rows={timelineRows} />
       </div>
       <div class="main-right">
         <AttentionList rows={model.problems} />

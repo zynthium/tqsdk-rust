@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { createTimelineHistory, exchangeOf, productGroupOf, pushTimelineSample, timelineBuckets } from './timeline';
-import { dashboardTimeline, NOW, row } from '../test/fixtures';
+import {
+  createTimelineHistory,
+  exchangeOf,
+  productGroupOf,
+  pushTimelineSample,
+  timelineBuckets,
+  timelineRowsForSnapshot,
+} from './timeline';
+import { dashboardTimeline, NOW, row, symbolSnapshot } from '../test/fixtures';
 
 describe('timeline', () => {
   it('groups continuous contracts by underlying exchange', () => {
@@ -130,5 +137,16 @@ describe('timeline', () => {
     const buckets = timelineBuckets(history, NOW, 60);
 
     expect(buckets.at(-1)?.sample.exchanges.DCE.severity).toBe('live');
+  });
+
+  it('uses unfiltered timeline rows when dashboard page is filtered', () => {
+    const pageRow = row({ symbol: 'SHFE.au2602' });
+    const hiddenTimelineRow = row({ symbol: 'DCE.m2609' });
+    const snapshot = {
+      page: symbolSnapshot([pageRow]),
+      timelineSymbols: [pageRow, hiddenTimelineRow],
+    };
+
+    expect(timelineRowsForSnapshot(snapshot).map((item) => item.symbol)).toEqual(['SHFE.au2602', 'DCE.m2609']);
   });
 });
