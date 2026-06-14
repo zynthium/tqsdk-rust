@@ -161,6 +161,7 @@ export type DashboardSnapshot = {
   metrics: RelayMetrics;
   global: SymbolMetricsSummary;
   timeline: DashboardTimelineSample;
+  timeline_symbols?: DashboardSymbolRow[];
   timeline_history?: DashboardTimelineHistory;
   page: DashboardSymbolMetricsSnapshot;
   events: RelayEvent[];
@@ -172,6 +173,7 @@ export type RelaySnapshot = {
   global: SymbolMetricsSummary;
   timeline: DashboardTimelineSample;
   timeline_history?: DashboardTimelineHistory;
+  timelineSymbols: SymbolRow[];
   page: SymbolMetricsSnapshot;
   events: RelayEvent[];
   receivedAt: number;

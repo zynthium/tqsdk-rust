@@ -39,6 +39,7 @@ pub struct DashboardSnapshot {
     pub metrics: MetricsSnapshot,
     pub global: SymbolMetricsSummary,
     pub timeline: DashboardTimelineSample,
+    pub timeline_symbols: Vec<DashboardSymbolRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_history: Option<DashboardTimelineHistory>,
     pub page: DashboardSymbolMetricsSnapshot,
@@ -129,6 +130,13 @@ impl DashboardSymbolRow {
             last_invalid_row_error: row.last_invalid_row_error,
         }
     }
+}
+
+fn dashboard_symbol_rows(rows: &[SymbolTelemetrySnapshot]) -> Vec<DashboardSymbolRow> {
+    rows.iter()
+        .cloned()
+        .map(DashboardSymbolRow::from_symbol_metrics)
+        .collect()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -287,12 +295,14 @@ impl DashboardSnapshotInputs {
     pub fn dashboard_snapshot(&self, query: &SymbolMetricsQuery) -> DashboardSnapshot {
         let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
         let timeline = dashboard_timeline(&global_page.symbols);
+        let timeline_symbols = dashboard_symbol_rows(&global_page.symbols);
         let page = self.symbol_metrics_snapshot(query);
         DashboardSnapshot {
             received_at_unix_millis: self.received_at_unix_millis,
             metrics: self.metrics.clone(),
             global: global_page.summary,
             timeline,
+            timeline_symbols,
             timeline_history: None,
             page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
             events: self.events.clone(),
@@ -307,12 +317,14 @@ impl DashboardSnapshotInputs {
         let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
         let timeline_sample =
             dashboard_timeline_history_sample(self.received_at_unix_millis, &global_page.symbols);
+        let timeline_symbols = dashboard_symbol_rows(&global_page.symbols);
         let page = self.symbol_metrics_snapshot(query);
         let dashboard = DashboardSnapshot {
             received_at_unix_millis: self.received_at_unix_millis,
             metrics: self.metrics.clone(),
             global: global_page.summary,
             timeline: timeline_sample.sample.clone(),
+            timeline_symbols,
             timeline_history: None,
             page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
             events: self.events.clone(),

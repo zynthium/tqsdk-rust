@@ -1,4 +1,11 @@
-import type { DashboardTimelineSample, SymbolRow, TimelineHistory, TimelineSample, TimelineSeverity } from './types';
+import type {
+  DashboardTimelineSample,
+  RelaySnapshot,
+  SymbolRow,
+  TimelineHistory,
+  TimelineSample,
+  TimelineSeverity,
+} from './types';
 
 export const EXCHANGES = ['SHFE', 'DCE', 'CZCE', 'INE', 'GFEX', 'CFFEX'];
 
@@ -50,6 +57,10 @@ export function pushTimelineSample(
   });
   history.samples = history.samples.filter((item) => item.sampledAt >= sampledAt - 300_000);
   return history;
+}
+
+export function timelineRowsForSnapshot(snapshot: Pick<RelaySnapshot, 'page' | 'timelineSymbols'>): SymbolRow[] {
+  return snapshot.timelineSymbols.length > 0 ? snapshot.timelineSymbols : snapshot.page.symbols;
 }
 
 export function timelineBuckets(

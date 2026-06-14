@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{Datelike, NaiveDate, TimeZone};
 use tqsdk_core::{Quote, TradingTime};
 use tqsdk_relay::{
     RelayTickRow, SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsContext,
@@ -59,16 +59,18 @@ fn quote_with_trading_time(
 }
 
 fn local_millis_at(hour: u32, minute: u32, second: u32) -> u64 {
-    let today = Local::now();
-    let timestamp = Local
-        .with_ymd_and_hms(
-            today.year(),
-            today.month(),
-            today.day(),
-            hour,
-            minute,
-            second,
-        )
+    china_millis_at(
+        NaiveDate::from_ymd_opt(2026, 6, 12).expect("test date should be valid"),
+        hour,
+        minute,
+        second,
+    )
+}
+
+fn china_millis_at(date: NaiveDate, hour: u32, minute: u32, second: u32) -> u64 {
+    let timestamp = chrono::FixedOffset::east_opt(8 * 3600)
+        .expect("china offset should be valid")
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, second)
         .single()
         .expect("local test time should be unambiguous")
         .timestamp_millis();
@@ -1073,6 +1075,116 @@ fn continuous_contract_uses_underlying_futures_session_fallback_for_midday_break
     assert_eq!(json["symbols"][0]["problem"], false);
     assert_eq!(json["summary"]["closed"], 1);
     assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
+fn sunday_night_does_not_open_before_monday_trading_day() {
+    let mut store = SymbolTelemetryStore::default();
+    let sunday_night = china_millis_at(
+        NaiveDate::from_ymd_opt(2026, 6, 14).expect("test date should be valid"),
+        23,
+        30,
+        0,
+    );
+    store.record_trading_calendar(&[
+        tqsdk_core::TradingCalendarDay {
+            date: "2026-06-14".to_string(),
+            trading: false,
+        },
+        tqsdk_core::TradingCalendarDay {
+            date: "2026-06-15".to_string(),
+            trading: true,
+        },
+    ]);
+    store.record_universe(["SHFE.ao2609", "KQ.i@SHFE.ao"], sunday_night - 90_000);
+    store.record_tick_at(
+        "SHFE.ao2609",
+        &tick(
+            1,
+            i64::try_from((sunday_night - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        sunday_night - 90_000,
+    );
+    store.record_tick_at(
+        "KQ.i@SHFE.ao",
+        &tick(
+            1,
+            i64::try_from((sunday_night - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        sunday_night - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        sunday_night,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.closed, 2);
+    assert_eq!(snapshot.summary.stale, 0);
+    assert!(snapshot.symbols.iter().all(|symbol| {
+        symbol.session == SymbolSession::Closed
+            && symbol.status == SymbolStatus::Closed
+            && !symbol.problem
+    }));
+}
+
+#[test]
+fn monday_early_morning_after_non_trading_sunday_is_closed() {
+    let mut store = SymbolTelemetryStore::default();
+    let monday_early = china_millis_at(
+        NaiveDate::from_ymd_opt(2026, 6, 15).expect("test date should be valid"),
+        0,
+        30,
+        0,
+    );
+    store.record_trading_calendar(&[
+        tqsdk_core::TradingCalendarDay {
+            date: "2026-06-14".to_string(),
+            trading: false,
+        },
+        tqsdk_core::TradingCalendarDay {
+            date: "2026-06-15".to_string(),
+            trading: true,
+        },
+    ]);
+    store.record_universe(["SHFE.ao2609", "KQ.i@SHFE.ao"], monday_early - 90_000);
+    store.record_tick_at(
+        "SHFE.ao2609",
+        &tick(
+            1,
+            i64::try_from((monday_early - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        monday_early - 90_000,
+    );
+    store.record_tick_at(
+        "KQ.i@SHFE.ao",
+        &tick(
+            1,
+            i64::try_from((monday_early - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        monday_early - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        monday_early,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.closed, 2);
+    assert_eq!(snapshot.summary.stale, 0);
+    assert!(snapshot.symbols.iter().all(|symbol| {
+        symbol.session == SymbolSession::Closed
+            && symbol.status == SymbolStatus::Closed
+            && !symbol.problem
+    }));
 }
 
 #[test]

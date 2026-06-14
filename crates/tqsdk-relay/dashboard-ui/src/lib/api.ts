@@ -50,6 +50,7 @@ export async function fetchRelaySnapshot(
     global: snapshot.global,
     timeline: snapshot.timeline,
     timeline_history: snapshot.timeline_history,
+    timelineSymbols: normalizeDashboardRows(snapshot.timeline_symbols ?? snapshot.page.symbols),
     page: normalizeDashboardPage(snapshot.page),
     events: snapshot.events,
     receivedAt: snapshot.received_at_unix_millis || Date.now(),
@@ -63,8 +64,12 @@ export async function fetchRelaySnapshot(
 function normalizeDashboardPage(page: DashboardSymbolMetricsSnapshot): SymbolMetricsSnapshot {
   return {
     ...page,
-    symbols: page.symbols.map(normalizeDashboardSymbolRow),
+    symbols: normalizeDashboardRows(page.symbols),
   };
+}
+
+function normalizeDashboardRows(rows: DashboardSymbolRow[]): SymbolRow[] {
+  return rows.map(normalizeDashboardSymbolRow);
 }
 
 function normalizeDashboardSymbolRow(row: DashboardSymbolRow): SymbolRow {

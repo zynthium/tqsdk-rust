@@ -41,6 +41,43 @@ describe('fetchRelaySnapshot', () => {
     expect(snapshot.timelineHistory).toBeUndefined();
   });
 
+  it('normalizes unfiltered continuity timeline rows separately from page rows', async () => {
+    const response = {
+      ...dashboardSnapshot([
+        row({
+          symbol: 'SHFE.au2602',
+          instrument_name: '沪金2602',
+        }),
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+        }),
+      ]),
+      page: {
+        ...dashboardSnapshot([row({ symbol: 'SHFE.au2602' })]).page,
+        symbols: [{ symbol: 'SHFE.au2602' }],
+      },
+      timeline_symbols: [
+        { symbol: 'SHFE.au2602', instrument_name: '沪金2602' },
+        {
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          session: 'closed',
+          status: 'closed',
+        },
+      ],
+    };
+    const fetch = vi.fn(async (_input: string | URL | Request) => Response.json(response));
+    vi.stubGlobal('fetch', fetch);
+
+    const snapshot = await fetchRelaySnapshot();
+
+    expect(snapshot.page.symbols).toHaveLength(1);
+    expect(snapshot.timelineSymbols).toHaveLength(2);
+    expect(snapshot.timelineSymbols[1].symbol).toBe('DCE.m2609');
+    expect(snapshot.timelineSymbols[1].session).toBe('closed');
+  });
+
   it('can request and normalize the cached continuity timeline history', async () => {
     const response = {
       ...dashboardSnapshot([row()]),

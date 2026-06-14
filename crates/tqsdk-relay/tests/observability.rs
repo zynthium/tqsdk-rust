@@ -439,6 +439,38 @@ fn engine_dashboard_snapshot_exposes_aggregate_timeline_without_global_symbol_ro
 }
 
 #[test]
+fn engine_dashboard_snapshot_exposes_unfiltered_timeline_symbol_rows() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(9, 30, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602", "DCE.m2609"],
+        21,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+    engine
+        .ingest_tick_at_for_test("SHFE.au2602", tick(1), now - 1_000)
+        .unwrap();
+
+    let query = tqsdk_relay::SymbolMetricsQuery {
+        limit: Some(1),
+        ..Default::default()
+    };
+    let dashboard = engine.dashboard_snapshot_at(now, &query);
+
+    assert_eq!(dashboard.page.symbols.len(), 1);
+    assert_eq!(dashboard.timeline.global.total, 2);
+    assert_eq!(dashboard.timeline_symbols.len(), 2);
+    assert!(
+        dashboard
+            .timeline_symbols
+            .iter()
+            .any(|row| row.symbol == "DCE.m2609")
+    );
+}
+
+#[test]
 fn dashboard_snapshot_serializes_compact_page_rows() {
     let mut engine = RelayEngine::new_memory_only(256, 256);
     let now = local_millis_at(9, 30, 0);

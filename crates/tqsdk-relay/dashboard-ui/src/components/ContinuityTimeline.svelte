@@ -65,7 +65,7 @@
       .filter((exchange) => visibleRows.some((row) => exchangeOf(row.symbol) === exchange))
       .sort((left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right)),
   );
-  let flatRows = $derived(orderedSymbolRows(visibleRows, Number.POSITIVE_INFINITY));
+  let flatRows = $derived(orderedSymbolRows(visibleRows));
   let definitions = $derived<TimelineDefinition[]>([
     {
       kind: 'summary',
@@ -220,9 +220,9 @@
       || false;
   }
 
-  function orderedSymbolRows(exchangeSymbols: SymbolRow[], limit = 30): SymbolRow[] {
+  function orderedSymbolRows(exchangeSymbols: SymbolRow[]): SymbolRow[] {
     const productNames = productNamesByGroup(exchangeSymbols);
-    const sorted = [...exchangeSymbols].sort((left, right) => {
+    return [...exchangeSymbols].sort((left, right) => {
       const leftGroup = productGroupOf(left.symbol);
       const rightGroup = productGroupOf(right.symbol);
       return compareText(productNames.get(leftGroup) ?? leftGroup, productNames.get(rightGroup) ?? rightGroup)
@@ -230,7 +230,6 @@
         || compareText(contractName(left), contractName(right))
         || left.symbol.localeCompare(right.symbol);
     });
-    return limit === Number.POSITIVE_INFINITY ? sorted : sorted.slice(0, limit);
   }
 
   function productNamesByGroup(rows: SymbolRow[]): Map<string, string> {

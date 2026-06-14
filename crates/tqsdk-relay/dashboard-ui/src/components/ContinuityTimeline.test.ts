@@ -350,6 +350,42 @@ describe('ContinuityTimeline', () => {
     expect(view.getAllByTestId('timeline-symbol-row')).toHaveLength(rows.length);
   });
 
+  it('does not truncate symbols when an exchange is expanded', async () => {
+    const rows = Array.from({ length: 35 }, (_, index) =>
+      row({
+        symbol: `DCE.m${2600 + index}`,
+        instrument_name: `豆粕${2600 + index}`,
+      }),
+    );
+    const symbols: TimelineSample['symbols'] = {};
+    for (const symbolRow of rows) {
+      symbols[symbolRow.symbol] = {
+        severity: 'live',
+        receive_gap_ms: 900,
+        avg_receive_gap_ms: 900,
+      };
+    }
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'live', total: rows.length, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'live', total: rows.length, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        },
+      },
+      symbols,
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows,
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+
+    expect(view.getAllByTestId('timeline-symbol-row')).toHaveLength(rows.length);
+  });
+
   it('keeps open-session filter, search, and view mode across remounts', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
