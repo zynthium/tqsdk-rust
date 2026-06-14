@@ -246,9 +246,11 @@ relay dashboard 的监控口径进一步拆成四类，不再把所有异常压�
 - `coverage`：合约是否属于当前上游 universe。下游仍在订阅但已退出 universe 的合约是
   `uncovered`，即使当前交易时段休盘也仍是覆盖问题。
 - `session`：基于官方 `trading_time`、quote trading time 或内置期货时段推导的
-  `open` / `closed` / `unknown`。计算固定使用 Asia/Shanghai 时区，不受 host 本地时区影响。
+  `open` / `closed` / `unknown`。当前 universe 内的无样本合约也应按可推导时段标记
+  `closed`，避免休盘期把尚无首样本的品种显示成异常。计算固定使用 Asia/Shanghai
+  时区，不受 host 本地时区影响。
 - `flow`：基于 relay 接收时间的 `flowing` / `silent` / `no_sample`。没有接收样本时是
-  `no_sample`，不得把它误判为 `closed`。
+  `no_sample`，即使 `session/status` 已判为 `closed`，flow 仍保持 `no_sample`。
 - `integrity`：当前只把长时间未收到数据标成 `suspected`；row id 跳号、重复和倒序
   保留为 diff 行号诊断。天勤 DIFF 协议可以后续 patch / refill 稀疏 row，
   `gap_event_count`、`duplicate_rows`、`out_of_order_rows` 不能单独证明市场数据缺失。
