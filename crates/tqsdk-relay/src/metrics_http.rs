@@ -1,17 +1,20 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock, TryLockError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::time::MissedTickBehavior;
 
 use crate::dashboard::dashboard_asset;
-use crate::engine::{DashboardTimelineHistoryCache, RelayEngine};
+use crate::engine::{DashboardSnapshotInputs, DashboardTimelineHistoryCache, RelayEngine};
 use crate::error::{RelayError, RelayResult};
 use crate::symbol_metrics::SymbolMetricsQuery;
+
+const DASHBOARD_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 pub async fn serve_metrics_until(
     listener: TcpListener,
@@ -19,18 +22,27 @@ pub async fn serve_metrics_until(
     mut shutdown: oneshot::Receiver<()>,
 ) -> RelayResult<()> {
     let timeline_history = Arc::new(Mutex::new(DashboardTimelineHistoryCache::default()));
+    let dashboard_cache = DashboardSnapshotCache::from_engine(&engine)?;
+    let mut dashboard_refresh = tokio::time::interval(DASHBOARD_SNAPSHOT_REFRESH_INTERVAL);
+    dashboard_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => return Ok(()),
+            _ = dashboard_refresh.tick() => {
+                let _refreshed = dashboard_cache.refresh_from_engine(&engine)?;
+            }
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted.map_err(|err| {
                     RelayError::Transport(format!("metrics accept failed: {err}"))
                 })?;
                 let engine = engine.clone();
                 let timeline_history = timeline_history.clone();
+                let dashboard_cache = dashboard_cache.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = serve_metrics_stream(&mut stream, engine, timeline_history).await {
+                    if let Err(err) =
+                        serve_metrics_stream(&mut stream, engine, dashboard_cache, timeline_history).await
+                    {
                         eprintln!("{err}");
                     }
                 });
@@ -42,6 +54,7 @@ pub async fn serve_metrics_until(
 async fn serve_metrics_stream(
     stream: &mut TcpStream,
     engine: Arc<Mutex<RelayEngine>>,
+    dashboard_cache: DashboardSnapshotCache,
     timeline_history: Arc<Mutex<DashboardTimelineHistoryCache>>,
 ) -> RelayResult<()> {
     let request = read_http_request(stream).await?;
@@ -71,10 +84,7 @@ async fn serve_metrics_stream(
                     return Ok(());
                 }
             };
-            let inputs = engine
-                .lock()
-                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
-                .dashboard_snapshot_inputs_at(current_unix_millis());
+            let inputs = dashboard_cache.load()?;
             let symbol_metrics = inputs.symbol_metrics_snapshot(&query);
             serde_json::to_value(symbol_metrics).map_err(|err| {
                 RelayError::Internal(format!("symbol metrics JSON encode failed: {err}"))
@@ -88,12 +98,9 @@ async fn serve_metrics_stream(
                     return Ok(());
                 }
             };
-            let inputs = engine
-                .lock()
-                .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
-                .dashboard_snapshot_inputs_at(current_unix_millis());
+            let inputs = dashboard_cache.load()?;
             let (mut dashboard, timeline_sample) =
-                inputs.into_dashboard_snapshot_and_timeline_sample(&query.symbol_metrics);
+                inputs.dashboard_snapshot_and_timeline_sample(&query.symbol_metrics);
             {
                 let mut timeline_history = timeline_history.lock().map_err(|_| {
                     RelayError::Internal("dashboard timeline history lock poisoned".to_string())
@@ -124,6 +131,57 @@ async fn serve_metrics_stream(
         }
     };
     write_response(stream, 200, response).await
+}
+
+#[derive(Debug, Clone)]
+struct DashboardSnapshotCache {
+    latest: Arc<RwLock<Arc<DashboardSnapshotInputs>>>,
+}
+
+impl DashboardSnapshotCache {
+    fn from_engine(engine: &Arc<Mutex<RelayEngine>>) -> RelayResult<Self> {
+        let inputs = engine
+            .lock()
+            .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?
+            .dashboard_snapshot_inputs_at(current_unix_millis());
+        Ok(Self::new(inputs))
+    }
+
+    fn new(inputs: DashboardSnapshotInputs) -> Self {
+        Self {
+            latest: Arc::new(RwLock::new(Arc::new(inputs))),
+        }
+    }
+
+    fn load(&self) -> RelayResult<Arc<DashboardSnapshotInputs>> {
+        self.latest
+            .read()
+            .map_err(|_| RelayError::Internal("dashboard snapshot cache poisoned".to_string()))
+            .map(|inputs| inputs.clone())
+    }
+
+    fn store(&self, inputs: DashboardSnapshotInputs) -> RelayResult<()> {
+        let mut latest = self
+            .latest
+            .write()
+            .map_err(|_| RelayError::Internal("dashboard snapshot cache poisoned".to_string()))?;
+        *latest = Arc::new(inputs);
+        Ok(())
+    }
+
+    fn refresh_from_engine(&self, engine: &Arc<Mutex<RelayEngine>>) -> RelayResult<bool> {
+        let inputs = match engine.try_lock() {
+            Ok(engine) => engine.dashboard_snapshot_inputs_at(current_unix_millis()),
+            Err(TryLockError::WouldBlock) => return Ok(false),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(RelayError::Internal(
+                    "relay engine lock poisoned".to_string(),
+                ));
+            }
+        };
+        self.store(inputs)?;
+        Ok(true)
+    }
 }
 
 async fn read_http_request(stream: &mut TcpStream) -> RelayResult<String> {
@@ -282,4 +340,59 @@ fn current_unix_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_cache_load_does_not_take_engine_lock() {
+        let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+        {
+            let mut engine = engine.lock().unwrap();
+            engine.record_universe_refresh_success_for_symbols(
+                ["SHFE.au2602"],
+                11,
+                None,
+                None,
+                1_700_000_000,
+            );
+        }
+        let cache = DashboardSnapshotCache::from_engine(&engine).unwrap();
+
+        let _engine_guard = engine.lock().unwrap();
+        let inputs = cache.load().unwrap();
+        let dashboard = inputs.dashboard_snapshot(&SymbolMetricsQuery::default());
+
+        assert_eq!(dashboard.global.total, 1);
+        assert!(dashboard.timeline.exchanges.contains_key("SHFE"));
+    }
+
+    #[test]
+    fn dashboard_cache_refresh_skips_busy_engine() {
+        let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+        let cache = DashboardSnapshotCache::from_engine(&engine).unwrap();
+
+        let engine_guard = engine.lock().unwrap();
+        assert!(!cache.refresh_from_engine(&engine).unwrap());
+        drop(engine_guard);
+
+        {
+            let mut engine = engine.lock().unwrap();
+            engine.record_universe_refresh_success_for_symbols(
+                ["DCE.m2609"],
+                10,
+                None,
+                None,
+                1_700_000_001,
+            );
+        }
+
+        assert!(cache.refresh_from_engine(&engine).unwrap());
+        let inputs = cache.load().unwrap();
+        let dashboard = inputs.dashboard_snapshot(&SymbolMetricsQuery::default());
+        assert_eq!(dashboard.global.total, 1);
+        assert!(dashboard.timeline.exchanges.contains_key("DCE"));
+    }
 }

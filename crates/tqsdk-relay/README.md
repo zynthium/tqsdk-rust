@@ -402,9 +402,10 @@ relay 二进制并服务 `/dashboard/` 与 `/dashboard/assets/*`。JSON 观测�
 浏览器复用已构建的 JS/CSS。页面顶部会展示上游阶段、transport 连接、订阅发送、frame
 接收数、解码事件数、backfilling 已持续时间、frame 速率、最近 frame/event idle、
 decode health 和最近 frame 时间；tick / quote ingest 热路径只更新当前合约的轻量
-telemetry。HTTP snapshot 路径只在 `RelayEngine` mutex 内复制
-metrics、symbol read model、订阅快照和事件账本，随后在锁外完成合约分类、汇总、过滤、
-排序、裁剪、timeline history 更新和 JSON 序列化。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
+telemetry。metrics 服务会每 `2s` 尝试从 `RelayEngine` 刷新一次 dashboard read model
+缓存；刷新如果撞上热路径锁会跳过本轮，保留上一份快照。`/dashboard-snapshot` 和
+`/symbol-metrics` 请求只读取缓存，不再在请求链路上获取 `RelayEngine` mutex；合约分类、汇总、过滤、
+排序、裁剪、timeline history 更新和 JSON 序列化都在请求侧基于缓存完成。dashboard 的全局健康、覆盖率、评分、时间带和事件账本使用
 未过滤 `global` / `timeline` 聚合数据；连续性热力图内的合约搜索、只看开盘中品种、
 不分交易所和 Blocks / Sparkline 视图模式保存在浏览器本地，只影响展开后的当前 page 合约行，不会把异常过滤成健康。dashboard 会把 tick row-id 跳号、重复和倒序显示为中性 DIFF 诊断，不作为确认的
 行情完整性异常、事件账本告警或评分扣分；当前健康判断仍以接收间隔、上游阶段、订阅影响

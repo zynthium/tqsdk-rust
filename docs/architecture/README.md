@@ -191,7 +191,8 @@ V1 是：
     `ins_list` 长度
   - 提供 dry-run 启动自检、结构化启动日志、HTTP `/health`、`/metrics`、
     `/symbol-metrics` 和内置只读 `/dashboard`；`/health` 区分进程/下游监听、
-    上游连接、订阅/补历史阶段、合约集合刷新和数据 freshness
+    上游连接、订阅/补历史阶段、合约集合刷新和数据 freshness；dashboard 和
+    `/symbol-metrics` 读取低频缓存的 read model，不在请求链路上获取 relay engine 全局锁
   - 新 K 线订阅可用内存 tick ring 回放已闭合的合成 K 线，减少冷启动空窗
   - 现有 SDK crates 不依赖 relay；用户显式配置 market endpoint 时才使用
 
