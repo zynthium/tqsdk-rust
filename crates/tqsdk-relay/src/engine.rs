@@ -22,8 +22,9 @@ use crate::observability::{
 use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
     SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery, SymbolMetricsSnapshot,
-    SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSubscriptionCounts,
-    SymbolTelemetryReadModel, SymbolTelemetrySnapshot, SymbolTelemetryStore,
+    SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolStatus,
+    SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
+    SymbolTelemetryStore,
 };
 use crate::universe::FuturesContract;
 
@@ -40,8 +41,126 @@ pub struct DashboardSnapshot {
     pub timeline: DashboardTimelineSample,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_history: Option<DashboardTimelineHistory>,
-    pub page: SymbolMetricsSnapshot,
+    pub page: DashboardSymbolMetricsSnapshot,
     pub events: Vec<RelayEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardSymbolMetricsSnapshot {
+    pub now_unix_millis: u64,
+    pub data_stale_after_millis: u64,
+    pub summary: SymbolMetricsSummary,
+    pub filtered_total: usize,
+    pub symbols: Vec<DashboardSymbolRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardSymbolRow {
+    pub symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instrument_name: Option<String>,
+    #[serde(skip_serializing_if = "is_symbol_status_live")]
+    pub status: SymbolStatus,
+    #[serde(skip_serializing_if = "is_symbol_session_open")]
+    pub session: SymbolSession,
+    #[serde(skip_serializing_if = "is_symbol_flow_flowing")]
+    pub flow: SymbolFlow,
+    #[serde(skip_serializing_if = "is_symbol_integrity_intact")]
+    pub integrity: SymbolIntegrity,
+    #[serde(skip_serializing_if = "is_false")]
+    pub problem: bool,
+    #[serde(skip_serializing_if = "is_symbol_problem_severity_live")]
+    pub problem_severity: SymbolProblemSeverity,
+    #[serde(skip_serializing_if = "is_false")]
+    pub subscribed: bool,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub quote_subscriber_count: usize,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub chart_subscriber_count: usize,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub ticks_ingested: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receive_gap_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_receive_gap_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_time_lag_ms: Option<u64>,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub invalid_rows: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_invalid_row_error: Option<String>,
+}
+
+impl DashboardSymbolMetricsSnapshot {
+    fn from_symbol_metrics(snapshot: SymbolMetricsSnapshot) -> Self {
+        Self {
+            now_unix_millis: snapshot.now_unix_millis,
+            data_stale_after_millis: snapshot.data_stale_after_millis,
+            summary: snapshot.summary,
+            filtered_total: snapshot.filtered_total,
+            symbols: snapshot
+                .symbols
+                .into_iter()
+                .map(DashboardSymbolRow::from_symbol_metrics)
+                .collect(),
+        }
+    }
+}
+
+impl DashboardSymbolRow {
+    fn from_symbol_metrics(row: SymbolTelemetrySnapshot) -> Self {
+        Self {
+            symbol: row.symbol,
+            instrument_name: row.instrument_name,
+            status: row.status,
+            session: row.session,
+            flow: row.flow,
+            integrity: row.integrity,
+            problem: row.problem,
+            problem_severity: row.problem_severity,
+            subscribed: row.subscribed,
+            quote_subscriber_count: row.quote_subscriber_count,
+            chart_subscriber_count: row.chart_subscriber_count,
+            ticks_ingested: row.ticks_ingested,
+            receive_gap_ms: row.receive_gap_ms,
+            avg_receive_gap_ms: row.avg_receive_gap_ms,
+            market_time_lag_ms: row.market_time_lag_ms,
+            invalid_rows: row.invalid_rows,
+            last_invalid_row_error: row.last_invalid_row_error,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_symbol_status_live(value: &SymbolStatus) -> bool {
+    *value == SymbolStatus::Live
+}
+
+fn is_symbol_session_open(value: &SymbolSession) -> bool {
+    *value == SymbolSession::Open
+}
+
+fn is_symbol_flow_flowing(value: &SymbolFlow) -> bool {
+    *value == SymbolFlow::Flowing
+}
+
+fn is_symbol_integrity_intact(value: &SymbolIntegrity) -> bool {
+    *value == SymbolIntegrity::Intact
+}
+
+fn is_symbol_problem_severity_live(value: &SymbolProblemSeverity) -> bool {
+    *value == SymbolProblemSeverity::Live
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -175,7 +294,7 @@ impl DashboardSnapshotInputs {
             global: global_page.summary,
             timeline,
             timeline_history: None,
-            page,
+            page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
             events: self.events,
         }
     }
@@ -195,7 +314,7 @@ impl DashboardSnapshotInputs {
             global: global_page.summary,
             timeline: timeline_sample.sample.clone(),
             timeline_history: None,
-            page,
+            page: DashboardSymbolMetricsSnapshot::from_symbol_metrics(page),
             events: self.events,
         };
         (dashboard, timeline_sample)

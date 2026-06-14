@@ -4,7 +4,27 @@ import { fetchRelaySnapshot } from './api';
 
 describe('fetchRelaySnapshot', () => {
   it('fetches one atomic dashboard snapshot endpoint', async () => {
-    const fetch = vi.fn(async (_input: string | URL | Request) => Response.json(dashboardSnapshot([row()])));
+    const response = dashboardSnapshot([
+      row({
+        symbol: 'SHFE.au2602',
+        instrument_name: '沪金2602',
+        receive_gap_ms: 900,
+        avg_receive_gap_ms: 900,
+        market_time_lag_ms: 1_200,
+        ticks_ingested: 5,
+      }),
+    ]);
+    response.page.symbols = [
+      {
+        symbol: 'SHFE.au2602',
+        instrument_name: '沪金2602',
+        receive_gap_ms: 900,
+        avg_receive_gap_ms: 900,
+        market_time_lag_ms: 1_200,
+        ticks_ingested: 5,
+      },
+    ];
+    const fetch = vi.fn(async (_input: string | URL | Request) => Response.json(response));
     vi.stubGlobal('fetch', fetch);
 
     const snapshot = await fetchRelaySnapshot();
@@ -13,6 +33,11 @@ describe('fetchRelaySnapshot', () => {
     expect(String(fetch.mock.calls[0][0])).toBe('/dashboard-snapshot');
     expect(snapshot.global.total).toBe(1);
     expect(snapshot.page.symbols).toHaveLength(1);
+    expect(snapshot.page.symbols[0].status).toBe('live');
+    expect(snapshot.page.symbols[0].session).toBe('open');
+    expect(snapshot.page.symbols[0].problem).toBe(false);
+    expect(snapshot.page.symbols[0].quote_subscriber_count).toBe(0);
+    expect(snapshot.page.symbols[0].last_receive_unix_millis).toBeNull();
     expect(snapshot.timelineHistory).toBeUndefined();
   });
 
