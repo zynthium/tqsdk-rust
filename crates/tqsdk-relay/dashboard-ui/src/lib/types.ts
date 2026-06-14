@@ -111,6 +111,12 @@ export type SymbolMetricsSnapshot = {
   symbols: SymbolRow[];
 };
 
+export type DashboardSymbolRow = Pick<SymbolRow, 'symbol'> & Partial<Omit<SymbolRow, 'symbol'>>;
+
+export type DashboardSymbolMetricsSnapshot = Omit<SymbolMetricsSnapshot, 'symbols'> & {
+  symbols: DashboardSymbolRow[];
+};
+
 export type RelayEventKind =
   | 'universe_refreshed'
   | 'universe_refresh_failed'
@@ -156,7 +162,7 @@ export type DashboardSnapshot = {
   global: SymbolMetricsSummary;
   timeline: DashboardTimelineSample;
   timeline_history?: DashboardTimelineHistory;
-  page: SymbolMetricsSnapshot;
+  page: DashboardSymbolMetricsSnapshot;
   events: RelayEvent[];
 };
 

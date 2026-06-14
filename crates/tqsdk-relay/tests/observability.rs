@@ -210,7 +210,13 @@ fn dashboard_marks_no_sample_universe_symbols_initializing_during_backfill() {
         json["page"]["symbols"][0]["problem_severity"],
         "initializing"
     );
-    assert_eq!(json["page"]["symbols"][0]["problem"], false);
+    assert!(
+        json["page"]["symbols"][0]
+            .as_object()
+            .unwrap()
+            .get("problem")
+            .is_none()
+    );
 }
 
 #[test]
@@ -430,6 +436,43 @@ fn engine_dashboard_snapshot_exposes_aggregate_timeline_without_global_symbol_ro
     assert_eq!(dashboard.timeline.global.total, 2);
     assert!(dashboard.timeline.exchanges.contains_key("SHFE"));
     assert!(dashboard.timeline.exchanges.contains_key("DCE"));
+}
+
+#[test]
+fn dashboard_snapshot_serializes_compact_page_rows() {
+    let mut engine = RelayEngine::new_memory_only(256, 256);
+    let now = local_millis_at(9, 30, 0);
+    let symbols: Vec<String> = (0..200)
+        .map(|index| format!("SHFE.au{:04}", 2600 + index))
+        .collect();
+    engine.record_universe_refresh_success_for_symbols(
+        symbols.iter().map(String::as_str),
+        21,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+    for (index, symbol) in symbols.iter().enumerate() {
+        engine
+            .ingest_tick_at_for_test(symbol, tick(i64::try_from(index + 1).unwrap()), now - 1_000)
+            .unwrap();
+    }
+
+    let dashboard = engine.dashboard_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+    let json = serde_json::to_value(&dashboard).unwrap();
+    let first = json["page"]["symbols"][0].as_object().unwrap();
+
+    assert_eq!(dashboard.page.symbols.len(), 200);
+    assert_eq!(first["symbol"].as_str(), Some(symbols[0].as_str()));
+    assert!(!first.contains_key("status"));
+    assert!(!first.contains_key("coverage"));
+    assert!(!first.contains_key("in_universe"));
+    assert!(!first.contains_key("last_receive_unix_millis"));
+    assert!(!first.contains_key("last_tick_datetime_ns"));
+    assert!(
+        serde_json::to_vec(&dashboard).unwrap().len() < 70_000,
+        "dashboard snapshot should stay compact for 200 symbols"
+    );
 }
 
 #[test]

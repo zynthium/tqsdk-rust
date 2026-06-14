@@ -388,7 +388,10 @@ chart 订阅时会推进 source epoch，避免重连后首条 row id 跳变污�
 `severity`、`total`、`problem`、`receive_gap_ms` 和 `avg_receive_gap_ms`，避免 dashboard 每次轮询传输和遍历
 全量合约行。事件账本只保存在内存，当前记录 universe refresh 成功/失败、上游 flow
 incident 和 decode incident。`/symbol-metrics` 继续作为合约列表调试端点；它的
-`summary` 仍是过滤前的全局汇总，`symbols` 只代表当前查询页。
+`summary` 仍是过滤前的全局汇总，`symbols` 只代表当前查询页。为控制轮询体积，
+`/dashboard-snapshot.page.symbols` 使用 dashboard 专用紧凑行：默认值、空值和 dashboard
+不使用的 raw timestamp / DIFF row-id 明细不会下发；需要完整合约级审计字段时使用
+`/symbol-metrics`。
 
 `/dashboard` 是内置只读运维页面，每 `2s` 串行轮询 `/dashboard-snapshot`。它不连接 relay
 market websocket，不创建下游订阅，也不会触发额外行情命令。页面由
