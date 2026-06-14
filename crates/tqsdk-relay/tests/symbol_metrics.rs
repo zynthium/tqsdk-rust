@@ -99,6 +99,55 @@ fn universe_symbol_without_tick_is_missing() {
 }
 
 #[test]
+fn unobserved_symbol_inside_closed_session_is_closed_with_no_sample_flow() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(10, 20, 0);
+    store.record_universe(["DCE.m2609", "KQ.i@DCE.m"], now - 10_000);
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.summary.closed, 2);
+    assert_eq!(snapshot.summary.missing, 0);
+    assert_eq!(snapshot.summary.problem, 0);
+    for symbol in &snapshot.symbols {
+        assert_eq!(symbol.status, SymbolStatus::Closed);
+        assert_eq!(symbol.session, SymbolSession::Closed);
+        assert_eq!(symbol.flow, SymbolFlow::NoSample);
+        assert_eq!(symbol.problem_severity, SymbolProblemSeverity::Closed);
+        assert!(!symbol.problem);
+    }
+}
+
+#[test]
+fn closed_session_overrides_pending_initial_sample_status() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(10, 20, 0);
+    store.record_universe(["DCE.m2609"], now - 10_000);
+
+    let snapshot = store.snapshot_at_with_context(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+        SymbolMetricsContext {
+            initializing_universe: true,
+            initializing_pending_samples: true,
+        },
+    );
+
+    assert_eq!(snapshot.summary.closed, 1);
+    assert_eq!(snapshot.summary.initializing, 0);
+    assert_eq!(snapshot.summary.missing, 0);
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Closed);
+    assert_eq!(snapshot.symbols[0].flow, SymbolFlow::NoSample);
+}
+
+#[test]
 fn pending_universe_symbol_can_remain_initializing_after_first_sample() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);

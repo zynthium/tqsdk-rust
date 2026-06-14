@@ -436,8 +436,7 @@ impl SymbolTelemetryReadModel {
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
                 .and_then(|tick_millis| now_unix_millis.checked_sub(tick_millis));
-            let trading_phase = raw_receive_gap_ms
-                .is_some()
+            let trading_phase = (in_universe || raw_receive_gap_ms.is_some())
                 .then(|| {
                     trading_phase_for_symbol(
                         &symbol,
@@ -447,7 +446,11 @@ impl SymbolTelemetryReadModel {
                         &self.trading_calendar_days,
                     )
                 })
-                .flatten();
+                .flatten()
+                .and_then(|phase| {
+                    (raw_receive_gap_ms.is_some() || matches!(phase, TradingSessionPhase::Closed))
+                        .then_some(phase)
+                });
             let status = classify_symbol(
                 in_universe,
                 raw_receive_gap_ms,
@@ -660,6 +663,9 @@ fn classify_symbol(
     if !in_universe && receive_gap_ms.is_none() {
         return SymbolStatus::Inactive;
     }
+    if matches!(trading_phase, Some(TradingSessionPhase::Closed)) {
+        return SymbolStatus::Closed;
+    }
     if in_universe
         && receive_gap_ms.is_none()
         && (context.initializing_universe
@@ -669,9 +675,6 @@ fn classify_symbol(
     }
     if receive_gap_ms.is_none() {
         return SymbolStatus::Missing;
-    }
-    if matches!(trading_phase, Some(TradingSessionPhase::Closed)) {
-        return SymbolStatus::Closed;
     }
     match receive_gap_ms {
         Some(gap) if gap <= stale_after_millis => SymbolStatus::Live,
