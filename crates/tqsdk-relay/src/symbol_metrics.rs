@@ -9,7 +9,7 @@ use tqsdk_core::{
 };
 
 use crate::protocol::RelayTickRow;
-use crate::symbol_identity::continuous_contract_display_name;
+use crate::symbol_identity::{continuous_contract_display_name, continuous_contract_parts};
 
 const RECEIVE_GAP_SAMPLE_LIMIT: usize = 128;
 
@@ -846,9 +846,13 @@ fn fallback_trading_phase_for_symbol(
 }
 
 fn fallback_trading_segments_for_symbol(symbol: &str) -> Option<Vec<TradingSessionSegment>> {
-    let (exchange, instrument_id) = symbol.split_once('.')?;
+    let (exchange, product_id) = if let Some(parts) = continuous_contract_parts(symbol) {
+        (parts.exchange_id, parts.product_id)
+    } else {
+        let (exchange, instrument_id) = symbol.split_once('.')?;
+        (exchange, futures_product_id(instrument_id)?)
+    };
     let exchange = exchange.to_ascii_uppercase();
-    let product_id = futures_product_id(instrument_id)?;
     let product_id = product_id.to_ascii_lowercase();
     match exchange.as_str() {
         "CFFEX" => Some(cffex_trading_segments(&product_id)),
