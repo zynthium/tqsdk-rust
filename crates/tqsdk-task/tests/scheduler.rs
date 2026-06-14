@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde_json::json;
-use tqsdk_core::{TradeDirection, TradeOffset, TradingCalendarDay};
+use tqsdk_core::{TradeDirection, TradeOffset};
 use tqsdk_task::{
     OffsetPriority, PriceMode, TargetPosExecutionReport, TargetPosExecutionStep,
     TargetPosScheduleStep, TargetPosScheduler, TargetPosSchedulerConfig,
@@ -80,22 +80,6 @@ fn task_host_accepts_injected_trading_calendar() {
     host.set_trading_calendar(calendar);
 
     assert_eq!(host.trading_calendar().day_status(date), Some(false));
-}
-
-#[test]
-fn task_host_rejects_invalid_trading_calendar_date() {
-    let mut host = market_only_host();
-    let error = host
-        .extend_trading_calendar([TradingCalendarDay {
-            date: "not-a-date".to_string(),
-            trading: true,
-        }])
-        .expect_err("invalid calendar date should fail");
-
-    assert!(matches!(
-        error,
-        TaskError::InvalidCalendarDate { date } if date == "not-a-date"
-    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

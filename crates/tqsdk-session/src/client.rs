@@ -37,7 +37,7 @@ use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionServiceQuery, Symbol
 use crate::http_executor::ReqwestHttpExecutor;
 use crate::order_intent::{OrderIntentRecord, OrderIntentRegistration};
 #[cfg(feature = "services")]
-use crate::services::SessionServiceEndpoints;
+use crate::services::{SessionServiceEndpoints, TradingCalendarHolidayCache};
 #[cfg(feature = "tq-auth")]
 use crate::tq_auth::{PasswordCredentials, TqAuthProvider};
 mod auth;
@@ -75,23 +75,32 @@ impl SessionClientContext {
         auth_pass: String,
         endpoints: tqsdk_core::EndpointConfig,
     ) -> Self {
-        #[cfg(not(feature = "live"))]
-        let _ = (auth_user, auth_pass, endpoints);
-
-        Self {
-            #[cfg(feature = "live")]
+        #[cfg(feature = "services")]
+        return Self::new_with_service_endpoints(
             auth_user,
-            #[cfg(feature = "live")]
             auth_pass,
-            #[cfg(feature = "live")]
             endpoints,
-            #[cfg(feature = "services")]
-            service_endpoints: SessionServiceEndpoints::default(),
+            SessionServiceEndpoints::default(),
+        );
+
+        #[cfg(not(feature = "services"))]
+        {
+            #[cfg(not(feature = "live"))]
+            let _ = (auth_user, auth_pass, endpoints);
+
+            Self {
+                #[cfg(feature = "live")]
+                auth_user,
+                #[cfg(feature = "live")]
+                auth_pass,
+                #[cfg(feature = "live")]
+                endpoints,
+            }
         }
     }
 
-    #[cfg(all(test, feature = "services"))]
-    pub(crate) fn new_with_services(
+    #[cfg(feature = "services")]
+    pub(crate) fn new_with_service_endpoints(
         auth_user: impl Into<String>,
         auth_pass: impl Into<String>,
         endpoints: tqsdk_core::EndpointConfig,
@@ -112,6 +121,16 @@ impl SessionClientContext {
             #[cfg(feature = "services")]
             service_endpoints,
         }
+    }
+
+    #[cfg(all(test, feature = "services"))]
+    pub(crate) fn new_with_services(
+        auth_user: impl Into<String>,
+        auth_pass: impl Into<String>,
+        endpoints: tqsdk_core::EndpointConfig,
+        service_endpoints: SessionServiceEndpoints,
+    ) -> Self {
+        Self::new_with_service_endpoints(auth_user, auth_pass, endpoints, service_endpoints)
     }
 }
 
@@ -240,6 +259,8 @@ pub struct SessionClient {
     order_intents: Arc<StdMutex<HashMap<(String, String), OrderIntentRecord>>>,
     #[cfg(feature = "services")]
     service_http: reqwest::Client,
+    #[cfg(feature = "services")]
+    trading_calendar_holiday_cache: Arc<Mutex<Option<TradingCalendarHolidayCache>>>,
     #[cfg(any(feature = "services", all(test, feature = "live")))]
     context: SessionClientContext,
     io: Option<Arc<Mutex<SessionIoState>>>,
@@ -291,6 +312,8 @@ impl SessionClient {
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
+            #[cfg(feature = "services")]
+            trading_calendar_holiday_cache: Arc::new(Mutex::new(None)),
             #[cfg(any(feature = "services", all(test, feature = "live")))]
             context,
             io: Some(Arc::new(Mutex::new(SessionIoState::new(
@@ -337,6 +360,8 @@ impl SessionClient {
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
             service_http: reqwest::Client::new(),
+            #[cfg(feature = "services")]
+            trading_calendar_holiday_cache: Arc::new(Mutex::new(None)),
             #[cfg(any(feature = "services", all(test, feature = "live")))]
             context,
             io: None,
@@ -439,6 +464,21 @@ impl SessionClient {
     #[cfg(feature = "services")]
     pub(crate) fn service_endpoints(&self) -> &SessionServiceEndpoints {
         &self.context.service_endpoints
+    }
+
+    #[cfg(feature = "services")]
+    pub(crate) async fn trading_calendar_holiday_cache(
+        &self,
+    ) -> Option<TradingCalendarHolidayCache> {
+        self.trading_calendar_holiday_cache.lock().await.clone()
+    }
+
+    #[cfg(feature = "services")]
+    pub(crate) async fn set_trading_calendar_holiday_cache(
+        &self,
+        cache: TradingCalendarHolidayCache,
+    ) {
+        *self.trading_calendar_holiday_cache.lock().await = Some(cache);
     }
 
     pub(crate) fn new_manual_with_handle(handle: RuntimeHandle) -> Self {

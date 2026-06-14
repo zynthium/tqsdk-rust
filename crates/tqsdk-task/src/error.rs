@@ -55,9 +55,6 @@ pub enum TaskError {
     InvalidCheckpoint {
         reason: String,
     },
-    InvalidCalendarDate {
-        date: String,
-    },
     Unsupported(&'static str),
     InvalidState(&'static str),
 }
@@ -139,9 +136,6 @@ impl Display for TaskError {
             Self::InvalidCheckpoint { reason } => {
                 write!(f, "invalid strategy replay checkpoint: {reason}")
             }
-            Self::InvalidCalendarDate { date } => {
-                write!(f, "invalid trading calendar date: {date}")
-            }
             Self::Unsupported(message) => write!(f, "unsupported task operation: {message}"),
             Self::InvalidState(message) => write!(f, "invalid task state: {message}"),
         }
@@ -163,7 +157,6 @@ impl std::error::Error for TaskError {
             | Self::OrderNotReady { .. }
             | Self::CheckpointIo { .. }
             | Self::InvalidCheckpoint { .. }
-            | Self::InvalidCalendarDate { .. }
             | Self::Unsupported(_)
             | Self::InvalidState(_) => None,
         }

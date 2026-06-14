@@ -340,13 +340,9 @@ async fn live_service_query_pack_smoke() {
         .get_trading_calendar(start_dt, end_dt)
         .await
         .expect("get_trading_calendar should succeed");
-    let start_dt_text = start_dt.format("%Y-%m-%d").to_string();
     assert_eq!(calendar.len(), 8);
-    assert_eq!(
-        calendar.first().map(|day| day.date.as_str()),
-        Some(start_dt_text.as_str())
-    );
-    assert!(calendar.iter().any(|day| !day.date.is_empty()));
+    assert_eq!(calendar.first().map(|day| day.date), Some(start_dt));
+    assert!(calendar.iter().any(|day| day.date == end_dt));
 
     let settlement = session
         .query_symbol_settlement(&[symbol.as_str()], 5, None)

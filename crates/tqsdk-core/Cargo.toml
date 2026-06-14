@@ -10,6 +10,7 @@ license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [dependencies]
+chrono.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

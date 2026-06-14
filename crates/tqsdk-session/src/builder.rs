@@ -5,6 +5,8 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, SessionConfig, TradeSessionTarget,
 };
 
+#[cfg(feature = "services")]
+use crate::services::SessionServiceEndpoints;
 use crate::{
     client::{SessionClient, SessionClientContext},
     error::Result,
@@ -21,6 +23,8 @@ pub struct SessionClientBuilder {
     auth_user: String,
     auth_pass: String,
     endpoints: EndpointConfig,
+    #[cfg(feature = "services")]
+    service_endpoints: SessionServiceEndpoints,
     query_enabled: bool,
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
@@ -39,6 +43,8 @@ impl SessionClientBuilder {
             auth_user: auth_user.into(),
             auth_pass: auth_pass.into(),
             endpoints,
+            #[cfg(feature = "services")]
+            service_endpoints: SessionServiceEndpoints::default(),
             query_enabled: false,
             market_target: MarketSessionTarget::stock_live(),
             trade_targets: Vec::new(),
@@ -83,6 +89,13 @@ impl SessionClientBuilder {
     #[must_use]
     pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
         self.endpoints = self.endpoints.with_replay_url(replay_url);
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "services")]
+    pub fn holiday_url(mut self, holiday_url: impl Into<String>) -> Self {
+        self.service_endpoints = self.service_endpoints.with_holiday_url(holiday_url);
         self
     }
 
@@ -200,6 +213,8 @@ impl SessionClientBuilder {
             auth_user,
             auth_pass,
             endpoints,
+            #[cfg(feature = "services")]
+            service_endpoints,
             query_enabled,
             market_target,
             trade_targets,
@@ -214,6 +229,14 @@ impl SessionClientBuilder {
             market_target,
             &trade_targets,
         );
+        #[cfg(feature = "services")]
+        let context = SessionClientContext::new_with_service_endpoints(
+            auth_user,
+            auth_pass,
+            endpoints,
+            service_endpoints,
+        );
+        #[cfg(not(feature = "services"))]
         let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
         SessionClient::new_live(handle, context, config, trade_targets)
     }
@@ -312,6 +335,13 @@ macro_rules! __tqsdk_impl_session_builder_forwarders {
         #[must_use]
         pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
             self.inner = self.inner.replay_url(replay_url);
+            self
+        }
+
+        #[must_use]
+        #[cfg(feature = "services")]
+        pub fn holiday_url(mut self, holiday_url: impl Into<String>) -> Self {
+            self.inner = self.inner.holiday_url(holiday_url);
             self
         }
 

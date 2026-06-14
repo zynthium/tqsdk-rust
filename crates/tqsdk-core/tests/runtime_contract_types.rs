@@ -174,6 +174,10 @@ fn market_and_query_schema_types_deserialize_sparse_payloads() {
         "trading": true
     }))
     .expect("trading calendar day schema should deserialize");
+    assert_eq!(
+        trading_calendar_day.date,
+        chrono::NaiveDate::from_ymd_opt(2026, 4, 20).expect("fixture date should exist")
+    );
     assert!(trading_calendar_day.trading);
 
     let edb_index_data = serde_json::from_value::<EdbIndexData>(json!({
