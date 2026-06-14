@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-use chrono::{Datelike, Weekday};
+use chrono::{Datelike, NaiveDate, Weekday};
 use serde::Serialize;
 use tqsdk_core::{
     Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
@@ -157,7 +157,7 @@ pub struct SymbolTelemetryStore {
     telemetry: BTreeMap<String, SymbolTelemetry>,
     source_epoch: u64,
     last_universe_refresh_unix_millis: Option<u64>,
-    trading_calendar_days: BTreeSet<String>,
+    trading_calendar_days: BTreeSet<NaiveDate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -165,7 +165,7 @@ pub struct SymbolTelemetryReadModel {
     universe: BTreeSet<String>,
     pending_initial_samples: BTreeSet<String>,
     telemetry: BTreeMap<String, SymbolTelemetry>,
-    trading_calendar_days: BTreeSet<String>,
+    trading_calendar_days: BTreeSet<NaiveDate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -356,7 +356,7 @@ impl SymbolTelemetryStore {
     pub fn record_trading_calendar(&mut self, calendar: &[tqsdk_core::TradingCalendarDay]) {
         for day in calendar {
             if day.trading {
-                self.trading_calendar_days.insert(day.date.clone());
+                self.trading_calendar_days.insert(day.date);
             } else {
                 self.trading_calendar_days.remove(&day.date);
             }
@@ -801,7 +801,7 @@ fn trading_phase_for_symbol(
     telemetry: Option<&SymbolTelemetry>,
     local_day_offset: Duration,
     now_unix_millis: u64,
-    trading_calendar_days: &BTreeSet<String>,
+    trading_calendar_days: &BTreeSet<NaiveDate>,
 ) -> Option<TradingSessionPhase> {
     let segments = telemetry
         .and_then(|telemetry| telemetry.trading_segments.clone())
@@ -825,12 +825,11 @@ fn trading_phase_for_symbol(
 
 fn night_session_has_next_trading_day(
     local_date: chrono::NaiveDate,
-    trading_calendar_days: &BTreeSet<String>,
+    trading_calendar_days: &BTreeSet<NaiveDate>,
 ) -> bool {
     for day_offset in 1..=5 {
         let candidate = local_date + chrono::Duration::days(day_offset);
-        let date_str = candidate.format("%Y-%m-%d").to_string();
-        if !trading_calendar_days.contains(&date_str) {
+        if !trading_calendar_days.contains(&candidate) {
             continue;
         }
         return day_offset == 1
@@ -845,7 +844,7 @@ fn trading_calendar_allows_open(
     segments: &[TradingSessionSegment],
     local_day_offset: Duration,
     now_unix_millis: u64,
-    trading_calendar_days: &BTreeSet<String>,
+    trading_calendar_days: &BTreeSet<NaiveDate>,
 ) -> bool {
     let local_date = china_date_from_unix_millis(now_unix_millis);
     if !trading_calendar_contains(local_date, trading_calendar_days) {
@@ -869,10 +868,9 @@ fn trading_calendar_allows_open(
 
 fn trading_calendar_contains(
     local_date: chrono::NaiveDate,
-    trading_calendar_days: &BTreeSet<String>,
+    trading_calendar_days: &BTreeSet<NaiveDate>,
 ) -> bool {
-    let date_str = local_date.format("%Y-%m-%d").to_string();
-    trading_calendar_days.contains(&date_str)
+    trading_calendar_days.contains(&local_date)
 }
 
 fn china_date_from_unix_millis(now_unix_millis: u64) -> chrono::NaiveDate {

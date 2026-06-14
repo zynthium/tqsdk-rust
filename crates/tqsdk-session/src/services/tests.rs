@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use tqsdk_core::{AdapterRegistry, EndpointConfig, RuntimeHandle, SessionConfig};
 
 use crate::{
-    SessionClient,
+    SessionClient, SessionClientBuilder,
     client::SessionClientContext,
     direct_query::{EdbDataAlign, EdbDataFill, SymbolRankingType},
 };
@@ -20,21 +20,6 @@ fn get_trading_calendar_fetches_holiday_file_and_marks_trading_days() {
         let addr = listener.local_addr().unwrap();
 
         let server = std::thread::spawn(move || {
-            let (mut auth_stream, _) = listener.accept().unwrap();
-            let auth_request = read_http_request(&mut auth_stream);
-            let normalized_auth = auth_request.to_ascii_lowercase();
-            assert!(
-                auth_request.starts_with(
-                    "POST /auth/realms/shinnytech/protocol/openid-connect/token HTTP/1.1"
-                ),
-                "{auth_request}"
-            );
-            assert!(
-                normalized_auth.contains("content-type: application/x-www-form-urlencoded"),
-                "{auth_request}"
-            );
-            write_http_ok(&mut auth_stream, token_response_body());
-
             let (mut holiday_stream, _) = listener.accept().unwrap();
             let holiday_request = read_http_request(&mut holiday_stream);
             let normalized_holiday = holiday_request.to_ascii_lowercase();
@@ -43,7 +28,7 @@ fn get_trading_calendar_fetches_holiday_file_and_marks_trading_days() {
                 "{holiday_request}"
             );
             assert!(
-                normalized_holiday.contains("authorization: bearer"),
+                !normalized_holiday.contains("authorization:"),
                 "{holiday_request}"
             );
             write_http_ok(
@@ -69,17 +54,124 @@ fn get_trading_calendar_fetches_holiday_file_and_marks_trading_days() {
             .unwrap();
 
         assert_eq!(days.len(), 5);
-        assert_eq!(days[0].date, "2026-04-30");
+        assert_eq!(days[0].date, NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
         assert!(days[0].trading);
-        assert_eq!(days[1].date, "2026-05-01");
+        assert_eq!(days[1].date, NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
         assert!(!days[1].trading);
-        assert_eq!(days[2].date, "2026-05-02");
+        assert_eq!(days[2].date, NaiveDate::from_ymd_opt(2026, 5, 2).unwrap());
         assert!(!days[2].trading);
-        assert_eq!(days[3].date, "2026-05-03");
+        assert_eq!(days[3].date, NaiveDate::from_ymd_opt(2026, 5, 3).unwrap());
         assert!(!days[3].trading);
-        assert_eq!(days[4].date, "2026-05-04");
+        assert_eq!(days[4].date, NaiveDate::from_ymd_opt(2026, 5, 4).unwrap());
         assert!(days[4].trading);
 
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn get_trading_calendar_rejects_invalid_ranges_before_http() {
+    run_on_tokio(async {
+        let client = test_client(
+            "http://127.0.0.1:1".to_string(),
+            SessionServiceEndpoints {
+                holiday_url: "http://127.0.0.1:1/holiday.json".to_string(),
+                ..SessionServiceEndpoints::default()
+            },
+        );
+
+        let error = client
+            .get_trading_calendar(
+                NaiveDate::from_ymd_opt(2026, 5, 2).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            )
+            .await
+            .expect_err("invalid range should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("start_dt must be less than or equal to end_dt")
+        );
+    });
+}
+
+#[test]
+fn get_trading_calendar_rejects_empty_holiday_payload() {
+    assert_calendar_payload_error("[]", "trading calendar holiday payload is empty");
+}
+
+#[test]
+fn get_trading_calendar_rejects_non_string_holiday_entries() {
+    assert_calendar_payload_error(
+        r#"["2026-05-01", 1]"#,
+        "trading calendar holiday entry must be a string",
+    );
+}
+
+#[test]
+fn get_trading_calendar_rejects_invalid_holiday_dates() {
+    assert_calendar_payload_error(r#"["2026-02-30"]"#, "invalid date string `2026-02-30`");
+}
+
+#[test]
+fn get_trading_calendar_rejects_ranges_outside_holiday_years() {
+    assert_calendar_range_error(
+        r#"["2026-05-01"]"#,
+        NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(),
+        "trading calendar supports 2026-01-01 to 2026-12-31",
+    );
+}
+
+#[test]
+fn get_trading_calendar_caches_holiday_payload_per_client() {
+    run_on_tokio(async {
+        let (holiday_url, server) =
+            spawn_single_holiday_server(r#"["2026-05-01","2026-05-02","2026-05-03"]"#);
+        let client = test_client(
+            "http://127.0.0.1:1".to_string(),
+            SessionServiceEndpoints {
+                holiday_url,
+                ..SessionServiceEndpoints::default()
+            },
+        );
+
+        for _ in 0..2 {
+            let days = client
+                .get_trading_calendar(
+                    NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                )
+                .await
+                .expect("calendar should use fetched or cached holidays");
+            assert_eq!(days.len(), 1);
+            assert!(!days[0].trading);
+        }
+
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn session_builder_holiday_url_overrides_default_endpoint() {
+    run_on_tokio(async {
+        let (holiday_url, server) = spawn_single_holiday_server(r#"["2026-05-01"]"#);
+        let client = SessionClientBuilder::new("user", "pass")
+            .holiday_url(holiday_url)
+            .build()
+            .expect("session should build");
+
+        let days = client
+            .get_trading_calendar(
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            )
+            .await
+            .expect("calendar should use overridden endpoint");
+
+        assert_eq!(days.len(), 1);
+        assert!(!days[0].trading);
         server.join().unwrap();
     });
 }
@@ -331,6 +423,62 @@ fn query_edb_data_aligns_and_fills_day_series_locally() {
 
         server.join().unwrap();
     });
+}
+
+fn assert_calendar_payload_error(body: &'static str, expected: &str) {
+    assert_calendar_range_error(
+        body,
+        NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+        expected,
+    );
+}
+
+fn assert_calendar_range_error(
+    body: &'static str,
+    start_dt: NaiveDate,
+    end_dt: NaiveDate,
+    expected: &str,
+) {
+    run_on_tokio(async {
+        let (holiday_url, server) = spawn_single_holiday_server(body);
+        let client = test_client(
+            "http://127.0.0.1:1".to_string(),
+            SessionServiceEndpoints {
+                holiday_url,
+                ..SessionServiceEndpoints::default()
+            },
+        );
+
+        let error = client
+            .get_trading_calendar(start_dt, end_dt)
+            .await
+            .expect_err("calendar should reject invalid payload or range");
+
+        assert!(
+            error.to_string().contains(expected),
+            "expected `{expected}` in `{error}`"
+        );
+        server.join().unwrap();
+    });
+}
+
+fn spawn_single_holiday_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut holiday_stream, _) = listener.accept().unwrap();
+        let holiday_request = read_http_request(&mut holiday_stream);
+        let normalized = holiday_request.to_ascii_lowercase();
+        assert!(
+            holiday_request.starts_with("GET /holiday.json HTTP/1.1"),
+            "{holiday_request}"
+        );
+        assert!(!normalized.contains("authorization:"), "{holiday_request}");
+        write_http_ok(&mut holiday_stream, body);
+    });
+
+    (format!("http://{addr}/holiday.json"), server)
 }
 
 fn test_client(auth_url: String, service_endpoints: SessionServiceEndpoints) -> SessionClient {

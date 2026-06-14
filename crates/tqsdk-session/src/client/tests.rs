@@ -1237,6 +1237,8 @@ fn test_live_client_with_components(
         order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "services")]
         service_http: reqwest::Client::new(),
+        #[cfg(feature = "services")]
+        trading_calendar_holiday_cache: Arc::new(TokioMutex::new(None)),
         #[cfg(feature = "live")]
         context: SessionClientContext::new(
             "demo-user".to_string(),

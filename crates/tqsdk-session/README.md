@@ -98,12 +98,22 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 默认会预置官方静态文件域名 `https://files.shinnytech.com` 作为 schema/file-backed metadata 的基地址，因此文件型 schema/metadata 刷新不需要额外传入环境变量。
 
-对于一次性的官方 metadata / query 服务，当前也直接内置官方端点，而不是再额外暴露环境变量或 builder 配置：
+对于一次性的官方 metadata / query 服务，当前直接内置官方端点：
 
 - 交易日历：`https://files.shinnytech.com/shinny_chinese_holiday.json`
 - 结算价：`https://md-settlement-system-fc-api.shinnytech.com/mss`
 - 持仓排名：`https://symbol-ranking-system-fc-api.shinnytech.com/srs`
 - EDB：`https://edb.shinnytech.com/data/index_data`
+
+交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
+同一个 `SessionClient` 会缓存已解析的 holiday payload，重复
+`get_trading_calendar(...)` 不会反复下载同一文件。返回的 `TradingCalendarDay.date`
+是 `chrono::NaiveDate`，不再是字符串。
+
+如需替换交易日历静态文件地址，可使用：
+
+- 环境变量 `TQ_CHINESE_HOLIDAY_URL`
+- `SessionClientBuilder::holiday_url(...)`
 
 `query_graphql_value()` 与 replay 的 `*_value()` helper 只会在对应 domain 已启用时工作。query domain 现在可以承载在官方 `ins_query` websocket 链路上，也保留显式 HTTP query route 的定制能力。
 `query_graphql_value()` 会在 `SessionClient` 内部串行化完整 query lifecycle，
@@ -118,6 +128,7 @@ session facade 上并发调用。raw `query_graphql()` 只提交 command id；�
 - `futures_market()`
 - `stock_backtest_market()`
 - `futures_backtest_market()`
+- `holiday_url(...)`
 - `trade_target_tqkq()`
 - `trade_target_tqkq_numbered(<1..99>)`
 - `trade_target_tqkq_stock()`
@@ -244,7 +255,8 @@ helper 仍是底层 escape hatch。
 - `query_atm_options(...)` 已实现
 - `query_all_level_options(...)` 已实现
 - `query_all_level_finance_options(...)` 已实现
-- `get_trading_calendar(...)` 已实现
+- `get_trading_calendar(...)` 已实现，返回的 `TradingCalendarDay.date` 是
+  `chrono::NaiveDate`
 - `query_symbol_settlement(...)` 已实现
 - `query_symbol_ranking(...)` 已实现
 - `query_edb_data(...)` 已实现

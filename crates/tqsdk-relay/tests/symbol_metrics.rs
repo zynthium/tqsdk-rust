@@ -1088,11 +1088,11 @@ fn sunday_night_does_not_open_before_monday_trading_day() {
     );
     store.record_trading_calendar(&[
         tqsdk_core::TradingCalendarDay {
-            date: "2026-06-14".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 14).expect("test date should be valid"),
             trading: false,
         },
         tqsdk_core::TradingCalendarDay {
-            date: "2026-06-15".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 15).expect("test date should be valid"),
             trading: true,
         },
     ]);
@@ -1143,11 +1143,11 @@ fn monday_early_morning_after_non_trading_sunday_is_closed() {
     );
     store.record_trading_calendar(&[
         tqsdk_core::TradingCalendarDay {
-            date: "2026-06-14".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 14).expect("test date should be valid"),
             trading: false,
         },
         tqsdk_core::TradingCalendarDay {
-            date: "2026-06-15".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 6, 15).expect("test date should be valid"),
             trading: true,
         },
     ]);

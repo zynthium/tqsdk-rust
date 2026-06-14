@@ -167,11 +167,11 @@ mod tests {
         calendar
             .extend([
                 TradingCalendarDay {
-                    date: "2026-05-01".to_string(),
+                    date: NaiveDate::from_ymd_opt(2026, 5, 1).expect("fixture date should exist"),
                     trading: false,
                 },
                 TradingCalendarDay {
-                    date: "2026-05-04".to_string(),
+                    date: NaiveDate::from_ymd_opt(2026, 5, 4).expect("fixture date should exist"),
                     trading: true,
                 },
             ])

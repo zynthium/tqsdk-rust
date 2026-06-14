@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use tqsdk_core::TradingCalendarDay;
 
-use crate::{Result, TaskError};
+use crate::Result;
 
 /// Minimal trading-day cache used by task schedulers.
 ///
@@ -44,12 +44,7 @@ impl TradingDayCalendar {
         days: impl IntoIterator<Item = TradingCalendarDay>,
     ) -> Result<()> {
         for day in days {
-            let date = NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").map_err(|_| {
-                TaskError::InvalidCalendarDate {
-                    date: day.date.clone(),
-                }
-            })?;
-            self.days.insert(date, day.trading);
+            self.days.insert(day.date, day.trading);
         }
         Ok(())
     }

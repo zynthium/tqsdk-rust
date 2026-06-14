@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ pub struct SymbolRanking {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TradingCalendarDay {
-    pub date: String,
+    pub date: NaiveDate,
     pub trading: bool,
 }
 

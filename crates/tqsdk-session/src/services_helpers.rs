@@ -67,6 +67,25 @@ pub(super) async fn fetch_json_get(client: &SessionClient, url: &str) -> Result<
     fetch_json(client, "GET", url, None).await
 }
 
+pub(super) async fn fetch_public_json_get(client: &SessionClient, url: &str) -> Result<Value> {
+    require_tokio_runtime()?;
+    let response = client
+        .service_http()
+        .get(url)
+        .header(ACCEPT, HeaderValue::from_static("application/json"))
+        .header(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| {
+            SessionFacadeError::from(tqsdk_core::ContractError::transport(format!(
+                "GET {url} request failed: {error}"
+            )))
+        })?;
+
+    read_json_response("GET", url, response).await
+}
+
 pub(super) async fn fetch_json_post(
     client: &SessionClient,
     url: &str,

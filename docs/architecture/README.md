@@ -224,7 +224,7 @@ V1 是：
 | GraphQL / HTTP query | `tqsdk-session` | 一次 `await` 请求/响应，不依赖 `wait_update()` 或 stream |
 | schema refresh / fetch | `tqsdk-session` | 一次性拉取/刷新，不是持续变化对象 |
 | 合约元数据查询 / `SymbolInfo` / `InstrumentSpec` 标准化 | `tqsdk-session` | 属于 direct query / metadata，不需要模式化消费 |
-| 交易日历 | `tqsdk-session` | 一次性结果，不应绑定某种 diff 消费形状 |
+| 交易日历 | `tqsdk-session` | 一次性结果，不应绑定某种 diff 消费形状；`TradingCalendarDay.date` 是 typed `NaiveDate` |
 | `SymbolSettlement` / `SymbolRanking` / 其他 metadata query | `tqsdk-session` | 都是 query 结果，不是 live object |
 | session 内订单 intent ledger | `tqsdk-session` | 是 shared session substrate，帮助 wait/stream/task 复用同一 client order id 去重语义，但不拥有 live order object |
 | 低层行情命令 helper | `tqsdk-session` | 是一次性 runtime command submission，不拥有 live quote object 或消费循环 |

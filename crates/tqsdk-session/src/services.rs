@@ -14,14 +14,15 @@ use crate::error::{Result, SessionFacadeError};
 mod helpers;
 
 use self::helpers::{
-    fetch_json_get, fetch_json_post, json_value_to_f64, next_day, parse_iso_date,
-    parse_service_url, ranking_value, split_symbol,
+    fetch_json_get, fetch_json_post, fetch_public_json_get, json_value_to_f64, next_day,
+    parse_iso_date, parse_service_url, ranking_value, split_symbol,
 };
 
 const DEFAULT_SETTLEMENT_URL: &str = "https://md-settlement-system-fc-api.shinnytech.com/mss";
 const DEFAULT_RANKING_URL: &str = "https://symbol-ranking-system-fc-api.shinnytech.com/srs";
 const DEFAULT_EDB_URL: &str = "https://edb.shinnytech.com/data/index_data";
 const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_holiday.json";
+const HOLIDAY_URL_ENV: &str = "TQ_CHINESE_HOLIDAY_URL";
 
 type EdbRowMap = HashMap<String, HashMap<i32, f64>>;
 
@@ -39,9 +40,27 @@ impl Default for SessionServiceEndpoints {
             settlement_url: DEFAULT_SETTLEMENT_URL.to_string(),
             ranking_url: DEFAULT_RANKING_URL.to_string(),
             edb_url: DEFAULT_EDB_URL.to_string(),
-            holiday_url: DEFAULT_HOLIDAY_URL.to_string(),
+            holiday_url: std::env::var(HOLIDAY_URL_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_HOLIDAY_URL.to_string()),
         }
     }
+}
+
+impl SessionServiceEndpoints {
+    pub(crate) fn with_holiday_url(mut self, holiday_url: impl Into<String>) -> Self {
+        self.holiday_url = holiday_url.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TradingCalendarHolidayCache {
+    holidays: HashSet<NaiveDate>,
+    first_day: NaiveDate,
+    last_day: NaiveDate,
 }
 
 impl SessionClient {
@@ -58,47 +77,22 @@ impl SessionClient {
             ));
         }
 
-        let holidays = fetch_json_get(self, &self.service_endpoints().holiday_url).await?;
-        let items = holidays.as_array().ok_or_else(|| {
-            SessionFacadeError::from(tqsdk_core::ContractError::validation(
-                "trading calendar holiday payload must be an array",
-            ))
-        })?;
-
-        let mut holiday_set = HashSet::new();
-        let mut years = Vec::new();
-        for item in items {
-            let value = item.as_str().ok_or_else(|| {
-                SessionFacadeError::from(tqsdk_core::ContractError::validation(
-                    "trading calendar holiday entry must be a string",
-                ))
-            })?;
-            let date = parse_iso_date(value)?;
-            holiday_set.insert(date);
-            years.push(date.year());
-        }
-
-        let (Some(first_year), Some(last_year)) = (years.iter().min(), years.iter().max()) else {
-            return Err(SessionFacadeError::from(
-                tqsdk_core::ContractError::validation("trading calendar holiday payload is empty"),
-            ));
+        let cache = if let Some(cache) = self.trading_calendar_holiday_cache().await {
+            cache
+        } else {
+            let holidays =
+                fetch_public_json_get(self, &self.service_endpoints().holiday_url).await?;
+            let cache = parse_trading_calendar_holiday_cache(holidays)?;
+            self.set_trading_calendar_holiday_cache(cache.clone()).await;
+            cache
         };
-        let first_day = NaiveDate::from_ymd_opt(*first_year, 1, 1).ok_or_else(|| {
-            SessionFacadeError::from(tqsdk_core::ContractError::validation(
-                "failed to build trading calendar lower bound",
-            ))
-        })?;
-        let last_day = NaiveDate::from_ymd_opt(*last_year, 12, 31).ok_or_else(|| {
-            SessionFacadeError::from(tqsdk_core::ContractError::validation(
-                "failed to build trading calendar upper bound",
-            ))
-        })?;
-        if start_dt < first_day || end_dt > last_day {
+
+        if start_dt < cache.first_day || end_dt > cache.last_day {
             return Err(SessionFacadeError::from(
                 tqsdk_core::ContractError::validation(format!(
                     "trading calendar supports {} to {}",
-                    first_day.format("%Y-%m-%d"),
-                    last_day.format("%Y-%m-%d")
+                    cache.first_day.format("%Y-%m-%d"),
+                    cache.last_day.format("%Y-%m-%d")
                 )),
             ));
         }
@@ -107,9 +101,9 @@ impl SessionClient {
         let mut current = start_dt;
         while current <= end_dt {
             let trading =
-                current.weekday().number_from_monday() <= 5 && !holiday_set.contains(&current);
+                current.weekday().number_from_monday() <= 5 && !cache.holidays.contains(&current);
             rows.push(TradingCalendarDay {
-                date: current.format("%Y-%m-%d").to_string(),
+                date: current,
                 trading,
             });
             current = next_day(current)?;
@@ -241,6 +235,49 @@ impl SessionClient {
         )?;
         Ok(collect_edb_data_rows(dates, rows, &deduped_ids))
     }
+}
+
+fn parse_trading_calendar_holiday_cache(holidays: Value) -> Result<TradingCalendarHolidayCache> {
+    let items = holidays.as_array().ok_or_else(|| {
+        SessionFacadeError::from(tqsdk_core::ContractError::validation(
+            "trading calendar holiday payload must be an array",
+        ))
+    })?;
+
+    let mut holiday_set = HashSet::new();
+    let mut years = Vec::new();
+    for item in items {
+        let value = item.as_str().ok_or_else(|| {
+            SessionFacadeError::from(tqsdk_core::ContractError::validation(
+                "trading calendar holiday entry must be a string",
+            ))
+        })?;
+        let date = parse_iso_date(value)?;
+        holiday_set.insert(date);
+        years.push(date.year());
+    }
+
+    let (Some(first_year), Some(last_year)) = (years.iter().min(), years.iter().max()) else {
+        return Err(SessionFacadeError::from(
+            tqsdk_core::ContractError::validation("trading calendar holiday payload is empty"),
+        ));
+    };
+    let first_day = NaiveDate::from_ymd_opt(*first_year, 1, 1).ok_or_else(|| {
+        SessionFacadeError::from(tqsdk_core::ContractError::validation(
+            "failed to build trading calendar lower bound",
+        ))
+    })?;
+    let last_day = NaiveDate::from_ymd_opt(*last_year, 12, 31).ok_or_else(|| {
+        SessionFacadeError::from(tqsdk_core::ContractError::validation(
+            "failed to build trading calendar upper bound",
+        ))
+    })?;
+
+    Ok(TradingCalendarHolidayCache {
+        holidays: holiday_set,
+        first_day,
+        last_day,
+    })
 }
 
 fn validate_symbol_ranking_args(symbol: &str, days: usize, broker: Option<&str>) -> Result<()> {

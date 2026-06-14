@@ -60,6 +60,9 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 - 证券对象：`SecurityAccount`、`SecurityPosition`、`SecurityOrder`、`SecurityTrade`。
 - 查询 / 元数据对象：`TradingStatus`、`SymbolSettlement`、`SymbolRanking`、`TradingCalendarDay`、`EdbIndexData`。
 
+`TradingCalendarDay.date` 使用 `chrono::NaiveDate`，避免上层 task、relay 或
+research 代码反复解析 `YYYY-MM-DD` 字符串。
+
 期货 `Order` / `Trade` 的方向、开平字段，以及 `Order.price_type`，使用
 `Option<TradeDirection>`、`Option<TradeOffset>`、`Option<TradePriceType>` 表达官方协议枚举；
 缺失、`null` 或空字符串仍按 `None` 处理，避免 schema 稀疏 diff 破坏反序列化。
