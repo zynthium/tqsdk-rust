@@ -997,6 +997,36 @@ fn tick_only_symbol_uses_futures_session_fallback_for_midday_break() {
 }
 
 #[test]
+fn continuous_contract_uses_underlying_futures_session_fallback_for_midday_break() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(10, 20, 0);
+    store.record_universe(["KQ.i@DCE.m"], now - 90_000);
+    store.record_tick_at(
+        "KQ.i@DCE.m",
+        &tick(
+            1,
+            i64::try_from((now - 90_000) * 1_000_000).unwrap(),
+            3100.0,
+        ),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let json = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(json["symbols"][0]["status"], "closed");
+    assert_eq!(json["symbols"][0]["session"], "closed");
+    assert_eq!(json["symbols"][0]["problem"], false);
+    assert_eq!(json["summary"]["closed"], 1);
+    assert_eq!(json["summary"]["stale"], 0);
+}
+
+#[test]
 fn tick_only_symbol_uses_query_symbol_info_trading_time_before_fallback() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(14, 0, 0);
