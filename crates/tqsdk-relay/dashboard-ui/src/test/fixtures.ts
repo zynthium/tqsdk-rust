@@ -80,6 +80,7 @@ export function row(overrides: Partial<SymbolRow> = {}): SymbolRow {
 
 export function symbolSnapshot(rows: SymbolRow[]): SymbolMetricsSnapshot {
   const summaryRows = rows;
+  const activeDelayRows = summaryRows.filter((item) => item.session !== 'closed');
   return {
     now_unix_millis: NOW,
     data_stale_after_millis: 30_000,
@@ -112,7 +113,7 @@ export function symbolSnapshot(rows: SymbolRow[]): SymbolMetricsSnapshot {
         (sum, item) => sum + Number(item.out_of_order_rows || 0),
         0,
       ),
-      p95_receive_gap_ms: summaryRows.reduce<number | null>((max, item) => {
+      p95_receive_gap_ms: activeDelayRows.reduce<number | null>((max, item) => {
         if (item.receive_gap_ms == null) return max;
         return max == null ? item.receive_gap_ms : Math.max(max, item.receive_gap_ms);
       }, null),
@@ -143,16 +144,17 @@ function timelineScope(rows: SymbolRow[]): DashboardTimelineScope {
   else if (rows.some((item) => item.problem_severity === 'warn')) severity = 'warn';
   else if (rows.every((item) => item.flow === 'no_sample')) severity = 'no_sample';
   else if (rows.every((item) => item.session === 'unknown')) severity = 'unknown';
+  const activeDelayRows = rows.filter((item) => item.session !== 'closed');
   return {
     severity,
     total: rows.length,
     problem: rows.filter((item) => item.problem).length,
-    receive_gap_ms: rows.reduce<number | null>((max, item) => {
+    receive_gap_ms: activeDelayRows.reduce<number | null>((max, item) => {
       if (item.receive_gap_ms == null) return max;
       return max == null ? item.receive_gap_ms : Math.max(max, item.receive_gap_ms);
     }, null),
     avg_receive_gap_ms: (() => {
-      const gaps = rows
+      const gaps = activeDelayRows
         .map((item) => item.avg_receive_gap_ms)
         .filter((gap): gap is number => gap != null);
       if (gaps.length === 0) return null;

@@ -29,7 +29,7 @@
   );
 
   function idleValue(model: IntegrityModel, idleMs: number | null): string {
-    if (model.idleDisplayState === 'closed') return '休市';
+    if (model.idleDisplayState === 'closed') return '--';
     if (model.idleDisplayState === 'subscribing') return '订阅中';
     if (model.idleDisplayState === 'backfilling') return '补历史';
     return formatDuration(idleMs);

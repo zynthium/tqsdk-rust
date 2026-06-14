@@ -23,8 +23,12 @@ describe('timeline', () => {
         symbol: 'SHFE.au2602',
         status: 'closed',
         session: 'closed',
+        flow: 'no_sample',
         problem: false,
         problem_severity: 'closed',
+        receive_gap_ms: null,
+        avg_receive_gap_ms: null,
+        market_time_lag_ms: null,
       }),
       row({
         symbol: 'DCE.m2609',
@@ -77,6 +81,9 @@ describe('timeline', () => {
         integrity: 'suspected',
         problem: false,
         problem_severity: 'closed',
+        receive_gap_ms: null,
+        avg_receive_gap_ms: null,
+        market_time_lag_ms: null,
       }),
     ]);
 

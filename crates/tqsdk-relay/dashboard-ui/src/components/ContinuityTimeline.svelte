@@ -137,6 +137,7 @@
   }
 
   function averageLatencyLabel(definition: TimelineDefinition): string {
+    if (latestSample && cellSeverity(definition, latestSample) === 'closed') return '⌁ --';
     const average = latestSample ? definition.averageLatency(latestSample) : null;
     return average == null ? '⌁ --' : `⌁ ${formatDuration(average)}`;
   }
@@ -173,7 +174,9 @@
 
   function cellTitle(definition: TimelineDefinition, sample: TimelineSample | null): string {
     if (!sample) return `${definition.label} 无样本`;
-    return `${definition.label} ${cellSeverity(definition, sample)} ${definition.summary} ${formatDuration(latency(definition, sample))}`;
+    const severity = cellSeverity(definition, sample);
+    const delay = severity === 'closed' ? '--' : formatDuration(latency(definition, sample));
+    return `${definition.label} ${severity} ${definition.summary} ${delay}`;
   }
 
   function handleHover(definition: TimelineDefinition, event: MouseEvent) {
@@ -276,6 +279,10 @@
     return row.quote_subscriber_count + row.chart_subscriber_count;
   }
 
+  function rowDelayLabel(row: SymbolRow, value: number | null | undefined): string {
+    return row.session === 'closed' ? '--' : formatDuration(value);
+  }
+
   function toggleExchange(exchange: string) {
     expandedExchanges = expandedExchanges.includes(exchange)
       ? expandedExchanges.filter((item) => item !== exchange)
@@ -333,7 +340,7 @@
           data-testid="timeline-symbol-row"
           class="row-label symbol-row"
           title={definition.row.symbol}
-          aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${formatDuration(definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
+          aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${rowDelayLabel(definition.row, definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
         >
           <span class="symbol-name">{definition.label}</span>
           <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
@@ -369,9 +376,9 @@
     <div class="health-tooltip" style={`left: ${tooltipX}px; top: ${tooltipY}px;`}>
       <div class="tooltip-title">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
       <div class="tooltip-body">
-        <div><span>接收延迟</span><b>{formatDuration(hoveredSymbolRow.receive_gap_ms)}</b></div>
-        <div><span>平均接收</span><b>{formatDuration(hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
-        <div><span>行情延时</span><b>{formatDuration(hoveredSymbolRow.market_time_lag_ms)}</b></div>
+        <div><span>接收延迟</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.receive_gap_ms)}</b></div>
+        <div><span>平均接收</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
+        <div><span>行情延时</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.market_time_lag_ms)}</b></div>
         <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
         {#if hoveredSymbolRow.last_invalid_row_error}
           <div class="error" title={hoveredSymbolRow.last_invalid_row_error}>{hoveredSymbolRow.last_invalid_row_error}</div>

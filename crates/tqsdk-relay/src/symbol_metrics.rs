@@ -428,15 +428,15 @@ impl SymbolTelemetryReadModel {
             let subscriptions = subscriptions.get(&symbol).copied().unwrap_or_default();
             let subscribed = subscriptions.quote_subscriber_count > 0
                 || subscriptions.chart_subscriber_count > 0;
-            let receive_gap_ms = telemetry
+            let raw_receive_gap_ms = telemetry
                 .and_then(|telemetry| telemetry.last_receive_unix_millis)
                 .map(|last_receive| now_unix_millis.saturating_sub(last_receive));
             let pending_initial_sample = self.pending_initial_samples.contains(&symbol);
-            let market_time_lag_ms = telemetry
+            let raw_market_time_lag_ms = telemetry
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
-                .map(|tick_millis| now_unix_millis.saturating_sub(tick_millis));
-            let trading_phase = receive_gap_ms
+                .and_then(|tick_millis| now_unix_millis.checked_sub(tick_millis));
+            let trading_phase = raw_receive_gap_ms
                 .is_some()
                 .then(|| {
                     trading_phase_for_symbol(
@@ -450,7 +450,7 @@ impl SymbolTelemetryReadModel {
                 .flatten();
             let status = classify_symbol(
                 in_universe,
-                receive_gap_ms,
+                raw_receive_gap_ms,
                 stale_after_millis,
                 trading_phase,
                 pending_initial_sample,
@@ -459,7 +459,17 @@ impl SymbolTelemetryReadModel {
             let telemetry = telemetry.cloned().unwrap_or_default();
             let coverage = coverage_for(in_universe);
             let session = session_for(trading_phase);
-            let flow = flow_for(receive_gap_ms, stale_after_millis);
+            let is_closed = status == SymbolStatus::Closed;
+            let receive_gap_ms = (!is_closed).then_some(raw_receive_gap_ms).flatten();
+            let avg_receive_gap_ms = (!is_closed)
+                .then(|| average_receive_gap_ms(&telemetry.receive_gap_samples_ms))
+                .flatten();
+            let market_time_lag_ms = (!is_closed).then_some(raw_market_time_lag_ms).flatten();
+            let flow = if is_closed {
+                SymbolFlow::NoSample
+            } else {
+                flow_for(raw_receive_gap_ms, stale_after_millis)
+            };
             let integrity = integrity_for(status);
             let problem_severity = problem_severity_for(status, coverage, telemetry.invalid_rows);
             let instrument_name = telemetry
@@ -489,7 +499,7 @@ impl SymbolTelemetryReadModel {
                 out_of_order_rows: telemetry.out_of_order_rows,
                 last_gap_unix_millis: telemetry.last_gap_unix_millis,
                 receive_gap_ms,
-                avg_receive_gap_ms: average_receive_gap_ms(&telemetry.receive_gap_samples_ms),
+                avg_receive_gap_ms,
                 market_time_lag_ms,
                 last_receive_unix_millis: telemetry.last_receive_unix_millis,
                 last_tick_datetime_ns: telemetry.last_tick_datetime_ns,
