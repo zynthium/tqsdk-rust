@@ -135,7 +135,8 @@ JS/CSS 预算回退。dashboard 页面不得展示会被误认为
 `/dashboard-snapshot?timeline_history=1` 恢复服务端缓存的 5 分钟压缩历史，后续普通轮询
 不得重复携带完整历史；交易所展开行只能维护当前 page rows 的 bounded symbol history，
 不应恢复轮询全量 `global_symbols` 后再在前端重算全市场时间带。连续性面板里的近期平均 tick 接收延迟必须来自服务端逐合约计算的
-`avg_receive_gap_ms`，UI 只负责逐品种同规格展示，不应从前端 bucket 再推导平均延迟。
+`avg_receive_gap_ms`，UI 只负责逐品种同规格展示，不应从前端 bucket 再推导平均延迟；
+`session=closed` 的合约不参与活跃延迟聚合，数值位置显示 `--`。
 
 推荐的 V1 回归入口：
 

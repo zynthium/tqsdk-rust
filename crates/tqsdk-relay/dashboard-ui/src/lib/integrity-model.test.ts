@@ -6,11 +6,14 @@ describe('deriveIntegrity', () => {
   it('keeps closed rows out of active problem count', () => {
     const closed = row({
       status: 'closed',
+      session: 'closed',
+      flow: 'no_sample',
       problem: false,
       problem_severity: 'closed',
       invalid_rows: 7,
-      receive_gap_ms: 90_000,
-      market_time_lag_ms: 90_000,
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
     });
     const stale = row({
       symbol: 'DCE.m2609',
@@ -30,8 +33,26 @@ describe('deriveIntegrity', () => {
   });
 
   it('detects global market closure and suppresses upstream idle alerts', () => {
-    const closedRow1 = row({ status: 'closed', problem: false, problem_severity: 'closed' });
-    const closedRow2 = row({ status: 'closed', problem: false, problem_severity: 'closed' });
+    const closedRow1 = row({
+      status: 'closed',
+      session: 'closed',
+      flow: 'no_sample',
+      problem: false,
+      problem_severity: 'closed',
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
+    });
+    const closedRow2 = row({
+      status: 'closed',
+      session: 'closed',
+      flow: 'no_sample',
+      problem: false,
+      problem_severity: 'closed',
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
+    });
 
     const model = deriveIntegrity(
       metrics({
@@ -311,7 +332,16 @@ describe('deriveIntegrity', () => {
   });
 
   it('keeps degraded upstream visible even when all symbols are closed', () => {
-    const closedRow = row({ status: 'closed', problem: false, problem_severity: 'closed' });
+    const closedRow = row({
+      status: 'closed',
+      session: 'closed',
+      flow: 'no_sample',
+      problem: false,
+      problem_severity: 'closed',
+      receive_gap_ms: null,
+      avg_receive_gap_ms: null,
+      market_time_lag_ms: null,
+    });
 
     const model = deriveIntegrity(
       metrics({

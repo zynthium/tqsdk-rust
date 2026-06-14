@@ -168,4 +168,62 @@ describe('App', () => {
     expect(screen.queryByText('链路异常')).toBeNull();
     expect(screen.queryByText('需关注')).toBeNull();
   });
+
+  it('shows placeholders instead of delay values while the market is closed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        if (path.includes('/dashboard-snapshot')) {
+          return Response.json(
+            dashboardSnapshot(
+              [
+                row({
+                  symbol: 'SHFE.au2602',
+                  instrument_name: '沪金2602',
+                  status: 'closed',
+                  session: 'closed',
+                  flow: 'no_sample',
+                  problem: false,
+                  problem_severity: 'closed',
+                  receive_gap_ms: null,
+                  avg_receive_gap_ms: null,
+                  market_time_lag_ms: null,
+                }),
+                row({
+                  symbol: 'DCE.m2609',
+                  instrument_name: '豆粕2609',
+                  status: 'closed',
+                  session: 'closed',
+                  flow: 'no_sample',
+                  problem: false,
+                  problem_severity: 'closed',
+                  receive_gap_ms: null,
+                  avg_receive_gap_ms: null,
+                  market_time_lag_ms: null,
+                }),
+              ],
+              {
+                upstream_stage: 'live',
+                upstream_frame_idle_ms: 9_000,
+                upstream_frame_idle_health: 'critical',
+                upstream_event_idle_ms: 9_000,
+                upstream_event_idle_health: 'critical',
+              },
+            ),
+          );
+        }
+        return Response.json({ error: 'not found' }, { status: 404 });
+      }),
+    );
+
+    render(App);
+
+    expect(await screen.findByText('全市场休盘')).toBeTruthy();
+    expect(screen.getByText('帧 -- / 事件 --')).toBeTruthy();
+    expect(screen.getAllByText('⌁ --').length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByText('行情静默预警')).toBeNull();
+    expect(screen.queryByText('链路异常')).toBeNull();
+    expect(screen.queryByText('9.0s')).toBeNull();
+  });
 });

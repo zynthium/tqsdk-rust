@@ -13,14 +13,14 @@ describe('ContinuityTimeline', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
-        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         exchanges: {
-          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         },
       },
       symbols: {
-        'SHFE.au2602': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        'SHFE.au2602': { severity: 'closed', receive_gap_ms: null, avg_receive_gap_ms: null },
       },
     };
 
@@ -31,31 +31,44 @@ describe('ContinuityTimeline', () => {
           symbol: 'SHFE.au2602',
           status: 'closed',
           session: 'closed',
+          flow: 'no_sample',
           problem: false,
           problem_severity: 'closed',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
         }),
       ],
     });
 
     await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
     const closedCells = view.baseElement.querySelectorAll('.cell.unknown');
+    const symbolRow = view.getByTestId('timeline-symbol-row');
 
     expect(closedCells.length).toBeGreaterThanOrEqual(2);
     expect(view.baseElement.querySelector('.cell.closed')).toBeNull();
+    expect(symbolRow.getAttribute('aria-label')).toContain('--');
+    expect(view.getAllByText('⌁ --').length).toBeGreaterThanOrEqual(3);
+
+    const cells = view.baseElement.querySelectorAll('.cell');
+    await fireEvent.mouseMove(cells[cells.length - 1], { clientX: 20, clientY: 20 });
+
+    expect(view.getAllByText('--')).toHaveLength(3);
+    expect(view.queryByText('0ms')).toBeNull();
   });
 
   it('uses closed-session color for missing buckets when the latest exchange sample is closed', () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
-        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        global: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         exchanges: {
-          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+          SHFE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         },
       },
       symbols: {
-        'SHFE.al2608': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        'SHFE.al2608': { severity: 'closed', receive_gap_ms: null, avg_receive_gap_ms: null },
       },
     };
     const view = render(ContinuityTimeline, {
@@ -65,8 +78,12 @@ describe('ContinuityTimeline', () => {
           symbol: 'SHFE.al2608',
           status: 'closed',
           session: 'closed',
+          flow: 'no_sample',
           problem: false,
           problem_severity: 'closed',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
         }),
       ],
     });
@@ -341,13 +358,13 @@ describe('ContinuityTimeline', () => {
         subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         exchanges: {
           DCE: { severity: 'warn', total: 2, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
-          CZCE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+          CZCE: { severity: 'closed', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
         },
       },
       symbols: {
         'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
         'DCE.i2609': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
-        'CZCE.AP610': { severity: 'closed', receive_gap_ms: 0, avg_receive_gap_ms: 0 },
+        'CZCE.AP610': { severity: 'closed', receive_gap_ms: null, avg_receive_gap_ms: null },
       },
     };
     const props = {
@@ -372,8 +389,12 @@ describe('ContinuityTimeline', () => {
           instrument_name: '苹果610',
           status: 'closed',
           session: 'closed',
+          flow: 'no_sample',
           problem: false,
           problem_severity: 'closed',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
         }),
       ],
     };

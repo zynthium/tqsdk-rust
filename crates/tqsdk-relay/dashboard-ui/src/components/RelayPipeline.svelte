@@ -57,6 +57,7 @@
   }
 
   function cacheMeta(model: IntegrityModel): string {
+    if (model.cacheHealth === 'closed') return '帧 -- / 事件 --';
     return `帧 ${formatDuration(model.upstreamIdleMs)} / 事件 ${formatDuration(model.eventIdleMs)}`;
   }
 

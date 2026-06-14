@@ -177,6 +177,34 @@ fn ticked_symbol_transitions_from_live_to_stale() {
 }
 
 #[test]
+fn future_tick_datetime_does_not_report_zero_market_lag() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(9, 30, 0);
+    let future_tick_datetime_ns = i64::try_from((now + 500) * 1_000_000).unwrap();
+    store.record_universe(["SHFE.au2602"], now - 2_000);
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(1, future_tick_datetime_ns, 610.0),
+        now - 100,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+
+    assert_eq!(snapshot.symbols[0].status, SymbolStatus::Live);
+    assert_eq!(snapshot.symbols[0].receive_gap_ms, Some(100));
+    assert_eq!(snapshot.symbols[0].market_time_lag_ms, None);
+    assert_eq!(
+        snapshot.symbols[0].last_tick_datetime_ns,
+        Some(future_tick_datetime_ns)
+    );
+}
+
+#[test]
 fn sequential_tick_ids_do_not_create_continuity_problems() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);
@@ -812,6 +840,72 @@ fn stale_quote_inside_day_rest_session_is_closed_not_problematic() {
     assert_eq!(json["symbols"][0]["status"], "closed");
     assert_eq!(json["summary"]["closed"], 1);
     assert_eq!(json["summary"]["stale"], 0);
+    assert_eq!(
+        json["symbols"][0]["receive_gap_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["symbols"][0]["avg_receive_gap_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["symbols"][0]["market_time_lag_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["summary"]["p95_receive_gap_ms"],
+        serde_json::Value::Null
+    );
+    assert!(snapshot.symbols[0].last_receive_unix_millis.is_some());
+}
+
+#[test]
+fn closed_session_nulls_active_delay_fields_but_keeps_raw_timestamps() {
+    let mut store = SymbolTelemetryStore::default();
+    let now = local_millis_at(11, 0, 0);
+    store.record_universe(["SHFE.au2602"], now - 120_000);
+    store.record_symbol_trading_time(
+        "SHFE.au2602",
+        &TradingTime {
+            day: vec![vec!["09:00:00".to_string(), "10:15:00".to_string()]],
+            night: Vec::new(),
+        },
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(
+            1,
+            i64::try_from((now - 120_000) * 1_000_000).unwrap(),
+            610.0,
+        ),
+        now - 120_000,
+    );
+    store.record_tick_at(
+        "SHFE.au2602",
+        &tick(2, i64::try_from((now - 90_000) * 1_000_000).unwrap(), 611.0),
+        now - 90_000,
+    );
+
+    let snapshot = store.snapshot_at(
+        now,
+        30_000,
+        &Default::default(),
+        &SymbolMetricsQuery::default(),
+    );
+    let symbol = &snapshot.symbols[0];
+
+    assert_eq!(symbol.status, SymbolStatus::Closed);
+    assert_eq!(symbol.session, SymbolSession::Closed);
+    assert_eq!(symbol.flow, SymbolFlow::NoSample);
+    assert_eq!(symbol.receive_gap_ms, None);
+    assert_eq!(symbol.avg_receive_gap_ms, None);
+    assert_eq!(symbol.market_time_lag_ms, None);
+    assert_eq!(snapshot.summary.p95_receive_gap_ms, None);
+    assert_eq!(symbol.last_receive_unix_millis, Some(now - 90_000));
+    assert_eq!(
+        symbol.last_tick_datetime_ns,
+        Some(i64::try_from((now - 90_000) * 1_000_000).unwrap())
+    );
 }
 
 #[test]

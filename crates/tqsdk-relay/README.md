@@ -366,7 +366,10 @@ open http://127.0.0.1:7789/dashboard
 数据解码告警和完整性异常计数的统一口径；响应同时包含 `market_time_lag_ms`，用于辅助
 判断行情时间与本地时间的差距；`ticks_ingested` 仍只统计 tick row，用于区分 quote-only
 远月合约；`avg_receive_gap_ms` 在服务端按每个合约的 tick 接收时间单独计算，用于
-dashboard 重点观察近期平均 tick 接收延迟。连续合约会优先继承产品发现时拿到的官方
+dashboard 重点观察近期平均 tick 接收延迟。`session=closed` 时，
+`receive_gap_ms`、`avg_receive_gap_ms` 和 `market_time_lag_ms` 这些活跃延迟字段返回
+`null`，但 `last_receive_unix_millis` 和 `last_tick_datetime_ns` 仍保留原始观测时间戳
+用于审计；dashboard 在这些数值位置显示 `--`。连续合约会优先继承产品发现时拿到的官方
 产品名称；无官方名称时会做最小中文展示名兜底，例如 `KQ.m@SHFE.au` 显示为“沪金主连”、
 `KQ.i@DCE.m` 显示为“豆粕加权”。tick row 还会按当前 source epoch 检查行号连续性，并暴露 `source_epoch`、
 `last_tick_id`、`gap_event_count`、`estimated_missing_rows`、`duplicate_rows`、
@@ -407,7 +410,7 @@ metrics、symbol read model、订阅快照和事件账本，随后在锁外完�
 同一品种的具体合约、主连和加权连续合约会聚在一起，避免实时健康变化导致行位置跳动；
 并只为这些当前页品种保存 5 分钟 bounded symbol-level 历史，不恢复全量 `global_symbols` 轮询。刷新页面时，首轮请求会用
 `timeline_history=1` 拉取服务端缓存的 5 分钟窗口，后续轮询只追加当前样本。近期平均 tick 接收延迟在服务端逐
-合约计算，dashboard 逐行显示 `avg_receive_gap_ms`，不在前端用时间桶反推平均值。页面不展示静态假 sparkline；全屏按钮调用
+合约计算，dashboard 逐行显示 `avg_receive_gap_ms`，不在前端用时间桶反推平均值；休盘合约不参与延迟聚合。页面不展示静态假 sparkline；全屏按钮调用
 浏览器 fullscreen API，不支持时禁用。backfilling 进度只基于 relay 已观测到的时间和
 frame/event 计数，不推断上游补历史百分比。
 
