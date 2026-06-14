@@ -59,6 +59,7 @@ async fn serve_metrics_stream(
 ) -> RelayResult<()> {
     let request = read_http_request(stream).await?;
     let target = request_target(&request)?;
+    let accept_gzip = request_accepts_gzip(&request);
     let response = match target.path {
         "/health" => {
             let health = engine
@@ -80,7 +81,7 @@ async fn serve_metrics_stream(
             let query = match SymbolMetricsQuery::from_query_string(target.query) {
                 Ok(query) => query,
                 Err(error) => {
-                    write_response(stream, 400, json!({ "error": error })).await?;
+                    write_response(stream, 400, json!({ "error": error }), accept_gzip).await?;
                     return Ok(());
                 }
             };
@@ -94,7 +95,7 @@ async fn serve_metrics_stream(
             let query = match DashboardSnapshotQuery::from_query_string(target.query) {
                 Ok(query) => query,
                 Err(error) => {
-                    write_response(stream, 400, json!({ "error": error })).await?;
+                    write_response(stream, 400, json!({ "error": error }), accept_gzip).await?;
                     return Ok(());
                 }
             };
@@ -119,18 +120,18 @@ async fn serve_metrics_stream(
             || path.starts_with("/dashboard/") =>
         {
             let Some(asset) = dashboard_asset(path) else {
-                write_response(stream, 404, json!({"error": "not found"})).await?;
+                write_response(stream, 404, json!({"error": "not found"}), accept_gzip).await?;
                 return Ok(());
             };
-            write_bytes_response(stream, 200, asset.content_type, asset.bytes).await?;
+            write_bytes_response(stream, 200, asset.content_type, asset.bytes, accept_gzip).await?;
             return Ok(());
         }
         _ => {
-            write_response(stream, 404, json!({"error": "not found"})).await?;
+            write_response(stream, 404, json!({"error": "not found"}), accept_gzip).await?;
             return Ok(());
         }
     };
-    write_response(stream, 200, response).await
+    write_response(stream, 200, response, accept_gzip).await
 }
 
 #[derive(Debug, Clone)]
@@ -276,24 +277,30 @@ fn request_target(request: &str) -> RelayResult<RequestTarget<'_>> {
     Ok(RequestTarget { path, query })
 }
 
-async fn write_response(stream: &mut TcpStream, status: u16, body: Value) -> RelayResult<()> {
-    let reason = status_reason(status);
+fn request_accepts_gzip(request: &str) -> bool {
+    for line in request.lines() {
+        if line.eq_ignore_ascii_case("") {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("Accept-Encoding") {
+                return value
+                    .split(',')
+                    .any(|s| s.trim().eq_ignore_ascii_case("gzip"));
+            }
+        }
+    }
+    false
+}
+
+async fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: Value,
+    gzip: bool,
+) -> RelayResult<()> {
     let body = body.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} {reason}\r\n\
-Content-Type: application/json\r\n\
-Content-Length: {}\r\n\
-Cache-Control: no-store\r\n\
-X-Content-Type-Options: nosniff\r\n\
-Connection: close\r\n\
-\r\n\
-{body}",
-        body.len(),
-    );
-    stream
-        .write_all(response.as_bytes())
-        .await
-        .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
+    write_bytes_response(stream, status, "application/json", body.as_bytes(), gzip).await
 }
 
 async fn write_bytes_response(
@@ -301,16 +308,27 @@ async fn write_bytes_response(
     status: u16,
     content_type: &str,
     body: &[u8],
+    gzip: bool,
 ) -> RelayResult<()> {
+    let (body, encoding_header) = if gzip {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        (encoder.finish().unwrap(), "Content-Encoding: gzip\r\n")
+    } else {
+        (body.to_vec(), "")
+    };
+
+    let reason = status_reason(status);
     let header = format!(
-        "HTTP/1.1 {status} {}\r\n\
+        "HTTP/1.1 {status} {reason}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
 Cache-Control: public, max-age=60\r\n\
 X-Content-Type-Options: nosniff\r\n\
+{encoding_header}\
 Connection: close\r\n\
 \r\n",
-        status_reason(status),
         body.len(),
     );
     stream
@@ -318,7 +336,7 @@ Connection: close\r\n\
         .await
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))?;
     stream
-        .write_all(body)
+        .write_all(&body)
         .await
         .map_err(|err| RelayError::Transport(format!("metrics write failed: {err}")))
 }
