@@ -253,6 +253,9 @@ relay 的上游 tick 源：
 路径保持一致。其中 `view_width` 来自 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` /
 `RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay
 本地保留多少 tick，不影响上游补历史窗口。
+上游连接进入静默等待后，relay 也会每 `1s` 主动发送一次 `peek_message`，避免中间休盘
+没有 frame 可触发下一次 peek，开盘后天勤 DIFF 服务端不再吐行情。idle peek 只更新
+`last_upstream_peek_delay_ms` 进度，不增加上游 frame / event 计数。
 
 relay 启动后，如果下游 `subscribe_quote` 或 `set_chart` 请求了当前上游 tick chart 尚未覆盖的
 合约，relay 会在现有上游 websocket 上立即为缺失合约补发对应的 `set_chart` 和

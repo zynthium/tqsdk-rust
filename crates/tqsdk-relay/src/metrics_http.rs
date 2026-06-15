@@ -300,7 +300,15 @@ async fn write_response(
     gzip: bool,
 ) -> RelayResult<()> {
     let body = body.to_string();
-    write_bytes_response(stream, status, "application/json", body.as_bytes(), gzip).await
+    write_bytes_response_with_cache_control(
+        stream,
+        status,
+        "application/json",
+        body.as_bytes(),
+        "no-store",
+        gzip,
+    )
+    .await
 }
 
 async fn write_bytes_response(
@@ -308,6 +316,25 @@ async fn write_bytes_response(
     status: u16,
     content_type: &str,
     body: &[u8],
+    gzip: bool,
+) -> RelayResult<()> {
+    write_bytes_response_with_cache_control(
+        stream,
+        status,
+        content_type,
+        body,
+        "public, max-age=60",
+        gzip,
+    )
+    .await
+}
+
+async fn write_bytes_response_with_cache_control(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    cache_control: &str,
     gzip: bool,
 ) -> RelayResult<()> {
     let (body, encoding_header) = if gzip {
@@ -324,7 +351,7 @@ async fn write_bytes_response(
         "HTTP/1.1 {status} {reason}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
-Cache-Control: public, max-age=60\r\n\
+Cache-Control: {cache_control}\r\n\
 X-Content-Type-Options: nosniff\r\n\
 {encoding_header}\
 Connection: close\r\n\
