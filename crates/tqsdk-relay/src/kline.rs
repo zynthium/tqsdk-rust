@@ -9,6 +9,7 @@ pub struct KlineSynthesis {
     duration_ns: i64,
     current: Option<MutableKline>,
     next_id: i64,
+    last_tick_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,12 +37,25 @@ impl KlineSynthesis {
             duration_ns,
             current: None,
             next_id: 0,
+            last_tick_id: None,
         })
     }
 
     pub fn push_tick(&mut self, tick: RelayTickRow) -> RelayResult<Vec<RelayKlineRow>> {
         let start = window_start(tick.datetime, self.duration_ns);
         let mut completed = Vec::new();
+
+        if self.last_tick_id.is_some_and(|last_id| tick.id < last_id) {
+            return Ok(completed);
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| start < current.row.datetime)
+        {
+            return Ok(completed);
+        }
+        self.last_tick_id = Some(tick.id);
 
         match self.current.take() {
             None => {
