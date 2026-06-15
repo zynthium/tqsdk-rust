@@ -114,13 +114,23 @@ public API、runtime contract、feature flags 或 facade 边界，必须同步�
 git diff --check
 ```
 
-Rust 代码改动默认验证：
+Rust 代码改动的快速自检：
+
+```bash
+cargo check --workspace --examples
+```
+
+可提交改动单元的默认验证：
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --examples --all-targets -- -D warnings
+```
+
+如果改动会影响格式化，提交前补充：
 
 ```bash
 cargo fmt --all --check
-cargo check --workspace --examples
-cargo test --workspace
-cargo clippy --workspace --examples --all-targets -- -D warnings
 ```
 
 修改 feature flags、workspace 依赖或 crate feature 传播时，补充：
