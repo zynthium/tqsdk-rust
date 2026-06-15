@@ -27,10 +27,29 @@ pub struct SourceKey {
     pub view_width: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChartSubscription {
+    pub client_id: ClientId,
+    pub chart_id: String,
+    pub symbols: Vec<String>,
+}
+
+impl ChartSubscription {
+    #[must_use]
+    pub(crate) fn new(client_id: ClientId, chart_id: String, symbols: Vec<String>) -> Self {
+        Self {
+            client_id,
+            chart_id,
+            symbols: preserve_symbol_order(symbols),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InterestRegistry {
     client_quotes: BTreeMap<ClientId, BTreeSet<String>>,
     chart_mappings: BTreeMap<(ClientId, String), SourceKey>,
+    chart_symbols_by_client_chart: BTreeMap<(ClientId, String), Vec<String>>,
     quote_clients_by_symbol: BTreeMap<String, BTreeSet<ClientId>>,
     sources_by_symbol: BTreeMap<String, BTreeSet<SourceKey>>,
     chart_clients_by_source: BTreeMap<SourceKey, BTreeSet<ClientId>>,
@@ -56,7 +75,8 @@ impl InterestRegistry {
     }
 
     pub fn set_chart(&mut self, client_id: ClientId, command: SetChartCommand) -> SourceKey {
-        let mut symbols = command.symbols;
+        let requested_symbols = preserve_symbol_order(command.symbols);
+        let mut symbols = requested_symbols.clone();
         symbols.sort();
         symbols.dedup();
 
@@ -68,11 +88,15 @@ impl InterestRegistry {
         let chart_id = command.chart_id;
         if let Some(previous) = self.chart_mappings.remove(&(client_id, chart_id.clone())) {
             self.remove_chart_index(client_id, &chart_id, &previous);
+            self.chart_symbols_by_client_chart
+                .remove(&(client_id, chart_id.clone()));
         }
 
         self.add_chart_index(client_id, &chart_id, &source);
         self.chart_mappings
-            .insert((client_id, chart_id), source.clone());
+            .insert((client_id, chart_id.clone()), source.clone());
+        self.chart_symbols_by_client_chart
+            .insert((client_id, chart_id), requested_symbols);
         source
     }
 
@@ -91,6 +115,8 @@ impl InterestRegistry {
             .collect::<Vec<_>>();
         for (chart_id, source) in removed_charts {
             self.chart_mappings.remove(&(client_id, chart_id.clone()));
+            self.chart_symbols_by_client_chart
+                .remove(&(client_id, chart_id.clone()));
             self.remove_chart_index(client_id, &chart_id, &source);
         }
     }
@@ -159,6 +185,35 @@ impl InterestRegistry {
                 Some((*client_id, chart_id))
             })
             .collect()
+    }
+
+    #[must_use]
+    pub(crate) fn chart_subscriptions(&self, source: &SourceKey) -> Vec<ChartSubscription> {
+        let Some(clients) = self.chart_clients_by_source.get(source) else {
+            return Vec::new();
+        };
+        let mut subscriptions = Vec::new();
+        for client_id in clients {
+            let Some(chart_ids) = self
+                .chart_ids_by_client_source
+                .get(&(*client_id, source.clone()))
+            else {
+                continue;
+            };
+            for chart_id in chart_ids {
+                let symbols = self
+                    .chart_symbols_by_client_chart
+                    .get(&(*client_id, chart_id.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| source.symbols.clone());
+                subscriptions.push(ChartSubscription {
+                    client_id: *client_id,
+                    chart_id: chart_id.clone(),
+                    symbols,
+                });
+            }
+        }
+        subscriptions
     }
 
     #[must_use]
@@ -263,6 +318,14 @@ where
     if should_remove_key {
         index.remove(key);
     }
+}
+
+fn preserve_symbol_order(symbols: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    symbols
+        .into_iter()
+        .filter(|symbol| seen.insert(symbol.clone()))
+        .collect()
 }
 
 #[cfg(test)]

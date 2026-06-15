@@ -26,9 +26,13 @@ fn quote(symbol: &str, datetime: &str, price: f64) -> Quote {
 }
 
 fn chart_command(chart_id: &str) -> DownstreamCommand {
+    chart_command_for(chart_id, vec!["SHFE.au2602"])
+}
+
+fn chart_command_for(chart_id: &str, symbols: Vec<&str>) -> DownstreamCommand {
     DownstreamCommand::SetChart(SetChartCommand {
         chart_id: chart_id.to_string(),
-        symbols: vec!["SHFE.au2602".to_string()],
+        symbols: symbols.into_iter().map(str::to_string).collect(),
         duration_ns: 60_000_000_000,
         view_width: 64,
         left_kline_id: None,
@@ -268,6 +272,110 @@ fn relay_engine_replays_tick_ring_for_new_kline_chart_subscription() {
     assert_eq!(
         chart_frame.payload["data"][0]["charts"]["client-chart"]["right_id"],
         0
+    );
+}
+
+#[test]
+fn relay_engine_keeps_multi_symbol_kline_state_separate_and_emits_binding() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .handle_command(
+            client,
+            chart_command_for("multi-chart", vec!["SHFE.au2602", "DCE.m2609"]),
+        )
+        .unwrap();
+
+    engine
+        .ingest_tick("SHFE.au2602", tick(1, 0, 610.0))
+        .unwrap();
+    engine
+        .ingest_tick("DCE.m2609", tick(10, 0, 3300.0))
+        .unwrap();
+    let primary_frames = engine
+        .ingest_tick("SHFE.au2602", tick(2, 60_000_000_000, 612.0))
+        .unwrap();
+    let secondary_frames = engine
+        .ingest_tick("DCE.m2609", tick(11, 60_000_000_000, 3310.0))
+        .unwrap();
+
+    let primary_kline = primary_frames
+        .iter()
+        .find_map(|frame| {
+            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]
+                .as_object()
+        })
+        .expect("primary completed kline should be emitted");
+    assert_eq!(primary_kline["close"], 610.0);
+    assert_eq!(primary_kline["high"], 610.0);
+
+    let secondary_kline = secondary_frames
+        .iter()
+        .find_map(|frame| {
+            frame.payload["data"][0]["klines"]["DCE.m2609"]["60000000000"]["data"]["0"].as_object()
+        })
+        .expect("secondary completed kline should be emitted");
+    assert_eq!(secondary_kline["close"], 3300.0);
+    assert_eq!(secondary_kline["high"], 3300.0);
+
+    let binding = secondary_frames
+        .iter()
+        .find_map(|frame| {
+            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["binding"]["DCE.m2609"]
+                ["0"]
+                .as_i64()
+        })
+        .expect("multi-symbol chart should bind secondary row to primary row");
+    assert_eq!(binding, 0);
+}
+
+#[test]
+fn relay_engine_replays_cached_multi_symbol_klines_with_binding() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .ingest_tick("SHFE.au2602", tick(1, 0, 610.0))
+        .unwrap();
+    engine
+        .ingest_tick("DCE.m2609", tick(10, 0, 3300.0))
+        .unwrap();
+    engine
+        .ingest_tick("SHFE.au2602", tick(2, 60_000_000_000, 612.0))
+        .unwrap();
+    engine
+        .ingest_tick("DCE.m2609", tick(11, 60_000_000_000, 3310.0))
+        .unwrap();
+
+    let frames = engine
+        .handle_command(
+            client,
+            chart_command_for("multi-chart", vec!["SHFE.au2602", "DCE.m2609"]),
+        )
+        .unwrap();
+
+    assert!(
+        frames.iter().any(|frame| {
+            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"]
+                == 610.0
+        }),
+        "primary cached kline should be replayed"
+    );
+    assert!(
+        frames.iter().any(|frame| {
+            frame.payload["data"][0]["klines"]["DCE.m2609"]["60000000000"]["data"]["0"]["close"]
+                == 3300.0
+        }),
+        "secondary cached kline should be replayed"
+    );
+    assert!(
+        frames.iter().any(|frame| {
+            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["binding"]["DCE.m2609"]
+                ["0"]
+                == 0
+        }),
+        "cached replay should include primary-to-secondary binding"
     );
 }
 

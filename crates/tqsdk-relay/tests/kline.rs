@@ -67,6 +67,26 @@ fn gaps_do_not_emit_empty_bars_without_ticks() {
 }
 
 #[test]
+fn old_tick_rows_do_not_reopen_completed_windows() {
+    let mut synth = KlineSynthesis::new("SHFE.au2602", 60_000_000_000);
+
+    synth.push_tick(tick(1, 0, 610.0, 100, 1000)).unwrap();
+    let completed = synth
+        .push_tick(tick(2, 60_000_000_000, 620.0, 130, 1005))
+        .unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].datetime, 0);
+
+    let completed = synth.push_tick(tick(1, 0, 611.0, 110, 1001)).unwrap();
+
+    assert!(completed.is_empty());
+    let current = synth.current_bar().unwrap();
+    assert_eq!(current.datetime, 60_000_000_000);
+    assert_eq!(current.open, 620.0);
+    assert_eq!(current.close, 620.0);
+}
+
+#[test]
 fn exposes_symbol_and_duration() {
     let synth = KlineSynthesis::new("SHFE.au2602", 60_000_000_000);
 

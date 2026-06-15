@@ -11,7 +11,7 @@ use tqsdk_core::Quote;
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
 use crate::cache::MarketCache;
 use crate::error::RelayResult;
-use crate::interest::{ClientId, InterestRegistry, SourceKey};
+use crate::interest::{ChartSubscription, ClientId, InterestRegistry, SourceKey};
 use crate::kline::KlineSynthesis;
 use crate::observability::{
     DECODE_HEALTH_WINDOW_SECS, DEFAULT_DATA_STALE_AFTER_SECS, DecodeHealth,
@@ -19,7 +19,7 @@ use crate::observability::{
     FRAME_IDLE_WARN_AFTER_MS, FlowIdleHealth, HealthSnapshot, MetricsSnapshot, RelaySourceStage,
     RelaySourceStatus,
 };
-use crate::protocol::{DownstreamCommand, RelayMarketFrame, RelayTickRow};
+use crate::protocol::{DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow};
 use crate::symbol_metrics::{
     SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery, SymbolMetricsSnapshot,
     SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolStatus,
@@ -547,12 +547,28 @@ pub struct DownstreamFrame {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct KlineSourceKey {
+    source: SourceKey,
+    symbol: String,
+}
+
+impl KlineSourceKey {
+    fn new(source: SourceKey, symbol: impl Into<String>) -> Self {
+        Self {
+            source,
+            symbol: symbol.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RelayEngine {
     cache: MarketCache,
     interests: InterestRegistry,
     bootstrap: BootstrapQueue,
-    klines: HashMap<SourceKey, KlineSynthesis>,
+    klines: HashMap<KlineSourceKey, KlineSynthesis>,
+    completed_kline_ids: BTreeMap<KlineSourceKey, BTreeMap<i64, i64>>,
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
     upstream_stage: RelaySourceStage,
@@ -591,6 +607,7 @@ impl RelayEngine {
             interests: InterestRegistry::default(),
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
+            completed_kline_ids: BTreeMap::new(),
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
             upstream_stage: RelaySourceStage::Connecting,
@@ -635,6 +652,11 @@ impl RelayEngine {
                 Ok(frames)
             }
             DownstreamCommand::SetChart(command) => {
+                let replay_subscription = ChartSubscription::new(
+                    client_id,
+                    command.chart_id.clone(),
+                    command.symbols.clone(),
+                );
                 let source = self.interests.set_chart(client_id, command);
                 self.bootstrap.enqueue(BootstrapRequest {
                     source: source.clone(),
@@ -642,7 +664,7 @@ impl RelayEngine {
                     end_id: i64::MAX,
                 });
                 self.queue_missing_upstream_symbols_for_source(&source);
-                self.replay_cached_kline_frames(client_id, &source)
+                self.replay_cached_kline_frames(&replay_subscription, &source)
             }
             DownstreamCommand::PeekMessage => Ok(Vec::new()),
         }
@@ -1312,14 +1334,16 @@ impl RelayEngine {
             if source.duration_ns <= 0 {
                 continue;
             }
+            let key = KlineSourceKey::new(source.clone(), symbol.to_string());
             let completed_rows = {
                 let synthesizer = self
                     .klines
-                    .entry(source.clone())
+                    .entry(key.clone())
                     .or_insert_with(|| KlineSynthesis::new(symbol.to_string(), source.duration_ns));
                 synthesizer.push_tick(row.clone())?
             };
             for completed in completed_rows {
+                self.record_completed_kline_id(key.clone(), &completed);
                 let kline_payload =
                     RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
                         symbol,
@@ -1327,15 +1351,27 @@ impl RelayEngine {
                         completed.clone(),
                     )])
                     .into_value();
-                for (client_id, chart_id) in self.interests.chart_clients_with_ids(&source) {
+                for subscription in self.interests.chart_subscriptions(&source) {
                     frames.push(DownstreamFrame {
-                        client_id,
+                        client_id: subscription.client_id,
                         payload: kline_payload.clone(),
                     });
-                    frames.push(DownstreamFrame {
-                        client_id,
-                        payload: chart_payload(&chart_id, completed.id),
-                    });
+                    frames.extend(self.binding_frames_for_completed(
+                        &source,
+                        &subscription,
+                        symbol,
+                        &completed,
+                    ));
+                    if subscription
+                        .symbols
+                        .first()
+                        .is_some_and(|primary| primary == symbol)
+                    {
+                        frames.push(DownstreamFrame {
+                            client_id: subscription.client_id,
+                            payload: chart_payload(&subscription.chart_id, completed.id),
+                        });
+                    }
                 }
             }
         }
@@ -1344,31 +1380,43 @@ impl RelayEngine {
 
     fn replay_cached_kline_frames(
         &mut self,
-        client_id: ClientId,
+        subscription: &ChartSubscription,
         source: &SourceKey,
     ) -> RelayResult<Vec<DownstreamFrame>> {
-        if source.duration_ns <= 0 || self.klines.contains_key(source) {
+        if source.duration_ns <= 0 {
             return Ok(Vec::new());
         }
-        let Some(symbol) = source.symbols.first() else {
-            return Ok(Vec::new());
-        };
-        let ticks = self.cache.ticks(symbol);
-        if ticks.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut synthesis = KlineSynthesis::new(symbol.clone(), source.duration_ns);
-        let mut completed_rows = Vec::new();
-        for tick in ticks {
-            completed_rows.extend(synthesis.push_tick(tick)?);
-        }
-        self.klines.insert(source.clone(), synthesis);
 
         let mut frames = Vec::new();
-        for completed in completed_rows {
+        let mut replayed_rows = Vec::new();
+        for symbol in &source.symbols {
+            let key = KlineSourceKey::new(source.clone(), symbol.clone());
+            if self.klines.contains_key(&key) {
+                continue;
+            }
+            let ticks = self.cache.ticks(symbol);
+            if ticks.is_empty() {
+                continue;
+            }
+            let mut synthesis = KlineSynthesis::new(symbol.clone(), source.duration_ns);
+            let mut completed_rows = Vec::new();
+            for tick in ticks {
+                completed_rows.extend(synthesis.push_tick(tick)?);
+            }
+            for completed in &completed_rows {
+                self.record_completed_kline_id(key.clone(), completed);
+            }
+            self.klines.insert(key, synthesis);
+            replayed_rows.extend(
+                completed_rows
+                    .into_iter()
+                    .map(|completed| (symbol.clone(), completed)),
+            );
+        }
+
+        for (symbol, completed) in &replayed_rows {
             frames.push(DownstreamFrame {
-                client_id,
+                client_id: subscription.client_id,
                 payload: RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
                     symbol,
                     source.duration_ns,
@@ -1376,14 +1424,99 @@ impl RelayEngine {
                 )])
                 .into_value(),
             });
-            if let Some(chart_id) = self.interests.downstream_chart_id(client_id, source) {
+        }
+        for (symbol, completed) in &replayed_rows {
+            frames.extend(self.binding_frames_for_completed(
+                source,
+                subscription,
+                symbol,
+                completed,
+            ));
+            if subscription
+                .symbols
+                .first()
+                .is_some_and(|primary| primary == symbol)
+            {
                 frames.push(DownstreamFrame {
-                    client_id,
-                    payload: chart_payload(chart_id, completed.id),
+                    client_id: subscription.client_id,
+                    payload: chart_payload(&subscription.chart_id, completed.id),
                 });
             }
         }
         Ok(frames)
+    }
+
+    fn record_completed_kline_id(&mut self, key: KlineSourceKey, row: &RelayKlineRow) {
+        self.completed_kline_ids
+            .entry(key)
+            .or_default()
+            .insert(row.datetime, row.id);
+    }
+
+    fn completed_kline_id(&self, source: &SourceKey, symbol: &str, datetime: i64) -> Option<i64> {
+        self.completed_kline_ids
+            .get(&KlineSourceKey::new(source.clone(), symbol.to_string()))
+            .and_then(|rows| rows.get(&datetime).copied())
+    }
+
+    fn binding_frames_for_completed(
+        &self,
+        source: &SourceKey,
+        subscription: &ChartSubscription,
+        completed_symbol: &str,
+        completed: &RelayKlineRow,
+    ) -> Vec<DownstreamFrame> {
+        let Some(primary_symbol) = subscription.symbols.first() else {
+            return Vec::new();
+        };
+        if subscription.symbols.len() < 2 {
+            return Vec::new();
+        }
+
+        let mut frames = Vec::new();
+        if completed_symbol == primary_symbol {
+            for secondary_symbol in subscription.symbols.iter().skip(1) {
+                if let Some(secondary_id) =
+                    self.completed_kline_id(source, secondary_symbol, completed.datetime)
+                {
+                    frames.push(DownstreamFrame {
+                        client_id: subscription.client_id,
+                        payload: binding_payload(
+                            primary_symbol,
+                            source.duration_ns,
+                            secondary_symbol,
+                            completed.id,
+                            secondary_id,
+                        ),
+                    });
+                }
+            }
+            return frames;
+        }
+
+        if !subscription
+            .symbols
+            .iter()
+            .skip(1)
+            .any(|symbol| symbol == completed_symbol)
+        {
+            return Vec::new();
+        }
+        if let Some(primary_id) =
+            self.completed_kline_id(source, primary_symbol, completed.datetime)
+        {
+            frames.push(DownstreamFrame {
+                client_id: subscription.client_id,
+                payload: binding_payload(
+                    primary_symbol,
+                    source.duration_ns,
+                    completed_symbol,
+                    primary_id,
+                    completed.id,
+                ),
+            });
+        }
+        frames
     }
 }
 
@@ -1398,6 +1531,33 @@ fn chart_payload(chart_id: &str, right_id: i64) -> Value {
                         "right_id": right_id,
                         "more_data": false,
                         "ready": true
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn binding_payload(
+    primary_symbol: &str,
+    duration_ns: i64,
+    secondary_symbol: &str,
+    primary_id: i64,
+    secondary_id: i64,
+) -> Value {
+    json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "klines": {
+                    primary_symbol: {
+                        duration_ns.to_string(): {
+                            "binding": {
+                                secondary_symbol: {
+                                    primary_id.to_string(): secondary_id
+                                }
+                            }
+                        }
                     }
                 }
             }
