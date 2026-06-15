@@ -16,17 +16,17 @@
   );
 </script>
 
-<section class="panel trend" data-testid="integrity-trend">
-  <div class="head">
+<section class="panel-shell flex flex-col px-3 py-2.5" data-testid="integrity-trend">
+  <div class="flex items-center justify-between gap-2">
     <div class="panel-title">完整性趋势</div>
-    <div class="legend">
-      <span><i class="ln-frame"></i>帧流</span>
-      <span><i class="ln-event"></i>事件</span>
-      <span><i class="ln-score"></i>评分</span>
+    <div class="flex gap-2 text-[9px] text-[color:var(--relay-muted)]">
+      <span class="inline-flex items-center gap-[3px]"><i class="ln-frame"></i>帧流</span>
+      <span class="inline-flex items-center gap-[3px]"><i class="ln-event"></i>事件</span>
+      <span class="inline-flex items-center gap-[3px]"><i class="ln-score"></i>评分</span>
     </div>
   </div>
-  <div class="body">
-    <div class="chart">
+  <div class="relative z-[1] mt-[5px] grid h-[120px] items-center gap-2 [grid-template-columns:minmax(0,1fr)_100px]">
+    <div class="trend-chart relative h-full border-l border-b border-[#30556d66]">
       <svg viewBox="0 0 600 100" preserveAspectRatio="none" aria-label="integrity trend">
         <polyline class="frame" points={framePoints}></polyline>
         <polyline class="event" points={eventPoints}></polyline>
@@ -36,39 +36,15 @@
         <div class="empty">积累实时采样后显示趋势</div>
       {/if}
     </div>
-    <div class="score-box">
+    <div class="grid justify-items-center gap-1">
       <ScoreGauge score={model.continuityScore} state={model.overall} compact />
-      <div class="average">页均 <b>{Math.round(average)}</b></div>
+      <div class="text-[10px] text-[#7e9eae]">页均 <b class="text-[14px] text-[color:var(--relay-live)]">{Math.round(average)}</b></div>
     </div>
   </div>
 </section>
 
 <style>
-  .trend {
-    padding: 10px 12px;
-  }
-
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .legend {
-    display: flex;
-    gap: 8px;
-    color: var(--relay-muted);
-    font-size: 9px;
-  }
-
-  .legend span {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .legend i {
+  i {
     width: 14px;
     height: 2px;
     border-radius: 1px;
@@ -86,20 +62,7 @@
     background: var(--relay-live);
   }
 
-  .body {
-    position: relative;
-    z-index: 1;
-    height: 120px;
-    margin-top: 5px;
-    display: grid;
-    grid-template-columns: 1fr 100px;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .chart {
-    position: relative;
-    height: 100%;
+  .trend-chart {
     border-left: 1px solid #30556d66;
     border-bottom: 1px solid #30556d66;
     background:
@@ -139,21 +102,5 @@
     place-items: center;
     color: #66899b;
     font-size: 10px;
-  }
-
-  .score-box {
-    display: grid;
-    justify-items: center;
-    gap: 4px;
-  }
-
-  .average {
-    color: #7e9eae;
-    font-size: 10px;
-  }
-
-  .average b {
-    color: var(--relay-live);
-    font-size: 14px;
   }
 </style>

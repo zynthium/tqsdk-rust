@@ -96,7 +96,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   const dceRow = timeline.getByRole('button', { name: /DCE.*40\/120/ });
   await expect(dceRow).toBeVisible();
   await dceRow.click();
-  await expect(timeline.getByTestId('timeline-symbol-row')).toHaveCount(30);
+  await expect(timeline.getByTestId('timeline-symbol-row')).toHaveCount(rows.length);
 
   const viewport = await page.evaluate(() => ({
     documentClientHeight: document.documentElement.clientHeight,
@@ -110,7 +110,7 @@ test('dashboard keeps document fixed and scrolls overflowing panels internally',
   await page.mouse.wheel(0, 1200);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 
-  const attentionList = page.getByTestId('attention-list').locator('.list');
+  const attentionList = page.getByTestId('attention-list').locator('.list-panel-list');
   const panelMetrics = await attentionList.evaluate((element) => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,

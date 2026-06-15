@@ -1,9 +1,16 @@
 <script lang="ts">
   import { formatDuration } from '../lib/format';
   import { statusLabel } from '../lib/integrity-model';
-  import type { SymbolRow } from '../lib/types';
+  import type { ProblemSeverity, SymbolRow } from '../lib/types';
 
   let { rows }: { rows: SymbolRow[] } = $props();
+  const itemToneClass: Record<ProblemSeverity, string> = {
+    live: 'border-[#45ff9a55] text-[#9cffc5]',
+    warn: 'border-[#ffc44780] text-[#ffe08c] [box-shadow:inset_3px_0_#ffc447]',
+    bad: 'border-[#ff536a80] text-[#ffadb8] [box-shadow:inset_3px_0_#ff536a]',
+    closed: 'border-[#2a93c55e] text-[#91dcff]',
+    initializing: 'border-[#4d789066] text-[#b8c8d3]',
+  };
   let ordered = $derived(
     [...rows]
       .sort((left, right) => {
@@ -15,24 +22,30 @@
   );
 </script>
 
-<aside class="panel attention" data-testid="attention-list">
-  <div class="head">
+<aside class="panel panel-shell flex min-h-0 flex-col overflow-hidden px-3 py-2.5" data-testid="attention-list">
+  <div class="head flex items-center justify-between gap-1.5">
     <div class="panel-title">当前关注 · 问题合约</div>
     {#if rows.length > 0}
-      <span class="count">{rows.length}</span>
+      <span class="count-chip bg-[#ff536a22] text-[color:var(--relay-bad)]">{rows.length}</span>
     {/if}
   </div>
-  <div class="list">
+  <div class="list-panel-list relative z-[1] mt-2 grid min-h-0 flex-1 content-start gap-[5px] overflow-y-auto pr-1">
     {#if ordered.length === 0}
-      <div class="empty">当前无活动异常</div>
+      <div class="list-panel-empty flex flex-1 items-center justify-center px-1 text-center text-[11px] text-[color:var(--relay-muted)]">
+        当前无活动异常
+      </div>
     {:else}
       {#each ordered as row}
-        <article class={`item ${row.problem_severity}`}>
-          <div class="item-top">
-            <span class="symbol" title={row.symbol}>{row.instrument_name ?? row.symbol}</span>
-            <span class="sub-tag">{row.subscribed ? '订阅中' : ''}</span>
+        <article
+          class={`rounded-[7px] border bg-[#071929] px-[9px] py-[7px] text-[11px] leading-[1.35] ${itemToneClass[row.problem_severity]}`}
+        >
+          <div class="flex items-center justify-between gap-1">
+            <span class="truncate text-[12px] font-extrabold text-inherit" title={row.symbol}>
+              {row.instrument_name ?? row.symbol}
+            </span>
+            <span class="shrink-0 text-[9px] font-bold text-[#6e94a8]">{row.subscribed ? '订阅中' : ''}</span>
           </div>
-          <div class="desc">
+          <div class="mt-0.5 text-[11px] text-inherit opacity-82">
             {statusLabel(row.status)} · {formatDuration(row.receive_gap_ms)}
           </div>
         </article>
@@ -40,115 +53,3 @@
     {/if}
   </div>
 </aside>
-
-<style>
-  .attention {
-    padding: 10px 12px;
-  }
-
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-
-  .count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 22px;
-    height: 18px;
-    border-radius: 9px;
-    padding: 0 6px;
-    background: #ff536a22;
-    color: var(--relay-bad);
-    font-size: 11px;
-    font-weight: 850;
-  }
-
-  .list {
-    position: relative;
-    z-index: 1;
-    margin-top: 8px;
-    display: grid;
-    align-content: start;
-    gap: 5px;
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 4px;
-    scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--relay-line) 80%, transparent) transparent;
-  }
-
-  .item {
-    position: relative;
-    border: 1px solid #2a93c55e;
-    border-radius: 7px;
-    padding: 7px 9px;
-    background: #071929;
-    color: #d5eaf3;
-    font-size: 11px;
-    line-height: 1.35;
-  }
-
-  .item.warn {
-    border-color: #ffc44780;
-    box-shadow: inset 3px 0 #ffc447;
-    color: #ffe08c;
-  }
-
-  .item.bad {
-    border-color: #ff536a80;
-    box-shadow: inset 3px 0 #ff536a;
-    color: #ffadb8;
-  }
-
-  .item.live {
-    border-color: #45ff9a55;
-    color: #9cffc5;
-  }
-
-  .item.closed {
-    color: #91dcff;
-  }
-
-  .item-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 4px;
-  }
-
-  .symbol {
-    overflow: hidden;
-    color: inherit;
-    font-size: 12px;
-    font-weight: 850;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sub-tag {
-    flex-shrink: 0;
-    color: #6e94a8;
-    font-size: 9px;
-    font-weight: 700;
-  }
-
-  .desc {
-    margin-top: 2px;
-    color: inherit;
-    opacity: 0.82;
-    font-size: 11px;
-  }
-
-  .empty {
-    padding: 22px 4px;
-    color: inherit;
-    opacity: 0.82;
-    font-size: 11px;
-    text-align: center;
-  }
-</style>

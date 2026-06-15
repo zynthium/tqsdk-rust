@@ -2,7 +2,14 @@
   import { EXCHANGES, exchangeOf, productGroupOf } from '../lib/timeline';
   import { formatDuration, formatNumber } from '../lib/format';
   import { statusLabel } from '../lib/integrity-model';
-  import type { DashboardTimelineScope, SymbolRow, TimelineSample, TimelineSeverity } from '../lib/types';
+  import type {
+    DashboardTimelineScope,
+    ProblemSeverity,
+    SymbolRow,
+    SymbolStatus,
+    TimelineSample,
+    TimelineSeverity,
+  } from '../lib/types';
 
   const PANEL_PREFS_KEY = 'tqsdk-relay.dashboard.continuity-panel';
   const NAME_COLLATOR = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
@@ -13,6 +20,31 @@
     viewMode?: ViewMode;
     flatSymbols?: boolean;
   };
+
+  const statusBadgeClass = {
+    live: 'badge live severity-badge justify-self-start text-[color:var(--relay-live)]',
+    closed: 'badge closed severity-badge justify-self-start text-[color:var(--relay-closed)]',
+    initializing: 'badge initializing severity-badge justify-self-start text-[color:var(--relay-muted)]',
+    stale: 'badge stale severity-badge justify-self-start text-[color:var(--relay-warn)]',
+    missing: 'badge missing severity-badge justify-self-start text-[color:var(--relay-warn)]',
+    inactive: 'badge inactive severity-badge justify-self-start text-[color:var(--relay-muted)]',
+  } satisfies Record<SymbolStatus, string>;
+
+  const riskClass = {
+    live: 'risk live text-[11px] font-[850] text-[color:var(--relay-live)]',
+    closed: 'risk closed text-[11px] font-[850] text-[color:var(--relay-closed)]',
+    initializing: 'risk initializing text-[11px] font-[850] text-[color:var(--relay-muted)]',
+    warn: 'risk warn text-[11px] font-[850] text-[color:var(--relay-warn)]',
+    bad: 'risk bad text-[11px] font-[850] text-[color:var(--relay-bad)]',
+  } satisfies Record<ProblemSeverity, string>;
+
+  const cellToneClass = {
+    live: 'live bg-[#23d786]',
+    warn: 'warn bg-[color:var(--relay-warn)]',
+    bad: 'bad bg-[color:var(--relay-bad)]',
+    unknown: 'unknown bg-[#566170]',
+    no_sample: 'no_sample bg-[#172532]',
+  } as const;
 
   let { buckets, rows = [] }: {
     buckets: Array<TimelineSample | null>;
@@ -127,7 +159,7 @@
     return sample ? (definition.severity(sample) ?? 'unknown') : (definition.emptySeverity ?? 'no_sample');
   }
 
-  function cellClass(definition: TimelineDefinition, sample: TimelineSample | null) {
+  function cellClass(definition: TimelineDefinition, sample: TimelineSample | null): keyof typeof cellToneClass {
     const severity = cellSeverity(definition, sample);
     return severity === 'closed' ? 'unknown' : severity;
   }
@@ -289,33 +321,38 @@
   }
 </script>
 
-<section class="panel timeline-panel" data-testid="continuity-timeline">
-  <div class="head">
+<section class="panel-shell flex min-h-0 flex-col px-3 py-2.5" data-testid="continuity-timeline">
+  <div class="flex items-center justify-between gap-3">
     <div class="panel-title">最近 5 分钟连续性</div>
-    <div class="panel-tools">
-      <label class="open-only-toggle">
-        <input type="checkbox" bind:checked={openOnly} aria-label="只看开盘中品种" />
+    <div class="ml-auto flex items-center gap-2">
+      <label class="inline-flex h-[26px] items-center gap-[5px] rounded-md border border-[color:var(--relay-line-soft)] bg-[#071929] px-2 text-[11px] whitespace-nowrap text-[color:var(--relay-muted)]">
+        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={openOnly} aria-label="只看开盘中品种" />
         <span>开盘中</span>
       </label>
-      <label class="open-only-toggle">
-        <input type="checkbox" bind:checked={flatSymbols} aria-label="不分交易所" />
+      <label class="inline-flex h-[26px] items-center gap-[5px] rounded-md border border-[color:var(--relay-line-soft)] bg-[#071929] px-2 text-[11px] whitespace-nowrap text-[color:var(--relay-muted)]">
+        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={flatSymbols} aria-label="不分交易所" />
         <span>不分交易所</span>
       </label>
-      <input class="panel-search" bind:value={search} placeholder="搜索合约或中文名" aria-label="搜索合约或中文名" />
-      <div class="view-toggle">
+      <input
+        class="toolbar-input w-[clamp(150px,14vw,220px)] placeholder:text-[color:var(--relay-muted)]"
+        bind:value={search}
+        placeholder="搜索合约或中文名"
+        aria-label="搜索合约或中文名"
+      />
+      <div class="view-toggle flex gap-1 rounded-md border border-[color:var(--relay-line-soft)] bg-[#0f2130] p-[3px]">
         <button class:active={viewMode === 'blocks'} onclick={() => (viewMode = 'blocks')}>Blocks</button>
         <button class:active={viewMode === 'sparkline'} onclick={() => (viewMode = 'sparkline')}>Sparkline</button>
       </div>
     </div>
-    <div class="legend">
-      <span><i class="live"></i>正常</span>
-      <span><i class="warn"></i>静默</span>
-      <span><i class="bad"></i>异常</span>
-      <span><i class="unknown"></i>休盘</span>
-      <span><i class="no_sample"></i>无样本</span>
+    <div class="legend flex gap-2.5 text-[10px] text-[color:var(--relay-muted)]">
+      <span class="inline-flex items-center gap-[5px]"><i class="live"></i>正常</span>
+      <span class="inline-flex items-center gap-[5px]"><i class="warn"></i>静默</span>
+      <span class="inline-flex items-center gap-[5px]"><i class="bad"></i>异常</span>
+      <span class="inline-flex items-center gap-[5px]"><i class="unknown"></i>休盘</span>
+      <span class="inline-flex items-center gap-[5px]"><i class="no_sample"></i>无样本</span>
     </div>
   </div>
-  <div class="timeline-meta">
+  <div class="mt-2 text-[10px] text-[color:var(--relay-muted)]">
     当前页 {formatNumber(pageRowCount)} 行{#if isFiltered} · 显示 {formatNumber(visibleRowCount)} 行{/if}
   </div>
   <div class="timeline" style={`--bucket-count:${buckets.length}`}>
@@ -342,10 +379,10 @@
           aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${rowDelayLabel(definition.row, definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
         >
           <span class="symbol-name">{definition.label}</span>
-          <span class={`badge ${definition.row.status}`}>{statusLabel(definition.row.status)}</span>
+          <span class={statusBadgeClass[definition.row.status]}>{statusLabel(definition.row.status)}</span>
           <em class="tick">Tick {formatNumber(definition.row.ticks_ingested)}</em>
           <em class="sub">订阅 {formatNumber(subscriberCount(definition.row))}</em>
-          <span class={`risk ${definition.row.problem_severity}`}>{definition.row.problem_severity}</span>
+          <span class={riskClass[definition.row.problem_severity]}>{definition.row.problem_severity}</span>
           <strong class="latency">{averageLatencyLabel(definition)}</strong>
         </div>
       {:else}
@@ -358,7 +395,7 @@
       {#if viewMode === 'blocks'}
         {#each buckets as bucket, index (`${definition.key}:${index}`)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class={`cell ${cellClass(definition, bucket)}`} title={cellTitle(definition, bucket)} onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}></span>
+          <span class={`cell ${cellToneClass[cellClass(definition, bucket)]}`} title={cellTitle(definition, bucket)} onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}></span>
         {/each}
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -372,8 +409,11 @@
     <div class="axis"><span>-5m</span><span>now</span></div>
   </div>
   {#if hoveredSymbolRow}
-    <div class="health-tooltip" style={`left: ${tooltipX}px; top: ${tooltipY}px;`}>
-      <div class="tooltip-title">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
+    <div
+      class="health-tooltip fixed z-[10000] flex min-w-[200px] pointer-events-none flex-col gap-1.5 rounded-lg border border-[color:var(--relay-line-soft)] bg-[rgba(15,33,48,0.95)] px-[14px] py-[10px] text-[11px] text-[color:var(--relay-text)] shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
+      style={`left: ${tooltipX}px; top: ${tooltipY}px;`}
+    >
+      <div class="mb-0.5 border-b border-[rgba(255,255,255,0.1)] pb-1.5 font-bold text-[color:var(--relay-info)]">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
       <div class="tooltip-body">
         <div><span>接收延迟</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.receive_gap_ms)}</b></div>
         <div><span>平均接收</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
@@ -388,70 +428,6 @@
 </section>
 
 <style>
-  .timeline-panel {
-    padding: 10px 12px;
-  }
-
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .view-toggle {
-    display: flex;
-    gap: 4px;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 6px;
-    background: #0f2130;
-    padding: 3px;
-  }
-
-  .panel-tools {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: auto;
-  }
-
-  .panel-search {
-    width: clamp(150px, 14vw, 220px);
-    height: 26px;
-    min-width: 0;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 6px;
-    background: #071929;
-    color: var(--relay-text);
-    font-size: 11px;
-    padding: 0 9px;
-  }
-
-  .panel-search::placeholder {
-    color: var(--relay-muted);
-  }
-
-  .open-only-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 26px;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 6px;
-    background: #071929;
-    color: var(--relay-muted);
-    font-size: 11px;
-    padding: 0 8px;
-    white-space: nowrap;
-  }
-
-  .open-only-toggle input {
-    width: 13px;
-    height: 13px;
-    margin: 0;
-    accent-color: var(--relay-live);
-  }
-
   .view-toggle button {
     border: 0;
     border-radius: 4px;
@@ -472,29 +448,10 @@
     color: var(--relay-info);
   }
 
-  .legend {
-    display: flex;
-    gap: 10px;
-    color: var(--relay-muted);
-    font-size: 10px;
-  }
-
-  .legend span {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-  }
-
   .legend i {
     width: 12px;
     height: 7px;
     border-radius: 2px;
-  }
-
-  .timeline-meta {
-    margin-top: 8px;
-    color: var(--relay-muted);
-    font-size: 10px;
   }
 
   .sparkline-container {
@@ -601,55 +558,6 @@
     white-space: nowrap;
   }
 
-  .badge {
-    justify-self: start;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 4px;
-    padding: 1px 5px;
-    color: var(--relay-live);
-    font-size: 11px;
-    line-height: 1.2;
-  }
-
-  .badge.closed {
-    color: var(--relay-closed);
-  }
-
-  .badge.initializing {
-    color: var(--relay-muted);
-  }
-
-  .badge.stale,
-  .badge.missing {
-    color: var(--relay-warn);
-  }
-
-  .badge.inactive {
-    color: var(--relay-muted);
-  }
-
-  .risk {
-    color: var(--relay-live);
-    font-size: 11px;
-    font-weight: 850;
-  }
-
-  .risk.warn {
-    color: var(--relay-warn);
-  }
-
-  .risk.bad {
-    color: var(--relay-bad);
-  }
-
-  .risk.closed {
-    color: var(--relay-closed);
-  }
-
-  .risk.initializing {
-    color: var(--relay-muted);
-  }
-
   .cell {
     height: 9px;
     border-radius: 1px;
@@ -683,31 +591,6 @@
     padding-top: 2px;
     color: #66889a;
     font-size: 9px;
-  }
-
-  .health-tooltip {
-    position: fixed;
-    z-index: 10000;
-    pointer-events: none;
-    display: flex;
-    min-width: 200px;
-    flex-direction: column;
-    gap: 6px;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 8px;
-    background: rgba(15, 33, 48, 0.95);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    color: var(--relay-text);
-    font-size: 11px;
-    padding: 10px 14px;
-  }
-
-  .tooltip-title {
-    margin-bottom: 2px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    color: var(--relay-info);
-    font-weight: 700;
-    padding-bottom: 6px;
   }
 
   .tooltip-body div {

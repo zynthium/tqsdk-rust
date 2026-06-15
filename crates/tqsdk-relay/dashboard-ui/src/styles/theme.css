@@ -15,4 +15,7 @@
   --relay-accent: #b06cff;
   --relay-blue: #42a7ff;
   --relay-shadow: 0 0 0 1px #20d8ff10, 0 16px 40px #0007, inset 0 0 28px #134c6e18;
+  --relay-grid-line: #3d93be0b;
+  --relay-scrollbar-track: #04111e;
+  --relay-scrollbar-thumb: #2ad0ff66;
 }
