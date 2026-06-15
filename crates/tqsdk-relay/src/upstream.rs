@@ -13,6 +13,9 @@ use tqsdk_core::internal::WebSocketTransport;
 #[cfg(feature = "server")]
 use tqsdk_core::{OutboundFrame, RawFrame, Transport};
 
+#[cfg(feature = "server")]
+const UPSTREAM_IDLE_PEEK_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpstreamTick {
     pub symbol: String,
@@ -540,7 +543,17 @@ impl WebSocketUpstreamTickSource {
     }
 
     async fn recv_events(&mut self) -> RelayResult<Option<Vec<UpstreamMarketEvent>>> {
-        match self.transport.recv().await {
+        let frame =
+            match tokio::time::timeout(UPSTREAM_IDLE_PEEK_INTERVAL, self.transport.recv()).await {
+                Ok(frame) => frame,
+                Err(_) => {
+                    let peek_started_at = Instant::now();
+                    self.send_peek_message().await?;
+                    self.record_peek_sent(millis_u64(peek_started_at.elapsed()));
+                    return Ok(Some(Vec::new()));
+                }
+            };
+        match frame {
             Ok(RawFrame::Text(text)) => {
                 let frame_received_at = Instant::now();
                 self.send_peek_message().await?;

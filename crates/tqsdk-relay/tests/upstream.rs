@@ -895,6 +895,42 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_peeks_while_idle() {
+    use tqsdk_relay::{
+        UpstreamSourceUpdate, UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource,
+    };
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let chart =
+        UpstreamTickChart::new("relay-upstream-tick-SHFE_au2602-1", ["SHFE.au2602"], 1).unwrap();
+
+    let mut source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+
+    let update = tokio::time::timeout(Duration::from_secs(2), source.next_update())
+        .await
+        .expect("idle upstream should produce progress after sending peek");
+    assert!(matches!(update, Some(UpstreamSourceUpdate::Progress)));
+    let progress = source.take_progress();
+    assert_eq!(progress.frames_received, 0);
+    assert_eq!(progress.events_decoded, 0);
+    assert!(progress.last_peek_delay_ms.is_some());
+    server.join();
+}
+
+#[tokio::test]
 async fn websocket_upstream_tick_source_peeks_before_json_decode() {
     use tqsdk_relay::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
     use websocket_support::TestWebSocketServer;
