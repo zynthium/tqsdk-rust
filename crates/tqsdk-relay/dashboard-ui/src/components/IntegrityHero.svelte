@@ -28,6 +28,13 @@
     model.overall === 'critical' ? '!' : model.overall === 'warning' ? '!' : model.overall === 'warming' ? '…' : model.overall === 'closed' ? '☾' : '✓',
   );
 
+  const chipValueToneClass = {
+    live: 'text-[color:var(--relay-text)]',
+    warn: 'text-[color:var(--relay-warn)]',
+    critical: 'text-[color:var(--relay-bad)]',
+    no_sample: 'text-[color:var(--relay-text)]',
+  } as const;
+
   function idleValue(model: IntegrityModel, idleMs: number | null): string {
     if (model.idleDisplayState === 'closed') return '--';
     if (model.idleDisplayState === 'subscribing') return '订阅中';
@@ -45,39 +52,48 @@
   }
 </script>
 
-<section class={`panel hero ${tone}`} data-testid="integrity-hero">
-  <div class="hero-left">
+<section
+  class={`hero panel-shell grid items-center gap-4 px-[22px] py-3 [grid-template-columns:auto_minmax(0,1fr)_minmax(140px,180px)] ${tone}`}
+  data-testid="integrity-hero"
+>
+  <div class="flex shrink-0 items-center gap-[14px]">
     <div class="orb"><span class="shield">{icon}</span></div>
-    <div class="hero-title-group">
+    <div class="min-w-0">
       <h2>{title}</h2>
       <p class="issue-count"><b>{formatNumber(model.issueCount)}</b> 个异常</p>
     </div>
   </div>
-  <div class="stat-chips">
-    <div class="chip">
-      <span class="chip-label">合约覆盖</span>
-      <span class="chip-value">{formatNumber(model.observedUniverse)}<em>/{formatNumber(model.totalUniverse)}</em></span>
-      <span class="chip-sub">{coverageSub(model)}</span>
+  <div class="flex min-w-0 flex-wrap items-stretch gap-1.5">
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">合约覆盖</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass.live}`}>
+        {formatNumber(model.observedUniverse)}<em class="ml-[0.28em] text-[11px] font-semibold not-italic text-[color:var(--relay-muted)]">/{formatNumber(model.totalUniverse)}</em>
+      </span>
+      <span class="text-[11px] font-[750] text-[color:var(--relay-live)]">{coverageSub(model)}</span>
     </div>
-    <div class="chip">
-      <span class="chip-label">帧静默</span>
-      <span class="chip-value {model.effectiveFrameFlowHealth === 'critical' ? 'val-bad' : model.effectiveFrameFlowHealth === 'warn' ? 'val-warn' : ''}">{idleValue(model, model.upstreamIdleMs)}</span>
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">帧静默</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass[model.effectiveFrameFlowHealth]}`}>{idleValue(model, model.upstreamIdleMs)}</span>
     </div>
-    <div class="chip">
-      <span class="chip-label">事件静默</span>
-      <span class="chip-value {model.effectiveEventFlowHealth === 'critical' ? 'val-bad' : model.effectiveEventFlowHealth === 'warn' ? 'val-warn' : ''}">{idleValue(model, model.eventIdleMs)}</span>
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">事件静默</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass[model.effectiveEventFlowHealth]}`}>{idleValue(model, model.eventIdleMs)}</span>
     </div>
-    <div class="chip">
-      <span class="chip-label">Diff行号</span>
-      <span class="chip-value">{formatNumber(model.diffRowDiscontinuityCount)}</span>
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">Diff行号</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass.live}`}>{formatNumber(model.diffRowDiscontinuityCount)}</span>
     </div>
-    <div class="chip">
-      <span class="chip-label">估算缺失</span>
-      <span class="chip-value">{formatNumber(model.estimatedMissingRows)}<em> 行</em></span>
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">估算缺失</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass.live}`}>
+        {formatNumber(model.estimatedMissingRows)}<em class="ml-[0.28em] text-[11px] font-semibold not-italic text-[color:var(--relay-muted)]"> 行</em>
+      </span>
     </div>
-    <div class="chip">
-      <span class="chip-label">倒序</span>
-      <span class="chip-value">{formatNumber(model.outOfOrderRowCount)}<em> 行</em></span>
+    <div class="flex min-w-20 flex-col gap-px rounded-[7px] border border-[#2ad0ff22] bg-[#071a2b99] px-[10px] py-[5px]">
+      <span class="text-[10px] font-semibold tracking-[0.3px] whitespace-nowrap text-[#7ea8bc]">倒序</span>
+      <span class={`text-[16px] leading-[1.15] font-[850] whitespace-nowrap ${chipValueToneClass.live}`}>
+        {formatNumber(model.outOfOrderRowCount)}<em class="ml-[0.28em] text-[11px] font-semibold not-italic text-[color:var(--relay-muted)]"> 行</em>
+      </span>
     </div>
   </div>
   <div class="ecg" aria-hidden="true">
@@ -91,11 +107,6 @@
   .hero {
     width: 100%;
     justify-self: stretch;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) minmax(140px, 180px);
-    align-items: center;
-    gap: 16px;
-    padding: 12px 22px;
     border-color: #45ff9a8c;
     background: linear-gradient(90deg, #062d26f5, #061e1df5);
     box-shadow:
@@ -122,17 +133,6 @@
   .hero.closed {
     border-color: #58758a80;
     background: linear-gradient(90deg, #0d1e2df5, #071522f5);
-  }
-
-  .hero-left {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-shrink: 0;
-  }
-
-  .hero-title-group {
-    min-width: 0;
   }
 
   .orb {
@@ -232,64 +232,6 @@
   .issue-count b {
     color: #8dff82;
     font-size: 15px;
-  }
-
-  /* -- Stat chips -- */
-  .stat-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: stretch;
-    min-width: 0;
-  }
-
-  .chip {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 80px;
-    padding: 5px 10px;
-    border: 1px solid #2ad0ff22;
-    border-radius: 7px;
-    background: #071a2b99;
-  }
-
-  .chip-label {
-    color: #7ea8bc;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-    white-space: nowrap;
-  }
-
-  .chip-value {
-    color: var(--relay-text);
-    font-size: 16px;
-    font-weight: 850;
-    line-height: 1.15;
-    white-space: nowrap;
-  }
-
-  .chip-value em {
-    color: var(--relay-muted);
-    font-size: 11px;
-    font-style: normal;
-    font-weight: 600;
-    margin-left: 0.28em;
-  }
-
-  .chip-value.val-warn {
-    color: var(--relay-warn);
-  }
-
-  .chip-value.val-bad {
-    color: var(--relay-bad);
-  }
-
-  .chip-sub {
-    color: var(--relay-live);
-    font-size: 11px;
-    font-weight: 750;
   }
 
   .ecg svg {

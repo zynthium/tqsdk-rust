@@ -81,24 +81,27 @@
   });
 </script>
 
-<main class="dashboard-shell" data-fullscreen={view.fullscreen}>
+<main
+  class="relative grid h-dvh min-h-0 overflow-hidden gap-2 px-3 pt-2 pb-[10px] text-[color:var(--relay-text)] [grid-template-rows:44px_auto_auto_minmax(0,1fr)]"
+  data-fullscreen={view.fullscreen}
+>
   <MonitorHeader {model} {error} bind:paused={view.paused} bind:fullscreen={view.fullscreen} />
 
   {#if model}
     <IntegrityHero {model} />
-    <section class="pipeline-kpi-row">
-      <div class="kpi-strip">
+    <section class="grid items-stretch gap-2 max-[1100px]:grid-cols-1 [grid-template-columns:auto_minmax(0,1fr)]">
+      <div class="flex gap-2 max-[1100px]:flex-wrap">
         <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
         <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
         <MetricCard label="下游客户端" value={model.metrics.downstream_clients} tone="info" icon="▤" />
       </div>
       <RelayPipeline {model} />
     </section>
-    <section class="dashboard-main">
-      <div class="main-left">
+    <section class="grid min-h-0 gap-2 overflow-hidden max-[1320px]:[grid-template-columns:minmax(460px,1fr)_300px] [grid-template-columns:minmax(520px,1fr)_340px]">
+      <div class="grid min-h-0 overflow-hidden">
         <ContinuityTimeline {buckets} rows={timelineRows} />
       </div>
-      <div class="main-right">
+      <div class="grid min-h-0 gap-2 overflow-hidden [grid-template-rows:1fr_auto_1fr]">
         <AttentionList rows={model.problems} />
         <IntegrityTrend {history} {model} />
         <IncidentTable incidents={incidents.incidents} />

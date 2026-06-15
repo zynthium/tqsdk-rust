@@ -12,6 +12,39 @@
     severity: TimelineSeverity;
   };
 
+  const nodeClass = {
+    live:
+      'node live box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[color:var(--relay-line-soft)] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    warn:
+      'node warn box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#ffc44766] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    bad:
+      'node bad box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#ff536a66] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    closed:
+      'node closed box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#58758a66] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    unknown:
+      'node unknown box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#4d789066] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    no_sample:
+      'node no_sample box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#4d789066] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+  } satisfies Record<TimelineSeverity, string>;
+
+  const stateClass = {
+    live: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-live)]',
+    warn: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-warn)]',
+    bad: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-bad)]',
+    closed: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-closed)]',
+    unknown: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-muted)]',
+    no_sample: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-muted)]',
+  } satisfies Record<TimelineSeverity, string>;
+
+  const severityDotClass = {
+    live: 'status-dot live rounded-full bg-[color:var(--relay-live)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-live)_70%,transparent)]',
+    warn: 'status-dot warn rounded-full bg-[color:var(--relay-warn)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-warn)_70%,transparent)]',
+    bad: 'status-dot bad rounded-full bg-[color:var(--relay-bad)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-bad)_70%,transparent)]',
+    closed: 'status-dot closed rounded-full bg-[color:var(--relay-closed)] shadow-none',
+    unknown: 'status-dot unknown rounded-full bg-[color:var(--relay-muted)] shadow-none',
+    no_sample: 'status-dot no_sample rounded-full bg-[color:var(--relay-muted)] shadow-none',
+  } satisfies Record<TimelineSeverity, string>;
+
   function sourceState(model: IntegrityModel): string {
     return {
       connecting: '连接中',
@@ -104,16 +137,25 @@
   ]);
 </script>
 
-<section class="panel pipeline" data-testid="relay-pipeline">
+<section
+  class="panel-shell grid min-h-[68px] items-center gap-1 px-[3%] py-1.5 [grid-template-columns:1fr_28px_1fr_28px_1fr_28px_1fr_28px_1fr]"
+  data-testid="relay-pipeline"
+>
   {#each nodes as node, index}
-    <div class={`node ${node.severity}`}>
-      <div class="node-icon">{node.icon}</div>
-      <div class="node-copy">
-        <div class="name">{node.name}</div>
-        <div class={`state ${node.severity}`}>{node.state}</div>
-        <div class="meta">{node.meta}</div>
+    <div class={nodeClass[node.severity]}>
+      <div
+        class="grid size-7 place-items-center rounded-full border border-[#2ad0ffaa] text-[13px] text-[#86ebff]"
+      >
+        {node.icon}
       </div>
-      <span class={`status-dot ${node.severity}`}></span>
+      <div class="grid min-w-0 gap-[3px]">
+        <div class="truncate text-[10px] leading-[1.1] text-[#c6dbe5]">{node.name}</div>
+        <div class={stateClass[node.severity]}>{node.state}</div>
+        <div class="truncate text-[9px] leading-[1.1] text-[color:color-mix(in_srgb,var(--relay-muted)_78%,transparent)]">
+          {node.meta}
+        </div>
+      </div>
+      <span aria-hidden="true" class={`size-2 ${severityDotClass[node.severity]}`}></span>
     </div>
     {#if index < nodes.length - 1}
       <div class="arrow"></div>
@@ -122,110 +164,6 @@
 </section>
 
 <style>
-  .pipeline {
-    min-height: 68px;
-    display: grid;
-    grid-template-columns: 1fr 28px 1fr 28px 1fr 28px 1fr 28px 1fr;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 3%;
-  }
-
-  .node {
-    box-sizing: border-box;
-    height: 60px;
-    min-width: 0;
-    display: grid;
-    grid-template-columns: 30px 1fr 8px;
-    align-items: center;
-    gap: 7px;
-    border: 1px solid var(--relay-line-soft);
-    border-radius: 9px;
-    padding: 5px 10px;
-    background: #061a2be6;
-    box-shadow:
-      inset 0 0 20px #20d8ff0b,
-      0 0 18px #20d8ff0d;
-    transition: border-color 0.3s ease;
-  }
-
-  .node.warn {
-    border-color: #ffc44766;
-  }
-
-  .node.bad {
-    border-color: #ff536a66;
-  }
-
-  .node.no_sample {
-    border-color: #4d789066;
-  }
-
-  .node.closed {
-    border-color: #58758a66;
-  }
-
-  .node-icon {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    border: 1px solid #2ad0ffaa;
-    border-radius: 50%;
-    color: #86ebff;
-    font-size: 13px;
-  }
-
-  .node-copy {
-    min-width: 0;
-    display: grid;
-    gap: 3px;
-  }
-
-  .name {
-    overflow: hidden;
-    color: #c6dbe5;
-    font-size: 10px;
-    line-height: 1.1;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .state {
-    overflow: hidden;
-    color: var(--relay-live);
-    font-size: 13px;
-    font-weight: 850;
-    line-height: 1.2;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .state.warn {
-    color: var(--relay-warn);
-  }
-
-  .state.bad {
-    color: var(--relay-bad);
-  }
-
-  .state.no_sample {
-    color: var(--relay-muted);
-  }
-
-  .state.closed {
-    color: var(--relay-closed);
-  }
-
-  .meta {
-    overflow: hidden;
-    color: color-mix(in srgb, var(--relay-muted) 78%, transparent);
-    font-size: 9px;
-    line-height: 1.1;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .arrow {
     position: relative;
     height: 2px;

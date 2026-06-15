@@ -1,4 +1,4 @@
-import { fireEvent, render } from '@testing-library/svelte';
+import { fireEvent, render, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it } from 'vitest';
 import ContinuityTimeline from './ContinuityTimeline.svelte';
 import type { TimelineSample } from '../lib/types';
@@ -186,6 +186,57 @@ describe('ContinuityTimeline', () => {
 
     expect(view.queryByText('豆粕2609')).toBeNull();
     expect(view.getByText('铁矿2609')).toBeTruthy();
+  });
+
+  it('renders utility-first toolbar and explicit symbol severity classes', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        exchanges: {
+          DCE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+          avg_receive_gap_ms: 24_000,
+          market_time_lag_ms: 45_000,
+          quote_subscriber_count: 1,
+          chart_subscriber_count: 2,
+        }),
+      ],
+    });
+
+    const search = view.getByPlaceholderText('搜索合约或中文名');
+    expect(search.className).toContain('toolbar-input');
+    expect(search.className).toContain('w-[clamp(150px,14vw,220px)]');
+
+    const viewToggle = view.getByRole('button', { name: 'Blocks' }).parentElement as HTMLElement;
+    expect(viewToggle.className).toContain('rounded-md');
+    expect(viewToggle.className).toContain('border-[color:var(--relay-line-soft)]');
+
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+
+    const symbolRow = view.getByTestId('timeline-symbol-row');
+    const badge = within(symbolRow).getByText('静默');
+    expect(badge.className).toContain('severity-badge');
+    expect(badge.className).toContain('text-[color:var(--relay-warn)]');
+
+    const risk = within(symbolRow).getByText('warn');
+    expect(risk.className).toContain('text-[color:var(--relay-warn)]');
   });
 
   it('keeps expanded exchange symbols in stable contract-name order by product', async () => {

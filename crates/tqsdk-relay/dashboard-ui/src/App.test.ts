@@ -34,6 +34,10 @@ describe('App', () => {
     render(App);
 
     expect(await screen.findByText('tqsdk-relay 行情完整性监控中心')).toBeTruthy();
+     const shell = document.querySelector('main');
+     expect(shell?.className).toContain('[grid-template-rows:44px_auto_auto_minmax(0,1fr)]');
+     expect(shell?.className).toContain('px-3');
+     expect(shell?.className).not.toContain('dashboard-shell');
     await waitFor(() => expect(screen.getByText('当前关注 · 问题合约')).toBeTruthy());
     expect(screen.getAllByText(/豆粕2609/).length).toBeGreaterThan(0);
     expect(screen.getByText('无样本')).toBeTruthy();

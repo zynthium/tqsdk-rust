@@ -29,69 +29,27 @@
           ? formatPercent(value)
           : formatNumber(value),
   );
+  let iconToneClass = $derived(
+    tone === 'live'
+      ? 'text-[var(--relay-live)]'
+      : tone === 'warn'
+        ? 'text-[var(--relay-warn)]'
+        : tone === 'bad' || tone === 'accent'
+          ? 'text-[var(--relay-accent)]'
+          : 'text-[var(--relay-info)]'
+  );
 </script>
 
-<article class={`panel metric ${tone}`}>
-  <div class="icon">{icon}</div>
-  <div class="body">
-    <div class="label">{label}</div>
-    <div class="value">{display}<span>{unit}</span></div>
+<article class={`panel grid min-w-[120px] grid-cols-[34px_1fr] items-center gap-2 px-[11px] py-2 ${tone}`}>
+  <div
+    class={`grid h-8 w-8 place-items-center rounded-full border border-current bg-[#20d8ff0d] text-[15px] shadow-[0_0_14px_currentColor] ${iconToneClass}`}
+  >
+    {icon}
+  </div>
+  <div class="min-w-0">
+    <div class="whitespace-nowrap text-[11px] text-[#a7c0ce]">{label}</div>
+    <div class="whitespace-nowrap text-[20px] leading-none font-black text-[var(--relay-text)]">
+      {display}<span class="ml-[3px] text-[11px] text-[var(--relay-muted)]">{unit}</span>
+    </div>
   </div>
 </article>
-
-<style>
-  .metric {
-    min-width: 120px;
-    display: grid;
-    grid-template-columns: 34px 1fr;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 11px;
-  }
-
-  .icon {
-    width: 32px;
-    height: 32px;
-    display: grid;
-    place-items: center;
-    border: 1px solid currentColor;
-    border-radius: 50%;
-    background: #20d8ff0d;
-    box-shadow: 0 0 14px currentColor;
-    color: var(--relay-info);
-    font-size: 15px;
-  }
-
-  .metric.live .icon {
-    color: var(--relay-live);
-  }
-
-  .metric.warn .icon {
-    color: var(--relay-warn);
-  }
-
-  .metric.bad .icon,
-  .metric.accent .icon {
-    color: var(--relay-accent);
-  }
-
-  .label {
-    color: #a7c0ce;
-    font-size: 11px;
-    white-space: nowrap;
-  }
-
-  .value {
-    color: var(--relay-text);
-    font-size: 20px;
-    font-weight: 850;
-    line-height: 1;
-    white-space: nowrap;
-  }
-
-  .value span {
-    margin-left: 3px;
-    color: var(--relay-muted);
-    font-size: 11px;
-  }
-</style>
