@@ -30,6 +30,7 @@ function timelineSeverityForRow(row: SymbolRow): TimelineSeverity {
   if (row.status === 'initializing' || row.problem_severity === 'initializing') return 'no_sample';
   if (row.problem_severity === 'bad' || row.integrity === 'confirmed_gap') return 'bad';
   if (row.problem_severity === 'warn' || row.integrity === 'suspected' || row.flow === 'silent') return 'warn';
+  if (row.phase.startsWith('auction')) return 'auction';
   if (row.flow === 'no_sample') return 'no_sample';
   if (row.session === 'unknown') return 'unknown';
   return 'live';

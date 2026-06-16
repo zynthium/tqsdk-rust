@@ -63,7 +63,7 @@ pub use symbol_metrics::{
     SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery,
     SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSort,
     SymbolStatus, SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
-    SymbolTelemetryStore,
+    SymbolTelemetryStore, SymbolTradingPhase, SymbolTradingPhaseSource,
 };
 #[cfg(feature = "metadata")]
 pub use universe::SessionFuturesUniverseResolver;
@@ -79,6 +79,6 @@ pub use upstream::WebSocketUpstreamTickSource;
 pub use upstream::{
     FakeUpstreamTickSource, UpstreamMarketDecodeReport, UpstreamMarketEvent, UpstreamQuote,
     UpstreamSourceProgress, UpstreamSourceUpdate, UpstreamTick, UpstreamTickChart,
-    UpstreamTickDecodeReport, UpstreamTickSource, decode_upstream_market_report,
-    decode_upstream_tick_report, decode_upstream_ticks,
+    UpstreamTickDecodeReport, UpstreamTickSource, UpstreamTradingStatus,
+    decode_upstream_market_report, decode_upstream_tick_report, decode_upstream_ticks,
 };

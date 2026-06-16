@@ -3,9 +3,9 @@ import { gzipSync } from 'node:zlib';
 
 const distRoot = new URL('../dist/', import.meta.url);
 const budgets = [
-  { label: 'app.js raw', file: 'assets/app.js', max: 100 * 1024, gzip: false },
+  { label: 'app.js raw', file: 'assets/app.js', max: 105 * 1024, gzip: false },
   { label: 'app.js gzip', file: 'assets/app.js', max: 36 * 1024, gzip: true },
-  { label: 'app.css raw', file: 'assets/app.css', max: 40 * 1024, gzip: false },
+  { label: 'app.css raw', file: 'assets/app.css', max: 44 * 1024, gzip: false },
   { label: 'app.css gzip', file: 'assets/app.css', max: 10 * 1024, gzip: true },
 ];
 

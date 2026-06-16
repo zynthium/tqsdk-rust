@@ -1,17 +1,17 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(feature = "server")]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
 use serde_json::Value;
-use tqsdk_core::Quote;
 #[cfg(feature = "server")]
 use tqsdk_core::internal::WebSocketTransport;
 #[cfg(feature = "server")]
 use tqsdk_core::{OutboundFrame, RawFrame, Transport};
+use tqsdk_core::{Quote, TradingStatus};
 
 #[cfg(feature = "server")]
 const UPSTREAM_IDLE_PEEK_INTERVAL: Duration = Duration::from_secs(1);
@@ -29,9 +29,16 @@ pub struct UpstreamQuote {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpstreamTradingStatus {
+    pub symbol: String,
+    pub trading_status: TradingStatus,
+}
+
+#[derive(Debug, Clone)]
 pub enum UpstreamMarketEvent {
     Tick(UpstreamTick),
     Quote(Box<UpstreamQuote>),
+    TradingStatus(Box<UpstreamTradingStatus>),
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +74,7 @@ impl UpstreamSourceProgress {
 pub struct UpstreamMarketDecodeReport {
     ticks: Vec<UpstreamTick>,
     quotes: Vec<UpstreamQuote>,
+    trading_statuses: Vec<UpstreamTradingStatus>,
     invalid_rows: u64,
     invalid_rows_by_symbol: BTreeMap<String, u64>,
     last_invalid_row_error: Option<String>,
@@ -81,6 +89,11 @@ impl UpstreamMarketDecodeReport {
     #[must_use]
     pub fn quotes(&self) -> &[UpstreamQuote] {
         &self.quotes
+    }
+
+    #[must_use]
+    pub fn trading_statuses(&self) -> &[UpstreamTradingStatus] {
+        &self.trading_statuses
     }
 
     #[must_use]
@@ -112,6 +125,11 @@ impl UpstreamMarketDecodeReport {
                 self.quotes
                     .into_iter()
                     .map(|quote| UpstreamMarketEvent::Quote(Box::new(quote))),
+            )
+            .chain(
+                self.trading_statuses
+                    .into_iter()
+                    .map(|status| UpstreamMarketEvent::TradingStatus(Box::new(status))),
             )
             .collect()
     }
@@ -206,6 +224,7 @@ fn decode_upstream_market_report_inner(
         return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
             quotes: Vec::new(),
+            trading_statuses: Vec::new(),
             invalid_rows: 0,
             invalid_rows_by_symbol: BTreeMap::new(),
             last_invalid_row_error: None,
@@ -215,6 +234,7 @@ fn decode_upstream_market_report_inner(
         return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
             quotes: Vec::new(),
+            trading_statuses: Vec::new(),
             invalid_rows: 0,
             invalid_rows_by_symbol: BTreeMap::new(),
             last_invalid_row_error: None,
@@ -222,6 +242,7 @@ fn decode_upstream_market_report_inner(
     };
     let mut ticks = Vec::new();
     let mut quotes = Vec::new();
+    let mut trading_statuses = Vec::new();
     let mut invalid_rows = 0_u64;
     let mut invalid_rows_by_symbol = BTreeMap::new();
     let mut last_invalid_row_error = None;
@@ -268,10 +289,28 @@ fn decode_upstream_market_report_inner(
                 });
             }
         }
+        if let Some(symbols) = fragment.get("trading_status").and_then(Value::as_object) {
+            for (symbol, row) in symbols {
+                let mut trading_status = serde_json::from_value::<TradingStatus>(row.clone())
+                    .map_err(|err| {
+                        RelayError::invalid_protocol(format!(
+                            "invalid upstream trading status row: {err}"
+                        ))
+                    })?;
+                if trading_status.symbol.trim().is_empty() {
+                    trading_status.symbol = symbol.clone();
+                }
+                trading_statuses.push(UpstreamTradingStatus {
+                    symbol: trading_status.symbol.clone(),
+                    trading_status,
+                });
+            }
+        }
     }
     Ok(UpstreamMarketDecodeReport {
         ticks,
         quotes,
+        trading_statuses,
         invalid_rows,
         invalid_rows_by_symbol,
         last_invalid_row_error,
@@ -442,6 +481,11 @@ impl FakeUpstreamTickSource {
         self.events
             .push_back(UpstreamMarketEvent::Quote(Box::new(quote)));
     }
+
+    pub fn push_trading_status(&mut self, status: UpstreamTradingStatus) {
+        self.events
+            .push_back(UpstreamMarketEvent::TradingStatus(Box::new(status)));
+    }
 }
 
 impl UpstreamTickSource for FakeUpstreamTickSource {
@@ -464,6 +508,7 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
+    trading_status_symbols: BTreeSet<String>,
     closed: bool,
     invalid_tick_rows: u64,
     invalid_tick_rows_by_symbol: BTreeMap<String, u64>,
@@ -482,6 +527,7 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
+            trading_status_symbols: BTreeSet::new(),
             closed: false,
             invalid_tick_rows: 0,
             invalid_tick_rows_by_symbol: BTreeMap::new(),
@@ -516,6 +562,8 @@ impl WebSocketUpstreamTickSource {
             ));
         }
         for chart in charts {
+            self.trading_status_symbols
+                .extend(chart.symbols().iter().cloned());
             self.send_json(serde_json::json!({
                 "aid": "set_chart",
                 "chart_id": chart.chart_id(),
@@ -526,6 +574,17 @@ impl WebSocketUpstreamTickSource {
             .await?;
             self.send_peek_message().await?;
         }
+        self.send_json(serde_json::json!({
+            "aid": "subscribe_trading_status",
+            "ins_list": self
+                .trading_status_symbols
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(","),
+        }))
+        .await?;
+        self.send_peek_message().await?;
         self.record_subscription_sent();
         Ok(())
     }

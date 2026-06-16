@@ -12,9 +12,15 @@
     severity: TimelineSeverity;
   };
 
+  const liveNodeClass =
+    'node live box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[color:var(--relay-line-soft)] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]';
+  const liveStateClass = 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-live)]';
+  const liveDotClass =
+    'status-dot live rounded-full bg-[color:var(--relay-live)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-live)_70%,transparent)]';
+
   const nodeClass = {
-    live:
-      'node live box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[color:var(--relay-line-soft)] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
+    live: liveNodeClass,
+    auction: liveNodeClass,
     warn:
       'node warn box-border grid h-[60px] min-w-0 grid-cols-[30px_1fr_8px] items-center gap-[7px] rounded-[9px] border border-[#ffc44766] bg-[#061a2be6] px-[10px] py-[5px] shadow-[inset_0_0_20px_#20d8ff0b,0_0_18px_#20d8ff0d]',
     bad:
@@ -28,7 +34,8 @@
   } satisfies Record<TimelineSeverity, string>;
 
   const stateClass = {
-    live: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-live)]',
+    live: liveStateClass,
+    auction: liveStateClass,
     warn: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-warn)]',
     bad: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-bad)]',
     closed: 'state truncate text-[13px] leading-[1.2] font-[850] text-[color:var(--relay-closed)]',
@@ -37,7 +44,8 @@
   } satisfies Record<TimelineSeverity, string>;
 
   const severityDotClass = {
-    live: 'status-dot live rounded-full bg-[color:var(--relay-live)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-live)_70%,transparent)]',
+    live: liveDotClass,
+    auction: liveDotClass,
     warn: 'status-dot warn rounded-full bg-[color:var(--relay-warn)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-warn)_70%,transparent)]',
     bad: 'status-dot bad rounded-full bg-[color:var(--relay-bad)] shadow-[0_0_10px_color-mix(in_srgb,var(--relay-bad)_70%,transparent)]',
     closed: 'status-dot closed rounded-full bg-[color:var(--relay-closed)] shadow-none',

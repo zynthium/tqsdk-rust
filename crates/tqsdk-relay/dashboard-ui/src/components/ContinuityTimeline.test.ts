@@ -148,6 +148,45 @@ describe('ContinuityTimeline', () => {
     expect(view.getByText('7')).toBeTruthy();
   });
 
+  it('shows auction phase without warning color for symbol rows', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'auction', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          SHFE: { severity: 'auction', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        },
+      },
+      symbols: {
+        'SHFE.au2602': { severity: 'auction', receive_gap_ms: null, avg_receive_gap_ms: null },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'SHFE.au2602',
+          instrument_name: '沪金2602',
+          phase: 'auction_ordering',
+          phase_source: 'trading_status',
+          raw_trade_status: 'AUCTIONORDERING',
+          flow: 'no_sample',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
+        }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
+
+    expect(view.getByText('集合竞价')).toBeTruthy();
+    expect(view.baseElement.querySelectorAll('.cell.auction')).toHaveLength(3);
+    expect(view.baseElement.querySelector('.cell.warn')).toBeNull();
+    expect(view.getByTestId('timeline-symbol-row').getAttribute('aria-label')).toContain('集合竞价');
+  });
+
   it('filters expanded symbol rows with panel-local search', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,

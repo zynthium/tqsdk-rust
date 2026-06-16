@@ -5,6 +5,7 @@
   import type {
     DashboardTimelineScope,
     ProblemSeverity,
+    SymbolTradingPhase,
     SymbolRow,
     SymbolStatus,
     TimelineSample,
@@ -40,6 +41,7 @@
 
   const cellToneClass = {
     live: 'live bg-[#23d786]',
+    auction: 'auction',
     warn: 'warn bg-[color:var(--relay-warn)]',
     bad: 'bad bg-[color:var(--relay-bad)]',
     unknown: 'unknown bg-[#566170]',
@@ -164,12 +166,16 @@
     return severity === 'closed' ? 'unknown' : severity;
   }
 
+  function isQuietSeverity(severity: TimelineSeverity): boolean {
+    return severity === 'closed' || severity === 'auction';
+  }
+
   function latency(definition: TimelineDefinition, sample: TimelineSample): number {
     return definition.latency(sample) ?? 0;
   }
 
   function averageLatencyLabel(definition: TimelineDefinition): string {
-    if (latestSample && cellSeverity(definition, latestSample) === 'closed') return '⌁ --';
+    if (latestSample && isQuietSeverity(cellSeverity(definition, latestSample))) return '⌁ --';
     const average = latestSample ? definition.averageLatency(latestSample) : null;
     return average == null ? '⌁ --' : `⌁ ${formatDuration(average)}`;
   }
@@ -183,6 +189,7 @@
         const severity = cellSeverity(definition, bucket);
         if (severity === 'bad') y = 10;
         else if (severity === 'warn') y = 40;
+        else if (severity === 'auction') y = 85;
         else {
           const lag = latency(definition, bucket);
           y = Math.max(70, 100 - (lag / 1000) * 30);
@@ -200,6 +207,7 @@
     const severity = lastActive ? cellSeverity(definition, lastActive) : (definition.emptySeverity ?? 'no_sample');
     if (severity === 'bad') return 'var(--relay-bad)';
     if (severity === 'warn') return 'var(--relay-warn)';
+    if (severity === 'auction') return '#38bdf8';
     if (severity === 'closed') return '#566170';
     return 'var(--relay-live)';
   }
@@ -207,7 +215,7 @@
   function cellTitle(definition: TimelineDefinition, sample: TimelineSample | null): string {
     if (!sample) return `${definition.label} 无样本`;
     const severity = cellSeverity(definition, sample);
-    const delay = severity === 'closed' ? '--' : formatDuration(latency(definition, sample));
+    const delay = isQuietSeverity(severity) ? '--' : formatDuration(latency(definition, sample));
     return `${definition.label} ${severity} ${definition.summary} ${delay}`;
   }
 
@@ -302,7 +310,7 @@
       severity: (sample: TimelineSample) => sample.symbols[row.symbol]?.severity,
       latency: (sample: TimelineSample) => sample.symbols[row.symbol]?.receive_gap_ms,
       averageLatency: (sample: TimelineSample) => sample.symbols[row.symbol]?.avg_receive_gap_ms,
-      emptySeverity: row.session === 'closed' ? 'closed' : 'no_sample',
+      emptySeverity: row.session === 'closed' ? 'closed' : isAuctionPhase(row.phase) ? 'auction' : 'no_sample',
     };
   }
 
@@ -311,13 +319,25 @@
   }
 
   function rowDelayLabel(row: SymbolRow, value: number | null | undefined): string {
-    return row.session === 'closed' ? '--' : formatDuration(value);
+    return row.session === 'closed' || isAuctionPhase(row.phase) ? '--' : formatDuration(value);
   }
 
   function toggleExchange(exchange: string) {
     expandedExchanges = expandedExchanges.includes(exchange)
       ? expandedExchanges.filter((item) => item !== exchange)
       : [...expandedExchanges, exchange];
+  }
+
+  function isAuctionPhase(phase: SymbolTradingPhase): boolean {
+    return phase.startsWith('auction');
+  }
+
+  function phaseLabel(row: SymbolRow): string | null {
+    if (row.phase === 'auction_ordering') return '集合竞价';
+    if (row.phase === 'auction_balance') return '竞价平衡';
+    if (row.phase === 'auction_match') return '竞价撮合';
+    if (row.phase === 'pre_close') return '临近收盘';
+    return null;
   }
 </script>
 
@@ -346,6 +366,7 @@
     </div>
     <div class="legend flex gap-2.5 text-[10px] text-[color:var(--relay-muted)]">
       <span class="inline-flex items-center gap-[5px]"><i class="live"></i>正常</span>
+      <span class="inline-flex items-center gap-[5px]"><i class="auction"></i>竞价</span>
       <span class="inline-flex items-center gap-[5px]"><i class="warn"></i>静默</span>
       <span class="inline-flex items-center gap-[5px]"><i class="bad"></i>异常</span>
       <span class="inline-flex items-center gap-[5px]"><i class="unknown"></i>休盘</span>
@@ -376,10 +397,12 @@
           data-testid="timeline-symbol-row"
           class="row-label symbol-row"
           title={definition.row.symbol}
-          aria-label={`${definition.label} ${statusLabel(definition.row.status)} ${rowDelayLabel(definition.row, definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
+          aria-label={`${definition.label} ${phaseLabel(definition.row) ?? ''} ${statusLabel(definition.row.status)} ${rowDelayLabel(definition.row, definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
         >
           <span class="symbol-name">{definition.label}</span>
-          <span class={statusBadgeClass[definition.row.status]}>{statusLabel(definition.row.status)}</span>
+          <span class={statusBadgeClass[definition.row.status]}>
+            {phaseLabel(definition.row) ?? statusLabel(definition.row.status)}
+          </span>
           <em class="tick">Tick {formatNumber(definition.row.ticks_ingested)}</em>
           <em class="sub">订阅 {formatNumber(subscriberCount(definition.row))}</em>
           <span class={riskClass[definition.row.problem_severity]}>{definition.row.problem_severity}</span>
@@ -418,6 +441,12 @@
         <div><span>接收延迟</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.receive_gap_ms)}</b></div>
         <div><span>平均接收</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
         <div><span>行情延时</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.market_time_lag_ms)}</b></div>
+        {#if phaseLabel(hoveredSymbolRow)}
+          <div><span>交易阶段</span><b>{phaseLabel(hoveredSymbolRow)}</b></div>
+        {/if}
+        {#if hoveredSymbolRow.raw_trade_status}
+          <div><span>原始状态</span><b>{hoveredSymbolRow.raw_trade_status}</b></div>
+        {/if}
         <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
         {#if hoveredSymbolRow.last_invalid_row_error}
           <div class="error" title={hoveredSymbolRow.last_invalid_row_error}>{hoveredSymbolRow.last_invalid_row_error}</div>
@@ -566,6 +595,10 @@
 
   .cell.live, .legend .live {
     background: #23d786;
+  }
+
+  .cell.auction, .legend .auction {
+    background: #38bdf8;
   }
 
   .cell.warn, .legend .warn {

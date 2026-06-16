@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tqsdk_core::Quote;
+use tqsdk_core::{Quote, TradingStatus};
 
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
 use crate::cache::MarketCache;
@@ -24,7 +24,7 @@ use crate::symbol_metrics::{
     SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery, SymbolMetricsSnapshot,
     SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolStatus,
     SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
-    SymbolTelemetryStore,
+    SymbolTelemetryStore, SymbolTradingPhase, SymbolTradingPhaseSource,
 };
 use crate::universe::FuturesContract;
 
@@ -64,6 +64,12 @@ pub struct DashboardSymbolRow {
     pub status: SymbolStatus,
     #[serde(skip_serializing_if = "is_symbol_session_open")]
     pub session: SymbolSession,
+    #[serde(skip_serializing_if = "is_symbol_phase_continuous")]
+    pub phase: SymbolTradingPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_source: Option<SymbolTradingPhaseSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_trade_status: Option<String>,
     #[serde(skip_serializing_if = "is_symbol_flow_flowing")]
     pub flow: SymbolFlow,
     #[serde(skip_serializing_if = "is_symbol_integrity_intact")]
@@ -110,11 +116,17 @@ impl DashboardSymbolMetricsSnapshot {
 
 impl DashboardSymbolRow {
     fn from_symbol_metrics(row: SymbolTelemetrySnapshot) -> Self {
+        let expose_phase_detail = row.phase != SymbolTradingPhase::Continuous;
         Self {
             symbol: row.symbol,
             instrument_name: row.instrument_name,
             status: row.status,
             session: row.session,
+            phase: row.phase,
+            phase_source: expose_phase_detail.then_some(row.phase_source).flatten(),
+            raw_trade_status: expose_phase_detail
+                .then_some(row.raw_trade_status)
+                .flatten(),
             flow: row.flow,
             integrity: row.integrity,
             problem: row.problem,
@@ -159,6 +171,10 @@ fn is_symbol_session_open(value: &SymbolSession) -> bool {
     *value == SymbolSession::Open
 }
 
+fn is_symbol_phase_continuous(value: &SymbolTradingPhase) -> bool {
+    *value == SymbolTradingPhase::Continuous
+}
+
 fn is_symbol_flow_flowing(value: &SymbolFlow) -> bool {
     *value == SymbolFlow::Flowing
 }
@@ -176,6 +192,7 @@ fn is_symbol_problem_severity_live(value: &SymbolProblemSeverity) -> bool {
 pub enum DashboardTimelineSeverity {
     Live,
     Closed,
+    Auction,
     Warn,
     Bad,
     Unknown,
@@ -359,6 +376,7 @@ fn dashboard_scope_for<'a>(
     let mut problem = 0;
     let mut bad = false;
     let mut warn = false;
+    let mut auction = false;
     let mut all_closed = true;
     let mut all_no_sample = true;
     let mut max_receive_gap_ms = None::<u64>;
@@ -372,6 +390,7 @@ fn dashboard_scope_for<'a>(
         }
         bad |= row.problem_severity == SymbolProblemSeverity::Bad;
         warn |= row.problem_severity == SymbolProblemSeverity::Warn;
+        auction |= row.phase.is_auction();
         all_closed &= row.session == SymbolSession::Closed;
         all_no_sample &= row.flow == SymbolFlow::NoSample;
         if let Some(gap) = row.receive_gap_ms {
@@ -391,6 +410,8 @@ fn dashboard_scope_for<'a>(
         DashboardTimelineSeverity::Bad
     } else if warn {
         DashboardTimelineSeverity::Warn
+    } else if auction {
+        DashboardTimelineSeverity::Auction
     } else if all_no_sample {
         DashboardTimelineSeverity::NoSample
     } else {
@@ -476,6 +497,8 @@ fn dashboard_symbol_severity(row: &SymbolTelemetrySnapshot) -> DashboardTimeline
         || row.flow == SymbolFlow::Silent
     {
         DashboardTimelineSeverity::Warn
+    } else if row.phase.is_auction() {
+        DashboardTimelineSeverity::Auction
     } else if row.flow == SymbolFlow::NoSample {
         DashboardTimelineSeverity::NoSample
     } else if row.session == SymbolSession::Unknown {
@@ -726,6 +749,49 @@ impl RelayEngine {
             .record_quote_at(symbol, &quote, receive_unix_millis);
         self.cache.push_quote(symbol, quote);
         Ok(self.quote_frames(symbol))
+    }
+
+    pub fn ingest_trading_status(
+        &mut self,
+        symbol: impl AsRef<str>,
+        trading_status: TradingStatus,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        self.ingest_trading_status_at(symbol, trading_status, current_unix_millis())
+    }
+
+    pub fn ingest_trading_status_at_for_test(
+        &mut self,
+        symbol: impl AsRef<str>,
+        trade_status: impl AsRef<str>,
+        receive_unix_millis: u64,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        let symbol = symbol.as_ref();
+        self.ingest_trading_status_at(
+            symbol,
+            TradingStatus {
+                symbol: symbol.to_string(),
+                trade_status: trade_status.as_ref().to_string(),
+                epoch: None,
+            },
+            receive_unix_millis,
+        )
+    }
+
+    fn ingest_trading_status_at(
+        &mut self,
+        symbol: impl AsRef<str>,
+        trading_status: TradingStatus,
+        receive_unix_millis: u64,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        let symbol = symbol.as_ref();
+        self.mark_upstream_live();
+        self.record_data_activity_at(receive_unix_millis / 1_000);
+        self.symbol_metrics.record_trading_status_at(
+            symbol,
+            &trading_status.trade_status,
+            receive_unix_millis,
+        );
+        Ok(Vec::new())
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) {
