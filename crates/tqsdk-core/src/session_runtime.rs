@@ -445,7 +445,14 @@ impl SessionRuntime {
                 continue;
             }
 
-            if matches!(current.as_deref(), Some("acked")) {
+            if matches!(current.as_deref(), Some("acked" | "partially_applied")) {
+                continue;
+            }
+
+            if matches!(
+                self.command_aid(command_id).as_deref(),
+                Some("insert_order")
+            ) {
                 continue;
             }
 
@@ -719,6 +726,23 @@ impl SessionRuntime {
         let command_segment = command_id.get().to_string();
         snapshot
             .get(["runtime", "commands", command_segment.as_str(), "status"])
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn command_aid(&self, command_id: CommandId) -> Option<String> {
+        let reader = self.handle.reader();
+        let snapshot = reader.read();
+        let snapshot = snapshot.view();
+        let command_segment = command_id.get().to_string();
+        snapshot
+            .get([
+                "runtime",
+                "commands",
+                command_segment.as_str(),
+                "detail",
+                "aid",
+            ])
             .and_then(Value::as_str)
             .map(str::to_string)
     }

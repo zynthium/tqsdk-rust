@@ -625,6 +625,120 @@ async fn wait_command_completed_accepts_insert_order_ack() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn wait_command_completed_ignores_unrelated_insert_order_trade_diffs_until_target_ack() {
+    let handle = runtime_with_default_adapters();
+    let transport = QueueTransport::default();
+    {
+        let mut queue = transport.recv_queue.lock().unwrap();
+        for order_id in ["other-1", "other-2"] {
+            queue.push_back(RawFrame::Text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            "sim": {
+                                "orders": {
+                                    order_id: {
+                                        "status": "ALIVE",
+                                        "exchange_order_id": format!("EX-{order_id}")
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })
+                .to_string(),
+            ));
+        }
+        queue.push_back(RawFrame::Text(
+            json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "trade": {
+                        "sim": {
+                            "orders": {
+                                "target-order": {
+                                    "status": "ALIVE",
+                                    "exchange_order_id": "EX-target"
+                                }
+                            }
+                        }
+                    }
+                }]
+            })
+            .to_string(),
+        ));
+    }
+
+    let client = test_live_client(
+        handle.clone(),
+        SessionTopology::default().with_route(SessionRoute {
+            label: "trade".to_string(),
+            target: SessionTarget::Account(AccountId::new("sim")),
+            domains: vec![ProtocolDomain::Trade],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "wss://trade.example".to_string(),
+                connect: tqsdk_core::WebSocketConnectOptions::default(),
+            },
+        }),
+        transport,
+        Arc::new(RecordingExecutor::default()),
+    );
+    let command_id = client
+        .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("sim"),
+                order_id: OrderId::new("target-order"),
+                symbol: Symbol::new("SHFE.ao2609"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(2800.0)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        )))
+        .await
+        .unwrap();
+
+    assert!(client.flush_outbound().await.unwrap());
+    assert_eq!(
+        client.command_status_typed(command_id).unwrap(),
+        Some(CommandStatus::Sent)
+    );
+
+    for order_id in ["other-1", "other-2"] {
+        assert!(
+            client
+                .drive_route_label_once(
+                    "trade",
+                    Some(Instant::now() + Duration::from_secs(1)),
+                    vec![command_id],
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["trade", "sim", "orders", order_id, "status"]),
+            Some(&json!("ALIVE"))
+        );
+        assert_eq!(
+            client.command_status_typed(command_id).unwrap(),
+            Some(CommandStatus::Sent)
+        );
+    }
+
+    client.wait_command_completed(command_id).await.unwrap();
+    assert_eq!(
+        client.command_status_typed(command_id).unwrap(),
+        Some(CommandStatus::Acked)
+    );
+}
+
 #[test]
 fn command_status_typed_rejects_unknown_status_strings() {
     let mut registry = AdapterRegistry::new();
