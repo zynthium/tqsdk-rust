@@ -1,11 +1,14 @@
+use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{Local, Timelike};
 use serde_json::json;
 use tqsdk_relay::{
-    RelayConfig, RelayEngine, UniverseExpression, UpstreamMarketEvent, UpstreamTickChart,
-    decode_upstream_market_report, decode_upstream_tick_report, decode_upstream_ticks,
+    DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig, RelayEngine, UniverseExpression,
+    UpstreamMarketEvent, UpstreamTickChart, decode_upstream_market_report,
+    decode_upstream_tick_report, decode_upstream_ticks,
 };
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
@@ -1237,6 +1240,121 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     upstream.join();
 }
 
+#[tokio::test]
+async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
+    use tqsdk_relay::{
+        RelayServer, RelaySourceStatus, spawn_configured_upstream_pump_with_retry_interval,
+    };
+    use websocket_support::TestWebSocketServer;
+
+    let (send_second_tick_tx, send_second_tick_rx) = std::sync::mpsc::channel();
+    let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_set_chart(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "17": {
+                                            "datetime": 1_000,
+                                            "last_price": 610.0,
+                                            "volume": 170,
+                                            "open_interest": 1007
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        loop {
+            match send_second_tick_rx.try_recv() {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+            match socket.recv() {
+                Ok(websocket_support::ClientFrame::Text(_)) => {}
+                Ok(websocket_support::ClientFrame::Close) => return,
+                Ok(_) => {}
+                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(err) => panic!("unexpected upstream client frame error: {err}"),
+            }
+        }
+        socket.set_read_timeout(None).unwrap();
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "ticks": {
+                                "SHFE.au2602": {
+                                    "data": {
+                                        "18": {
+                                            "datetime": 2_000,
+                                            "last_price": 611.0,
+                                            "volume": 180,
+                                            "open_interest": 1008
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
+        futures_universe_refresh: FuturesUniverseRefreshSchedule::daily(refresh_time_after(
+            Duration::from_secs(4),
+        )),
+        ..RelayConfig::default()
+    };
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+
+    let shutdown = spawn_configured_upstream_pump_with_retry_interval(
+        &config,
+        server,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    wait_for_ticks_ingested(&engine, 1).await;
+    wait_for_upstream_status(&engine, RelaySourceStatus::Up).await;
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        engine.lock().unwrap().health_snapshot().upstream_status,
+        RelaySourceStatus::Up
+    );
+
+    send_second_tick_tx.send(()).unwrap();
+    wait_for_ticks_ingested(&engine, 2).await;
+    let _ = shutdown.send(());
+    upstream.join();
+}
+
 async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -1268,6 +1386,11 @@ async fn wait_for_upstream_status(
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+fn refresh_time_after(delay: Duration) -> DailyRefreshTime {
+    let target = Local::now() + chrono::Duration::from_std(delay).unwrap();
+    DailyRefreshTime::from_hms(target.hour(), target.minute(), target.second()).unwrap()
 }
 
 fn free_loopback_addr() -> SocketAddr {
