@@ -592,15 +592,6 @@ impl WebSocketUpstreamTickSource {
             self.quote_symbols.extend(chart.symbols().iter().cloned());
             self.trading_status_symbols
                 .extend(chart.symbols().iter().cloned());
-            self.send_json(serde_json::json!({
-                "aid": "set_chart",
-                "chart_id": chart.chart_id(),
-                "ins_list": chart.ins_list(),
-                "duration": chart.duration_ns(),
-                "view_width": chart.view_width(),
-            }))
-            .await?;
-            self.send_peek_message().await?;
         }
         self.send_json(serde_json::json!({
             "aid": "subscribe_quote",
@@ -614,6 +605,17 @@ impl WebSocketUpstreamTickSource {
         }))
         .await?;
         self.send_peek_message().await?;
+        for chart in charts {
+            self.send_json(serde_json::json!({
+                "aid": "set_chart",
+                "chart_id": chart.chart_id(),
+                "ins_list": chart.ins_list(),
+                "duration": chart.duration_ns(),
+                "view_width": chart.view_width(),
+            }))
+            .await?;
+            self.send_peek_message().await?;
+        }
         self.record_subscription_sent();
         Ok(())
     }

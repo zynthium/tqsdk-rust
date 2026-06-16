@@ -268,9 +268,9 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
 
     let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         send_tick_rx.recv().unwrap();
         socket
             .send_text(
@@ -346,12 +346,12 @@ async fn relay_configured_upstream_adds_downstream_symbol_immediately() {
     let (dynamic_seen_tx, dynamic_seen_rx) = std::sync::mpsc::channel();
     let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         expect_set_chart(&mut socket, "DCE.m2609");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         dynamic_seen_tx.send(()).unwrap();
         send_tick_rx.recv().unwrap();
         socket
