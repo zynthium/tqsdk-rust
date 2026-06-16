@@ -11,13 +11,15 @@ use tqsdk_core::TradeAccountType;
 use tqsdk_core::internal::{DynRouteConnectFuture, DynTransport, SessionBootstrap};
 use tqsdk_core::internal::{RouteRequestExecutor, SessionRuntime};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, AuthId, AuthProvider, CommandId, CommandStatus, CommitScope,
-    EndpointConfig, FieldMutation, InputPayload, IoEvent, MarketCommand, MutationSource,
-    NormalizedMutation, ObjectKey, OutboundDispatch, OutboundFrame, OutboundRequest,
-    ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, RawFrame, ReplaySessionId,
-    Result as CoreResult, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput, SessionConfig,
-    SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionTarget, SessionTopology,
-    SessionTopologyResolver, StatePath, Transport,
+    AccountId, AdapterRegistry, AuthContext, AuthId, AuthProvider, CommandId, CommandStatus,
+    CommitScope, EndpointConfig, FieldMutation, InputPayload, IoEvent, MarketCommand,
+    MutationSource, NormalizedMutation, ObjectKey, OrderId, OutboundDispatch, OutboundFrame,
+    OutboundRequest, ProtocolAdapter, ProtocolDomain, QueryCommand, QueryId, RawFrame,
+    ReplaySessionId, Result as CoreResult, Runtime, RuntimeCommand, RuntimeHandle, RuntimeInput,
+    SessionConfig, SessionRoute, SessionRouteConnector, SessionRouteEndpoint, SessionTarget,
+    SessionTopology, SessionTopologyResolver, StatePath, Symbol, TradeCommand, TradeDirection,
+    TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    Transport,
 };
 
 #[cfg(feature = "live")]
@@ -570,6 +572,48 @@ async fn wait_command_completed_drives_http_query_command_to_completion() {
         handle.latest_snapshot().get(["query", "query-1", "quotes"]),
         Some(&json!(["SHFE.au2602"]))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_command_completed_accepts_insert_order_ack() {
+    let handle = runtime_with_default_adapters();
+    let client = ManualSession::from_runtime(handle.clone()).into_client();
+    let command_id = handle
+        .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+            TradeInsertOrderCommand {
+                account_id: AccountId::new("sim"),
+                order_id: OrderId::new("order-1"),
+                symbol: Symbol::new("SHFE.ao2609"),
+                direction: TradeDirection::Buy,
+                offset: Some(TradeOffset::Open),
+                volume: 1,
+                price_type: TradePriceType::Limit,
+                limit_price: Some(json!(2800.0)),
+                time_condition: TradeTimeCondition::Gfd,
+                volume_condition: TradeVolumeCondition::Any,
+            },
+        )))
+        .await
+        .unwrap();
+
+    handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Sent,
+            Some(json!({"aid": "insert_order"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+    handle
+        .record_command_status(
+            command_id,
+            CommandStatus::Acked,
+            Some(json!({"aid": "insert_order"})),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+
+    client.wait_command_completed(command_id).await.unwrap();
 }
 
 #[test]
