@@ -90,7 +90,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 relay 侧统一使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 描述合约集合，例如
 `active:all`、`main:all;index:all;!CFFEX` 或 `file:./futures-symbols.txt`，
 由 relay 动态查询当前活跃合约集合，并默认在本地时间每天 `08:30:00` 重新发现。relay 会暴露上游
-合约数、单个上游 tick chart 的最大 `ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
+合约数、上游命令中的最大 `ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
 检查订阅规模；`/health` 会区分下游监听、上游连接、订阅/补历史阶段、合约集合刷新和数据 freshness；
 `/metrics` 和 `/dashboard` 会暴露上游 `connecting` / `subscribing` / `backfilling` / `live` 阶段，
 dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame idle；
