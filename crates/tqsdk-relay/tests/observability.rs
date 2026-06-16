@@ -220,6 +220,45 @@ fn dashboard_marks_no_sample_universe_symbols_initializing_during_backfill() {
 }
 
 #[test]
+fn dashboard_marks_auction_ordering_open_without_continuity_problem() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let now = local_millis_at(20, 56, 0);
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602"],
+        11,
+        Some(32_000),
+        None,
+        now / 1_000 - 2,
+    );
+
+    engine
+        .ingest_trading_status_at_for_test("SHFE.au2602", "AUCTIONORDERING", now - 1_000)
+        .unwrap();
+
+    let dashboard = engine.dashboard_snapshot_at(now, &tqsdk_relay::SymbolMetricsQuery::default());
+    let row = &dashboard.page.symbols[0];
+    let json = serde_json::to_value(&dashboard).unwrap();
+
+    assert_eq!(row.status, tqsdk_relay::SymbolStatus::Live);
+    assert_eq!(row.session, tqsdk_relay::SymbolSession::Open);
+    assert_eq!(dashboard.global.problem, 0);
+    assert_eq!(
+        dashboard.timeline.global.severity,
+        tqsdk_relay::DashboardTimelineSeverity::Auction
+    );
+    assert_eq!(json["page"]["symbols"][0]["phase"], "auction_ordering");
+    assert_eq!(json["page"]["symbols"][0]["phase_source"], "trading_status");
+    assert_eq!(
+        json["page"]["symbols"][0]["raw_trade_status"],
+        "AUCTIONORDERING"
+    );
+    assert_eq!(
+        json["page"]["symbols"][0]["receive_gap_ms"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
 fn dashboard_keeps_unobserved_universe_symbols_initializing_after_live_tick() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let now = local_millis_at(9, 30, 0);

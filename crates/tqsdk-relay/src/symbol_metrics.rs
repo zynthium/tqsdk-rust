@@ -52,6 +52,35 @@ pub enum SymbolSession {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SymbolTradingPhase {
+    Continuous,
+    AuctionOrdering,
+    AuctionBalance,
+    AuctionMatch,
+    PreClose,
+    Closed,
+    Unknown,
+}
+
+impl SymbolTradingPhase {
+    #[must_use]
+    pub fn is_auction(self) -> bool {
+        matches!(
+            self,
+            Self::AuctionOrdering | Self::AuctionBalance | Self::AuctionMatch
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolTradingPhaseSource {
+    Schedule,
+    TradingStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SymbolFlow {
     Flowing,
     Silent,
@@ -133,6 +162,9 @@ pub struct SymbolSubscriptionCounts {
 pub struct SymbolTelemetry {
     instrument_name: Option<String>,
     trading_segments: Option<Vec<TradingSessionSegment>>,
+    trading_phase: Option<SymbolTradingPhase>,
+    trading_phase_source: Option<SymbolTradingPhaseSource>,
+    raw_trade_status: Option<String>,
     ticks_ingested: u64,
     source_epoch: u64,
     last_tick_id: Option<i64>,
@@ -208,6 +240,9 @@ pub struct SymbolTelemetrySnapshot {
     pub status: SymbolStatus,
     pub coverage: SymbolCoverage,
     pub session: SymbolSession,
+    pub phase: SymbolTradingPhase,
+    pub phase_source: Option<SymbolTradingPhaseSource>,
+    pub raw_trade_status: Option<String>,
     pub flow: SymbolFlow,
     pub integrity: SymbolIntegrity,
     pub problem: bool,
@@ -328,6 +363,23 @@ impl SymbolTelemetryStore {
         telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
     }
 
+    pub fn record_trading_status_at(
+        &mut self,
+        symbol: &str,
+        trade_status: &str,
+        _receive_unix_millis: u64,
+    ) {
+        let trade_status = trade_status.trim();
+        if trade_status.is_empty() {
+            return;
+        }
+        self.pending_initial_samples.remove(symbol);
+        let telemetry = self.telemetry.entry(symbol.to_string()).or_default();
+        telemetry.trading_phase = Some(phase_from_trade_status(trade_status));
+        telemetry.trading_phase_source = Some(SymbolTradingPhaseSource::TradingStatus);
+        telemetry.raw_trade_status = Some(trade_status.to_string());
+    }
+
     pub fn record_invalid_row(&mut self, symbol: &str, message: impl Into<String>) {
         self.record_invalid_rows(symbol, 1, Some(message.into()));
     }
@@ -437,7 +489,7 @@ impl SymbolTelemetryReadModel {
                 .and_then(|telemetry| telemetry.last_tick_datetime_ns)
                 .and_then(tick_datetime_ns_to_unix_millis)
                 .and_then(|tick_millis| now_unix_millis.checked_sub(tick_millis));
-            let trading_phase = (in_universe || raw_receive_gap_ms.is_some())
+            let schedule_phase = (in_universe || raw_receive_gap_ms.is_some())
                 .then(|| {
                     trading_phase_for_symbol(
                         &symbol,
@@ -452,24 +504,30 @@ impl SymbolTelemetryReadModel {
                     (raw_receive_gap_ms.is_some() || matches!(phase, TradingSessionPhase::Closed))
                         .then_some(phase)
                 });
+            let phase = symbol_trading_phase_for(telemetry, schedule_phase);
+            let phase_source = symbol_trading_phase_source_for(telemetry, schedule_phase);
             let status = classify_symbol(
                 in_universe,
                 raw_receive_gap_ms,
                 stale_after_millis,
-                trading_phase,
+                phase,
                 pending_initial_sample,
                 context,
             );
             let telemetry = telemetry.cloned().unwrap_or_default();
             let coverage = coverage_for(in_universe);
-            let session = session_for(trading_phase);
-            let is_closed = status == SymbolStatus::Closed;
-            let receive_gap_ms = (!is_closed).then_some(raw_receive_gap_ms).flatten();
-            let avg_receive_gap_ms = (!is_closed)
+            let session = session_for(phase);
+            let suppress_continuity = status == SymbolStatus::Closed || phase.is_auction();
+            let receive_gap_ms = (!suppress_continuity)
+                .then_some(raw_receive_gap_ms)
+                .flatten();
+            let avg_receive_gap_ms = (!suppress_continuity)
                 .then(|| average_receive_gap_ms(&telemetry.receive_gap_samples_ms))
                 .flatten();
-            let market_time_lag_ms = (!is_closed).then_some(raw_market_time_lag_ms).flatten();
-            let flow = if is_closed {
+            let market_time_lag_ms = (!suppress_continuity)
+                .then_some(raw_market_time_lag_ms)
+                .flatten();
+            let flow = if suppress_continuity {
                 SymbolFlow::NoSample
             } else {
                 flow_for(raw_receive_gap_ms, stale_after_millis)
@@ -486,6 +544,9 @@ impl SymbolTelemetryReadModel {
                 status,
                 coverage,
                 session,
+                phase,
+                phase_source,
+                raw_trade_status: telemetry.raw_trade_status,
                 flow,
                 integrity,
                 problem: is_problem_severity(problem_severity),
@@ -623,11 +684,15 @@ fn coverage_for(in_universe: bool) -> SymbolCoverage {
     }
 }
 
-fn session_for(trading_phase: Option<TradingSessionPhase>) -> SymbolSession {
-    match trading_phase {
-        Some(TradingSessionPhase::Open | TradingSessionPhase::PreClose) => SymbolSession::Open,
-        Some(TradingSessionPhase::Closed) => SymbolSession::Closed,
-        None => SymbolSession::Unknown,
+fn session_for(phase: SymbolTradingPhase) -> SymbolSession {
+    match phase {
+        SymbolTradingPhase::Continuous
+        | SymbolTradingPhase::AuctionOrdering
+        | SymbolTradingPhase::AuctionBalance
+        | SymbolTradingPhase::AuctionMatch
+        | SymbolTradingPhase::PreClose => SymbolSession::Open,
+        SymbolTradingPhase::Closed => SymbolSession::Closed,
+        SymbolTradingPhase::Unknown => SymbolSession::Unknown,
     }
 }
 
@@ -657,15 +722,18 @@ fn classify_symbol(
     in_universe: bool,
     receive_gap_ms: Option<u64>,
     stale_after_millis: u64,
-    trading_phase: Option<TradingSessionPhase>,
+    phase: SymbolTradingPhase,
     pending_initial_sample: bool,
     context: SymbolMetricsContext,
 ) -> SymbolStatus {
     if !in_universe && receive_gap_ms.is_none() {
         return SymbolStatus::Inactive;
     }
-    if matches!(trading_phase, Some(TradingSessionPhase::Closed)) {
+    if phase == SymbolTradingPhase::Closed {
         return SymbolStatus::Closed;
+    }
+    if phase.is_auction() {
+        return SymbolStatus::Live;
     }
     if in_universe
         && receive_gap_ms.is_none()
@@ -682,6 +750,51 @@ fn classify_symbol(
         Some(_) => SymbolStatus::Stale,
         None if in_universe => SymbolStatus::Missing,
         None => SymbolStatus::Inactive,
+    }
+}
+
+fn symbol_trading_phase_for(
+    telemetry: Option<&SymbolTelemetry>,
+    schedule_phase: Option<TradingSessionPhase>,
+) -> SymbolTradingPhase {
+    telemetry
+        .and_then(|telemetry| telemetry.trading_phase)
+        .unwrap_or_else(|| phase_from_schedule(schedule_phase))
+}
+
+fn symbol_trading_phase_source_for(
+    telemetry: Option<&SymbolTelemetry>,
+    schedule_phase: Option<TradingSessionPhase>,
+) -> Option<SymbolTradingPhaseSource> {
+    telemetry
+        .and_then(|telemetry| telemetry.trading_phase_source)
+        .or_else(|| schedule_phase.map(|_| SymbolTradingPhaseSource::Schedule))
+}
+
+fn phase_from_schedule(phase: Option<TradingSessionPhase>) -> SymbolTradingPhase {
+    match phase {
+        Some(TradingSessionPhase::Open) => SymbolTradingPhase::Continuous,
+        Some(TradingSessionPhase::PreClose) => SymbolTradingPhase::PreClose,
+        Some(TradingSessionPhase::Closed) => SymbolTradingPhase::Closed,
+        None => SymbolTradingPhase::Unknown,
+    }
+}
+
+fn phase_from_trade_status(trade_status: &str) -> SymbolTradingPhase {
+    let normalized = trade_status
+        .trim()
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match normalized.as_str() {
+        "AUCTIONORDERING" => SymbolTradingPhase::AuctionOrdering,
+        "AUCTIONBALANCE" => SymbolTradingPhase::AuctionBalance,
+        "AUCTIONMATCH" => SymbolTradingPhase::AuctionMatch,
+        "CONTINOUS" | "CONTINUOUS" => SymbolTradingPhase::Continuous,
+        "PRECLOSE" => SymbolTradingPhase::PreClose,
+        "CLOSED" | "NOTTRADE" | "NOTTRADING" | "BEFORETRADING" => SymbolTradingPhase::Closed,
+        _ => SymbolTradingPhase::Unknown,
     }
 }
 

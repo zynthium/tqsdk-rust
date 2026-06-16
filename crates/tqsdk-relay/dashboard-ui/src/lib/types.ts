@@ -9,6 +9,15 @@ export type UpstreamStage =
 export type SymbolStatus = 'live' | 'closed' | 'initializing' | 'stale' | 'missing' | 'inactive';
 export type SymbolCoverage = 'covered' | 'uncovered';
 export type SymbolSession = 'open' | 'closed' | 'unknown';
+export type SymbolTradingPhase =
+  | 'continuous'
+  | 'auction_ordering'
+  | 'auction_balance'
+  | 'auction_match'
+  | 'pre_close'
+  | 'closed'
+  | 'unknown';
+export type SymbolTradingPhaseSource = 'schedule' | 'trading_status';
 export type SymbolFlow = 'flowing' | 'silent' | 'no_sample';
 export type SymbolIntegrity = 'intact' | 'suspected' | 'confirmed_gap';
 export type ProblemSeverity = 'live' | 'closed' | 'initializing' | 'warn' | 'bad';
@@ -76,6 +85,9 @@ export type SymbolRow = {
   status: SymbolStatus;
   coverage: SymbolCoverage;
   session: SymbolSession;
+  phase: SymbolTradingPhase;
+  phase_source: SymbolTradingPhaseSource | null;
+  raw_trade_status: string | null;
   flow: SymbolFlow;
   integrity: SymbolIntegrity;
   problem: boolean;
@@ -130,7 +142,7 @@ export type RelayEvent = {
   detail: string;
 };
 
-export type TimelineSeverity = 'live' | 'closed' | 'warn' | 'bad' | 'unknown' | 'no_sample';
+export type TimelineSeverity = 'live' | 'closed' | 'auction' | 'warn' | 'bad' | 'unknown' | 'no_sample';
 
 export type DashboardTimelineScope = {
   severity: TimelineSeverity;

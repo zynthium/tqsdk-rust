@@ -3,17 +3,21 @@
   import type { LocalIncident, TimelineSeverity } from '../lib/types';
 
   let { incidents }: { incidents: LocalIncident[] } = $props();
+  const liveTone = 'border-[#45ff9a44]';
+  const liveBadge = 'border-[#45ff9a55] bg-[#45ff9a0d] text-[color:var(--relay-live)]';
   const itemToneClass: Record<TimelineSeverity, string> = {
-    live: 'border-[#45ff9a44]',
+    live: liveTone,
     closed: 'border-[#58758a44]',
+    auction: liveTone,
     warn: 'border-[#ffc44744]',
     bad: 'border-[#ff536a44]',
     unknown: 'border-[#4d789044]',
     no_sample: 'border-[#4d789044]',
   };
   const severityBadgeClass: Record<TimelineSeverity, string> = {
-    live: 'border-[#45ff9a55] bg-[#45ff9a0d] text-[color:var(--relay-live)]',
+    live: liveBadge,
     closed: 'border-[#58758a66] bg-[#58758a14] text-[#9eb9ce]',
+    auction: liveBadge,
     warn: 'border-[#ffc44766] bg-[#ffc44712] text-[color:var(--relay-warn)]',
     bad: 'border-[#ff536a66] bg-[#ff536a12] text-[color:var(--relay-bad)]',
     unknown: 'border-[#4d789066] bg-[#4d78900f] text-[color:var(--relay-muted)]',

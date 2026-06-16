@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tqsdk_relay::{
-    RelayConfig, RelayEngine, UniverseExpression, UpstreamTickChart, decode_upstream_market_report,
-    decode_upstream_tick_report, decode_upstream_ticks,
+    RelayConfig, RelayEngine, UniverseExpression, UpstreamMarketEvent, UpstreamTickChart,
+    decode_upstream_market_report, decode_upstream_tick_report, decode_upstream_ticks,
 };
 
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
@@ -36,6 +36,24 @@ fn expect_peek_message(socket: &mut websocket_support::TestWebSocketConnection) 
         recv_text_json(socket, "peek_message"),
         json!({"aid": "peek_message"})
     );
+}
+
+fn expect_subscribe_trading_status(
+    socket: &mut websocket_support::TestWebSocketConnection,
+    ins_list: &str,
+) {
+    assert_eq!(
+        recv_text_json(socket, "subscribe_trading_status"),
+        json!({"aid": "subscribe_trading_status", "ins_list": ins_list})
+    );
+}
+
+fn expect_initial_trading_status_subscription(
+    socket: &mut websocket_support::TestWebSocketConnection,
+    ins_list: &str,
+) {
+    expect_subscribe_trading_status(socket, ins_list);
+    expect_peek_message(socket);
 }
 
 #[test]
@@ -235,6 +253,41 @@ fn decode_upstream_market_report_extracts_quote_updates() {
     assert_eq!(report.quotes()[0].quote.last_price, 16666.0);
     assert_eq!(report.quotes()[0].quote.volume, 12);
     assert_eq!(report.quotes()[0].quote.open_interest, 34);
+}
+
+#[test]
+fn decode_upstream_market_report_extracts_trading_status_updates() {
+    let report = decode_upstream_market_report(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "trading_status": {
+                    "SHFE.au2602": {
+                        "symbol": "SHFE.au2602",
+                        "trade_status": "AUCTIONORDERING"
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert!(report.ticks().is_empty());
+    assert!(report.quotes().is_empty());
+    assert_eq!(report.trading_statuses().len(), 1);
+    assert_eq!(report.trading_statuses()[0].symbol, "SHFE.au2602");
+    assert_eq!(
+        report.trading_statuses()[0].trading_status.trade_status,
+        "AUCTIONORDERING"
+    );
+
+    let events = report.into_events();
+    assert_eq!(events.len(), 1);
+    let UpstreamMarketEvent::TradingStatus(status) = &events[0] else {
+        panic!("expected trading status event");
+    };
+    assert_eq!(status.symbol, "SHFE.au2602");
+    assert_eq!(status.trading_status.trade_status, "AUCTIONORDERING");
 }
 
 #[test]
@@ -742,6 +795,7 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "DCE.m2609,SHFE.au2602");
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -776,6 +830,7 @@ async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
             .unwrap();
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
         socket
             .send_text(json!({"aid": "rtn_data", "data": [{}]}).to_string())
             .unwrap();
@@ -820,6 +875,7 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
             .unwrap();
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({
@@ -907,6 +963,7 @@ async fn websocket_upstream_tick_source_peeks_while_idle() {
             .unwrap();
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
@@ -941,6 +998,7 @@ async fn websocket_upstream_tick_source_peeks_before_json_decode() {
             .unwrap();
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
 
         socket.send_text("{not-json".to_string()).unwrap();
         expect_peek_message(&mut socket);
@@ -978,6 +1036,7 @@ async fn configured_upstream_source_subscribes_universe_expression_symbols() {
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "DCE.m2609,SHFE.au2602");
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -1033,6 +1092,7 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({
@@ -1142,6 +1202,7 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
+        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({

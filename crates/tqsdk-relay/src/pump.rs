@@ -54,6 +54,10 @@ fn ingest_event(
     match event {
         UpstreamMarketEvent::Tick(tick) => engine.ingest_tick(tick.symbol, tick.row),
         UpstreamMarketEvent::Quote(quote) => engine.ingest_quote(quote.symbol, quote.quote),
+        UpstreamMarketEvent::TradingStatus(status) => {
+            let status = *status;
+            engine.ingest_trading_status(status.symbol, status.trading_status)
+        }
     }
 }
 

@@ -50,6 +50,9 @@ export function row(overrides: Partial<SymbolRow> = {}): SymbolRow {
     status: 'live',
     coverage: 'covered',
     session: 'open',
+    phase: 'continuous',
+    phase_source: null,
+    raw_trade_status: null,
     flow: 'flowing',
     integrity: 'intact',
     problem: false,
@@ -142,6 +145,7 @@ function timelineScope(rows: SymbolRow[]): DashboardTimelineScope {
   if (rows.every((item) => item.session === 'closed')) severity = 'closed';
   else if (rows.some((item) => item.problem_severity === 'bad')) severity = 'bad';
   else if (rows.some((item) => item.problem_severity === 'warn')) severity = 'warn';
+  else if (rows.some((item) => item.phase?.startsWith('auction'))) severity = 'auction';
   else if (rows.every((item) => item.flow === 'no_sample')) severity = 'no_sample';
   else if (rows.every((item) => item.session === 'unknown')) severity = 'unknown';
   const activeDelayRows = rows.filter((item) => item.session !== 'closed');
