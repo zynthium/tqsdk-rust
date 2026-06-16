@@ -788,11 +788,44 @@ async fn websocket_upstream_tick_source_exposes_invalid_tick_row_diagnostics() {
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_bootstraps_quote_before_tick_chart() {
+    use tqsdk_relay::{UpstreamTickChart, WebSocketUpstreamTickSource};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
+        let set_chart = expect_set_chart(&mut socket, "SHFE.au2602");
+        assert_eq!(
+            set_chart["chart_id"],
+            "relay-upstream-tick-SHFE_au2602-10000"
+        );
+        assert_eq!(set_chart["duration"], 0);
+        assert_eq!(set_chart["view_width"], 10_000);
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let chart = UpstreamTickChart::new(
+        "relay-upstream-tick-SHFE_au2602-10000",
+        ["SHFE.au2602"],
+        10_000,
+    )
+    .unwrap();
+
+    let _source =
+        WebSocketUpstreamTickSource::connect_with_tick_chart(server.url("/market"), chart)
+            .await
+            .unwrap();
+    server.join();
+}
+
+#[tokio::test]
 async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
     use tqsdk_relay::{UpstreamTickChart, WebSocketUpstreamTickSource};
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         let set_chart = expect_set_chart(&mut socket, "DCE.m2609");
         assert_eq!(set_chart["chart_id"], "relay-upstream-tick-DCE_m2609-10000");
         assert_eq!(set_chart["duration"], 0);
@@ -807,7 +840,6 @@ async fn websocket_upstream_tick_source_subscribes_tick_chart_on_connect() {
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -840,9 +872,9 @@ async fn websocket_upstream_tick_source_reports_progress_for_empty_rtn_data() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         socket
             .send_text(json!({"aid": "rtn_data", "data": [{}]}).to_string())
             .unwrap();
@@ -885,9 +917,9 @@ async fn websocket_upstream_tick_source_peeks_after_each_received_frame() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({
@@ -973,9 +1005,9 @@ async fn websocket_upstream_tick_source_peeks_while_idle() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
@@ -1008,9 +1040,9 @@ async fn websocket_upstream_tick_source_peeks_before_json_decode() {
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
 
         socket.send_text("{not-json".to_string()).unwrap();
         expect_peek_message(&mut socket);
@@ -1034,6 +1066,7 @@ async fn configured_upstream_source_subscribes_universe_expression_symbols() {
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         let set_chart = expect_set_chart(&mut socket, "DCE.m2609");
         assert_eq!(set_chart["chart_id"], "relay-upstream-tick-DCE_m2609-10000");
         assert_eq!(set_chart["duration"], 0);
@@ -1048,7 +1081,6 @@ async fn configured_upstream_source_subscribes_universe_expression_symbols() {
         assert_eq!(set_chart["duration"], 0);
         assert_eq!(set_chart["view_width"], 10_000);
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -1102,9 +1134,9 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
     use websocket_support::TestWebSocketServer;
 
     let upstream = TestWebSocketServer::spawn(|mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({
@@ -1212,9 +1244,9 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     wait_for_upstream_status(&engine, RelaySourceStatus::Degraded).await;
 
     let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({
@@ -1258,9 +1290,9 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
 
     let (send_second_tick_tx, send_second_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         socket
             .send_text(
                 json!({

@@ -38,6 +38,22 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         assert_eq!(socket.request().path, "/market");
 
+        assert_eq!(
+            recv_text_json(&mut socket, "subscribe_quote"),
+            json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"})
+        );
+        assert_eq!(
+            recv_text_json(&mut socket, "peek_message"),
+            json!({"aid": "peek_message"})
+        );
+        assert_eq!(
+            recv_text_json(&mut socket, "subscribe_trading_status"),
+            json!({"aid": "subscribe_trading_status", "ins_list": "SHFE.au2602"})
+        );
+        assert_eq!(
+            recv_text_json(&mut socket, "peek_message"),
+            json!({"aid": "peek_message"})
+        );
         let set_chart = recv_text_json(&mut socket, "set_chart");
         assert_eq!(set_chart["aid"], "set_chart");
         assert_eq!(
