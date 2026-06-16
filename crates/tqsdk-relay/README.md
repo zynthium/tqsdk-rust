@@ -43,7 +43,7 @@ relay 不改变 SDK 运行时模型：
 | 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
 | 缓存 | 保留内存 tick ring 和 quote 快照。当前二进制程序尚未启用磁盘持久化。 |
 | bootstrap 队列 | 在 relay 内部合并并限流 chart bootstrap 请求。远端 K 线回填和 oracle 对比尚未实现。 |
-| 上游恢复 | 下游监听保持运行；上游 websocket 连接失败后会重试。 |
+| 上游恢复 | 下游监听保持运行；上游 websocket 连接失败后会重试；每日合约集合刷新失败时保留上一条可用上游连接并按 retry interval 重试刷新。 |
 | 启动自检 | `TQSDK_RELAY_DRY_RUN=1` 会解析配置、解析或发现上游合约集合、输出 JSON 诊断后退出，不绑定下游或 metrics 监听，也不连接上游 market websocket。 |
 | HTTP 观测 | `metrics_listen` 提供 `/health` 和 `/metrics` JSON 端点；库 API 也暴露 health、metrics 和 source status 快照。 |
 

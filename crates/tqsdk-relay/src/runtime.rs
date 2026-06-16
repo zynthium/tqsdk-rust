@@ -13,6 +13,7 @@ use crate::universe::{FuturesContract, resolve_futures_contracts_with_expression
 use crate::upstream::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
 use chrono::Timelike;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 const DEFAULT_UPSTREAM_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -58,6 +59,11 @@ struct ConfiguredTickCharts {
     charts: Vec<UpstreamTickChart>,
     contracts: Vec<FuturesContract>,
     calendar: Option<Vec<tqsdk_core::TradingCalendarDay>>,
+}
+
+enum UpstreamPumpExit {
+    Shutdown,
+    SourceClosed,
 }
 
 async fn connect_configured_upstream_for_pump(
@@ -180,34 +186,21 @@ async fn run_upstream_retry_loop(
     loop {
         match connect_configured_upstream_for_pump(&config, &server).await {
             Ok(Some(mut upstream)) => {
-                let (pump_shutdown_tx, pump_shutdown_rx) = oneshot::channel();
-                let refresh = tokio::time::sleep(next_universe_refresh_delay(&config));
-                tokio::pin!(refresh);
-                let reconnect_delay = tokio::select! {
-                    biased;
-                    _ = &mut shutdown => {
-                        let _ = pump_shutdown_tx.send(());
-                        return;
+                match pump_configured_upstream_until(
+                    &config,
+                    &server,
+                    &mut upstream.source,
+                    retry_interval,
+                    &mut shutdown,
+                )
+                .await
+                {
+                    Ok(UpstreamPumpExit::Shutdown) => return,
+                    Ok(UpstreamPumpExit::SourceClosed) => {}
+                    Err(err) => {
+                        mark_upstream_degraded(&server);
+                        eprintln!("{err}");
                     }
-                    () = &mut refresh, if config.refreshes_futures_universe() => {
-                        let _ = pump_shutdown_tx.send(());
-                        Duration::ZERO
-                    }
-                    result = pump_configured_upstream_until(
-                        &config,
-                        &server,
-                        &mut upstream.source,
-                        pump_shutdown_rx,
-                    ) => {
-                        if let Err(err) = result {
-                            mark_upstream_degraded(&server);
-                            eprintln!("{err}");
-                        }
-                        retry_interval
-                    }
-                };
-                if reconnect_delay == Duration::ZERO {
-                    continue;
                 }
             }
             Ok(None) => return,
@@ -233,14 +226,26 @@ async fn pump_configured_upstream_until(
     config: &RelayConfig,
     server: &RelayServer,
     source: &mut WebSocketUpstreamTickSource,
-    mut shutdown: oneshot::Receiver<()>,
-) -> RelayResult<usize> {
-    let mut sent = 0_usize;
+    retry_interval: Duration,
+    shutdown: &mut oneshot::Receiver<()>,
+) -> RelayResult<UpstreamPumpExit> {
+    let refresh_enabled = config.refreshes_futures_universe();
+    let refresh = tokio::time::sleep(next_universe_refresh_delay(config));
+    tokio::pin!(refresh);
     server.request_pending_upstream_subscriptions()?;
     loop {
         tokio::select! {
             biased;
-            _ = &mut shutdown => return Ok(sent),
+            _ = &mut *shutdown => return Ok(UpstreamPumpExit::Shutdown),
+            () = &mut refresh, if refresh_enabled => {
+                let refreshed = refresh_configured_upstream(config, server, source).await;
+                let next_delay = if refreshed {
+                    next_universe_refresh_delay(config)
+                } else {
+                    retry_interval
+                };
+                refresh.as_mut().reset(Instant::now() + next_delay);
+            }
             symbols = server.next_upstream_subscription_symbols() => {
                 let Some(symbols) = symbols else {
                     continue;
@@ -252,17 +257,41 @@ async fn pump_configured_upstream_until(
                 let invalid_rows = source.take_invalid_tick_rows();
                 let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();
                 let last_error = source.take_last_invalid_tick_row_error();
-                let Some(dispatched) = server.process_upstream_update(
+                let Some(_dispatched) = server.process_upstream_update(
                     update,
                     progress,
                     invalid_rows,
                     invalid_rows_by_symbol,
                     last_error,
                 )? else {
-                    return Ok(sent);
+                    return Ok(UpstreamPumpExit::SourceClosed);
                 };
-                sent = sent.saturating_add(dispatched);
             }
+        }
+    }
+}
+
+async fn refresh_configured_upstream(
+    config: &RelayConfig,
+    server: &RelayServer,
+    source: &mut WebSocketUpstreamTickSource,
+) -> bool {
+    match connect_configured_upstream_for_pump(config, server).await {
+        Ok(Some(refreshed)) => {
+            *source = refreshed.source;
+            true
+        }
+        Ok(None) => {
+            eprintln!("relay upstream refresh returned no charts; keeping existing upstream");
+            false
+        }
+        Err(RelayError::Transport(message)) => {
+            eprintln!("relay upstream refresh failed; keeping existing upstream: {message}");
+            false
+        }
+        Err(err) => {
+            eprintln!("relay upstream refresh failed; keeping existing upstream: {err}");
+            false
         }
     }
 }
