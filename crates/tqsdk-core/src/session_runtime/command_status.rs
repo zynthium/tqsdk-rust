@@ -114,6 +114,7 @@ pub(super) fn trade_order_status(
     let order_status = snapshot
         .get(["trade", account_id, "orders", order_id, "status"])?
         .as_str()?;
+    let aid = detail.get("aid").and_then(Value::as_str).unwrap_or("");
     let exchange_order_id = snapshot
         .get(["trade", account_id, "orders", order_id, "exchange_order_id"])
         .and_then(Value::as_str)
@@ -127,6 +128,7 @@ pub(super) fn trade_order_status(
 
     let status = match order_status {
         "ALIVE" => CommandStatus::Acked,
+        "FINISHED" if aid == "cancel_order" => CommandStatus::Completed,
         "FINISHED" if exchange_order_id.is_empty() => CommandStatus::Rejected,
         "FINISHED" => CommandStatus::Completed,
         _ => return None,

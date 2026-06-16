@@ -578,42 +578,51 @@ async fn wait_command_completed_drives_http_query_command_to_completion() {
 async fn wait_command_completed_accepts_insert_order_ack() {
     let handle = runtime_with_default_adapters();
     let client = ManualSession::from_runtime(handle.clone()).into_client();
-    let command_id = handle
-        .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
-            TradeInsertOrderCommand {
-                account_id: AccountId::new("sim"),
-                order_id: OrderId::new("order-1"),
-                symbol: Symbol::new("SHFE.ao2609"),
-                direction: TradeDirection::Buy,
-                offset: Some(TradeOffset::Open),
-                volume: 1,
-                price_type: TradePriceType::Limit,
-                limit_price: Some(json!(2800.0)),
-                time_condition: TradeTimeCondition::Gfd,
-                volume_condition: TradeVolumeCondition::Any,
-            },
-        )))
-        .await
-        .unwrap();
+    for (index, offset) in [
+        TradeOffset::Open,
+        TradeOffset::Close,
+        TradeOffset::CloseToday,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let command_id = handle
+            .submit(RuntimeCommand::Trade(TradeCommand::InsertOrder(
+                TradeInsertOrderCommand {
+                    account_id: AccountId::new("sim"),
+                    order_id: OrderId::new(format!("order-{index}")),
+                    symbol: Symbol::new("SHFE.ao2609"),
+                    direction: TradeDirection::Buy,
+                    offset: Some(offset),
+                    volume: 1,
+                    price_type: TradePriceType::Limit,
+                    limit_price: Some(json!(2800.0)),
+                    time_condition: TradeTimeCondition::Gfd,
+                    volume_condition: TradeVolumeCondition::Any,
+                },
+            )))
+            .await
+            .unwrap();
 
-    handle
-        .record_command_status(
-            command_id,
-            CommandStatus::Sent,
-            Some(json!({"aid": "insert_order"})),
-            CommitScope::RealtimeUpdate,
-        )
-        .unwrap();
-    handle
-        .record_command_status(
-            command_id,
-            CommandStatus::Acked,
-            Some(json!({"aid": "insert_order"})),
-            CommitScope::RealtimeUpdate,
-        )
-        .unwrap();
+        handle
+            .record_command_status(
+                command_id,
+                CommandStatus::Sent,
+                Some(json!({"aid": "insert_order"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        handle
+            .record_command_status(
+                command_id,
+                CommandStatus::Acked,
+                Some(json!({"aid": "insert_order"})),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
 
-    client.wait_command_completed(command_id).await.unwrap();
+        client.wait_command_completed(command_id).await.unwrap();
+    }
 }
 
 #[test]
