@@ -10,7 +10,10 @@ use crate::server::RelayServer;
 #[cfg(feature = "metadata")]
 use crate::universe::SessionFuturesUniverseResolver;
 use crate::universe::{FuturesContract, resolve_futures_contracts_with_expression};
-use crate::upstream::{UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource};
+use crate::upstream::{
+    UpstreamTickChart, UpstreamTickSource, WebSocketUpstreamTickSource,
+    upstream_subscription_ins_list_chars,
+};
 use chrono::Timelike;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -355,7 +358,7 @@ fn record_universe_refresh_success(
     calendar: Option<&[tqsdk_core::TradingCalendarDay]>,
 ) {
     let engine = server.engine();
-    let upstream_ins_list_chars = max_ins_list_chars(charts);
+    let upstream_ins_list_chars = upstream_subscription_ins_list_chars(charts);
     let unix_secs = current_unix_secs();
     match engine.lock() {
         Ok(mut engine) if contracts.is_empty() => {
@@ -391,7 +394,7 @@ fn record_dynamic_upstream_subscription_success(
     charts: &[UpstreamTickChart],
 ) {
     let engine = server.engine();
-    let upstream_ins_list_chars = max_ins_list_chars(charts);
+    let upstream_ins_list_chars = upstream_subscription_ins_list_chars(charts);
     let unix_secs = current_unix_secs();
     match engine.lock() {
         Ok(mut engine) => engine.record_dynamic_upstream_subscription_sent(
@@ -401,14 +404,6 @@ fn record_dynamic_upstream_subscription_success(
         ),
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
     }
-}
-
-fn max_ins_list_chars(charts: &[UpstreamTickChart]) -> usize {
-    charts
-        .iter()
-        .map(UpstreamTickChart::ins_list_chars)
-        .max()
-        .unwrap_or(0)
 }
 
 fn record_universe_refresh_error(server: &RelayServer, message: String) {

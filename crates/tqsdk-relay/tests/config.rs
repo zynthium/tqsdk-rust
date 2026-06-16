@@ -373,7 +373,7 @@ fn config_rejects_upstream_ins_list_that_exceeds_hard_limit() {
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: upstream tick chart ins_list length 11 exceeds hard limit 10 chars"
+        "invalid relay config: upstream subscription ins_list length 11 exceeds hard limit 10 chars"
     );
 }
 

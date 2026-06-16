@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
 use crate::universe_expression::UniverseExpression;
-use crate::upstream::UpstreamTickChart;
+use crate::upstream::{UpstreamTickChart, upstream_subscription_ins_list_chars};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const UPSTREAM_TICK_CHART_ID_PREFIX: &str = "relay-upstream-tick";
@@ -152,7 +152,7 @@ impl UpstreamInsListLimits {
             && chars > max_chars
         {
             return Err(RelayError::invalid_config(format!(
-                "upstream tick chart ins_list length {chars} exceeds hard limit {max_chars} chars"
+                "upstream subscription ins_list length {chars} exceeds hard limit {max_chars} chars"
             )));
         }
         Ok(())
@@ -355,19 +355,19 @@ impl RelayConfig {
         if symbols.is_empty() {
             return Ok(Vec::new());
         }
-        symbols
+        let charts = symbols
             .iter()
             .map(|symbol| {
-                let chart = UpstreamTickChart::new(
+                UpstreamTickChart::new(
                     upstream_tick_chart_id(symbol, self.upstream_tick_view_width),
                     [symbol.as_str()],
                     self.upstream_tick_view_width,
-                )?;
-                self.upstream_ins_list_limits
-                    .validate_ins_list_chars(chart.ins_list_chars())?;
-                Ok(chart)
+                )
             })
-            .collect()
+            .collect::<RelayResult<Vec<_>>>()?;
+        self.upstream_ins_list_limits
+            .validate_ins_list_chars(upstream_subscription_ins_list_chars(&charts))?;
+        Ok(charts)
     }
 
     #[must_use]

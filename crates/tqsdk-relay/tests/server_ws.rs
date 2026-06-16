@@ -46,10 +46,19 @@ fn expect_subscribe_trading_status(
     );
 }
 
-fn expect_initial_trading_status_subscription(
+fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
+    assert_eq!(
+        recv_text_json(socket, "subscribe_quote"),
+        json!({"aid": "subscribe_quote", "ins_list": ins_list})
+    );
+}
+
+fn expect_initial_universe_subscriptions(
     socket: &mut websocket_support::TestWebSocketConnection,
     ins_list: &str,
 ) {
+    expect_subscribe_quote(socket, ins_list);
+    expect_peek_message(socket);
     expect_subscribe_trading_status(socket, ins_list);
     expect_peek_message(socket);
 }
@@ -261,7 +270,7 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         send_tick_rx.recv().unwrap();
         socket
             .send_text(
@@ -339,10 +348,10 @@ async fn relay_configured_upstream_adds_downstream_symbol_immediately() {
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_set_chart(&mut socket, "SHFE.au2602");
         expect_peek_message(&mut socket);
-        expect_initial_trading_status_subscription(&mut socket, "SHFE.au2602");
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_set_chart(&mut socket, "DCE.m2609");
         expect_peek_message(&mut socket);
-        expect_initial_trading_status_subscription(&mut socket, "DCE.m2609,SHFE.au2602");
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         dynamic_seen_tx.send(()).unwrap();
         send_tick_rx.recv().unwrap();
         socket

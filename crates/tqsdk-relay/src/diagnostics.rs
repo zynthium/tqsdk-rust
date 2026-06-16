@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::config::{FuturesUniverseRefreshSchedule, RelayConfig};
-use crate::upstream::UpstreamTickChart;
+use crate::upstream::{UpstreamTickChart, upstream_subscription_ins_list_chars};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RelayStartupReport {
@@ -39,11 +39,7 @@ impl RelayStartupReport {
 
     #[must_use]
     pub fn from_config_and_charts(config: &RelayConfig, charts: &[UpstreamTickChart]) -> Self {
-        let upstream_ins_list_chars = charts
-            .iter()
-            .map(UpstreamTickChart::ins_list_chars)
-            .max()
-            .unwrap_or(0);
+        let upstream_ins_list_chars = upstream_subscription_ins_list_chars(charts);
         Self {
             event: "relay_startup",
             dry_run: config.dry_run,

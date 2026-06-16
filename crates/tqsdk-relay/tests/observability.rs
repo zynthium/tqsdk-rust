@@ -908,7 +908,10 @@ fn startup_report_serializes_operational_summary() {
 
     assert_eq!(report.upstream_symbols, 2);
     assert_eq!(report.upstream_tick_view_width, 10_000);
-    assert_eq!(report.upstream_ins_list_chars, "SHFE.au2602".len());
+    assert_eq!(
+        report.upstream_ins_list_chars,
+        "DCE.m2609,SHFE.au2602".len()
+    );
     assert_eq!(report.upstream_source, "universe-expression");
     assert!(line.contains("\"event\":\"relay_startup\""));
     assert!(line.contains("\"upstream_symbols\":2"));

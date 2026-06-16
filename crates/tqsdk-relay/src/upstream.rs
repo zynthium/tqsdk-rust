@@ -467,6 +467,31 @@ impl UpstreamTickChart {
     }
 }
 
+pub(crate) fn upstream_subscription_ins_list_chars(charts: &[UpstreamTickChart]) -> usize {
+    charts
+        .iter()
+        .map(UpstreamTickChart::ins_list_chars)
+        .max()
+        .unwrap_or(0)
+        .max(join_chart_symbols(charts).len())
+}
+
+fn join_chart_symbols(charts: &[UpstreamTickChart]) -> String {
+    let mut symbols = BTreeSet::new();
+    for chart in charts {
+        symbols.extend(chart.symbols().iter().cloned());
+    }
+    join_symbols(&symbols)
+}
+
+fn join_symbols(symbols: &BTreeSet<String>) -> String {
+    symbols
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[derive(Debug, Default)]
 pub struct FakeUpstreamTickSource {
     events: VecDeque<UpstreamMarketEvent>,
@@ -508,6 +533,7 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
+    quote_symbols: BTreeSet<String>,
     trading_status_symbols: BTreeSet<String>,
     closed: bool,
     invalid_tick_rows: u64,
@@ -527,6 +553,7 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
+            quote_symbols: BTreeSet::new(),
             trading_status_symbols: BTreeSet::new(),
             closed: false,
             invalid_tick_rows: 0,
@@ -562,6 +589,7 @@ impl WebSocketUpstreamTickSource {
             ));
         }
         for chart in charts {
+            self.quote_symbols.extend(chart.symbols().iter().cloned());
             self.trading_status_symbols
                 .extend(chart.symbols().iter().cloned());
             self.send_json(serde_json::json!({
@@ -575,13 +603,14 @@ impl WebSocketUpstreamTickSource {
             self.send_peek_message().await?;
         }
         self.send_json(serde_json::json!({
+            "aid": "subscribe_quote",
+            "ins_list": join_symbols(&self.quote_symbols),
+        }))
+        .await?;
+        self.send_peek_message().await?;
+        self.send_json(serde_json::json!({
             "aid": "subscribe_trading_status",
-            "ins_list": self
-                .trading_status_symbols
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(","),
+            "ins_list": join_symbols(&self.trading_status_symbols),
         }))
         .await?;
         self.send_peek_message().await?;
