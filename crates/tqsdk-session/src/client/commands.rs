@@ -121,7 +121,8 @@ impl SessionClient {
     }
 
     /// Drives the substrate until the specified command reaches a completed
-    /// terminal status.
+    /// terminal status. For `insert_order`, the accepted command result is the
+    /// first `acked` order update; the order may remain live afterward.
     ///
     /// This helper only advances transport/runtime state for the submitted
     /// command. It does not impose `wait_update()` semantics or consume commit
@@ -220,6 +221,9 @@ impl SessionClient {
     fn command_completed(&self, command_id: CommandId) -> crate::error::Result<bool> {
         match self.command_status_typed(command_id)? {
             Some(CommandStatus::Completed) => Ok(true),
+            Some(CommandStatus::Acked) => {
+                Ok(self.command_aid(command_id)?.as_deref() == Some("insert_order"))
+            }
             Some(status) if status.is_terminal() => {
                 Err(crate::error::SessionFacadeError::InvalidState(
                     "command reached a non-completed terminal status",
@@ -227,6 +231,16 @@ impl SessionClient {
             }
             Some(_) | None => Ok(false),
         }
+    }
+
+    fn command_aid(&self, command_id: CommandId) -> crate::error::Result<Option<String>> {
+        Ok(self.command_state(command_id)?.and_then(|command| {
+            command
+                .get("detail")
+                .and_then(|detail| detail.get("aid"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }))
     }
 
     async fn require_query_value_route(&self) -> crate::error::Result<()> {
