@@ -909,7 +909,7 @@ fn tick_datetime_ns_to_unix_millis(datetime_ns: i64) -> Option<u64> {
         .map(|value| value / 1_000_000)
 }
 
-fn parse_quote_datetime_ns(datetime: &str) -> Option<i64> {
+pub(crate) fn parse_quote_datetime_ns(datetime: &str) -> Option<i64> {
     let datetime = datetime.trim();
     if datetime.is_empty() {
         return None;
