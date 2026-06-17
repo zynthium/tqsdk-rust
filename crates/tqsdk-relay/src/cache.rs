@@ -74,7 +74,21 @@ fn project_quote(symbol: &str, row: &RelayTickRow) -> Quote {
         last_price: row.last_price,
         volume: row.volume,
         open_interest: row.open_interest,
-        datetime: row.datetime.to_string(),
+        datetime: quote_datetime_from_tick_ns(row.datetime),
         ..Quote::default()
     }
+}
+
+fn quote_datetime_from_tick_ns(datetime_ns: i64) -> String {
+    let secs = datetime_ns.div_euclid(1_000_000_000);
+    let nanos = datetime_ns.rem_euclid(1_000_000_000) as u32;
+    let Some(utc) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos) else {
+        return datetime_ns.to_string();
+    };
+    let Some(china_offset) = chrono::FixedOffset::east_opt(8 * 3600) else {
+        return datetime_ns.to_string();
+    };
+    utc.with_timezone(&china_offset)
+        .format("%Y-%m-%d %H:%M:%S%.6f")
+        .to_string()
 }

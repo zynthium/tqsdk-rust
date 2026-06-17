@@ -1102,6 +1102,88 @@ async fn configured_upstream_source_decodes_quote_without_startup_tick_charts() 
 }
 
 #[tokio::test]
+async fn websocket_upstream_tick_source_merges_sparse_quote_patches() {
+    use tqsdk_relay::{
+        UpstreamMarketEvent, UpstreamSourceUpdate, UpstreamTickSource, WebSocketUpstreamTickSource,
+    };
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "quotes": {
+                                "SHFE.au2602": {
+                                    "datetime": "2026-06-17 13:56:00.000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 944.5,
+                                    "volume": 12,
+                                    "open_interest": 34
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "quotes": {
+                                "SHFE.au2602": {
+                                    "last_price": 945.0
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let mut source = WebSocketUpstreamTickSource::connect_with_quote_symbols(
+        server.url("/market"),
+        ["SHFE.au2602"],
+    )
+    .await
+    .unwrap();
+
+    let first = source.next_update().await.unwrap();
+    let UpstreamSourceUpdate::Event(UpstreamMarketEvent::Quote(first)) = first else {
+        panic!("expected first quote event");
+    };
+    assert_eq!(first.quote.last_price, 944.5);
+    assert_eq!(first.quote.volume, 12);
+    assert_eq!(first.quote.open_interest, 34);
+
+    let second = source.next_update().await.unwrap();
+    let UpstreamSourceUpdate::Event(UpstreamMarketEvent::Quote(second)) = second else {
+        panic!("expected second quote event");
+    };
+    assert_eq!(second.quote.last_price, 945.0);
+    assert_eq!(second.quote.volume, 12);
+    assert_eq!(second.quote.open_interest, 34);
+    assert_eq!(second.quote.datetime, "2026-06-17 13:56:00.000000");
+    server.join();
+}
+
+#[tokio::test]
 async fn configured_upstream_source_subscribes_universe_expression_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
     use websocket_support::TestWebSocketServer;
