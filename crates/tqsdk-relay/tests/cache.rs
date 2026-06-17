@@ -36,7 +36,7 @@ fn quote_snapshot_is_derived_from_latest_tick() {
     assert_eq!(quote.last_price, 611.5);
     assert_eq!(quote.volume, 20);
     assert_eq!(quote.open_interest, 200);
-    assert_eq!(quote.datetime, "1713660000000000002");
+    assert_eq!(quote.datetime, "2024-04-21 08:40:00.000000");
 }
 
 #[test]

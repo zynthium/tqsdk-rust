@@ -41,6 +41,18 @@ fn chart_command_for(chart_id: &str, symbols: Vec<&str>) -> DownstreamCommand {
     })
 }
 
+fn delete_chart_command(chart_id: &str) -> DownstreamCommand {
+    DownstreamCommand::SetChart(SetChartCommand {
+        chart_id: chart_id.to_string(),
+        symbols: Vec::new(),
+        duration_ns: 60_000_000_000,
+        view_width: 64,
+        left_kline_id: None,
+        focus_datetime_ns: None,
+        focus_position: None,
+    })
+}
+
 #[test]
 fn relay_engine_fans_out_quotes_from_ticks() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
@@ -177,6 +189,57 @@ fn relay_engine_rewrites_chart_payload_to_downstream_chart_id() {
     assert_eq!(
         chart_frame.payload["data"][0]["charts"]["client-chart"]["right_id"],
         0
+    );
+    assert_eq!(
+        chart_frame.payload["data"][0]["charts"]["client-chart"]["state"]["ins_list"],
+        "SHFE.au2602"
+    );
+    assert_eq!(
+        chart_frame.payload["data"][0]["charts"]["client-chart"]["state"]["duration"],
+        60_000_000_000i64
+    );
+    assert_eq!(
+        chart_frame.payload["data"][0]["charts"]["client-chart"]["state"]["view_width"],
+        64
+    );
+}
+
+#[test]
+fn relay_engine_deletes_chart_subscription_on_empty_ins_list() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+    let source = SourceKey {
+        symbols: vec!["SHFE.au2602".to_string()],
+        duration_ns: 60_000_000_000,
+        view_width: 64,
+    };
+
+    engine
+        .handle_command(client, chart_command("client-chart"))
+        .unwrap();
+    let frames = engine
+        .handle_command(client, delete_chart_command("client-chart"))
+        .unwrap();
+
+    assert_eq!(engine.interests().chart_interest_count(&source), 0);
+    assert_eq!(engine.bootstrap_pending_len(), 0);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].payload["data"][0]["charts"]["client-chart"],
+        serde_json::Value::Null
+    );
+
+    engine
+        .ingest_tick("SHFE.au2602", tick(1, 0, 610.0))
+        .unwrap();
+    let frames = engine
+        .ingest_tick("SHFE.au2602", tick(2, 60_000_000_000, 620.0))
+        .unwrap();
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.payload["data"][0].get("charts").is_none()),
+        "deleted chart should not receive further chart updates"
     );
 }
 

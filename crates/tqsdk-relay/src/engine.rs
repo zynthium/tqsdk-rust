@@ -723,6 +723,15 @@ impl RelayEngine {
                 Ok(frames)
             }
             DownstreamCommand::SetChart(command) => {
+                if command.symbols.is_empty() {
+                    self.interests.remove_chart(client_id, &command.chart_id);
+                    self.retain_bootstrap_with_current_chart_interests();
+                    self.prune_pending_upstream_subscription_symbols();
+                    return Ok(vec![DownstreamFrame {
+                        client_id,
+                        payload: delete_chart_payload(&command.chart_id),
+                    }]);
+                }
                 let replay_subscription = ChartSubscription::new(
                     client_id,
                     command.chart_id.clone(),
@@ -852,6 +861,11 @@ impl RelayEngine {
 
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.interests.remove_client(client_id);
+        self.retain_bootstrap_with_current_chart_interests();
+        self.prune_pending_upstream_subscription_symbols();
+    }
+
+    fn retain_bootstrap_with_current_chart_interests(&mut self) {
         let interests = &self.interests;
         self.bootstrap
             .retain_pending(|request| interests.chart_interest_count(&request.source) > 0);
@@ -1511,7 +1525,7 @@ impl RelayEngine {
                     {
                         frames.push(DownstreamFrame {
                             client_id: subscription.client_id,
-                            payload: chart_payload(&subscription.chart_id, completed.id),
+                            payload: chart_payload(&subscription, &source, completed.id),
                         });
                     }
                 }
@@ -1581,7 +1595,7 @@ impl RelayEngine {
             {
                 frames.push(DownstreamFrame {
                     client_id: subscription.client_id,
-                    payload: chart_payload(&subscription.chart_id, completed.id),
+                    payload: chart_payload(subscription, source, completed.id),
                 });
             }
         }
@@ -1660,20 +1674,52 @@ impl RelayEngine {
         }
         frames
     }
+
+    fn prune_pending_upstream_subscription_symbols(&mut self) {
+        let subscribed_symbols = self.interests.subscribed_symbols();
+        let chart_symbols = self.interests.chart_symbols();
+        self.pending_upstream_subscription_symbols.retain(|symbol| {
+            (!self.upstream_subscribed_symbols.contains(symbol)
+                && subscribed_symbols.contains(symbol))
+                || (!self.upstream_tick_chart_symbols.contains(symbol)
+                    && chart_symbols.contains(symbol))
+        });
+    }
 }
 
-fn chart_payload(chart_id: &str, right_id: i64) -> Value {
+fn chart_payload(subscription: &ChartSubscription, source: &SourceKey, right_id: i64) -> Value {
+    let ins_list = subscription.symbols.join(",");
     json!({
         "aid": "rtn_data",
         "data": [
             {
                 "charts": {
-                    chart_id: {
+                    subscription.chart_id.as_str(): {
+                        "state": {
+                            "aid": "set_chart",
+                            "chart_id": subscription.chart_id.as_str(),
+                            "ins_list": ins_list,
+                            "duration": source.duration_ns,
+                            "view_width": source.view_width
+                        },
                         "left_id": right_id,
                         "right_id": right_id,
                         "more_data": false,
                         "ready": true
                     }
+                }
+            }
+        ]
+    })
+}
+
+fn delete_chart_payload(chart_id: &str) -> Value {
+    json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "charts": {
+                    chart_id: Value::Null
                 }
             }
         ]

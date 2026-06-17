@@ -138,6 +138,7 @@ impl UpstreamMarketDecodeReport {
 pub type UpstreamTickDecodeReport = UpstreamMarketDecodeReport;
 
 type TickRowCache = BTreeMap<String, BTreeMap<i64, CachedTickRow>>;
+type QuoteCache = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct CachedTickRow {
@@ -206,19 +207,21 @@ pub fn decode_upstream_tick_report(frame: Value) -> RelayResult<UpstreamTickDeco
 }
 
 pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarketDecodeReport> {
-    decode_upstream_market_report_inner(frame, None)
+    decode_upstream_market_report_inner(frame, None, None)
 }
 
 fn decode_upstream_market_report_with_cache(
     frame: Value,
     tick_row_cache: &mut TickRowCache,
+    quote_cache: &mut QuoteCache,
 ) -> RelayResult<UpstreamMarketDecodeReport> {
-    decode_upstream_market_report_inner(frame, Some(tick_row_cache))
+    decode_upstream_market_report_inner(frame, Some(tick_row_cache), Some(quote_cache))
 }
 
 fn decode_upstream_market_report_inner(
     frame: Value,
     mut tick_row_cache: Option<&mut TickRowCache>,
+    mut quote_cache: Option<&mut QuoteCache>,
 ) -> RelayResult<UpstreamMarketDecodeReport> {
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
         return Ok(UpstreamMarketDecodeReport {
@@ -277,16 +280,13 @@ fn decode_upstream_market_report_inner(
         }
         if let Some(symbols) = fragment.get("quotes").and_then(Value::as_object) {
             for (symbol, quote) in symbols {
-                let mut quote = serde_json::from_value::<Quote>(quote.clone()).map_err(|err| {
-                    RelayError::invalid_protocol(format!("invalid upstream quote row: {err}"))
-                })?;
-                if quote.instrument_id.is_empty() {
-                    quote.instrument_id = symbol.clone();
+                let decoded = match &mut quote_cache {
+                    Some(cache) => decode_quote_with_cache(cache, symbol, quote)?,
+                    None => Some(decode_quote(symbol, quote.clone())?),
+                };
+                if let Some(quote) = decoded {
+                    quotes.push(quote);
                 }
-                quotes.push(UpstreamQuote {
-                    symbol: symbol.clone(),
-                    quote,
-                });
             }
         }
         if let Some(symbols) = fragment.get("trading_status").and_then(Value::as_object) {
@@ -315,6 +315,62 @@ fn decode_upstream_market_report_inner(
         invalid_rows_by_symbol,
         last_invalid_row_error,
     })
+}
+
+fn decode_quote_with_cache(
+    cache: &mut QuoteCache,
+    symbol: &str,
+    patch: &Value,
+) -> RelayResult<Option<UpstreamQuote>> {
+    if patch.is_null() {
+        cache.remove(symbol);
+        return Ok(None);
+    }
+    if !patch.is_object() {
+        return Err(RelayError::invalid_protocol(
+            "upstream quote row must be an object or null",
+        ));
+    }
+
+    let cached = cache
+        .entry(symbol.to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    merge_diff(cached, patch);
+    decode_quote(symbol, cached.clone()).map(Some)
+}
+
+fn decode_quote(symbol: &str, value: Value) -> RelayResult<UpstreamQuote> {
+    let mut quote = serde_json::from_value::<Quote>(value).map_err(|err| {
+        RelayError::invalid_protocol(format!("invalid upstream quote row: {err}"))
+    })?;
+    if quote.instrument_id.is_empty() {
+        quote.instrument_id = symbol.to_string();
+    }
+    Ok(UpstreamQuote {
+        symbol: symbol.to_string(),
+        quote,
+    })
+}
+
+fn merge_diff(target: &mut Value, patch: &Value) {
+    let (Some(target_object), Some(patch_object)) = (target.as_object_mut(), patch.as_object())
+    else {
+        *target = patch.clone();
+        return;
+    };
+
+    for (key, value) in patch_object {
+        if value.is_null() {
+            target_object.remove(key);
+        } else if value.is_object() {
+            let entry = target_object
+                .entry(key.clone())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            merge_diff(entry, value);
+        } else {
+            target_object.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 fn decode_tick_row(row_id: &str, row: &Value) -> RelayResult<RelayTickRow> {
@@ -533,6 +589,7 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
+    quote_cache: QuoteCache,
     quote_symbols: BTreeSet<String>,
     closed: bool,
     invalid_tick_rows: u64,
@@ -552,6 +609,7 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
+            quote_cache: QuoteCache::default(),
             quote_symbols: BTreeSet::new(),
             closed: false,
             invalid_tick_rows: 0,
@@ -732,7 +790,11 @@ impl WebSocketUpstreamTickSource {
     }
 
     fn decode_market_report(&mut self, value: Value) -> RelayResult<UpstreamMarketDecodeReport> {
-        decode_upstream_market_report_with_cache(value, &mut self.tick_row_cache)
+        decode_upstream_market_report_with_cache(
+            value,
+            &mut self.tick_row_cache,
+            &mut self.quote_cache,
+        )
     }
 
     fn record_transport_connected(&mut self) {

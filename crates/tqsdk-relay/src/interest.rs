@@ -100,6 +100,16 @@ impl InterestRegistry {
         source
     }
 
+    pub fn remove_chart(&mut self, client_id: ClientId, chart_id: &str) -> Option<SourceKey> {
+        let source = self
+            .chart_mappings
+            .remove(&(client_id, chart_id.to_string()))?;
+        self.chart_symbols_by_client_chart
+            .remove(&(client_id, chart_id.to_string()));
+        self.remove_chart_index(client_id, chart_id, &source);
+        Some(source)
+    }
+
     pub fn remove_client(&mut self, client_id: ClientId) {
         if let Some(symbols) = self.client_quotes.remove(&client_id) {
             for symbol in symbols {
