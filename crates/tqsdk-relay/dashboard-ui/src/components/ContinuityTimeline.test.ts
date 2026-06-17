@@ -148,6 +148,37 @@ describe('ContinuityTimeline', () => {
     expect(view.getByText('7')).toBeTruthy();
   });
 
+  it('falls back to latest receive delay when quote-only rows have no average delay', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: null },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: null },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: null },
+      },
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          receive_gap_ms: 900,
+          avg_receive_gap_ms: null,
+        }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+
+    expect(within(view.getByTestId('timeline-symbol-row')).getByText('⌁ 900ms')).toBeTruthy();
+  });
+
   it('shows auction phase without warning color for symbol rows', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
