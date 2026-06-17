@@ -36,16 +36,6 @@ fn expect_peek_message(socket: &mut websocket_support::TestWebSocketConnection) 
     );
 }
 
-fn expect_subscribe_trading_status(
-    socket: &mut websocket_support::TestWebSocketConnection,
-    ins_list: &str,
-) {
-    assert_eq!(
-        recv_text_json(socket, "subscribe_trading_status"),
-        json!({"aid": "subscribe_trading_status", "ins_list": ins_list})
-    );
-}
-
 fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnection, ins_list: &str) {
     assert_eq!(
         recv_text_json(socket, "subscribe_quote"),
@@ -58,8 +48,6 @@ fn expect_initial_universe_subscriptions(
     ins_list: &str,
 ) {
     expect_subscribe_quote(socket, ins_list);
-    expect_peek_message(socket);
-    expect_subscribe_trading_status(socket, ins_list);
     expect_peek_message(socket);
 }
 

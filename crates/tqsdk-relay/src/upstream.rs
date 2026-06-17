@@ -534,7 +534,6 @@ pub struct WebSocketUpstreamTickSource {
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
     quote_symbols: BTreeSet<String>,
-    trading_status_symbols: BTreeSet<String>,
     closed: bool,
     invalid_tick_rows: u64,
     invalid_tick_rows_by_symbol: BTreeMap<String, u64>,
@@ -554,7 +553,6 @@ impl WebSocketUpstreamTickSource {
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
             quote_symbols: BTreeSet::new(),
-            trading_status_symbols: BTreeSet::new(),
             closed: false,
             invalid_tick_rows: 0,
             invalid_tick_rows_by_symbol: BTreeMap::new(),
@@ -611,8 +609,7 @@ impl WebSocketUpstreamTickSource {
             ));
         }
         self.quote_symbols.extend(symbols.iter().cloned());
-        self.trading_status_symbols.extend(symbols);
-        self.send_quote_and_trading_status().await?;
+        self.send_quote_subscription().await?;
         self.record_subscription_sent();
         Ok(())
     }
@@ -625,10 +622,8 @@ impl WebSocketUpstreamTickSource {
         }
         for chart in charts {
             self.quote_symbols.extend(chart.symbols().iter().cloned());
-            self.trading_status_symbols
-                .extend(chart.symbols().iter().cloned());
         }
-        self.send_quote_and_trading_status().await?;
+        self.send_quote_subscription().await?;
         for chart in charts {
             self.send_json(serde_json::json!({
                 "aid": "set_chart",
@@ -644,16 +639,10 @@ impl WebSocketUpstreamTickSource {
         Ok(())
     }
 
-    async fn send_quote_and_trading_status(&mut self) -> RelayResult<()> {
+    async fn send_quote_subscription(&mut self) -> RelayResult<()> {
         self.send_json(serde_json::json!({
             "aid": "subscribe_quote",
             "ins_list": join_symbols(&self.quote_symbols),
-        }))
-        .await?;
-        self.send_peek_message().await?;
-        self.send_json(serde_json::json!({
-            "aid": "subscribe_trading_status",
-            "ins_list": join_symbols(&self.trading_status_symbols),
         }))
         .await?;
         self.send_peek_message().await?;
