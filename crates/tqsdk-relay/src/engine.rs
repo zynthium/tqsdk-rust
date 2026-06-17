@@ -253,7 +253,7 @@ impl DashboardTimelineHistoryCache {
         self.prune(sampled_at);
         if let Some(last) = self.samples.back_mut() {
             if sampled_at
-                <= last
+                < last
                     .sampled_at_unix_millis
                     .saturating_add(DASHBOARD_TIMELINE_HISTORY_MIN_SAMPLE_INTERVAL_MILLIS)
             {
@@ -284,6 +284,46 @@ impl DashboardTimelineHistoryCache {
         while self.samples.len() > DASHBOARD_TIMELINE_HISTORY_SAMPLE_LIMIT {
             self.samples.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline_history_sample(sampled_at_unix_millis: u64) -> DashboardTimelineHistorySample {
+        let scope = DashboardTimelineScope {
+            severity: DashboardTimelineSeverity::Live,
+            total: 1,
+            problem: 0,
+            receive_gap_ms: Some(0),
+            avg_receive_gap_ms: Some(0),
+        };
+        DashboardTimelineHistorySample {
+            sampled_at_unix_millis,
+            sample: DashboardTimelineSample {
+                global: scope.clone(),
+                subscribed: scope,
+                exchanges: BTreeMap::new(),
+            },
+            symbols: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn timeline_history_keeps_samples_at_min_interval_boundary() {
+        let mut history = DashboardTimelineHistoryCache::default();
+
+        history.push(timeline_history_sample(10_000));
+        history.push(timeline_history_sample(11_999));
+        let samples = history.snapshot().samples;
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].sampled_at_unix_millis, 11_999);
+
+        history.push(timeline_history_sample(13_999));
+        let samples = history.snapshot().samples;
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[1].sampled_at_unix_millis, 13_999);
     }
 }
 
@@ -347,6 +387,12 @@ impl DashboardSnapshotInputs {
             events: self.events.clone(),
         };
         (dashboard, timeline_sample)
+    }
+
+    #[must_use]
+    pub(crate) fn timeline_history_sample(&self) -> DashboardTimelineHistorySample {
+        let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
+        dashboard_timeline_history_sample(self.received_at_unix_millis, &global_page.symbols)
     }
 
     #[must_use]

@@ -70,8 +70,9 @@ export function timelineBuckets(
   bucketCount = 60,
 ): Array<TimelineSample | null> {
   const bucketMs = 300_000 / bucketCount;
+  const alignedEnd = Math.ceil(now / bucketMs) * bucketMs;
   return Array.from({ length: bucketCount }, (_, index) => {
-    const start = now - 300_000 + index * bucketMs;
+    const start = alignedEnd - 300_000 + index * bucketMs;
     const end = start + bucketMs;
     for (let sampleIndex = history.samples.length - 1; sampleIndex >= 0; sampleIndex -= 1) {
       const sample = history.samples[sampleIndex];
