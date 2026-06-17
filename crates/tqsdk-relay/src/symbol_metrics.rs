@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Weekday};
 use serde::Serialize;
 use tqsdk_core::{
     Quote, TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingTime,
@@ -360,7 +360,7 @@ impl SymbolTelemetryStore {
             telemetry.trading_segments = Some(trading_segments);
         }
         telemetry.last_receive_unix_millis = Some(receive_unix_millis);
-        telemetry.last_tick_datetime_ns = quote.datetime.parse::<i64>().ok();
+        telemetry.last_tick_datetime_ns = parse_quote_datetime_ns(&quote.datetime);
     }
 
     pub fn record_trading_status_at(
@@ -907,6 +907,21 @@ fn tick_datetime_ns_to_unix_millis(datetime_ns: i64) -> Option<u64> {
     u64::try_from(datetime_ns)
         .ok()
         .map(|value| value / 1_000_000)
+}
+
+fn parse_quote_datetime_ns(datetime: &str) -> Option<i64> {
+    let datetime = datetime.trim();
+    if datetime.is_empty() {
+        return None;
+    }
+    if let Ok(datetime_ns) = datetime.parse::<i64>() {
+        return Some(datetime_ns);
+    }
+    let local = NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S%.f").ok()?;
+    FixedOffset::east_opt(8 * 3600)?
+        .from_local_datetime(&local)
+        .single()?
+        .timestamp_nanos_opt()
 }
 
 fn trading_phase_for_symbol(
