@@ -139,9 +139,6 @@
       ];
     }),
   ]);
-  let pageRowCount = $derived(rows.length);
-  let visibleRowCount = $derived(visibleRows.length);
-  let isFiltered = $derived(openOnly || searchNeedle.length > 0);
 
   $effect(() => {
     writePanelPrefs({ openOnly, viewMode, expandAll });
@@ -369,21 +366,18 @@
       <span class="inline-flex items-center gap-[5px]"><i class="no_sample"></i>无样本</span>
     </div>
   </div>
-  <div class="mt-2 text-[10px] text-[color:var(--relay-muted)]">
-    当前页 {formatNumber(pageRowCount)} 行{#if isFiltered} · 显示 {formatNumber(visibleRowCount)} 行{/if}
-  </div>
   <div class="timeline" style={`--bucket-count:${buckets.length}`}>
     {#each definitions as definition (definition.key)}
       {#if definition.kind === 'exchange' && definition.exchange}
         <button
           type="button"
-          class="row-label exchange-row"
+          class="row-label exchange-row border-0 bg-transparent cursor-pointer font-[inherit] text-left hover:text-[color:var(--relay-info)]"
           aria-expanded={definition.expanded}
           aria-label={`${definition.label} ${definition.summary} 异常`}
           title={definition.label}
           onclick={() => definition.exchange && toggleExchange(definition.exchange)}
         >
-          <span class="caret">{definition.expanded ? '-' : '+'}</span>
+          <span class="w-3 text-[color:var(--relay-info)] font-black">{definition.expanded ? '-' : '+'}</span>
           <span class="name">{definition.label}</span>
           <em class="summary">{definition.summary}</em>
           <strong class="latency">{averageLatencyLabel(definition)}</strong>
@@ -395,7 +389,7 @@
           title={definition.row.symbol}
           aria-label={`${definition.label} ${phaseLabel(definition.row) ?? ''} ${statusLabel(definition.row.status)} ${rowDelayLabel(definition.row, definition.row.receive_gap_ms)} ${definition.row.problem_severity}`}
         >
-          <span class="symbol-name">{definition.label}</span>
+          <span class="symbol-name overflow-hidden text-ellipsis whitespace-nowrap">{definition.label}</span>
           <span class={statusBadgeClass[definition.row.status]}>
             {phaseLabel(definition.row) ?? statusLabel(definition.row.status)}
           </span>
@@ -418,8 +412,8 @@
         {/each}
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="sparkline-container" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}>
-          <svg viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
+        <div class="flex items-center h-full w-full" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}>
+          <svg class="h-[20px] w-full" viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
             <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/>
           </svg>
         </div>
@@ -462,6 +456,7 @@
     font-size: 10px;
     font-weight: 600;
     padding: 3px 8px;
+    line-height: 14px;
   }
 
   .view-toggle button:hover {
@@ -477,18 +472,6 @@
     width: 12px;
     height: 7px;
     border-radius: 2px;
-  }
-
-  .sparkline-container {
-    display: flex;
-    align-items: center;
-    height: 100%;
-    width: 100%;
-  }
-
-  .sparkline-container svg {
-    height: 20px;
-    width: 100%;
   }
 
   .timeline {
@@ -520,18 +503,6 @@
     font-size: 11px;
   }
 
-  button.row-label {
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    font: inherit;
-    text-align: left;
-  }
-
-  button.row-label:hover {
-    color: var(--relay-info);
-  }
-
   .summary-row .name { grid-column: 1 / 3; }
   .summary-row .summary,
   .exchange-row .summary { grid-column: 3 / 7; text-align: right; }
@@ -551,12 +522,6 @@
   
   .row-label .latency { grid-column: 7; text-align: right; }
 
-  .caret {
-    width: 12px;
-    color: var(--relay-info);
-    font-weight: 900;
-  }
-
   .row-label span {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -574,12 +539,6 @@
     color: var(--relay-info);
     font-size: 10px;
     font-weight: 800;
-    white-space: nowrap;
-  }
-
-  .symbol-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
