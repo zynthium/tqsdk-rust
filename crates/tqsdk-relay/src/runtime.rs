@@ -27,9 +27,9 @@ pub async fn connect_configured_upstream(
     if charts.is_empty() {
         return Ok(None);
     }
-    WebSocketUpstreamTickSource::connect_with_tick_charts(
+    WebSocketUpstreamTickSource::connect_with_quote_symbols(
         config.upstream_market_url.clone(),
-        charts,
+        charts.iter().map(UpstreamTickChart::symbol),
     )
     .await
     .map(Some)
@@ -88,9 +88,9 @@ async fn connect_configured_upstream_for_pump(
         &configured.contracts,
         configured.calendar.as_deref(),
     );
-    let mut source = WebSocketUpstreamTickSource::connect_with_tick_charts(
+    let mut source = WebSocketUpstreamTickSource::connect_with_quote_symbols(
         config.upstream_market_url.clone(),
-        configured.charts,
+        configured.charts.iter().map(UpstreamTickChart::symbol),
     )
     .await?;
     record_upstream_progress(server, source.take_progress());

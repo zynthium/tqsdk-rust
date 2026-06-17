@@ -582,6 +582,41 @@ impl WebSocketUpstreamTickSource {
         Ok(source)
     }
 
+    pub async fn connect_with_quote_symbols<I, S>(
+        url: impl Into<String>,
+        symbols: I,
+    ) -> RelayResult<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut source = Self::connect(url).await?;
+        source.subscribe_quote_symbols(symbols).await?;
+        Ok(source)
+    }
+
+    pub async fn subscribe_quote_symbols<I, S>(&mut self, symbols: I) -> RelayResult<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| symbol.as_ref().trim().to_string())
+            .filter(|symbol| !symbol.is_empty())
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return Err(RelayError::invalid_config(
+                "upstream quote subscriptions require at least one symbol",
+            ));
+        }
+        self.quote_symbols.extend(symbols.iter().cloned());
+        self.trading_status_symbols.extend(symbols);
+        self.send_quote_and_trading_status().await?;
+        self.record_subscription_sent();
+        Ok(())
+    }
+
     pub async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
         if charts.is_empty() {
             return Err(RelayError::invalid_config(
@@ -593,18 +628,7 @@ impl WebSocketUpstreamTickSource {
             self.trading_status_symbols
                 .extend(chart.symbols().iter().cloned());
         }
-        self.send_json(serde_json::json!({
-            "aid": "subscribe_quote",
-            "ins_list": join_symbols(&self.quote_symbols),
-        }))
-        .await?;
-        self.send_peek_message().await?;
-        self.send_json(serde_json::json!({
-            "aid": "subscribe_trading_status",
-            "ins_list": join_symbols(&self.trading_status_symbols),
-        }))
-        .await?;
-        self.send_peek_message().await?;
+        self.send_quote_and_trading_status().await?;
         for chart in charts {
             self.send_json(serde_json::json!({
                 "aid": "set_chart",
@@ -617,6 +641,22 @@ impl WebSocketUpstreamTickSource {
             self.send_peek_message().await?;
         }
         self.record_subscription_sent();
+        Ok(())
+    }
+
+    async fn send_quote_and_trading_status(&mut self) -> RelayResult<()> {
+        self.send_json(serde_json::json!({
+            "aid": "subscribe_quote",
+            "ins_list": join_symbols(&self.quote_symbols),
+        }))
+        .await?;
+        self.send_peek_message().await?;
+        self.send_json(serde_json::json!({
+            "aid": "subscribe_trading_status",
+            "ins_list": join_symbols(&self.trading_status_symbols),
+        }))
+        .await?;
+        self.send_peek_message().await?;
         Ok(())
     }
 

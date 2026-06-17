@@ -199,6 +199,28 @@ fn relay_engine_tracks_bootstrap_request_without_subscribing_remote_kline_immedi
 }
 
 #[test]
+fn chart_subscription_queues_tick_chart_even_when_universe_quote_is_subscribed() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine.record_universe_refresh_success_for_symbols(
+        ["SHFE.au2602"],
+        "SHFE.au2602".len(),
+        None,
+        None,
+        1,
+    );
+    engine
+        .handle_command(client, chart_command("client-chart"))
+        .unwrap();
+
+    assert_eq!(
+        engine.drain_pending_upstream_subscription_symbols(),
+        vec!["SHFE.au2602".to_string()]
+    );
+}
+
+#[test]
 fn relay_engine_drops_pending_bootstrap_when_last_chart_client_disconnects() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let client = ClientId::new(1);

@@ -1061,26 +1061,65 @@ async fn websocket_upstream_tick_source_peeks_before_json_decode() {
 }
 
 #[tokio::test]
+async fn configured_upstream_source_decodes_quote_without_startup_tick_charts() {
+    use tqsdk_relay::{RelayConfig, UpstreamTickSource, connect_configured_upstream};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
+        socket
+            .send_text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [
+                        {
+                            "quotes": {
+                                "SHFE.au2602": {
+                                    "datetime": "1781658240000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 944.5,
+                                    "volume": 12,
+                                    "open_interest": 34
+                                }
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        expect_peek_message(&mut socket);
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let config = RelayConfig {
+        upstream_market_url: server.url("/market"),
+        futures_universe_expression: Some(
+            UniverseExpression::parse("symbol:SHFE.au2602,DCE.m2609").unwrap(),
+        ),
+        ..RelayConfig::default()
+    };
+
+    let mut source = connect_configured_upstream(&config).await.unwrap().unwrap();
+    let update = source.next_update().await.unwrap();
+    let tqsdk_relay::UpstreamSourceUpdate::Event(UpstreamMarketEvent::Quote(quote)) = update else {
+        panic!("expected quote event from configured upstream");
+    };
+    assert_eq!(quote.symbol, "SHFE.au2602");
+    assert_eq!(quote.quote.last_price, 944.5);
+    server.join();
+}
+
+#[tokio::test]
 async fn configured_upstream_source_subscribes_universe_expression_symbols() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
-        let set_chart = expect_set_chart(&mut socket, "DCE.m2609");
-        assert_eq!(set_chart["chart_id"], "relay-upstream-tick-DCE_m2609-10000");
-        assert_eq!(set_chart["duration"], 0);
-        assert_eq!(set_chart["view_width"], 10_000);
-        expect_peek_message(&mut socket);
-
-        let set_chart = expect_set_chart(&mut socket, "SHFE.au2602");
-        assert_eq!(
-            set_chart["chart_id"],
-            "relay-upstream-tick-SHFE_au2602-10000"
-        );
-        assert_eq!(set_chart["duration"], 0);
-        assert_eq!(set_chart["view_width"], 10_000);
-        expect_peek_message(&mut socket);
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -1129,30 +1168,25 @@ async fn configured_product_discovery_requires_auth_credentials() {
 }
 
 #[tokio::test]
-async fn configured_upstream_pump_ingests_upstream_ticks() {
+async fn configured_upstream_pump_ingests_upstream_quotes() {
     use tqsdk_relay::{RelayConfig, RelayServer, spawn_configured_upstream_pump};
     use websocket_support::TestWebSocketServer;
 
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
-        expect_set_chart(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
                     "aid": "rtn_data",
                     "data": [
                         {
-                            "ticks": {
+                            "quotes": {
                                 "SHFE.au2602": {
-                                    "data": {
-                                        "17": {
-                                            "datetime": 1_000,
-                                            "last_price": 610.0,
-                                            "volume": 170,
-                                            "open_interest": 1007
-                                        }
-                                    }
+                                    "datetime": "1781658240000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 610.0,
+                                    "volume": 170,
+                                    "open_interest": 1007
                                 }
                             }
                         }
@@ -1177,9 +1211,10 @@ async fn configured_upstream_pump_ingests_upstream_ticks() {
         .unwrap()
         .unwrap();
 
-    wait_for_ticks_ingested(&engine, 1).await;
+    wait_for_upstream_events_decoded(&engine, 1).await;
     let metrics = engine.lock().unwrap().metrics_snapshot();
-    assert_eq!(metrics.ticks_ingested, 1);
+    assert_eq!(metrics.ticks_ingested, 0);
+    assert_eq!(metrics.upstream_events_decoded, 1);
     assert_eq!(metrics.upstream_symbols, 1);
     assert_eq!(metrics.upstream_ins_list_chars, "SHFE.au2602".len());
     assert_eq!(
@@ -1245,24 +1280,19 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
 
     let upstream = TestWebSocketServer::spawn_on(addr, |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
-        expect_set_chart(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
                     "aid": "rtn_data",
                     "data": [
                         {
-                            "ticks": {
+                            "quotes": {
                                 "SHFE.au2602": {
-                                    "data": {
-                                        "18": {
-                                            "datetime": 2_000,
-                                            "last_price": 611.0,
-                                            "volume": 180,
-                                            "open_interest": 1008
-                                        }
-                                    }
+                                    "datetime": "1781658241000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 611.0,
+                                    "volume": 180,
+                                    "open_interest": 1008
                                 }
                             }
                         }
@@ -1275,7 +1305,7 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     })
     .unwrap();
 
-    wait_for_ticks_ingested(&engine, 1).await;
+    wait_for_upstream_events_decoded(&engine, 1).await;
     wait_for_upstream_status(&engine, RelaySourceStatus::Up).await;
     let _ = shutdown.send(());
     upstream.join();
@@ -1288,27 +1318,22 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
     };
     use websocket_support::TestWebSocketServer;
 
-    let (send_second_tick_tx, send_second_tick_rx) = std::sync::mpsc::channel();
+    let (send_second_quote_tx, send_second_quote_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
-        expect_set_chart(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
         socket
             .send_text(
                 json!({
                     "aid": "rtn_data",
                     "data": [
                         {
-                            "ticks": {
+                            "quotes": {
                                 "SHFE.au2602": {
-                                    "data": {
-                                        "17": {
-                                            "datetime": 1_000,
-                                            "last_price": 610.0,
-                                            "volume": 170,
-                                            "open_interest": 1007
-                                        }
-                                    }
+                                    "datetime": "1781658240000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 610.0,
+                                    "volume": 170,
+                                    "open_interest": 1007
                                 }
                             }
                         }
@@ -1321,7 +1346,7 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
             .set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
         loop {
-            match send_second_tick_rx.try_recv() {
+            match send_second_quote_rx.try_recv() {
                 Ok(()) => break,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
@@ -1341,16 +1366,13 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
                     "aid": "rtn_data",
                     "data": [
                         {
-                            "ticks": {
+                            "quotes": {
                                 "SHFE.au2602": {
-                                    "data": {
-                                        "18": {
-                                            "datetime": 2_000,
-                                            "last_price": 611.0,
-                                            "volume": 180,
-                                            "open_interest": 1008
-                                        }
-                                    }
+                                    "datetime": "1781658241000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 611.0,
+                                    "volume": 180,
+                                    "open_interest": 1008
                                 }
                             }
                         }
@@ -1381,7 +1403,7 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
     .await
     .unwrap()
     .unwrap();
-    wait_for_ticks_ingested(&engine, 1).await;
+    wait_for_upstream_events_decoded(&engine, 1).await;
     wait_for_upstream_status(&engine, RelaySourceStatus::Up).await;
 
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1390,22 +1412,26 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
         RelaySourceStatus::Up
     );
 
-    send_second_tick_tx.send(()).unwrap();
-    wait_for_ticks_ingested(&engine, 2).await;
+    send_second_quote_tx.send(()).unwrap();
+    wait_for_upstream_events_decoded(&engine, 2).await;
     let _ = shutdown.send(());
     upstream.join();
 }
 
-async fn wait_for_ticks_ingested(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
+async fn wait_for_upstream_events_decoded(engine: &Arc<Mutex<RelayEngine>>, expected: u64) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let ticks_ingested = engine.lock().unwrap().metrics_snapshot().ticks_ingested;
-        if ticks_ingested >= expected {
+        let events_decoded = engine
+            .lock()
+            .unwrap()
+            .metrics_snapshot()
+            .upstream_events_decoded;
+        if events_decoded >= expected {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {expected} ingested ticks; saw {ticks_ingested}"
+            "timed out waiting for {expected} decoded upstream events; saw {events_decoded}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

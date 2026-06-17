@@ -54,19 +54,6 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
             recv_text_json(&mut socket, "peek_message"),
             json!({"aid": "peek_message"})
         );
-        let set_chart = recv_text_json(&mut socket, "set_chart");
-        assert_eq!(set_chart["aid"], "set_chart");
-        assert_eq!(
-            set_chart["chart_id"],
-            "relay-upstream-tick-SHFE_au2602-10000"
-        );
-        assert_eq!(set_chart["ins_list"], "SHFE.au2602");
-        assert_eq!(set_chart["duration"], 0);
-
-        assert_eq!(
-            recv_text_json(&mut socket, "peek_message"),
-            json!({"aid": "peek_message"})
-        );
         socket.send_close().unwrap();
     })
     .unwrap();
