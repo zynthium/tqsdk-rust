@@ -24,7 +24,7 @@ use crate::symbol_metrics::{
     SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery, SymbolMetricsSnapshot,
     SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolStatus,
     SymbolSubscriptionCounts, SymbolTelemetryReadModel, SymbolTelemetrySnapshot,
-    SymbolTelemetryStore, SymbolTradingPhase, SymbolTradingPhaseSource,
+    SymbolTelemetryStore, SymbolTradingPhase, SymbolTradingPhaseSource, parse_quote_datetime_ns,
 };
 use crate::universe::FuturesContract;
 
@@ -749,8 +749,16 @@ impl RelayEngine {
         self.record_data_activity_at(receive_unix_millis / 1_000);
         self.symbol_metrics
             .record_quote_at(symbol, &quote, receive_unix_millis);
+        let synthetic_tick = quote_to_synthetic_tick(&quote);
+        if let Some(row) = synthetic_tick.clone() {
+            self.cache.push_tick(symbol, row.clone());
+        }
         self.cache.push_quote(symbol, quote);
-        Ok(self.quote_frames(symbol))
+        let mut frames = self.quote_frames(symbol);
+        if let Some(row) = synthetic_tick {
+            frames.extend(self.kline_frames(symbol, row)?);
+        }
+        Ok(frames)
     }
 
     pub fn ingest_trading_status(
@@ -1666,6 +1674,17 @@ fn quote_payload(symbol: &str, quote: Quote) -> Value {
         }
     })])])
     .into_value()
+}
+
+fn quote_to_synthetic_tick(quote: &Quote) -> Option<RelayTickRow> {
+    let datetime = parse_quote_datetime_ns(&quote.datetime)?;
+    quote.last_price.is_finite().then_some(RelayTickRow {
+        id: datetime,
+        datetime,
+        last_price: quote.last_price,
+        volume: quote.volume,
+        open_interest: quote.open_interest,
+    })
 }
 
 fn invalid_row_error_symbol(message: &str) -> Option<&str> {

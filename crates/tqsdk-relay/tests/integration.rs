@@ -181,6 +181,48 @@ fn relay_engine_rewrites_chart_payload_to_downstream_chart_id() {
 }
 
 #[test]
+fn relay_engine_synthesizes_klines_from_quote_updates() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+    let client = ClientId::new(1);
+
+    engine
+        .handle_command(client, chart_command_for("client-chart", vec!["DCE.m2609"]))
+        .unwrap();
+
+    engine
+        .ingest_quote_at(
+            "DCE.m2609",
+            quote("DCE.m2609", "2026-06-17 13:56:00.000000", 3100.0),
+            1_780_985_400_000,
+        )
+        .unwrap();
+    let frames = engine
+        .ingest_quote_at(
+            "DCE.m2609",
+            quote("DCE.m2609", "2026-06-17 13:57:00.000000", 3110.0),
+            1_780_985_460_000,
+        )
+        .unwrap();
+
+    let chart_frame = frames
+        .iter()
+        .find(|frame| frame.payload["data"][0].get("charts").is_some())
+        .expect("quote update crossing a K-line window should emit chart metadata");
+    assert_eq!(chart_frame.client_id, client);
+    assert_eq!(
+        chart_frame.payload["data"][0]["charts"]["client-chart"]["right_id"],
+        0
+    );
+    let snapshot = engine.symbol_metrics_snapshot_at(1_780_985_460_000, &Default::default());
+    let symbol = snapshot
+        .symbols
+        .iter()
+        .find(|row| row.symbol == "DCE.m2609")
+        .expect("quote update should create symbol telemetry");
+    assert_eq!(symbol.ticks_ingested, 0);
+}
+
+#[test]
 fn relay_engine_tracks_bootstrap_request_without_subscribing_remote_kline_immediately() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let client = ClientId::new(1);

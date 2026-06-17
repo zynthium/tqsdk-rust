@@ -36,11 +36,11 @@ relay 不改变 SDK 运行时模型：
 | --- | --- |
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
-| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，启动时发送累计 `subscribe_quote` 作为首样本 bootstrap；下游 chart 或未覆盖合约需要 tick 数据时再动态发送 duration 为 `0` 的 tick `set_chart`。 |
+| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，启动时发送累计 `subscribe_quote` 作为首样本 bootstrap；quote update 会转成本地合成 tick 驱动 K 线，下游 chart 或未覆盖合约需要真实 tick chart 时再动态发送 duration 为 `0` 的 `set_chart`。 |
 | 合约集合刷新 | 使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 组合全部活跃、指定产品、主力、加权指数、主连、每品种活跃度前 N、静态符号文件和排除规则；动态发现模式下按本地每日固定时间重建上游 quote bootstrap 集合，默认 `08:30:00`。 |
 | 订阅长度防线 | 在连接上游前统计累计 quote 订阅和动态 tick chart 命令里的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 接收上游 quote，或将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
-| 固定周期 K 线合成 | 从上游 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
+| 固定周期 K 线合成 | 从上游 tick 或 quote update 派生的本地 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
 | 缓存 | 保留内存 tick ring 和 quote 快照。当前二进制程序尚未启用磁盘持久化。 |
 | bootstrap 队列 | 在 relay 内部合并并限流 chart bootstrap 请求。远端 K 线回填和 oracle 对比尚未实现。 |
 | 上游恢复 | 下游监听保持运行；上游 websocket 连接失败后会重试；每日合约集合刷新失败时保留上一条可用上游连接并按 retry interval 重试刷新。 |
@@ -266,6 +266,9 @@ duration 为 `0` 的 tick chart。多合约单 chart 属于对齐 K 线用法，
 路径保持一致。其中 `view_width` 来自 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` /
 `RelayConfig.upstream_tick_view_width`；`TQSDK_RELAY_TICK_RING_CAPACITY` 只影响 relay
 本地保留多少 tick，不影响上游补历史窗口。
+启动 quote 流中的 `datetime`、`last_price`、`volume` 和 `open_interest` 会转成本地合成
+tick，用于 tick ring 回放和固定周期 K 线合成；`ticks_ingested` 仍只统计上游真实
+tick chart 行，用来区分真实 tick chart 覆盖和 quote-only 覆盖。
 动态 tick chart 发送前，relay 也会刷新累计 `subscribe_quote`，保证新增合约至少有
 quote 覆盖。relay 不在启动或动态补订时主动发送 `subscribe_trading_status`；如果上游在
 其他场景返回 trading status，relay 仍会解码并写入 telemetry。

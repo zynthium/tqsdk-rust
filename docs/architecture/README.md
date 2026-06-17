@@ -188,7 +188,8 @@ V1 是：
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
   - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
     长度阈值；启动时上游先发送累计 quote 订阅用于首样本，
-    只有下游 chart 或未覆盖合约需要 tick 数据时才动态补发每合约 tick chart；
+    quote update 会转成本地合成 tick 驱动 tick ring 和固定周期 K 线，
+    只有下游 chart 或未覆盖合约需要真实 tick chart 时才动态补发每合约 tick chart；
     检查口径取这些上游命令中的最大 `ins_list` 长度
   - 提供 dry-run 启动自检、结构化启动日志、HTTP `/health`、`/metrics`、
     `/symbol-metrics` 和内置只读 `/dashboard`；`/health` 区分进程/下游监听、
