@@ -46,14 +46,6 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
             recv_text_json(&mut socket, "peek_message"),
             json!({"aid": "peek_message"})
         );
-        assert_eq!(
-            recv_text_json(&mut socket, "subscribe_trading_status"),
-            json!({"aid": "subscribe_trading_status", "ins_list": "SHFE.au2602"})
-        );
-        assert_eq!(
-            recv_text_json(&mut socket, "peek_message"),
-            json!({"aid": "peek_message"})
-        );
         socket.send_close().unwrap();
     })
     .unwrap();
