@@ -218,6 +218,54 @@ describe('ContinuityTimeline', () => {
     expect(view.getByTestId('timeline-symbol-row').getAttribute('aria-label')).toContain('集合竞价');
   });
 
+  it('keeps initializing open-session symbols visible behind the open filter', async () => {
+    const sample: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'no_sample', total: 1, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {},
+      },
+      symbols: {},
+    };
+    const view = render(ContinuityTimeline, {
+      buckets: [sample],
+      rows: [
+        row({
+          symbol: 'SHFE.au2602',
+          instrument_name: '沪金2602',
+          status: 'initializing',
+          session: 'open',
+          flow: 'no_sample',
+          problem: false,
+          problem_severity: 'initializing',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
+        }),
+        row({
+          symbol: 'CZCE.AP610',
+          instrument_name: '苹果610',
+          status: 'closed',
+          session: 'closed',
+          flow: 'no_sample',
+          problem: false,
+          problem_severity: 'closed',
+          receive_gap_ms: null,
+          avg_receive_gap_ms: null,
+          market_time_lag_ms: null,
+        }),
+      ],
+    });
+
+    await fireEvent.click(view.getByLabelText('只看开盘中品种'));
+    await fireEvent.click(view.getByRole('button', { name: /SHFE/ }));
+
+    expect(view.getByText('沪金2602')).toBeTruthy();
+    expect(view.queryByRole('button', { name: /CZCE/ })).toBeNull();
+    expect(view.queryByText('苹果610')).toBeNull();
+  });
+
   it('filters expanded symbol rows with panel-local search', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
@@ -293,6 +341,8 @@ describe('ContinuityTimeline', () => {
     const search = view.getByPlaceholderText('搜索合约或中文名');
     expect(search.className).toContain('toolbar-input');
     expect(search.className).toContain('w-[clamp(150px,14vw,220px)]');
+    expect(search.className).toContain('text-[10px]');
+    expect(search.className).toContain('placeholder:text-[10px]');
 
     const viewToggle = view.getByRole('button', { name: 'Blocks' }).parentElement as HTMLElement;
     expect(viewToggle.className).toContain('rounded-md');
@@ -384,7 +434,7 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
-    await fireEvent.click(view.getByLabelText('不分交易所'));
+    await fireEvent.click(view.getByLabelText('展开'));
 
     expect(view.queryByRole('button', { name: /DCE/ })).toBeNull();
     expect(view.queryByRole('button', { name: /SHFE/ })).toBeNull();
@@ -425,7 +475,7 @@ describe('ContinuityTimeline', () => {
       ],
     });
 
-    await fireEvent.click(view.getByLabelText('不分交易所'));
+    await fireEvent.click(view.getByLabelText('展开'));
 
     const symbolRows = view.getAllByTestId('timeline-symbol-row').map((item) => item.textContent ?? '');
     expect(symbolRows).toHaveLength(3);
@@ -465,7 +515,7 @@ describe('ContinuityTimeline', () => {
       rows,
     });
 
-    await fireEvent.click(view.getByLabelText('不分交易所'));
+    await fireEvent.click(view.getByLabelText('展开'));
 
     expect(view.queryByRole('button', { name: /DCE/ })).toBeNull();
     expect(view.getAllByTestId('timeline-symbol-row')).toHaveLength(rows.length);
@@ -507,7 +557,7 @@ describe('ContinuityTimeline', () => {
     expect(view.getAllByTestId('timeline-symbol-row')).toHaveLength(rows.length);
   });
 
-  it('keeps open-session filter, search, and view mode across remounts', async () => {
+  it('keeps open-session filter, expanded mode, and view mode across remounts without persisting search', async () => {
     const sample: TimelineSample = {
       sampledAt: NOW,
       sample: {
@@ -558,20 +608,20 @@ describe('ContinuityTimeline', () => {
 
     const first = render(ContinuityTimeline, props);
     await fireEvent.click(first.getByLabelText('只看开盘中品种'));
-    await fireEvent.click(first.getByLabelText('不分交易所'));
+    await fireEvent.click(first.getByLabelText('展开'));
     await fireEvent.input(first.getByPlaceholderText('搜索合约或中文名'), { target: { value: '铁矿' } });
     await fireEvent.click(first.getByRole('button', { name: 'Sparkline' }));
     first.unmount();
 
     const second = render(ContinuityTimeline, props);
     expect((second.getByLabelText('只看开盘中品种') as HTMLInputElement).checked).toBe(true);
-    expect((second.getByLabelText('不分交易所') as HTMLInputElement).checked).toBe(true);
-    expect((second.getByPlaceholderText('搜索合约或中文名') as HTMLInputElement).value).toBe('铁矿');
+    expect((second.getByLabelText('展开') as HTMLInputElement).checked).toBe(true);
+    expect((second.getByPlaceholderText('搜索合约或中文名') as HTMLInputElement).value).toBe('');
     expect(second.getByRole('button', { name: 'Sparkline' }).classList.contains('active')).toBe(true);
 
     expect(second.queryByRole('button', { name: /DCE/ })).toBeNull();
     expect(second.queryByRole('button', { name: /CZCE/ })).toBeNull();
-    expect(second.queryByText('豆粕2609')).toBeNull();
+    expect(second.getByText('豆粕2609')).toBeTruthy();
     expect(second.getByText('铁矿2609')).toBeTruthy();
   });
 });
