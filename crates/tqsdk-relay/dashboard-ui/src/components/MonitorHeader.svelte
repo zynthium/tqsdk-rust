@@ -86,7 +86,7 @@
     <span>{formatTime(now)}</span>
   </div>
   <h1 class="m-0 whitespace-nowrap text-[clamp(20px,1.7vw,28px)] font-black tracking-normal text-shadow-[0_0_20px_#50beff7a]">
-    tqsdk-relay 行情完整性监控中心
+    中继行情监控中心
   </h1>
   <div class="flex items-center justify-end gap-3 whitespace-nowrap text-xs text-[var(--relay-muted)]">
     {#if model}

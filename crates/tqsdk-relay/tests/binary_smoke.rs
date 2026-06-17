@@ -297,7 +297,7 @@ fn relay_binary_serves_embedded_dashboard_assets() {
 
     let html = wait_for_http_response(metrics_addr, "/dashboard/", &mut child);
     assert!(html.starts_with("HTTP/1.1 200"));
-    assert!(html.contains("tqsdk-relay 行情完整性监控中心"));
+    assert!(html.contains("中继行情监控中心"));
     assert!(html.contains("/dashboard/assets/app.js"));
     assert!(html.contains("/dashboard/assets/app.css"));
 

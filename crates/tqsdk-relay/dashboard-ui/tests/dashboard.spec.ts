@@ -36,7 +36,7 @@ test('dashboard renders relay integrity view from intercepted snapshots', async 
 
   await page.goto('/dashboard/');
 
-  await expect(page.getByText('tqsdk-relay 行情完整性监控中心')).toBeVisible();
+  await expect(page.getByText('中继行情监控中心')).toBeVisible();
   await expect(page.getByTestId('dashboard-controls')).toHaveCount(0);
   await expect(page.getByTestId('integrity-hero')).toBeVisible();
   await expect(page.getByTestId('score-gauge')).toBeVisible();
@@ -219,15 +219,16 @@ test('continuity timeline keeps panel filters and view mode after reload', async
   const timeline = page.getByTestId('continuity-timeline');
   await timeline.getByPlaceholder('搜索合约或中文名').fill('铁矿');
   await timeline.getByLabel('只看开盘中品种').check();
-  await timeline.getByLabel('不分交易所').check();
+  await timeline.getByLabel('展开').check();
   await timeline.getByRole('button', { name: 'Sparkline' }).click();
 
   await page.reload();
 
-  await expect(timeline.getByPlaceholder('搜索合约或中文名')).toHaveValue('铁矿');
+  await expect(timeline.getByPlaceholder('搜索合约或中文名')).toHaveValue('');
   await expect(timeline.getByLabel('只看开盘中品种')).toBeChecked();
-  await expect(timeline.getByLabel('不分交易所')).toBeChecked();
+  await expect(timeline.getByLabel('展开')).toBeChecked();
   await expect(timeline.getByRole('button', { name: 'Sparkline' })).toHaveClass(/active/);
+  await expect(timeline.getByText('豆粕2609')).toBeVisible();
   await expect(timeline.getByText('铁矿2609')).toBeVisible();
   await expect(timeline.getByRole('button', { name: /DCE/ })).toHaveCount(0);
   await expect(timeline.getByRole('button', { name: /CZCE/ })).toHaveCount(0);

@@ -79,7 +79,7 @@ select {
 }
 
 @utility toolbar-input {
-  @apply h-[26px] min-w-0 rounded-md border bg-[#071929] px-[9px] text-[11px] text-[color:var(--relay-text)] outline-none;
+  @apply h-[26px] min-w-0 rounded-md border bg-[#071929] px-[9px] text-[10px] text-[color:var(--relay-text)] outline-none;
   border-color: var(--relay-line-soft);
 }
 

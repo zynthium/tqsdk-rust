@@ -16,7 +16,6 @@
   const NAME_COLLATOR = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
   type ViewMode = 'blocks' | 'sparkline';
   type PanelPrefs = {
-    search?: string;
     openOnly?: boolean;
     viewMode?: ViewMode;
     flatSymbols?: boolean;
@@ -54,7 +53,7 @@
   } = $props();
   const initialPrefs = readPanelPrefs();
   let viewMode = $state<ViewMode>(initialPrefs.viewMode ?? 'blocks');
-  let search = $state(initialPrefs.search ?? '');
+  let search = $state('');
   let openOnly = $state(initialPrefs.openOnly ?? false);
   let flatSymbols = $state(initialPrefs.flatSymbols ?? false);
   let expandedExchanges = $state<string[]>([]);
@@ -95,8 +94,7 @@
 
   let latestSample = $derived(latestTimelineSample(buckets));
   let exchangeRows = $derived(
-    Object.keys(latestSample?.sample.exchanges ?? {})
-      .filter((exchange) => visibleRows.some((row) => exchangeOf(row.symbol) === exchange))
+    Array.from(new Set(visibleRows.map((row) => exchangeOf(row.symbol))))
       .sort((left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right)),
   );
   let flatRows = $derived(orderedSymbolRows(visibleRows));
@@ -149,7 +147,7 @@
   let isFiltered = $derived(openOnly || searchNeedle.length > 0);
 
   $effect(() => {
-    writePanelPrefs({ search, openOnly, viewMode, flatSymbols });
+    writePanelPrefs({ openOnly, viewMode, flatSymbols });
   });
 
   function scopeSummary(scope: DashboardTimelineScope | undefined): string {
@@ -238,7 +236,6 @@
       if (!raw) return {};
       const parsed = JSON.parse(raw) as PanelPrefs;
       return {
-        search: typeof parsed.search === 'string' ? parsed.search : undefined,
         openOnly: typeof parsed.openOnly === 'boolean' ? parsed.openOnly : undefined,
         viewMode: parsed.viewMode === 'sparkline' ? 'sparkline' : parsed.viewMode === 'blocks' ? 'blocks' : undefined,
         flatSymbols: typeof parsed.flatSymbols === 'boolean' ? parsed.flatSymbols : undefined,
@@ -352,11 +349,11 @@
         <span>开盘中</span>
       </label>
       <label class="inline-flex h-[26px] items-center gap-[5px] rounded-md border border-[color:var(--relay-line-soft)] bg-[#071929] px-2 text-[11px] whitespace-nowrap text-[color:var(--relay-muted)]">
-        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={flatSymbols} aria-label="不分交易所" />
-        <span>不分交易所</span>
+        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={flatSymbols} aria-label="展开" />
+        <span>展开</span>
       </label>
       <input
-        class="toolbar-input w-[clamp(150px,14vw,220px)] placeholder:text-[color:var(--relay-muted)]"
+        class="toolbar-input w-[clamp(150px,14vw,220px)] text-[10px] placeholder:text-[10px] placeholder:text-[color:var(--relay-muted)]"
         bind:value={search}
         placeholder="搜索合约或中文名"
         aria-label="搜索合约或中文名"
@@ -426,7 +423,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="sparkline-container" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}>
           <svg viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
-            <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="2" fill="none" vector-effect="non-scaling-stroke"/>
+            <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/>
           </svg>
         </div>
       {/if}

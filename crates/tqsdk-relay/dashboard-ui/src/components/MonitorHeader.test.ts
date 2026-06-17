@@ -26,7 +26,7 @@ describe('MonitorHeader', () => {
     expect(header.className).toContain('min-h-11');
     expect(header.className).toContain('items-center');
 
-    expect(screen.getByText('tqsdk-relay 行情完整性监控中心')).toBeTruthy();
+    expect(screen.getByText('中继行情监控中心')).toBeTruthy();
     expect(screen.getByRole('button', { name: '暂停' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '全屏' })).toBeTruthy();
 
