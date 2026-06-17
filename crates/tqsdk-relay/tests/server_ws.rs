@@ -269,8 +269,6 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
     let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
-        expect_set_chart(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
         send_tick_rx.recv().unwrap();
         socket
             .send_text(
@@ -278,16 +276,13 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
                     "aid": "rtn_data",
                     "data": [
                         {
-                            "ticks": {
+                            "quotes": {
                                 "SHFE.au2602": {
-                                    "data": {
-                                        "17": {
-                                            "datetime": 1_000,
-                                            "last_price": 610.0,
-                                            "volume": 170,
-                                            "open_interest": 1007
-                                        }
-                                    }
+                                    "datetime": "1781658240000000000",
+                                    "instrument_id": "SHFE.au2602",
+                                    "last_price": 610.0,
+                                    "volume": 170,
+                                    "open_interest": 1007
                                 }
                             }
                         }
@@ -347,8 +342,6 @@ async fn relay_configured_upstream_adds_downstream_symbol_immediately() {
     let (send_tick_tx, send_tick_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
-        expect_set_chart(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
         expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
         expect_set_chart(&mut socket, "DCE.m2609");
         expect_peek_message(&mut socket);

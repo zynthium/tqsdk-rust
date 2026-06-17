@@ -267,6 +267,15 @@ impl InterestRegistry {
         symbols
     }
 
+    #[must_use]
+    pub fn chart_symbols(&self) -> BTreeSet<String> {
+        let mut symbols = BTreeSet::new();
+        for source in self.chart_mappings.values() {
+            symbols.extend(source.symbols.iter().cloned());
+        }
+        symbols
+    }
+
     fn add_chart_index(&mut self, client_id: ClientId, chart_id: &str, source: &SourceKey) {
         self.chart_clients_by_source
             .entry(source.clone())

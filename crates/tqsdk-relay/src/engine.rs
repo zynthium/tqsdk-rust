@@ -607,6 +607,7 @@ pub struct RelayEngine {
     ticks_ingested: u64,
     upstream_symbols: usize,
     upstream_subscribed_symbols: BTreeSet<String>,
+    upstream_tick_chart_symbols: BTreeSet<String>,
     pending_upstream_subscription_symbols: BTreeSet<String>,
     upstream_ins_list_chars: usize,
     upstream_ins_list_warn_chars: Option<usize>,
@@ -646,6 +647,7 @@ impl RelayEngine {
             ticks_ingested: 0,
             upstream_symbols: 0,
             upstream_subscribed_symbols: BTreeSet::new(),
+            upstream_tick_chart_symbols: BTreeSet::new(),
             pending_upstream_subscription_symbols: BTreeSet::new(),
             upstream_ins_list_chars: 0,
             upstream_ins_list_warn_chars: None,
@@ -950,6 +952,7 @@ impl RelayEngine {
             unix_secs,
         );
         self.upstream_subscribed_symbols = symbols.iter().cloned().collect();
+        self.upstream_tick_chart_symbols.clear();
         self.symbol_metrics
             .record_universe(symbols, unix_secs.saturating_mul(1_000));
         self.queue_missing_upstream_symbols_for_current_interests();
@@ -974,6 +977,7 @@ impl RelayEngine {
             .iter()
             .map(|contract| contract.symbol.clone())
             .collect();
+        self.upstream_tick_chart_symbols.clear();
         self.symbol_metrics.record_universe(
             contracts.iter().map(|contract| contract.symbol.as_str()),
             unix_secs.saturating_mul(1_000),
@@ -1005,6 +1009,7 @@ impl RelayEngine {
                 continue;
             }
             changed |= self.upstream_subscribed_symbols.insert(symbol.to_string());
+            self.upstream_tick_chart_symbols.insert(symbol.to_string());
             self.pending_upstream_subscription_symbols.remove(symbol);
         }
         self.upstream_symbols = self.upstream_subscribed_symbols.len();
@@ -1031,13 +1036,15 @@ impl RelayEngine {
             .filter(|symbol| !symbol.is_empty())
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .filter(|symbol| !self.upstream_subscribed_symbols.contains(symbol))
+            .filter(|symbol| !self.upstream_tick_chart_symbols.contains(symbol))
             .collect()
     }
 
     pub fn queue_missing_upstream_symbols_for_current_interests(&mut self) {
         let symbols = self.interests.subscribed_symbols();
         self.queue_missing_upstream_symbols(symbols);
+        let chart_symbols = self.interests.chart_symbols();
+        self.queue_missing_upstream_tick_chart_symbols(chart_symbols);
     }
 
     pub fn drain_pending_upstream_subscription_symbols(&mut self) -> Vec<String> {
@@ -1062,7 +1069,7 @@ impl RelayEngine {
     }
 
     fn queue_missing_upstream_symbols_for_source(&mut self, source: &SourceKey) {
-        self.queue_missing_upstream_symbols(source.symbols.iter().map(String::as_str));
+        self.queue_missing_upstream_tick_chart_symbols(source.symbols.iter().map(String::as_str));
     }
 
     fn queue_missing_upstream_symbols<I, S>(&mut self, symbols: I)
@@ -1073,6 +1080,21 @@ impl RelayEngine {
         for symbol in symbols {
             let symbol = symbol.as_ref().trim();
             if symbol.is_empty() || self.upstream_subscribed_symbols.contains(symbol) {
+                continue;
+            }
+            self.pending_upstream_subscription_symbols
+                .insert(symbol.to_string());
+        }
+    }
+
+    fn queue_missing_upstream_tick_chart_symbols<I, S>(&mut self, symbols: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for symbol in symbols {
+            let symbol = symbol.as_ref().trim();
+            if symbol.is_empty() || self.upstream_tick_chart_symbols.contains(symbol) {
                 continue;
             }
             self.pending_upstream_subscription_symbols
