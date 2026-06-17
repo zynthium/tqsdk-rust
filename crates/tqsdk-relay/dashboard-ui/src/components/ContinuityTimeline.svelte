@@ -18,7 +18,7 @@
   type PanelPrefs = {
     openOnly?: boolean;
     viewMode?: ViewMode;
-    flatSymbols?: boolean;
+    expandAll?: boolean;
   };
 
   const statusBadgeClass = {
@@ -55,7 +55,7 @@
   let viewMode = $state<ViewMode>(initialPrefs.viewMode ?? 'blocks');
   let search = $state('');
   let openOnly = $state(initialPrefs.openOnly ?? false);
-  let flatSymbols = $state(initialPrefs.flatSymbols ?? false);
+  let expandAll = $state(initialPrefs.expandAll ?? false);
   let expandedExchanges = $state<string[]>([]);
   let hoveredSymbol = $state<string | null>(null);
   let tooltipX = $state(0);
@@ -97,7 +97,6 @@
     Array.from(new Set(visibleRows.map((row) => exchangeOf(row.symbol))))
       .sort((left, right) => exchangeRank(left) - exchangeRank(right) || left.localeCompare(right)),
   );
-  let flatRows = $derived(orderedSymbolRows(visibleRows));
   let definitions = $derived<TimelineDefinition[]>([
     {
       kind: 'summary',
@@ -117,37 +116,35 @@
       latency: (sample) => sample.sample.subscribed.receive_gap_ms,
       averageLatency: (sample) => sample.sample.subscribed.avg_receive_gap_ms,
     },
-    ...(flatSymbols
-      ? flatRows.map((row): TimelineDefinition => symbolDefinition(row))
-      : exchangeRows.flatMap((exchange) => {
-          const scope = latestSample?.sample.exchanges[exchange];
-          const exchangeSymbols = orderedSymbolRows(visibleRows.filter((row) => exchangeOf(row.symbol) === exchange));
-          const expanded = expandedExchanges.includes(exchange);
-          const exchangeDefinition: TimelineDefinition = {
-            kind: 'exchange',
-            key: `exchange:${exchange}`,
-            label: exchange,
-            summary: scopeSummary(scope),
-            exchange,
-            expanded,
-            severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
-            latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
-            averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
-            emptySeverity: scope?.severity ?? 'no_sample',
-          };
-          if (!expanded) return [exchangeDefinition];
-          return [
-            exchangeDefinition,
-            ...exchangeSymbols.map((row): TimelineDefinition => symbolDefinition(row)),
-          ];
-        })),
+    ...exchangeRows.flatMap((exchange) => {
+      const scope = latestSample?.sample.exchanges[exchange];
+      const exchangeSymbols = orderedSymbolRows(visibleRows.filter((row) => exchangeOf(row.symbol) === exchange));
+      const expanded = expandedExchanges.includes(exchange) || expandAll;
+      const exchangeDefinition: TimelineDefinition = {
+        kind: 'exchange',
+        key: `exchange:${exchange}`,
+        label: exchange,
+        summary: scopeSummary(scope),
+        exchange,
+        expanded,
+        severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
+        latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
+        averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
+        emptySeverity: scope?.severity ?? 'no_sample',
+      };
+      if (!expanded) return [exchangeDefinition];
+      return [
+        exchangeDefinition,
+        ...exchangeSymbols.map((row): TimelineDefinition => symbolDefinition(row)),
+      ];
+    }),
   ]);
   let pageRowCount = $derived(rows.length);
   let visibleRowCount = $derived(visibleRows.length);
   let isFiltered = $derived(openOnly || searchNeedle.length > 0);
 
   $effect(() => {
-    writePanelPrefs({ openOnly, viewMode, flatSymbols });
+    writePanelPrefs({ openOnly, viewMode, expandAll });
   });
 
   function scopeSummary(scope: DashboardTimelineScope | undefined): string {
@@ -238,7 +235,7 @@
       return {
         openOnly: typeof parsed.openOnly === 'boolean' ? parsed.openOnly : undefined,
         viewMode: parsed.viewMode === 'sparkline' ? 'sparkline' : parsed.viewMode === 'blocks' ? 'blocks' : undefined,
-        flatSymbols: typeof parsed.flatSymbols === 'boolean' ? parsed.flatSymbols : undefined,
+        expandAll: typeof parsed.expandAll === 'boolean' ? parsed.expandAll : undefined,
       };
     } catch {
       return {};
@@ -349,7 +346,7 @@
         <span>开盘中</span>
       </label>
       <label class="inline-flex h-[26px] items-center gap-[5px] rounded-md border border-[color:var(--relay-line-soft)] bg-[#071929] px-2 text-[11px] whitespace-nowrap text-[color:var(--relay-muted)]">
-        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={flatSymbols} aria-label="展开" />
+        <input class="m-0 size-[13px] accent-[color:var(--relay-live)]" type="checkbox" bind:checked={expandAll} aria-label="展开" />
         <span>展开</span>
       </label>
       <input
