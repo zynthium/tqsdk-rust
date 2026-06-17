@@ -700,6 +700,30 @@ fn average_receive_gap_uses_tick_receive_times_not_quote_updates() {
 }
 
 #[test]
+fn quote_datetime_accepts_upstream_local_timestamp_format() {
+    let mut store = SymbolTelemetryStore::default();
+    let date = NaiveDate::from_ymd_opt(2026, 6, 17).expect("test date should be valid");
+    let now = china_millis_at(date, 13, 56, 36);
+    store.record_universe(["CZCE.AP610"], now - 10_000);
+    store.record_quote_at(
+        "CZCE.AP610",
+        &Quote {
+            instrument_id: "CZCE.AP610".to_string(),
+            datetime: "2026-06-17 13:56:35.000001".to_string(),
+            last_price: 7626.0,
+            ..Quote::default()
+        },
+        now - 500,
+    );
+
+    let snapshot = store.snapshot_at(now, 30_000, &Default::default(), &Default::default());
+
+    assert_eq!(snapshot.symbols[0].receive_gap_ms, Some(500));
+    assert_eq!(snapshot.symbols[0].market_time_lag_ms, Some(1_000));
+    assert!(snapshot.symbols[0].last_tick_datetime_ns.is_some());
+}
+
+#[test]
 fn snapshot_summary_stays_global_when_query_filters_and_limits_rows() {
     let mut store = SymbolTelemetryStore::default();
     let now = local_millis_at(9, 30, 0);
