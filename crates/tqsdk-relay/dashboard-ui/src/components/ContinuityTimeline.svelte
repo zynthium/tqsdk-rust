@@ -176,8 +176,10 @@
 
   function averageLatencyLabel(definition: TimelineDefinition): string {
     if (latestSample && isQuietSeverity(cellSeverity(definition, latestSample))) return '⌁ --';
-    const average = latestSample ? definition.averageLatency(latestSample) : null;
-    return average == null ? '⌁ --' : `⌁ ${formatDuration(average)}`;
+    const delay = latestSample
+      ? (definition.averageLatency(latestSample) ?? definition.latency(latestSample))
+      : null;
+    return delay == null ? '⌁ --' : `⌁ ${formatDuration(delay)}`;
   }
 
   function sparklinePath(definition: TimelineDefinition, buckets: Array<TimelineSample | null>): string {
