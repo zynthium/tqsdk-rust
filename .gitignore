@@ -15,3 +15,6 @@ skills-lock.json
 crates/tqsdk-relay/dashboard-ui/dist/
 .superpowers/
 docs/designs
+.gemini/
+opencode.jsonc
+GEMINI.md
