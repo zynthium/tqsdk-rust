@@ -139,6 +139,32 @@ describe('timeline', () => {
     expect(buckets.at(-1)?.sample.exchanges.DCE.severity).toBe('live');
   });
 
+  it('keeps bucket placement aligned within the same sampling boundary', () => {
+    const history = createTimelineHistory();
+    const sample = dashboardTimeline([row({ symbol: 'DCE.m2609' })]);
+
+    pushTimelineSample(history, sample, NOW - 4_900);
+    const earlyBuckets = timelineBuckets(history, NOW + 1, 60);
+    const lateBuckets = timelineBuckets(history, NOW + 4_999, 60);
+
+    expect(earlyBuckets.at(-2)?.sample.exchanges.DCE.severity).toBe('live');
+    expect(earlyBuckets.at(-1)).toBeNull();
+    expect(lateBuckets.at(-2)?.sample.exchanges.DCE.severity).toBe('live');
+    expect(lateBuckets.at(-1)).toBeNull();
+  });
+
+  it('carries the latest continuous sample across short dashboard sampling jitter', () => {
+    const history = createTimelineHistory();
+    const sample = dashboardTimeline([row({ symbol: 'DCE.m2609' })]);
+
+    pushTimelineSample(history, sample, NOW);
+    pushTimelineSample(history, sample, NOW + 5_100);
+    const buckets = timelineBuckets(history, NOW + 5_100, 60);
+
+    expect(buckets.at(-2)?.sample.exchanges.DCE.severity).toBe('live');
+    expect(buckets.at(-1)?.sample.exchanges.DCE.severity).toBe('live');
+  });
+
   it('uses unfiltered timeline rows when dashboard page is filtered', () => {
     const pageRow = row({ symbol: 'SHFE.au2602' });
     const hiddenTimelineRow = row({ symbol: 'DCE.m2609' });

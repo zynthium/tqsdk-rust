@@ -30,7 +30,10 @@ pub async fn serve_metrics_until(
             biased;
             _ = &mut shutdown => return Ok(()),
             _ = dashboard_refresh.tick() => {
-                let _refreshed = dashboard_cache.refresh_from_engine(&engine)?;
+                if dashboard_cache.refresh_from_engine(&engine)? {
+                    let inputs = dashboard_cache.load()?;
+                    push_dashboard_timeline_history_sample(&timeline_history, inputs.as_ref())?;
+                }
             }
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted.map_err(|err| {
@@ -132,6 +135,17 @@ async fn serve_metrics_stream(
         }
     };
     write_response(stream, 200, response, accept_gzip).await
+}
+
+fn push_dashboard_timeline_history_sample(
+    timeline_history: &Arc<Mutex<DashboardTimelineHistoryCache>>,
+    inputs: &DashboardSnapshotInputs,
+) -> RelayResult<()> {
+    let mut timeline_history = timeline_history.lock().map_err(|_| {
+        RelayError::Internal("dashboard timeline history lock poisoned".to_string())
+    })?;
+    timeline_history.push(inputs.timeline_history_sample());
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -439,5 +453,32 @@ mod tests {
         let dashboard = inputs.dashboard_snapshot(&SymbolMetricsQuery::default());
         assert_eq!(dashboard.global.total, 1);
         assert!(dashboard.timeline.exchanges.contains_key("DCE"));
+    }
+
+    #[test]
+    fn dashboard_refresh_can_feed_timeline_history_without_request() {
+        let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+        let cache = DashboardSnapshotCache::from_engine(&engine).unwrap();
+        let timeline_history = Arc::new(Mutex::new(DashboardTimelineHistoryCache::default()));
+
+        {
+            let mut engine = engine.lock().unwrap();
+            engine.record_universe_refresh_success_for_symbols(
+                ["SHFE.au2602"],
+                11,
+                None,
+                None,
+                1_700_000_000,
+            );
+        }
+        assert!(cache.refresh_from_engine(&engine).unwrap());
+        let inputs = cache.load().unwrap();
+
+        push_dashboard_timeline_history_sample(&timeline_history, inputs.as_ref()).unwrap();
+
+        let history = timeline_history.lock().unwrap().snapshot();
+        assert_eq!(history.samples.len(), 1);
+        assert_eq!(history.samples[0].sample.global.total, 1);
+        assert!(history.samples[0].sample.exchanges.contains_key("SHFE"));
     }
 }
