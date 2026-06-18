@@ -1,6 +1,6 @@
 <script lang="ts">
   import { EXCHANGES, exchangeOf, productGroupOf } from '../lib/timeline';
-  import { formatDuration, formatNumber } from '../lib/format';
+  import { formatDuration, formatNumber, formatTime } from '../lib/format';
   import { statusLabel } from '../lib/integrity-model';
   import type {
     DashboardTimelineScope,
@@ -57,14 +57,13 @@
   let openOnly = $state(initialPrefs.openOnly ?? false);
   let expandAll = $state(initialPrefs.expandAll ?? false);
   let expandedExchanges = $state<string[]>([]);
-  let hoveredSymbol = $state<string | null>(null);
+  let hoveredCell = $state<HoveredCell | null>(null);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
   let searchNeedle = $derived(search.trim().toLowerCase());
   let visibleRows = $derived(
     rows.filter((row) => (!openOnly || row.session === 'open') && (!searchNeedle || matchesSymbolSearch(row, searchNeedle))),
   );
-  let hoveredSymbolRow = $derived(visibleRows.find((row) => row.symbol === hoveredSymbol) ?? null);
 
   type TimelineDefinition = {
     kind: 'summary' | 'exchange' | 'symbol';
@@ -78,6 +77,10 @@
     latency: (sample: TimelineSample) => number | null | undefined;
     averageLatency: (sample: TimelineSample) => number | null | undefined;
     emptySeverity?: TimelineSeverity;
+  };
+  type HoveredCell = {
+    definition: TimelineDefinition;
+    sample: TimelineSample | null;
   };
 
   function latestTimelineSample(buckets: Array<TimelineSample | null>): TimelineSample | null {
@@ -213,15 +216,34 @@
     return `${definition.label} ${severity} ${definition.summary} ${delay}`;
   }
 
-  function handleHover(definition: TimelineDefinition, event: MouseEvent) {
-    if (definition.kind !== 'symbol' || !definition.row) return;
-    hoveredSymbol = definition.row.symbol;
+  function handleHover(definition: TimelineDefinition, sample: TimelineSample | null, event: MouseEvent) {
+    hoveredCell = { definition, sample };
     tooltipX = event.clientX + 15;
     tooltipY = Math.min(event.clientY + 15, window.innerHeight - 160);
   }
 
   function clearHover() {
-    hoveredSymbol = null;
+    hoveredCell = null;
+  }
+
+  function scopeFor(definition: TimelineDefinition, sample: TimelineSample): DashboardTimelineScope | undefined {
+    if (definition.kind === 'summary') return definition.key === 'global' ? sample.sample.global : sample.sample.subscribed;
+    if (definition.kind === 'exchange' && definition.exchange) return sample.sample.exchanges[definition.exchange];
+    return undefined;
+  }
+
+  function cellSummary(definition: TimelineDefinition, sample: TimelineSample | null): string {
+    return sample ? scopeSummary(scopeFor(definition, sample)) : definition.summary;
+  }
+
+  function cellLatencyLabel(definition: TimelineDefinition, sample: TimelineSample | null): string {
+    if (!sample || isQuietSeverity(cellSeverity(definition, sample))) return '--';
+    return formatDuration(definition.latency(sample));
+  }
+
+  function cellAverageLatencyLabel(definition: TimelineDefinition, sample: TimelineSample | null): string {
+    if (!sample || isQuietSeverity(cellSeverity(definition, sample))) return '--';
+    return formatDuration(definition.averageLatency(sample) ?? definition.latency(sample));
   }
 
   function readPanelPrefs(): PanelPrefs {
@@ -408,11 +430,11 @@
       {#if viewMode === 'blocks'}
         {#each buckets as bucket, index (`${definition.key}:${index}`)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class={`cell ${cellToneClass[cellClass(definition, bucket)]}`} title={cellTitle(definition, bucket)} onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}></span>
+          <span class={`cell ${cellToneClass[cellClass(definition, bucket)]}`} title={cellTitle(definition, bucket)} onmousemove={(event) => handleHover(definition, bucket, event)} onmouseleave={clearHover}></span>
         {/each}
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="flex items-center h-full w-full" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, event)} onmouseleave={clearHover}>
+        <div class="flex items-center h-full w-full" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, latestTimelineSample(buckets), event)} onmouseleave={clearHover}>
           <svg class="h-[20px] w-full" viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
             <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/>
           </svg>
@@ -421,25 +443,25 @@
     {/each}
     <div class="axis"><span>-5m</span><span>now</span></div>
   </div>
-  {#if hoveredSymbolRow}
+  {#if hoveredCell}
     <div
       class="health-tooltip fixed z-[10000] flex min-w-[200px] pointer-events-none flex-col gap-1.5 rounded-lg border border-[color:var(--relay-line-soft)] bg-[rgba(15,33,48,0.95)] px-[14px] py-[10px] text-[11px] text-[color:var(--relay-text)] shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
       style={`left: ${tooltipX}px; top: ${tooltipY}px;`}
     >
-      <div class="mb-0.5 border-b border-[rgba(255,255,255,0.1)] pb-1.5 font-bold text-[color:var(--relay-info)]">{hoveredSymbolRow.instrument_name ?? hoveredSymbolRow.symbol}</div>
+      <div class="mb-0.5 border-b border-[rgba(255,255,255,0.1)] pb-1.5 font-bold text-[color:var(--relay-info)]">{hoveredCell.definition.label}</div>
       <div class="tooltip-body">
-        <div><span>接收延迟</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.receive_gap_ms)}</b></div>
-        <div><span>平均接收</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.avg_receive_gap_ms)}</b></div>
-        <div><span>行情延时</span><b>{rowDelayLabel(hoveredSymbolRow, hoveredSymbolRow.market_time_lag_ms)}</b></div>
-        {#if phaseLabel(hoveredSymbolRow)}
-          <div><span>交易阶段</span><b>{phaseLabel(hoveredSymbolRow)}</b></div>
+        <div><span>样本时间</span><b>{hoveredCell.sample ? formatTime(hoveredCell.sample.sampledAt) : '无样本'}</b></div>
+        <div><span>状态</span><b>{cellSeverity(hoveredCell.definition, hoveredCell.sample)}</b></div>
+        <div><span>接收延迟</span><b>{cellLatencyLabel(hoveredCell.definition, hoveredCell.sample)}</b></div>
+        <div><span>平均接收</span><b>{cellAverageLatencyLabel(hoveredCell.definition, hoveredCell.sample)}</b></div>
+        {#if hoveredCell.definition.kind !== 'symbol'}
+          <div><span>异常/总数</span><b>{cellSummary(hoveredCell.definition, hoveredCell.sample)}</b></div>
         {/if}
-        {#if hoveredSymbolRow.raw_trade_status}
-          <div><span>原始状态</span><b>{hoveredSymbolRow.raw_trade_status}</b></div>
-        {/if}
-        <div><span>异常记录数</span><b>{formatNumber(hoveredSymbolRow.invalid_rows)}</b></div>
-        {#if hoveredSymbolRow.last_invalid_row_error}
-          <div class="error" title={hoveredSymbolRow.last_invalid_row_error}>{hoveredSymbolRow.last_invalid_row_error}</div>
+        {#if hoveredCell.definition.row}
+          <div><span>异常记录数</span><b>{formatNumber(hoveredCell.definition.row.invalid_rows)}</b></div>
+          {#if hoveredCell.definition.row.last_invalid_row_error}
+            <div class="error" title={hoveredCell.definition.row.last_invalid_row_error}>{hoveredCell.definition.row.last_invalid_row_error}</div>
+          {/if}
         {/if}
       </div>
     </div>
