@@ -246,6 +246,35 @@
     return formatDuration(definition.averageLatency(sample) ?? definition.latency(sample));
   }
 
+  function rowLatencyLabel(definition: TimelineDefinition, sample: TimelineSample | null): string {
+    if (!sample || !definition.row) return '--';
+    if (isQuietSeverity(cellSeverity(definition, sample))) return '--';
+    return rowDelayLabel(definition.row, definition.row.market_time_lag_ms);
+  }
+
+  function sparklineBucket(event: MouseEvent): number {
+    const target = event.currentTarget as HTMLElement | null;
+    const bucketsLength = buckets.length;
+    if (bucketsLength < 1 || !target) return 0;
+
+    const typedEvent = event as MouseEvent & { offsetX?: number };
+    const offsetX = typedEvent.offsetX;
+    const rect = target.getBoundingClientRect();
+    const width = target.clientWidth || rect.width;
+    const fallbackWidth = bucketsLength * 10;
+    const effectiveWidth = width > 0 ? width : fallbackWidth;
+
+    const pointerX = typeof offsetX === 'number' ? offsetX : event.clientX - rect.left;
+    const rawIndex = Math.floor((pointerX / effectiveWidth) * bucketsLength);
+    return Math.max(0, Math.min(bucketsLength - 1, rawIndex));
+  }
+
+  function handleSparklineHover(definition: TimelineDefinition, event: MouseEvent) {
+    hoveredCell = { definition, sample: buckets[sparklineBucket(event)] };
+    tooltipX = event.clientX + 15;
+    tooltipY = Math.min(event.clientY + 15, window.innerHeight - 160);
+  }
+
   function readPanelPrefs(): PanelPrefs {
     try {
       const raw = localStorage.getItem(PANEL_PREFS_KEY);
@@ -369,7 +398,7 @@
         <span>展开</span>
       </label>
       <input
-        class="toolbar-input w-[clamp(150px,14vw,220px)] text-[10px] placeholder:text-[10px] placeholder:text-[color:var(--relay-muted)]"
+        class="h-[26px] min-w-0 rounded-md border border-[color:var(--relay-line-soft)] bg-[#071929] px-[9px] text-[10px] text-[color:var(--relay-text)] outline-none placeholder:text-[10px] placeholder:text-[color:var(--relay-muted)] w-[clamp(150px,14vw,220px)]"
         bind:value={search}
         placeholder="搜索合约或中文名"
         aria-label="搜索合约或中文名"
@@ -434,7 +463,7 @@
         {/each}
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="flex items-center h-full w-full" style="grid-column: 2 / -1;" onmousemove={(event) => handleHover(definition, latestTimelineSample(buckets), event)} onmouseleave={clearHover}>
+        <div class="flex items-center h-full w-full" style="grid-column: 2 / -1;" onmousemove={(event) => handleSparklineHover(definition, event)} onmouseleave={clearHover}>
           <svg class="h-[20px] w-full" viewBox={`0 0 ${buckets.length * 10} 100`} preserveAspectRatio="none">
             <path d={sparklinePath(definition, buckets)} stroke={sparklineColor(definition, buckets)} stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/>
           </svg>
@@ -454,6 +483,9 @@
         <div><span>状态</span><b>{cellSeverity(hoveredCell.definition, hoveredCell.sample)}</b></div>
         <div><span>接收延迟</span><b>{cellLatencyLabel(hoveredCell.definition, hoveredCell.sample)}</b></div>
         <div><span>平均接收</span><b>{cellAverageLatencyLabel(hoveredCell.definition, hoveredCell.sample)}</b></div>
+        {#if hoveredCell.definition.row}
+          <div><span>市场延迟</span><b>{rowLatencyLabel(hoveredCell.definition, hoveredCell.sample)}</b></div>
+        {/if}
         {#if hoveredCell.definition.kind !== 'symbol'}
           <div><span>异常/总数</span><b>{cellSummary(hoveredCell.definition, hoveredCell.sample)}</b></div>
         {/if}
