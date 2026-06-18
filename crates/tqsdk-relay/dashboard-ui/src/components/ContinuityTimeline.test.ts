@@ -143,9 +143,83 @@ describe('ContinuityTimeline', () => {
 
     expect(view.getByText('31.0s')).toBeTruthy();
     expect(view.getByText('24.0s')).toBeTruthy();
+    expect(view.getByText('市场延迟')).toBeTruthy();
     expect(view.getByText('45.0s')).toBeTruthy();
     expect(view.getByText(/异常记录数/)).toBeTruthy();
     expect(view.getByText('7')).toBeTruthy();
+  });
+
+  it('shows hovered sample delay for the current sparkline bucket', async () => {
+    const sample0: TimelineSample = {
+      sampledAt: NOW,
+      sample: {
+        global: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'warn', total: 1, problem: 1, receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'warn', receive_gap_ms: 31_000, avg_receive_gap_ms: 24_000 },
+      },
+    };
+
+    const sample1: TimelineSample = {
+      sampledAt: NOW + 1_000,
+      sample: {
+        global: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        subscribed: { severity: 'unknown', total: 0, problem: 0, receive_gap_ms: null, avg_receive_gap_ms: null },
+        exchanges: {
+          DCE: { severity: 'live', total: 1, problem: 0, receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+        },
+      },
+      symbols: {
+        'DCE.m2609': { severity: 'live', receive_gap_ms: 900, avg_receive_gap_ms: 900 },
+      },
+    };
+
+    const view = render(ContinuityTimeline, {
+      buckets: [sample0, sample1],
+      rows: [
+        row({
+          symbol: 'DCE.m2609',
+          instrument_name: '豆粕2609',
+          status: 'stale',
+          problem: true,
+          problem_severity: 'warn',
+          receive_gap_ms: 31_000,
+          avg_receive_gap_ms: 24_000,
+        }),
+      ],
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: 'Sparkline' }));
+    await fireEvent.click(view.getByRole('button', { name: /DCE/ }));
+
+    const sparkline = view.container.querySelector('.flex.items-center.h-full.w-full') as HTMLElement;
+    expect(sparkline).toBeTruthy();
+
+    const tooltipText = () => view.container.querySelector('.health-tooltip')?.textContent ?? '';
+
+    await fireEvent.mouseMove(sparkline, {
+      clientX: 5,
+      clientY: 12,
+      offsetX: 5,
+      offsetY: 1,
+    });
+
+    expect(tooltipText()).toContain('31.0s');
+    expect(tooltipText()).toContain('24.0s');
+
+    await fireEvent.mouseMove(sparkline, {
+      clientX: 30,
+      clientY: 12,
+      offsetX: 19,
+      offsetY: 1,
+    });
+
+    expect(tooltipText()).toContain('900ms');
+    expect(tooltipText()).not.toContain('31.0s');
   });
 
   it('falls back to latest receive delay when quote-only rows have no average delay', async () => {
@@ -339,7 +413,8 @@ describe('ContinuityTimeline', () => {
     });
 
     const search = view.getByPlaceholderText('搜索合约或中文名');
-    expect(search.className).toContain('toolbar-input');
+    expect(search.className).toContain('h-[26px]');
+    expect(search.className).toContain('rounded-md');
     expect(search.className).toContain('w-[clamp(150px,14vw,220px)]');
     expect(search.className).toContain('text-[10px]');
     expect(search.className).toContain('placeholder:text-[10px]');

@@ -64,7 +64,7 @@ body::before {
 button,
 input,
 select {
-  font: inherit;
+  font-family: inherit;
 }
 
 @utility panel-shell {
@@ -72,28 +72,6 @@ select {
   border-color: var(--relay-line);
   background: linear-gradient(180deg, var(--relay-panel), var(--relay-panel-soft));
   box-shadow: var(--relay-shadow);
-}
-
-@utility panel-head {
-  @apply relative z-[1] flex min-h-9 items-center gap-2 text-[13px] font-extrabold tracking-[0.6px] text-[#bfeeff];
-}
-
-@utility toolbar-input {
-  @apply h-[26px] min-w-0 rounded-md border bg-[#071929] px-[9px] text-[10px] text-[color:var(--relay-text)] outline-none;
-  border-color: var(--relay-line-soft);
-}
-
-@utility status-pill {
-  @apply inline-flex items-center gap-2 rounded-full border px-3 py-[7px];
-}
-
-@utility panel-body {
-  @apply min-h-0 flex flex-col overflow-hidden;
-}
-
-@utility relay-scrollbar {
-  scrollbar-color: var(--relay-scrollbar-thumb) var(--relay-scrollbar-track);
-  scrollbar-width: thin;
 }
 
 @utility count-chip {
@@ -113,16 +91,6 @@ select {
 
 @utility list-panel-empty {
   @apply relative z-[1] flex flex-1 items-center justify-center text-center;
-}
-
-/* ── Shell grid ── */
-.dashboard-shell {
-  @apply relative grid h-dvh min-h-0 overflow-hidden gap-2 px-3 pb-[10px] pt-2 text-[color:var(--relay-text)];
-  grid-template-rows:
-    44px            /* header */
-    auto            /* hero */
-    auto            /* pipeline + kpi strip */
-    minmax(0, 1fr); /* main area */
 }
 
 /* ── Panel glass card ── */
@@ -150,7 +118,7 @@ select {
 }
 
 .panel-title {
-  @apply panel-head;
+  @apply relative z-[1] flex min-h-9 items-center gap-2 text-[13px] font-extrabold tracking-[0.6px] text-[#bfeeff];
 }
 
 .panel-title::before {
@@ -192,141 +160,4 @@ select {
   box-shadow: none;
 }
 
-/* ── Pipeline + KPI horizontal band ── */
-.pipeline-kpi-row {
-  @apply grid items-stretch gap-2;
-  grid-template-columns: auto minmax(0, 1fr);
-}
-
-.kpi-strip {
-  @apply flex gap-2;
-}
-
-/* ── Main area: 2-column layout ── */
-.dashboard-main {
-  @apply grid min-h-0 gap-2 overflow-hidden;
-  grid-template-columns: minmax(520px, 1fr) 340px;
-}
-
-.main-left {
-  @apply grid min-h-0 overflow-hidden;
-  grid-template-rows: 1fr;
-}
-
-.main-right {
-  @apply relay-scrollbar grid min-h-0 overflow-hidden gap-2;
-  grid-template-rows: 1fr auto 1fr;
-}
-
-.dashboard-main .panel,
-.main-right > .panel {
-  --relay-card-header-height: 36px;
-  --relay-table-sticky-top: calc(-1 * var(--relay-card-padding-y));
-  --relay-card-padding-y: 10px;
-  --relay-card-padding-x: 12px;
-
-  @apply panel-body relay-scrollbar;
-}
-
-.main-left > .panel {
-  @apply panel-body relay-scrollbar;
-}
-
-.dashboard-shell > .table-panel {
-  --relay-card-header-height: 36px;
-  --relay-table-sticky-top: calc(-1 * var(--relay-card-padding-y));
-  --relay-card-padding-y: 10px;
-  --relay-card-padding-x: 12px;
-
-  @apply panel-body relay-scrollbar;
-}
-
-.dashboard-main .panel > .panel-title,
-.dashboard-main .panel > .head,
-.dashboard-shell > .table-panel > .head {
-  position: relative;
-  z-index: 7;
-  box-sizing: border-box;
-  flex-shrink: 0;
-  min-height: var(--relay-card-header-height);
-  margin: calc(-1 * var(--relay-card-padding-y)) calc(-1 * var(--relay-card-padding-x)) 0;
-  padding: var(--relay-card-padding-y) var(--relay-card-padding-x) 8px;
-  background: linear-gradient(180deg, #081b2df7, #061525f0);
-  backdrop-filter: blur(8px);
-  box-shadow:
-    0 1px 0 #24445a66,
-    0 3px 8px #0208128c;
-}
-
-.dashboard-main .panel::-webkit-scrollbar,
-.main-left .panel::-webkit-scrollbar,
-.main-right::-webkit-scrollbar,
-.dashboard-shell > .table-panel::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
-}
-
-.dashboard-main .panel::-webkit-scrollbar-track,
-.main-left .panel::-webkit-scrollbar-track,
-.main-right::-webkit-scrollbar-track,
-.dashboard-shell > .table-panel::-webkit-scrollbar-track {
-  background: var(--relay-scrollbar-track);
-}
-
-.dashboard-main .panel::-webkit-scrollbar-thumb,
-.main-left .panel::-webkit-scrollbar-thumb,
-.main-right::-webkit-scrollbar-thumb,
-.dashboard-shell > .table-panel::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--relay-scrollbar-thumb);
-}
-
-/* ── Tables ── */
-.table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
-}
-
-.table th,
-.table td {
-  overflow: hidden;
-  padding: 7px 6px;
-  border-bottom: 1px solid #24445a66;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 10px;
-}
-
-.table th {
-  position: sticky;
-  top: var(--relay-table-sticky-top, 0);
-  z-index: 6;
-  background: #0a2135aa;
-  color: #83a9ba;
-  font-weight: 650;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 1px 0 #24445a66;
-}
-
-.table td {
-  color: #c5dce7;
-}
-
 /* ── Responsive ── */
-@media (max-width: 1320px) {
-  .dashboard-main {
-    grid-template-columns: minmax(460px, 1fr) 300px;
-  }
-}
-
-@media (max-width: 1100px) {
-  .pipeline-kpi-row {
-    grid-template-columns: 1fr;
-  }
-  .kpi-strip {
-    flex-wrap: wrap;
-  }
-}
