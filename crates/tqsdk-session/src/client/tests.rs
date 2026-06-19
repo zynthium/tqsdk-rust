@@ -304,6 +304,14 @@ fn outbound_query_id(frame: &OutboundFrame) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn peek_frame_count(sent: &Arc<Mutex<Vec<OutboundFrame>>>) -> usize {
+    sent.lock()
+        .unwrap()
+        .iter()
+        .filter(|frame| matches!(frame, OutboundFrame::Text(text) if text == super::PEEK_MESSAGE))
+        .count()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn live_client_drive_route_once_establishes_market_session_and_ingests_quote() {
     let handle = runtime_with_default_adapters();
@@ -356,11 +364,74 @@ async fn live_client_drive_route_once_establishes_market_session_and_ingests_quo
             .get(["quotes", "SHFE.au2602", "last_price"]),
         Some(&json!(618.5))
     );
+    assert_eq!(peek_frame_count(&sent), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_client_does_not_send_duplicate_peek_while_prior_peek_is_pending() {
+    let handle = runtime_with_default_adapters();
+    let transport = QueueTransport::default();
+    {
+        let mut queue = transport.recv_queue.lock().unwrap();
+        for last_price in [618.5, 619.5] {
+            queue.push_back(RawFrame::Text(
+                json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.au2602": {
+                                "instrument_id": "au2602",
+                                "last_price": last_price
+                            }
+                        }
+                    }]
+                })
+                .to_string(),
+            ));
+        }
+    }
+    let sent = Arc::clone(&transport.sent);
+    let client = test_live_client(
+        handle.clone(),
+        SessionTopology::default().with_route(SessionRoute {
+            label: "market".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Market],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "wss://market.example".to_string(),
+                connect: tqsdk_core::WebSocketConnectOptions::default(),
+            },
+        }),
+        transport,
+        Arc::new(RecordingExecutor::default()),
+    );
+
     assert!(
-        sent.lock()
+        client
+            .drive_route_once(Some(Instant::now() + Duration::from_secs(1)))
+            .await
             .unwrap()
-            .iter()
-            .any(|frame| matches!(frame, OutboundFrame::Text(text) if text == super::PEEK_MESSAGE))
+    );
+    assert_eq!(peek_frame_count(&sent), 1);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(618.5))
+    );
+
+    assert!(
+        client
+            .drive_route_once(Some(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap()
+    );
+    assert_eq!(peek_frame_count(&sent), 2);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(619.5))
     );
 }
 

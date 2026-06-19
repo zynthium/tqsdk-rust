@@ -37,6 +37,7 @@ pub struct RoutePumpOutcome {
     pub commits: Vec<SharedCommitResult>,
     pub reconnect_required: bool,
     pub reconnect_reason: Option<&'static str>,
+    pub received_input: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub struct SessionStepOutcome {
     pub dispatches: Vec<DispatchReceipt>,
     pub commits: Vec<SharedCommitResult>,
     pub recovered: bool,
+    pub received_route_input: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -257,11 +259,13 @@ impl SessionRuntime {
             dispatches: self.flush_outbound(run).await?,
             commits: Vec::new(),
             recovered: false,
+            received_route_input: false,
         };
 
         let route_outcome = self
             .pump_route_once(run, route_label, caused_by.clone(), scope)
             .await?;
+        outcome.received_route_input = route_outcome.received_input;
         outcome.commits.extend(route_outcome.commits);
 
         if route_outcome.reconnect_required {

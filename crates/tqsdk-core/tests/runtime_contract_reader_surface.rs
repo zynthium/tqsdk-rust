@@ -108,6 +108,129 @@ fn runtime_reader_next_view_reports_lagged_cursor_when_head_has_advanced() {
 }
 
 #[test]
+fn runtime_ingest_preserves_root_market_scalars_in_snapshot_and_market_guard() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "ins_list": "SHFE.au2602,DCE.m2609",
+                        "mdhis_more_data": false
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("root market scalars should publish a commit");
+
+    let snapshot = handle.latest_snapshot();
+    assert_eq!(
+        snapshot.get(["ins_list"]),
+        Some(&json!("SHFE.au2602,DCE.m2609"))
+    );
+    assert_eq!(snapshot.get(["mdhis_more_data"]), Some(&json!(false)));
+    let market = reader.read_market_state();
+    assert_eq!(
+        market.get_path(&["ins_list"]),
+        Some(&json!("SHFE.au2602,DCE.m2609"))
+    );
+    assert_eq!(market.get_path(&["mdhis_more_data"]), Some(&json!(false)));
+
+    let commit = reader.next(&mut cursor).unwrap();
+    assert!(
+        commit
+            .changes
+            .path_hits
+            .contains(&tqsdk_core::StatePath::new(["mdhis_more_data"]))
+    );
+}
+
+#[test]
+fn runtime_ingest_materializes_empty_objects_and_keeps_empty_parent_after_delete() {
+    let handle = runtime_with_default_adapters();
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.empty": {}
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("empty object diff should publish a structural commit");
+    assert_eq!(
+        handle.latest_snapshot().get(["quotes", "SHFE.empty"]),
+        Some(&json!({}))
+    );
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.delete": {
+                                "last_price": 512.0
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed quote should publish a commit");
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": {
+                            "SHFE.delete": {
+                                "last_price": null
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("null field delete should publish a commit");
+
+    assert_eq!(
+        handle.latest_snapshot().get(["quotes", "SHFE.delete"]),
+        Some(&json!({}))
+    );
+}
+
+#[test]
 fn runtime_handle_runtime_trait_surface_uses_reader_not_owned_snapshot() {
     let handle = runtime_with_default_adapters();
     let reader = handle.reader();

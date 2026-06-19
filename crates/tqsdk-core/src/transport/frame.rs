@@ -1,6 +1,6 @@
-use crate::Result;
 use crate::events::{InputPayload, InternalEvent, IoEvent, RuntimeInput};
 use crate::ids::ProtocolDomain;
+use crate::{ContractError, Result};
 use serde_json::{Value, json};
 
 use super::topology::SessionRoute;
@@ -54,10 +54,11 @@ pub(super) fn map_raw_frame_to_input(
 }
 
 fn parse_text_payload(text: String) -> Result<InputPayload> {
-    match serde_json::from_str::<Value>(&text) {
-        Ok(value) => Ok(InputPayload::Json(value)),
-        Err(_) => Ok(InputPayload::Text(text)),
-    }
+    serde_json::from_str::<Value>(&text)
+        .map(InputPayload::Json)
+        .map_err(|err| {
+            ContractError::transport(format!("invalid websocket JSON text frame: {err}"))
+        })
 }
 
 fn parse_binary_payload(bytes: Vec<u8>) -> Result<InputPayload> {
@@ -100,6 +101,16 @@ mod tests {
     fn parse_text_payload_decodes_json_when_possible() {
         let payload = parse_text_payload(r#"{"aid":"rtn_data"}"#.to_string()).unwrap();
         assert_eq!(payload, InputPayload::Json(json!({ "aid": "rtn_data" })));
+    }
+
+    #[test]
+    fn parse_text_payload_rejects_invalid_json() {
+        let error = parse_text_payload("{not-json".to_string()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid websocket JSON text frame")
+        );
     }
 
     #[test]

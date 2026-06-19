@@ -35,7 +35,10 @@ impl SessionRuntime {
                 self.handle_transport_signal(event, caused_by)
             }
             Ok(Some(input)) => {
-                let mut outcome = RoutePumpOutcome::default();
+                let mut outcome = RoutePumpOutcome {
+                    received_input: true,
+                    ..RoutePumpOutcome::default()
+                };
                 if let Some(commit) = self.handle.ingest(input, caused_by.clone(), scope)? {
                     self.record_transport_commit_statuses(route_label, &commit, &caused_by, scope)?;
                     outcome.commits.push(commit);
@@ -137,6 +140,7 @@ impl SessionRuntime {
             commits: Vec::new(),
             reconnect_required: true,
             reconnect_reason: Some("transport-close"),
+            received_input: false,
         };
 
         if let Some(commit) = self.handle.ingest(
@@ -187,6 +191,7 @@ impl SessionRuntime {
             commits: Vec::new(),
             reconnect_required: true,
             reconnect_reason: Some("transport-error"),
+            received_input: false,
         };
 
         if let Some(commit) = self.handle.ingest(

@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(any(test, feature = "live"))]
 use std::future::Future;
 #[cfg(any(test, feature = "live"))]
@@ -147,6 +147,7 @@ struct SessionIoState {
     cached_auth: Option<AuthContext>,
     next_pending_route: usize,
     next_websocket_route: usize,
+    pending_peek_routes: BTreeSet<String>,
 }
 
 #[cfg(any(test, feature = "live"))]
@@ -179,6 +180,7 @@ impl SessionIoState {
             cached_auth: None,
             next_pending_route: 0,
             next_websocket_route: 0,
+            pending_peek_routes: BTreeSet::new(),
         }
     }
 
@@ -188,6 +190,30 @@ impl SessionIoState {
 
     fn next_websocket_route_label(&mut self) -> Option<String> {
         next_route_label(&self.run, &mut self.next_websocket_route, true)
+    }
+
+    fn clear_pending_peek(&mut self, route_label: &str) {
+        self.pending_peek_routes.remove(route_label);
+    }
+
+    fn clear_all_pending_peeks(&mut self) {
+        self.pending_peek_routes.clear();
+    }
+
+    fn mark_pending_peek_if_websocket(&mut self, route_label: &str) {
+        let is_websocket = self.run.as_ref().is_some_and(|run| {
+            run.connected.routes.iter().any(|route| {
+                route.route.label == route_label
+                    && matches!(route.route.endpoint, SessionRouteEndpoint::WebSocket { .. })
+            })
+        });
+        if is_websocket {
+            self.pending_peek_routes.insert(route_label.to_string());
+        }
+    }
+
+    fn mark_market_command_peek(&mut self, route_label: &str) {
+        self.mark_pending_peek_if_websocket(route_label);
     }
 }
 
@@ -205,7 +231,7 @@ async fn recover_run(
         )
         .await?;
     io.run = Some(run);
-    prime_all_websocket_routes(io).await?;
+    io.clear_all_pending_peeks();
     Ok(())
 }
 
@@ -771,36 +797,17 @@ fn next_route_label(
     None
 }
 
-async fn prime_all_websocket_routes(io: &mut SessionIoState) -> crate::error::Result<()> {
-    let Some(run) = io.run.as_mut() else {
-        return Ok(());
-    };
-    let labels = run
-        .connected
-        .routes
-        .iter()
-        .filter_map(|route| match route.route.endpoint {
-            SessionRouteEndpoint::WebSocket { .. } => Some(route.route.label.clone()),
-            SessionRouteEndpoint::Http { .. }
-            | SessionRouteEndpoint::Replay { .. }
-            | SessionRouteEndpoint::Internal { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    for label in labels {
-        run.connected
-            .send_route_frame(&label, OutboundFrame::Text(PEEK_MESSAGE.to_string()))
-            .await?;
-    }
-    Ok(())
-}
-
 async fn prime_route(io: &mut SessionIoState, route_label: &str) -> crate::error::Result<()> {
+    if io.pending_peek_routes.contains(route_label) {
+        return Ok(());
+    }
     let Some(run) = io.run.as_mut() else {
         return Ok(());
     };
     run.connected
         .send_route_frame(route_label, OutboundFrame::Text(PEEK_MESSAGE.to_string()))
         .await?;
+    io.pending_peek_routes.insert(route_label.to_string());
     Ok(())
 }
 

@@ -27,6 +27,7 @@ enum MarketStateSource<'a> {
         charts: &'a Value,
         klines: &'a Value,
         ticks: &'a Value,
+        other: &'a Value,
     },
 }
 
@@ -44,6 +45,7 @@ impl<'a> MarketStateView<'a> {
         charts: &'a Value,
         klines: &'a Value,
         ticks: &'a Value,
+        other: &'a Value,
     ) -> Self {
         Self {
             source: MarketStateSource::Partitions {
@@ -53,6 +55,7 @@ impl<'a> MarketStateView<'a> {
                 charts,
                 klines,
                 ticks,
+                other,
             },
         }
     }
@@ -75,6 +78,7 @@ impl<'a> MarketStateView<'a> {
                 charts,
                 klines,
                 ticks,
+                other,
                 ..
             } => {
                 let (root, rest) = path.split_first()?;
@@ -84,6 +88,9 @@ impl<'a> MarketStateView<'a> {
                     "charts" => charts,
                     "klines" => klines,
                     "ticks" => ticks,
+                    "ins_list" | "mdhis_more_data" => {
+                        return get_at_path(other, path.iter().copied());
+                    }
                     _ => return None,
                 };
                 get_at_path(partition, rest.iter().copied())
@@ -133,6 +140,7 @@ pub struct MarketStateReadGuard<'a> {
     charts: RwLockReadGuard<'a, Value>,
     klines: RwLockReadGuard<'a, Value>,
     ticks: RwLockReadGuard<'a, Value>,
+    other: RwLockReadGuard<'a, Value>,
 }
 
 impl<'a> MarketStateReadGuard<'a> {
@@ -143,6 +151,7 @@ impl<'a> MarketStateReadGuard<'a> {
         charts: RwLockReadGuard<'a, Value>,
         klines: RwLockReadGuard<'a, Value>,
         ticks: RwLockReadGuard<'a, Value>,
+        other: RwLockReadGuard<'a, Value>,
     ) -> Self {
         Self {
             revision,
@@ -151,6 +160,7 @@ impl<'a> MarketStateReadGuard<'a> {
             charts,
             klines,
             ticks,
+            other,
         }
     }
 
@@ -162,6 +172,7 @@ impl<'a> MarketStateReadGuard<'a> {
             &self.charts,
             &self.klines,
             &self.ticks,
+            &self.other,
         )
     }
 
@@ -436,6 +447,7 @@ mod tests {
         let market = MarketStateView::from_partitions(
             Revision::new(13),
             &quotes,
+            &empty,
             &empty,
             &empty,
             &empty,
