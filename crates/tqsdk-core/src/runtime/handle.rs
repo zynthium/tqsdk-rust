@@ -709,7 +709,13 @@ fn mutation_source_allows_root(source: MutationSource, root: &str) -> bool {
         MutationSource::MarketDiff => {
             matches!(
                 root,
-                "quotes" | "trading_status" | "charts" | "klines" | "ticks"
+                "ins_list"
+                    | "mdhis_more_data"
+                    | "quotes"
+                    | "trading_status"
+                    | "charts"
+                    | "klines"
+                    | "ticks"
             )
         }
         MutationSource::TradeReply => root == "trade",

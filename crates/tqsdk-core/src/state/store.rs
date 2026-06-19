@@ -174,6 +174,7 @@ impl StateStore {
         let charts = rwlock_read(&self.charts);
         let klines = rwlock_read(&self.klines);
         let ticks = rwlock_read(&self.ticks);
+        let other = rwlock_read(&self.other);
         MarketStateReadGuard::new(
             self.revision(),
             quotes,
@@ -181,6 +182,7 @@ impl StateStore {
             charts,
             klines,
             ticks,
+            other,
         )
     }
 
@@ -195,10 +197,18 @@ impl StateStore {
         let charts = rwlock_read(&self.charts);
         let klines = rwlock_read(&self.klines);
         let ticks = rwlock_read(&self.ticks);
+        let other = rwlock_read(&self.other);
         let trade = rwlock_read(&self.trade);
         let revision = self.revision();
-        let market =
-            MarketStateReadGuard::new(revision, quotes, trading_status, charts, klines, ticks);
+        let market = MarketStateReadGuard::new(
+            revision,
+            quotes,
+            trading_status,
+            charts,
+            klines,
+            ticks,
+            other,
+        );
         let trade = TradeStateReadGuard::new(revision, trade);
         MarketTradeStateReadGuard::new(revision, market, trade)
     }
@@ -262,7 +272,7 @@ impl StateStore {
                 continue;
             };
             if let Some(changed) =
-                apply_mutation_at_partition(&mut *partition, path, mutation_index, mutation)
+                apply_mutation_at_partition(root, &mut *partition, path, mutation_index, mutation)
             {
                 applied.push(changed);
             }
@@ -291,7 +301,7 @@ impl StateStore {
         for (mutation_index, mutation) in mutations.iter().enumerate() {
             let (_, path) = partition_path(mutation);
             if let Some(changed) =
-                apply_mutation_at_partition(&mut partition, path, mutation_index, mutation)
+                apply_mutation_at_partition(root, &mut partition, path, mutation_index, mutation)
             {
                 applied.push(changed);
             }
@@ -323,21 +333,27 @@ impl StateStore {
 }
 
 fn apply_mutation_at_partition(
+    partition_root: StateRoot,
     root: &mut Value,
     path: &[PathSegment],
     mutation_index: usize,
     mutation: &NormalizedMutation,
 ) -> Option<AppliedChange> {
     let mut field_indexes = Vec::new();
-    apply_mutation_at_path(
-        root,
-        path,
-        mutation.object.as_ref(),
-        &mutation.fields,
-        &mut field_indexes,
-    );
+    let structural_changed = if is_direct_root_scalar_path(path) {
+        apply_direct_root_scalar(root, path, &mutation.fields, &mut field_indexes)
+    } else {
+        apply_mutation_at_path(
+            root,
+            path,
+            mutation.object.as_ref(),
+            &mutation.fields,
+            &mut field_indexes,
+            partition_root == StateRoot::Runtime,
+        )
+    };
 
-    if field_indexes.is_empty() {
+    if field_indexes.is_empty() && !structural_changed {
         None
     } else {
         let (root, _) = partition_path(mutation);
@@ -495,16 +511,37 @@ fn apply_mutation_at_path(
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
-) {
+    prune_empty_parents: bool,
+) -> bool {
     if path.is_empty() {
-        apply_fields(cursor, object, fields, field_indexes);
-        return;
+        return apply_fields(cursor, object, fields, field_indexes);
     }
 
     let segment = &path[0];
-    let child = ensure_child_object(cursor, segment);
-    apply_mutation_at_path(child, &path[1..], object, fields, field_indexes);
-    prune_empty_child(cursor, segment);
+    let (mut changed, child_empty_after) = {
+        let (child, structural_changed) = ensure_child_object(cursor, segment);
+        let child_changed = apply_mutation_at_path(
+            child,
+            &path[1..],
+            object,
+            fields,
+            field_indexes,
+            prune_empty_parents,
+        );
+        (
+            structural_changed || child_changed,
+            prune_empty_parents && is_empty_partition(child),
+        )
+    };
+
+    if child_empty_after
+        && let Value::Object(map) = cursor
+        && map.remove(segment).is_some()
+    {
+        changed = true;
+    }
+
+    changed
 }
 
 fn apply_fields(
@@ -512,9 +549,11 @@ fn apply_fields(
     object: Option<&ObjectKey>,
     fields: &[crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
-) {
+) -> bool {
+    let mut changed = false;
     if !cursor.is_object() {
         *cursor = Value::Object(Map::new());
+        changed = true;
     }
 
     let Value::Object(map) = cursor else {
@@ -539,17 +578,67 @@ fn apply_fields(
             map.insert(field.field.clone(), field.value.clone());
         }
 
+        changed = true;
         field_indexes.push(field_index);
     }
+
+    changed
 }
 
 fn preserves_null_field(object: Option<&ObjectKey>, field: &str) -> bool {
     matches!(object, Some(ObjectKey::SessionReconnect)) && field == "max_attempts"
 }
 
-fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mut Value {
+fn is_direct_root_scalar_path(path: &[PathSegment]) -> bool {
+    matches!(path, [field] if matches!(field.as_str(), "ins_list" | "mdhis_more_data"))
+}
+
+fn apply_direct_root_scalar(
+    root: &mut Value,
+    path: &[PathSegment],
+    fields: &[crate::events::FieldMutation],
+    field_indexes: &mut Vec<usize>,
+) -> bool {
+    let [segment] = path else {
+        return false;
+    };
+    let [field] = fields else {
+        return false;
+    };
+    if field.field != "value" {
+        return false;
+    }
+
     if !root.is_object() {
         *root = Value::Object(Map::new());
+    }
+    let Value::Object(map) = root else {
+        unreachable!("direct root scalar partition must be an object");
+    };
+
+    let changed = if field.value.is_null() {
+        map.contains_key(segment)
+    } else {
+        map.get(segment) != Some(&field.value)
+    };
+    if !changed {
+        return false;
+    }
+
+    if field.value.is_null() {
+        map.remove(segment);
+    } else {
+        map.insert(segment.clone(), field.value.clone());
+    }
+    field_indexes.push(0);
+    true
+}
+
+fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> (&'a mut Value, bool) {
+    let mut changed = false;
+    if !root.is_object() {
+        *root = Value::Object(Map::new());
+        changed = true;
     }
 
     let Value::Object(map) = root else {
@@ -557,29 +646,17 @@ fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> &'a mu
     };
     if !map.contains_key(segment) {
         map.insert(segment.clone(), Value::Object(Map::new()));
+        changed = true;
     }
     let child = map
         .get_mut(segment)
         .expect("child was inserted or already present");
     if !child.is_object() {
         *child = Value::Object(Map::new());
+        changed = true;
     }
 
-    child
-}
-
-fn prune_empty_child(root: &mut Value, segment: &PathSegment) {
-    let Some(map) = root.as_object_mut() else {
-        return;
-    };
-
-    let should_remove = map
-        .get(segment)
-        .and_then(Value::as_object)
-        .is_some_and(Map::is_empty);
-    if should_remove {
-        map.remove(segment);
-    }
+    (child, changed)
 }
 
 #[cfg(test)]

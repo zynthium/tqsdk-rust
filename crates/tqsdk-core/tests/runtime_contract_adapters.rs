@@ -1337,6 +1337,127 @@ fn market_adapter_decodes_quote_payload_with_golden_fast_path_contract() {
 }
 
 #[test]
+fn market_adapter_decodes_root_market_scalars() {
+    let market = decode_market_payload(json!({
+        "aid": "rtn_data",
+        "data": [{
+            "ins_list": "SHFE.au2602,DCE.m2609",
+            "mdhis_more_data": false
+        }]
+    }));
+
+    assert_eq!(
+        market,
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["ins_list"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "value".to_string(),
+                    value: json!("SHFE.au2602,DCE.m2609"),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["mdhis_more_data"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "value".to_string(),
+                    value: json!(false),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+        ]
+    );
+}
+
+#[test]
+fn market_adapter_rejects_rtn_data_without_array_data() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let result = registry.decode_input(&RuntimeInput::Io(tqsdk_core::IoEvent {
+        route: "market".to_string(),
+        domains: vec![ProtocolDomain::Market],
+        payload: InputPayload::Json(json!({
+            "aid": "rtn_data",
+            "data": {}
+        })),
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn query_adapter_rejects_rtn_data_without_array_data() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let result = registry.decode_input(&RuntimeInput::Io(tqsdk_core::IoEvent {
+        route: "query".to_string(),
+        domains: vec![ProtocolDomain::Query],
+        payload: InputPayload::Json(json!({
+            "aid": "rtn_data",
+            "data": {}
+        })),
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn system_adapter_decodes_notify_from_market_route_without_mirroring_market_roots() {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+
+    let decoded = registry
+        .decode_input(&RuntimeInput::Io(tqsdk_core::IoEvent {
+            route: "market".to_string(),
+            domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [{
+                    "quotes": {
+                        "SHFE.au2602": {
+                            "last_price": 618.5
+                        }
+                    },
+                    "notify": {
+                        "notify-1": {
+                            "level": "ERROR",
+                            "content": "permission denied"
+                        }
+                    }
+                }]
+            })),
+        }))
+        .unwrap();
+
+    assert!(decoded.contains(&NormalizedMutation {
+        path: StatePath::new(["system", "notify", "notify-1"]),
+        object: Some(ObjectKey::Notification {
+            notification_id: NotificationId::new("notify-1"),
+        }),
+        fields: vec![
+            FieldMutation {
+                field: "content".to_string(),
+                value: json!("permission denied"),
+            },
+            FieldMutation {
+                field: "level".to_string(),
+                value: json!("ERROR"),
+            },
+        ],
+        source: MutationSource::SessionControl,
+    }));
+    assert!(
+        !decoded.iter().any(|mutation| {
+            mutation.path == StatePath::new(["system", "quotes", "SHFE.au2602"])
+        })
+    );
+}
+
+#[test]
 fn market_adapter_decodes_multi_quote_fast_path_with_sorted_fields_and_nulls() {
     let market = decode_market_payload(json!({
         "aid": "rtn_data",

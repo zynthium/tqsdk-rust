@@ -1,13 +1,16 @@
 use crate::{
     commands::{OutboundRequest, RuntimeCommand, SystemCommand},
     error::{ContractError, Result},
-    events::{IoEvent, MutationSource, NormalizedMutation, RuntimeInput},
+    events::{MutationSource, NormalizedMutation, RuntimeInput},
     ids::ProtocolDomain,
 };
 
 use super::{
     ProtocolAdapter,
-    common::{decode_named_payload, decode_system_io_payload},
+    common::{
+        decode_named_payload, decode_notify_io_payload, decode_system_io_payload,
+        is_notify_io_event,
+    },
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,7 +40,9 @@ impl ProtocolAdapter for SystemAdapter {
     fn accepts_input(&self, input: &RuntimeInput) -> bool {
         match input {
             RuntimeInput::Auth(_) | RuntimeInput::Timer(_) | RuntimeInput::Internal(_) => true,
-            RuntimeInput::Io(IoEvent { domains, .. }) => domains.contains(&ProtocolDomain::System),
+            RuntimeInput::Io(event) => {
+                event.domains.contains(&ProtocolDomain::System) || is_notify_io_event(event)
+            }
             _ => false,
         }
     }
@@ -62,6 +67,7 @@ impl ProtocolAdapter for SystemAdapter {
             RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::System) => {
                 decode_system_io_payload(event)
             }
+            RuntimeInput::Io(event) if is_notify_io_event(event) => decode_notify_io_payload(event),
             _ => Ok(vec![]),
         }
     }

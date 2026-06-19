@@ -218,6 +218,13 @@ pub(super) fn decode_system_io_payload(event: &IoEvent) -> Result<Vec<Normalized
     }
 }
 
+pub(super) fn decode_notify_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
+    match &event.payload {
+        InputPayload::Json(value) => decode_notify_envelope(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
 pub(super) fn decode_query_io_payload(event: &IoEvent) -> Result<Vec<NormalizedMutation>> {
     match &event.payload {
         InputPayload::Json(value) => decode_query_envelope(value),
@@ -242,6 +249,13 @@ pub(super) fn is_market_io_event(event: &IoEvent) -> bool {
 pub(super) fn is_trade_io_event(event: &IoEvent) -> bool {
     match &event.payload {
         InputPayload::Json(value) => value_contains_trade_payload(value),
+        InputPayload::Text(_) | InputPayload::Binary(_) => false,
+    }
+}
+
+pub(super) fn is_notify_io_event(event: &IoEvent) -> bool {
+    match &event.payload {
+        InputPayload::Json(value) => value_contains_notify_payload(value),
         InputPayload::Text(_) | InputPayload::Binary(_) => false,
     }
 }
@@ -314,16 +328,28 @@ fn split_symbol(symbol: &str) -> Result<(&str, &str)> {
 }
 
 fn value_contains_market_payload(value: &Value) -> bool {
-    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
-        && let Some(data) = value.get("data").and_then(Value::as_array)
-    {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let Some(data) = value.get("data") else {
+            return true;
+        };
+        let Some(data) = data.as_array() else {
+            return true;
+        };
         return data.iter().any(value_contains_market_payload);
     }
 
     value.as_object().is_some_and(|object| {
-        ["quotes", "trading_status", "charts", "klines", "ticks"]
-            .iter()
-            .any(|root| object.contains_key(*root))
+        [
+            "ins_list",
+            "mdhis_more_data",
+            "quotes",
+            "trading_status",
+            "charts",
+            "klines",
+            "ticks",
+        ]
+        .iter()
+        .any(|root| object.contains_key(*root))
     })
 }
 
@@ -332,9 +358,13 @@ fn value_contains_trade_payload(value: &Value) -> bool {
         return true;
     }
 
-    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
-        && let Some(data) = value.get("data").and_then(Value::as_array)
-    {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let Some(data) = value.get("data") else {
+            return true;
+        };
+        let Some(data) = data.as_array() else {
+            return true;
+        };
         return data.iter().any(value_contains_trade_payload);
     }
 
@@ -343,16 +373,32 @@ fn value_contains_trade_payload(value: &Value) -> bool {
         .is_some_and(|object| object.contains_key("trade"))
 }
 
+fn value_contains_notify_payload(value: &Value) -> bool {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let Some(data) = value.get("data").and_then(Value::as_array) else {
+            return false;
+        };
+        return data.iter().any(value_contains_notify_payload);
+    }
+
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("notify"))
+}
+
 fn value_contains_query_payload(value: &Value) -> bool {
     if value.get("query_id").and_then(Value::as_str).is_some() || value.get("symbols").is_some() {
         return true;
     }
 
     if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
-        return value
-            .get("data")
-            .and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(value_contains_query_payload));
+        let Some(data) = value.get("data") else {
+            return true;
+        };
+        let Some(items) = data.as_array() else {
+            return true;
+        };
+        return items.iter().any(value_contains_query_payload);
     }
 
     false
@@ -363,9 +409,11 @@ fn decode_json_envelope(
     source: MutationSource,
     prefix: Vec<String>,
 ) -> Result<Vec<NormalizedMutation>> {
-    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
-        && let Some(data) = value.get("data").and_then(Value::as_array)
-    {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ContractError::Adapter("rtn_data.data must be an array".to_string()))?;
         let mut mutations = Vec::new();
         for item in data {
             if let Some(decoded) = decode_market_quote_rtn_data_item(item, source, &prefix) {
@@ -378,6 +426,34 @@ fn decode_json_envelope(
     }
 
     decode_json_value(value, source, prefix)
+}
+
+fn decode_notify_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
+    let mut mutations = Vec::new();
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let Some(data) = value.get("data").and_then(Value::as_array) else {
+            return Ok(mutations);
+        };
+        for item in data {
+            extend_notify_mutations(item, &mut mutations)?;
+        }
+        return Ok(mutations);
+    }
+
+    extend_notify_mutations(value, &mut mutations)?;
+    Ok(mutations)
+}
+
+fn extend_notify_mutations(value: &Value, out: &mut Vec<NormalizedMutation>) -> Result<()> {
+    let Some(notify) = value.get("notify") else {
+        return Ok(());
+    };
+    out.extend(decode_json_value(
+        &json!({ "notify": notify }),
+        MutationSource::SessionControl,
+        vec!["system".to_string()],
+    )?);
+    Ok(())
 }
 
 fn decode_market_quote_rtn_data_item(
@@ -423,10 +499,6 @@ fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<Norm
             .collect::<Vec<_>>();
         fields.sort_unstable_by(|left, right| left.field.cmp(&right.field));
 
-        if fields.is_empty() {
-            continue;
-        }
-
         mutations.push(NormalizedMutation {
             path: StatePath::new(["quotes", symbol.as_str()]),
             object: Some(ObjectKey::Quote {
@@ -441,9 +513,11 @@ fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<Norm
 }
 
 fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
-    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData
-        && let Some(data) = value.get("data").and_then(Value::as_array)
-    {
+    if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ContractError::Adapter("rtn_data.data must be an array".to_string()))?;
         let mut mutations = Vec::new();
         for item in data {
             mutations.extend(decode_query_value(item)?);
@@ -579,6 +653,13 @@ fn flatten_object(
             fields,
             source,
         });
+    } else if !path.is_empty() && map.is_empty() {
+        out.push(NormalizedMutation {
+            path: StatePath::new(path.iter().cloned()),
+            object: infer_object_key_from_segments(path.as_slice()),
+            fields: Vec::new(),
+            source,
+        });
     }
 
     for (field, value) in map {
@@ -632,7 +713,8 @@ fn market_data_row_id(path: &[String]) -> Option<i64> {
 }
 
 fn emits_scalar_leaf(path: &[String], field: &str) -> bool {
-    matches!(path, [root, _account_id] if root == "trade") && field == "trade_more_data"
+    matches!(path, [] if matches!(field, "ins_list" | "mdhis_more_data"))
+        || matches!(path, [root, _account_id] if root == "trade") && field == "trade_more_data"
 }
 
 fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {

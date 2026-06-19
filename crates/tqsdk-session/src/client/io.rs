@@ -2,11 +2,11 @@ use std::future::Future;
 
 use tokio::time::{Instant, timeout};
 use tqsdk_core::internal::SessionRuntimeDeps;
-use tqsdk_core::{CommandId, CommitScope, ContractError, SessionRouteEndpoint};
+use tqsdk_core::{CommandId, CommitScope, ContractError, ProtocolDomain, SessionRouteEndpoint};
 
 use super::{
-    SessionClient, SessionIoState, SessionProgress, SharedRouteExecutor,
-    prime_all_websocket_routes, prime_route_with_recover, recover_run,
+    SessionClient, SessionIoState, SessionProgress, SharedRouteExecutor, prime_route_with_recover,
+    recover_run,
 };
 
 impl SessionClient {
@@ -30,7 +30,7 @@ impl SessionClient {
             )
             .await?;
         io.run = Some(run);
-        prime_all_websocket_routes(&mut io).await?;
+        io.clear_all_pending_peeks();
         Ok(true)
     }
 
@@ -135,6 +135,7 @@ impl SessionClient {
         {
             return Ok(false);
         }
+        let flushed = self.flush_outbound_locked(&mut io).await?;
         prime_route_with_recover(&mut io, &self.runtime, route_label).await?;
 
         let SessionIoState {
@@ -166,8 +167,14 @@ impl SessionClient {
         let Some(outcome) = drive_with_deadline(deadline, future).await? else {
             return Ok(false);
         };
+        if outcome.received_route_input {
+            io.clear_pending_peek(route_label);
+        }
 
-        Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
+        Ok(flushed
+            || !outcome.dispatches.is_empty()
+            || !outcome.commits.is_empty()
+            || outcome.recovered)
     }
 
     async fn flush_outbound_locked(&self, io: &mut SessionIoState) -> crate::error::Result<bool> {
@@ -188,6 +195,11 @@ impl SessionClient {
             }
             Err(err) => return Err(err.into()),
         };
+        for receipt in &receipts {
+            if receipt.domain == ProtocolDomain::Market {
+                io.mark_market_command_peek(receipt.route_label.as_str());
+            }
+        }
         Ok(!receipts.is_empty())
     }
 
@@ -225,6 +237,7 @@ impl SessionClient {
         let Some(route_label) = io.next_websocket_route_label() else {
             return Ok(false);
         };
+        let flushed = self.flush_outbound_locked(io).await?;
         prime_route_with_recover(io, &self.runtime, route_label.as_str()).await?;
 
         let SessionIoState {
@@ -256,8 +269,14 @@ impl SessionClient {
         let Some(outcome) = drive_with_deadline(deadline, future).await? else {
             return Ok(false);
         };
+        if outcome.received_route_input {
+            io.clear_pending_peek(route_label.as_str());
+        }
 
-        Ok(!outcome.dispatches.is_empty() || !outcome.commits.is_empty() || outcome.recovered)
+        Ok(flushed
+            || !outcome.dispatches.is_empty()
+            || !outcome.commits.is_empty()
+            || outcome.recovered)
     }
 }
 
