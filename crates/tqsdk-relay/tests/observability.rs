@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{FixedOffset, TimeZone};
 use tqsdk_core::TradingTime;
 use tqsdk_relay::{
     ClientId, DecodeHealth, DownstreamCommand, FlowIdleHealth, FuturesContract, RelayConfig,
@@ -29,18 +29,11 @@ fn chart_command(chart_id: &str) -> DownstreamCommand {
 }
 
 fn local_millis_at(hour: u32, minute: u32, second: u32) -> u64 {
-    let today = Local::now();
-    let timestamp = Local
-        .with_ymd_and_hms(
-            today.year(),
-            today.month(),
-            today.day(),
-            hour,
-            minute,
-            second,
-        )
+    let timestamp = FixedOffset::east_opt(8 * 3600)
+        .unwrap()
+        .with_ymd_and_hms(2026, 6, 23, hour, minute, second)
         .single()
-        .expect("local test time should be unambiguous")
+        .expect("fixed China test time should be valid")
         .timestamp_millis();
     u64::try_from(timestamp).expect("local test time should be after unix epoch")
 }
