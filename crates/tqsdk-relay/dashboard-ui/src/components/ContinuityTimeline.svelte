@@ -119,28 +119,30 @@
       latency: (sample) => sample.sample.subscribed.receive_gap_ms,
       averageLatency: (sample) => sample.sample.subscribed.avg_receive_gap_ms,
     },
-    ...exchangeRows.flatMap((exchange) => {
-      const scope = latestSample?.sample.exchanges[exchange];
-      const exchangeSymbols = orderedSymbolRows(visibleRows.filter((row) => exchangeOf(row.symbol) === exchange));
-      const expanded = expandedExchanges.includes(exchange) || expandAll;
-      const exchangeDefinition: TimelineDefinition = {
-        kind: 'exchange',
-        key: `exchange:${exchange}`,
-        label: exchange,
-        summary: scopeSummary(scope),
-        exchange,
-        expanded,
-        severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
-        latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
-        averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
-        emptySeverity: scope?.severity ?? 'no_sample',
-      };
-      if (!expanded) return [exchangeDefinition];
-      return [
-        exchangeDefinition,
-        ...exchangeSymbols.map((row): TimelineDefinition => symbolDefinition(row)),
-      ];
-    }),
+    ...(expandAll
+      ? orderedSymbolRows(visibleRows).map((row): TimelineDefinition => symbolDefinition(row))
+      : exchangeRows.flatMap((exchange) => {
+          const scope = latestSample?.sample.exchanges[exchange];
+          const exchangeSymbols = orderedSymbolRows(visibleRows.filter((row) => exchangeOf(row.symbol) === exchange));
+          const expanded = expandedExchanges.includes(exchange);
+          const exchangeDefinition: TimelineDefinition = {
+            kind: 'exchange',
+            key: `exchange:${exchange}`,
+            label: exchange,
+            summary: scopeSummary(scope),
+            exchange,
+            expanded,
+            severity: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.severity,
+            latency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.receive_gap_ms,
+            averageLatency: (sample: TimelineSample) => sample.sample.exchanges[exchange]?.avg_receive_gap_ms,
+            emptySeverity: scope?.severity ?? 'no_sample',
+          };
+          if (!expanded) return [exchangeDefinition];
+          return [
+            exchangeDefinition,
+            ...exchangeSymbols.map((row): TimelineDefinition => symbolDefinition(row)),
+          ];
+        })),
   ]);
 
   $effect(() => {
@@ -561,7 +563,6 @@
   .summary-row .summary,
   .exchange-row .summary { grid-column: 3 / 7; text-align: right; }
   
-  .exchange-row .caret { grid-column: 1; }
   .exchange-row .name { grid-column: 2; }
   
   .symbol-row {

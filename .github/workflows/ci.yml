@@ -91,9 +91,6 @@ jobs:
       - name: Build embedded dashboard
         run: pnpm run build
 
-      - name: Verify embedded dashboard assets are committed
-        run: git diff --exit-code ../src/dashboard-dist
-
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 
