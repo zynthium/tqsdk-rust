@@ -563,7 +563,6 @@
   .summary-row .summary,
   .exchange-row .summary { grid-column: 3 / 7; text-align: right; }
   
-  .exchange-row .caret { grid-column: 1; }
   .exchange-row .name { grid-column: 2; }
   
   .symbol-row {
