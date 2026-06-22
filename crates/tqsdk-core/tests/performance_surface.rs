@@ -197,11 +197,7 @@ fn path_dispatcher_reuses_candidate_scratch_buffers() {
         "path dispatcher should retain reusable dead-subscriber storage on the registry"
     );
 
-    let collector = function_block(
-        source,
-        "fn collect_candidate_ids(",
-        "\n    fn cleanup_dead",
-    );
+    let collector = function_block(source, "fn collect_candidate_ids(", "\n    fn cleanup_dead");
     assert!(
         !collector.contains("HashSet::new()"),
         "candidate collection should clear and reuse the registry HashSet instead of allocating per commit"
