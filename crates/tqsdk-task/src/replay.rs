@@ -51,6 +51,14 @@ pub struct ReplayMarketSource {
     index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplayStepMeta {
+    pub(crate) source: String,
+    pub(crate) symbol: String,
+    pub(crate) received_at_ns: i64,
+    pub(crate) event_time_ns: i64,
+}
+
 /// Offline strategy replay builder backed by ordered replay market events.
 pub struct StrategyReplayBuilder {
     replay: ReplayMarketSource,
@@ -574,12 +582,7 @@ impl StrategyReplayCheckpoint {
 
 impl StrategyReplayEvent {
     fn from_replay_event(event: &ReplayMarketEvent) -> Self {
-        Self {
-            source: event.source.clone(),
-            symbol: event.symbol.clone(),
-            received_at_ns: event.received_at_ns,
-            event_time_ns: event.event_time_ns(),
-        }
+        event.step_meta().into()
     }
 
     #[must_use]
@@ -603,6 +606,17 @@ impl StrategyReplayEvent {
     }
 }
 
+impl From<ReplayStepMeta> for StrategyReplayEvent {
+    fn from(meta: ReplayStepMeta) -> Self {
+        Self {
+            source: meta.source,
+            symbol: meta.symbol,
+            received_at_ns: meta.received_at_ns,
+            event_time_ns: meta.event_time_ns,
+        }
+    }
+}
+
 impl ReplayMarketPayload {
     #[must_use]
     pub fn kind(&self) -> ReplayMarketPayloadKind {
@@ -615,6 +629,15 @@ impl ReplayMarketPayload {
 }
 
 impl ReplayMarketEvent {
+    pub(crate) fn step_meta(&self) -> ReplayStepMeta {
+        ReplayStepMeta {
+            source: self.source().to_owned(),
+            symbol: self.symbol().to_owned(),
+            received_at_ns: self.received_at_ns(),
+            event_time_ns: self.event_time_ns(),
+        }
+    }
+
     pub fn quote(
         source: impl Into<String>,
         symbol: impl Into<String>,

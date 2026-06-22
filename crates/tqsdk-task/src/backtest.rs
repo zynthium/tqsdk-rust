@@ -10,6 +10,7 @@ use tqsdk_core::{
 
 use crate::replay::{
     ReplayMarketEvent, ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource,
+    ReplayStepMeta,
 };
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
@@ -297,12 +298,7 @@ impl StrategyBacktestSummary {
 
 impl StrategyBacktestEvent {
     fn from_replay_event(event: &ReplayMarketEvent) -> Self {
-        Self {
-            source: event.source().to_owned(),
-            symbol: event.symbol().to_owned(),
-            received_at_ns: event.received_at_ns(),
-            event_time_ns: event.event_time_ns(),
-        }
+        event.step_meta().into()
     }
 
     #[must_use]
@@ -323,6 +319,17 @@ impl StrategyBacktestEvent {
     #[must_use]
     pub fn event_time_ns(&self) -> i64 {
         self.event_time_ns
+    }
+}
+
+impl From<ReplayStepMeta> for StrategyBacktestEvent {
+    fn from(meta: ReplayStepMeta) -> Self {
+        Self {
+            source: meta.source,
+            symbol: meta.symbol,
+            received_at_ns: meta.received_at_ns,
+            event_time_ns: meta.event_time_ns,
+        }
     }
 }
 

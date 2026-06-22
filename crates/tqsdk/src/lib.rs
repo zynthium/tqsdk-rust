@@ -487,42 +487,24 @@ impl TqBuilder {
     }
 
     pub async fn connect(self) -> Result<Tq> {
-        if let Some(BacktestConfig::Local { replay }) = self.backtest {
-            let mut builder = tqsdk_task::StrategyBacktest::builder(replay);
-            for symbol in &self.quote_symbols {
-                builder = builder.quote(symbol);
+        let Self {
+            auth,
+            query_enabled,
+            trade_targets,
+            market_url,
+            backtest,
+            quote_symbols,
+            price_ticks,
+        } = self;
+
+        match backtest {
+            Some(BacktestConfig::Local { replay }) => {
+                connect_local_backtest(replay, quote_symbols, price_ticks).await
             }
-            for (symbol, tick) in &self.price_ticks {
-                builder = builder.price_tick(symbol, *tick);
+            backtest => {
+                connect_wait_facade(auth, query_enabled, trade_targets, market_url, backtest).await
             }
-            let backtest = builder.build().await?;
-            return Ok(Tq::from_local_backtest(backtest));
         }
-
-        let auth = self.auth.ok_or(Error::MissingAuth)?;
-        let mut session_builder = tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
-        session_builder = session_builder.futures_market();
-
-        if let Some(market_url) = self.market_url {
-            session_builder = session_builder.market_relay(market_url);
-        }
-
-        if self.query_enabled {
-            session_builder = session_builder.enable_query();
-        }
-        for target in self.trade_targets {
-            session_builder = target.apply(session_builder);
-        }
-
-        let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
-
-        // Apply backtest if configured.
-        if let Some(BacktestConfig::Server { start_ns, end_ns }) = self.backtest {
-            wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
-        }
-
-        let api = wait_builder.build().await?;
-        Ok(Tq::from_api(api))
     }
 }
 
@@ -612,6 +594,59 @@ impl std::fmt::Debug for BacktestConfig {
     }
 }
 
+async fn connect_local_backtest(
+    replay: tqsdk_task::ReplayMarketSource,
+    quote_symbols: Vec<String>,
+    price_ticks: std::collections::HashMap<String, f64>,
+) -> Result<Tq> {
+    let mut builder = tqsdk_task::StrategyBacktest::builder(replay);
+    for symbol in &quote_symbols {
+        builder = builder.quote(symbol);
+    }
+    for (symbol, tick) in &price_ticks {
+        builder = builder.price_tick(symbol, *tick);
+    }
+    let backtest = builder.build().await?;
+    Ok(Tq::from_local_backtest(backtest))
+}
+
+async fn connect_wait_facade(
+    auth: Option<Auth>,
+    query_enabled: bool,
+    trade_targets: Vec<TradeTarget>,
+    market_url: Option<String>,
+    backtest: Option<BacktestConfig>,
+) -> Result<Tq> {
+    let session_builder = session_builder(auth, query_enabled, trade_targets, market_url)?;
+    let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
+    if let Some(BacktestConfig::Server { start_ns, end_ns }) = backtest {
+        wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
+    }
+    let api = wait_builder.build().await?;
+    Ok(Tq::from_api(api))
+}
+
+fn session_builder(
+    auth: Option<Auth>,
+    query_enabled: bool,
+    trade_targets: Vec<TradeTarget>,
+    market_url: Option<String>,
+) -> Result<tqsdk_session::SessionClientBuilder> {
+    let auth = auth.ok_or(Error::MissingAuth)?;
+    let mut builder =
+        tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass).futures_market();
+    if let Some(market_url) = market_url {
+        builder = builder.market_relay(market_url);
+    }
+    if query_enabled {
+        builder = builder.enable_query();
+    }
+    for target in trade_targets {
+        builder = target.apply(builder);
+    }
+    Ok(builder)
+}
+
 #[derive(Debug, Clone)]
 enum TradeTarget {
     Custom {
@@ -678,5 +713,26 @@ mod tests {
                 name: "TQ_AUTH_PASS"
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod builder_contract_tests {
+    use super::{Error, TqBuilder};
+
+    #[tokio::test]
+    async fn local_backtest_connect_does_not_require_auth() {
+        let replay = tqsdk_task::ReplayMarketSource::new(Vec::new());
+
+        let result = TqBuilder::new().local_backtest(replay).connect().await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_connect_requires_auth() {
+        let result = TqBuilder::new().connect().await;
+
+        assert!(matches!(result, Err(Error::MissingAuth)));
     }
 }

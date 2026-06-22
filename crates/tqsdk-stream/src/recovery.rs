@@ -67,6 +67,7 @@ async fn wait_startup_recovery(
     spec: StartupRecoverySpec,
     deadline: Option<tokio::time::Instant>,
 ) -> crate::error::Result<StartupRecoveryStatus> {
+    // ponytail: adapter loop stays local; shared generic driver only pays off with a third adapter.
     let mut commits = stream.commit_stream()?;
     let quote_symbols = spec
         .quote_symbols()
