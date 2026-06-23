@@ -292,8 +292,12 @@ async fn strategy_backtest_summary_tracks_counts_and_final_snapshots() {
     assert_eq!(summary.kline_count(), 0);
     assert_eq!(summary.orders().len(), backtest.sim().orders().len());
     assert_eq!(summary.trades().len(), backtest.sim().trades().len());
+    assert_eq!(summary.trade_log().len(), summary.trades().len());
+    assert_eq!(summary.initial_account().balance, 10_000_000.0);
     assert_eq!(summary.final_account().user_id, "TQSIM");
     assert_eq!(summary.final_positions()[0].pos_long, 1);
+    assert_eq!(summary.balance_change(), 0.0);
+    assert_eq!(summary.balance_return_rate(), 0.0);
 }
 
 fn quote_event(

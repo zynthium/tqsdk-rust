@@ -53,6 +53,7 @@ pub struct StrategyBacktestSummary {
     kline_count: usize,
     orders: Vec<Order>,
     trades: Vec<Trade>,
+    initial_account: Account,
     final_account: Account,
     final_positions: Vec<Position>,
 }
@@ -230,6 +231,7 @@ impl StrategyBacktestSummary {
             kline_count: 0,
             orders: Vec::new(),
             trades: Vec::new(),
+            initial_account: sim.account(),
             final_account: sim.account(),
             final_positions: Vec::new(),
         };
@@ -297,6 +299,16 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn trade_log(&self) -> &[Trade] {
+        &self.trades
+    }
+
+    #[must_use]
+    pub fn initial_account(&self) -> &Account {
+        &self.initial_account
+    }
+
+    #[must_use]
     pub fn final_account(&self) -> &Account {
         &self.final_account
     }
@@ -304,6 +316,21 @@ impl StrategyBacktestSummary {
     #[must_use]
     pub fn final_positions(&self) -> &[Position] {
         &self.final_positions
+    }
+
+    #[must_use]
+    pub fn balance_change(&self) -> f64 {
+        self.final_account.balance - self.initial_account.balance
+    }
+
+    #[must_use]
+    pub fn balance_return_rate(&self) -> f64 {
+        let initial_balance = self.initial_account.balance;
+        if initial_balance == 0.0 || !initial_balance.is_finite() {
+            f64::NAN
+        } else {
+            self.balance_change() / initial_balance
+        }
     }
 }
 

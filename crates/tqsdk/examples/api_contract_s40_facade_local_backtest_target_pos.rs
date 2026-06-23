@@ -56,8 +56,15 @@ async fn main() -> tqsdk::Result<()> {
         "events={} orders={} trades={} final_pos_long={}",
         summary.event_count(),
         summary.orders().len(),
-        summary.trades().len(),
+        summary.trade_log().len(),
         final_position.pos_long,
+    );
+    println!(
+        "initial_balance={} final_balance={} balance_change={} balance_return_rate={}",
+        summary.initial_account().balance,
+        summary.final_account().balance,
+        summary.balance_change(),
+        summary.balance_return_rate(),
     );
 
     Ok(())
