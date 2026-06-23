@@ -343,6 +343,41 @@ async fn strategy_backtest_summary_tracks_counts_and_final_snapshots() {
     assert_eq!(summary.balance_return_rate(), 0.0);
 }
 
+#[tokio::test]
+async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
+    let replay =
+        ReplayMarketSource::new(vec![quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8)]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_commission("SHFE.rb2501", 12.5))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("summary-drawdown-order")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let summary = backtest.summary();
+    assert_eq!(summary.balance_points().len(), 2);
+    assert_eq!(summary.balance_points()[0].event_count(), 0);
+    assert_eq!(summary.balance_points()[0].balance(), 10_000_000.0);
+    assert_eq!(summary.balance_points()[1].event_count(), 1);
+    assert_eq!(summary.balance_points()[1].balance(), 9_999_987.5);
+    assert_eq!(summary.peak_balance(), 10_000_000.0);
+    assert_eq!(summary.max_balance_drawdown(), 12.5);
+    assert_eq!(summary.balance_change(), -12.5);
+    assert!((summary.balance_return_rate() + 0.00000125).abs() < 1e-12);
+    assert!((summary.max_balance_drawdown_rate() - 0.00000125).abs() < 1e-12);
+    assert!((summary.balance_points()[1].return_rate() + 0.00000125).abs() < 1e-12);
+    assert!((summary.balance_points()[1].drawdown_rate() - 0.00000125).abs() < 1e-12);
+}
+
 fn quote_event(
     symbol: &str,
     datetime: i64,

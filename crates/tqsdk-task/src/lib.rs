@@ -43,8 +43,8 @@ pub use account_group::{
     MultiAccountOrderTicket, Ratio,
 };
 pub use backtest::{
-    StrategyBacktest, StrategyBacktestBuilder, StrategyBacktestContext, StrategyBacktestEvent,
-    StrategyBacktestSummary,
+    StrategyBacktest, StrategyBacktestBalancePoint, StrategyBacktestBuilder,
+    StrategyBacktestContext, StrategyBacktestEvent, StrategyBacktestSummary,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{

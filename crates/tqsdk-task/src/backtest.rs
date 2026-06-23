@@ -53,11 +53,25 @@ pub struct StrategyBacktestSummary {
     quote_count: usize,
     tick_count: usize,
     kline_count: usize,
+    balance_points: Vec<StrategyBacktestBalancePoint>,
     orders: Vec<Order>,
     trades: Vec<Trade>,
     initial_account: Account,
     final_account: Account,
     final_positions: Vec<Position>,
+    peak_balance: f64,
+    max_balance_drawdown: f64,
+    max_balance_drawdown_rate: f64,
+}
+
+/// Cash-balance point recorded by local backtest summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestBalancePoint {
+    event_count: usize,
+    balance: f64,
+    return_rate: f64,
+    drawdown: f64,
+    drawdown_rate: f64,
 }
 
 /// Strategy context plus local sim controls for the current backtest step.
@@ -65,6 +79,8 @@ pub struct StrategyBacktestContext<'a> {
     event: StrategyBacktestEvent,
     context: StrategyContext<'a>,
     sim: &'a mut TqSim,
+    summary: &'a mut StrategyBacktestSummary,
+    tracked_symbols: &'a [String],
 }
 
 impl StrategyBacktest {
@@ -96,12 +112,16 @@ impl StrategyBacktest {
             }
         }
         self.summary.record_payload(payload_kind);
+        self.summary
+            .record_account_snapshot(&self.sim, &self.tracked_symbols);
 
         let context = self.strategy.next_once().await?;
         Ok(Some(StrategyBacktestContext {
             event: backtest_event,
             context,
             sim: &mut self.sim,
+            summary: &mut self.summary,
+            tracked_symbols: &self.tracked_symbols,
         }))
     }
 
@@ -128,7 +148,7 @@ impl StrategyBacktest {
     #[must_use]
     pub fn summary(&self) -> StrategyBacktestSummary {
         let mut summary = self.summary.clone();
-        summary.refresh_from_sim(&self.sim, &self.tracked_symbols);
+        summary.record_account_snapshot(&self.sim, &self.tracked_symbols);
         summary
     }
 
@@ -137,8 +157,6 @@ impl StrategyBacktest {
         let report = self.sim.update_quote(symbol.to_owned(), quote.clone());
         self.sim
             .ingest_step_report(self.strategy.task_host(), &report)?;
-        self.summary
-            .refresh_from_sim(&self.sim, &self.tracked_symbols);
         Ok(())
     }
 
@@ -240,18 +258,24 @@ impl StrategyBacktestBuilder {
 
 impl StrategyBacktestSummary {
     fn from_sim(sim: &TqSim, symbols: &[String]) -> Self {
+        let initial_account = sim.account();
+        let initial_balance = initial_account.balance;
         let mut summary = Self {
             event_count: 0,
             quote_count: 0,
             tick_count: 0,
             kline_count: 0,
+            balance_points: Vec::new(),
             orders: Vec::new(),
             trades: Vec::new(),
-            initial_account: sim.account(),
-            final_account: sim.account(),
+            initial_account: initial_account.clone(),
+            final_account: initial_account,
             final_positions: Vec::new(),
+            peak_balance: initial_balance,
+            max_balance_drawdown: 0.0,
+            max_balance_drawdown_rate: 0.0,
         };
-        summary.refresh_from_sim(sim, symbols);
+        summary.record_account_snapshot(sim, symbols);
         summary
     }
 
@@ -282,6 +306,36 @@ impl StrategyBacktestSummary {
             .into_iter()
             .map(|symbol| sim.position(symbol))
             .collect();
+    }
+
+    fn record_account_snapshot(&mut self, sim: &TqSim, symbols: &[String]) {
+        self.refresh_from_sim(sim, symbols);
+        self.record_balance_point();
+    }
+
+    fn record_balance_point(&mut self) {
+        let balance = self.final_account.balance;
+        if self
+            .balance_points
+            .last()
+            .is_some_and(|point| point.balance == balance)
+        {
+            return;
+        }
+        if balance.is_finite() && (!self.peak_balance.is_finite() || balance > self.peak_balance) {
+            self.peak_balance = balance;
+        }
+        let point = StrategyBacktestBalancePoint::new(
+            self.event_count,
+            balance,
+            self.initial_account.balance,
+            self.peak_balance,
+        );
+        if point.drawdown.is_finite() && point.drawdown > self.max_balance_drawdown {
+            self.max_balance_drawdown = point.drawdown;
+            self.max_balance_drawdown_rate = point.drawdown_rate;
+        }
+        self.balance_points.push(point);
     }
 
     #[must_use]
@@ -320,6 +374,11 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn balance_points(&self) -> &[StrategyBacktestBalancePoint] {
+        &self.balance_points
+    }
+
+    #[must_use]
     pub fn initial_account(&self) -> &Account {
         &self.initial_account
     }
@@ -341,12 +400,64 @@ impl StrategyBacktestSummary {
 
     #[must_use]
     pub fn balance_return_rate(&self) -> f64 {
-        let initial_balance = self.initial_account.balance;
-        if initial_balance == 0.0 || !initial_balance.is_finite() {
-            f64::NAN
+        rate_or_nan(self.balance_change(), self.initial_account.balance)
+    }
+
+    #[must_use]
+    pub fn peak_balance(&self) -> f64 {
+        self.peak_balance
+    }
+
+    #[must_use]
+    pub fn max_balance_drawdown(&self) -> f64 {
+        self.max_balance_drawdown
+    }
+
+    #[must_use]
+    pub fn max_balance_drawdown_rate(&self) -> f64 {
+        self.max_balance_drawdown_rate
+    }
+}
+
+impl StrategyBacktestBalancePoint {
+    fn new(event_count: usize, balance: f64, initial_balance: f64, peak_balance: f64) -> Self {
+        let drawdown = if balance.is_finite() && peak_balance.is_finite() {
+            (peak_balance - balance).max(0.0)
         } else {
-            self.balance_change() / initial_balance
+            f64::NAN
+        };
+        Self {
+            event_count,
+            balance,
+            return_rate: rate_or_nan(balance - initial_balance, initial_balance),
+            drawdown,
+            drawdown_rate: rate_or_nan(drawdown, peak_balance),
         }
+    }
+
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    #[must_use]
+    pub fn balance(&self) -> f64 {
+        self.balance
+    }
+
+    #[must_use]
+    pub fn return_rate(&self) -> f64 {
+        self.return_rate
+    }
+
+    #[must_use]
+    pub fn drawdown(&self) -> f64 {
+        self.drawdown
+    }
+
+    #[must_use]
+    pub fn drawdown_rate(&self) -> f64 {
+        self.drawdown_rate
     }
 }
 
@@ -434,7 +545,10 @@ impl StrategyBacktestContext<'_> {
     }
 
     pub fn finish_sim_step(&mut self) -> Result<TqSimStepReport> {
-        self.sim.process_host_orders(self.context.task_host())
+        let report = self.sim.process_host_orders(self.context.task_host())?;
+        self.summary
+            .record_account_snapshot(self.sim, self.tracked_symbols);
+        Ok(report)
     }
 }
 
@@ -568,6 +682,14 @@ fn validate_default_price_tick(price_tick: Option<f64>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn rate_or_nan(numerator: f64, denominator: f64) -> f64 {
+    if denominator == 0.0 || !denominator.is_finite() {
+        f64::NAN
+    } else {
+        numerator / denominator
+    }
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
