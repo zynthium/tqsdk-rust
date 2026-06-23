@@ -373,6 +373,7 @@ pub struct TqBuilder {
     backtest: Option<BacktestConfig>,
     quote_symbols: Vec<String>,
     price_ticks: std::collections::HashMap<String, f64>,
+    default_price_tick: Option<f64>,
 }
 
 impl TqBuilder {
@@ -386,6 +387,7 @@ impl TqBuilder {
             backtest: None,
             quote_symbols: Vec::new(),
             price_ticks: std::collections::HashMap::new(),
+            default_price_tick: None,
         }
     }
 
@@ -430,6 +432,15 @@ impl TqBuilder {
     #[must_use]
     pub fn price_tick(mut self, symbol: impl Into<String>, tick: f64) -> Self {
         self.price_ticks.insert(symbol.into(), tick);
+        self
+    }
+
+    /// Set fallback price tick for local-backtest kline quote synthesis.
+    ///
+    /// Per-symbol [`TqBuilder::price_tick`] overrides this fallback.
+    #[must_use]
+    pub fn default_price_tick(mut self, tick: f64) -> Self {
+        self.default_price_tick = Some(tick);
         self
     }
 
@@ -504,11 +515,12 @@ impl TqBuilder {
             backtest,
             quote_symbols,
             price_ticks,
+            default_price_tick,
         } = self;
 
         match backtest {
             Some(BacktestConfig::Local { replay }) => {
-                connect_local_backtest(replay, quote_symbols, price_ticks).await
+                connect_local_backtest(replay, quote_symbols, price_ticks, default_price_tick).await
             }
             backtest => {
                 connect_wait_facade(auth, query_enabled, trade_targets, market_url, backtest).await
@@ -607,8 +619,12 @@ async fn connect_local_backtest(
     replay: tqsdk_task::ReplayMarketSource,
     quote_symbols: Vec<String>,
     price_ticks: std::collections::HashMap<String, f64>,
+    default_price_tick: Option<f64>,
 ) -> Result<Tq> {
     let mut builder = tqsdk_task::StrategyBacktest::builder(replay);
+    if let Some(default_price_tick) = default_price_tick {
+        builder = builder.default_price_tick(default_price_tick);
+    }
     for symbol in &quote_symbols {
         builder = builder.quote(symbol);
     }

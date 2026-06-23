@@ -107,7 +107,7 @@
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
   - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，让 history series 可以显式转为本地 replay source
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
-  - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；不自动 metadata 查询，不自动订阅分钟线
+  - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不自动 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
   - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化和余额变化率；完整绩效报告仍不在当前最小闭环内

@@ -108,7 +108,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - 默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出，供默认 facade 和示例共用
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；`quote(symbol)` builder 方法只用于额外预声明空 replay 或尚未出现在 replay 中的 symbol
   - 当前最小闭环覆盖 quote/tick/kline replay event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金 per-symbol 配置
-  - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；不会自动查询合约 metadata 或自动订阅分钟线
+  - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不会自动查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化和余额变化率
   - 完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续迭代范围
@@ -295,7 +295,7 @@ println!("events={} trades={}", summary.event_count(), summary.trades().len());
 # }
 ```
 
-当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置，并提供轻量 `summary()` / trade log / 账户余额变化率。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。kline 合成需要显式配置 `price_tick(symbol, tick)`；完整绩效报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
+当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置，并提供轻量 `summary()` / trade log / 账户余额变化率。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。kline 合成需要显式配置 `price_tick(symbol, tick)` 或 `default_price_tick(tick)`；完整绩效报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
 
 ## 示例
 

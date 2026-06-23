@@ -23,6 +23,7 @@ pub struct StrategyBacktestBuilder {
     sim: TqSim,
     quotes: Vec<String>,
     price_ticks: HashMap<String, f64>,
+    default_price_tick: Option<f64>,
 }
 
 /// Local Python-compatible strategy backtest host.
@@ -32,6 +33,7 @@ pub struct StrategyBacktest {
     sim: TqSim,
     tracked_symbols: Vec<String>,
     price_ticks: HashMap<String, f64>,
+    default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
 }
 
@@ -144,8 +146,9 @@ impl StrategyBacktest {
         self.price_ticks
             .get(symbol)
             .copied()
+            .or(self.default_price_tick)
             .ok_or(TaskError::Unsupported(
-                "StrategyBacktest kline event requires price_tick(symbol, tick)",
+                "StrategyBacktest kline event requires price_tick(symbol, tick) or default_price_tick(tick)",
             ))
     }
 }
@@ -158,6 +161,7 @@ impl StrategyBacktestBuilder {
             sim: TqSim::new(),
             quotes: Vec::new(),
             price_ticks: HashMap::new(),
+            default_price_tick: None,
         }
     }
 
@@ -183,14 +187,25 @@ impl StrategyBacktestBuilder {
         self
     }
 
+    /// Set fallback price tick for kline quote synthesis.
+    ///
+    /// Per-symbol [`StrategyBacktestBuilder::price_tick`] overrides this fallback.
+    #[must_use]
+    pub fn default_price_tick(mut self, price_tick: f64) -> Self {
+        self.default_price_tick = Some(price_tick);
+        self
+    }
+
     pub async fn build(self) -> Result<StrategyBacktest> {
         let Self {
             replay,
             sim,
             mut quotes,
             price_ticks,
+            default_price_tick,
         } = self;
         validate_price_ticks(&price_ticks)?;
+        validate_default_price_tick(default_price_tick)?;
         for symbol in replay.symbols() {
             if !quotes.iter().any(|existing| existing == symbol) {
                 quotes.push(symbol.to_owned());
@@ -217,6 +232,7 @@ impl StrategyBacktestBuilder {
             sim,
             tracked_symbols,
             price_ticks,
+            default_price_tick,
             summary,
         })
     }
@@ -539,6 +555,17 @@ fn validate_price_ticks(price_ticks: &HashMap<String, f64>) -> Result<()> {
                 "StrategyBacktest price_tick(symbol, tick) must be finite and positive"
             }));
         }
+    }
+    Ok(())
+}
+
+fn validate_default_price_tick(price_tick: Option<f64>) -> Result<()> {
+    if let Some(price_tick) = price_tick
+        && (!price_tick.is_finite() || price_tick <= 0.0)
+    {
+        return Err(TaskError::InvalidState(
+            "StrategyBacktest default_price_tick must be finite and positive",
+        ));
     }
     Ok(())
 }

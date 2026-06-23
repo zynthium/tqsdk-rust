@@ -172,6 +172,31 @@ async fn strategy_backtest_synthesizes_kline_close_quote_once_for_strategy() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_uses_default_price_tick_for_kline_quote_synthesis() {
+    let replay = ReplayMarketSource::new(vec![kline_event(
+        "SHFE.rb2501",
+        1_000,
+        101.0,
+        105.0,
+        97.0,
+        99.0,
+    )]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .default_price_tick(0.5)
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let quote = ctx.quote("SHFE.rb2501").unwrap();
+    assert_eq!(quote.last_price, 99.0);
+    assert_eq!(quote.ask_price1, 99.5);
+    assert_eq!(quote.bid_price1, 98.5);
+}
+
+#[tokio::test]
 async fn strategy_backtest_kline_checkpoints_fill_pending_orders_without_extra_strategy_steps() {
     let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 120.0, 10, 90.0, 10),
@@ -258,6 +283,24 @@ async fn strategy_backtest_rejects_invalid_price_tick_config() {
             Err(error) => error,
         };
         assert!(matches!(err, TaskError::InvalidState(message) if message.contains("price_tick")));
+    }
+}
+
+#[tokio::test]
+async fn strategy_backtest_rejects_invalid_default_price_tick_config() {
+    for price_tick in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let replay = ReplayMarketSource::new(Vec::new());
+        let err = match StrategyBacktest::builder(replay)
+            .default_price_tick(price_tick)
+            .build()
+            .await
+        {
+            Ok(_) => panic!("invalid default_price_tick should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(err, TaskError::InvalidState(message) if message.contains("default_price_tick"))
+        );
     }
 }
 
