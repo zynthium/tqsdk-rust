@@ -52,6 +52,7 @@ while tq.next().await? {
 use tqsdk::advanced::session::SessionClientBuilder;
 use tqsdk::advanced::stream::TqStreamBuilder;
 use tqsdk::advanced::runtime::RuntimeReader;
+use tqsdk::advanced::task::StrategyReplaySourceBuilder;
 ```
 
 需要完整 stream、task、data、session 或 core surface 的用户应直接依赖对应 sibling crate。这样可以让 `tqsdk` 的 semver surface 保持小，同时不限制高级用户使用底层能力。

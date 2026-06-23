@@ -150,7 +150,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
 能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
 当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
-自动追踪、`TargetPos` 执行闭环和轻量 `summary()` / trade log / 账户余额变化率；完整报告、
+自动追踪、`TargetPos` 执行闭环和轻量 `summary()` / trade log / 账户余额变化率；默认
+`tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
+`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。完整报告、
 自动分钟线和主连历史映射仍是后续范围。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：

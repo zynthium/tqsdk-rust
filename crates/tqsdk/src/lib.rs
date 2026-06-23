@@ -21,7 +21,10 @@ pub mod advanced {
     }
 
     pub mod data {
-        pub use tqsdk_data::{DataClient, DataError};
+        pub use tqsdk_data::{
+            DataClient, DataError, KlineDataSeries, KlineDataSeriesRequest, TickDataSeries,
+            TickDataSeriesRequest,
+        };
     }
 
     pub mod runtime {
@@ -43,8 +46,8 @@ pub mod advanced {
         pub use tqsdk_task::{
             LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
             ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
-            StrategyBacktestSummary, TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport,
-            TaskError, TaskHost, VolumeSplitPolicy,
+            StrategyBacktestSummary, StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
+            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
         };
     }
 
