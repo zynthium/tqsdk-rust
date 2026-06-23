@@ -98,6 +98,7 @@ V1 是：
 - `tqsdk`
   - 默认用户入口 crate
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
+  - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/stream/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
 - `tqsdk-session`
@@ -210,6 +211,9 @@ V1 是：
 - `tqsdk-task` 可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供
   Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait/stream
   的 runtime contract 和 facade 边界
+- `tqsdk` 的 local backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
+  `StrategyBacktest + TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
+  和 `TargetPos`，不会创建 facade 私有状态树
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。

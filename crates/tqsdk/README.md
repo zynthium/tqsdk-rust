@@ -10,6 +10,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
+- Local backtest 默认模拟账户常量 `LOCAL_BACKTEST_ACCOUNT_ID`
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 

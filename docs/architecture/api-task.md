@@ -103,10 +103,11 @@
 - `StrategyBacktest` / `TqSim`
   - 消费 task-owned `ReplayMarketSource` 的本地 quote/tick/kline event，作为 Python-compatible 回测模拟账户 foundation
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
-  - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission
+  - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；不自动 metadata 查询，不自动订阅分钟线
-  - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
+  - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
+  - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
   - `StrategyBacktest::summary()` 只提供事件计数、payload 分类计数、最终订单/成交/账户/持仓快照
   - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
   - 完整回测报告、自动分钟线、主连合约表、股票/期权账户语义不在当前最小闭环内

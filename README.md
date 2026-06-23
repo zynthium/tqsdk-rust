@@ -149,8 +149,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
 能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
-当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis 和轻量
-`summary()`；完整报告、自动分钟线和主连历史映射仍是后续范围。
+当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、`TargetPos`
+执行闭环和轻量 `summary()`；完整报告、自动分钟线和主连历史映射仍是后续范围。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 
@@ -250,6 +250,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().backtest(...)` 一行切换到服务端回测；需要账号 |
 | 默认 facade 本地回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().local_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
 | 默认 facade live/backtest 同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一策略函数接受 `&mut Tq`，builder 决定 live、服务端回测或本地回测 |
+| 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
 | 高级 quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 多消费者 async 集成示例，需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
 | 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` | 需要账号；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |

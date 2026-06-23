@@ -10,14 +10,14 @@ use std::fmt;
 
 /// Common imports for strategy-oriented users.
 pub mod prelude {
-    pub use crate::{Error, Result, TargetPos, Tq, TqBuilder};
+    pub use crate::{Error, LOCAL_BACKTEST_ACCOUNT_ID, Result, TargetPos, Tq, TqBuilder};
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
 
 /// Explicit access to the underlying crates for advanced users.
 pub mod advanced {
     pub mod core {
-        pub use tqsdk_core::{TradeAccountType, TradeDirection, TradeOffset};
+        pub use tqsdk_core::{Kline, Quote, Tick, TradeAccountType, TradeDirection, TradeOffset};
     }
 
     pub mod data {
@@ -41,10 +41,10 @@ pub mod advanced {
 
     pub mod task {
         pub use tqsdk_task::{
-            OffsetPriority, PriceMode, ReplayMarketEvent, ReplayMarketPayload,
-            ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest, StrategyBacktestSummary,
-            TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost,
-            VolumeSplitPolicy,
+            LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
+            ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
+            StrategyBacktestSummary, TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport,
+            TaskError, TaskHost, VolumeSplitPolicy,
         };
     }
 
@@ -59,6 +59,9 @@ pub mod advanced {
 
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Default account id used by [`Tq::local_backtest`].
+pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::LOCAL_BACKTEST_ACCOUNT_ID;
 
 /// Error type for the user-facing facade.
 #[derive(Debug)]
@@ -331,10 +334,13 @@ impl Tq {
                 let task = host.target_pos(account_id, symbol).build()?;
                 Ok(TargetPos::new(task))
             }
-            TqInner::LocalBacktest(_) => {
-                Err(Error::Task(Box::new(tqsdk_task::TaskError::Unsupported(
-                    "target_pos is not yet supported in local backtest mode",
-                ))))
+            TqInner::LocalBacktest(backtest) => {
+                let task = backtest
+                    .strategy_mut()
+                    .task_host_mut()
+                    .target_pos(account_id, symbol)
+                    .build()?;
+                Ok(TargetPos::new(task))
             }
         }
     }

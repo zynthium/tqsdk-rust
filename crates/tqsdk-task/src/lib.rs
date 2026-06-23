@@ -83,7 +83,7 @@ pub use scheduler::{
     TargetPosSchedulerBuilder, TargetPosSchedulerExecutionEvent, TargetPosSchedulerTradeFill,
     TargetPosStepOutcomeReport,
 };
-pub use sim::{TqSim, TqSimOrderRequest, TqSimStepReport};
+pub use sim::{LOCAL_BACKTEST_ACCOUNT_ID, TqSim, TqSimOrderRequest, TqSimStepReport};
 pub use strategy::{StrategyContext, StrategyHost, StrategyHostBuilder, StrategyUpdate};
 pub use target_pos::{
     TargetPosBuilder, TargetPosTask, TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport,

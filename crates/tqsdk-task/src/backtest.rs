@@ -361,6 +361,15 @@ impl StrategyBacktestContext<'_> {
     }
 
     #[must_use]
+    pub fn target_pos(
+        &mut self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> crate::TargetPosBuilder {
+        self.context.target_pos(account_id, symbol)
+    }
+
+    #[must_use]
     pub fn task_host(&self) -> &TaskHost {
         self.context.task_host()
     }

@@ -52,10 +52,12 @@ name = "api_contract_s38_facade_local_backtest"
 [[example]]
 name = "api_contract_s39_facade_same_body"
 
+[[example]]
+name = "api_contract_s40_facade_local_backtest_target_pos"
+
 [lints]
 workspace = true
 
 [[example]]
 name = "trade_with_relay"
 required-features = ["live"]
-

@@ -11,7 +11,8 @@ use tqsdk_core::{
 
 use crate::{Result, TaskError, TaskHost};
 
-const DEFAULT_ACCOUNT_ID: &str = "TQSIM";
+/// Default account id used by local Python-compatible backtest simulation.
+pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = "TQSIM";
 const DEFAULT_INIT_BALANCE: f64 = 10_000_000.0;
 
 /// Local Python-compatible futures simulated account.
@@ -78,7 +79,7 @@ enum MatchDecision {
 
 impl Default for TqSim {
     fn default() -> Self {
-        Self::with_account(DEFAULT_ACCOUNT_ID, DEFAULT_INIT_BALANCE)
+        Self::with_account(LOCAL_BACKTEST_ACCOUNT_ID, DEFAULT_INIT_BALANCE)
     }
 }
 
