@@ -141,12 +141,16 @@ cargo run -p tqsdk-task --example api_contract_s24_testable_strategy
 cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 ```
 
-如果要对齐 Python `TqApi(backtest=TqBacktest(...))` 的 live/backtest 同策略主体心智，
-使用 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
-`stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合，则使用
-`tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。当前本地路径已覆盖
-quote/tick/kline replay event 的最小 quote synthesis 和轻量 `summary()`；完整报告、
-自动分钟线和主连历史映射仍是后续范围。
+如果要让普通策略主体在 live / server backtest / local replay backtest 间保持同一套
+`Tq::next()` / `quote()` 写法，优先使用默认 `tqsdk` facade：
+`Tq::futures().backtest(start_ns, end_ns)` 对齐 Python `TqBacktest` 的服务端回测心智；
+`Tq::futures().local_backtest(replay)` 使用本地 `ReplayMarketSource + TqSim`
+撮合，不需要真实服务。明确要直接操作 Python-style wait facade 时，才下钻到
+`tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
+`stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
+能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
+当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis 和轻量
+`summary()`；完整报告、自动分钟线和主连历史映射仍是后续范围。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 
@@ -243,6 +247,9 @@ let page = client.get_kline_data_page(request).await?;
 | --- | --- | --- |
 | 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
 | Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote/tick/kline replay + `TqSim`，不连接真实服务 |
+| 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().backtest(...)` 一行切换到服务端回测；需要账号 |
+| 默认 facade 本地回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().local_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
+| 默认 facade live/backtest 同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一策略函数接受 `&mut Tq`，builder 决定 live、服务端回测或本地回测 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
 | 高级 quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 多消费者 async 集成示例，需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |
 | 合约 metadata 查询 | `cargo run -p tqsdk-session --example query_symbol_info` | 需要账号；可用 `TQ_TEST_SYMBOL` 覆盖默认合约 |
