@@ -422,6 +422,34 @@ impl TqBuilder {
         self
     }
 
+    /// Enter local-backtest mode from owned kline history series.
+    ///
+    /// This is a convenience wrapper around [`tqsdk_task::StrategyReplaySourceBuilder`].
+    pub fn local_backtest_klines(
+        self,
+        series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
+    ) -> Result<Self> {
+        let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+        for series in series {
+            builder = builder.kline_series(series, "history-kline")?;
+        }
+        Ok(self.local_backtest(builder.build()))
+    }
+
+    /// Enter local-backtest mode from owned tick history series.
+    ///
+    /// This is a convenience wrapper around [`tqsdk_task::StrategyReplaySourceBuilder`].
+    pub fn local_backtest_ticks(
+        self,
+        series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
+    ) -> Result<Self> {
+        let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+        for series in series {
+            builder = builder.tick_series(series, "history-tick")?;
+        }
+        Ok(self.local_backtest(builder.build()))
+    }
+
     /// Pre-declare a symbol for local backtest.
     #[must_use]
     pub fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
