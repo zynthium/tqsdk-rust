@@ -183,28 +183,39 @@ impl StrategyBacktestBuilder {
     }
 
     pub async fn build(self) -> Result<StrategyBacktest> {
-        validate_price_ticks(&self.price_ticks)?;
+        let Self {
+            replay,
+            sim,
+            mut quotes,
+            price_ticks,
+        } = self;
+        validate_price_ticks(&price_ticks)?;
+        for symbol in replay.symbols() {
+            if !quotes.iter().any(|existing| existing == symbol) {
+                quotes.push(symbol.to_owned());
+            }
+        }
         let harness = StrategyTestHarness::new().build()?;
         let host = harness.into_task_host();
-        let mut sim = self.sim;
-        for quote in &self.quotes {
+        let mut sim = sim;
+        for quote in &quotes {
             sim.ensure_position(quote);
         }
         sim.seed_runtime(&host)?;
         let mut builder = StrategyHostBuilder::new(host).account(sim.account_id());
-        for quote in &self.quotes {
+        for quote in &quotes {
             builder = builder.quote(quote);
         }
         let mut strategy = builder.build().await?;
         drain_initial_commits(&mut strategy).await?;
-        let tracked_symbols = self.quotes;
+        let tracked_symbols = quotes;
         let summary = StrategyBacktestSummary::from_sim(&sim, &tracked_symbols);
         Ok(StrategyBacktest {
-            replay: self.replay,
+            replay,
             strategy,
             sim,
             tracked_symbols,
-            price_ticks: self.price_ticks,
+            price_ticks,
             summary,
         })
     }

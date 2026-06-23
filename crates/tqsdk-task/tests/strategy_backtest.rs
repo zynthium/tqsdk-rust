@@ -55,6 +55,26 @@ async fn strategy_backtest_fills_limit_order_against_replayed_quote() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_tracks_symbols_from_replay_without_quote_preset() {
+    let replay =
+        ReplayMarketSource::new(vec![quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8)]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    assert_eq!(ctx.quote("SHFE.rb2501").unwrap().ask_price1, 100.0);
+    assert_eq!(ctx.position("TQSIM", "SHFE.rb2501").unwrap().pos, 0);
+    let summary = backtest.summary();
+    let final_position = &summary.final_positions()[0];
+    assert_eq!(final_position.exchange_id, "SHFE");
+    assert_eq!(final_position.instrument_id, "rb2501");
+}
+
+#[tokio::test]
 async fn strategy_backtest_fills_alive_limit_order_on_later_quote() {
     let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),

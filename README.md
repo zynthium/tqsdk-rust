@@ -149,8 +149,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
 能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
-当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、`TargetPos`
-执行闭环和轻量 `summary()`；完整报告、自动分钟线和主连历史映射仍是后续范围。
+当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
+自动追踪、`TargetPos` 执行闭环和轻量 `summary()`；完整报告、自动分钟线和主连历史映射仍是后续范围。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

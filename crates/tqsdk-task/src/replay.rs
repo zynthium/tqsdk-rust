@@ -777,6 +777,13 @@ impl ReplayMarketSource {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Symbols present in the remaining replay events.
+    pub fn symbols(&self) -> impl Iterator<Item = &str> {
+        self.events[self.index..]
+            .iter()
+            .map(ReplayMarketEvent::symbol)
+    }
 }
 
 impl Iterator for ReplayMarketSource {
