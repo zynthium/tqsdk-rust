@@ -910,8 +910,9 @@ fn quote_from_tick(tick: &Tick) -> Quote {
     }
 }
 
-fn kline_quote_checkpoints(row: &Kline, price_tick: f64) -> [Quote; 3] {
+fn kline_quote_checkpoints(row: &Kline, price_tick: f64) -> [Quote; 4] {
     [
+        quote_from_kline_checkpoint(row, row.open, price_tick),
         quote_from_kline_checkpoint(row, row.high, price_tick),
         quote_from_kline_checkpoint(row, row.low, price_tick),
         quote_from_kline_checkpoint(row, row.close, price_tick),
@@ -1019,5 +1020,36 @@ fn insert_f64_if_finite(value: &mut Map<String, Value>, key: &str, field: f64) {
 fn insert_i64_if_nonzero(value: &mut Map<String, Value>, key: &str, field: i64) {
     if field != 0 {
         value.insert(key.to_string(), Value::from(field));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kline_quote_checkpoints_include_open_high_low_close_order() {
+        let row = Kline {
+            datetime: 1_000,
+            open: 101.0,
+            high: 105.0,
+            low: 97.0,
+            close: 99.0,
+            volume: 100,
+            open_oi: 40,
+            close_oi: 50,
+            ..Kline::default()
+        };
+
+        let checkpoints = kline_quote_checkpoints(&row, 0.5);
+
+        assert_eq!(checkpoints[0].last_price, 101.0);
+        assert_eq!(checkpoints[0].ask_price1, 101.5);
+        assert_eq!(checkpoints[0].bid_price1, 100.5);
+        assert_eq!(checkpoints[1].last_price, 105.0);
+        assert_eq!(checkpoints[2].last_price, 97.0);
+        assert_eq!(checkpoints[3].last_price, 99.0);
+        assert_eq!(checkpoints[3].ask_price1, 99.5);
+        assert_eq!(checkpoints[3].bid_price1, 98.5);
     }
 }
