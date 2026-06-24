@@ -105,13 +105,14 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `StrategyBacktest` / `TqSim`
   - 使用 task-owned `ReplayMarketSource` 作为本地回测行情输入
   - `TqSim` 提供 Python-compatible 本地模拟账户 foundation，默认账户为 `TQSIM`，默认资金为 `10_000_000.0`
+  - `TqSim` 支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段
   - 默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出，供默认 facade 和示例共用
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；`quote(symbol)` builder 方法只用于额外预声明空 replay 或尚未出现在 replay 中的 symbol
-  - 当前最小闭环覆盖 quote/tick/kline replay event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金 per-symbol 配置
+  - 当前最小闭环覆盖 quote/tick/kline replay event、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金/合约乘数 per-symbol 配置
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不会自动查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
-  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、峰值余额和现金余额最大回撤
-  - 完整 mark-to-market 绩效报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续迭代范围
+  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、峰值余额/权益和最大回撤
+  - 日频/Sharpe 类完整绩效统计、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续迭代范围
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`
@@ -295,7 +296,7 @@ println!("events={} trades={}", summary.event_count(), summary.trades().len());
 # }
 ```
 
-当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金和手续费配置，并提供轻量 `summary()` / trade log / 账户余额变化率 / 余额曲线点 / 现金余额最大回撤。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。kline 合成需要显式配置 `price_tick(symbol, tick)` 或 `default_price_tick(tick)`；完整 mark-to-market 绩效报告、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
+当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金/手续费/合约乘数配置，并提供轻量 `summary()` / trade log / 账户余额变化率 / cash + equity 曲线点 / 最大回撤。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。kline 合成需要显式配置 `price_tick(symbol, tick)` 或 `default_price_tick(tick)`；日频/Sharpe 类完整绩效统计、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续范围。
 
 ## 示例
 

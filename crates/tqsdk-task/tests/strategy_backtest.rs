@@ -378,6 +378,45 @@ async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
     assert!((summary.balance_points()[1].drawdown_rate() - 0.00000125).abs() < 1e-12);
 }
 
+#[tokio::test]
+async fn strategy_backtest_summary_tracks_mark_to_market_equity_points() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 110.0, 10, 109.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_contract_multiplier("SHFE.rb2501", 10.0))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("summary-equity-order")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+    let _ctx = backtest.next().await.unwrap().unwrap();
+
+    let summary = backtest.summary();
+    assert_eq!(summary.final_account().float_profit, 100.0);
+    assert_eq!(summary.initial_equity(), 10_000_000.0);
+    assert_eq!(summary.final_equity(), 10_000_100.0);
+    assert_eq!(summary.equity_change(), 100.0);
+    assert_eq!(summary.peak_equity(), 10_000_100.0);
+    assert_eq!(summary.max_equity_drawdown(), 0.0);
+    assert_eq!(summary.equity_points().len(), 2);
+    assert_eq!(summary.equity_points()[0].event_count(), 0);
+    assert_eq!(summary.equity_points()[0].equity(), 10_000_000.0);
+    assert_eq!(summary.equity_points()[1].event_count(), 2);
+    assert_eq!(summary.equity_points()[1].equity(), 10_000_100.0);
+    assert!((summary.equity_return_rate() - 0.00001).abs() < 1e-12);
+    assert!((summary.equity_points()[1].return_rate() - 0.00001).abs() < 1e-12);
+}
+
 fn quote_event(
     symbol: &str,
     datetime: i64,

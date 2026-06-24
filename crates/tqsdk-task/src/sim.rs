@@ -22,11 +22,14 @@ pub struct TqSim {
     init_balance: f64,
     balance: f64,
     commission: f64,
+    close_profit: f64,
     margin_by_symbol: HashMap<String, f64>,
     commission_by_symbol: HashMap<String, f64>,
+    contract_multiplier_by_symbol: HashMap<String, f64>,
     quotes: HashMap<String, Quote>,
     orders: HashMap<String, SimOrder>,
     positions: HashMap<String, i64>,
+    avg_price_by_symbol: HashMap<String, f64>,
     trades: HashMap<String, Trade>,
     next_seq: i64,
     next_trade_seq: i64,
@@ -101,11 +104,14 @@ impl TqSim {
             init_balance,
             balance: init_balance,
             commission: 0.0,
+            close_profit: 0.0,
             margin_by_symbol: HashMap::new(),
             commission_by_symbol: HashMap::new(),
+            contract_multiplier_by_symbol: HashMap::new(),
             quotes: HashMap::new(),
             orders: HashMap::new(),
             positions: HashMap::new(),
+            avg_price_by_symbol: HashMap::new(),
             trades: HashMap::new(),
             next_seq: 1,
             next_trade_seq: 1,
@@ -124,6 +130,12 @@ impl TqSim {
         self
     }
 
+    #[must_use]
+    pub fn with_contract_multiplier(mut self, symbol: impl Into<String>, multiplier: f64) -> Self {
+        self.set_contract_multiplier(symbol, multiplier);
+        self
+    }
+
     pub fn set_margin(&mut self, symbol: impl Into<String>, margin_per_lot: f64) {
         if margin_per_lot.is_finite() && margin_per_lot >= 0.0 {
             self.margin_by_symbol.insert(symbol.into(), margin_per_lot);
@@ -134,6 +146,13 @@ impl TqSim {
         if commission_per_lot.is_finite() && commission_per_lot >= 0.0 {
             self.commission_by_symbol
                 .insert(symbol.into(), commission_per_lot);
+        }
+    }
+
+    pub fn set_contract_multiplier(&mut self, symbol: impl Into<String>, multiplier: f64) {
+        if multiplier.is_finite() && multiplier > 0.0 {
+            self.contract_multiplier_by_symbol
+                .insert(symbol.into(), multiplier);
         }
     }
 
@@ -177,7 +196,12 @@ impl TqSim {
     pub fn update_quote(&mut self, symbol: impl Into<String>, quote: Quote) -> TqSimStepReport {
         let symbol = symbol.into();
         self.quotes.insert(symbol.clone(), quote);
-        self.match_pending_for_symbol(&symbol)
+        let report = self.match_pending_for_symbol(&symbol);
+        if report.is_empty() && self.positions.get(&symbol).copied().unwrap_or_default() != 0 {
+            self.symbol_snapshot_report(&symbol)
+        } else {
+            report
+        }
     }
 
     pub fn insert_order(&mut self, request: TqSimOrderRequest) -> Result<TqSimStepReport> {
@@ -324,7 +348,7 @@ impl TqSim {
                 let commission = self.commission_for(&request.symbol) * request.volume as f64;
                 self.balance -= commission;
                 self.commission += commission;
-                self.apply_position_delta(&request);
+                self.apply_position_delta(&request, trade_price);
                 let position = self.position_snapshot(&request.symbol);
                 let order_value = self.dead_order(&request, "filled", "", 0, trade_price)?;
                 let trade = self.trade(&request, trade_price, commission)?;
@@ -494,10 +518,37 @@ impl TqSim {
         }
     }
 
-    fn apply_position_delta(&mut self, request: &TqSimOrderRequest) {
+    fn apply_position_delta(&mut self, request: &TqSimOrderRequest, trade_price: f64) {
         let delta = signed_position_delta(request.direction, request.offset, request.volume);
+        let previous = self
+            .positions
+            .get(&request.symbol)
+            .copied()
+            .unwrap_or_default();
+        let previous_avg = self
+            .avg_price_by_symbol
+            .get(&request.symbol)
+            .copied()
+            .unwrap_or(trade_price);
+        let close_profit = close_profit_for_delta(
+            previous,
+            delta,
+            previous_avg,
+            trade_price,
+            self.contract_multiplier_for(&request.symbol),
+        );
+        self.close_profit += close_profit;
+        self.balance += close_profit;
         let position = self.positions.entry(request.symbol.clone()).or_default();
         *position += delta;
+        update_average_price(
+            &mut self.avg_price_by_symbol,
+            &request.symbol,
+            previous,
+            delta,
+            previous_avg,
+            trade_price,
+        );
     }
 
     fn alive_order(&mut self, request: &TqSimOrderRequest) -> Result<Order> {
@@ -631,6 +682,8 @@ impl TqSim {
 
     fn account_snapshot(&self) -> Account {
         let margin = self.margin_total();
+        let float_profit = self.float_profit_total();
+        let market_value = self.market_value_total();
         Account {
             user_id: self.account_id.clone(),
             currency: "CNY".to_string(),
@@ -640,6 +693,9 @@ impl TqSim {
             available: self.balance - margin,
             ctp_balance: self.balance,
             ctp_available: self.balance - margin,
+            float_profit,
+            position_profit: float_profit,
+            close_profit: self.close_profit,
             margin,
             commission: self.commission,
             risk_ratio: if self.balance > 0.0 {
@@ -647,6 +703,7 @@ impl TqSim {
             } else {
                 0.0
             },
+            market_value,
             ..Account::default()
         }
     }
@@ -655,11 +712,16 @@ impl TqSim {
         let net = self.positions.get(symbol).copied().unwrap_or_default();
         let (exchange_id, instrument_id) = split_symbol(symbol);
         let margin = self.margin_for(symbol) * net.unsigned_abs() as f64;
+        let avg_price = self.avg_price_by_symbol.get(symbol).copied().unwrap_or(0.0);
         let last_price = self
             .quotes
             .get(symbol)
             .map(|quote| quote.last_price)
             .unwrap_or_default();
+        let multiplier = self.contract_multiplier_for(symbol);
+        let float_profit = self.float_profit_for(symbol);
+        let market_value = market_value(net, last_price, multiplier);
+        let open_cost = avg_price * net.unsigned_abs() as f64 * multiplier;
         Position {
             user_id: self.account_id.clone(),
             exchange_id: exchange_id.to_string(),
@@ -673,6 +735,23 @@ impl TqSim {
             margin_short: if net < 0 { margin } else { 0.0 },
             margin,
             last_price,
+            open_price_long: if net > 0 { avg_price } else { f64::NAN },
+            open_price_short: if net < 0 { avg_price } else { f64::NAN },
+            open_cost_long: if net > 0 { open_cost } else { 0.0 },
+            open_cost_short: if net < 0 { open_cost } else { 0.0 },
+            position_price_long: if net > 0 { avg_price } else { f64::NAN },
+            position_price_short: if net < 0 { avg_price } else { f64::NAN },
+            position_cost_long: if net > 0 { open_cost } else { 0.0 },
+            position_cost_short: if net < 0 { open_cost } else { 0.0 },
+            float_profit_long: if net > 0 { float_profit } else { 0.0 },
+            float_profit_short: if net < 0 { float_profit } else { 0.0 },
+            float_profit,
+            position_profit_long: if net > 0 { float_profit } else { 0.0 },
+            position_profit_short: if net < 0 { float_profit } else { 0.0 },
+            position_profit: float_profit,
+            market_value_long: if net > 0 { market_value } else { 0.0 },
+            market_value_short: if net < 0 { market_value } else { 0.0 },
+            market_value,
             ..Position::default()
         }
     }
@@ -687,6 +766,15 @@ impl TqSim {
                 .keys()
                 .map(|symbol| self.position_snapshot(symbol))
                 .collect(),
+        }
+    }
+
+    fn symbol_snapshot_report(&self, symbol: &str) -> TqSimStepReport {
+        TqSimStepReport {
+            account: Some(self.account_snapshot()),
+            orders: Vec::new(),
+            trades: Vec::new(),
+            positions: vec![self.position_snapshot(symbol)],
         }
     }
 
@@ -723,10 +811,54 @@ impl TqSim {
             .unwrap_or_default()
     }
 
+    fn contract_multiplier_for(&self, symbol: &str) -> f64 {
+        self.contract_multiplier_by_symbol
+            .get(symbol)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
     fn margin_total(&self) -> f64 {
         self.positions
             .iter()
             .map(|(symbol, net)| self.margin_for(symbol) * net.unsigned_abs() as f64)
+            .sum()
+    }
+
+    fn float_profit_total(&self) -> f64 {
+        self.positions
+            .keys()
+            .map(|symbol| self.float_profit_for(symbol))
+            .sum()
+    }
+
+    fn float_profit_for(&self, symbol: &str) -> f64 {
+        let net = self.positions.get(symbol).copied().unwrap_or_default();
+        let Some(avg_price) = self.avg_price_by_symbol.get(symbol).copied() else {
+            return 0.0;
+        };
+        let Some(last_price) = self.quotes.get(symbol).map(|quote| quote.last_price) else {
+            return 0.0;
+        };
+        profit_for_net(
+            net,
+            avg_price,
+            last_price,
+            self.contract_multiplier_for(symbol),
+        )
+    }
+
+    fn market_value_total(&self) -> f64 {
+        self.positions
+            .iter()
+            .map(|(symbol, net)| {
+                let last_price = self
+                    .quotes
+                    .get(symbol)
+                    .map(|quote| quote.last_price)
+                    .unwrap_or_default();
+                market_value(*net, last_price, self.contract_multiplier_for(symbol))
+            })
             .sum()
     }
 
@@ -1016,6 +1148,73 @@ fn signed_position_delta(direction: TradeDirection, offset: TradeOffset, volume:
             TradeDirection::Sell,
             TradeOffset::Open | TradeOffset::Close | TradeOffset::CloseToday,
         ) => -volume,
+    }
+}
+
+fn close_profit_for_delta(
+    previous: i64,
+    delta: i64,
+    avg_price: f64,
+    trade_price: f64,
+    multiplier: f64,
+) -> f64 {
+    if previous == 0 || delta == 0 || previous.signum() == delta.signum() {
+        return 0.0;
+    }
+    let closed_volume = previous.unsigned_abs().min(delta.unsigned_abs()) as f64;
+    profit_for_net(
+        previous.signum() * closed_volume as i64,
+        avg_price,
+        trade_price,
+        multiplier,
+    )
+}
+
+fn update_average_price(
+    prices: &mut HashMap<String, f64>,
+    symbol: &str,
+    previous: i64,
+    delta: i64,
+    previous_avg: f64,
+    trade_price: f64,
+) {
+    let next = previous + delta;
+    if next == 0 {
+        prices.remove(symbol);
+        return;
+    }
+    if previous == 0 || previous.signum() == delta.signum() {
+        let previous_volume = previous.unsigned_abs() as f64;
+        let delta_volume = delta.unsigned_abs() as f64;
+        let next_avg = (previous_avg * previous_volume + trade_price * delta_volume)
+            / (previous_volume + delta_volume);
+        prices.insert(symbol.to_string(), next_avg);
+        return;
+    }
+    if next.signum() == previous.signum() {
+        prices.insert(symbol.to_string(), previous_avg);
+    } else {
+        prices.insert(symbol.to_string(), trade_price);
+    }
+}
+
+fn profit_for_net(net: i64, avg_price: f64, last_price: f64, multiplier: f64) -> f64 {
+    if net == 0 || !avg_price.is_finite() || !last_price.is_finite() || !multiplier.is_finite() {
+        return 0.0;
+    }
+    let volume = net.unsigned_abs() as f64;
+    if net > 0 {
+        (last_price - avg_price) * volume * multiplier
+    } else {
+        (avg_price - last_price) * volume * multiplier
+    }
+}
+
+fn market_value(net: i64, last_price: f64, multiplier: f64) -> f64 {
+    if net == 0 || !last_price.is_finite() || !multiplier.is_finite() {
+        0.0
+    } else {
+        last_price * net.unsigned_abs() as f64 * multiplier
     }
 }
 

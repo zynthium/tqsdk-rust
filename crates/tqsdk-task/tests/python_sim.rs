@@ -52,6 +52,110 @@ fn tqsim_fills_crossing_limit_order_at_order_price_without_partial_fill() {
 }
 
 #[test]
+fn tqsim_marks_open_position_to_latest_quote_with_contract_multiplier() {
+    let mut sim = TqSim::new().with_contract_multiplier("SHFE.rb2501", 10.0);
+    sim.update_quote(
+        "SHFE.rb2501",
+        Quote {
+            last_price: 100.0,
+            ask_price1: 100.0,
+            ask_volume1: 10,
+            bid_price1: 99.0,
+            bid_volume1: 8,
+            ..Quote::default()
+        },
+    );
+    sim.insert_order(TqSimOrderRequest::limit(
+        "order-mtm-1",
+        "SHFE.rb2501",
+        TradeDirection::Buy,
+        TradeOffset::Open,
+        2,
+        100.0,
+    ))
+    .unwrap();
+
+    let report = sim.update_quote(
+        "SHFE.rb2501",
+        Quote {
+            last_price: 103.0,
+            ask_price1: 103.0,
+            ask_volume1: 10,
+            bid_price1: 102.0,
+            bid_volume1: 8,
+            ..Quote::default()
+        },
+    );
+
+    let account = report.account().unwrap();
+    assert_eq!(account.float_profit, 60.0);
+    assert_eq!(account.position_profit, 60.0);
+    assert_eq!(account.market_value, 2_060.0);
+    assert_eq!(account.balance, 10_000_000.0);
+
+    let position = &report.positions()[0];
+    assert_eq!(position.open_price_long, 100.0);
+    assert_eq!(position.float_profit_long, 60.0);
+    assert_eq!(position.market_value_long, 2_060.0);
+}
+
+#[test]
+fn tqsim_realizes_close_profit_into_balance() {
+    let mut sim = TqSim::new().with_contract_multiplier("SHFE.rb2501", 10.0);
+    sim.update_quote(
+        "SHFE.rb2501",
+        Quote {
+            last_price: 100.0,
+            ask_price1: 100.0,
+            ask_volume1: 10,
+            bid_price1: 99.0,
+            bid_volume1: 8,
+            ..Quote::default()
+        },
+    );
+    sim.insert_order(TqSimOrderRequest::limit(
+        "order-mtm-2",
+        "SHFE.rb2501",
+        TradeDirection::Buy,
+        TradeOffset::Open,
+        2,
+        100.0,
+    ))
+    .unwrap();
+    sim.update_quote(
+        "SHFE.rb2501",
+        Quote {
+            last_price: 105.0,
+            ask_price1: 106.0,
+            ask_volume1: 10,
+            bid_price1: 105.0,
+            bid_volume1: 8,
+            ..Quote::default()
+        },
+    );
+
+    sim.insert_order(TqSimOrderRequest::limit(
+        "order-mtm-3",
+        "SHFE.rb2501",
+        TradeDirection::Sell,
+        TradeOffset::Close,
+        1,
+        105.0,
+    ))
+    .unwrap();
+
+    let account = sim.account();
+    assert_eq!(account.close_profit, 50.0);
+    assert_eq!(account.balance, 10_000_050.0);
+    assert_eq!(account.float_profit, 50.0);
+
+    let position = sim.position("SHFE.rb2501");
+    assert_eq!(position.pos_long, 1);
+    assert_eq!(position.open_price_long, 100.0);
+    assert_eq!(position.float_profit_long, 50.0);
+}
+
+#[test]
 fn tqsim_keeps_non_crossing_limit_order_alive_until_quote_crosses() {
     let mut sim = TqSim::new();
     sim.update_quote(

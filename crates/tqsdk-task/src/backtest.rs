@@ -54,6 +54,7 @@ pub struct StrategyBacktestSummary {
     tick_count: usize,
     kline_count: usize,
     balance_points: Vec<StrategyBacktestBalancePoint>,
+    equity_points: Vec<StrategyBacktestEquityPoint>,
     orders: Vec<Order>,
     trades: Vec<Trade>,
     initial_account: Account,
@@ -62,6 +63,9 @@ pub struct StrategyBacktestSummary {
     peak_balance: f64,
     max_balance_drawdown: f64,
     max_balance_drawdown_rate: f64,
+    peak_equity: f64,
+    max_equity_drawdown: f64,
+    max_equity_drawdown_rate: f64,
 }
 
 /// Cash-balance point recorded by local backtest summary.
@@ -69,6 +73,16 @@ pub struct StrategyBacktestSummary {
 pub struct StrategyBacktestBalancePoint {
     event_count: usize,
     balance: f64,
+    return_rate: f64,
+    drawdown: f64,
+    drawdown_rate: f64,
+}
+
+/// Mark-to-market equity point recorded by local backtest summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestEquityPoint {
+    event_count: usize,
+    equity: f64,
     return_rate: f64,
     drawdown: f64,
     drawdown_rate: f64,
@@ -260,12 +274,14 @@ impl StrategyBacktestSummary {
     fn from_sim(sim: &TqSim, symbols: &[String]) -> Self {
         let initial_account = sim.account();
         let initial_balance = initial_account.balance;
+        let initial_equity = account_equity(&initial_account);
         let mut summary = Self {
             event_count: 0,
             quote_count: 0,
             tick_count: 0,
             kline_count: 0,
             balance_points: Vec::new(),
+            equity_points: Vec::new(),
             orders: Vec::new(),
             trades: Vec::new(),
             initial_account: initial_account.clone(),
@@ -274,6 +290,9 @@ impl StrategyBacktestSummary {
             peak_balance: initial_balance,
             max_balance_drawdown: 0.0,
             max_balance_drawdown_rate: 0.0,
+            peak_equity: initial_equity,
+            max_equity_drawdown: 0.0,
+            max_equity_drawdown_rate: 0.0,
         };
         summary.record_account_snapshot(sim, symbols);
         summary
@@ -311,6 +330,7 @@ impl StrategyBacktestSummary {
     fn record_account_snapshot(&mut self, sim: &TqSim, symbols: &[String]) {
         self.refresh_from_sim(sim, symbols);
         self.record_balance_point();
+        self.record_equity_point();
     }
 
     fn record_balance_point(&mut self) {
@@ -336,6 +356,31 @@ impl StrategyBacktestSummary {
             self.max_balance_drawdown_rate = point.drawdown_rate;
         }
         self.balance_points.push(point);
+    }
+
+    fn record_equity_point(&mut self) {
+        let equity = account_equity(&self.final_account);
+        if self
+            .equity_points
+            .last()
+            .is_some_and(|point| point.equity == equity)
+        {
+            return;
+        }
+        if equity.is_finite() && (!self.peak_equity.is_finite() || equity > self.peak_equity) {
+            self.peak_equity = equity;
+        }
+        let point = StrategyBacktestEquityPoint::new(
+            self.event_count,
+            equity,
+            account_equity(&self.initial_account),
+            self.peak_equity,
+        );
+        if point.drawdown.is_finite() && point.drawdown > self.max_equity_drawdown {
+            self.max_equity_drawdown = point.drawdown;
+            self.max_equity_drawdown_rate = point.drawdown_rate;
+        }
+        self.equity_points.push(point);
     }
 
     #[must_use]
@@ -379,6 +424,11 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn equity_points(&self) -> &[StrategyBacktestEquityPoint] {
+        &self.equity_points
+    }
+
+    #[must_use]
     pub fn initial_account(&self) -> &Account {
         &self.initial_account
     }
@@ -404,6 +454,26 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn initial_equity(&self) -> f64 {
+        account_equity(&self.initial_account)
+    }
+
+    #[must_use]
+    pub fn final_equity(&self) -> f64 {
+        account_equity(&self.final_account)
+    }
+
+    #[must_use]
+    pub fn equity_change(&self) -> f64 {
+        self.final_equity() - self.initial_equity()
+    }
+
+    #[must_use]
+    pub fn equity_return_rate(&self) -> f64 {
+        rate_or_nan(self.equity_change(), self.initial_equity())
+    }
+
+    #[must_use]
     pub fn peak_balance(&self) -> f64 {
         self.peak_balance
     }
@@ -416,6 +486,21 @@ impl StrategyBacktestSummary {
     #[must_use]
     pub fn max_balance_drawdown_rate(&self) -> f64 {
         self.max_balance_drawdown_rate
+    }
+
+    #[must_use]
+    pub fn peak_equity(&self) -> f64 {
+        self.peak_equity
+    }
+
+    #[must_use]
+    pub fn max_equity_drawdown(&self) -> f64 {
+        self.max_equity_drawdown
+    }
+
+    #[must_use]
+    pub fn max_equity_drawdown_rate(&self) -> f64 {
+        self.max_equity_drawdown_rate
     }
 }
 
@@ -443,6 +528,48 @@ impl StrategyBacktestBalancePoint {
     #[must_use]
     pub fn balance(&self) -> f64 {
         self.balance
+    }
+
+    #[must_use]
+    pub fn return_rate(&self) -> f64 {
+        self.return_rate
+    }
+
+    #[must_use]
+    pub fn drawdown(&self) -> f64 {
+        self.drawdown
+    }
+
+    #[must_use]
+    pub fn drawdown_rate(&self) -> f64 {
+        self.drawdown_rate
+    }
+}
+
+impl StrategyBacktestEquityPoint {
+    fn new(event_count: usize, equity: f64, initial_equity: f64, peak_equity: f64) -> Self {
+        let drawdown = if equity.is_finite() && peak_equity.is_finite() {
+            (peak_equity - equity).max(0.0)
+        } else {
+            f64::NAN
+        };
+        Self {
+            event_count,
+            equity,
+            return_rate: rate_or_nan(equity - initial_equity, initial_equity),
+            drawdown,
+            drawdown_rate: rate_or_nan(drawdown, peak_equity),
+        }
+    }
+
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    #[must_use]
+    pub fn equity(&self) -> f64 {
+        self.equity
     }
 
     #[must_use]
@@ -690,6 +817,10 @@ fn rate_or_nan(numerator: f64, denominator: f64) -> f64 {
     } else {
         numerator / denominator
     }
+}
+
+fn account_equity(account: &Account) -> f64 {
+    account.balance + account.float_profit
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
