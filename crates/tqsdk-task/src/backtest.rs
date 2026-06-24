@@ -122,6 +122,8 @@ pub struct StrategyBacktestDailyEquityReturn {
     date: NaiveDate,
     equity: f64,
     profit: f64,
+    drawdown: f64,
+    drawdown_rate: f64,
     return_rate: f64,
 }
 
@@ -131,6 +133,8 @@ pub struct StrategyBacktestDailyBalanceReturn {
     date: NaiveDate,
     balance: f64,
     profit: f64,
+    drawdown: f64,
+    drawdown_rate: f64,
     return_rate: f64,
 }
 
@@ -811,16 +815,21 @@ impl StrategyBacktestSummary {
         }
 
         let mut previous_balance = self.initial_account.balance;
+        let mut peak_balance = self.initial_account.balance;
         daily_balance
             .into_iter()
             .map(|(date, balance)| {
                 let profit = balance - previous_balance;
                 let return_rate = rate_or_nan(profit, previous_balance);
+                update_peak(&mut peak_balance, balance);
+                let (drawdown, drawdown_rate) = drawdown_from_peak(balance, peak_balance);
                 previous_balance = balance;
                 StrategyBacktestDailyBalanceReturn {
                     date,
                     balance,
                     profit,
+                    drawdown,
+                    drawdown_rate,
                     return_rate,
                 }
             })
@@ -838,6 +847,7 @@ impl StrategyBacktestSummary {
         windows: &[StrategyBacktestDailyReturnWindow],
     ) -> Vec<StrategyBacktestDailyBalanceReturn> {
         let mut previous_balance = self.initial_account.balance;
+        let mut peak_balance = self.initial_account.balance;
         windows
             .iter()
             .filter(|window| window.is_valid())
@@ -846,11 +856,15 @@ impl StrategyBacktestSummary {
                     .unwrap_or(previous_balance);
                 let profit = balance - previous_balance;
                 let return_rate = rate_or_nan(profit, previous_balance);
+                update_peak(&mut peak_balance, balance);
+                let (drawdown, drawdown_rate) = drawdown_from_peak(balance, peak_balance);
                 previous_balance = balance;
                 StrategyBacktestDailyBalanceReturn {
                     date: window.date,
                     balance,
                     profit,
+                    drawdown,
+                    drawdown_rate,
                     return_rate,
                 }
             })
@@ -916,16 +930,21 @@ impl StrategyBacktestSummary {
         }
 
         let mut previous_equity = self.initial_equity();
+        let mut peak_equity = self.initial_equity();
         daily_equity
             .into_iter()
             .map(|(date, equity)| {
                 let profit = equity - previous_equity;
                 let return_rate = rate_or_nan(profit, previous_equity);
+                update_peak(&mut peak_equity, equity);
+                let (drawdown, drawdown_rate) = drawdown_from_peak(equity, peak_equity);
                 previous_equity = equity;
                 StrategyBacktestDailyEquityReturn {
                     date,
                     equity,
                     profit,
+                    drawdown,
+                    drawdown_rate,
                     return_rate,
                 }
             })
@@ -943,6 +962,7 @@ impl StrategyBacktestSummary {
         windows: &[StrategyBacktestDailyReturnWindow],
     ) -> Vec<StrategyBacktestDailyEquityReturn> {
         let mut previous_equity = self.initial_equity();
+        let mut peak_equity = self.initial_equity();
         windows
             .iter()
             .filter(|window| window.is_valid())
@@ -951,11 +971,15 @@ impl StrategyBacktestSummary {
                     last_equity_in_window(&self.equity_points, window).unwrap_or(previous_equity);
                 let profit = equity - previous_equity;
                 let return_rate = rate_or_nan(profit, previous_equity);
+                update_peak(&mut peak_equity, equity);
+                let (drawdown, drawdown_rate) = drawdown_from_peak(equity, peak_equity);
                 previous_equity = equity;
                 StrategyBacktestDailyEquityReturn {
                     date: window.date,
                     equity,
                     profit,
+                    drawdown,
+                    drawdown_rate,
                     return_rate,
                 }
             })
@@ -1334,6 +1358,16 @@ impl StrategyBacktestDailyEquityReturn {
     }
 
     #[must_use]
+    pub fn drawdown(&self) -> f64 {
+        self.drawdown
+    }
+
+    #[must_use]
+    pub fn drawdown_rate(&self) -> f64 {
+        self.drawdown_rate
+    }
+
+    #[must_use]
     pub fn return_rate(&self) -> f64 {
         self.return_rate
     }
@@ -1353,6 +1387,16 @@ impl StrategyBacktestDailyBalanceReturn {
     #[must_use]
     pub fn profit(&self) -> f64 {
         self.profit
+    }
+
+    #[must_use]
+    pub fn drawdown(&self) -> f64 {
+        self.drawdown
+    }
+
+    #[must_use]
+    pub fn drawdown_rate(&self) -> f64 {
+        self.drawdown_rate
     }
 
     #[must_use]
@@ -1679,6 +1723,21 @@ fn rate_or_nan(numerator: f64, denominator: f64) -> f64 {
     } else {
         numerator / denominator
     }
+}
+
+fn update_peak(peak: &mut f64, value: f64) {
+    if value.is_finite() && (!peak.is_finite() || value > *peak) {
+        *peak = value;
+    }
+}
+
+fn drawdown_from_peak(value: f64, peak: f64) -> (f64, f64) {
+    let drawdown = if value.is_finite() && peak.is_finite() {
+        (peak - value).max(0.0)
+    } else {
+        f64::NAN
+    };
+    (drawdown, rate_or_nan(drawdown, peak))
 }
 
 fn count_return_days(

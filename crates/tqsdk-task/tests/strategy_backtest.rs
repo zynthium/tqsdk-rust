@@ -841,6 +841,8 @@ async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
     );
     assert_eq!(daily_balance[0].balance(), 9_999_987.5);
     assert_eq!(daily_balance[0].profit(), -12.5);
+    assert_eq!(daily_balance[0].drawdown(), 12.5);
+    assert!((daily_balance[0].drawdown_rate() - 0.00000125).abs() < 1e-12);
     assert!((daily_balance[0].return_rate() + 0.00000125).abs() < 1e-12);
     let expected_annualized = (1.0_f64 - 0.00000125).powf(250.0) - 1.0;
     assert!((summary.annualized_balance_return_rate() - expected_annualized).abs() < 1e-12);
@@ -1006,6 +1008,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(daily[0].equity(), 10_000_000.0);
     assert_eq!(daily[0].profit(), 0.0);
+    assert_eq!(daily[0].drawdown(), 0.0);
+    assert_eq!(daily[0].drawdown_rate(), 0.0);
     assert_eq!(daily[0].return_rate(), 0.0);
     assert_eq!(
         daily[1].date(),
@@ -1013,6 +1017,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(daily[1].equity(), 10_000_100.0);
     assert_eq!(daily[1].profit(), 100.0);
+    assert_eq!(daily[1].drawdown(), 0.0);
+    assert_eq!(daily[1].drawdown_rate(), 0.0);
     assert!((daily[1].return_rate() - 0.00001).abs() < 1e-12);
     assert_eq!(
         daily[2].date(),
@@ -1020,6 +1026,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(daily[2].equity(), 10_000_050.0);
     assert_eq!(daily[2].profit(), -50.0);
+    assert_eq!(daily[2].drawdown(), 50.0);
+    assert!((daily[2].drawdown_rate() - 0.0000049999500005).abs() < 1e-15);
     assert!((daily[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
     let windows = [
         StrategyBacktestDailyReturnWindow::new(
@@ -1056,6 +1064,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(windowed_equity[0].equity(), 10_000_000.0);
     assert_eq!(windowed_equity[0].profit(), 0.0);
+    assert_eq!(windowed_equity[0].drawdown(), 0.0);
+    assert_eq!(windowed_equity[0].drawdown_rate(), 0.0);
     assert_eq!(windowed_equity[0].return_rate(), 0.0);
     assert_eq!(
         windowed_equity[1].date(),
@@ -1063,6 +1073,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(windowed_equity[1].equity(), 10_000_100.0);
     assert_eq!(windowed_equity[1].profit(), 100.0);
+    assert_eq!(windowed_equity[1].drawdown(), 0.0);
+    assert_eq!(windowed_equity[1].drawdown_rate(), 0.0);
     assert!((windowed_equity[1].return_rate() - 0.00001).abs() < 1e-12);
     assert_eq!(
         windowed_equity[2].date(),
@@ -1070,6 +1082,8 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(windowed_equity[2].equity(), 10_000_050.0);
     assert_eq!(windowed_equity[2].profit(), -50.0);
+    assert_eq!(windowed_equity[2].drawdown(), 50.0);
+    assert!((windowed_equity[2].drawdown_rate() - 0.0000049999500005).abs() < 1e-15);
     assert!((windowed_equity[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
     assert_eq!(
         windowed_equity[3].date(),
