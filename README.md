@@ -167,8 +167,8 @@ equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
 也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
 symbol 回放，同时保留 quote `underlying_symbol` metadata。summary
-已含手续费、净实现盈亏、daily cash/equity returns、年化收益率和年化日
-Sharpe / Sortino / Calmar；官方完整报表、自动主连分段回测和执行 symbol
+已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、盈利/亏损天数、
+最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；官方完整报表、自动主连分段回测和执行 symbol
 切换仍是后续范围；交易日历、单主连
 date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /

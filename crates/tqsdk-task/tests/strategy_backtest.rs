@@ -528,6 +528,10 @@ async fn strategy_backtest_summary_tracks_closed_profit_observations() {
     assert_eq!(summary.closed_profit_points()[1].trade_count(), 1);
     assert_eq!(summary.closed_profit_points()[1].profit(), -50.0);
     assert_eq!(summary.closed_trade_count(), 2);
+    assert_eq!(summary.buy_trade_count(), 2);
+    assert_eq!(summary.sell_trade_count(), 2);
+    assert_eq!(summary.open_trade_count(), 2);
+    assert_eq!(summary.close_trade_count(), 2);
     assert_eq!(summary.closed_profit_observation_count(), 2);
     assert_eq!(summary.winning_closed_profit_observation_count(), 1);
     assert_eq!(summary.losing_closed_profit_observation_count(), 1);
@@ -575,6 +579,10 @@ async fn strategy_backtest_summary_counts_break_even_close_observations() {
     assert_eq!(summary.closed_profit_points()[0].trade_count(), 1);
     assert_eq!(summary.closed_profit_points()[0].profit(), 0.0);
     assert_eq!(summary.closed_trade_count(), 1);
+    assert_eq!(summary.buy_trade_count(), 1);
+    assert_eq!(summary.sell_trade_count(), 1);
+    assert_eq!(summary.open_trade_count(), 1);
+    assert_eq!(summary.close_trade_count(), 1);
     assert_eq!(summary.closed_profit_observation_count(), 1);
     assert_eq!(summary.winning_closed_profit_observation_count(), 1);
     assert_eq!(summary.losing_closed_profit_observation_count(), 0);
@@ -735,6 +743,16 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(daily[2].equity(), 10_000_050.0);
     assert!((daily[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
+    assert_eq!(summary.equity_trading_day_count(), 3);
+    assert_eq!(summary.profitable_equity_day_count(), 1);
+    assert_eq!(summary.losing_equity_day_count(), 1);
+    assert_eq!(summary.max_consecutive_profitable_equity_days(), 1);
+    assert_eq!(summary.max_consecutive_losing_equity_days(), 1);
+    assert_eq!(summary.balance_trading_day_count(), 3);
+    assert_eq!(summary.profitable_balance_day_count(), 0);
+    assert_eq!(summary.losing_balance_day_count(), 0);
+    assert_eq!(summary.max_consecutive_profitable_balance_days(), 0);
+    assert_eq!(summary.max_consecutive_losing_balance_days(), 0);
     assert!(summary.annualized_daily_sharpe_ratio().is_finite());
     assert_eq!(
         summary.annualized_daily_sharpe_ratio(),

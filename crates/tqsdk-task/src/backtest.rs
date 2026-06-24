@@ -6,7 +6,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
     Account, CommitScope, InputPayload, IoEvent, Kline, Order, Position, ProtocolDomain, Quote,
-    RuntimeInput, Tick, Trade, TradeOffset,
+    RuntimeInput, Tick, Trade, TradeDirection, TradeOffset,
 };
 
 use crate::replay::{
@@ -503,6 +503,38 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn buy_trade_count(&self) -> usize {
+        self.trades
+            .iter()
+            .filter(|trade| trade.direction == Some(TradeDirection::Buy))
+            .count()
+    }
+
+    #[must_use]
+    pub fn sell_trade_count(&self) -> usize {
+        self.trades
+            .iter()
+            .filter(|trade| trade.direction == Some(TradeDirection::Sell))
+            .count()
+    }
+
+    #[must_use]
+    pub fn open_trade_count(&self) -> usize {
+        self.trades
+            .iter()
+            .filter(|trade| trade.offset == Some(TradeOffset::Open))
+            .count()
+    }
+
+    #[must_use]
+    pub fn close_trade_count(&self) -> usize {
+        self.trades
+            .iter()
+            .filter(|trade| is_close_trade(trade))
+            .count()
+    }
+
+    #[must_use]
     pub fn balance_points(&self) -> &[StrategyBacktestBalancePoint] {
         &self.balance_points
     }
@@ -673,6 +705,51 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn balance_trading_day_count(&self) -> usize {
+        self.daily_balance_returns().len()
+    }
+
+    #[must_use]
+    pub fn profitable_balance_day_count(&self) -> usize {
+        count_return_days(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            |return_rate| return_rate > 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn losing_balance_day_count(&self) -> usize {
+        count_return_days(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            |return_rate| return_rate < 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn max_consecutive_profitable_balance_days(&self) -> usize {
+        max_consecutive_return_days(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            |return_rate| return_rate > 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn max_consecutive_losing_balance_days(&self) -> usize {
+        max_consecutive_return_days(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            |return_rate| return_rate < 0.0,
+        )
+    }
+
+    #[must_use]
     pub fn daily_equity_returns(&self) -> Vec<StrategyBacktestDailyEquityReturn> {
         let mut daily_equity = BTreeMap::new();
         for point in &self.equity_points {
@@ -698,6 +775,51 @@ impl StrategyBacktestSummary {
                 }
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn equity_trading_day_count(&self) -> usize {
+        self.daily_equity_returns().len()
+    }
+
+    #[must_use]
+    pub fn profitable_equity_day_count(&self) -> usize {
+        count_return_days(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+            |return_rate| return_rate > 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn losing_equity_day_count(&self) -> usize {
+        count_return_days(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+            |return_rate| return_rate < 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn max_consecutive_profitable_equity_days(&self) -> usize {
+        max_consecutive_return_days(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+            |return_rate| return_rate > 0.0,
+        )
+    }
+
+    #[must_use]
+    pub fn max_consecutive_losing_equity_days(&self) -> usize {
+        max_consecutive_return_days(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+            |return_rate| return_rate < 0.0,
+        )
     }
 
     #[must_use]
@@ -1311,6 +1433,33 @@ fn rate_or_nan(numerator: f64, denominator: f64) -> f64 {
     } else {
         numerator / denominator
     }
+}
+
+fn count_return_days(
+    returns: impl IntoIterator<Item = f64>,
+    predicate: impl Fn(f64) -> bool,
+) -> usize {
+    returns
+        .into_iter()
+        .filter(|return_rate| return_rate.is_finite() && predicate(*return_rate))
+        .count()
+}
+
+fn max_consecutive_return_days(
+    returns: impl IntoIterator<Item = f64>,
+    predicate: impl Fn(f64) -> bool,
+) -> usize {
+    let mut current = 0;
+    let mut max_seen = 0;
+    for return_rate in returns {
+        if return_rate.is_finite() && predicate(return_rate) {
+            current += 1;
+            max_seen = max_seen.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    max_seen
 }
 
 fn account_equity(account: &Account) -> f64 {
