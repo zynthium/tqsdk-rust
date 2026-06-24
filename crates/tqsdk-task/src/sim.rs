@@ -154,6 +154,16 @@ impl TqSim {
         }
     }
 
+    #[must_use]
+    pub fn margin(&self, symbol: impl AsRef<str>) -> f64 {
+        self.margin_for(symbol.as_ref())
+    }
+
+    #[must_use]
+    pub fn commission(&self, symbol: impl AsRef<str>) -> f64 {
+        self.commission_for(symbol.as_ref())
+    }
+
     pub fn set_contract_multiplier(&mut self, symbol: impl Into<String>, multiplier: f64) {
         if multiplier.is_finite() && multiplier > 0.0 {
             self.contract_multiplier_by_symbol

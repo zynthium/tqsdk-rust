@@ -110,7 +110,7 @@
   - 消费 task-owned `ReplayMarketSource` 的本地 quote/tick/kline event，作为 Python-compatible 回测模拟账户 foundation
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
-  - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先
+  - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先，且通过 `margin(symbol)` / `commission(symbol)` 暴露当前每手配置
   - `TqSim` 会使用 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单解析到实际 underlying symbol 撮合、成交和记账，并把实际持仓镜像回 replay symbol，避免 `TargetPos` / strategy context 在主连路径上反复误判空仓
   - 本地回测订单和成交时间字段使用 replay event time；挂单跨 step 成交时订单保留原始插入时间，成交使用成交 step 时间
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明

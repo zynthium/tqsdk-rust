@@ -59,6 +59,42 @@ async fn strategy_backtest_fills_limit_order_against_replayed_quote() {
     assert!(backtest.next().await.unwrap().is_none());
 }
 
+#[test]
+fn tqsim_exposes_margin_and_commission_configuration() {
+    let mut sim = TqSim::new()
+        .with_margin("SHFE.rb2501", 1_000.0)
+        .with_commission("SHFE.rb2501", 3.5);
+
+    assert_eq!(sim.margin("SHFE.rb2501"), 1_000.0);
+    assert_eq!(sim.commission("SHFE.rb2501"), 3.5);
+    assert_eq!(sim.margin("DCE.i2501"), 0.0);
+    assert_eq!(sim.commission("DCE.i2501"), 0.0);
+
+    sim.apply_quote_metadata(
+        "SHFE.rb2501",
+        &Quote {
+            margin: 2_000.0,
+            commission: 7.0,
+            volume_multiple: 20,
+            ..Quote::default()
+        },
+    );
+    assert_eq!(sim.margin("SHFE.rb2501"), 1_000.0);
+    assert_eq!(sim.commission("SHFE.rb2501"), 3.5);
+
+    sim.apply_quote_metadata(
+        "DCE.i2501",
+        &Quote {
+            margin: 2_000.0,
+            commission: 7.0,
+            volume_multiple: 20,
+            ..Quote::default()
+        },
+    );
+    assert_eq!(sim.margin("DCE.i2501"), 2_000.0);
+    assert_eq!(sim.commission("DCE.i2501"), 7.0);
+}
+
 #[tokio::test]
 async fn strategy_backtest_tracks_symbols_from_replay_without_quote_preset() {
     let replay =
