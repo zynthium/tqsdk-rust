@@ -155,7 +155,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 需要把 underlying history 以主连等稳定 replay symbol 回放时，使用
 `local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
 request 使用 `local_backtest_kline_histories_as(...)` /
-`local_backtest_tick_histories_as(...)` 组合分段；交易日/夜盘边界仍由调用方显式给出。
+`local_backtest_tick_histories_as(...)` 组合分段。主连分钟线常用路径可直接用
+`local_backtest_continuous_minute_history(&data, "KQ.m@SHFE.rb", start_ns, end_ns).await?`
+自动查询 date -> underlying segment，并按官方风格交易日窗口裁剪后回放。
 若已通过 `tqsdk-session` 查询到合约 metadata，可把 `InstrumentSpec` 传入
 `instrument_spec(...)`，用于 kline quote synthesis 的 `price_tick` 和本地撮合合约乘数。
 明确要直接操作 Python-style wait facade 时，才下钻到
@@ -168,9 +170,10 @@ equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
 也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
-symbol 回放，同时保留 quote `underlying_symbol` metadata。summary
+symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
+`local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
 已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、显式交易日窗口 returns、
-盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；官方完整报表、自动主连分段回测和执行 symbol
+盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；官方完整报表和执行 symbol
 切换仍是后续范围；交易日历、单主连
 date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /

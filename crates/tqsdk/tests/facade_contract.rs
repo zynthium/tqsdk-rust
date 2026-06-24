@@ -329,3 +329,24 @@ fn default_facade_contract_example_exists() {
         );
     }
 }
+
+#[test]
+fn local_backtest_contract_example_exposes_continuous_minute_helper() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/api_contract_s38_facade_local_backtest.rs"
+    );
+    let source = std::fs::read_to_string(path).expect("read local backtest facade example");
+
+    for required in [
+        "local_backtest_continuous_minute_history(",
+        "\"KQ.m@SHFE.rb\"",
+        ".default_price_tick(1.0)",
+        ".local_backtest(replay)",
+    ] {
+        assert!(
+            source.contains(required),
+            "local backtest example missing required flow fragment: {required}"
+        );
+    }
+}

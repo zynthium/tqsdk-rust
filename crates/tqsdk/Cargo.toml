@@ -27,6 +27,7 @@ services = [
 ]
 
 [dependencies]
+chrono.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
 tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = false }
