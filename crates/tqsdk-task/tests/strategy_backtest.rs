@@ -1215,6 +1215,116 @@ async fn strategy_backtest_summary_derives_rolling_daily_equity_ratios() {
     assert!(summary.rolling_daily_equity_calmar_ratios(0).is_empty());
 }
 
+#[tokio::test]
+async fn strategy_backtest_summary_derives_rolling_daily_balance_ratios() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 172_800_000_000_000, 111.0, 10, 110.0, 8),
+        quote_event("SHFE.rb2501", 259_200_000_000_000, 95.0, 10, 94.0, 8),
+        quote_event("SHFE.rb2501", 345_600_000_000_000, 91.0, 10, 90.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(
+            TqSim::new()
+                .with_contract_multiplier("SHFE.rb2501", 10.0)
+                .with_commission("SHFE.rb2501", 1.0),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("summary-rolling-balance-open-win")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .sell_close("SHFE.rb2501", 1)
+        .limit(110.0)
+        .send_once("summary-rolling-balance-close-win")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(95.0)
+        .send_once("summary-rolling-balance-open-loss")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .sell_close("SHFE.rb2501", 1)
+        .limit(90.0)
+        .send_once("summary-rolling-balance-close-loss")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let summary = backtest.summary();
+    let daily = summary.daily_balance_returns();
+    assert_eq!(daily.len(), 4);
+    let returns = daily
+        .iter()
+        .map(|day| day.return_rate())
+        .collect::<Vec<_>>();
+    let drawdowns = daily
+        .iter()
+        .map(|day| day.drawdown_rate())
+        .collect::<Vec<_>>();
+
+    let sharpe = summary.rolling_daily_balance_sharpe_ratios(2);
+    let sortino = summary.rolling_daily_balance_sortino_ratios(2);
+    let calmar = summary.rolling_daily_balance_calmar_ratios(2);
+    assert_eq!(sharpe.len(), daily.len());
+    assert_eq!(sortino.len(), daily.len());
+    assert_eq!(calmar.len(), daily.len());
+    assert!(sharpe[0].ratio().is_nan());
+    assert!(sortino[0].ratio().is_nan());
+    assert!(calmar[0].ratio().is_nan());
+    for index in 1..daily.len() {
+        let start = index + 1 - 2;
+        assert_eq!(sharpe[index].date(), daily[index].date());
+        assert_eq!(sharpe[index].sample_count(), 2);
+        assert_nan_or_close(
+            sharpe[index].ratio(),
+            expected_annualized_sharpe(&returns[start..=index]),
+        );
+        assert_nan_or_close(
+            sortino[index].ratio(),
+            expected_annualized_sortino(&returns[start..=index]),
+        );
+        assert_nan_or_close(
+            calmar[index].ratio(),
+            expected_annualized_calmar(&returns[start..=index], &drawdowns[start..=index]),
+        );
+    }
+
+    assert!(summary.rolling_daily_balance_sharpe_ratios(0).is_empty());
+    assert!(summary.rolling_daily_balance_sortino_ratios(0).is_empty());
+    assert!(summary.rolling_daily_balance_calmar_ratios(0).is_empty());
+}
+
+fn assert_nan_or_close(actual: f64, expected: f64) {
+    if expected.is_nan() {
+        assert!(actual.is_nan(), "expected NaN, got {actual}");
+    } else {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+}
+
 fn expected_annualized_sharpe(returns: &[f64]) -> f64 {
     if returns.len() < 2 {
         return f64::NAN;

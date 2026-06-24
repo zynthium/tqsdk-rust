@@ -1071,6 +1071,17 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn rolling_daily_balance_sharpe_ratios(
+        &self,
+        window_len: usize,
+    ) -> Vec<StrategyBacktestRollingRatioPoint> {
+        let daily = self.daily_balance_returns();
+        rolling_balance_ratio_points(&daily, window_len, |window| {
+            annualized_sharpe_ratio(window.iter().map(|day| day.return_rate), 0.0)
+        })
+    }
+
+    #[must_use]
     pub fn annualized_daily_equity_sharpe_ratio(&self) -> f64 {
         self.annualized_daily_equity_sharpe_ratio_with_risk_free_rate(0.0)
     }
@@ -1131,6 +1142,17 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn rolling_daily_balance_sortino_ratios(
+        &self,
+        window_len: usize,
+    ) -> Vec<StrategyBacktestRollingRatioPoint> {
+        let daily = self.daily_balance_returns();
+        rolling_balance_ratio_points(&daily, window_len, |window| {
+            annualized_sortino_ratio(window.iter().map(|day| day.return_rate), 0.0)
+        })
+    }
+
+    #[must_use]
     pub fn annualized_daily_equity_sortino_ratio(&self) -> f64 {
         self.annualized_daily_equity_sortino_ratio_with_risk_free_rate(0.0)
     }
@@ -1174,6 +1196,24 @@ impl StrategyBacktestSummary {
             self.max_balance_drawdown_rate,
             annual_risk_free_rate,
         )
+    }
+
+    #[must_use]
+    pub fn rolling_daily_balance_calmar_ratios(
+        &self,
+        window_len: usize,
+    ) -> Vec<StrategyBacktestRollingRatioPoint> {
+        let daily = self.daily_balance_returns();
+        rolling_balance_ratio_points(&daily, window_len, |window| {
+            annualized_calmar_ratio(
+                annualized_return_rate(
+                    compounded_return_rate(window.iter().map(|day| day.return_rate)),
+                    window.len(),
+                ),
+                max_rolling_drawdown_rate(window.iter().map(|day| day.drawdown_rate)),
+                0.0,
+            )
+        })
     }
 
     #[must_use]
@@ -1809,6 +1849,33 @@ fn rolling_equity_ratio_points(
     daily: &[StrategyBacktestDailyEquityReturn],
     window_len: usize,
     ratio: impl Fn(&[StrategyBacktestDailyEquityReturn]) -> f64,
+) -> Vec<StrategyBacktestRollingRatioPoint> {
+    if window_len == 0 {
+        return Vec::new();
+    }
+    daily
+        .iter()
+        .enumerate()
+        .map(|(index, day)| {
+            let sample_count = (index + 1).min(window_len);
+            let ratio = if index + 1 < window_len {
+                f64::NAN
+            } else {
+                ratio(&daily[index + 1 - window_len..=index])
+            };
+            StrategyBacktestRollingRatioPoint {
+                date: day.date,
+                sample_count,
+                ratio,
+            }
+        })
+        .collect()
+}
+
+fn rolling_balance_ratio_points(
+    daily: &[StrategyBacktestDailyBalanceReturn],
+    window_len: usize,
+    ratio: impl Fn(&[StrategyBacktestDailyBalanceReturn]) -> f64,
 ) -> Vec<StrategyBacktestRollingRatioPoint> {
     if window_len == 0 {
         return Vec::new();
