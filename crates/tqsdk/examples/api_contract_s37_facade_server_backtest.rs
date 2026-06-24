@@ -7,6 +7,18 @@
 
 use tqsdk::prelude::*;
 
+#[allow(dead_code)]
+fn build_with_custom_replay_endpoint(
+    replay_url: impl Into<String>,
+    start_ns: i64,
+    end_ns: i64,
+) -> tqsdk::Result<TqBuilder> {
+    Ok(Tq::futures()
+        .auth_env()?
+        .replay_url(replay_url)
+        .backtest(start_ns, end_ns))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
     // 2025-01-02 00:00:00 CST  →  1735747200_000_000_000 ns

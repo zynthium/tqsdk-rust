@@ -388,6 +388,7 @@ pub struct TqBuilder {
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_url: Option<String>,
+    replay_url: Option<String>,
     backtest: Option<BacktestConfig>,
     quote_symbols: Vec<String>,
     price_ticks: std::collections::HashMap<String, f64>,
@@ -403,6 +404,7 @@ impl TqBuilder {
             query_enabled: false,
             trade_targets: Vec::new(),
             market_url: None,
+            replay_url: None,
             backtest: None,
             quote_symbols: Vec::new(),
             price_ticks: std::collections::HashMap::new(),
@@ -420,6 +422,12 @@ impl TqBuilder {
     #[must_use]
     pub fn market_relay(mut self, relay_url: impl Into<String>) -> Self {
         self.market_url = Some(relay_url.into());
+        self
+    }
+
+    #[must_use]
+    pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
+        self.replay_url = Some(replay_url.into());
         self
     }
 
@@ -808,6 +816,7 @@ impl TqBuilder {
             query_enabled,
             trade_targets,
             market_url,
+            replay_url,
             backtest,
             quote_symbols,
             price_ticks,
@@ -827,7 +836,15 @@ impl TqBuilder {
                 .await
             }
             backtest => {
-                connect_wait_facade(auth, query_enabled, trade_targets, market_url, backtest).await
+                connect_wait_facade(
+                    auth,
+                    query_enabled,
+                    trade_targets,
+                    market_url,
+                    replay_url,
+                    backtest,
+                )
+                .await
             }
         }
     }
@@ -962,9 +979,11 @@ async fn connect_wait_facade(
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_url: Option<String>,
+    replay_url: Option<String>,
     backtest: Option<BacktestConfig>,
 ) -> Result<Tq> {
-    let session_builder = session_builder(auth, query_enabled, trade_targets, market_url)?;
+    let session_builder =
+        session_builder(auth, query_enabled, trade_targets, market_url, replay_url)?;
     let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
     if let Some(BacktestConfig::Server { start_ns, end_ns }) = backtest {
         wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
@@ -978,12 +997,16 @@ fn session_builder(
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_url: Option<String>,
+    replay_url: Option<String>,
 ) -> Result<tqsdk_session::SessionClientBuilder> {
     let auth = auth.ok_or(Error::MissingAuth)?;
     let mut builder =
         tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass).futures_market();
     if let Some(market_url) = market_url {
         builder = builder.market_relay(market_url);
+    }
+    if let Some(replay_url) = replay_url {
+        builder = builder.replay_url(replay_url);
     }
     if query_enabled {
         builder = builder.enable_query();
@@ -1228,8 +1251,8 @@ mod builder_contract_tests {
     use chrono::NaiveDate;
 
     use super::{
-        Error, TqBuilder, continuous_minute_history_requests,
-        declared_quote_minute_history_requests, trading_day_from_timestamp_ns,
+        Auth, Error, TqBuilder, continuous_minute_history_requests,
+        declared_quote_minute_history_requests, session_builder, trading_day_from_timestamp_ns,
         trading_day_start_time_ns,
     };
 
@@ -1247,6 +1270,26 @@ mod builder_contract_tests {
         let result = TqBuilder::new().connect().await;
 
         assert!(matches!(result, Err(Error::MissingAuth)));
+    }
+
+    #[test]
+    fn session_builder_applies_replay_url() {
+        let builder = session_builder(
+            Some(Auth {
+                user: "demo-user".to_string(),
+                pass: "demo-pass".to_string(),
+            }),
+            false,
+            Vec::new(),
+            None,
+            Some("replay-driver".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            builder.endpoints().replay_url.as_deref(),
+            Some("replay-driver")
+        );
     }
 
     #[test]

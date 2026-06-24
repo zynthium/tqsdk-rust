@@ -5,7 +5,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
-- Server-side backtest (`.backtest()`)
+- Server-side backtest (`.backtest()`, optional `.replay_url(...)`)
 - Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_kline_histories(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_quote_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
