@@ -849,6 +849,34 @@ async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_summary_tracks_event_date_range() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 172_800_000_000_000, 101.0, 10, 100.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .build()
+        .await
+        .unwrap();
+
+    while backtest.next().await.unwrap().is_some() {}
+
+    let summary = backtest.summary();
+    assert_eq!(summary.start_event_time_ns(), Some(86_400_000_000_000));
+    assert_eq!(summary.end_event_time_ns(), Some(172_800_000_000_000));
+    assert_eq!(
+        summary.start_event_date_utc(),
+        Some(NaiveDate::from_ymd_opt(1970, 1, 2).unwrap())
+    );
+    assert_eq!(
+        summary.end_event_date_utc(),
+        Some(NaiveDate::from_ymd_opt(1970, 1, 3).unwrap())
+    );
+}
+
+#[tokio::test]
 async fn strategy_backtest_summary_tracks_average_risk_ratio() {
     let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),

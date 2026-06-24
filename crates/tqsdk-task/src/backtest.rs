@@ -58,6 +58,8 @@ pub struct StrategyBacktestSummary {
     quote_count: usize,
     tick_count: usize,
     kline_count: usize,
+    start_event_time_ns: Option<i64>,
+    end_event_time_ns: Option<i64>,
     balance_points: Vec<StrategyBacktestBalancePoint>,
     equity_points: Vec<StrategyBacktestEquityPoint>,
     risk_ratio_points: Vec<StrategyBacktestRiskRatioPoint>,
@@ -383,6 +385,8 @@ impl StrategyBacktestSummary {
             quote_count: 0,
             tick_count: 0,
             kline_count: 0,
+            start_event_time_ns: None,
+            end_event_time_ns: None,
             balance_points: Vec::new(),
             equity_points: Vec::new(),
             risk_ratio_points: Vec::new(),
@@ -440,11 +444,26 @@ impl StrategyBacktestSummary {
     ) {
         let previous_close_profit = self.final_account.close_profit;
         let previous_trade_count = self.trades.len();
+        self.record_event_time(event_time_ns);
         self.refresh_from_sim(sim, symbols);
         self.record_closed_profit_point(previous_close_profit, previous_trade_count, event_time_ns);
         self.record_balance_point(event_time_ns);
         self.record_equity_point(event_time_ns);
         self.record_risk_ratio_point(event_time_ns);
+    }
+
+    fn record_event_time(&mut self, event_time_ns: Option<i64>) {
+        let Some(event_time_ns) = event_time_ns else {
+            return;
+        };
+        self.start_event_time_ns = Some(
+            self.start_event_time_ns
+                .map_or(event_time_ns, |start| start.min(event_time_ns)),
+        );
+        self.end_event_time_ns = Some(
+            self.end_event_time_ns
+                .map_or(event_time_ns, |end| end.max(event_time_ns)),
+        );
     }
 
     fn record_closed_profit_point(
@@ -554,6 +573,27 @@ impl StrategyBacktestSummary {
     #[must_use]
     pub fn kline_count(&self) -> usize {
         self.kline_count
+    }
+
+    #[must_use]
+    pub fn start_event_time_ns(&self) -> Option<i64> {
+        self.start_event_time_ns
+    }
+
+    #[must_use]
+    pub fn end_event_time_ns(&self) -> Option<i64> {
+        self.end_event_time_ns
+    }
+
+    #[must_use]
+    pub fn start_event_date_utc(&self) -> Option<NaiveDate> {
+        self.start_event_time_ns
+            .and_then(utc_date_from_timestamp_ns)
+    }
+
+    #[must_use]
+    pub fn end_event_date_utc(&self) -> Option<NaiveDate> {
+        self.end_event_time_ns.and_then(utc_date_from_timestamp_ns)
     }
 
     #[must_use]
