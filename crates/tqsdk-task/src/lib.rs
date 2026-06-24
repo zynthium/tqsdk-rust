@@ -45,8 +45,8 @@ pub use account_group::{
 pub use backtest::{
     StrategyBacktest, StrategyBacktestBalancePoint, StrategyBacktestBuilder,
     StrategyBacktestClosedProfitPoint, StrategyBacktestContext, StrategyBacktestDailyBalanceReturn,
-    StrategyBacktestDailyEquityReturn, StrategyBacktestEquityPoint, StrategyBacktestEvent,
-    StrategyBacktestSummary,
+    StrategyBacktestDailyEquityReturn, StrategyBacktestDailyReturnWindow,
+    StrategyBacktestEquityPoint, StrategyBacktestEvent, StrategyBacktestSummary,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{

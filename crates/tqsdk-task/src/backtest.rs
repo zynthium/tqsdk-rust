@@ -121,6 +121,14 @@ pub struct StrategyBacktestDailyBalanceReturn {
     return_rate: f64,
 }
 
+/// Explicit daily return window for exchange/trading-day grouping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyBacktestDailyReturnWindow {
+    date: NaiveDate,
+    start_time_ns: i64,
+    end_time_ns: i64,
+}
+
 /// Strategy context plus local sim controls for the current backtest step.
 pub struct StrategyBacktestContext<'a> {
     event: StrategyBacktestEvent,
@@ -726,6 +734,34 @@ impl StrategyBacktestSummary {
             .collect()
     }
 
+    /// Derive cash-balance returns with caller-provided trading-day windows.
+    ///
+    /// Windows are evaluated in caller order. Invalid empty windows are skipped.
+    /// A valid window with no observations carries the previous balance forward
+    /// and therefore contributes a zero-return day.
+    #[must_use]
+    pub fn daily_balance_returns_for_windows(
+        &self,
+        windows: &[StrategyBacktestDailyReturnWindow],
+    ) -> Vec<StrategyBacktestDailyBalanceReturn> {
+        let mut previous_balance = self.initial_account.balance;
+        windows
+            .iter()
+            .filter(|window| window.is_valid())
+            .map(|window| {
+                let balance = last_balance_in_window(&self.balance_points, window)
+                    .unwrap_or(previous_balance);
+                let return_rate = rate_or_nan(balance - previous_balance, previous_balance);
+                previous_balance = balance;
+                StrategyBacktestDailyBalanceReturn {
+                    date: window.date,
+                    balance,
+                    return_rate,
+                }
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn balance_trading_day_count(&self) -> usize {
         self.daily_balance_returns().len()
@@ -792,6 +828,34 @@ impl StrategyBacktestSummary {
                 previous_equity = equity;
                 StrategyBacktestDailyEquityReturn {
                     date,
+                    equity,
+                    return_rate,
+                }
+            })
+            .collect()
+    }
+
+    /// Derive mark-to-market equity returns with caller-provided trading-day windows.
+    ///
+    /// Windows are evaluated in caller order. Invalid empty windows are skipped.
+    /// A valid window with no observations carries the previous equity forward
+    /// and therefore contributes a zero-return day.
+    #[must_use]
+    pub fn daily_equity_returns_for_windows(
+        &self,
+        windows: &[StrategyBacktestDailyReturnWindow],
+    ) -> Vec<StrategyBacktestDailyEquityReturn> {
+        let mut previous_equity = self.initial_equity();
+        windows
+            .iter()
+            .filter(|window| window.is_valid())
+            .map(|window| {
+                let equity =
+                    last_equity_in_window(&self.equity_points, window).unwrap_or(previous_equity);
+                let return_rate = rate_or_nan(equity - previous_equity, previous_equity);
+                previous_equity = equity;
+                StrategyBacktestDailyEquityReturn {
+                    date: window.date,
                     equity,
                     return_rate,
                 }
@@ -1171,6 +1235,40 @@ impl StrategyBacktestDailyBalanceReturn {
     }
 }
 
+impl StrategyBacktestDailyReturnWindow {
+    #[must_use]
+    pub fn new(date: NaiveDate, start_time_ns: i64, end_time_ns: i64) -> Self {
+        Self {
+            date,
+            start_time_ns,
+            end_time_ns,
+        }
+    }
+
+    #[must_use]
+    pub fn date(&self) -> NaiveDate {
+        self.date
+    }
+
+    #[must_use]
+    pub fn start_time_ns(&self) -> i64 {
+        self.start_time_ns
+    }
+
+    #[must_use]
+    pub fn end_time_ns(&self) -> i64 {
+        self.end_time_ns
+    }
+
+    fn is_valid(&self) -> bool {
+        self.start_time_ns < self.end_time_ns
+    }
+
+    fn contains(&self, event_time_ns: i64) -> bool {
+        self.start_time_ns <= event_time_ns && event_time_ns < self.end_time_ns
+    }
+}
+
 impl StrategyBacktestEvent {
     fn from_replay_event(event: &ReplayMarketEvent) -> Self {
         event.step_meta().into()
@@ -1482,6 +1580,38 @@ fn max_consecutive_return_days(
         }
     }
     max_seen
+}
+
+fn last_balance_in_window(
+    points: &[StrategyBacktestBalancePoint],
+    window: &StrategyBacktestDailyReturnWindow,
+) -> Option<f64> {
+    points
+        .iter()
+        .filter_map(|point| {
+            point
+                .event_time_ns
+                .filter(|event_time_ns| window.contains(*event_time_ns))
+                .map(|event_time_ns| (event_time_ns, point.balance))
+        })
+        .max_by_key(|(event_time_ns, _)| *event_time_ns)
+        .map(|(_, balance)| balance)
+}
+
+fn last_equity_in_window(
+    points: &[StrategyBacktestEquityPoint],
+    window: &StrategyBacktestDailyReturnWindow,
+) -> Option<f64> {
+    points
+        .iter()
+        .filter_map(|point| {
+            point
+                .event_time_ns
+                .filter(|event_time_ns| window.contains(*event_time_ns))
+                .map(|event_time_ns| (event_time_ns, point.equity))
+        })
+        .max_by_key(|(event_time_ns, _)| *event_time_ns)
+        .map(|(_, equity)| equity)
 }
 
 fn account_equity(account: &Account) -> f64 {

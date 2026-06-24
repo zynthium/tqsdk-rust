@@ -1,7 +1,10 @@
 use chrono::NaiveDate;
 use tqsdk_core::{Kline, Quote, Symbol, Tick};
 use tqsdk_session::{InstrumentClass, InstrumentSpec};
-use tqsdk_task::{ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, TaskError, TqSim};
+use tqsdk_task::{
+    ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, StrategyBacktestDailyReturnWindow,
+    TaskError, TqSim,
+};
 use tqsdk_wait::OrderTicketState;
 
 #[tokio::test]
@@ -778,6 +781,68 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
     assert_eq!(daily[2].equity(), 10_000_050.0);
     assert!((daily[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
+    let windows = [
+        StrategyBacktestDailyReturnWindow::new(
+            NaiveDate::from_ymd_opt(2026, 5, 15).unwrap(),
+            0,
+            100_000_000_000_000,
+        ),
+        StrategyBacktestDailyReturnWindow::new(
+            NaiveDate::from_ymd_opt(2026, 5, 18).unwrap(),
+            100_000_000_000_000,
+            200_000_000_000_000,
+        ),
+        StrategyBacktestDailyReturnWindow::new(
+            NaiveDate::from_ymd_opt(2026, 5, 19).unwrap(),
+            200_000_000_000_000,
+            300_000_000_000_000,
+        ),
+        StrategyBacktestDailyReturnWindow::new(
+            NaiveDate::from_ymd_opt(2026, 5, 20).unwrap(),
+            300_000_000_000_000,
+            400_000_000_000_000,
+        ),
+        StrategyBacktestDailyReturnWindow::new(
+            NaiveDate::from_ymd_opt(2026, 5, 21).unwrap(),
+            400_000_000_000_000,
+            400_000_000_000_000,
+        ),
+    ];
+    let windowed_equity = summary.daily_equity_returns_for_windows(&windows);
+    assert_eq!(windowed_equity.len(), 4);
+    assert_eq!(
+        windowed_equity[0].date(),
+        NaiveDate::from_ymd_opt(2026, 5, 15).unwrap()
+    );
+    assert_eq!(windowed_equity[0].equity(), 10_000_000.0);
+    assert_eq!(windowed_equity[0].return_rate(), 0.0);
+    assert_eq!(
+        windowed_equity[1].date(),
+        NaiveDate::from_ymd_opt(2026, 5, 18).unwrap()
+    );
+    assert_eq!(windowed_equity[1].equity(), 10_000_100.0);
+    assert!((windowed_equity[1].return_rate() - 0.00001).abs() < 1e-12);
+    assert_eq!(
+        windowed_equity[2].date(),
+        NaiveDate::from_ymd_opt(2026, 5, 19).unwrap()
+    );
+    assert_eq!(windowed_equity[2].equity(), 10_000_050.0);
+    assert!((windowed_equity[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
+    assert_eq!(
+        windowed_equity[3].date(),
+        NaiveDate::from_ymd_opt(2026, 5, 20).unwrap()
+    );
+    assert_eq!(windowed_equity[3].equity(), 10_000_050.0);
+    assert_eq!(windowed_equity[3].return_rate(), 0.0);
+    let windowed_balance = summary.daily_balance_returns_for_windows(&windows);
+    assert_eq!(windowed_balance.len(), 4);
+    assert_eq!(windowed_balance[0].balance(), 10_000_000.0);
+    assert_eq!(windowed_balance[3].balance(), 10_000_000.0);
+    assert!(
+        windowed_balance
+            .iter()
+            .all(|daily| daily.return_rate() == 0.0)
+    );
     assert_eq!(summary.equity_trading_day_count(), 3);
     assert_eq!(summary.profitable_equity_day_count(), 1);
     assert_eq!(summary.losing_equity_day_count(), 1);

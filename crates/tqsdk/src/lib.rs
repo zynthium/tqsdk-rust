@@ -52,9 +52,9 @@ pub mod advanced {
             ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
             StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
             StrategyBacktestDailyBalanceReturn, StrategyBacktestDailyEquityReturn,
-            StrategyBacktestEquityPoint, StrategyBacktestSummary, StrategyReplaySourceBuilder,
-            TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost,
-            VolumeSplitPolicy,
+            StrategyBacktestDailyReturnWindow, StrategyBacktestEquityPoint,
+            StrategyBacktestSummary, StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
+            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
         };
     }
 
