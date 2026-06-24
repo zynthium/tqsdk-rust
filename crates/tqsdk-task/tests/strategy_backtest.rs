@@ -1145,6 +1145,133 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     );
 }
 
+#[tokio::test]
+async fn strategy_backtest_summary_derives_rolling_daily_equity_ratios() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 172_800_000_000_000, 110.0, 10, 109.0, 8),
+        quote_event("SHFE.rb2501", 259_200_000_000_000, 105.0, 10, 104.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_contract_multiplier("SHFE.rb2501", 10.0))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("summary-rolling-equity-order")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+    let _ctx = backtest.next().await.unwrap().unwrap();
+    let _ctx = backtest.next().await.unwrap().unwrap();
+
+    let summary = backtest.summary();
+    let daily = summary.daily_equity_returns();
+    let returns = [
+        daily[0].return_rate(),
+        daily[1].return_rate(),
+        daily[2].return_rate(),
+    ];
+    let drawdowns = [
+        daily[0].drawdown_rate(),
+        daily[1].drawdown_rate(),
+        daily[2].drawdown_rate(),
+    ];
+
+    let sharpe = summary.rolling_daily_equity_sharpe_ratios(2);
+    assert_eq!(sharpe.len(), 3);
+    assert_eq!(
+        sharpe[0].date(),
+        NaiveDate::from_ymd_opt(1970, 1, 2).unwrap()
+    );
+    assert_eq!(sharpe[0].sample_count(), 1);
+    assert!(sharpe[0].ratio().is_nan());
+    assert_eq!(sharpe[1].sample_count(), 2);
+    assert!((sharpe[1].ratio() - expected_annualized_sharpe(&returns[0..2])).abs() < 1e-12);
+    assert!((sharpe[2].ratio() - expected_annualized_sharpe(&returns[1..3])).abs() < 1e-12);
+
+    let sortino = summary.rolling_daily_equity_sortino_ratios(2);
+    assert_eq!(sortino.len(), 3);
+    assert!(sortino[0].ratio().is_nan());
+    assert!(sortino[1].ratio().is_nan());
+    assert!((sortino[2].ratio() - expected_annualized_sortino(&returns[1..3])).abs() < 1e-12);
+
+    let calmar = summary.rolling_daily_equity_calmar_ratios(2);
+    assert_eq!(calmar.len(), 3);
+    assert!(calmar[0].ratio().is_nan());
+    assert!(calmar[1].ratio().is_nan());
+    assert!(
+        (calmar[2].ratio() - expected_annualized_calmar(&returns[1..3], &drawdowns[1..3])).abs()
+            < 1e-12
+    );
+
+    assert!(summary.rolling_daily_equity_sharpe_ratios(0).is_empty());
+    assert!(summary.rolling_daily_equity_sortino_ratios(0).is_empty());
+    assert!(summary.rolling_daily_equity_calmar_ratios(0).is_empty());
+}
+
+fn expected_annualized_sharpe(returns: &[f64]) -> f64 {
+    if returns.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|return_rate| {
+            let diff = return_rate - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
+    let std_dev = variance.sqrt();
+    if std_dev == 0.0 {
+        f64::NAN
+    } else {
+        mean / std_dev * 250.0_f64.sqrt()
+    }
+}
+
+fn expected_annualized_sortino(returns: &[f64]) -> f64 {
+    if returns.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let downside_variance = returns
+        .iter()
+        .filter(|return_rate| **return_rate < 0.0)
+        .map(|return_rate| return_rate * return_rate)
+        .sum::<f64>()
+        / returns.len() as f64;
+    let downside_dev = downside_variance.sqrt();
+    if downside_dev == 0.0 {
+        f64::NAN
+    } else {
+        mean / downside_dev * 250.0_f64.sqrt()
+    }
+}
+
+fn expected_annualized_calmar(returns: &[f64], drawdown_rates: &[f64]) -> f64 {
+    if returns.is_empty() {
+        return f64::NAN;
+    }
+    let total_return = returns
+        .iter()
+        .fold(1.0, |growth, return_rate| growth * (1.0 + return_rate))
+        - 1.0;
+    let annualized_return = (1.0 + total_return).powf(250.0 / returns.len() as f64) - 1.0;
+    let max_drawdown = drawdown_rates.iter().copied().fold(0.0_f64, f64::max);
+    if max_drawdown <= 0.0 {
+        f64::NAN
+    } else {
+        annualized_return / max_drawdown
+    }
+}
+
 fn quote_event(
     symbol: &str,
     datetime: i64,
