@@ -702,19 +702,37 @@ impl StrategyBacktestSummary {
 
     #[must_use]
     pub fn annualized_daily_balance_sharpe_ratio(&self) -> f64 {
+        self.annualized_daily_balance_sharpe_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sharpe_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_sharpe_ratio(
             self.daily_balance_returns()
                 .iter()
                 .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            annual_risk_free_rate,
         )
     }
 
     #[must_use]
     pub fn annualized_daily_equity_sharpe_ratio(&self) -> f64 {
+        self.annualized_daily_equity_sharpe_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_sharpe_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_sharpe_ratio(
             self.daily_equity_returns()
                 .iter()
                 .map(StrategyBacktestDailyEquityReturn::return_rate),
+            annual_risk_free_rate,
         )
     }
 
@@ -724,36 +742,80 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn annualized_daily_sharpe_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
+        self.annualized_daily_equity_sharpe_ratio_with_risk_free_rate(annual_risk_free_rate)
+    }
+
+    #[must_use]
     pub fn annualized_daily_balance_sortino_ratio(&self) -> f64 {
+        self.annualized_daily_balance_sortino_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sortino_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_sortino_ratio(
             self.daily_balance_returns()
                 .iter()
                 .map(StrategyBacktestDailyBalanceReturn::return_rate),
+            annual_risk_free_rate,
         )
     }
 
     #[must_use]
     pub fn annualized_daily_equity_sortino_ratio(&self) -> f64 {
+        self.annualized_daily_equity_sortino_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_sortino_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_sortino_ratio(
             self.daily_equity_returns()
                 .iter()
                 .map(StrategyBacktestDailyEquityReturn::return_rate),
+            annual_risk_free_rate,
         )
     }
 
     #[must_use]
     pub fn annualized_daily_balance_calmar_ratio(&self) -> f64 {
+        self.annualized_daily_balance_calmar_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_calmar_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_calmar_ratio(
             self.annualized_balance_return_rate(),
             self.max_balance_drawdown_rate,
+            annual_risk_free_rate,
         )
     }
 
     #[must_use]
     pub fn annualized_daily_equity_calmar_ratio(&self) -> f64 {
+        self.annualized_daily_equity_calmar_ratio_with_risk_free_rate(0.0)
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_calmar_ratio_with_risk_free_rate(
+        &self,
+        annual_risk_free_rate: f64,
+    ) -> f64 {
         annualized_calmar_ratio(
             self.annualized_equity_return_rate(),
             self.max_equity_drawdown_rate,
+            annual_risk_free_rate,
         )
     }
 
@@ -1275,12 +1337,27 @@ fn annualized_return_rate(total_return_rate: f64, period_count: usize) -> f64 {
     }
 }
 
-fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
+fn daily_risk_free_rate(annual_risk_free_rate: f64) -> f64 {
+    if !annual_risk_free_rate.is_finite() || annual_risk_free_rate <= -1.0 {
+        f64::NAN
+    } else {
+        (1.0 + annual_risk_free_rate).powf(1.0 / DEFAULT_TRADING_DAYS_PER_YEAR) - 1.0
+    }
+}
+
+fn annualized_sharpe_ratio(
+    returns: impl IntoIterator<Item = f64>,
+    annual_risk_free_rate: f64,
+) -> f64 {
     let returns = returns
         .into_iter()
         .filter(|value| value.is_finite())
         .collect::<Vec<_>>();
     if returns.len() < 2 {
+        return f64::NAN;
+    }
+    let daily_rf = daily_risk_free_rate(annual_risk_free_rate);
+    if !daily_rf.is_finite() {
         return f64::NAN;
     }
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
@@ -1296,11 +1373,14 @@ fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
     if std_dev == 0.0 || !std_dev.is_finite() {
         f64::NAN
     } else {
-        mean / std_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
+        (mean - daily_rf) / std_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
     }
 }
 
-fn annualized_sortino_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
+fn annualized_sortino_ratio(
+    returns: impl IntoIterator<Item = f64>,
+    annual_risk_free_rate: f64,
+) -> f64 {
     let returns = returns
         .into_iter()
         .filter(|value| value.is_finite())
@@ -1308,29 +1388,42 @@ fn annualized_sortino_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
     if returns.len() < 2 {
         return f64::NAN;
     }
+    let daily_rf = daily_risk_free_rate(annual_risk_free_rate);
+    if !daily_rf.is_finite() {
+        return f64::NAN;
+    }
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
     let downside_variance = returns
         .iter()
-        .filter(|value| **value < 0.0)
-        .map(|value| value * value)
+        .filter(|value| **value < daily_rf)
+        .map(|value| {
+            let diff = value - daily_rf;
+            diff * diff
+        })
         .sum::<f64>()
         / returns.len() as f64;
     let downside_dev = downside_variance.sqrt();
     if downside_dev == 0.0 || !downside_dev.is_finite() {
         f64::NAN
     } else {
-        mean / downside_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
+        (mean - daily_rf) / downside_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
     }
 }
 
-fn annualized_calmar_ratio(annualized_return_rate: f64, max_drawdown_rate: f64) -> f64 {
+fn annualized_calmar_ratio(
+    annualized_return_rate: f64,
+    max_drawdown_rate: f64,
+    annual_risk_free_rate: f64,
+) -> f64 {
     if !annualized_return_rate.is_finite()
         || !max_drawdown_rate.is_finite()
+        || !annual_risk_free_rate.is_finite()
+        || annual_risk_free_rate <= -1.0
         || max_drawdown_rate <= 0.0
     {
         f64::NAN
     } else {
-        annualized_return_rate / max_drawdown_rate
+        (annualized_return_rate - annual_risk_free_rate) / max_drawdown_rate
     }
 }
 

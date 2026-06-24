@@ -697,6 +697,30 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
     assert!((summary.annualized_equity_return_rate() - expected_annualized).abs() < 1e-12);
     assert!(summary.annualized_daily_equity_sortino_ratio().is_finite());
     assert!(summary.annualized_daily_equity_calmar_ratio().is_finite());
+
+    let risk_free_rate = 0.025;
+    let sharpe_with_risk_free =
+        summary.annualized_daily_equity_sharpe_ratio_with_risk_free_rate(risk_free_rate);
+    assert!(sharpe_with_risk_free.is_finite());
+    assert!(sharpe_with_risk_free < summary.annualized_daily_equity_sharpe_ratio());
+    assert_eq!(
+        summary.annualized_daily_sharpe_ratio_with_risk_free_rate(risk_free_rate),
+        sharpe_with_risk_free
+    );
+    assert!(
+        summary
+            .annualized_daily_equity_sortino_ratio_with_risk_free_rate(risk_free_rate)
+            .is_finite()
+    );
+    assert!(
+        summary
+            .annualized_daily_equity_calmar_ratio_with_risk_free_rate(risk_free_rate)
+            .is_finite()
+    );
+    assert!(
+        summary.annualized_daily_equity_calmar_ratio_with_risk_free_rate(risk_free_rate)
+            < summary.annualized_daily_equity_calmar_ratio()
+    );
 }
 
 fn quote_event(
