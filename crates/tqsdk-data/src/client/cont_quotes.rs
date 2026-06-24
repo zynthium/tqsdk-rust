@@ -20,6 +20,14 @@ pub struct HistoricalContQuotesRow {
     pub underlyings: BTreeMap<String, String>,
 }
 
+/// A single historical continuous-contract underlying mapping row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalContUnderlyingRow {
+    pub date: String,
+    pub symbol: String,
+    pub underlying: String,
+}
+
 impl DataClient {
     pub async fn query_his_cont_quotes(
         &self,
@@ -93,6 +101,25 @@ impl DataClient {
         }
 
         Ok(rows)
+    }
+
+    pub async fn query_his_cont_underlyings(
+        &self,
+        symbol: &str,
+        days: usize,
+        end_date: Option<NaiveDate>,
+    ) -> Result<Vec<HistoricalContUnderlyingRow>> {
+        let rows = self
+            .query_his_cont_quotes(&[symbol], days, end_date)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|mut row| HistoricalContUnderlyingRow {
+                date: row.date,
+                symbol: symbol.to_string(),
+                underlying: row.underlyings.remove(symbol).unwrap_or_default(),
+            })
+            .collect())
     }
 
     async fn trading_days(

@@ -165,6 +165,7 @@
    - `kline_data_download`
    - `tick_data_download`
    - 扩展 `query_his_cont_quotes`
+   - `query_his_cont_underlyings` 提供单主连 date -> underlying 映射薄 helper
    - `query_option_greeks`
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`

@@ -22,7 +22,7 @@ mod history_series;
 mod page;
 mod permissions;
 
-pub use cont_quotes::HistoricalContQuotesRow;
+pub use cont_quotes::{HistoricalContQuotesRow, HistoricalContUnderlyingRow};
 pub use page::{
     KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
     TickDataPageRequest, TickDataSeries, TickDataSeriesRequest,
@@ -523,6 +523,66 @@ mod tests {
             assert_eq!(rows[2].date, "2026-05-04");
             assert_eq!(rows[2].underlyings["KQ.m@DCE.a"], "DCE.a2609");
             assert_eq!(rows[2].underlyings["KQ.m@DCE.eg"], "DCE.eg2609");
+
+            server.join().unwrap();
+        });
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn query_his_cont_underlyings_returns_single_symbol_mapping() {
+        run_on_tokio(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = std::thread::spawn(move || {
+                let (mut holiday_stream, _) = listener.accept().unwrap();
+                let holiday_request = read_http_request(&mut holiday_stream);
+                assert!(
+                    holiday_request.starts_with("GET /holiday.json HTTP/1.1"),
+                    "{holiday_request}"
+                );
+                write_http_ok(
+                    &mut holiday_stream,
+                    r#"["2026-05-01","2026-05-02","2026-05-03"]"#,
+                );
+
+                let (mut cont_stream, _) = listener.accept().unwrap();
+                let cont_request = read_http_request(&mut cont_stream);
+                assert!(
+                    cont_request.starts_with("GET /continuous_table.json HTTP/1.1"),
+                    "{cont_request}"
+                );
+                write_http_ok(
+                    &mut cont_stream,
+                    r#"{
+                        "DCE.a": [[20260429, "DCE.a2605"], [20260502, "DCE.a2609"]]
+                    }"#,
+                );
+            });
+
+            let client = DataClient::new_for_test_with_urls(
+                format!("http://{addr}/holiday.json"),
+                format!("http://{addr}/continuous_table.json"),
+            );
+
+            let rows = client
+                .query_his_cont_underlyings(
+                    "KQ.m@DCE.a",
+                    3,
+                    Some(NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].date, "2026-04-29");
+            assert_eq!(rows[0].symbol, "KQ.m@DCE.a");
+            assert_eq!(rows[0].underlying, "DCE.a2605");
+            assert_eq!(rows[1].date, "2026-04-30");
+            assert_eq!(rows[1].underlying, "DCE.a2605");
+            assert_eq!(rows[2].date, "2026-05-04");
+            assert_eq!(rows[2].underlying, "DCE.a2609");
 
             server.join().unwrap();
         });

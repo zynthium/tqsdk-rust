@@ -159,7 +159,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 equity 曲线；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。完整
-日频/Sharpe 类绩效报告、自动分钟线和主连历史映射仍是后续范围。
+日频/Sharpe 类绩效报告、自动分钟线和自动主连分段回测仍是后续范围；单主连
+date -> underlying 映射可用 `tqsdk-data::DataClient::query_his_cont_underlyings(...)`。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

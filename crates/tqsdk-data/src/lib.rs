@@ -66,9 +66,9 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 }
 
 pub use client::{
-    DataClient, DataClientBuilder, HistoricalContQuotesRow, KlineDataPage, KlineDataPageRequest,
-    KlineDataSeries, KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
-    TickDataSeriesRequest,
+    DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,
+    KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
+    TickDataPageRequest, TickDataSeries, TickDataSeriesRequest,
 };
 pub use download::{
     DataDownloadProgress, KlineDataDownload, KlineDataDownloadPage, TickDataDownload,
