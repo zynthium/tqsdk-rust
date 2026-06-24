@@ -121,6 +121,7 @@ pub struct StrategyBacktestRiskRatioPoint {
 pub struct StrategyBacktestDailyEquityReturn {
     date: NaiveDate,
     equity: f64,
+    profit: f64,
     return_rate: f64,
 }
 
@@ -129,6 +130,7 @@ pub struct StrategyBacktestDailyEquityReturn {
 pub struct StrategyBacktestDailyBalanceReturn {
     date: NaiveDate,
     balance: f64,
+    profit: f64,
     return_rate: f64,
 }
 
@@ -812,11 +814,13 @@ impl StrategyBacktestSummary {
         daily_balance
             .into_iter()
             .map(|(date, balance)| {
-                let return_rate = rate_or_nan(balance - previous_balance, previous_balance);
+                let profit = balance - previous_balance;
+                let return_rate = rate_or_nan(profit, previous_balance);
                 previous_balance = balance;
                 StrategyBacktestDailyBalanceReturn {
                     date,
                     balance,
+                    profit,
                     return_rate,
                 }
             })
@@ -840,11 +844,13 @@ impl StrategyBacktestSummary {
             .map(|window| {
                 let balance = last_balance_in_window(&self.balance_points, window)
                     .unwrap_or(previous_balance);
-                let return_rate = rate_or_nan(balance - previous_balance, previous_balance);
+                let profit = balance - previous_balance;
+                let return_rate = rate_or_nan(profit, previous_balance);
                 previous_balance = balance;
                 StrategyBacktestDailyBalanceReturn {
                     date: window.date,
                     balance,
+                    profit,
                     return_rate,
                 }
             })
@@ -913,11 +919,13 @@ impl StrategyBacktestSummary {
         daily_equity
             .into_iter()
             .map(|(date, equity)| {
-                let return_rate = rate_or_nan(equity - previous_equity, previous_equity);
+                let profit = equity - previous_equity;
+                let return_rate = rate_or_nan(profit, previous_equity);
                 previous_equity = equity;
                 StrategyBacktestDailyEquityReturn {
                     date,
                     equity,
+                    profit,
                     return_rate,
                 }
             })
@@ -941,11 +949,13 @@ impl StrategyBacktestSummary {
             .map(|window| {
                 let equity =
                     last_equity_in_window(&self.equity_points, window).unwrap_or(previous_equity);
-                let return_rate = rate_or_nan(equity - previous_equity, previous_equity);
+                let profit = equity - previous_equity;
+                let return_rate = rate_or_nan(profit, previous_equity);
                 previous_equity = equity;
                 StrategyBacktestDailyEquityReturn {
                     date: window.date,
                     equity,
+                    profit,
                     return_rate,
                 }
             })
@@ -1319,6 +1329,11 @@ impl StrategyBacktestDailyEquityReturn {
     }
 
     #[must_use]
+    pub fn profit(&self) -> f64 {
+        self.profit
+    }
+
+    #[must_use]
     pub fn return_rate(&self) -> f64 {
         self.return_rate
     }
@@ -1333,6 +1348,11 @@ impl StrategyBacktestDailyBalanceReturn {
     #[must_use]
     pub fn balance(&self) -> f64 {
         self.balance
+    }
+
+    #[must_use]
+    pub fn profit(&self) -> f64 {
+        self.profit
     }
 
     #[must_use]

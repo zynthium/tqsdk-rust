@@ -117,7 +117,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；逐合约显式配置优先，其次可用已查询的 `InstrumentSpec` 或已 replay quote 的 `price_tick` metadata，最后才使用 `default_price_tick(tick)` 全局 fallback；不会在本地回测 builder 内自动联网查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
   - replay 结束前会 drain 已进入 runtime 的 task updates，确保 `TargetPosTask::execution_report()` 可记录最后一个本地模拟成交
-  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、回测事件起止时间与 UTC 日期范围、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、风险度观测与平均风险度、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的资金/权益收益、调用方显式交易日窗口收益、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、峰值余额/权益和最大回撤
+  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、回测事件起止时间与 UTC 日期范围、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、风险度观测与平均风险度、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的资金/权益收益与每日盈亏、调用方显式交易日窗口收益与每日盈亏、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、峰值余额/权益和最大回撤
   - 官方完整报表、自动分钟线、股票/期权完整账户语义仍是后续迭代范围；交易日历基础查询由 `tqsdk-data` 提供
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
@@ -302,7 +302,7 @@ println!("events={} trades={}", summary.event_count(), summary.trades().len());
 # }
 ```
 
-当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金/手续费/合约乘数配置，并提供轻量 `summary()` / 回测事件起止时间与 UTC 日期范围 / trade log / 账户余额变化率 / cash + equity 曲线点 / 风险度观测 / 平仓盈亏观测 / 胜率 / 盈亏额比例 / daily equity returns / 年化日 Sharpe / 最大回撤。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。replay quote 中已有的 `price_tick` / `volume_multiple` / `margin` / `commission` / `underlying_symbol` 会进入策略 quote 和本地 `TqSim` 缺省参数；显式逐合约配置仍优先，且可通过 `margin(symbol)` / `commission(symbol)` 查询。kline-only replay 仍需要显式配置 `price_tick(symbol, tick)` 或 `default_price_tick(tick)`；交易日历基础查询由 `tqsdk-data` 提供，完整绩效指标集、自动分钟线、股票/期权完整账户语义仍是后续范围。
+当前本地最小闭环覆盖 quote/tick/kline replay event、replay symbol 自动追踪、futures 单账户、主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、per-symbol 保证金/手续费/合约乘数配置，并提供轻量 `summary()` / 回测事件起止时间与 UTC 日期范围 / trade log / 账户余额变化率 / cash + equity 曲线点 / 每日资金和权益盈亏 / 风险度观测 / 平仓盈亏观测 / 胜率 / 盈亏额比例 / daily equity returns / 年化日 Sharpe / 最大回撤。默认 facade 的 `Tq::target_pos(...)` 可在 local backtest 中复用这套模拟账户。replay quote 中已有的 `price_tick` / `volume_multiple` / `margin` / `commission` / `underlying_symbol` 会进入策略 quote 和本地 `TqSim` 缺省参数；显式逐合约配置仍优先，且可通过 `margin(symbol)` / `commission(symbol)` 查询。kline-only replay 仍需要显式配置 `price_tick(symbol, tick)` 或 `default_price_tick(tick)`；交易日历基础查询由 `tqsdk-data` 提供，完整绩效指标集、自动分钟线、股票/期权完整账户语义仍是后续范围。
 
 ## 示例
 
