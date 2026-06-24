@@ -111,8 +111,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 会向 `replay.api.shinnytech.com` 创建 replay session，并返回
 `ServerReplaySession` 中的 `session_url`、`instrument_url` 和 `market_url`。
 默认 `tqsdk` facade 的 `.server_replay(date)?` 会用这个 `market_url` 接入正常
-行情 loop。`ServerReplaySession::set_speed(...)` / `heartbeat()` / `terminate()`
-提供显式控制；当前不自动后台化 heartbeat。
+行情 loop，并在 facade 层自动发送 replay heartbeat。底层
+`ServerReplaySession::set_speed(...)` / `heartbeat()` / `terminate()` 仍提供显式控制。
 
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复

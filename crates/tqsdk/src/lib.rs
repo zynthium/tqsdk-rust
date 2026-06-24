@@ -87,6 +87,8 @@ const TRADING_DAY_START_OFFSET_NS: i64 = 6 * 60 * 60 * NANOS_PER_SECOND;
 const TRADING_DAY_END_OFFSET_NS: i64 = 18 * 60 * 60 * NANOS_PER_SECOND;
 const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
+#[cfg(all(feature = "services", feature = "live"))]
+const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Error type for the user-facing facade.
 #[derive(Debug)]
@@ -175,6 +177,8 @@ pub struct Tq {
     inner: TqInner,
     #[cfg(all(feature = "services", feature = "live"))]
     server_replay: Option<tqsdk_session::ServerReplaySession>,
+    #[cfg(all(feature = "services", feature = "live"))]
+    server_replay_heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 enum TqInner {
@@ -202,6 +206,8 @@ impl Tq {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay_heartbeat: None,
         }
     }
 
@@ -210,9 +216,11 @@ impl Tq {
         api: tqsdk_wait::TqApi,
         server_replay: tqsdk_session::ServerReplaySession,
     ) -> Self {
+        let server_replay_heartbeat = Some(spawn_server_replay_heartbeat(&server_replay));
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             server_replay: Some(server_replay),
+            server_replay_heartbeat,
         }
     }
 
@@ -221,6 +229,8 @@ impl Tq {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay_heartbeat: None,
         }
     }
 
@@ -295,6 +305,13 @@ impl Tq {
         self.server_replay.as_ref()
     }
 
+    #[cfg(all(test, feature = "services", feature = "live"))]
+    fn server_replay_heartbeat_active(&self) -> bool {
+        self.server_replay_heartbeat
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+    }
+
     #[cfg(all(feature = "services", feature = "live"))]
     pub async fn set_replay_speed(&self, speed: f64) -> Result<()> {
         self.require_server_replay_session()?
@@ -312,11 +329,17 @@ impl Tq {
     }
 
     #[cfg(all(feature = "services", feature = "live"))]
-    pub async fn terminate_server_replay(&self) -> Result<()> {
-        self.require_server_replay_session()?
-            .terminate()
-            .await
-            .map_err(Error::from)
+    pub async fn terminate_server_replay(&mut self) -> Result<()> {
+        let session = self.require_server_replay_session()?.clone();
+        self.abort_server_replay_heartbeat();
+        session.terminate().await.map_err(Error::from)
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    fn abort_server_replay_heartbeat(&mut self) {
+        if let Some(handle) = self.server_replay_heartbeat.take() {
+            handle.abort();
+        }
     }
 
     #[cfg(all(feature = "services", feature = "live"))]
@@ -456,6 +479,26 @@ impl Tq {
         self.backtest_summary()
             .map(|summary| summary.performance_report(rolling_window_len))
     }
+}
+
+#[cfg(all(feature = "services", feature = "live"))]
+impl Drop for Tq {
+    fn drop(&mut self) {
+        self.abort_server_replay_heartbeat();
+    }
+}
+
+#[cfg(all(feature = "services", feature = "live"))]
+fn spawn_server_replay_heartbeat(
+    replay_session: &tqsdk_session::ServerReplaySession,
+) -> tokio::task::JoinHandle<()> {
+    let replay_session = replay_session.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SERVER_REPLAY_HEARTBEAT_INTERVAL).await;
+            let _ = replay_session.heartbeat().await;
+        }
+    })
 }
 
 /// Builder for [`Tq`].
@@ -1520,6 +1563,7 @@ mod builder_contract_tests {
 
         let tq = Tq::from_api_with_server_replay(api, session);
 
+        assert!(tq.server_replay_heartbeat_active());
         assert_eq!(
             tq.server_replay_session()
                 .expect("server replay session should be retained")

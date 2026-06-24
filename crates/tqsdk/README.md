@@ -27,9 +27,8 @@ runtime contract；它只提供一个更容易开始的 facade：
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
 服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
-把返回的 `md_url` 接入正常行情 loop。复盘速度、heartbeat 和 terminate 可通过
-`Tq::set_replay_speed(...)` / `send_replay_heartbeat()` / `terminate_server_replay()`
-显式控制；当前不会自动启动 Python 风格后台 heartbeat。
+把返回的 `md_url` 接入正常行情 loop，并自动发送 replay heartbeat。复盘速度和
+terminate 可通过 `Tq::set_replay_speed(...)` / `terminate_server_replay()` 显式控制。
 本地回测结束前会 drain 已进入 runtime 的 task updates，因此 `TargetPos` 的
 `execution_report()` 能看到最后一个 replay step 产生的本地模拟成交；需要类似
 task channel 的增量消费时，可用 `execution_events_since(cursor)` /

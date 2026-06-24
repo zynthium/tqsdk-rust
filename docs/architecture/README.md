@@ -122,8 +122,8 @@ V1 是：
     下单校验规格对象
   - `ServerReplayBuilder` / `ServerReplaySession` 用于官方单日 replay session
     创建和 endpoint 解析；默认 facade 可用 `.server_replay(date)?` 接入返回的
-    replay 行情 endpoint，并显式调用控速/heartbeat/terminate；不自动后台化
-    Python 风格 heartbeat 生命周期
+    replay 行情 endpoint，并自动 heartbeat；控速和 terminate 为显式调用，
+    terminate 不伪装成 async Drop
   - session-level error diagnostic / retry hint wrapper
   - session-scoped order intent ledger，供上层 facade 在同一 session 内对稳定
     client order id 做去重和命令关联
