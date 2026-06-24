@@ -9,6 +9,8 @@
 //! - `DataClient::new().query_his_cont_quotes(...)`
 //! - `DataClient::new().query_his_cont_underlyings(...)`
 //! - `DataClient::new().query_his_cont_underlying_segments(...)`
+//! - `DataClient::new().query_trading_calendar(...)`
+//! - `DataClient::new().query_trading_days(...)`
 //! - `historical_cont_underlying_segments(...)`
 //! - `DataClient::from_session(...).get_kline_data_page(...)`
 //! - `DataClient::from_session(...).get_tick_data_page(...)`
@@ -72,7 +74,7 @@ pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,
     HistoricalContUnderlyingSegment, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
     KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
-    TickDataSeriesRequest, historical_cont_underlying_segments,
+    TickDataSeriesRequest, TradingCalendarRow, historical_cont_underlying_segments,
 };
 pub use download::{
     DataDownloadProgress, KlineDataDownload, KlineDataDownloadPage, TickDataDownload,

@@ -38,6 +38,19 @@ pub struct HistoricalContUnderlyingSegment {
     pub trading_days: usize,
 }
 
+/// A single exchange trading-calendar row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradingCalendarRow {
+    pub date: String,
+    pub trading: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TradingCalendarDay {
+    date: NaiveDate,
+    trading: bool,
+}
+
 impl DataClient {
     pub async fn query_his_cont_quotes(
         &self,
@@ -144,11 +157,48 @@ impl DataClient {
         Ok(historical_cont_underlying_segments(&rows))
     }
 
+    pub async fn query_trading_calendar(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<TradingCalendarRow>> {
+        Ok(self
+            .trading_calendar(start_date, end_date)
+            .await?
+            .into_iter()
+            .map(|day| TradingCalendarRow {
+                date: day.date.format("%Y-%m-%d").to_string(),
+                trading: day.trading,
+            })
+            .collect())
+    }
+
+    pub async fn query_trading_days(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<NaiveDate>> {
+        Ok(self
+            .trading_calendar(start_date, end_date)
+            .await?
+            .into_iter()
+            .filter_map(|day| day.trading.then_some(day.date))
+            .collect())
+    }
+
     async fn trading_days(
         &self,
         start_date: NaiveDate,
         end_date: NaiveDate,
     ) -> Result<Vec<NaiveDate>> {
+        self.query_trading_days(start_date, end_date).await
+    }
+
+    async fn trading_calendar(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<TradingCalendarDay>> {
         if start_date > end_date {
             return Err(DataError::Validation(
                 "start_date must be less than or equal to end_date".to_string(),
@@ -197,9 +247,10 @@ impl DataClient {
         while current <= end_date {
             let trading =
                 current.weekday().number_from_monday() <= 5 && !holiday_set.contains(&current);
-            if trading {
-                days.push(current);
-            }
+            days.push(TradingCalendarDay {
+                date: current,
+                trading,
+            });
             current = current.checked_add_days(Days::new(1)).ok_or_else(|| {
                 DataError::Validation("failed to advance trading day".to_string())
             })?;

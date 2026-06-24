@@ -23,8 +23,9 @@ pub mod advanced {
 
     pub mod data {
         pub use tqsdk_data::{
-            DataClient, DataError, HistoricalContUnderlyingRow, KlineDataSeries,
-            KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
+            DataClient, DataError, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
+            KlineDataSeries, KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
+            TradingCalendarRow, historical_cont_underlying_segments,
         };
     }
 

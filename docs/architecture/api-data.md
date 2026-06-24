@@ -96,10 +96,13 @@
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `query_his_cont_underlyings(symbol, days, end_date)`
 - `query_his_cont_underlying_segments(symbol, days, end_date)`
+- `query_trading_calendar(start_date, end_date)`
+- `query_trading_days(start_date, end_date)`
 - `historical_cont_underlying_segments(rows)`
 - `HistoricalContQuotesRow`
 - `HistoricalContUnderlyingRow`
 - `HistoricalContUnderlyingSegment`
+- `TradingCalendarRow`
 - `get_kline_data_page(KlineDataPageRequest)`
 - `get_tick_data_page(TickDataPageRequest)`
 - `get_kline_data_series(KlineDataSeriesRequest)`
@@ -172,6 +175,7 @@
    - 扩展 `query_his_cont_quotes`
    - `query_his_cont_underlyings` 提供单主连 date -> underlying 映射薄 helper
    - `query_his_cont_underlying_segments` / `historical_cont_underlying_segments` 提供相邻交易日同一 underlying 的 segment 压缩基础能力
+   - `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用
    - `query_option_greeks`
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`

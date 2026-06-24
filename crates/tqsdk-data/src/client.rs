@@ -24,7 +24,7 @@ mod permissions;
 
 pub use cont_quotes::{
     HistoricalContQuotesRow, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
-    historical_cont_underlying_segments,
+    TradingCalendarRow, historical_cont_underlying_segments,
 };
 pub use page::{
     KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
@@ -586,6 +586,80 @@ mod tests {
             assert_eq!(rows[1].underlying, "DCE.a2605");
             assert_eq!(rows[2].date, "2026-05-04");
             assert_eq!(rows[2].underlying, "DCE.a2609");
+
+            server.join().unwrap();
+        });
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn query_trading_calendar_and_days_use_holiday_payload() {
+        run_on_tokio(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut holiday_stream, _) = listener.accept().unwrap();
+                    let holiday_request = read_http_request(&mut holiday_stream);
+                    assert!(
+                        holiday_request.starts_with("GET /holiday.json HTTP/1.1"),
+                        "{holiday_request}"
+                    );
+                    write_http_ok(
+                        &mut holiday_stream,
+                        r#"["2026-05-01","2026-05-02","2026-05-03"]"#,
+                    );
+                }
+            });
+
+            let client = DataClient::new_for_test_with_urls(
+                format!("http://{addr}/holiday.json"),
+                format!("http://{addr}/continuous_table.json"),
+            );
+            let start = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+            let end = NaiveDate::from_ymd_opt(2026, 5, 4).unwrap();
+
+            let calendar = client.query_trading_calendar(start, end).await.unwrap();
+            assert_eq!(
+                calendar,
+                vec![
+                    TradingCalendarRow {
+                        date: "2026-04-29".to_string(),
+                        trading: true,
+                    },
+                    TradingCalendarRow {
+                        date: "2026-04-30".to_string(),
+                        trading: true,
+                    },
+                    TradingCalendarRow {
+                        date: "2026-05-01".to_string(),
+                        trading: false,
+                    },
+                    TradingCalendarRow {
+                        date: "2026-05-02".to_string(),
+                        trading: false,
+                    },
+                    TradingCalendarRow {
+                        date: "2026-05-03".to_string(),
+                        trading: false,
+                    },
+                    TradingCalendarRow {
+                        date: "2026-05-04".to_string(),
+                        trading: true,
+                    },
+                ]
+            );
+
+            let trading_days = client.query_trading_days(start, end).await.unwrap();
+            assert_eq!(
+                trading_days,
+                vec![
+                    NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 5, 4).unwrap(),
+                ]
+            );
 
             server.join().unwrap();
         });
