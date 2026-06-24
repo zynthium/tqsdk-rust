@@ -138,6 +138,13 @@ async fn facade_local_backtest_target_pos_uses_underlying_for_continuous_replay_
     assert_eq!(summary.trades()[0].exchange_id, "SHFE");
     assert_eq!(summary.trades()[0].instrument_id, "rb2501");
     assert_eq!(target.execution_report().trades.len(), 1);
+
+    let (event_cursor, events) = target.execution_events_since(0);
+    assert!(!events.is_empty());
+    assert!(target.execution_events_since(event_cursor).1.is_empty());
+    let (trade_cursor, trades) = target.execution_trades_since(0);
+    assert_eq!(trades.len(), 1);
+    assert!(target.execution_trades_since(trade_cursor).1.is_empty());
 }
 
 #[test]

@@ -56,7 +56,9 @@ pub mod advanced {
             StrategyBacktestDailyBalanceReturn, StrategyBacktestDailyEquityReturn,
             StrategyBacktestDailyReturnWindow, StrategyBacktestEquityPoint,
             StrategyBacktestSummary, StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
-            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
+            TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport, TargetPosTaskOrderReport,
+            TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError, TaskHost,
+            VolumeSplitPolicy,
         };
     }
 
@@ -877,6 +879,22 @@ impl TargetPos {
     #[must_use]
     pub fn execution_report(&self) -> tqsdk_task::TargetPosTaskExecutionReport {
         self.inner.execution_report()
+    }
+
+    #[must_use]
+    pub fn execution_events_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<tqsdk_task::TargetPosTaskExecutionEvent>) {
+        self.inner.execution_events_since(start)
+    }
+
+    #[must_use]
+    pub fn execution_trades_since(
+        &self,
+        start: usize,
+    ) -> (usize, Vec<tqsdk_task::TargetPosTaskTradeFill>) {
+        self.inner.execution_trades_since(start)
     }
 
     pub fn set(&self, volume: i64) -> Result<()> {
