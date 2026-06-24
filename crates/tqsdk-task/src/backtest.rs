@@ -146,6 +146,7 @@ impl StrategyBacktest {
 
     pub async fn next(&mut self) -> Result<Option<StrategyBacktestContext<'_>>> {
         let Some(event) = self.replay.next() else {
+            self.drain_pending_task_updates().await?;
             return Ok(None);
         };
         let backtest_event = StrategyBacktestEvent::from_replay_event(&event);
@@ -242,6 +243,16 @@ impl StrategyBacktest {
                 .entry(symbol.to_owned())
                 .or_insert(quote.price_tick);
         }
+    }
+
+    async fn drain_pending_task_updates(&mut self) -> Result<()> {
+        while self
+            .strategy
+            .task_host_mut()
+            .wait_update(Some(tokio::time::Instant::now()))
+            .await?
+        {}
+        Ok(())
     }
 }
 

@@ -22,6 +22,8 @@ runtime contract；它只提供一个更容易开始的 facade：
 自动查询 underlying segment、按交易日窗口裁剪并组合 replay source。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
+本地回测结束前会 drain 已进入 runtime 的 task updates，因此 `TargetPos` 的
+`execution_report()` 能看到最后一个 replay step 产生的本地模拟成交。
 
 ## 示例
 

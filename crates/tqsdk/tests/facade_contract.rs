@@ -1,6 +1,6 @@
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
-use tqsdk_core::{Kline, Symbol};
+use tqsdk_core::{Kline, Quote, Symbol};
 
 #[test]
 fn prelude_exposes_default_strategy_surface() {
@@ -72,6 +72,55 @@ async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
     assert_eq!(quote.last_price, 102.0);
     assert_eq!(quote.ask_price1, 102.5);
     assert_eq!(quote.bid_price1, 101.5);
+}
+
+#[tokio::test]
+async fn facade_local_backtest_target_pos_uses_underlying_for_continuous_replay_symbol() {
+    let alias = "KQ.m@SHFE.rb";
+    let underlying = "SHFE.rb2501";
+    let replay = ReplayMarketSource::new(vec![
+        quote_event(alias, 1_000, 100.0, 10, 99.0, 8)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+        quote_event(alias, 2_000, 101.0, 10, 100.0, 8)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+    ]);
+
+    let mut tq = Tq::futures()
+        .local_backtest(replay)
+        .connect()
+        .await
+        .unwrap();
+    let quote = tq.quote(alias).await.unwrap();
+    let target = tq.target_pos(LOCAL_BACKTEST_ACCOUNT_ID, alias).unwrap();
+    target.set(1).unwrap();
+
+    assert!(tq.next().await.unwrap());
+    assert_eq!(quote.load().unwrap().underlying_symbol, underlying);
+    assert_eq!(
+        tq.position(LOCAL_BACKTEST_ACCOUNT_ID, alias)
+            .load()
+            .unwrap()
+            .pos_long,
+        1
+    );
+    assert_eq!(
+        tq.position(LOCAL_BACKTEST_ACCOUNT_ID, underlying)
+            .load()
+            .unwrap()
+            .pos_long,
+        1
+    );
+
+    assert!(tq.next().await.unwrap());
+    assert!(!tq.next().await.unwrap());
+
+    let summary = tq.backtest_summary().unwrap();
+    assert_eq!(summary.trades().len(), 1);
+    assert_eq!(summary.trades()[0].exchange_id, "SHFE");
+    assert_eq!(summary.trades()[0].instrument_id, "rb2501");
+    assert_eq!(target.execution_report().trades.len(), 1);
 }
 
 #[test]
@@ -220,6 +269,32 @@ fn instrument_spec(
         expire_datetime_secs: None,
         underlying_symbol: None,
     }
+}
+
+fn quote_event(
+    symbol: &str,
+    datetime: i64,
+    ask_price1: f64,
+    ask_volume1: i64,
+    bid_price1: f64,
+    bid_volume1: i64,
+) -> ReplayMarketEvent {
+    ReplayMarketEvent::quote(
+        "fixture",
+        symbol,
+        datetime,
+        Some(datetime),
+        Quote {
+            datetime: "2026-05-15 09:30:00.000000".to_string(),
+            last_price: ask_price1,
+            ask_price1,
+            ask_volume1,
+            bid_price1,
+            bid_volume1,
+            ..Quote::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
