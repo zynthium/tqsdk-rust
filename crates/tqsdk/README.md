@@ -6,7 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Server-side backtest (`.backtest()`)
-- Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_minute_history(...)`, `_as` alias helpers, optional `.default_price_tick(...)`)
+- Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
@@ -18,6 +18,8 @@ runtime contract；它只提供一个更容易开始的 facade：
 本地回测的 `_as` helper 让 caller-provided replay symbol 与实际 history symbol 分离：
 可以把 `SHFE.rb2601` / `SHFE.rb2605` 等 underlying series 显式组合到
 `KQ.m@SHFE.rb` 这样的主连代码下回放，并保留 quote `underlying_symbol` metadata。
+如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
+`.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
 
 ## 示例
 
@@ -55,6 +57,7 @@ while tq.next().await? {
 
 ```rust
 use tqsdk::advanced::session::SessionClientBuilder;
+use tqsdk::advanced::session::InstrumentSpec;
 use tqsdk::advanced::stream::TqStreamBuilder;
 use tqsdk::advanced::runtime::RuntimeReader;
 use tqsdk::advanced::task::StrategyReplaySourceBuilder;

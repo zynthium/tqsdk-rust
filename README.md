@@ -156,6 +156,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
 request 使用 `local_backtest_kline_histories_as(...)` /
 `local_backtest_tick_histories_as(...)` 组合分段；交易日/夜盘边界仍由调用方显式给出。
+若已通过 `tqsdk-session` 查询到合约 metadata，可把 `InstrumentSpec` 传入
+`instrument_spec(...)`，用于 kline quote synthesis 的 `price_tick` 和本地撮合合约乘数。
 明确要直接操作 Python-style wait facade 时，才下钻到
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部

@@ -269,6 +269,28 @@ impl StrategyBacktestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn instrument_spec(mut self, spec: tqsdk_session::InstrumentSpec) -> Self {
+        let symbol = spec.symbol.as_str().to_owned();
+        self.price_ticks
+            .entry(symbol.clone())
+            .or_insert(spec.price_tick);
+        self.sim
+            .set_contract_multiplier(symbol, spec.volume_multiple as f64);
+        self
+    }
+
+    #[must_use]
+    pub fn instrument_specs(
+        mut self,
+        specs: impl IntoIterator<Item = tqsdk_session::InstrumentSpec>,
+    ) -> Self {
+        for spec in specs {
+            self = self.instrument_spec(spec);
+        }
+        self
+    }
+
     /// Set fallback price tick for kline quote synthesis.
     ///
     /// Per-symbol [`StrategyBacktestBuilder::price_tick`] overrides this fallback.

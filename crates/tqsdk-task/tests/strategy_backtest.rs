@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
-use tqsdk_core::{Kline, Quote, Tick};
+use tqsdk_core::{Kline, Quote, Symbol, Tick};
+use tqsdk_session::{InstrumentClass, InstrumentSpec};
 use tqsdk_task::{ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, TaskError, TqSim};
 use tqsdk_wait::OrderTicketState;
 
@@ -220,6 +221,40 @@ async fn strategy_backtest_uses_default_price_tick_for_kline_quote_synthesis() {
     assert_eq!(quote.last_price, 99.0);
     assert_eq!(quote.ask_price1, 99.5);
     assert_eq!(quote.bid_price1, 98.5);
+}
+
+#[tokio::test]
+async fn strategy_backtest_uses_instrument_spec_for_kline_metadata() {
+    let replay = ReplayMarketSource::new(vec![kline_event(
+        "SHFE.rb2501",
+        1_000,
+        100.0,
+        105.0,
+        99.0,
+        102.0,
+    )]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .instrument_spec(instrument_spec("SHFE.rb2501", 0.5, 10))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    let quote = ctx.quote("SHFE.rb2501").unwrap();
+    assert_eq!(quote.ask_price1, 102.5);
+    assert_eq!(quote.bid_price1, 101.5);
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(102.5)
+        .send_once("instrument-spec-open")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+    let position = ctx.sim().position("SHFE.rb2501");
+    assert_eq!(position.open_cost_long, 1_025.0);
+    assert_eq!(position.market_value_long, 1_020.0);
 }
 
 #[tokio::test]
@@ -873,4 +908,27 @@ fn kline_event(
         },
     )
     .unwrap()
+}
+
+fn instrument_spec(symbol: &str, price_tick: f64, volume_multiple: i64) -> InstrumentSpec {
+    let (exchange_id, product_id) =
+        symbol
+            .split_once('.')
+            .map_or(("", symbol), |(exchange, instrument)| {
+                let product_len = instrument
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphabetic())
+                    .count();
+                (exchange, &instrument[..product_len])
+            });
+    InstrumentSpec {
+        symbol: Symbol::new(symbol),
+        exchange_id: exchange_id.to_string(),
+        product_id: product_id.to_string(),
+        class: InstrumentClass::Future,
+        price_tick,
+        volume_multiple,
+        expire_datetime_secs: None,
+        underlying_symbol: None,
+    }
 }

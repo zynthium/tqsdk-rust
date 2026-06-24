@@ -1,4 +1,6 @@
+use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
+use tqsdk_core::{Kline, Symbol};
 
 #[test]
 fn prelude_exposes_default_strategy_surface() {
@@ -34,10 +36,50 @@ async fn facade_local_backtest_alias_history_helpers_build_empty_replay() {
     assert!(!tq.next().await.unwrap());
 }
 
+#[tokio::test]
+async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::kline(
+            "fixture",
+            "SHFE.rb2501",
+            1_000,
+            Some(1_000),
+            60_000_000_000,
+            Kline {
+                id: 1,
+                datetime: 1_000,
+                open: 100.0,
+                high: 105.0,
+                low: 99.0,
+                close: 102.0,
+                volume: 10,
+                ..Kline::default()
+            },
+        )
+        .unwrap(),
+    ]);
+
+    let mut tq = Tq::futures()
+        .local_backtest(replay)
+        .instrument_spec(instrument_spec("SHFE.rb2501", 0.5, 10))
+        .connect()
+        .await
+        .unwrap();
+    let quote = tq.quote("SHFE.rb2501").await.unwrap();
+
+    assert!(tq.next().await.unwrap());
+    let quote = quote.load().unwrap();
+    assert_eq!(quote.last_price, 102.0);
+    assert_eq!(quote.ask_price1, 102.5);
+    assert_eq!(quote.bid_price1, 101.5);
+}
+
 #[test]
 fn advanced_namespaces_keep_curated_underlying_access() {
     let _session = tqsdk::advanced::session::SessionClientBuilder::new("demo-user", "demo-pass")
         .futures_market();
+    let _ = std::any::type_name::<tqsdk::advanced::session::InstrumentSpec>();
+    let _ = std::any::type_name::<tqsdk::advanced::session::SymbolInfo>();
     let _stream =
         tqsdk::advanced::stream::TqStreamBuilder::new("demo-user", "demo-pass").futures_market();
     let _data = tqsdk::advanced::data::DataClient::new();
@@ -151,6 +193,33 @@ fn strip_alias(export: &str) -> &str {
     export
         .split_once("as")
         .map_or(export, |(symbol, _alias)| symbol)
+}
+
+fn instrument_spec(
+    symbol: &str,
+    price_tick: f64,
+    volume_multiple: i64,
+) -> tqsdk::advanced::session::InstrumentSpec {
+    let (exchange_id, product_id) =
+        symbol
+            .split_once('.')
+            .map_or(("", symbol), |(exchange, instrument)| {
+                let product_len = instrument
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphabetic())
+                    .count();
+                (exchange, &instrument[..product_len])
+            });
+    tqsdk::advanced::session::InstrumentSpec {
+        symbol: Symbol::new(symbol),
+        exchange_id: exchange_id.to_string(),
+        product_id: product_id.to_string(),
+        class: tqsdk::advanced::session::InstrumentClass::Future,
+        price_tick,
+        volume_multiple,
+        expire_datetime_secs: None,
+        underlying_symbol: None,
+    }
 }
 
 #[test]
