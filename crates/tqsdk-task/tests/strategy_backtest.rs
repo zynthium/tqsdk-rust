@@ -741,6 +741,64 @@ async fn strategy_backtest_summary_tracks_closed_profit_observations() {
     assert_eq!(summary.gross_loss(), 50.0);
     assert_eq!(summary.profit_loss_ratio(), 2.0);
     assert_eq!(summary.winning_rate(), 0.5);
+
+    let metrics = summary.performance_metrics();
+    assert_eq!(
+        metrics.start_date_utc(),
+        Some(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+    );
+    assert_eq!(
+        metrics.end_date_utc(),
+        Some(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+    );
+    assert_eq!(metrics.start_balance(), 10_000_000.0);
+    assert_eq!(metrics.end_balance(), 10_000_046.0);
+    assert_eq!(metrics.balance_change(), 46.0);
+    assert_nan_or_close(metrics.balance_return_rate(), summary.balance_return_rate());
+    assert_eq!(
+        metrics.balance_trading_day_count(),
+        summary.balance_trading_day_count()
+    );
+    assert_eq!(
+        metrics.profitable_balance_day_count(),
+        summary.profitable_balance_day_count()
+    );
+    assert_eq!(
+        metrics.losing_balance_day_count(),
+        summary.losing_balance_day_count()
+    );
+    assert_eq!(metrics.open_trade_count(), 2);
+    assert_eq!(metrics.close_trade_count(), 2);
+    assert_eq!(metrics.total_commission(), 4.0);
+    assert_eq!(metrics.realized_profit(), 50.0);
+    assert_eq!(metrics.net_realized_profit(), 46.0);
+    assert_nan_or_close(metrics.average_risk_ratio(), summary.average_risk_ratio());
+    assert_eq!(metrics.winning_rate(), 0.5);
+    assert_eq!(metrics.profit_loss_ratio(), 2.0);
+    assert_eq!(
+        metrics.max_balance_drawdown(),
+        summary.max_balance_drawdown()
+    );
+    assert_eq!(
+        metrics.max_balance_drawdown_rate(),
+        summary.max_balance_drawdown_rate()
+    );
+    assert_nan_or_close(
+        metrics.annualized_balance_return_rate(),
+        summary.annualized_balance_return_rate(),
+    );
+    assert_nan_or_close(
+        metrics.annualized_daily_balance_sharpe_ratio(),
+        summary.annualized_daily_balance_sharpe_ratio(),
+    );
+    assert_nan_or_close(
+        metrics.annualized_daily_balance_sortino_ratio(),
+        summary.annualized_daily_balance_sortino_ratio(),
+    );
+    assert_nan_or_close(
+        metrics.annualized_daily_balance_calmar_ratio(),
+        summary.annualized_daily_balance_calmar_ratio(),
+    );
 }
 
 #[tokio::test]

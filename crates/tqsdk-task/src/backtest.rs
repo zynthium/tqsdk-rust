@@ -146,6 +146,36 @@ pub struct StrategyBacktestRollingRatioPoint {
     ratio: f64,
 }
 
+/// Aggregated balance-based performance metrics for local backtest summaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestPerformanceMetrics {
+    start_date_utc: Option<NaiveDate>,
+    end_date_utc: Option<NaiveDate>,
+    start_balance: f64,
+    end_balance: f64,
+    balance_change: f64,
+    balance_return_rate: f64,
+    annualized_balance_return_rate: f64,
+    balance_trading_day_count: usize,
+    profitable_balance_day_count: usize,
+    losing_balance_day_count: usize,
+    max_consecutive_profitable_balance_days: usize,
+    max_consecutive_losing_balance_days: usize,
+    max_balance_drawdown: f64,
+    max_balance_drawdown_rate: f64,
+    total_commission: f64,
+    open_trade_count: usize,
+    close_trade_count: usize,
+    average_risk_ratio: f64,
+    realized_profit: f64,
+    net_realized_profit: f64,
+    winning_rate: f64,
+    profit_loss_ratio: f64,
+    annualized_daily_balance_sharpe_ratio: f64,
+    annualized_daily_balance_sortino_ratio: f64,
+    annualized_daily_balance_calmar_ratio: f64,
+}
+
 /// Explicit daily return window for exchange/trading-day grouping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyBacktestDailyReturnWindow {
@@ -806,6 +836,37 @@ impl StrategyBacktestSummary {
             }
         } else {
             gross_profit / gross_loss
+        }
+    }
+
+    #[must_use]
+    pub fn performance_metrics(&self) -> StrategyBacktestPerformanceMetrics {
+        StrategyBacktestPerformanceMetrics {
+            start_date_utc: self.start_event_date_utc(),
+            end_date_utc: self.end_event_date_utc(),
+            start_balance: self.initial_account.balance,
+            end_balance: self.final_account.balance,
+            balance_change: self.balance_change(),
+            balance_return_rate: self.balance_return_rate(),
+            annualized_balance_return_rate: self.annualized_balance_return_rate(),
+            balance_trading_day_count: self.balance_trading_day_count(),
+            profitable_balance_day_count: self.profitable_balance_day_count(),
+            losing_balance_day_count: self.losing_balance_day_count(),
+            max_consecutive_profitable_balance_days: self.max_consecutive_profitable_balance_days(),
+            max_consecutive_losing_balance_days: self.max_consecutive_losing_balance_days(),
+            max_balance_drawdown: self.max_balance_drawdown,
+            max_balance_drawdown_rate: self.max_balance_drawdown_rate,
+            total_commission: self.total_commission(),
+            open_trade_count: self.open_trade_count(),
+            close_trade_count: self.close_trade_count(),
+            average_risk_ratio: self.average_risk_ratio(),
+            realized_profit: self.realized_profit(),
+            net_realized_profit: self.net_realized_profit(),
+            winning_rate: self.winning_rate(),
+            profit_loss_ratio: self.profit_loss_ratio(),
+            annualized_daily_balance_sharpe_ratio: self.annualized_daily_balance_sharpe_ratio(),
+            annualized_daily_balance_sortino_ratio: self.annualized_daily_balance_sortino_ratio(),
+            annualized_daily_balance_calmar_ratio: self.annualized_daily_balance_calmar_ratio(),
         }
     }
 
@@ -1507,6 +1568,133 @@ impl StrategyBacktestRollingRatioPoint {
     #[must_use]
     pub fn ratio(&self) -> f64 {
         self.ratio
+    }
+}
+
+impl StrategyBacktestPerformanceMetrics {
+    #[must_use]
+    pub fn start_date_utc(&self) -> Option<NaiveDate> {
+        self.start_date_utc
+    }
+
+    #[must_use]
+    pub fn end_date_utc(&self) -> Option<NaiveDate> {
+        self.end_date_utc
+    }
+
+    #[must_use]
+    pub fn start_balance(&self) -> f64 {
+        self.start_balance
+    }
+
+    #[must_use]
+    pub fn end_balance(&self) -> f64 {
+        self.end_balance
+    }
+
+    #[must_use]
+    pub fn balance_change(&self) -> f64 {
+        self.balance_change
+    }
+
+    #[must_use]
+    pub fn balance_return_rate(&self) -> f64 {
+        self.balance_return_rate
+    }
+
+    #[must_use]
+    pub fn annualized_balance_return_rate(&self) -> f64 {
+        self.annualized_balance_return_rate
+    }
+
+    #[must_use]
+    pub fn balance_trading_day_count(&self) -> usize {
+        self.balance_trading_day_count
+    }
+
+    #[must_use]
+    pub fn profitable_balance_day_count(&self) -> usize {
+        self.profitable_balance_day_count
+    }
+
+    #[must_use]
+    pub fn losing_balance_day_count(&self) -> usize {
+        self.losing_balance_day_count
+    }
+
+    #[must_use]
+    pub fn max_consecutive_profitable_balance_days(&self) -> usize {
+        self.max_consecutive_profitable_balance_days
+    }
+
+    #[must_use]
+    pub fn max_consecutive_losing_balance_days(&self) -> usize {
+        self.max_consecutive_losing_balance_days
+    }
+
+    #[must_use]
+    pub fn max_balance_drawdown(&self) -> f64 {
+        self.max_balance_drawdown
+    }
+
+    #[must_use]
+    pub fn max_balance_drawdown_rate(&self) -> f64 {
+        self.max_balance_drawdown_rate
+    }
+
+    #[must_use]
+    pub fn total_commission(&self) -> f64 {
+        self.total_commission
+    }
+
+    #[must_use]
+    pub fn open_trade_count(&self) -> usize {
+        self.open_trade_count
+    }
+
+    #[must_use]
+    pub fn close_trade_count(&self) -> usize {
+        self.close_trade_count
+    }
+
+    #[must_use]
+    pub fn average_risk_ratio(&self) -> f64 {
+        self.average_risk_ratio
+    }
+
+    #[must_use]
+    pub fn realized_profit(&self) -> f64 {
+        self.realized_profit
+    }
+
+    #[must_use]
+    pub fn net_realized_profit(&self) -> f64 {
+        self.net_realized_profit
+    }
+
+    #[must_use]
+    pub fn winning_rate(&self) -> f64 {
+        self.winning_rate
+    }
+
+    #[must_use]
+    pub fn profit_loss_ratio(&self) -> f64 {
+        self.profit_loss_ratio
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sharpe_ratio(&self) -> f64 {
+        self.annualized_daily_balance_sharpe_ratio
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sortino_ratio(&self) -> f64 {
+        self.annualized_daily_balance_sortino_ratio
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_calmar_ratio(&self) -> f64 {
+        self.annualized_daily_balance_calmar_ratio
     }
 }
 
