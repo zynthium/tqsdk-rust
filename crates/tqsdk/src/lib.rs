@@ -173,6 +173,8 @@ impl From<tqsdk_data::DataError> for Error {
 /// while keeping the same public surface (`next()`, `quote()`, etc.).
 pub struct Tq {
     inner: TqInner,
+    #[cfg(all(feature = "services", feature = "live"))]
+    server_replay: Option<tqsdk_session::ServerReplaySession>,
 }
 
 enum TqInner {
@@ -198,12 +200,27 @@ impl Tq {
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay: None,
+        }
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    fn from_api_with_server_replay(
+        api: tqsdk_wait::TqApi,
+        server_replay: tqsdk_session::ServerReplaySession,
+    ) -> Self {
+        Self {
+            inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
+            server_replay: Some(server_replay),
         }
     }
 
     fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
         Self {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay: None,
         }
     }
 
@@ -270,6 +287,45 @@ impl Tq {
     #[must_use]
     pub fn history(&self) -> tqsdk_data::DataClient {
         tqsdk_data::DataClient::from_session(self.session().clone())
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[must_use]
+    pub fn server_replay_session(&self) -> Option<&tqsdk_session::ServerReplaySession> {
+        self.server_replay.as_ref()
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    pub async fn set_replay_speed(&self, speed: f64) -> Result<()> {
+        self.require_server_replay_session()?
+            .set_speed(speed)
+            .await
+            .map_err(Error::from)
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    pub async fn send_replay_heartbeat(&self) -> Result<()> {
+        self.require_server_replay_session()?
+            .heartbeat()
+            .await
+            .map_err(Error::from)
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    pub async fn terminate_server_replay(&self) -> Result<()> {
+        self.require_server_replay_session()?
+            .terminate()
+            .await
+            .map_err(Error::from)
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    fn require_server_replay_session(&self) -> Result<&tqsdk_session::ServerReplaySession> {
+        self.server_replay_session().ok_or_else(|| {
+            Error::from(tqsdk_session::SessionFacadeError::InvalidState(
+                "server replay control requires server_replay mode",
+            ))
+        })
     }
 
     #[cfg(feature = "live")]
@@ -1025,6 +1081,8 @@ async fn connect_wait_facade(
     backtest: Option<BacktestConfig>,
 ) -> Result<Tq> {
     #[cfg(all(feature = "services", feature = "live"))]
+    let mut server_replay_session = None;
+    #[cfg(all(feature = "services", feature = "live"))]
     let (market_url, replay_url) =
         if let Some(BacktestConfig::ServerReplay { replay_date }) = &backtest {
             let auth_ref = auth.as_ref().ok_or(Error::MissingAuth)?;
@@ -1035,7 +1093,9 @@ async fn connect_wait_facade(
             )?
             .create()
             .await?;
-            server_replay_endpoints(market_url, replay_url, &replay_session)
+            let endpoints = server_replay_endpoints(market_url, replay_url, &replay_session);
+            server_replay_session = Some(replay_session);
+            endpoints
         } else {
             (market_url, replay_url)
         };
@@ -1052,6 +1112,10 @@ async fn connect_wait_facade(
         Some(BacktestConfig::Local { .. }) | None => {}
     }
     let api = wait_builder.build().await?;
+    #[cfg(all(feature = "services", feature = "live"))]
+    if let Some(server_replay) = server_replay_session {
+        return Ok(Tq::from_api_with_server_replay(api, server_replay));
+    }
     Ok(Tq::from_api(api))
 }
 
@@ -1327,7 +1391,7 @@ mod builder_contract_tests {
     use serde_json::json;
 
     use super::{
-        Auth, BacktestConfig, Error, TqBuilder, continuous_minute_history_requests,
+        Auth, BacktestConfig, Error, Tq, TqBuilder, continuous_minute_history_requests,
         declared_quote_minute_history_requests, session_builder, trading_day_from_timestamp_ns,
         trading_day_start_time_ns,
     };
@@ -1432,6 +1496,55 @@ mod builder_contract_tests {
         assert_eq!(
             builder.endpoints().replay_url.as_deref(),
             Some("http://127.0.0.1:18888/t/rmd/replay/session/session-1")
+        );
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[tokio::test]
+    async fn tq_retains_server_replay_session_handle() {
+        let api = tqsdk_wait::TqApiBuilder::new("demo-user", "demo-pass")
+            .build()
+            .await
+            .expect("session client should build without network");
+        let replay_date = NaiveDate::from_ymd_opt(2026, 6, 25).expect("valid date");
+        let session = tqsdk_session::ServerReplaySession::from_create_session_payload(
+            replay_date,
+            &json!({
+                "ip": "127.0.0.1",
+                "session_port": 18888,
+                "gateway_web_port": 27777,
+                "session": "session-1"
+            }),
+        )
+        .expect("valid session response");
+
+        let tq = Tq::from_api_with_server_replay(api, session);
+
+        assert_eq!(
+            tq.server_replay_session()
+                .expect("server replay session should be retained")
+                .session_id(),
+            "session-1"
+        );
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[tokio::test]
+    async fn replay_control_requires_server_replay_mode() {
+        let api = tqsdk_wait::TqApiBuilder::new("demo-user", "demo-pass")
+            .build()
+            .await
+            .expect("session client should build without network");
+        let tq = Tq::from_api(api);
+
+        let error = tq
+            .set_replay_speed(1.0)
+            .await
+            .expect_err("live mode should not have replay control");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: server replay control requires server_replay mode"
         );
     }
 

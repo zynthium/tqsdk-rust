@@ -92,17 +92,34 @@ impl ServerReplayBuilder {
                 )))
             })?;
         let payload = read_json_response(response, "replay create_session").await?;
-        ServerReplaySession::from_create_session_payload(self.replay_date, &payload)
+        let mut session =
+            ServerReplaySession::from_create_session_payload(self.replay_date, &payload)?;
+        session.control_client = Some(client);
+        Ok(session)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerReplaySession {
     replay_date: NaiveDate,
     session_id: String,
     session_url: String,
     instrument_url: String,
     market_url: String,
+    control_client: Option<reqwest::Client>,
+}
+
+impl Debug for ServerReplaySession {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerReplaySession")
+            .field("replay_date", &self.replay_date)
+            .field("session_id", &self.session_id)
+            .field("session_url", &self.session_url)
+            .field("instrument_url", &self.instrument_url)
+            .field("market_url", &self.market_url)
+            .field("control_client", &self.control_client.is_some())
+            .finish()
+    }
 }
 
 impl ServerReplaySession {
@@ -122,6 +139,7 @@ impl ServerReplaySession {
             session_url,
             instrument_url,
             market_url,
+            control_client: None,
         })
     }
 
@@ -149,6 +167,37 @@ impl ServerReplaySession {
     pub fn market_url(&self) -> &str {
         &self.market_url
     }
+
+    pub async fn set_speed(&self, speed: f64) -> Result<()> {
+        self.post_control(speed_control_body(speed)?).await
+    }
+
+    pub async fn heartbeat(&self) -> Result<()> {
+        self.post_control(heartbeat_control_body()).await
+    }
+
+    pub async fn terminate(&self) -> Result<()> {
+        self.post_control(terminate_control_body()).await
+    }
+
+    async fn post_control(&self, body: Value) -> Result<()> {
+        let Some(client) = self.control_client.as_ref() else {
+            return Err(SessionFacadeError::InvalidState(
+                "server replay session was not created with an authenticated control client",
+            ));
+        };
+        let response = client
+            .post(&self.session_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                SessionFacadeError::from(ContractError::transport(format!(
+                    "replay control request failed: {err}"
+                )))
+            })?;
+        read_empty_response(response, "replay control").await
+    }
 }
 
 async fn read_json_response(response: reqwest::Response, context: &str) -> Result<Value> {
@@ -171,6 +220,41 @@ async fn read_json_response(response: reqwest::Response, context: &str) -> Resul
             "{context} returned invalid json: {err}"
         )))
     })
+}
+
+async fn read_empty_response(response: reqwest::Response, context: &str) -> Result<()> {
+    let status = response.status();
+    let bytes = read_limited_response_bytes(
+        response,
+        AUTH_RESPONSE_BODY_LIMIT,
+        context,
+        ContractError::http,
+    )
+    .await?;
+    if !status.is_success() {
+        let body = response_body_preview(&bytes);
+        return Err(SessionFacadeError::from(ContractError::http(format!(
+            "{context} failed with status {status}: {body}"
+        ))));
+    }
+    Ok(())
+}
+
+fn speed_control_body(speed: f64) -> Result<Value> {
+    if !speed.is_finite() || speed < 0.0 {
+        return Err(SessionFacadeError::from(ContractError::validation(
+            "replay speed must be finite and greater than or equal to zero",
+        )));
+    }
+    Ok(json!({ "aid": "ratio", "speed": speed }))
+}
+
+fn heartbeat_control_body() -> Value {
+    json!({ "aid": "heartbeat" })
+}
+
+fn terminate_control_body() -> Value {
+    json!({ "aid": "terminate" })
 }
 
 fn validate_replay_date(replay_date: NaiveDate) -> Result<()> {
@@ -243,7 +327,10 @@ mod tests {
     use chrono::NaiveDate;
     use serde_json::json;
 
-    use super::{ServerReplayBuilder, ServerReplaySession};
+    use super::{
+        ServerReplayBuilder, ServerReplaySession, heartbeat_control_body, speed_control_body,
+        terminate_control_body,
+    };
 
     #[test]
     fn server_replay_builder_rejects_weekend_dates() {
@@ -295,5 +382,22 @@ mod tests {
             session.market_url(),
             "ws://127.0.0.1:27777/t/rmd/front/mobile"
         );
+    }
+
+    #[test]
+    fn replay_control_bodies_match_official_aids() {
+        assert_eq!(
+            speed_control_body(3.0).expect("valid speed"),
+            json!({ "aid": "ratio", "speed": 3.0 })
+        );
+        assert_eq!(heartbeat_control_body(), json!({ "aid": "heartbeat" }));
+        assert_eq!(terminate_control_body(), json!({ "aid": "terminate" }));
+    }
+
+    #[test]
+    fn replay_speed_body_rejects_negative_or_non_finite_speed() {
+        assert!(speed_control_body(-0.1).is_err());
+        assert!(speed_control_body(f64::NAN).is_err());
+        assert!(speed_control_body(f64::INFINITY).is_err());
     }
 }

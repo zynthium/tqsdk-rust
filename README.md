@@ -146,8 +146,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `Tq::futures().backtest(start_ns, end_ns)` 对齐 Python `TqBacktest` 的服务端回测心智，
 需要自定义 replay endpoint 时可链式加 `.replay_url(url)`；单日服务端复盘可用
 `.server_replay(date)?` 对齐 Python `TqReplay(date)` 的会话创建和 replay 行情 endpoint
-接入，策略主体仍保持同一套 `next()` / `quote()` loop。复盘速度控制、heartbeat
-和 terminate lifecycle 目前仍未自动封装成 Python 风格后台对象。
+接入，策略主体仍保持同一套 `next()` / `quote()` loop。复盘速度、heartbeat
+和 terminate 可通过 `Tq::set_replay_speed(...)` / `send_replay_heartbeat()` /
+`terminate_server_replay()` 显式控制；目前不会自动启动 Python 风格后台 heartbeat。
 `Tq::futures().local_backtest(replay)` 使用本地 `ReplayMarketSource + TqSim`
 撮合，不需要真实服务；已有 owned history series 时也可以用
 `local_backtest_klines([series])` / `local_backtest_ticks([series])` 直接转本地 replay；

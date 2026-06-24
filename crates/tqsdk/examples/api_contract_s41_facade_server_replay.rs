@@ -23,6 +23,7 @@ async fn main() -> tqsdk::Result<()> {
         .server_replay(replay_date)?
         .connect()
         .await?;
+    tq.set_replay_speed(3.0).await?;
 
     let quote = tq.quote("SHFE.au2612").await?;
 
