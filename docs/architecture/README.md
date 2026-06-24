@@ -99,6 +99,7 @@ V1 是：
   - 默认用户入口 crate
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
+  - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/stream/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
 - `tqsdk-session`

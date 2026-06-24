@@ -152,6 +152,10 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `local_backtest_tick_history(&data, request).await?` 直接取数并进入本地回测。
 分钟线常用路径可进一步用
 `local_backtest_minute_history(&data, symbol, start_ns, end_ns).await?` 省掉 duration 配置。
+需要把 underlying history 以主连等稳定 replay symbol 回放时，使用
+`local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
+request 使用 `local_backtest_kline_histories_as(...)` /
+`local_backtest_tick_histories_as(...)` 组合分段；交易日/夜盘边界仍由调用方显式给出。
 明确要直接操作 Python-style wait facade 时，才下钻到
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
@@ -160,9 +164,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 自动追踪、`TargetPos` 执行闭环和轻量 `summary()` / trade log / cash + mark-to-market
 equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
-`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source，并可将
-underlying history 以主连等 caller-provided replay symbol 回放，同时保留 quote
-`underlying_symbol` metadata。summary
+`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
+也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
+symbol 回放，同时保留 quote `underlying_symbol` metadata。summary
 已含手续费、净实现盈亏、daily cash/equity returns、年化收益率和年化日
 Sharpe / Sortino / Calmar；官方完整报表、自动主连分段回测和执行 symbol
 切换仍是后续范围；交易日历、单主连

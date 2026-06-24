@@ -112,7 +112,7 @@
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
-  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_minute_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source
+  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_minute_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source；`local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)` 与 `*_histories_as(...)` 可把 underlying history 以 caller-provided replay symbol 分段回放并保留 `underlying_symbol` metadata
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；逐合约显式配置优先，其次使用已 replay quote 的 `price_tick` metadata，最后使用 `default_price_tick(tick)` 全局 fallback；不自动 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交

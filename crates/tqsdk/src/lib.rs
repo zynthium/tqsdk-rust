@@ -440,6 +440,23 @@ impl TqBuilder {
         Ok(self.local_backtest(builder.build()))
     }
 
+    /// Enter local-backtest mode from owned kline history series under a replay symbol.
+    ///
+    /// This is useful when underlying contract history should drive a synthetic
+    /// symbol such as a continuous-contract code.
+    pub fn local_backtest_klines_as(
+        self,
+        replay_symbol: impl AsRef<str>,
+        series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
+    ) -> Result<Self> {
+        let replay_symbol = replay_symbol.as_ref().to_owned();
+        let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+        for series in series {
+            builder = builder.kline_series_as(series, replay_symbol.as_str(), "history-kline")?;
+        }
+        Ok(self.local_backtest(builder.build()))
+    }
+
     /// Fetch kline history and enter local-backtest mode from the owned series.
     pub async fn local_backtest_kline_history(
         self,
@@ -448,6 +465,34 @@ impl TqBuilder {
     ) -> Result<Self> {
         let series = data.get_kline_data_series(request).await?;
         self.local_backtest_klines([series])
+    }
+
+    /// Fetch multiple kline history requests and replay them under one symbol.
+    ///
+    /// Use this for explicitly segmented continuous-contract backtests after the
+    /// caller has chosen the date/time windows for each underlying segment.
+    pub async fn local_backtest_kline_histories_as(
+        self,
+        data: &tqsdk_data::DataClient,
+        replay_symbol: impl AsRef<str>,
+        requests: impl IntoIterator<Item = tqsdk_data::KlineDataSeriesRequest>,
+    ) -> Result<Self> {
+        let mut series = Vec::new();
+        for request in requests {
+            series.push(data.get_kline_data_series(request).await?);
+        }
+        self.local_backtest_klines_as(replay_symbol, series)
+    }
+
+    /// Fetch kline history and replay it under a caller-provided symbol.
+    pub async fn local_backtest_kline_history_as(
+        self,
+        data: &tqsdk_data::DataClient,
+        replay_symbol: impl AsRef<str>,
+        request: tqsdk_data::KlineDataSeriesRequest,
+    ) -> Result<Self> {
+        self.local_backtest_kline_histories_as(data, replay_symbol, [request])
+            .await
     }
 
     /// Fetch one-minute kline history and enter local-backtest mode.
@@ -460,6 +505,28 @@ impl TqBuilder {
     ) -> Result<Self> {
         self.local_backtest_kline_history(
             data,
+            tqsdk_data::KlineDataSeriesRequest::new(
+                symbol,
+                Duration::from_secs(60),
+                start_datetime_ns,
+                end_datetime_ns,
+            ),
+        )
+        .await
+    }
+
+    /// Fetch one-minute kline history and replay it under a caller-provided symbol.
+    pub async fn local_backtest_minute_history_as(
+        self,
+        data: &tqsdk_data::DataClient,
+        replay_symbol: impl AsRef<str>,
+        symbol: impl Into<String>,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Self> {
+        self.local_backtest_kline_history_as(
+            data,
+            replay_symbol,
             tqsdk_data::KlineDataSeriesRequest::new(
                 symbol,
                 Duration::from_secs(60),
@@ -484,6 +551,23 @@ impl TqBuilder {
         Ok(self.local_backtest(builder.build()))
     }
 
+    /// Enter local-backtest mode from owned tick history series under a replay symbol.
+    ///
+    /// This keeps the strategy-facing symbol stable while preserving each
+    /// series' original symbol as quote `underlying_symbol` metadata.
+    pub fn local_backtest_ticks_as(
+        self,
+        replay_symbol: impl AsRef<str>,
+        series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
+    ) -> Result<Self> {
+        let replay_symbol = replay_symbol.as_ref().to_owned();
+        let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+        for series in series {
+            builder = builder.tick_series_as(series, replay_symbol.as_str(), "history-tick")?;
+        }
+        Ok(self.local_backtest(builder.build()))
+    }
+
     /// Fetch tick history and enter local-backtest mode from the owned series.
     pub async fn local_backtest_tick_history(
         self,
@@ -492,6 +576,31 @@ impl TqBuilder {
     ) -> Result<Self> {
         let series = data.get_tick_data_series(request).await?;
         self.local_backtest_ticks([series])
+    }
+
+    /// Fetch multiple tick history requests and replay them under one symbol.
+    pub async fn local_backtest_tick_histories_as(
+        self,
+        data: &tqsdk_data::DataClient,
+        replay_symbol: impl AsRef<str>,
+        requests: impl IntoIterator<Item = tqsdk_data::TickDataSeriesRequest>,
+    ) -> Result<Self> {
+        let mut series = Vec::new();
+        for request in requests {
+            series.push(data.get_tick_data_series(request).await?);
+        }
+        self.local_backtest_ticks_as(replay_symbol, series)
+    }
+
+    /// Fetch tick history and replay it under a caller-provided symbol.
+    pub async fn local_backtest_tick_history_as(
+        self,
+        data: &tqsdk_data::DataClient,
+        replay_symbol: impl AsRef<str>,
+        request: tqsdk_data::TickDataSeriesRequest,
+    ) -> Result<Self> {
+        self.local_backtest_tick_histories_as(data, replay_symbol, [request])
+            .await
     }
 
     /// Pre-declare a symbol for local backtest.

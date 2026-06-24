@@ -13,6 +13,27 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<TargetPos> = None;
 }
 
+#[tokio::test]
+async fn facade_local_backtest_alias_history_helpers_build_empty_replay() {
+    let kline_series = Vec::<tqsdk::advanced::data::KlineDataSeries>::new();
+    let mut tq = Tq::futures()
+        .local_backtest_klines_as("KQ.m@SHFE.rb", kline_series)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    assert!(!tq.next().await.unwrap());
+
+    let tick_series = Vec::<tqsdk::advanced::data::TickDataSeries>::new();
+    let mut tq = Tq::futures()
+        .local_backtest_ticks_as("KQ.m@SHFE.rb", tick_series)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    assert!(!tq.next().await.unwrap());
+}
+
 #[test]
 fn advanced_namespaces_keep_curated_underlying_access() {
     let _session = tqsdk::advanced::session::SessionClientBuilder::new("demo-user", "demo-pass")
