@@ -11,7 +11,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
 - Local backtest 默认模拟账户常量 `LOCAL_BACKTEST_ACCOUNT_ID`
-- Local backtest summary cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
+- Local backtest summary / performance metrics、cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 

@@ -174,7 +174,7 @@ request 使用 `local_backtest_kline_histories_as(...)` /
 能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
 当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
 自动追踪、`TargetPos` 执行闭环与增量 execution events/trades 读取，以及轻量
-`summary()` / trade log / cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
+`summary()` / `performance_metrics()` / trade log / cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
 也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
@@ -182,7 +182,8 @@ symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
 `local_backtest_quote_minute_history(...)` 复用已声明 quote symbol 自动生成一分钟 history
 request，或用 `local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
 已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、显式交易日窗口 returns、
-盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；
+盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar
+和 rolling balance/equity Sharpe / Sortino / Calmar；
 当 replay quote 带有 `underlying_symbol` 时，本地 `TqSim` 会把主连等 replay symbol
 订单映射到实际 underlying symbol 执行和记账，并把实际持仓镜像回 replay symbol 供策略继续读取；
 官方完整报表仍是后续范围；交易日历、单主连

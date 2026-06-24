@@ -60,11 +60,18 @@ async fn main() -> tqsdk::Result<()> {
         println!("{} last_price={}", snapshot.datetime, snapshot.last_price);
     }
 
-    // You can also inspect the summary of the backtest afterwards
+    // You can also inspect the summary and typed metrics of the backtest afterwards
     if let Some(summary) = tq.backtest_summary() {
         println!(
             "Backtest finished! Executed {} events.",
             summary.event_count()
+        );
+    }
+    if let Some(metrics) = tq.backtest_performance_metrics() {
+        println!(
+            "Backtest return={} max_drawdown={}",
+            metrics.balance_return_rate(),
+            metrics.max_balance_drawdown_rate()
         );
     }
 
