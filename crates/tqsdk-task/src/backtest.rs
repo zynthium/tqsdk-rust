@@ -176,6 +176,20 @@ pub struct StrategyBacktestPerformanceMetrics {
     annualized_daily_balance_calmar_ratio: f64,
 }
 
+/// Typed performance report snapshot for local backtest summaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestPerformanceReport {
+    metrics: StrategyBacktestPerformanceMetrics,
+    daily_balance_returns: Vec<StrategyBacktestDailyBalanceReturn>,
+    daily_equity_returns: Vec<StrategyBacktestDailyEquityReturn>,
+    rolling_balance_sharpe_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+    rolling_balance_sortino_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+    rolling_balance_calmar_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+    rolling_equity_sharpe_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+    rolling_equity_sortino_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+    rolling_equity_calmar_ratios: Vec<StrategyBacktestRollingRatioPoint>,
+}
+
 /// Explicit daily return window for exchange/trading-day grouping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyBacktestDailyReturnWindow {
@@ -867,6 +881,30 @@ impl StrategyBacktestSummary {
             annualized_daily_balance_sharpe_ratio: self.annualized_daily_balance_sharpe_ratio(),
             annualized_daily_balance_sortino_ratio: self.annualized_daily_balance_sortino_ratio(),
             annualized_daily_balance_calmar_ratio: self.annualized_daily_balance_calmar_ratio(),
+        }
+    }
+
+    #[must_use]
+    pub fn performance_report(
+        &self,
+        rolling_window_len: usize,
+    ) -> StrategyBacktestPerformanceReport {
+        StrategyBacktestPerformanceReport {
+            metrics: self.performance_metrics(),
+            daily_balance_returns: self.daily_balance_returns(),
+            daily_equity_returns: self.daily_equity_returns(),
+            rolling_balance_sharpe_ratios: self
+                .rolling_daily_balance_sharpe_ratios(rolling_window_len),
+            rolling_balance_sortino_ratios: self
+                .rolling_daily_balance_sortino_ratios(rolling_window_len),
+            rolling_balance_calmar_ratios: self
+                .rolling_daily_balance_calmar_ratios(rolling_window_len),
+            rolling_equity_sharpe_ratios: self
+                .rolling_daily_equity_sharpe_ratios(rolling_window_len),
+            rolling_equity_sortino_ratios: self
+                .rolling_daily_equity_sortino_ratios(rolling_window_len),
+            rolling_equity_calmar_ratios: self
+                .rolling_daily_equity_calmar_ratios(rolling_window_len),
         }
     }
 
@@ -1695,6 +1733,53 @@ impl StrategyBacktestPerformanceMetrics {
     #[must_use]
     pub fn annualized_daily_balance_calmar_ratio(&self) -> f64 {
         self.annualized_daily_balance_calmar_ratio
+    }
+}
+
+impl StrategyBacktestPerformanceReport {
+    #[must_use]
+    pub fn metrics(&self) -> &StrategyBacktestPerformanceMetrics {
+        &self.metrics
+    }
+
+    #[must_use]
+    pub fn daily_balance_returns(&self) -> &[StrategyBacktestDailyBalanceReturn] {
+        &self.daily_balance_returns
+    }
+
+    #[must_use]
+    pub fn daily_equity_returns(&self) -> &[StrategyBacktestDailyEquityReturn] {
+        &self.daily_equity_returns
+    }
+
+    #[must_use]
+    pub fn rolling_balance_sharpe_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_balance_sharpe_ratios
+    }
+
+    #[must_use]
+    pub fn rolling_balance_sortino_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_balance_sortino_ratios
+    }
+
+    #[must_use]
+    pub fn rolling_balance_calmar_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_balance_calmar_ratios
+    }
+
+    #[must_use]
+    pub fn rolling_equity_sharpe_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_equity_sharpe_ratios
+    }
+
+    #[must_use]
+    pub fn rolling_equity_sortino_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_equity_sortino_ratios
+    }
+
+    #[must_use]
+    pub fn rolling_equity_calmar_ratios(&self) -> &[StrategyBacktestRollingRatioPoint] {
+        &self.rolling_equity_calmar_ratios
     }
 }
 

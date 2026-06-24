@@ -47,7 +47,8 @@ pub use backtest::{
     StrategyBacktestClosedProfitPoint, StrategyBacktestContext, StrategyBacktestDailyBalanceReturn,
     StrategyBacktestDailyEquityReturn, StrategyBacktestDailyReturnWindow,
     StrategyBacktestEquityPoint, StrategyBacktestEvent, StrategyBacktestPerformanceMetrics,
-    StrategyBacktestRiskRatioPoint, StrategyBacktestSummary,
+    StrategyBacktestPerformanceReport, StrategyBacktestRiskRatioPoint,
+    StrategyBacktestRollingRatioPoint, StrategyBacktestSummary,
 };
 pub use calendar::TradingDayCalendar;
 pub use config::{

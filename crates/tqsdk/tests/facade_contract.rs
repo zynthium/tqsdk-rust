@@ -141,6 +141,17 @@ async fn facade_local_backtest_target_pos_uses_underlying_for_continuous_replay_
     assert_eq!(metrics.open_trade_count(), 1);
     assert_eq!(metrics.close_trade_count(), 0);
     assert_eq!(metrics.start_balance(), metrics.end_balance());
+    let report = tq.backtest_performance_report(2).unwrap();
+    assert_eq!(
+        report.metrics().open_trade_count(),
+        metrics.open_trade_count()
+    );
+    assert_eq!(
+        report.metrics().balance_return_rate(),
+        metrics.balance_return_rate()
+    );
+    assert_eq!(report.daily_balance_returns().len(), 1);
+    assert_eq!(report.rolling_balance_sharpe_ratios().len(), 1);
     assert_eq!(target.execution_report().trades.len(), 1);
 
     let (event_cursor, events) = target.execution_events_since(0);

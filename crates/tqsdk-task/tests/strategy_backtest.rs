@@ -1370,6 +1370,48 @@ async fn strategy_backtest_summary_derives_rolling_daily_balance_ratios() {
     assert!(summary.rolling_daily_balance_sharpe_ratios(0).is_empty());
     assert!(summary.rolling_daily_balance_sortino_ratios(0).is_empty());
     assert!(summary.rolling_daily_balance_calmar_ratios(0).is_empty());
+
+    let report = summary.performance_report(2);
+    assert_eq!(report.metrics(), &summary.performance_metrics());
+    assert_eq!(report.daily_balance_returns(), daily.as_slice());
+    let daily_equity = summary.daily_equity_returns();
+    assert_eq!(report.daily_equity_returns(), daily_equity.as_slice());
+    assert_rolling_points_match(
+        report.rolling_balance_sharpe_ratios(),
+        summary.rolling_daily_balance_sharpe_ratios(2).as_slice(),
+    );
+    assert_rolling_points_match(
+        report.rolling_balance_sortino_ratios(),
+        summary.rolling_daily_balance_sortino_ratios(2).as_slice(),
+    );
+    assert_rolling_points_match(
+        report.rolling_balance_calmar_ratios(),
+        summary.rolling_daily_balance_calmar_ratios(2).as_slice(),
+    );
+    assert_rolling_points_match(
+        report.rolling_equity_sharpe_ratios(),
+        summary.rolling_daily_equity_sharpe_ratios(2).as_slice(),
+    );
+    assert_rolling_points_match(
+        report.rolling_equity_sortino_ratios(),
+        summary.rolling_daily_equity_sortino_ratios(2).as_slice(),
+    );
+    assert_rolling_points_match(
+        report.rolling_equity_calmar_ratios(),
+        summary.rolling_daily_equity_calmar_ratios(2).as_slice(),
+    );
+}
+
+fn assert_rolling_points_match(
+    actual: &[tqsdk_task::StrategyBacktestRollingRatioPoint],
+    expected: &[tqsdk_task::StrategyBacktestRollingRatioPoint],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.date(), expected.date());
+        assert_eq!(actual.sample_count(), expected.sample_count());
+        assert_nan_or_close(actual.ratio(), expected.ratio());
+    }
 }
 
 fn assert_nan_or_close(actual: f64, expected: f64) {

@@ -74,6 +74,13 @@ async fn main() -> tqsdk::Result<()> {
             metrics.max_balance_drawdown_rate()
         );
     }
+    if let Some(report) = tq.backtest_performance_report(21) {
+        println!(
+            "Report days={} rolling_points={}",
+            report.daily_balance_returns().len(),
+            report.rolling_balance_sharpe_ratios().len()
+        );
+    }
 
     Ok(())
 }

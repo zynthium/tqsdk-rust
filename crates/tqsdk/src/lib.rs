@@ -55,7 +55,8 @@ pub mod advanced {
             StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
             StrategyBacktestDailyBalanceReturn, StrategyBacktestDailyEquityReturn,
             StrategyBacktestDailyReturnWindow, StrategyBacktestEquityPoint,
-            StrategyBacktestPerformanceMetrics, StrategyBacktestSummary,
+            StrategyBacktestPerformanceMetrics, StrategyBacktestPerformanceReport,
+            StrategyBacktestRollingRatioPoint, StrategyBacktestSummary,
             StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
             TargetPosTaskExecutionEvent, TargetPosTaskExecutionReport, TargetPosTaskOrderReport,
             TargetPosTaskReachedTarget, TargetPosTaskTradeFill, TaskError, TaskHost,
@@ -387,6 +388,15 @@ impl Tq {
     ) -> Option<tqsdk_task::StrategyBacktestPerformanceMetrics> {
         self.backtest_summary()
             .map(|summary| summary.performance_metrics())
+    }
+
+    /// Returns a typed backtest performance report (local-backtest mode only).
+    pub fn backtest_performance_report(
+        &self,
+        rolling_window_len: usize,
+    ) -> Option<tqsdk_task::StrategyBacktestPerformanceReport> {
+        self.backtest_summary()
+            .map(|summary| summary.performance_report(rolling_window_len))
     }
 }
 
