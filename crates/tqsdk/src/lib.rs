@@ -436,6 +436,16 @@ impl TqBuilder {
         Ok(self.local_backtest(builder.build()))
     }
 
+    /// Fetch kline history and enter local-backtest mode from the owned series.
+    pub async fn local_backtest_kline_history(
+        self,
+        data: &tqsdk_data::DataClient,
+        request: tqsdk_data::KlineDataSeriesRequest,
+    ) -> Result<Self> {
+        let series = data.get_kline_data_series(request).await?;
+        self.local_backtest_klines([series])
+    }
+
     /// Enter local-backtest mode from owned tick history series.
     ///
     /// This is a convenience wrapper around [`tqsdk_task::StrategyReplaySourceBuilder`].
@@ -448,6 +458,16 @@ impl TqBuilder {
             builder = builder.tick_series(series, "history-tick")?;
         }
         Ok(self.local_backtest(builder.build()))
+    }
+
+    /// Fetch tick history and enter local-backtest mode from the owned series.
+    pub async fn local_backtest_tick_history(
+        self,
+        data: &tqsdk_data::DataClient,
+        request: tqsdk_data::TickDataSeriesRequest,
+    ) -> Result<Self> {
+        let series = data.get_tick_data_series(request).await?;
+        self.local_backtest_ticks([series])
     }
 
     /// Pre-declare a symbol for local backtest.

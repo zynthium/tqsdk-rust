@@ -146,7 +146,10 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `Tq::futures().backtest(start_ns, end_ns)` 对齐 Python `TqBacktest` 的服务端回测心智；
 `Tq::futures().local_backtest(replay)` 使用本地 `ReplayMarketSource + TqSim`
 撮合，不需要真实服务；已有 owned history series 时也可以用
-`local_backtest_klines([series])` / `local_backtest_ticks([series])` 直接转本地 replay。
+`local_backtest_klines([series])` / `local_backtest_ticks([series])` 直接转本地 replay；
+已有 `DataClient` 和 history request 时可以用
+`local_backtest_kline_history(&data, request).await?` /
+`local_backtest_tick_history(&data, request).await?` 直接取数并进入本地回测。
 明确要直接操作 Python-style wait facade 时，才下钻到
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部

@@ -105,7 +105,7 @@
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
-  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` 便利入口，让 history series 可以显式转为本地 replay source
+  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不自动 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
