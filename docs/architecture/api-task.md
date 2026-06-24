@@ -157,7 +157,7 @@
 - 内部纯规划器已经覆盖 `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 的基础 offset 计划语义
 - `TargetPosTask` 已接入最小真实 planner：
   - `OpenOnly` / `今昨开` / `今昨,开` / `昨开` 都会按 planner 结果推进
-  - `PriceMode::Active / Passive` 会影响委托价格
+  - `PriceMode::Active / Passive / Last` 会影响委托价格，其中 `Last` 使用最新价作为限价
   - `split_policy` 已接入最小确定性拆单
   - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
   - 同一请求序号在净持仓未变化前不会重复发单

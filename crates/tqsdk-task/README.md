@@ -148,7 +148,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
     - 基于当前净持仓与目标手数差额按 planner 结果推进
     - 每次 `wait_update()` 最多提交一个 planner batch，batch 内可连续提交多笔委托
     - batch 与 batch 之间仍等待持仓或挂单状态推进
-    - `Active/Passive` 价格模式生效
+    - `Active/Passive/Last` 价格模式生效，其中 `Last` 使用最新价作为限价
     - `split_policy` 已接入最小确定性拆单
     - 只有当目标持仓匹配且挂单都进入终态后，`wait_target_reached()` 才会完成
     - 同一请求在净持仓未变化前不会重复发单

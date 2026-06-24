@@ -120,6 +120,7 @@ fn resolve_limit_price(quote: &Quote, direction: TradeDirection, mode: PriceMode
     let price = match mode {
         PriceMode::Active => active_price?,
         PriceMode::Passive => passive_price?,
+        PriceMode::Last => quote.last_price.is_finite().then_some(quote.last_price)?,
     };
 
     Some(price)
@@ -225,5 +226,22 @@ mod tests {
                 limit_price: 11.0,
             }]
         );
+    }
+
+    #[test]
+    fn desired_batch_can_price_at_last_price() {
+        let config = TargetPosConfig::new().with_price_mode(PriceMode::Last);
+        let quote = Quote {
+            ask_price1: 11.0,
+            bid_price1: 10.0,
+            last_price: 10.5,
+            ..Quote::default()
+        };
+        let position = Position::default();
+
+        let batch = desired_batch_for_target("SHFE.rb2601", &config, 1, &position, &quote)
+            .expect("target increase should produce an order batch");
+
+        assert_eq!(batch.orders[0].limit_price, 10.5);
     }
 }

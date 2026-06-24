@@ -8,6 +8,7 @@ pub enum PriceMode {
     #[default]
     Active,
     Passive,
+    Last,
 }
 
 #[non_exhaustive]
