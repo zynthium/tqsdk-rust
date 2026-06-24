@@ -167,7 +167,12 @@ V1 是：
   - research/offline data crate
   - `DataClient`
   - `query_his_cont_quotes`
+  - `query_his_cont_underlyings`
+  - `query_his_cont_underlying_segments`
+  - `historical_cont_underlying_segments`
   - `HistoricalContQuotesRow`
+  - `HistoricalContUnderlyingRow`
+  - `HistoricalContUnderlyingSegment`
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
   - Python-compatible history series mmap cache

@@ -22,7 +22,10 @@ mod history_series;
 mod page;
 mod permissions;
 
-pub use cont_quotes::{HistoricalContQuotesRow, HistoricalContUnderlyingRow};
+pub use cont_quotes::{
+    HistoricalContQuotesRow, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
+    historical_cont_underlying_segments,
+};
 pub use page::{
     KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
     TickDataPageRequest, TickDataSeries, TickDataSeriesRequest,
@@ -1307,6 +1310,71 @@ mod tests {
                 matches!(err, DataError::Validation(message) if message == "days must be greater than zero")
             );
         });
+    }
+
+    #[test]
+    fn historical_cont_underlying_segments_compacts_adjacent_rows() {
+        let rows = vec![
+            HistoricalContUnderlyingRow {
+                date: "2026-04-28".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: String::new(),
+            },
+            HistoricalContUnderlyingRow {
+                date: "2026-04-29".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: "DCE.a2605".to_string(),
+            },
+            HistoricalContUnderlyingRow {
+                date: "2026-04-30".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: "DCE.a2605".to_string(),
+            },
+            HistoricalContUnderlyingRow {
+                date: "2026-05-04".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: "DCE.a2609".to_string(),
+            },
+            HistoricalContUnderlyingRow {
+                date: "2026-05-05".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: "DCE.a2609".to_string(),
+            },
+            HistoricalContUnderlyingRow {
+                date: "2026-05-06".to_string(),
+                symbol: "KQ.m@DCE.a".to_string(),
+                underlying: "DCE.a2605".to_string(),
+            },
+        ];
+
+        let segments = historical_cont_underlying_segments(&rows);
+
+        assert_eq!(
+            segments,
+            vec![
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@DCE.a".to_string(),
+                    underlying: "DCE.a2605".to_string(),
+                    start_date: "2026-04-29".to_string(),
+                    end_date: "2026-04-30".to_string(),
+                    trading_days: 2,
+                },
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@DCE.a".to_string(),
+                    underlying: "DCE.a2609".to_string(),
+                    start_date: "2026-05-04".to_string(),
+                    end_date: "2026-05-05".to_string(),
+                    trading_days: 2,
+                },
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@DCE.a".to_string(),
+                    underlying: "DCE.a2605".to_string(),
+                    start_date: "2026-05-06".to_string(),
+                    end_date: "2026-05-06".to_string(),
+                    trading_days: 1,
+                },
+            ]
+        );
     }
 
     #[test]

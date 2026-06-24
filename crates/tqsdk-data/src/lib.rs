@@ -7,6 +7,9 @@
 //! Current stabilized surfaces stay intentionally narrow:
 //!
 //! - `DataClient::new().query_his_cont_quotes(...)`
+//! - `DataClient::new().query_his_cont_underlyings(...)`
+//! - `DataClient::new().query_his_cont_underlying_segments(...)`
+//! - `historical_cont_underlying_segments(...)`
 //! - `DataClient::from_session(...).get_kline_data_page(...)`
 //! - `DataClient::from_session(...).get_tick_data_page(...)`
 //! - `DataClient::from_session(...).get_kline_data_series(...)`
@@ -67,8 +70,9 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,
-    KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
-    TickDataPageRequest, TickDataSeries, TickDataSeriesRequest,
+    HistoricalContUnderlyingSegment, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
+    KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
+    TickDataSeriesRequest, historical_cont_underlying_segments,
 };
 pub use download::{
     DataDownloadProgress, KlineDataDownload, KlineDataDownloadPage, TickDataDownload,

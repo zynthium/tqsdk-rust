@@ -6,6 +6,8 @@
 
 - `DataClient::new().query_his_cont_quotes(...)`
 - `DataClient::new().query_his_cont_underlyings(...)`
+- `DataClient::new().query_his_cont_underlying_segments(...)`
+- `historical_cont_underlying_segments(...)`
 - `DataClient::from_session(...).get_kline_data_page(...)`
 - `DataClient::from_session(...).get_tick_data_page(...)`
 - `DataClient::from_session(...).get_kline_data_series(...)`
@@ -23,7 +25,7 @@
 
 其中：
 
-- `query_his_cont_quotes` / `query_his_cont_underlyings` 是纯 HTTP 的一次性 direct query，不需要 live session；前者返回多主连表格，后者返回单主连 date -> underlying 映射
+- `query_his_cont_quotes` / `query_his_cont_underlyings` / `query_his_cont_underlying_segments` 是纯 HTTP 的一次性 direct query，不需要 live session；分别返回多主连表格、单主连 date -> underlying 映射，以及同一 underlying 相邻交易日压缩后的连续 segment
 - `get_*_data_page` 是最底层的 chart/history page substrate，并显式暴露 chart 的 `more_data` 分页信号
 - `get_*_data_series` 是建立在 page substrate 之上的时间范围历史快照，语义对齐官方 `data_series`，范围为 `[start_datetime_ns, end_datetime_ns)`，分页继续与否以 `more_data` 为准
 - `integrity_report()` 是对已返回 owned series 的本地质量报告；K 线按 duration 做

@@ -28,6 +28,16 @@ pub struct HistoricalContUnderlyingRow {
     pub underlying: String,
 }
 
+/// A contiguous historical continuous-contract underlying segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalContUnderlyingSegment {
+    pub symbol: String,
+    pub underlying: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub trading_days: usize,
+}
+
 impl DataClient {
     pub async fn query_his_cont_quotes(
         &self,
@@ -120,6 +130,18 @@ impl DataClient {
                 underlying: row.underlyings.remove(symbol).unwrap_or_default(),
             })
             .collect())
+    }
+
+    pub async fn query_his_cont_underlying_segments(
+        &self,
+        symbol: &str,
+        days: usize,
+        end_date: Option<NaiveDate>,
+    ) -> Result<Vec<HistoricalContUnderlyingSegment>> {
+        let rows = self
+            .query_his_cont_underlyings(symbol, days, end_date)
+            .await?;
+        Ok(historical_cont_underlying_segments(&rows))
     }
 
     async fn trading_days(
@@ -237,6 +259,35 @@ impl DataClient {
 
         Ok(updates)
     }
+}
+
+#[must_use]
+pub fn historical_cont_underlying_segments(
+    rows: &[HistoricalContUnderlyingRow],
+) -> Vec<HistoricalContUnderlyingSegment> {
+    let mut segments: Vec<HistoricalContUnderlyingSegment> = Vec::new();
+    for row in rows {
+        if row.underlying.is_empty() {
+            continue;
+        }
+
+        if let Some(last) = segments.last_mut() {
+            if last.symbol == row.symbol && last.underlying == row.underlying {
+                last.end_date.clone_from(&row.date);
+                last.trading_days += 1;
+                continue;
+            }
+        }
+
+        segments.push(HistoricalContUnderlyingSegment {
+            symbol: row.symbol.clone(),
+            underlying: row.underlying.clone(),
+            start_date: row.date.clone(),
+            end_date: row.date.clone(),
+            trading_days: 1,
+        });
+    }
+    segments
 }
 
 fn current_cst_date() -> NaiveDate {

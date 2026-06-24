@@ -163,7 +163,9 @@ equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。summary
 已含手续费、净实现盈亏、daily equity returns / 年化日 Sharpe；交易所交易日历口径、
 完整绩效指标集、自动主连分段回测仍是后续范围；单主连
-date -> underlying 映射可用 `tqsdk-data::DataClient::query_his_cont_underlyings(...)`。
+date -> underlying 映射和 contiguous segment 压缩可用
+`tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
+`query_his_cont_underlying_segments(...)`。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 
