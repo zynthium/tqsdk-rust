@@ -120,7 +120,7 @@
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
   - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
   - local backtest replay 结束前会 drain 已进入 runtime 的 task updates，避免最后一个本地模拟成交只进入 summary 而没有进入 `TargetPos` execution report
-  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的资金/权益收益、调用方显式交易日窗口收益、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、峰值余额/权益和最大回撤；官方完整报表仍不在当前最小闭环内，交易日历基础查询由 `tqsdk-data` 提供
+  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、风险度观测与平均风险度、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的资金/权益收益、调用方显式交易日窗口收益、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、峰值余额/权益和最大回撤；官方完整报表仍不在当前最小闭环内，交易日历基础查询由 `tqsdk-data` 提供
   - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
   - 官方完整报表、股票/期权账户语义不在当前最小闭环内；交易日历和主连分段基础查询由 `tqsdk-data` 提供
 - `tqsdk-task::testing`

@@ -813,6 +813,50 @@ async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_summary_tracks_average_risk_ratio() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 172_800_000_000_000, 101.0, 10, 100.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_margin("SHFE.rb2501", 1_000.0))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("risk-ratio-open")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+    let _ctx = backtest.next().await.unwrap().unwrap();
+
+    let summary = backtest.summary();
+    assert_eq!(summary.risk_ratio_points().len(), 4);
+    assert_eq!(summary.risk_ratio_points()[0].risk_ratio(), 0.0);
+    assert_eq!(
+        summary.risk_ratio_points()[1].event_time_ns(),
+        Some(86_400_000_000_000)
+    );
+    assert_eq!(summary.risk_ratio_points()[1].risk_ratio(), 0.0);
+    assert_eq!(
+        summary.risk_ratio_points()[2].event_time_ns(),
+        Some(86_400_000_000_000)
+    );
+    assert_eq!(summary.risk_ratio_points()[2].risk_ratio(), 0.0001);
+    assert_eq!(
+        summary.risk_ratio_points()[3].event_time_ns(),
+        Some(172_800_000_000_000)
+    );
+    assert_eq!(summary.risk_ratio_points()[3].risk_ratio(), 0.0001);
+    assert!((summary.average_risk_ratio() - 0.00005).abs() < 1e-12);
+}
+
+#[tokio::test]
 async fn strategy_backtest_summary_tracks_mark_to_market_equity_points() {
     let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 86_400_000_000_000, 100.0, 10, 99.0, 8),

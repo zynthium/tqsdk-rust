@@ -60,6 +60,7 @@ pub struct StrategyBacktestSummary {
     kline_count: usize,
     balance_points: Vec<StrategyBacktestBalancePoint>,
     equity_points: Vec<StrategyBacktestEquityPoint>,
+    risk_ratio_points: Vec<StrategyBacktestRiskRatioPoint>,
     closed_profit_points: Vec<StrategyBacktestClosedProfitPoint>,
     orders: Vec<Order>,
     trades: Vec<Trade>,
@@ -103,6 +104,14 @@ pub struct StrategyBacktestClosedProfitPoint {
     event_time_ns: Option<i64>,
     trade_count: usize,
     profit: f64,
+}
+
+/// Account risk-ratio observation recorded by local backtest summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestRiskRatioPoint {
+    event_count: usize,
+    event_time_ns: Option<i64>,
+    risk_ratio: f64,
 }
 
 /// End-of-day mark-to-market equity return derived from replay observations.
@@ -376,6 +385,7 @@ impl StrategyBacktestSummary {
             kline_count: 0,
             balance_points: Vec::new(),
             equity_points: Vec::new(),
+            risk_ratio_points: Vec::new(),
             closed_profit_points: Vec::new(),
             orders: Vec::new(),
             trades: Vec::new(),
@@ -434,6 +444,7 @@ impl StrategyBacktestSummary {
         self.record_closed_profit_point(previous_close_profit, previous_trade_count, event_time_ns);
         self.record_balance_point(event_time_ns);
         self.record_equity_point(event_time_ns);
+        self.record_risk_ratio_point(event_time_ns);
     }
 
     fn record_closed_profit_point(
@@ -508,6 +519,21 @@ impl StrategyBacktestSummary {
             self.max_equity_drawdown_rate = point.drawdown_rate;
         }
         self.equity_points.push(point);
+    }
+
+    fn record_risk_ratio_point(&mut self, event_time_ns: Option<i64>) {
+        let risk_ratio = self.final_account.risk_ratio;
+        if self.risk_ratio_points.last().is_some_and(|point| {
+            point.risk_ratio == risk_ratio
+                && same_observation_bucket(point.event_time_ns, event_time_ns)
+        }) {
+            return;
+        }
+        self.risk_ratio_points.push(StrategyBacktestRiskRatioPoint {
+            event_count: self.event_count,
+            event_time_ns,
+            risk_ratio,
+        });
     }
 
     #[must_use]
@@ -588,6 +614,11 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn risk_ratio_points(&self) -> &[StrategyBacktestRiskRatioPoint] {
+        &self.risk_ratio_points
+    }
+
+    #[must_use]
     pub fn closed_profit_points(&self) -> &[StrategyBacktestClosedProfitPoint] {
         &self.closed_profit_points
     }
@@ -650,6 +681,11 @@ impl StrategyBacktestSummary {
     #[must_use]
     pub fn net_realized_profit(&self) -> f64 {
         self.realized_profit() - self.total_commission()
+    }
+
+    #[must_use]
+    pub fn average_risk_ratio(&self) -> f64 {
+        average_finite(self.risk_ratio_points.iter().map(|point| point.risk_ratio))
     }
 
     #[must_use]
@@ -1214,6 +1250,23 @@ impl StrategyBacktestClosedProfitPoint {
     }
 }
 
+impl StrategyBacktestRiskRatioPoint {
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    #[must_use]
+    pub fn event_time_ns(&self) -> Option<i64> {
+        self.event_time_ns
+    }
+
+    #[must_use]
+    pub fn risk_ratio(&self) -> f64 {
+        self.risk_ratio
+    }
+}
+
 impl StrategyBacktestDailyEquityReturn {
     #[must_use]
     pub fn date(&self) -> NaiveDate {
@@ -1650,6 +1703,22 @@ fn same_observation_date(left: Option<i64>, right: Option<i64>) -> bool {
 
 fn same_observation_bucket(previous: Option<i64>, current: Option<i64>) -> bool {
     current.is_none() || same_observation_date(previous, current)
+}
+
+fn average_finite(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for value in values {
+        if value.is_finite() {
+            sum += value;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        f64::NAN
+    } else {
+        sum / count as f64
+    }
 }
 
 fn annualized_return_rate(total_return_rate: f64, period_count: usize) -> f64 {
