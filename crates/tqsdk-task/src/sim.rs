@@ -34,6 +34,7 @@ pub struct TqSim {
     trades: HashMap<String, Trade>,
     next_seq: i64,
     next_trade_seq: i64,
+    current_time_ns: i64,
 }
 
 /// Order request handled by [`TqSim`].
@@ -62,6 +63,7 @@ struct SimOrder {
     request: TqSimOrderRequest,
     command_id: Option<CommandId>,
     alive: bool,
+    inserted_at_ns: i64,
     snapshot: Option<Order>,
 }
 
@@ -117,6 +119,7 @@ impl TqSim {
             trades: HashMap::new(),
             next_seq: 1,
             next_trade_seq: 1,
+            current_time_ns: 0,
         }
     }
 
@@ -202,7 +205,11 @@ impl TqSim {
             .values()
             .map(|order| {
                 order.snapshot.clone().unwrap_or_else(|| {
-                    self.order_snapshot(&order.request, order_volume_left(order))
+                    self.order_snapshot(
+                        &order.request,
+                        order_volume_left(order),
+                        order.inserted_at_ns,
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -218,7 +225,20 @@ impl TqSim {
     }
 
     pub fn update_quote(&mut self, symbol: impl Into<String>, quote: Quote) -> TqSimStepReport {
-        let symbol = symbol.into();
+        self.update_quote_inner(symbol.into(), quote)
+    }
+
+    pub fn update_quote_at(
+        &mut self,
+        symbol: impl Into<String>,
+        quote: Quote,
+        event_time_ns: i64,
+    ) -> TqSimStepReport {
+        self.current_time_ns = event_time_ns;
+        self.update_quote_inner(symbol.into(), quote)
+    }
+
+    fn update_quote_inner(&mut self, symbol: String, quote: Quote) -> TqSimStepReport {
         let execution_symbol = self.update_execution_symbol_alias_from_quote(&symbol, &quote);
         self.apply_quote_metadata(&symbol, &quote);
         self.quotes.insert(symbol.clone(), quote.clone());
@@ -278,6 +298,7 @@ impl TqSim {
                 request,
                 command_id: Some(dispatch.command_id),
                 alive: true,
+                inserted_at_ns: self.current_time_ns,
                 snapshot: None,
             })?;
             if let Some(status) = outcome.command_status {
@@ -331,6 +352,7 @@ impl TqSim {
             request,
             command_id,
             alive: true,
+            inserted_at_ns: self.current_time_ns,
             snapshot: None,
         })?;
         Ok(self.report_from_outcomes(vec![outcome]))
@@ -357,16 +379,25 @@ impl TqSim {
     fn apply_order(&mut self, order: SimOrder) -> Result<SimOrderOutcome> {
         let request = order.request;
         let command_id = order.command_id;
+        let inserted_at_ns = order.inserted_at_ns;
         let decision = self.match_decision(&request);
 
         if let Some(reason) = self.pretrade_rejection(&request) {
-            let order = self.dead_order(&request, "rejected", reason, request.volume, 0.0)?;
+            let order = self.dead_order(
+                &request,
+                "rejected",
+                reason,
+                request.volume,
+                0.0,
+                inserted_at_ns,
+            )?;
             self.orders.insert(
                 request.order_id.clone(),
                 SimOrder {
                     request,
                     command_id,
                     alive: false,
+                    inserted_at_ns,
                     snapshot: Some(order.clone()),
                 },
             );
@@ -387,7 +418,8 @@ impl TqSim {
                 self.commission += commission;
                 self.apply_position_delta(&request, trade_price);
                 let position = self.position_snapshot(&request.symbol);
-                let order_value = self.dead_order(&request, "filled", "", 0, trade_price)?;
+                let order_value =
+                    self.dead_order(&request, "filled", "", 0, trade_price, inserted_at_ns)?;
                 let trade = self.trade(&request, trade_price, commission)?;
                 self.orders.insert(
                     request.order_id.clone(),
@@ -395,6 +427,7 @@ impl TqSim {
                         request,
                         command_id,
                         alive: false,
+                        inserted_at_ns,
                         snapshot: Some(order_value.clone()),
                     },
                 );
@@ -408,13 +441,14 @@ impl TqSim {
                 })
             }
             MatchDecision::KeepAlive => {
-                let order_value = self.alive_order(&request)?;
+                let order_value = self.alive_order(&request, inserted_at_ns)?;
                 self.orders.insert(
                     request.order_id.clone(),
                     SimOrder {
                         request,
                         command_id,
                         alive: true,
+                        inserted_at_ns,
                         snapshot: Some(order_value.clone()),
                     },
                 );
@@ -433,6 +467,7 @@ impl TqSim {
                     "市价单没有对手盘",
                     request.volume,
                     0.0,
+                    inserted_at_ns,
                 )?;
                 self.orders.insert(
                     request.order_id.clone(),
@@ -440,6 +475,7 @@ impl TqSim {
                         request,
                         command_id,
                         alive: false,
+                        inserted_at_ns,
                         snapshot: Some(order_value.clone()),
                     },
                 );
@@ -588,7 +624,7 @@ impl TqSim {
         );
     }
 
-    fn alive_order(&mut self, request: &TqSimOrderRequest) -> Result<Order> {
+    fn alive_order(&mut self, request: &TqSimOrderRequest, inserted_at_ns: i64) -> Result<Order> {
         let seqno = self.next_seq();
         let account_id = self.account_id.clone();
         let exchange_order_id = format!("tqsim-exchange-{}", request.order_id);
@@ -608,7 +644,7 @@ impl TqSim {
             "price_type": request.price_type,
             "volume_condition": "ANY",
             "time_condition": if request.price_type == TradePriceType::Limit { "GFD" } else { "IOC" },
-            "insert_date_time": 0,
+            "insert_date_time": inserted_at_ns,
             "last_msg": "",
             "status": "ALIVE",
             "lifecycle": OrderLifecycle::Accepted,
@@ -624,6 +660,7 @@ impl TqSim {
         last_msg: &'static str,
         volume_left: i64,
         trade_price: f64,
+        inserted_at_ns: i64,
     ) -> Result<Order> {
         let seqno = self.next_seq();
         let account_id = self.account_id.clone();
@@ -648,7 +685,7 @@ impl TqSim {
             "price_type": request.price_type,
             "volume_condition": "ANY",
             "time_condition": if request.price_type == TradePriceType::Limit { "GFD" } else { "IOC" },
-            "insert_date_time": 0,
+            "insert_date_time": inserted_at_ns,
             "last_msg": last_msg,
             "status": "FINISHED",
             "lifecycle": lifecycle,
@@ -675,13 +712,18 @@ impl TqSim {
             "offset": request.offset,
             "price": price,
             "volume": request.volume,
-            "trade_date_time": 0,
+            "trade_date_time": self.current_time_ns,
             "commission": commission,
         }))
         .map_err(|_| TaskError::InvalidState("sim trade payload is invalid"))
     }
 
-    fn order_snapshot(&self, request: &TqSimOrderRequest, volume_left: i64) -> Order {
+    fn order_snapshot(
+        &self,
+        request: &TqSimOrderRequest,
+        volume_left: i64,
+        inserted_at_ns: i64,
+    ) -> Order {
         let lifecycle = if volume_left == 0 {
             OrderLifecycle::Filled
         } else {
@@ -702,7 +744,7 @@ impl TqSim {
             "price_type": request.price_type,
             "volume_condition": "ANY",
             "time_condition": if request.price_type == TradePriceType::Limit { "GFD" } else { "IOC" },
-            "insert_date_time": 0,
+            "insert_date_time": inserted_at_ns,
             "last_msg": "",
             "status": if volume_left == 0 { "FINISHED" } else { "ALIVE" },
             "lifecycle": lifecycle,

@@ -112,6 +112,7 @@
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先
   - `TqSim` 会使用 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单解析到实际 underlying symbol 撮合、成交和记账，并把实际持仓镜像回 replay symbol，避免 `TargetPos` / strategy context 在主连路径上反复误判空仓
+  - 本地回测订单和成交时间字段使用 replay event time；挂单跨 step 成交时订单保留原始插入时间，成交使用成交 step 时间
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
   - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_minute_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source；`local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)` 与 `*_histories_as(...)` 可把 underlying history 以 caller-provided replay symbol 分段回放并保留 `underlying_symbol` metadata；`local_backtest_continuous_minute_history(...)` 会复用 `tqsdk-data` 主连 segment 和历史分钟线，在默认 facade 中自动生成这一组分段 request
   - 当前覆盖 futures 单账户最小闭环：主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单

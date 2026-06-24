@@ -110,6 +110,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `TqSim` 支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段
   - `TqSim` 会从 replay quote metadata 中补齐缺失的 margin / commission / contract multiplier；用户显式 `with_*` / `set_*` 配置优先
   - 当 replay quote 带有 `underlying_symbol` 时，`TqSim` 会把策略侧 replay symbol 下单自动映射到实际 underlying symbol 撮合和记账，同时把实际持仓镜像回 replay symbol，便于同一策略主体继续读取主连持仓
+  - 本地回测订单 `insert_date_time` 和成交 `trade_date_time` 使用当前 replay event time，挂单后续成交会保留原始插入时间
   - 默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出，供默认 facade 和示例共用
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；`quote(symbol)` builder 方法只用于额外预声明空 replay 或尚未出现在 replay 中的 symbol
   - 当前最小闭环覆盖 quote/tick/kline replay event、futures 单账户、主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、限价未穿价挂单、后续 tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单、手续费/保证金/合约乘数 per-symbol 配置

@@ -154,19 +154,19 @@ impl StrategyBacktest {
             ReplayMarketPayload::Quote(quote) => {
                 let quote =
                     quote_with_replay_underlying((**quote).clone(), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote)?;
+                self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
             }
             ReplayMarketPayload::Tick(tick) => {
                 let quote =
                     quote_with_replay_underlying(quote_from_tick(tick), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote)?;
+                self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
             }
             ReplayMarketPayload::Kline { row, .. } => {
                 let price_tick = self.price_tick(event.symbol())?;
                 let checkpoints = kline_quote_checkpoints(row, price_tick);
                 for quote in checkpoints {
                     let quote = quote_with_replay_underlying(quote, event.underlying_symbol());
-                    self.ingest_quote(event.symbol(), &quote)?;
+                    self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
                 }
             }
         }
@@ -214,10 +214,12 @@ impl StrategyBacktest {
         summary
     }
 
-    fn ingest_quote(&mut self, symbol: &str, quote: &Quote) -> Result<()> {
+    fn ingest_quote(&mut self, symbol: &str, quote: &Quote, event_time_ns: i64) -> Result<()> {
         self.remember_quote_metadata(symbol, quote);
         ingest_quote_event(self.strategy.task_host(), symbol, quote)?;
-        let report = self.sim.update_quote(symbol.to_owned(), quote.clone());
+        let report = self
+            .sim
+            .update_quote_at(symbol.to_owned(), quote.clone(), event_time_ns);
         self.sim
             .ingest_step_report(self.strategy.task_host(), &report)?;
         Ok(())

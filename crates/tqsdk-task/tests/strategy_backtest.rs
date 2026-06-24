@@ -114,6 +114,38 @@ async fn strategy_backtest_fills_alive_limit_order_on_later_quote() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_stamps_orders_and_trades_with_replay_event_time() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 98.0, 10, 97.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .quote("SHFE.rb2501")
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(99.0)
+        .send_once("timed-order")
+        .await
+        .unwrap();
+    let report = ctx.finish_sim_step().unwrap();
+    assert_eq!(report.orders()[0].insert_date_time, 1_000);
+    assert!(report.trades().is_empty());
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let order = ctx.sim().orders().into_iter().next().unwrap();
+    let trade = ctx.sim().trades().into_iter().next().unwrap();
+    assert_eq!(order.insert_date_time, 1_000);
+    assert_eq!(trade.trade_date_time, 2_000);
+}
+
+#[tokio::test]
 async fn strategy_backtest_synthesizes_tick_as_quote_and_fills_pending_order() {
     let replay = ReplayMarketSource::new(vec![
         tick_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
