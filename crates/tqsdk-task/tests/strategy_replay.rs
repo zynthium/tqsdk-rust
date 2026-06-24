@@ -215,9 +215,11 @@ async fn strategy_replay_source_builder_merges_multiple_series_by_event_time() {
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
     let alias = "KQ.m@SHFE.au";
+    let underlying = "SHFE.au2602";
     let replay = StrategyReplay::source_builder()
-        .kline_rows(
+        .kline_rows_with_underlying(
             alias,
+            underlying,
             60_000_000_000,
             [Kline {
                 id: 1,
@@ -228,8 +230,9 @@ async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
             "underlying-segment",
         )
         .unwrap()
-        .tick_rows(
+        .tick_rows_with_underlying(
             alias,
+            underlying,
             [Tick {
                 id: 2,
                 datetime: 2_000,
@@ -245,6 +248,7 @@ async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
         .market(FakeMarket::new().account("sim", 100_000.0))
         .broker(FakeBroker::new().fill_all())
         .account("sim")
+        .quote(alias)
         .kline(alias, Duration::from_secs(60), 16)
         .tick(alias, 16)
         .build()
@@ -254,6 +258,8 @@ async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
     let ctx = strategy.next().await.unwrap().unwrap();
     assert_eq!(ctx.event().source(), "underlying-segment");
     assert_eq!(ctx.event().symbol(), alias);
+    assert_eq!(ctx.event().underlying_symbol(), Some(underlying));
+    assert_eq!(ctx.quote(alias).unwrap().underlying_symbol, underlying);
     assert_eq!(
         ctx.kline(alias, Duration::from_secs(60))
             .unwrap()
@@ -267,6 +273,8 @@ async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
     let ctx = strategy.next().await.unwrap().unwrap();
     assert_eq!(ctx.event().source(), "underlying-segment");
     assert_eq!(ctx.event().symbol(), alias);
+    assert_eq!(ctx.event().underlying_symbol(), Some(underlying));
+    assert_eq!(ctx.quote(alias).unwrap().underlying_symbol, underlying);
     assert_eq!(ctx.tick(alias).unwrap().last().unwrap().last_price, 481.0);
 }
 
@@ -294,7 +302,11 @@ fn replay_market_event_exposes_validated_accessors() {
     assert_eq!(event.symbol(), "SHFE.au2602");
     assert_eq!(event.received_at_ns(), 1_000);
     assert_eq!(event.event_time_ns(), 900);
+    assert_eq!(event.underlying_symbol(), None);
     assert_eq!(event.payload_kind(), ReplayMarketPayloadKind::Quote);
+
+    let event = event.with_underlying_symbol("SHFE.au2602").unwrap();
+    assert_eq!(event.underlying_symbol(), Some("SHFE.au2602"));
 }
 
 #[test]
@@ -314,6 +326,12 @@ fn replay_market_event_constructors_reject_invalid_invariants() {
     assert_task_error_contains(
         ReplayMarketEvent::quote("cache", "SHFE.au2602", 1, Some(-1), Quote::default()),
         "event_time_ns must be non-negative",
+    );
+    assert_task_error_contains(
+        ReplayMarketEvent::quote("cache", "KQ.m@SHFE.au", 1, Some(1), Quote::default())
+            .unwrap()
+            .with_underlying_symbol(" "),
+        "underlying_symbol must not be empty",
     );
     assert_task_error_contains(
         ReplayMarketEvent::kline("cache", "SHFE.au2602", 1, Some(1), 0, Kline::default()),

@@ -97,9 +97,12 @@
   - 暴露 `StrategyReplaySourceBuilder`，支持多个 history/replay event series 合并，
     并提供 `kline_series(...)` / `tick_series(...)` 从 `tqsdk-data`
     owned history series 构建 replay source
-  - `StrategyReplaySourceBuilder::kline_series_as(...)` / `tick_series_as(...)` /
-    `kline_rows(...)` / `tick_rows(...)` 可把 underlying history 以主连等
-    caller-provided replay symbol 回放
+  - `StrategyReplaySourceBuilder::kline_series_as(...)` / `tick_series_as(...)`
+    可把 underlying history 以主连等 caller-provided replay symbol 回放，并把原
+    series symbol 写入 quote `underlying_symbol`
+  - `kline_rows_with_underlying(...)` / `tick_rows_with_underlying(...)` 为手工
+    rows 提供同样的 quote `underlying_symbol` metadata；不需要 metadata 时仍可用
+    `kline_rows(...)` / `tick_rows(...)`
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
     strategy execution 搬入 data

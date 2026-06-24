@@ -161,7 +161,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source，并可将
-underlying history 以主连等 caller-provided replay symbol 回放。summary
+underlying history 以主连等 caller-provided replay symbol 回放，同时保留 quote
+`underlying_symbol` metadata。summary
 已含手续费、净实现盈亏、daily equity returns / 年化日 Sharpe；交易所交易日历口径、
 完整绩效指标集、自动主连分段回测和执行 symbol 切换仍是后续范围；单主连
 date -> underlying 映射和 contiguous segment 压缩可用

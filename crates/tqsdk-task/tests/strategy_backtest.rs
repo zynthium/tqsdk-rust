@@ -173,6 +173,31 @@ async fn strategy_backtest_synthesizes_kline_close_quote_once_for_strategy() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_applies_replay_underlying_to_synthesized_kline_quote() {
+    let alias = "KQ.m@SHFE.rb";
+    let underlying = "SHFE.rb2501";
+    let replay = ReplayMarketSource::new(vec![
+        kline_event(alias, 1_000, 101.0, 105.0, 97.0, 99.0)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .quote(alias)
+        .price_tick(alias, 1.0)
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().underlying_symbol(), Some(underlying));
+    let quote = ctx.quote(alias).unwrap();
+    assert_eq!(quote.last_price, 99.0);
+    assert_eq!(quote.underlying_symbol, underlying);
+}
+
+#[tokio::test]
 async fn strategy_backtest_uses_default_price_tick_for_kline_quote_synthesis() {
     let replay = ReplayMarketSource::new(vec![kline_event(
         "SHFE.rb2501",

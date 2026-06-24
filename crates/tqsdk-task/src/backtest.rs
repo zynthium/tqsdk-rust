@@ -46,6 +46,7 @@ pub struct StrategyBacktestEvent {
     symbol: String,
     received_at_ns: i64,
     event_time_ns: i64,
+    underlying_symbol: Option<String>,
 }
 
 /// Lightweight local backtest summary.
@@ -133,16 +134,20 @@ impl StrategyBacktest {
         let payload_kind = event.payload_kind();
         match event.payload() {
             ReplayMarketPayload::Quote(quote) => {
-                self.ingest_quote(event.symbol(), quote)?;
+                let quote =
+                    quote_with_replay_underlying((**quote).clone(), event.underlying_symbol());
+                self.ingest_quote(event.symbol(), &quote)?;
             }
             ReplayMarketPayload::Tick(tick) => {
-                let quote = quote_from_tick(tick);
+                let quote =
+                    quote_with_replay_underlying(quote_from_tick(tick), event.underlying_symbol());
                 self.ingest_quote(event.symbol(), &quote)?;
             }
             ReplayMarketPayload::Kline { row, .. } => {
                 let price_tick = self.price_tick(event.symbol())?;
                 let checkpoints = kline_quote_checkpoints(row, price_tick);
                 for quote in checkpoints {
+                    let quote = quote_with_replay_underlying(quote, event.underlying_symbol());
                     self.ingest_quote(event.symbol(), &quote)?;
                 }
             }
@@ -859,6 +864,11 @@ impl StrategyBacktestEvent {
     pub fn event_time_ns(&self) -> i64 {
         self.event_time_ns
     }
+
+    #[must_use]
+    pub fn underlying_symbol(&self) -> Option<&str> {
+        self.underlying_symbol.as_deref()
+    }
 }
 
 impl From<ReplayStepMeta> for StrategyBacktestEvent {
@@ -868,6 +878,7 @@ impl From<ReplayStepMeta> for StrategyBacktestEvent {
             symbol: meta.symbol,
             received_at_ns: meta.received_at_ns,
             event_time_ns: meta.event_time_ns,
+            underlying_symbol: meta.underlying_symbol,
         }
     }
 }
@@ -1044,6 +1055,15 @@ fn quote_from_tick(tick: &Tick) -> Quote {
         open_interest: tick.open_interest,
         ..Quote::default()
     }
+}
+
+fn quote_with_replay_underlying(mut quote: Quote, underlying_symbol: Option<&str>) -> Quote {
+    if quote.underlying_symbol.is_empty() {
+        if let Some(underlying_symbol) = underlying_symbol {
+            quote.underlying_symbol = underlying_symbol.to_owned();
+        }
+    }
+    quote
 }
 
 fn kline_quote_checkpoints(row: &Kline, price_tick: f64) -> [Quote; 4] {

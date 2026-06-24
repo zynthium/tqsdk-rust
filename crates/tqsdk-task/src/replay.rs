@@ -41,6 +41,7 @@ pub struct ReplayMarketEvent {
     symbol: String,
     received_at_ns: i64,
     event_time_ns: i64,
+    underlying_symbol: Option<String>,
     payload: ReplayMarketPayload,
 }
 
@@ -57,6 +58,7 @@ pub(crate) struct ReplayStepMeta {
     pub(crate) symbol: String,
     pub(crate) received_at_ns: i64,
     pub(crate) event_time_ns: i64,
+    pub(crate) underlying_symbol: Option<String>,
 }
 
 /// Offline strategy replay builder backed by ordered replay market events.
@@ -96,6 +98,7 @@ pub struct StrategyReplayEvent {
     symbol: String,
     received_at_ns: i64,
     event_time_ns: i64,
+    underlying_symbol: Option<String>,
 }
 
 /// Resumable position in a [`StrategyReplay`].
@@ -232,7 +235,8 @@ impl StrategyReplaySourceBuilder {
 
     pub fn kline_series(self, series: KlineDataSeries, source: impl AsRef<str>) -> Result<Self> {
         let symbol = series.symbol().to_owned();
-        self.kline_series_as(series, symbol, source)
+        let duration_ns = series.duration_ns();
+        self.kline_rows(symbol, duration_ns, series.into_rows(), source)
     }
 
     /// Append kline history series while replaying it under a caller-provided symbol.
@@ -245,16 +249,60 @@ impl StrategyReplaySourceBuilder {
         replay_symbol: impl AsRef<str>,
         source: impl AsRef<str>,
     ) -> Result<Self> {
+        let underlying_symbol = series.symbol().to_owned();
+        let replay_symbol = replay_symbol.as_ref().to_owned();
         let duration_ns = series.duration_ns();
-        self.kline_rows(replay_symbol, duration_ns, series.into_rows(), source)
+        if replay_symbol == underlying_symbol {
+            self.kline_rows(replay_symbol, duration_ns, series.into_rows(), source)
+        } else {
+            self.kline_rows_with_underlying(
+                replay_symbol,
+                underlying_symbol,
+                duration_ns,
+                series.into_rows(),
+                source,
+            )
+        }
     }
 
     /// Append owned kline rows under a replay symbol.
     ///
     /// `duration_ns` is the kline duration in nanoseconds.
     pub fn kline_rows(
+        self,
+        replay_symbol: impl AsRef<str>,
+        duration_ns: i64,
+        rows: impl IntoIterator<Item = Kline>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        self.kline_rows_inner(replay_symbol, None::<&str>, duration_ns, rows, source)
+    }
+
+    /// Append owned kline rows under a replay symbol with underlying metadata.
+    ///
+    /// This keeps the replay symbol stable while exposing the contract that
+    /// supplied the rows through quote `underlying_symbol`.
+    pub fn kline_rows_with_underlying(
+        self,
+        replay_symbol: impl AsRef<str>,
+        underlying_symbol: impl AsRef<str>,
+        duration_ns: i64,
+        rows: impl IntoIterator<Item = Kline>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        self.kline_rows_inner(
+            replay_symbol,
+            Some(underlying_symbol.as_ref()),
+            duration_ns,
+            rows,
+            source,
+        )
+    }
+
+    fn kline_rows_inner(
         mut self,
         replay_symbol: impl AsRef<str>,
+        underlying_symbol: Option<&str>,
         duration_ns: i64,
         rows: impl IntoIterator<Item = Kline>,
         source: impl AsRef<str>,
@@ -262,21 +310,25 @@ impl StrategyReplaySourceBuilder {
         let replay_symbol = replay_symbol.as_ref();
         let source = source.as_ref();
         for row in rows {
-            self.events.push(ReplayMarketEvent::kline(
+            let mut event = ReplayMarketEvent::kline(
                 source,
                 replay_symbol,
                 row.datetime,
                 Some(row.datetime),
                 duration_ns,
                 row,
-            )?);
+            )?;
+            if let Some(underlying_symbol) = underlying_symbol {
+                event = event.with_underlying_symbol(underlying_symbol)?;
+            }
+            self.events.push(event);
         }
         Ok(self)
     }
 
     pub fn tick_series(self, series: TickDataSeries, source: impl AsRef<str>) -> Result<Self> {
         let symbol = series.symbol().to_owned();
-        self.tick_series_as(series, symbol, source)
+        self.tick_rows(symbol, series.into_rows(), source)
     }
 
     /// Append tick history series while replaying it under a caller-provided symbol.
@@ -289,26 +341,70 @@ impl StrategyReplaySourceBuilder {
         replay_symbol: impl AsRef<str>,
         source: impl AsRef<str>,
     ) -> Result<Self> {
-        self.tick_rows(replay_symbol, series.into_rows(), source)
+        let underlying_symbol = series.symbol().to_owned();
+        let replay_symbol = replay_symbol.as_ref().to_owned();
+        if replay_symbol == underlying_symbol {
+            self.tick_rows(replay_symbol, series.into_rows(), source)
+        } else {
+            self.tick_rows_with_underlying(
+                replay_symbol,
+                underlying_symbol,
+                series.into_rows(),
+                source,
+            )
+        }
     }
 
     /// Append owned tick rows under a replay symbol.
     pub fn tick_rows(
+        self,
+        replay_symbol: impl AsRef<str>,
+        rows: impl IntoIterator<Item = Tick>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        self.tick_rows_inner(replay_symbol, None::<&str>, rows, source)
+    }
+
+    /// Append owned tick rows under a replay symbol with underlying metadata.
+    ///
+    /// This keeps the replay symbol stable while exposing the contract that
+    /// supplied the rows through quote `underlying_symbol`.
+    pub fn tick_rows_with_underlying(
+        self,
+        replay_symbol: impl AsRef<str>,
+        underlying_symbol: impl AsRef<str>,
+        rows: impl IntoIterator<Item = Tick>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        self.tick_rows_inner(
+            replay_symbol,
+            Some(underlying_symbol.as_ref()),
+            rows,
+            source,
+        )
+    }
+
+    fn tick_rows_inner(
         mut self,
         replay_symbol: impl AsRef<str>,
+        underlying_symbol: Option<&str>,
         rows: impl IntoIterator<Item = Tick>,
         source: impl AsRef<str>,
     ) -> Result<Self> {
         let replay_symbol = replay_symbol.as_ref();
         let source = source.as_ref();
         for row in rows {
-            self.events.push(ReplayMarketEvent::tick(
+            let mut event = ReplayMarketEvent::tick(
                 source,
                 replay_symbol,
                 row.datetime,
                 Some(row.datetime),
                 row,
-            )?);
+            )?;
+            if let Some(underlying_symbol) = underlying_symbol {
+                event = event.with_underlying_symbol(underlying_symbol)?;
+            }
+            self.events.push(event);
         }
         Ok(self)
     }
@@ -651,6 +747,11 @@ impl StrategyReplayEvent {
     pub fn event_time_ns(&self) -> i64 {
         self.event_time_ns
     }
+
+    #[must_use]
+    pub fn underlying_symbol(&self) -> Option<&str> {
+        self.underlying_symbol.as_deref()
+    }
 }
 
 impl From<ReplayStepMeta> for StrategyReplayEvent {
@@ -660,6 +761,7 @@ impl From<ReplayStepMeta> for StrategyReplayEvent {
             symbol: meta.symbol,
             received_at_ns: meta.received_at_ns,
             event_time_ns: meta.event_time_ns,
+            underlying_symbol: meta.underlying_symbol,
         }
     }
 }
@@ -682,6 +784,7 @@ impl ReplayMarketEvent {
             symbol: self.symbol().to_owned(),
             received_at_ns: self.received_at_ns(),
             event_time_ns: self.event_time_ns(),
+            underlying_symbol: self.underlying_symbol.clone(),
         }
     }
 
@@ -773,8 +876,20 @@ impl ReplayMarketEvent {
             symbol,
             received_at_ns,
             event_time_ns: event_time_ns.unwrap_or(received_at_ns),
+            underlying_symbol: None,
             payload,
         })
+    }
+
+    pub fn with_underlying_symbol(mut self, underlying_symbol: impl AsRef<str>) -> Result<Self> {
+        let underlying_symbol = underlying_symbol.as_ref();
+        if underlying_symbol.trim().is_empty() {
+            return Err(TaskError::InvalidState(
+                "replay market event underlying_symbol must not be empty",
+            ));
+        }
+        self.underlying_symbol = Some(underlying_symbol.to_owned());
+        Ok(self)
     }
 
     #[must_use]
@@ -795,6 +910,11 @@ impl ReplayMarketEvent {
     #[must_use]
     pub fn event_time_ns(&self) -> i64 {
         self.event_time_ns
+    }
+
+    #[must_use]
+    pub fn underlying_symbol(&self) -> Option<&str> {
+        self.underlying_symbol.as_deref()
     }
 
     #[must_use]
@@ -923,11 +1043,19 @@ fn ingest_replay_market_event(
     ticks: &[ReplayTickSpec],
 ) -> Result<()> {
     let body = match &event.payload {
-        ReplayMarketPayload::Quote(quote) => quote_update(&event.symbol, quote),
-        ReplayMarketPayload::Kline { duration_ns, row } => {
-            kline_update(&event.symbol, *duration_ns, row, klines)
+        ReplayMarketPayload::Quote(quote) => {
+            quote_update(&event.symbol, quote, event.underlying_symbol())
         }
-        ReplayMarketPayload::Tick(tick) => tick_update(&event.symbol, tick, ticks),
+        ReplayMarketPayload::Kline { duration_ns, row } => kline_update(
+            &event.symbol,
+            *duration_ns,
+            row,
+            klines,
+            event.underlying_symbol(),
+        ),
+        ReplayMarketPayload::Tick(tick) => {
+            tick_update(&event.symbol, tick, ticks, event.underlying_symbol())
+        }
     };
 
     host.api().session().handle().ingest(
@@ -1039,7 +1167,7 @@ async fn drain_initial_commits(strategy: &mut StrategyHost) -> Result<()> {
     Ok(())
 }
 
-fn quote_update(symbol: &str, quote: &Quote) -> Value {
+fn quote_update(symbol: &str, quote: &Quote, underlying_symbol: Option<&str>) -> Value {
     let mut quote_value = Map::new();
     insert_string_if_present(&mut quote_value, "datetime", &quote.datetime);
     insert_f64_if_finite(&mut quote_value, "last_price", quote.last_price);
@@ -1047,6 +1175,11 @@ fn quote_update(symbol: &str, quote: &Quote) -> Value {
     insert_i64_if_nonzero(&mut quote_value, "ask_volume1", quote.ask_volume1);
     insert_f64_if_finite(&mut quote_value, "bid_price1", quote.bid_price1);
     insert_i64_if_nonzero(&mut quote_value, "bid_volume1", quote.bid_volume1);
+    insert_string_if_present(
+        &mut quote_value,
+        "underlying_symbol",
+        effective_underlying_symbol(quote, underlying_symbol),
+    );
 
     json!({
         "quotes": {
@@ -1055,7 +1188,13 @@ fn quote_update(symbol: &str, quote: &Quote) -> Value {
     })
 }
 
-fn kline_update(symbol: &str, duration_ns: i64, row: &Kline, klines: &[ReplayKlineSpec]) -> Value {
+fn kline_update(
+    symbol: &str,
+    duration_ns: i64,
+    row: &Kline,
+    klines: &[ReplayKlineSpec],
+    underlying_symbol: Option<&str>,
+) -> Value {
     let row_id = row.id.to_string();
     let mut charts = Map::new();
     for spec in klines
@@ -1078,7 +1217,7 @@ fn kline_update(symbol: &str, duration_ns: i64, row: &Kline, klines: &[ReplayKli
         );
     }
 
-    json!({
+    let mut body = json!({
         "charts": Value::Object(charts),
         "klines": {
             symbol: {
@@ -1089,10 +1228,17 @@ fn kline_update(symbol: &str, duration_ns: i64, row: &Kline, klines: &[ReplayKli
                 }
             }
         }
-    })
+    });
+    insert_quote_underlying_update(&mut body, symbol, underlying_symbol);
+    body
 }
 
-fn tick_update(symbol: &str, tick: &Tick, ticks: &[ReplayTickSpec]) -> Value {
+fn tick_update(
+    symbol: &str,
+    tick: &Tick,
+    ticks: &[ReplayTickSpec],
+    underlying_symbol: Option<&str>,
+) -> Value {
     let row_id = tick.id.to_string();
     let mut charts = Map::new();
     for spec in ticks.iter().filter(|spec| spec.symbol == symbol) {
@@ -1112,7 +1258,7 @@ fn tick_update(symbol: &str, tick: &Tick, ticks: &[ReplayTickSpec]) -> Value {
         );
     }
 
-    json!({
+    let mut body = json!({
         "charts": Value::Object(charts),
         "ticks": {
             symbol: {
@@ -1121,7 +1267,9 @@ fn tick_update(symbol: &str, tick: &Tick, ticks: &[ReplayTickSpec]) -> Value {
                 }
             }
         }
-    })
+    });
+    insert_quote_underlying_update(&mut body, symbol, underlying_symbol);
+    body
 }
 
 fn kline_value(row: &Kline) -> Value {
@@ -1154,6 +1302,37 @@ fn tick_value(row: &Tick) -> Value {
     insert_f64_if_finite(&mut value, "amount", row.amount);
     insert_i64_if_nonzero(&mut value, "open_interest", row.open_interest);
     Value::Object(value)
+}
+
+fn effective_underlying_symbol<'a>(
+    quote: &'a Quote,
+    event_underlying_symbol: Option<&'a str>,
+) -> &'a str {
+    if !quote.underlying_symbol.is_empty() {
+        &quote.underlying_symbol
+    } else {
+        event_underlying_symbol.unwrap_or("")
+    }
+}
+
+fn insert_quote_underlying_update(body: &mut Value, symbol: &str, underlying_symbol: Option<&str>) {
+    let Some(underlying_symbol) = underlying_symbol else {
+        return;
+    };
+    if underlying_symbol.is_empty() {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "quotes".to_string(),
+        json!({
+            symbol: {
+                "underlying_symbol": underlying_symbol
+            }
+        }),
+    );
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
