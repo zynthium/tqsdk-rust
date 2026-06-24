@@ -118,6 +118,8 @@ crate 自己维护。
 - value-style GraphQL direct query 内部串行化完整 query lifecycle；raw command-style
   query 仍由调用方负责推进顺序
 - auth refresh、replay step/reset 这类 one-shot control-plane helper
+- 官方单日 replay session 创建这类 authenticated service helper；后台控速、
+  heartbeat/terminate 不伪装成已自动生命周期管理
 - session-level error diagnostics / retry hints
 - 天勤特定 auth/http/TqKq 实现的内部落点
 

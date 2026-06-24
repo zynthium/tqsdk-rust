@@ -34,6 +34,8 @@ mod instrument;
 mod metadata;
 mod order_intent;
 mod recovery;
+#[cfg(all(feature = "services", feature = "tq-auth"))]
+mod replay_service;
 #[cfg(feature = "http-client")]
 mod response_body;
 #[cfg(feature = "services")]
@@ -57,4 +59,6 @@ pub use error::{Result, SessionErrorDiagnostic, SessionErrorKind, SessionFacadeE
 pub use instrument::{InstrumentClass, InstrumentSpec, SymbolInfo};
 pub use order_intent::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec};
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};
+#[cfg(all(feature = "services", feature = "tq-auth"))]
+pub use replay_service::{ServerReplayBuilder, ServerReplaySession};
 pub use tqsdk_core::RetryHint;

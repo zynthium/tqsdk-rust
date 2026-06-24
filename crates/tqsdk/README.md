@@ -6,6 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Server-side backtest (`.backtest()`, optional `.replay_url(...)`)
+- Server-side single-day replay (`.server_replay(date)?`)
 - Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_kline_histories(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_quote_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
@@ -25,6 +26,9 @@ runtime contract；它只提供一个更容易开始的 facade：
 一分钟 K 线进入本地回测；该路径不做隐藏订阅或隐式联网。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
+服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
+把返回的 `md_url` 接入正常行情 loop。复盘速度控制、heartbeat 和 terminate
+lifecycle 尚未封装成 Python 风格后台对象。
 本地回测结束前会 drain 已进入 runtime 的 task updates，因此 `TargetPos` 的
 `execution_report()` 能看到最后一个 replay step 产生的本地模拟成交；需要类似
 task channel 的增量消费时，可用 `execution_events_since(cursor)` /

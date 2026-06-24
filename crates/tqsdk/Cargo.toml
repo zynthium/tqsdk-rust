@@ -37,6 +37,7 @@ tqsdk-task = { path = "../tqsdk-task", version = "0.1.0", default-features = fal
 tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
 
 [dev-dependencies]
+serde_json.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
@@ -55,6 +56,10 @@ name = "api_contract_s39_facade_same_body"
 
 [[example]]
 name = "api_contract_s40_facade_local_backtest_target_pos"
+
+[[example]]
+name = "api_contract_s41_facade_server_replay"
+required-features = ["live", "services"]
 
 [lints]
 workspace = true

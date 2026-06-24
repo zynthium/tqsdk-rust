@@ -126,6 +126,7 @@
 - metadata query
 - `SymbolInfo` 这类官方合约信息表 typed 结果，以及 `InstrumentSpec` 这类窄规格对象
 - calendar / settlement / ranking / EDB
+- 官方单日 replay session 创建和 endpoint 解析
 - auth refresh
 - session-scoped order intent ledger（只记录 client order id 与 runtime order id
   的进程内/session 内对应关系，不做订单状态 overlay）
@@ -156,6 +157,8 @@
 - `query_symbol_ranking`
 - `query_edb_data`
 - `refresh_auth*`
+- `ServerReplayBuilder`
+- `ServerReplaySession`
 - `remember_order_intent`
 - `order_intent`
 - `replay_step*`

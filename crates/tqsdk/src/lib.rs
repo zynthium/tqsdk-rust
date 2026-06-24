@@ -37,6 +37,8 @@ pub mod advanced {
 
     pub mod session {
         pub use tqsdk_session::{InstrumentClass, InstrumentSpec, SymbolInfo};
+        #[cfg(all(feature = "services", feature = "live"))]
+        pub use tqsdk_session::{ServerReplayBuilder, ServerReplaySession};
 
         pub type SessionClient = tqsdk_session::SessionClient;
         pub type SessionClientBuilder = tqsdk_session::SessionClientBuilder;
@@ -448,6 +450,18 @@ impl TqBuilder {
     pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
         self.replay_url = Some(replay_url.into());
         self
+    }
+
+    /// Enter server-side single-day replay mode (≈ Python `TqReplay(date)`).
+    ///
+    /// The replay server replays one trading day of market data through the
+    /// normal live `next()` / `quote()` strategy body. Creating the official
+    /// replay session still requires auth during [`TqBuilder::connect`].
+    #[cfg(all(feature = "services", feature = "live"))]
+    pub fn server_replay(mut self, replay_date: NaiveDate) -> Result<Self> {
+        tqsdk_session::ServerReplayBuilder::new("validation", "validation", replay_date)?;
+        self.backtest = Some(BacktestConfig::ServerReplay { replay_date });
+        Ok(self)
     }
 
     /// Enter server-side backtest mode (≈ Python `TqBacktest`).
@@ -953,6 +967,10 @@ enum BacktestConfig {
         start_ns: i64,
         end_ns: i64,
     },
+    #[cfg(all(feature = "services", feature = "live"))]
+    ServerReplay {
+        replay_date: NaiveDate,
+    },
     Local {
         replay: tqsdk_task::ReplayMarketSource,
     },
@@ -965,6 +983,11 @@ impl std::fmt::Debug for BacktestConfig {
                 .debug_struct("Server")
                 .field("start_ns", start_ns)
                 .field("end_ns", end_ns)
+                .finish(),
+            #[cfg(all(feature = "services", feature = "live"))]
+            Self::ServerReplay { replay_date } => f
+                .debug_struct("ServerReplay")
+                .field("replay_date", replay_date)
                 .finish(),
             Self::Local { .. } => f.debug_struct("Local").finish_non_exhaustive(),
         }
@@ -1001,14 +1024,47 @@ async fn connect_wait_facade(
     replay_url: Option<String>,
     backtest: Option<BacktestConfig>,
 ) -> Result<Tq> {
+    #[cfg(all(feature = "services", feature = "live"))]
+    let (market_url, replay_url) =
+        if let Some(BacktestConfig::ServerReplay { replay_date }) = &backtest {
+            let auth_ref = auth.as_ref().ok_or(Error::MissingAuth)?;
+            let replay_session = tqsdk_session::ServerReplayBuilder::new(
+                auth_ref.user.as_str(),
+                auth_ref.pass.as_str(),
+                *replay_date,
+            )?
+            .create()
+            .await?;
+            server_replay_endpoints(market_url, replay_url, &replay_session)
+        } else {
+            (market_url, replay_url)
+        };
+
     let session_builder =
         session_builder(auth, query_enabled, trade_targets, market_url, replay_url)?;
     let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
-    if let Some(BacktestConfig::Server { start_ns, end_ns }) = backtest {
-        wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
+    match backtest {
+        Some(BacktestConfig::Server { start_ns, end_ns }) => {
+            wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
+        }
+        #[cfg(all(feature = "services", feature = "live"))]
+        Some(BacktestConfig::ServerReplay { .. }) => {}
+        Some(BacktestConfig::Local { .. }) | None => {}
     }
     let api = wait_builder.build().await?;
     Ok(Tq::from_api(api))
+}
+
+#[cfg(all(feature = "services", feature = "live"))]
+fn server_replay_endpoints(
+    _market_url: Option<String>,
+    _replay_url: Option<String>,
+    replay_session: &tqsdk_session::ServerReplaySession,
+) -> (Option<String>, Option<String>) {
+    (
+        Some(replay_session.market_url().to_string()),
+        Some(replay_session.session_url().to_string()),
+    )
 }
 
 fn session_builder(
@@ -1268,9 +1324,10 @@ mod tests {
 #[cfg(test)]
 mod builder_contract_tests {
     use chrono::NaiveDate;
+    use serde_json::json;
 
     use super::{
-        Auth, Error, TqBuilder, continuous_minute_history_requests,
+        Auth, BacktestConfig, Error, TqBuilder, continuous_minute_history_requests,
         declared_quote_minute_history_requests, session_builder, trading_day_from_timestamp_ns,
         trading_day_start_time_ns,
     };
@@ -1308,6 +1365,73 @@ mod builder_contract_tests {
         assert_eq!(
             builder.endpoints().replay_url.as_deref(),
             Some("replay-driver")
+        );
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[test]
+    fn server_replay_builder_sets_replay_config() {
+        let replay_date = NaiveDate::from_ymd_opt(2026, 6, 25).expect("valid date");
+        let builder = TqBuilder::new()
+            .server_replay(replay_date)
+            .expect("weekday replay date should be valid");
+
+        assert!(matches!(
+            builder.backtest,
+            Some(BacktestConfig::ServerReplay { replay_date: date }) if date == replay_date
+        ));
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[test]
+    fn server_replay_builder_rejects_weekend_dates() {
+        let weekend = NaiveDate::from_ymd_opt(2026, 6, 27).expect("valid date");
+
+        let error = TqBuilder::new()
+            .server_replay(weekend)
+            .expect_err("weekend replay date should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "validation error: replay_date must be a weekday trading date"
+        );
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[test]
+    fn server_replay_session_sets_market_and_replay_endpoints() {
+        let replay_date = NaiveDate::from_ymd_opt(2026, 6, 25).expect("valid date");
+        let session = tqsdk_session::ServerReplaySession::from_create_session_payload(
+            replay_date,
+            &json!({
+                "ip": "127.0.0.1",
+                "session_port": 18888,
+                "gateway_web_port": 27777,
+                "session": "session-1"
+            }),
+        )
+        .expect("valid session response");
+
+        let (market_url, replay_url) = super::server_replay_endpoints(None, None, &session);
+        let builder = session_builder(
+            Some(Auth {
+                user: "demo-user".to_string(),
+                pass: "demo-pass".to_string(),
+            }),
+            false,
+            Vec::new(),
+            market_url,
+            replay_url,
+        )
+        .unwrap();
+
+        assert_eq!(
+            builder.endpoints().market_url.as_deref(),
+            Some("ws://127.0.0.1:27777/t/rmd/front/mobile")
+        );
+        assert_eq!(
+            builder.endpoints().replay_url.as_deref(),
+            Some("http://127.0.0.1:18888/t/rmd/replay/session/session-1")
         );
     }
 

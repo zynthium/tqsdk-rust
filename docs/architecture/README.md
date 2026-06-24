@@ -120,6 +120,9 @@ V1 是：
   - `SymbolInfo` / `InstrumentSpec` / `InstrumentClass` 这类一次性 metadata
     标准化对象；`SymbolInfo` 对齐官方合约信息表，`InstrumentSpec` 是窄的
     下单校验规格对象
+  - `ServerReplayBuilder` / `ServerReplaySession` 用于官方单日 replay session
+    创建和 endpoint 解析；默认 facade 可用 `.server_replay(date)?` 接入返回的
+    replay 行情 endpoint，复盘控速/heartbeat/terminate 仍不自动后台化
   - session-level error diagnostic / retry hint wrapper
   - session-scoped order intent ledger，供上层 facade 在同一 session 内对稳定
     client order id 做去重和命令关联

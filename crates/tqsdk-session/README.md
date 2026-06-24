@@ -79,6 +79,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - `replay_step_value(...).await`
 - `replay_reset(...).await`
 - `replay_reset_value(...).await`
+- `ServerReplayBuilder`
+- `ServerReplaySession`
 - `StartupRecoverySpec`
 - `startup_recovery_status(...)`
 - `OrderIntentRecord`
@@ -104,6 +106,12 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 - 结算价：`https://md-settlement-system-fc-api.shinnytech.com/mss`
 - 持仓排名：`https://symbol-ranking-system-fc-api.shinnytech.com/srs`
 - EDB：`https://edb.shinnytech.com/data/index_data`
+
+对于官方单日复盘服务，`ServerReplayBuilder::new(user, pass, date)?.create().await`
+会向 `replay.api.shinnytech.com` 创建 replay session，并返回
+`ServerReplaySession` 中的 `session_url`、`instrument_url` 和 `market_url`。
+默认 `tqsdk` facade 的 `.server_replay(date)?` 会用这个 `market_url` 接入正常
+行情 loop。复盘速度控制、heartbeat 和 terminate lifecycle 目前不自动后台化。
 
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复

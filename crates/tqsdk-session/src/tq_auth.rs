@@ -173,7 +173,7 @@ impl TqAuthProvider {
         .await
     }
 
-    fn auth_headers(&self, auth: &AuthContext) -> Result<HeaderMap> {
+    pub(crate) fn auth_headers(&self, auth: &AuthContext) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
