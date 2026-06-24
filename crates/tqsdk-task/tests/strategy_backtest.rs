@@ -198,6 +198,90 @@ async fn strategy_backtest_uses_default_price_tick_for_kline_quote_synthesis() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_uses_replayed_quote_metadata_for_kline_quote_synthesis() {
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
+            "fixture",
+            "SHFE.rb2501",
+            500,
+            Some(500),
+            Quote {
+                datetime: "2026-05-15 09:29:00.000000".to_string(),
+                last_price: 100.0,
+                ask_price1: 100.0,
+                ask_volume1: 10,
+                bid_price1: 99.5,
+                bid_volume1: 8,
+                price_tick: 0.5,
+                price_decs: 1,
+                volume_multiple: 10,
+                margin: 1_000.0,
+                commission: 2.5,
+                ..Quote::default()
+            },
+        )
+        .unwrap(),
+        kline_event("SHFE.rb2501", 1_000, 101.0, 105.0, 97.0, 99.0),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let quote = ctx.quote("SHFE.rb2501").unwrap();
+    assert_eq!(quote.price_tick, 0.5);
+    assert_eq!(quote.price_decs, 1);
+    assert_eq!(quote.volume_multiple, 10);
+    assert_eq!(quote.margin, 1_000.0);
+    assert_eq!(quote.commission, 2.5);
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let quote = ctx.quote("SHFE.rb2501").unwrap();
+    assert_eq!(quote.last_price, 99.0);
+    assert_eq!(quote.ask_price1, 99.5);
+    assert_eq!(quote.bid_price1, 98.5);
+}
+
+#[tokio::test]
+async fn strategy_backtest_explicit_price_tick_overrides_replayed_quote_metadata() {
+    let replay = ReplayMarketSource::new(vec![
+        ReplayMarketEvent::quote(
+            "fixture",
+            "SHFE.rb2501",
+            500,
+            Some(500),
+            Quote {
+                last_price: 100.0,
+                ask_price1: 100.0,
+                ask_volume1: 10,
+                bid_price1: 99.5,
+                bid_volume1: 8,
+                price_tick: 0.5,
+                ..Quote::default()
+            },
+        )
+        .unwrap(),
+        kline_event("SHFE.rb2501", 1_000, 101.0, 105.0, 97.0, 99.0),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .price_tick("SHFE.rb2501", 1.0)
+        .build()
+        .await
+        .unwrap();
+
+    let _ctx = backtest.next().await.unwrap().unwrap();
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let quote = ctx.quote("SHFE.rb2501").unwrap();
+    assert_eq!(quote.ask_price1, 100.0);
+    assert_eq!(quote.bid_price1, 98.0);
+}
+
+#[tokio::test]
 async fn strategy_backtest_kline_checkpoints_fill_pending_orders_without_extra_strategy_steps() {
     let replay = ReplayMarketSource::new(vec![
         quote_event("SHFE.rb2501", 1_000, 120.0, 10, 90.0, 10),

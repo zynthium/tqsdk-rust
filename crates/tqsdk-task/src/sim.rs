@@ -156,6 +156,28 @@ impl TqSim {
         }
     }
 
+    /// Fill missing per-symbol simulation parameters from quote metadata.
+    ///
+    /// Explicit `set_*` / `with_*` configuration keeps precedence.
+    pub fn apply_quote_metadata(&mut self, symbol: impl AsRef<str>, quote: &Quote) {
+        let symbol = symbol.as_ref();
+        if quote.margin.is_finite() && quote.margin >= 0.0 {
+            self.margin_by_symbol
+                .entry(symbol.to_owned())
+                .or_insert(quote.margin);
+        }
+        if quote.commission.is_finite() && quote.commission >= 0.0 {
+            self.commission_by_symbol
+                .entry(symbol.to_owned())
+                .or_insert(quote.commission);
+        }
+        if quote.volume_multiple > 0 {
+            self.contract_multiplier_by_symbol
+                .entry(symbol.to_owned())
+                .or_insert(quote.volume_multiple as f64);
+        }
+    }
+
     #[must_use]
     pub fn account_id(&self) -> &str {
         &self.account_id
@@ -195,6 +217,7 @@ impl TqSim {
 
     pub fn update_quote(&mut self, symbol: impl Into<String>, quote: Quote) -> TqSimStepReport {
         let symbol = symbol.into();
+        self.apply_quote_metadata(&symbol, &quote);
         self.quotes.insert(symbol.clone(), quote);
         let report = self.match_pending_for_symbol(&symbol);
         if report.is_empty() && self.positions.get(&symbol).copied().unwrap_or_default() != 0 {

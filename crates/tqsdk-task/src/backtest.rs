@@ -34,6 +34,7 @@ pub struct StrategyBacktest {
     sim: TqSim,
     tracked_symbols: Vec<String>,
     price_ticks: HashMap<String, f64>,
+    quote_metadata_price_ticks: HashMap<String, f64>,
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
 }
@@ -181,6 +182,7 @@ impl StrategyBacktest {
     }
 
     fn ingest_quote(&mut self, symbol: &str, quote: &Quote) -> Result<()> {
+        self.remember_quote_metadata(symbol, quote);
         ingest_quote_event(self.strategy.task_host(), symbol, quote)?;
         let report = self.sim.update_quote(symbol.to_owned(), quote.clone());
         self.sim
@@ -192,10 +194,19 @@ impl StrategyBacktest {
         self.price_ticks
             .get(symbol)
             .copied()
+            .or_else(|| self.quote_metadata_price_ticks.get(symbol).copied())
             .or(self.default_price_tick)
             .ok_or(TaskError::Unsupported(
-                "StrategyBacktest kline event requires price_tick(symbol, tick) or default_price_tick(tick)",
+                "StrategyBacktest kline event requires price_tick(symbol, tick), replayed quote price_tick metadata, or default_price_tick(tick)",
             ))
+    }
+
+    fn remember_quote_metadata(&mut self, symbol: &str, quote: &Quote) {
+        if quote.price_tick.is_finite() && quote.price_tick > 0.0 {
+            self.quote_metadata_price_ticks
+                .entry(symbol.to_owned())
+                .or_insert(quote.price_tick);
+        }
     }
 }
 
@@ -278,6 +289,7 @@ impl StrategyBacktestBuilder {
             sim,
             tracked_symbols,
             price_ticks,
+            quote_metadata_price_ticks: HashMap::new(),
             default_price_tick,
             summary,
         })
@@ -820,6 +832,42 @@ fn quote_update(symbol: &str, quote: &Quote) -> Value {
     insert_f64_if_finite(&mut quote_value, "amount", quote.amount);
     insert_i64_if_nonzero(&mut quote_value, "open_interest", quote.open_interest);
     insert_f64_if_finite(&mut quote_value, "price_tick", quote.price_tick);
+    insert_i64_if_nonzero(&mut quote_value, "price_decs", quote.price_decs);
+    insert_i64_if_nonzero(&mut quote_value, "volume_multiple", quote.volume_multiple);
+    insert_i64_if_nonzero(&mut quote_value, "open_limit", quote.open_limit);
+    insert_i64_if_nonzero(
+        &mut quote_value,
+        "max_limit_order_volume",
+        quote.max_limit_order_volume,
+    );
+    insert_i64_if_nonzero(
+        &mut quote_value,
+        "max_market_order_volume",
+        quote.max_market_order_volume,
+    );
+    insert_i64_if_nonzero(
+        &mut quote_value,
+        "min_limit_order_volume",
+        quote.min_limit_order_volume,
+    );
+    insert_i64_if_nonzero(
+        &mut quote_value,
+        "min_market_order_volume",
+        quote.min_market_order_volume,
+    );
+    insert_string_if_present(
+        &mut quote_value,
+        "underlying_symbol",
+        &quote.underlying_symbol,
+    );
+    insert_f64_if_finite(&mut quote_value, "strike_price", quote.strike_price);
+    insert_string_if_present(&mut quote_value, "ins_class", &quote.ins_class);
+    insert_string_if_present(&mut quote_value, "instrument_id", &quote.instrument_id);
+    insert_string_if_present(&mut quote_value, "instrument_name", &quote.instrument_name);
+    insert_string_if_present(&mut quote_value, "exchange_id", &quote.exchange_id);
+    insert_string_if_present(&mut quote_value, "product_id", &quote.product_id);
+    insert_f64_if_finite(&mut quote_value, "margin", quote.margin);
+    insert_f64_if_finite(&mut quote_value, "commission", quote.commission);
 
     json!({
         "quotes": {
