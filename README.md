@@ -158,11 +158,11 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
 当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
 自动追踪、`TargetPos` 执行闭环和轻量 `summary()` / trade log / cash + mark-to-market
-equity 曲线；默认
+equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。summary
-已含 daily equity returns / 年化日 Sharpe；交易所交易日历口径、完整绩效指标集、
-自动主连分段回测仍是后续范围；单主连
+已含手续费、净实现盈亏、daily equity returns / 年化日 Sharpe；交易所交易日历口径、
+完整绩效指标集、自动主连分段回测仍是后续范围；单主连
 date -> underlying 映射可用 `tqsdk-data::DataClient::query_his_cont_underlyings(...)`。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：

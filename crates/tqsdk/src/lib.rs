@@ -47,10 +47,10 @@ pub mod advanced {
         pub use tqsdk_task::{
             LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
             ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
-            StrategyBacktestBalancePoint, StrategyBacktestDailyEquityReturn,
-            StrategyBacktestEquityPoint, StrategyBacktestSummary, StrategyReplaySourceBuilder,
-            TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost,
-            VolumeSplitPolicy,
+            StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
+            StrategyBacktestDailyEquityReturn, StrategyBacktestEquityPoint,
+            StrategyBacktestSummary, StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
+            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
         };
     }
 

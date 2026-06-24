@@ -429,6 +429,90 @@ async fn strategy_backtest_summary_tracks_counts_and_final_snapshots() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_summary_tracks_closed_profit_observations() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 111.0, 10, 110.0, 8),
+        quote_event("SHFE.rb2501", 3_000, 95.0, 10, 94.0, 8),
+        quote_event("SHFE.rb2501", 4_000, 91.0, 10, 90.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(
+            TqSim::new()
+                .with_contract_multiplier("SHFE.rb2501", 10.0)
+                .with_commission("SHFE.rb2501", 1.0),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("closed-profit-open-win")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .sell_close("SHFE.rb2501", 1)
+        .limit(110.0)
+        .send_once("closed-profit-close-win")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(95.0)
+        .send_once("closed-profit-open-loss")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .sell_close("SHFE.rb2501", 1)
+        .limit(90.0)
+        .send_once("closed-profit-close-loss")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let summary = backtest.summary();
+    assert_eq!(summary.realized_profit(), 50.0);
+    assert_eq!(summary.total_commission(), 4.0);
+    assert_eq!(summary.net_realized_profit(), 46.0);
+    assert_eq!(summary.closed_profit_points().len(), 2);
+    assert_eq!(summary.closed_profit_points()[0].event_count(), 2);
+    assert_eq!(
+        summary.closed_profit_points()[0].event_time_ns(),
+        Some(2_000)
+    );
+    assert_eq!(summary.closed_profit_points()[0].trade_count(), 1);
+    assert_eq!(summary.closed_profit_points()[0].profit(), 100.0);
+    assert_eq!(summary.closed_profit_points()[1].event_count(), 4);
+    assert_eq!(
+        summary.closed_profit_points()[1].event_time_ns(),
+        Some(4_000)
+    );
+    assert_eq!(summary.closed_profit_points()[1].trade_count(), 1);
+    assert_eq!(summary.closed_profit_points()[1].profit(), -50.0);
+    assert_eq!(summary.closed_trade_count(), 2);
+    assert_eq!(summary.closed_profit_observation_count(), 2);
+    assert_eq!(summary.winning_closed_profit_observation_count(), 1);
+    assert_eq!(summary.losing_closed_profit_observation_count(), 1);
+    assert_eq!(summary.gross_profit(), 100.0);
+    assert_eq!(summary.gross_loss(), 50.0);
+    assert_eq!(summary.profit_loss_ratio(), 2.0);
+    assert_eq!(summary.winning_rate(), 0.5);
+}
+
+#[tokio::test]
 async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
     let replay =
         ReplayMarketSource::new(vec![quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8)]);

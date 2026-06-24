@@ -107,13 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_summary(summary: StrategyBacktestSummary) {
     println!(
-        "events={} quote={} tick={} kline={} orders={} trades={} available={} positions={}",
+        "events={} quote={} tick={} kline={} orders={} trades={} closed={} win_rate={} pl_ratio={} net_profit={} available={} positions={}",
         summary.event_count(),
         summary.quote_count(),
         summary.tick_count(),
         summary.kline_count(),
         summary.orders().len(),
         summary.trades().len(),
+        summary.closed_profit_observation_count(),
+        summary.winning_rate(),
+        summary.profit_loss_ratio(),
+        summary.net_realized_profit(),
         summary.final_account().available,
         summary.final_positions().len()
     );

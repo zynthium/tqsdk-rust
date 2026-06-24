@@ -6,7 +6,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
     Account, CommitScope, InputPayload, IoEvent, Kline, Order, Position, ProtocolDomain, Quote,
-    RuntimeInput, Tick, Trade,
+    RuntimeInput, Tick, Trade, TradeOffset,
 };
 
 use crate::replay::{
@@ -57,6 +57,7 @@ pub struct StrategyBacktestSummary {
     kline_count: usize,
     balance_points: Vec<StrategyBacktestBalancePoint>,
     equity_points: Vec<StrategyBacktestEquityPoint>,
+    closed_profit_points: Vec<StrategyBacktestClosedProfitPoint>,
     orders: Vec<Order>,
     trades: Vec<Trade>,
     initial_account: Account,
@@ -90,6 +91,15 @@ pub struct StrategyBacktestEquityPoint {
     return_rate: f64,
     drawdown: f64,
     drawdown_rate: f64,
+}
+
+/// Realized close-profit observation recorded by local backtest summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestClosedProfitPoint {
+    event_count: usize,
+    event_time_ns: Option<i64>,
+    trade_count: usize,
+    profit: f64,
 }
 
 /// End-of-day mark-to-market equity return derived from replay observations.
@@ -308,6 +318,7 @@ impl StrategyBacktestSummary {
             kline_count: 0,
             balance_points: Vec::new(),
             equity_points: Vec::new(),
+            closed_profit_points: Vec::new(),
             orders: Vec::new(),
             trades: Vec::new(),
             initial_account: initial_account.clone(),
@@ -359,9 +370,35 @@ impl StrategyBacktestSummary {
         symbols: &[String],
         event_time_ns: Option<i64>,
     ) {
+        let previous_close_profit = self.final_account.close_profit;
+        let previous_trade_count = self.trades.len();
         self.refresh_from_sim(sim, symbols);
+        self.record_closed_profit_point(previous_close_profit, previous_trade_count, event_time_ns);
         self.record_balance_point(event_time_ns);
         self.record_equity_point(event_time_ns);
+    }
+
+    fn record_closed_profit_point(
+        &mut self,
+        previous_close_profit: f64,
+        previous_trade_count: usize,
+        event_time_ns: Option<i64>,
+    ) {
+        let profit = self.final_account.close_profit - previous_close_profit;
+        if !profit.is_finite() || profit == 0.0 {
+            return;
+        }
+        let trade_count = self.trades[previous_trade_count..]
+            .iter()
+            .filter(|trade| is_close_trade(trade))
+            .count();
+        self.closed_profit_points
+            .push(StrategyBacktestClosedProfitPoint {
+                event_count: self.event_count,
+                event_time_ns,
+                trade_count,
+                profit,
+            });
     }
 
     fn record_balance_point(&mut self, event_time_ns: Option<i64>) {
@@ -462,6 +499,11 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn closed_profit_points(&self) -> &[StrategyBacktestClosedProfitPoint] {
+        &self.closed_profit_points
+    }
+
+    #[must_use]
     pub fn initial_account(&self) -> &Account {
         &self.initial_account
     }
@@ -504,6 +546,78 @@ impl StrategyBacktestSummary {
     #[must_use]
     pub fn equity_return_rate(&self) -> f64 {
         rate_or_nan(self.equity_change(), self.initial_equity())
+    }
+
+    #[must_use]
+    pub fn realized_profit(&self) -> f64 {
+        self.final_account.close_profit - self.initial_account.close_profit
+    }
+
+    #[must_use]
+    pub fn total_commission(&self) -> f64 {
+        self.final_account.commission - self.initial_account.commission
+    }
+
+    #[must_use]
+    pub fn net_realized_profit(&self) -> f64 {
+        self.realized_profit() - self.total_commission()
+    }
+
+    #[must_use]
+    pub fn closed_trade_count(&self) -> usize {
+        self.closed_profit_points
+            .iter()
+            .map(StrategyBacktestClosedProfitPoint::trade_count)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn closed_profit_observation_count(&self) -> usize {
+        self.closed_profit_points.len()
+    }
+
+    #[must_use]
+    pub fn winning_closed_profit_observation_count(&self) -> usize {
+        self.closed_profit_points
+            .iter()
+            .filter(|point| point.profit > 0.0)
+            .count()
+    }
+
+    #[must_use]
+    pub fn losing_closed_profit_observation_count(&self) -> usize {
+        self.closed_profit_points
+            .iter()
+            .filter(|point| point.profit < 0.0)
+            .count()
+    }
+
+    #[must_use]
+    pub fn winning_rate(&self) -> f64 {
+        let wins = self.winning_closed_profit_observation_count();
+        let losses = self.losing_closed_profit_observation_count();
+        rate_or_nan(wins as f64, (wins + losses) as f64)
+    }
+
+    #[must_use]
+    pub fn gross_profit(&self) -> f64 {
+        self.closed_profit_points
+            .iter()
+            .filter_map(|point| (point.profit > 0.0).then_some(point.profit))
+            .sum()
+    }
+
+    #[must_use]
+    pub fn gross_loss(&self) -> f64 {
+        self.closed_profit_points
+            .iter()
+            .filter_map(|point| (point.profit < 0.0).then_some(-point.profit))
+            .sum()
+    }
+
+    #[must_use]
+    pub fn profit_loss_ratio(&self) -> f64 {
+        rate_or_nan(self.gross_profit(), self.gross_loss())
     }
 
     #[must_use]
@@ -679,6 +793,28 @@ impl StrategyBacktestEquityPoint {
     #[must_use]
     pub fn drawdown_rate(&self) -> f64 {
         self.drawdown_rate
+    }
+}
+
+impl StrategyBacktestClosedProfitPoint {
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    #[must_use]
+    pub fn event_time_ns(&self) -> Option<i64> {
+        self.event_time_ns
+    }
+
+    #[must_use]
+    pub fn trade_count(&self) -> usize {
+        self.trade_count
+    }
+
+    #[must_use]
+    pub fn profit(&self) -> f64 {
+        self.profit
     }
 }
 
@@ -1003,6 +1139,13 @@ fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
     } else {
         mean / std_dev * 252.0_f64.sqrt()
     }
+}
+
+fn is_close_trade(trade: &Trade) -> bool {
+    matches!(
+        trade.offset,
+        Some(TradeOffset::Close | TradeOffset::CloseToday)
+    )
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
