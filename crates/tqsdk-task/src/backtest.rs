@@ -400,13 +400,16 @@ impl StrategyBacktestSummary {
         event_time_ns: Option<i64>,
     ) {
         let profit = self.final_account.close_profit - previous_close_profit;
-        if !profit.is_finite() || profit == 0.0 {
+        if !profit.is_finite() {
             return;
         }
         let trade_count = self.trades[previous_trade_count..]
             .iter()
             .filter(|trade| is_close_trade(trade))
             .count();
+        if trade_count == 0 && profit == 0.0 {
+            return;
+        }
         self.closed_profit_points
             .push(StrategyBacktestClosedProfitPoint {
                 event_count: self.event_count,
@@ -591,7 +594,7 @@ impl StrategyBacktestSummary {
     pub fn winning_closed_profit_observation_count(&self) -> usize {
         self.closed_profit_points
             .iter()
-            .filter(|point| point.profit > 0.0)
+            .filter(|point| point.profit >= 0.0)
             .count()
     }
 
@@ -628,7 +631,17 @@ impl StrategyBacktestSummary {
 
     #[must_use]
     pub fn profit_loss_ratio(&self) -> f64 {
-        rate_or_nan(self.gross_profit(), self.gross_loss())
+        let gross_profit = self.gross_profit();
+        let gross_loss = self.gross_loss();
+        if gross_loss == 0.0 {
+            if gross_profit > 0.0 {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            }
+        } else {
+            gross_profit / gross_loss
+        }
     }
 
     #[must_use]

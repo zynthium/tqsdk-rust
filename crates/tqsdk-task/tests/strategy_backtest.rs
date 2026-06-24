@@ -538,6 +538,53 @@ async fn strategy_backtest_summary_tracks_closed_profit_observations() {
 }
 
 #[tokio::test]
+async fn strategy_backtest_summary_counts_break_even_close_observations() {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 100.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 100.0, 10, 100.0, 8),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_contract_multiplier("SHFE.rb2501", 10.0))
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("closed-profit-open-even")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .sell_close("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("closed-profit-close-even")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+
+    let summary = backtest.summary();
+    assert_eq!(summary.realized_profit(), 0.0);
+    assert_eq!(summary.closed_profit_points().len(), 1);
+    assert_eq!(summary.closed_profit_points()[0].event_count(), 2);
+    assert_eq!(summary.closed_profit_points()[0].trade_count(), 1);
+    assert_eq!(summary.closed_profit_points()[0].profit(), 0.0);
+    assert_eq!(summary.closed_trade_count(), 1);
+    assert_eq!(summary.closed_profit_observation_count(), 1);
+    assert_eq!(summary.winning_closed_profit_observation_count(), 1);
+    assert_eq!(summary.losing_closed_profit_observation_count(), 0);
+    assert_eq!(summary.winning_rate(), 1.0);
+    assert_eq!(summary.gross_profit(), 0.0);
+    assert_eq!(summary.gross_loss(), 0.0);
+    assert!(summary.profit_loss_ratio().is_nan());
+}
+
+#[tokio::test]
 async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
     let replay =
         ReplayMarketSource::new(vec![quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8)]);
