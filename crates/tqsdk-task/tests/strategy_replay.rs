@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tqsdk_core::{Kline, Quote};
+use tqsdk_core::{Kline, Quote, Tick};
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
 use tqsdk_task::{
     ReplayMarketEvent, ReplayMarketPayloadKind, ReplayMarketSource, StrategyReplay,
@@ -210,6 +210,64 @@ async fn strategy_replay_source_builder_merges_multiple_series_by_event_time() {
             .close,
         481.0
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strategy_replay_source_builder_replays_rows_as_alias_symbol() {
+    let alias = "KQ.m@SHFE.au";
+    let replay = StrategyReplay::source_builder()
+        .kline_rows(
+            alias,
+            60_000_000_000,
+            [Kline {
+                id: 1,
+                datetime: 1_000,
+                close: 480.0,
+                ..Kline::default()
+            }],
+            "underlying-segment",
+        )
+        .unwrap()
+        .tick_rows(
+            alias,
+            [Tick {
+                id: 2,
+                datetime: 2_000,
+                last_price: 481.0,
+                ..Tick::default()
+            }],
+            "underlying-segment",
+        )
+        .unwrap()
+        .build();
+
+    let mut strategy = StrategyReplay::builder(replay)
+        .market(FakeMarket::new().account("sim", 100_000.0))
+        .broker(FakeBroker::new().fill_all())
+        .account("sim")
+        .kline(alias, Duration::from_secs(60), 16)
+        .tick(alias, 16)
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().source(), "underlying-segment");
+    assert_eq!(ctx.event().symbol(), alias);
+    assert_eq!(
+        ctx.kline(alias, Duration::from_secs(60))
+            .unwrap()
+            .last()
+            .unwrap()
+            .close,
+        480.0
+    );
+    drop(ctx);
+
+    let ctx = strategy.next().await.unwrap().unwrap();
+    assert_eq!(ctx.event().source(), "underlying-segment");
+    assert_eq!(ctx.event().symbol(), alias);
+    assert_eq!(ctx.tick(alias).unwrap().last().unwrap().last_price, 481.0);
 }
 
 #[test]

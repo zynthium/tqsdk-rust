@@ -97,6 +97,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - 使用 task-owned `ReplayMarketSource` 作为离线 market event source
   - 将 `ReplayMarketEvent` 的 quote/kline/tick 转成正常 runtime market commit
   - `StrategyReplaySourceBuilder` 可接收 `KlineDataSeries` / `TickDataSeries` 生成 history replay
+  - `StrategyReplaySourceBuilder::kline_series_as(...)` / `tick_series_as(...)` / `kline_rows(...)` / `tick_rows(...)` 可把 underlying history 以主连等 caller-provided replay symbol 回放
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
@@ -113,7 +114,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；逐合约显式配置优先，其次使用已 replay quote 的 `price_tick` metadata，最后才使用 `default_price_tick(tick)` 全局 fallback；不会自动查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的权益收益、年化日 Sharpe、峰值余额/权益和最大回撤
-  - 交易所交易日历口径、无风险利率、完整绩效指标集、自动分钟线、主连合约表、股票/期权完整账户语义仍是后续迭代范围
+  - 交易所交易日历口径、无风险利率、完整绩效指标集、自动分钟线、主连自动切换执行、股票/期权完整账户语义仍是后续迭代范围
 - `tqsdk-task::testing`
   - 提供 public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 测试策略时不需要真实网络、hidden `*_for_test` API、runtime handle、channel 或 `Arc<Mutex<_>>`

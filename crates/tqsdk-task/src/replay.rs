@@ -230,18 +230,41 @@ impl StrategyReplaySourceBuilder {
         self
     }
 
-    pub fn kline_series(
-        mut self,
+    pub fn kline_series(self, series: KlineDataSeries, source: impl AsRef<str>) -> Result<Self> {
+        let symbol = series.symbol().to_owned();
+        self.kline_series_as(series, symbol, source)
+    }
+
+    /// Append kline history series while replaying it under a caller-provided symbol.
+    ///
+    /// This is useful when underlying contract history should drive a synthetic
+    /// replay symbol such as a continuous-contract code.
+    pub fn kline_series_as(
+        self,
         series: KlineDataSeries,
+        replay_symbol: impl AsRef<str>,
         source: impl AsRef<str>,
     ) -> Result<Self> {
-        let source = source.as_ref();
-        let symbol = series.symbol().to_owned();
         let duration_ns = series.duration_ns();
-        for row in series.into_rows() {
+        self.kline_rows(replay_symbol, duration_ns, series.into_rows(), source)
+    }
+
+    /// Append owned kline rows under a replay symbol.
+    ///
+    /// `duration_ns` is the kline duration in nanoseconds.
+    pub fn kline_rows(
+        mut self,
+        replay_symbol: impl AsRef<str>,
+        duration_ns: i64,
+        rows: impl IntoIterator<Item = Kline>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        let replay_symbol = replay_symbol.as_ref();
+        let source = source.as_ref();
+        for row in rows {
             self.events.push(ReplayMarketEvent::kline(
                 source,
-                symbol.as_str(),
+                replay_symbol,
                 row.datetime,
                 Some(row.datetime),
                 duration_ns,
@@ -251,13 +274,37 @@ impl StrategyReplaySourceBuilder {
         Ok(self)
     }
 
-    pub fn tick_series(mut self, series: TickDataSeries, source: impl AsRef<str>) -> Result<Self> {
-        let source = source.as_ref();
+    pub fn tick_series(self, series: TickDataSeries, source: impl AsRef<str>) -> Result<Self> {
         let symbol = series.symbol().to_owned();
-        for row in series.into_rows() {
+        self.tick_series_as(series, symbol, source)
+    }
+
+    /// Append tick history series while replaying it under a caller-provided symbol.
+    ///
+    /// This is useful when underlying contract history should drive a synthetic
+    /// replay symbol such as a continuous-contract code.
+    pub fn tick_series_as(
+        self,
+        series: TickDataSeries,
+        replay_symbol: impl AsRef<str>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        self.tick_rows(replay_symbol, series.into_rows(), source)
+    }
+
+    /// Append owned tick rows under a replay symbol.
+    pub fn tick_rows(
+        mut self,
+        replay_symbol: impl AsRef<str>,
+        rows: impl IntoIterator<Item = Tick>,
+        source: impl AsRef<str>,
+    ) -> Result<Self> {
+        let replay_symbol = replay_symbol.as_ref();
+        let source = source.as_ref();
+        for row in rows {
             self.events.push(ReplayMarketEvent::tick(
                 source,
-                symbol.as_str(),
+                replay_symbol,
                 row.datetime,
                 Some(row.datetime),
                 row,

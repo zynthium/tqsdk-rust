@@ -160,9 +160,10 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 自动追踪、`TargetPos` 执行闭环和轻量 `summary()` / trade log / cash + mark-to-market
 equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
-`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。summary
+`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source，并可将
+underlying history 以主连等 caller-provided replay symbol 回放。summary
 已含手续费、净实现盈亏、daily equity returns / 年化日 Sharpe；交易所交易日历口径、
-完整绩效指标集、自动主连分段回测仍是后续范围；单主连
+完整绩效指标集、自动主连分段回测和执行 symbol 切换仍是后续范围；单主连
 date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
