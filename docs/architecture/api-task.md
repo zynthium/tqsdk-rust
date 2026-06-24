@@ -110,9 +110,9 @@
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不自动 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
   - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
-  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、峰值余额/权益和最大回撤；日频/Sharpe 类完整绩效统计仍不在当前最小闭环内
+  - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、按 UTC 自然日压缩的权益收益、年化日 Sharpe、峰值余额/权益和最大回撤；交易所交易日历口径、无风险利率和完整绩效指标集仍不在当前最小闭环内
   - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
-  - 日频/Sharpe 类完整绩效统计、自动分钟线、主连合约表、股票/期权账户语义不在当前最小闭环内
+  - 交易所交易日历口径、完整绩效指标集、自动分钟线、主连合约表、股票/期权账户语义不在当前最小闭环内
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略

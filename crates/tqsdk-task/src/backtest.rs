@@ -1,7 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
     Account, CommitScope, InputPayload, IoEvent, Kline, Order, Position, ProtocolDomain, Quote,
@@ -72,6 +73,7 @@ pub struct StrategyBacktestSummary {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategyBacktestBalancePoint {
     event_count: usize,
+    event_time_ns: Option<i64>,
     balance: f64,
     return_rate: f64,
     drawdown: f64,
@@ -82,10 +84,19 @@ pub struct StrategyBacktestBalancePoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategyBacktestEquityPoint {
     event_count: usize,
+    event_time_ns: Option<i64>,
     equity: f64,
     return_rate: f64,
     drawdown: f64,
     drawdown_rate: f64,
+}
+
+/// End-of-day mark-to-market equity return derived from replay observations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestDailyEquityReturn {
+    date: NaiveDate,
+    equity: f64,
+    return_rate: f64,
 }
 
 /// Strategy context plus local sim controls for the current backtest step.
@@ -126,8 +137,11 @@ impl StrategyBacktest {
             }
         }
         self.summary.record_payload(payload_kind);
-        self.summary
-            .record_account_snapshot(&self.sim, &self.tracked_symbols);
+        self.summary.record_account_snapshot(
+            &self.sim,
+            &self.tracked_symbols,
+            Some(backtest_event.event_time_ns()),
+        );
 
         let context = self.strategy.next_once().await?;
         Ok(Some(StrategyBacktestContext {
@@ -162,7 +176,7 @@ impl StrategyBacktest {
     #[must_use]
     pub fn summary(&self) -> StrategyBacktestSummary {
         let mut summary = self.summary.clone();
-        summary.record_account_snapshot(&self.sim, &self.tracked_symbols);
+        summary.record_account_snapshot(&self.sim, &self.tracked_symbols, None);
         summary
     }
 
@@ -294,7 +308,7 @@ impl StrategyBacktestSummary {
             max_equity_drawdown: 0.0,
             max_equity_drawdown_rate: 0.0,
         };
-        summary.record_account_snapshot(sim, symbols);
+        summary.record_account_snapshot(sim, symbols, None);
         summary
     }
 
@@ -327,13 +341,18 @@ impl StrategyBacktestSummary {
             .collect();
     }
 
-    fn record_account_snapshot(&mut self, sim: &TqSim, symbols: &[String]) {
+    fn record_account_snapshot(
+        &mut self,
+        sim: &TqSim,
+        symbols: &[String],
+        event_time_ns: Option<i64>,
+    ) {
         self.refresh_from_sim(sim, symbols);
-        self.record_balance_point();
-        self.record_equity_point();
+        self.record_balance_point(event_time_ns);
+        self.record_equity_point(event_time_ns);
     }
 
-    fn record_balance_point(&mut self) {
+    fn record_balance_point(&mut self, event_time_ns: Option<i64>) {
         let balance = self.final_account.balance;
         if self
             .balance_points
@@ -347,6 +366,7 @@ impl StrategyBacktestSummary {
         }
         let point = StrategyBacktestBalancePoint::new(
             self.event_count,
+            event_time_ns,
             balance,
             self.initial_account.balance,
             self.peak_balance,
@@ -358,7 +378,7 @@ impl StrategyBacktestSummary {
         self.balance_points.push(point);
     }
 
-    fn record_equity_point(&mut self) {
+    fn record_equity_point(&mut self, event_time_ns: Option<i64>) {
         let equity = account_equity(&self.final_account);
         if self
             .equity_points
@@ -372,6 +392,7 @@ impl StrategyBacktestSummary {
         }
         let point = StrategyBacktestEquityPoint::new(
             self.event_count,
+            event_time_ns,
             equity,
             account_equity(&self.initial_account),
             self.peak_equity,
@@ -474,6 +495,43 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn daily_equity_returns(&self) -> Vec<StrategyBacktestDailyEquityReturn> {
+        let mut daily_equity = BTreeMap::new();
+        for point in &self.equity_points {
+            let Some(event_time_ns) = point.event_time_ns else {
+                continue;
+            };
+            let Some(date) = utc_date_from_timestamp_ns(event_time_ns) else {
+                continue;
+            };
+            daily_equity.insert(date, point.equity);
+        }
+
+        let mut previous_equity = self.initial_equity();
+        daily_equity
+            .into_iter()
+            .map(|(date, equity)| {
+                let return_rate = rate_or_nan(equity - previous_equity, previous_equity);
+                previous_equity = equity;
+                StrategyBacktestDailyEquityReturn {
+                    date,
+                    equity,
+                    return_rate,
+                }
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn annualized_daily_sharpe_ratio(&self) -> f64 {
+        annualized_sharpe_ratio(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+        )
+    }
+
+    #[must_use]
     pub fn peak_balance(&self) -> f64 {
         self.peak_balance
     }
@@ -505,7 +563,13 @@ impl StrategyBacktestSummary {
 }
 
 impl StrategyBacktestBalancePoint {
-    fn new(event_count: usize, balance: f64, initial_balance: f64, peak_balance: f64) -> Self {
+    fn new(
+        event_count: usize,
+        event_time_ns: Option<i64>,
+        balance: f64,
+        initial_balance: f64,
+        peak_balance: f64,
+    ) -> Self {
         let drawdown = if balance.is_finite() && peak_balance.is_finite() {
             (peak_balance - balance).max(0.0)
         } else {
@@ -513,6 +577,7 @@ impl StrategyBacktestBalancePoint {
         };
         Self {
             event_count,
+            event_time_ns,
             balance,
             return_rate: rate_or_nan(balance - initial_balance, initial_balance),
             drawdown,
@@ -523,6 +588,11 @@ impl StrategyBacktestBalancePoint {
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.event_count
+    }
+
+    #[must_use]
+    pub fn event_time_ns(&self) -> Option<i64> {
+        self.event_time_ns
     }
 
     #[must_use]
@@ -547,7 +617,13 @@ impl StrategyBacktestBalancePoint {
 }
 
 impl StrategyBacktestEquityPoint {
-    fn new(event_count: usize, equity: f64, initial_equity: f64, peak_equity: f64) -> Self {
+    fn new(
+        event_count: usize,
+        event_time_ns: Option<i64>,
+        equity: f64,
+        initial_equity: f64,
+        peak_equity: f64,
+    ) -> Self {
         let drawdown = if equity.is_finite() && peak_equity.is_finite() {
             (peak_equity - equity).max(0.0)
         } else {
@@ -555,6 +631,7 @@ impl StrategyBacktestEquityPoint {
         };
         Self {
             event_count,
+            event_time_ns,
             equity,
             return_rate: rate_or_nan(equity - initial_equity, initial_equity),
             drawdown,
@@ -565,6 +642,11 @@ impl StrategyBacktestEquityPoint {
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.event_count
+    }
+
+    #[must_use]
+    pub fn event_time_ns(&self) -> Option<i64> {
+        self.event_time_ns
     }
 
     #[must_use]
@@ -585,6 +667,23 @@ impl StrategyBacktestEquityPoint {
     #[must_use]
     pub fn drawdown_rate(&self) -> f64 {
         self.drawdown_rate
+    }
+}
+
+impl StrategyBacktestDailyEquityReturn {
+    #[must_use]
+    pub fn date(&self) -> NaiveDate {
+        self.date
+    }
+
+    #[must_use]
+    pub fn equity(&self) -> f64 {
+        self.equity
+    }
+
+    #[must_use]
+    pub fn return_rate(&self) -> f64 {
+        self.return_rate
     }
 }
 
@@ -673,8 +772,11 @@ impl StrategyBacktestContext<'_> {
 
     pub fn finish_sim_step(&mut self) -> Result<TqSimStepReport> {
         let report = self.sim.process_host_orders(self.context.task_host())?;
-        self.summary
-            .record_account_snapshot(self.sim, self.tracked_symbols);
+        self.summary.record_account_snapshot(
+            self.sim,
+            self.tracked_symbols,
+            Some(self.event.event_time_ns()),
+        );
         Ok(report)
     }
 }
@@ -821,6 +923,37 @@ fn rate_or_nan(numerator: f64, denominator: f64) -> f64 {
 
 fn account_equity(account: &Account) -> f64 {
     account.balance + account.float_profit
+}
+
+fn utc_date_from_timestamp_ns(timestamp_ns: i64) -> Option<NaiveDate> {
+    let seconds = timestamp_ns.div_euclid(1_000_000_000);
+    let nanos = timestamp_ns.rem_euclid(1_000_000_000) as u32;
+    DateTime::<Utc>::from_timestamp(seconds, nanos).map(|datetime| datetime.date_naive())
+}
+
+fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
+    let returns = returns
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if returns.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| {
+            let diff = value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
+    let std_dev = variance.sqrt();
+    if std_dev == 0.0 || !std_dev.is_finite() {
+        f64::NAN
+    } else {
+        mean / std_dev * 252.0_f64.sqrt()
+    }
 }
 
 fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
