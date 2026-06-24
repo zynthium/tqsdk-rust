@@ -150,8 +150,14 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 已有 `DataClient` 和 history request 时可以用
 `local_backtest_kline_history(&data, request).await?` /
 `local_backtest_tick_history(&data, request).await?` 直接取数并进入本地回测。
+多个普通 K 线 request 可以用 `local_backtest_kline_histories(&data, requests).await?`
+一次组合成 replay source。
 分钟线常用路径可进一步用
 `local_backtest_minute_history(&data, symbol, start_ns, end_ns).await?` 省掉 duration 配置。
+如果策略在 live/server backtest/local backtest 间只想保留同一批 quote symbol，
+可先用 `quote_symbol("SHFE.rb2601")` 预声明，再调用
+`local_backtest_quote_minute_history(&data, start_ns, end_ns).await?`，它会为已声明
+symbol 显式取一分钟 K 线作为本地 quote fallback，不做隐藏联网订阅。
 需要把 underlying history 以主连等稳定 replay symbol 回放时，使用
 `local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
 request 使用 `local_backtest_kline_histories_as(...)` /
@@ -171,7 +177,8 @@ equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
 也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
 symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
-`local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
+`local_backtest_quote_minute_history(...)` 复用已声明 quote symbol 自动生成一分钟 history
+request，或用 `local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
 已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、显式交易日窗口 returns、
 盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；
 当 replay quote 带有 `underlying_symbol` 时，本地 `TqSim` 会把主连等 replay symbol

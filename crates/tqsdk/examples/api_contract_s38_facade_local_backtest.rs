@@ -23,6 +23,21 @@ async fn build_continuous_minute_backtest(
         .await
 }
 
+#[allow(dead_code)]
+async fn build_declared_quote_minute_backtest(
+    data: &tqsdk::advanced::data::DataClient,
+) -> tqsdk::Result<TqBuilder> {
+    Tq::futures()
+        .quote_symbol("SHFE.rb2601")
+        .default_price_tick(1.0)
+        .local_backtest_quote_minute_history(
+            data,
+            1_767_715_200_000_000_000,
+            1_768_233_600_000_000_000,
+        )
+        .await
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
     // Usually you'd build this from downloaded history rows or explicit replay events,

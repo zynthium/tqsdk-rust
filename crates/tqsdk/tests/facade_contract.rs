@@ -37,6 +37,23 @@ async fn facade_local_backtest_alias_history_helpers_build_empty_replay() {
 }
 
 #[tokio::test]
+async fn facade_local_backtest_quote_minute_history_requires_declared_quotes() {
+    let err = Tq::futures()
+        .local_backtest_quote_minute_history(
+            &tqsdk::advanced::data::DataClient::new(),
+            1_000,
+            61_000_000_000,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("quote_symbol"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
     let replay = ReplayMarketSource::new(vec![
         ReplayMarketEvent::kline(

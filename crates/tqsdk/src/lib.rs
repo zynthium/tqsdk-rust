@@ -480,6 +480,19 @@ impl TqBuilder {
         self.local_backtest_klines([series])
     }
 
+    /// Fetch multiple kline history requests and enter local-backtest mode.
+    pub async fn local_backtest_kline_histories(
+        self,
+        data: &tqsdk_data::DataClient,
+        requests: impl IntoIterator<Item = tqsdk_data::KlineDataSeriesRequest>,
+    ) -> Result<Self> {
+        let mut series = Vec::new();
+        for request in requests {
+            series.push(data.get_kline_data_series(request).await?);
+        }
+        self.local_backtest_klines(series)
+    }
+
     /// Fetch multiple kline history requests and replay them under one symbol.
     ///
     /// Use this for explicitly segmented continuous-contract backtests after the
@@ -548,6 +561,26 @@ impl TqBuilder {
             ),
         )
         .await
+    }
+
+    /// Fetch one-minute kline history for pre-declared quote symbols.
+    ///
+    /// This is the explicit local-backtest counterpart to Python TqBacktest's
+    /// minute-line quote fallback: declare symbols with [`TqBuilder::quote_symbol`],
+    /// then call this helper to fetch `[start_datetime_ns, end_datetime_ns)` minute
+    /// histories for those symbols without hidden subscriptions.
+    pub async fn local_backtest_quote_minute_history(
+        self,
+        data: &tqsdk_data::DataClient,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Self> {
+        let requests = declared_quote_minute_history_requests(
+            &self.quote_symbols,
+            start_datetime_ns,
+            end_datetime_ns,
+        )?;
+        self.local_backtest_kline_histories(data, requests).await
     }
 
     /// Fetch one-minute underlying histories for a main continuous contract.
@@ -958,7 +991,7 @@ fn continuous_minute_history_requests(
         ));
     }
 
-    let mut requests = Vec::new();
+    let mut requests: Vec<tqsdk_data::KlineDataSeriesRequest> = Vec::new();
     for segment in segments {
         if segment.symbol != symbol {
             return Err(data_validation(format!(
@@ -986,6 +1019,40 @@ fn continuous_minute_history_requests(
         }
     }
 
+    Ok(requests)
+}
+
+fn declared_quote_minute_history_requests(
+    symbols: &[String],
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+) -> Result<Vec<tqsdk_data::KlineDataSeriesRequest>> {
+    if symbols.is_empty() {
+        return Err(data_validation(
+            "local_backtest_quote_minute_history requires at least one quote_symbol",
+        ));
+    }
+    if end_datetime_ns <= start_datetime_ns {
+        return Err(data_validation(
+            "end_datetime_ns must be greater than start_datetime_ns",
+        ));
+    }
+
+    let mut requests: Vec<tqsdk_data::KlineDataSeriesRequest> = Vec::new();
+    for symbol in symbols {
+        if symbol.is_empty() {
+            return Err(data_validation("quote_symbol must not be empty"));
+        }
+        if requests.iter().any(|request| request.symbol() == symbol) {
+            continue;
+        }
+        requests.push(tqsdk_data::KlineDataSeriesRequest::new(
+            symbol.clone(),
+            Duration::from_secs(60),
+            start_datetime_ns,
+            end_datetime_ns,
+        ));
+    }
     Ok(requests)
 }
 
@@ -1143,7 +1210,8 @@ mod builder_contract_tests {
     use chrono::NaiveDate;
 
     use super::{
-        Error, TqBuilder, continuous_minute_history_requests, trading_day_from_timestamp_ns,
+        Error, TqBuilder, continuous_minute_history_requests,
+        declared_quote_minute_history_requests, trading_day_from_timestamp_ns,
         trading_day_start_time_ns,
     };
 
@@ -1161,6 +1229,27 @@ mod builder_contract_tests {
         let result = TqBuilder::new().connect().await;
 
         assert!(matches!(result, Err(Error::MissingAuth)));
+    }
+
+    #[test]
+    fn declared_quote_minute_history_requests_dedupes_declared_symbols() {
+        let start = cst_datetime_ns(2026, 5, 18, 9, 0, 0);
+        let end = cst_datetime_ns(2026, 5, 18, 10, 0, 0);
+        let symbols = vec![
+            "SHFE.rb2601".to_string(),
+            "SHFE.rb2601".to_string(),
+            "DCE.i2601".to_string(),
+        ];
+
+        let requests = declared_quote_minute_history_requests(&symbols, start, end).unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].symbol(), "SHFE.rb2601");
+        assert_eq!(requests[0].duration(), std::time::Duration::from_secs(60));
+        assert_eq!(requests[0].start_datetime_ns(), start);
+        assert_eq!(requests[0].end_datetime_ns(), end);
+        assert_eq!(requests[1].symbol(), "DCE.i2601");
+        assert_eq!(requests[1].duration(), std::time::Duration::from_secs(60));
     }
 
     #[test]

@@ -6,7 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Server-side backtest (`.backtest()`)
-- Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
+- Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_kline_histories(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_quote_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
@@ -20,6 +20,9 @@ runtime contract；它只提供一个更容易开始的 facade：
 `KQ.m@SHFE.rb` 这样的主连代码下回放，并保留 quote `underlying_symbol` metadata。
 常用主连分钟线回测可以用 `.local_backtest_continuous_minute_history(...)`
 自动查询 underlying segment、按交易日窗口裁剪并组合 replay source。
+若只需要 Python TqBacktest 风格的分钟线 quote fallback，可先用 `.quote_symbol(...)`
+声明普通合约，再用 `.local_backtest_quote_minute_history(...)` 显式取这些 symbol 的
+一分钟 K 线进入本地回测；该路径不做隐藏订阅或隐式联网。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
 本地回测结束前会 drain 已进入 runtime 的 task updates，因此 `TargetPos` 的
