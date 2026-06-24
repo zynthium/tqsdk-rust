@@ -150,6 +150,8 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 已有 `DataClient` 和 history request 时可以用
 `local_backtest_kline_history(&data, request).await?` /
 `local_backtest_tick_history(&data, request).await?` 直接取数并进入本地回测。
+分钟线常用路径可进一步用
+`local_backtest_minute_history(&data, symbol, start_ns, end_ns).await?` 省掉 duration 配置。
 明确要直接操作 Python-style wait facade 时，才下钻到
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
@@ -160,7 +162,7 @@ equity 曲线；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
 `StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source。summary
 已含 daily equity returns / 年化日 Sharpe；交易所交易日历口径、完整绩效指标集、
-自动分钟线和自动主连分段回测仍是后续范围；单主连
+自动主连分段回测仍是后续范围；单主连
 date -> underlying 映射可用 `tqsdk-data::DataClient::query_his_cont_underlyings(...)`。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：

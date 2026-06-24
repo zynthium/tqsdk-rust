@@ -105,14 +105,14 @@
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
-  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source
+  - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_minute_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source
   - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；`default_price_tick(tick)` 可作为全局 fallback，逐合约配置优先；不自动 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
   - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、按 UTC 自然日压缩的权益收益、年化日 Sharpe、峰值余额/权益和最大回撤；交易所交易日历口径、无风险利率和完整绩效指标集仍不在当前最小闭环内
   - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
-  - 交易所交易日历口径、完整绩效指标集、自动分钟线、主连合约表、股票/期权账户语义不在当前最小闭环内
+  - 交易所交易日历口径、完整绩效指标集、自动主连分段回测、股票/期权账户语义不在当前最小闭环内
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略

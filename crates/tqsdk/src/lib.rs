@@ -7,6 +7,7 @@
 
 use std::env;
 use std::fmt;
+use std::time::Duration;
 
 /// Common imports for strategy-oriented users.
 pub mod prelude {
@@ -445,6 +446,26 @@ impl TqBuilder {
     ) -> Result<Self> {
         let series = data.get_kline_data_series(request).await?;
         self.local_backtest_klines([series])
+    }
+
+    /// Fetch one-minute kline history and enter local-backtest mode.
+    pub async fn local_backtest_minute_history(
+        self,
+        data: &tqsdk_data::DataClient,
+        symbol: impl Into<String>,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Self> {
+        self.local_backtest_kline_history(
+            data,
+            tqsdk_data::KlineDataSeriesRequest::new(
+                symbol,
+                Duration::from_secs(60),
+                start_datetime_ns,
+                end_datetime_ns,
+            ),
+        )
+        .await
     }
 
     /// Enter local-backtest mode from owned tick history series.
