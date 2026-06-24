@@ -18,6 +18,8 @@ use crate::strategy::StrategyHostBuilder;
 use crate::testing::StrategyTestHarness;
 use crate::{Result, StrategyContext, StrategyHost, TaskError, TaskHost};
 
+const DEFAULT_TRADING_DAYS_PER_YEAR: f64 = 250.0;
+
 /// Local Python-compatible strategy backtest over task-owned replay market events.
 pub struct StrategyBacktestBuilder {
     replay: ReplayMarketSource,
@@ -108,6 +110,14 @@ pub struct StrategyBacktestClosedProfitPoint {
 pub struct StrategyBacktestDailyEquityReturn {
     date: NaiveDate,
     equity: f64,
+    return_rate: f64,
+}
+
+/// End-of-day cash-balance return derived from replay observations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyBacktestDailyBalanceReturn {
+    date: NaiveDate,
+    balance: f64,
     return_rate: f64,
 }
 
@@ -408,11 +418,9 @@ impl StrategyBacktestSummary {
 
     fn record_balance_point(&mut self, event_time_ns: Option<i64>) {
         let balance = self.final_account.balance;
-        if self
-            .balance_points
-            .last()
-            .is_some_and(|point| point.balance == balance)
-        {
+        if self.balance_points.last().is_some_and(|point| {
+            point.balance == balance && same_observation_bucket(point.event_time_ns, event_time_ns)
+        }) {
             return;
         }
         if balance.is_finite() && (!self.peak_balance.is_finite() || balance > self.peak_balance) {
@@ -434,11 +442,9 @@ impl StrategyBacktestSummary {
 
     fn record_equity_point(&mut self, event_time_ns: Option<i64>) {
         let equity = account_equity(&self.final_account);
-        if self
-            .equity_points
-            .last()
-            .is_some_and(|point| point.equity == equity)
-        {
+        if self.equity_points.last().is_some_and(|point| {
+            point.equity == equity && same_observation_bucket(point.event_time_ns, event_time_ns)
+        }) {
             return;
         }
         if equity.is_finite() && (!self.peak_equity.is_finite() || equity > self.peak_equity) {
@@ -626,6 +632,34 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
+    pub fn daily_balance_returns(&self) -> Vec<StrategyBacktestDailyBalanceReturn> {
+        let mut daily_balance = BTreeMap::new();
+        for point in &self.balance_points {
+            let Some(event_time_ns) = point.event_time_ns else {
+                continue;
+            };
+            let Some(date) = utc_date_from_timestamp_ns(event_time_ns) else {
+                continue;
+            };
+            daily_balance.insert(date, point.balance);
+        }
+
+        let mut previous_balance = self.initial_account.balance;
+        daily_balance
+            .into_iter()
+            .map(|(date, balance)| {
+                let return_rate = rate_or_nan(balance - previous_balance, previous_balance);
+                previous_balance = balance;
+                StrategyBacktestDailyBalanceReturn {
+                    date,
+                    balance,
+                    return_rate,
+                }
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn daily_equity_returns(&self) -> Vec<StrategyBacktestDailyEquityReturn> {
         let mut daily_equity = BTreeMap::new();
         for point in &self.equity_points {
@@ -654,11 +688,72 @@ impl StrategyBacktestSummary {
     }
 
     #[must_use]
-    pub fn annualized_daily_sharpe_ratio(&self) -> f64 {
+    pub fn annualized_balance_return_rate(&self) -> f64 {
+        annualized_return_rate(
+            self.balance_return_rate(),
+            self.daily_balance_returns().len(),
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_equity_return_rate(&self) -> f64 {
+        annualized_return_rate(self.equity_return_rate(), self.daily_equity_returns().len())
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sharpe_ratio(&self) -> f64 {
+        annualized_sharpe_ratio(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_sharpe_ratio(&self) -> f64 {
         annualized_sharpe_ratio(
             self.daily_equity_returns()
                 .iter()
                 .map(StrategyBacktestDailyEquityReturn::return_rate),
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_daily_sharpe_ratio(&self) -> f64 {
+        self.annualized_daily_equity_sharpe_ratio()
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_sortino_ratio(&self) -> f64 {
+        annualized_sortino_ratio(
+            self.daily_balance_returns()
+                .iter()
+                .map(StrategyBacktestDailyBalanceReturn::return_rate),
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_sortino_ratio(&self) -> f64 {
+        annualized_sortino_ratio(
+            self.daily_equity_returns()
+                .iter()
+                .map(StrategyBacktestDailyEquityReturn::return_rate),
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_daily_balance_calmar_ratio(&self) -> f64 {
+        annualized_calmar_ratio(
+            self.annualized_balance_return_rate(),
+            self.max_balance_drawdown_rate,
+        )
+    }
+
+    #[must_use]
+    pub fn annualized_daily_equity_calmar_ratio(&self) -> f64 {
+        annualized_calmar_ratio(
+            self.annualized_equity_return_rate(),
+            self.max_equity_drawdown_rate,
         )
     }
 
@@ -832,6 +927,23 @@ impl StrategyBacktestDailyEquityReturn {
     #[must_use]
     pub fn equity(&self) -> f64 {
         self.equity
+    }
+
+    #[must_use]
+    pub fn return_rate(&self) -> f64 {
+        self.return_rate
+    }
+}
+
+impl StrategyBacktestDailyBalanceReturn {
+    #[must_use]
+    pub fn date(&self) -> NaiveDate {
+        self.date
+    }
+
+    #[must_use]
+    pub fn balance(&self) -> f64 {
+        self.balance
     }
 
     #[must_use]
@@ -1136,6 +1248,33 @@ fn utc_date_from_timestamp_ns(timestamp_ns: i64) -> Option<NaiveDate> {
     DateTime::<Utc>::from_timestamp(seconds, nanos).map(|datetime| datetime.date_naive())
 }
 
+fn same_observation_date(left: Option<i64>, right: Option<i64>) -> bool {
+    match (
+        left.and_then(utc_date_from_timestamp_ns),
+        right.and_then(utc_date_from_timestamp_ns),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_observation_bucket(previous: Option<i64>, current: Option<i64>) -> bool {
+    current.is_none() || same_observation_date(previous, current)
+}
+
+fn annualized_return_rate(total_return_rate: f64, period_count: usize) -> f64 {
+    if period_count == 0 || !total_return_rate.is_finite() {
+        return f64::NAN;
+    }
+    let growth = 1.0 + total_return_rate;
+    if growth < 0.0 {
+        f64::NAN
+    } else {
+        growth.powf(DEFAULT_TRADING_DAYS_PER_YEAR / period_count as f64) - 1.0
+    }
+}
+
 fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
     let returns = returns
         .into_iter()
@@ -1157,7 +1296,41 @@ fn annualized_sharpe_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
     if std_dev == 0.0 || !std_dev.is_finite() {
         f64::NAN
     } else {
-        mean / std_dev * 252.0_f64.sqrt()
+        mean / std_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
+    }
+}
+
+fn annualized_sortino_ratio(returns: impl IntoIterator<Item = f64>) -> f64 {
+    let returns = returns
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if returns.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let downside_variance = returns
+        .iter()
+        .filter(|value| **value < 0.0)
+        .map(|value| value * value)
+        .sum::<f64>()
+        / returns.len() as f64;
+    let downside_dev = downside_variance.sqrt();
+    if downside_dev == 0.0 || !downside_dev.is_finite() {
+        f64::NAN
+    } else {
+        mean / downside_dev * DEFAULT_TRADING_DAYS_PER_YEAR.sqrt()
+    }
+}
+
+fn annualized_calmar_ratio(annualized_return_rate: f64, max_drawdown_rate: f64) -> f64 {
+    if !annualized_return_rate.is_finite()
+        || !max_drawdown_rate.is_finite()
+        || max_drawdown_rate <= 0.0
+    {
+        f64::NAN
+    } else {
+        annualized_return_rate / max_drawdown_rate
     }
 }
 

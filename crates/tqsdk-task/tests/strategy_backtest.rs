@@ -558,18 +558,37 @@ async fn strategy_backtest_summary_tracks_balance_points_and_drawdown() {
     ctx.finish_sim_step().unwrap();
 
     let summary = backtest.summary();
-    assert_eq!(summary.balance_points().len(), 2);
+    assert_eq!(summary.balance_points().len(), 3);
     assert_eq!(summary.balance_points()[0].event_count(), 0);
     assert_eq!(summary.balance_points()[0].balance(), 10_000_000.0);
     assert_eq!(summary.balance_points()[1].event_count(), 1);
-    assert_eq!(summary.balance_points()[1].balance(), 9_999_987.5);
+    assert_eq!(summary.balance_points()[1].event_time_ns(), Some(1_000));
+    assert_eq!(summary.balance_points()[1].balance(), 10_000_000.0);
+    assert_eq!(summary.balance_points()[2].event_count(), 1);
+    assert_eq!(summary.balance_points()[2].event_time_ns(), Some(1_000));
+    assert_eq!(summary.balance_points()[2].balance(), 9_999_987.5);
     assert_eq!(summary.peak_balance(), 10_000_000.0);
     assert_eq!(summary.max_balance_drawdown(), 12.5);
     assert_eq!(summary.balance_change(), -12.5);
     assert!((summary.balance_return_rate() + 0.00000125).abs() < 1e-12);
     assert!((summary.max_balance_drawdown_rate() - 0.00000125).abs() < 1e-12);
-    assert!((summary.balance_points()[1].return_rate() + 0.00000125).abs() < 1e-12);
-    assert!((summary.balance_points()[1].drawdown_rate() - 0.00000125).abs() < 1e-12);
+    assert_eq!(summary.balance_points()[1].return_rate(), 0.0);
+    assert!((summary.balance_points()[2].return_rate() + 0.00000125).abs() < 1e-12);
+    assert!((summary.balance_points()[2].drawdown_rate() - 0.00000125).abs() < 1e-12);
+
+    let daily_balance = summary.daily_balance_returns();
+    assert_eq!(daily_balance.len(), 1);
+    assert_eq!(
+        daily_balance[0].date(),
+        NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+    );
+    assert_eq!(daily_balance[0].balance(), 9_999_987.5);
+    assert!((daily_balance[0].return_rate() + 0.00000125).abs() < 1e-12);
+    let expected_annualized = (1.0_f64 - 0.00000125).powf(250.0) - 1.0;
+    assert!((summary.annualized_balance_return_rate() - expected_annualized).abs() < 1e-12);
+    assert!(summary.annualized_daily_balance_sharpe_ratio().is_nan());
+    assert!(summary.annualized_daily_balance_sortino_ratio().is_nan());
+    assert!(summary.annualized_daily_balance_calmar_ratio().is_finite());
 }
 
 #[tokio::test]
@@ -602,18 +621,25 @@ async fn strategy_backtest_summary_tracks_mark_to_market_equity_points() {
     assert_eq!(summary.equity_change(), 100.0);
     assert_eq!(summary.peak_equity(), 10_000_100.0);
     assert_eq!(summary.max_equity_drawdown(), 0.0);
-    assert_eq!(summary.equity_points().len(), 2);
+    assert_eq!(summary.equity_points().len(), 3);
     assert_eq!(summary.equity_points()[0].event_count(), 0);
     assert_eq!(summary.equity_points()[0].event_time_ns(), None);
     assert_eq!(summary.equity_points()[0].equity(), 10_000_000.0);
-    assert_eq!(summary.equity_points()[1].event_count(), 2);
+    assert_eq!(summary.equity_points()[1].event_count(), 1);
     assert_eq!(
         summary.equity_points()[1].event_time_ns(),
+        Some(86_400_000_000_000)
+    );
+    assert_eq!(summary.equity_points()[1].equity(), 10_000_000.0);
+    assert_eq!(summary.equity_points()[2].event_count(), 2);
+    assert_eq!(
+        summary.equity_points()[2].event_time_ns(),
         Some(172_800_000_000_000)
     );
-    assert_eq!(summary.equity_points()[1].equity(), 10_000_100.0);
+    assert_eq!(summary.equity_points()[2].equity(), 10_000_100.0);
     assert!((summary.equity_return_rate() - 0.00001).abs() < 1e-12);
-    assert!((summary.equity_points()[1].return_rate() - 0.00001).abs() < 1e-12);
+    assert_eq!(summary.equity_points()[1].return_rate(), 0.0);
+    assert!((summary.equity_points()[2].return_rate() - 0.00001).abs() < 1e-12);
 }
 
 #[tokio::test]
@@ -643,20 +669,34 @@ async fn strategy_backtest_summary_derives_daily_equity_returns_and_sharpe() {
 
     let summary = backtest.summary();
     let daily = summary.daily_equity_returns();
-    assert_eq!(daily.len(), 2);
+    assert_eq!(daily.len(), 3);
     assert_eq!(
         daily[0].date(),
-        NaiveDate::from_ymd_opt(1970, 1, 3).unwrap()
+        NaiveDate::from_ymd_opt(1970, 1, 2).unwrap()
     );
-    assert_eq!(daily[0].equity(), 10_000_100.0);
-    assert!((daily[0].return_rate() - 0.00001).abs() < 1e-12);
+    assert_eq!(daily[0].equity(), 10_000_000.0);
+    assert_eq!(daily[0].return_rate(), 0.0);
     assert_eq!(
         daily[1].date(),
+        NaiveDate::from_ymd_opt(1970, 1, 3).unwrap()
+    );
+    assert_eq!(daily[1].equity(), 10_000_100.0);
+    assert!((daily[1].return_rate() - 0.00001).abs() < 1e-12);
+    assert_eq!(
+        daily[2].date(),
         NaiveDate::from_ymd_opt(1970, 1, 4).unwrap()
     );
-    assert_eq!(daily[1].equity(), 10_000_050.0);
-    assert!((daily[1].return_rate() + 0.0000049999500005).abs() < 1e-15);
+    assert_eq!(daily[2].equity(), 10_000_050.0);
+    assert!((daily[2].return_rate() + 0.0000049999500005).abs() < 1e-15);
     assert!(summary.annualized_daily_sharpe_ratio().is_finite());
+    assert_eq!(
+        summary.annualized_daily_sharpe_ratio(),
+        summary.annualized_daily_equity_sharpe_ratio()
+    );
+    let expected_annualized = (1.0_f64 + 0.000005).powf(250.0 / 3.0) - 1.0;
+    assert!((summary.annualized_equity_return_rate() - expected_annualized).abs() < 1e-12);
+    assert!(summary.annualized_daily_equity_sortino_ratio().is_finite());
+    assert!(summary.annualized_daily_equity_calmar_ratio().is_finite());
 }
 
 fn quote_event(

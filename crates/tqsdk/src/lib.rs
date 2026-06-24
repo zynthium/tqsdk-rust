@@ -49,9 +49,10 @@ pub mod advanced {
             LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
             ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
             StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
-            StrategyBacktestDailyEquityReturn, StrategyBacktestEquityPoint,
-            StrategyBacktestSummary, StrategyReplaySourceBuilder, TargetPosConfig, TargetPosTask,
-            TargetPosTaskExecutionReport, TaskError, TaskHost, VolumeSplitPolicy,
+            StrategyBacktestDailyBalanceReturn, StrategyBacktestDailyEquityReturn,
+            StrategyBacktestEquityPoint, StrategyBacktestSummary, StrategyReplaySourceBuilder,
+            TargetPosConfig, TargetPosTask, TargetPosTaskExecutionReport, TaskError, TaskHost,
+            VolumeSplitPolicy,
         };
     }
 
