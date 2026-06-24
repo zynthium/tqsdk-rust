@@ -202,6 +202,102 @@ async fn strategy_backtest_applies_replay_underlying_to_synthesized_kline_quote(
 }
 
 #[tokio::test]
+async fn strategy_backtest_executes_main_continuous_order_on_replay_underlying_symbol() {
+    let alias = "KQ.m@SHFE.rb";
+    let underlying = "SHFE.rb2501";
+    let replay = ReplayMarketSource::new(vec![
+        quote_event(alias, 1_000, 100.0, 10, 99.0, 8)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new().with_margin(underlying, 1_000.0))
+        .quote(alias)
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open(alias, 2)
+        .limit(101.0)
+        .send_once("main-continuous-order")
+        .await
+        .unwrap();
+    let report = ctx.finish_sim_step().unwrap();
+
+    assert_eq!(report.trades().len(), 1);
+    assert_eq!(report.trades()[0].exchange_id, "SHFE");
+    assert_eq!(report.trades()[0].instrument_id, "rb2501");
+    assert_eq!(ctx.position("TQSIM", underlying).unwrap().pos_long, 2);
+    assert_eq!(ctx.position("TQSIM", alias).unwrap().pos_long, 2);
+
+    let summary = backtest.summary();
+    assert_eq!(summary.trades()[0].exchange_id, "SHFE");
+    assert_eq!(summary.trades()[0].instrument_id, "rb2501");
+    assert!(
+        summary
+            .final_positions()
+            .iter()
+            .any(|position| position.exchange_id == "SHFE"
+                && position.instrument_id == "rb2501"
+                && position.pos_long == 2)
+    );
+    assert!(
+        summary
+            .final_positions()
+            .iter()
+            .any(|position| position.exchange_id == "KQ"
+                && position.instrument_id == "m@SHFE.rb"
+                && position.pos_long == 2)
+    );
+}
+
+#[tokio::test]
+async fn strategy_backtest_fills_pending_main_continuous_order_on_later_underlying_quote() {
+    let alias = "KQ.m@SHFE.rb";
+    let underlying = "SHFE.rb2501";
+    let replay = ReplayMarketSource::new(vec![
+        quote_event(alias, 1_000, 100.0, 10, 99.0, 8)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+        quote_event(alias, 2_000, 98.0, 10, 97.0, 8)
+            .with_underlying_symbol(underlying)
+            .unwrap(),
+    ]);
+
+    let mut backtest = StrategyBacktest::builder(replay)
+        .sim(TqSim::new())
+        .quote(alias)
+        .build()
+        .await
+        .unwrap();
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    let ticket = ctx
+        .orders("TQSIM")
+        .buy_open(alias, 1)
+        .limit(99.0)
+        .send_once("main-continuous-pending-order")
+        .await
+        .unwrap();
+    let report = ctx.finish_sim_step().unwrap();
+    assert_eq!(report.orders()[0].exchange_id, "SHFE");
+    assert_eq!(report.orders()[0].instrument_id, "rb2501");
+    assert_eq!(report.orders()[0].status, "ALIVE");
+    assert!(report.trades().is_empty());
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    assert_eq!(ctx.position("TQSIM", underlying).unwrap().pos_long, 1);
+    assert_eq!(ctx.position("TQSIM", alias).unwrap().pos_long, 1);
+    assert!(matches!(
+        ticket.status(ctx.task_host().api()).unwrap(),
+        OrderTicketState::Filled { .. }
+    ));
+}
+
+#[tokio::test]
 async fn strategy_backtest_uses_default_price_tick_for_kline_quote_synthesis() {
     let replay = ReplayMarketSource::new(vec![kline_event(
         "SHFE.rb2501",

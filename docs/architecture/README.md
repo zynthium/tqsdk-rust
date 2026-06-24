@@ -101,6 +101,7 @@ V1 是：
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - local backtest continuous minute helper 可自动查询主连 underlying segment、按交易日窗口裁剪历史分钟线并以主连 symbol 回放
+  - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/stream/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
 - `tqsdk-session`

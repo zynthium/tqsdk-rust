@@ -26,6 +26,7 @@ pub struct TqSim {
     margin_by_symbol: HashMap<String, f64>,
     commission_by_symbol: HashMap<String, f64>,
     contract_multiplier_by_symbol: HashMap<String, f64>,
+    execution_symbol_by_strategy_symbol: HashMap<String, String>,
     quotes: HashMap<String, Quote>,
     orders: HashMap<String, SimOrder>,
     positions: HashMap<String, i64>,
@@ -108,6 +109,7 @@ impl TqSim {
             margin_by_symbol: HashMap::new(),
             commission_by_symbol: HashMap::new(),
             contract_multiplier_by_symbol: HashMap::new(),
+            execution_symbol_by_strategy_symbol: HashMap::new(),
             quotes: HashMap::new(),
             orders: HashMap::new(),
             positions: HashMap::new(),
@@ -217,11 +219,21 @@ impl TqSim {
 
     pub fn update_quote(&mut self, symbol: impl Into<String>, quote: Quote) -> TqSimStepReport {
         let symbol = symbol.into();
+        let execution_symbol = self.update_execution_symbol_alias_from_quote(&symbol, &quote);
         self.apply_quote_metadata(&symbol, &quote);
-        self.quotes.insert(symbol.clone(), quote);
-        let report = self.match_pending_for_symbol(&symbol);
-        if report.is_empty() && self.positions.get(&symbol).copied().unwrap_or_default() != 0 {
-            self.symbol_snapshot_report(&symbol)
+        self.quotes.insert(symbol.clone(), quote.clone());
+        if execution_symbol != symbol {
+            self.apply_quote_metadata(&execution_symbol, &quote);
+            self.quotes.insert(execution_symbol.clone(), quote);
+        }
+
+        let mut report = self.match_pending_for_symbol(&symbol);
+        if execution_symbol != symbol {
+            report.extend(self.match_pending_for_symbol(&execution_symbol));
+        }
+
+        if report.is_empty() {
+            self.nonzero_symbols_snapshot_report([symbol.as_str(), execution_symbol.as_str()])
         } else {
             report
         }
@@ -255,6 +267,7 @@ impl TqSim {
             let Some(request) = TqSimOrderRequest::from_outbound(&dispatch.request)? else {
                 continue;
             };
+            let request = self.resolve_order_request(request);
             let _ = host.api().session().handle().record_command_status(
                 dispatch.command_id,
                 CommandStatus::Sent,
@@ -312,6 +325,7 @@ impl TqSim {
         request: TqSimOrderRequest,
         command_id: Option<CommandId>,
     ) -> Result<TqSimStepReport> {
+        let request = self.resolve_order_request(request);
         validate_request(&request)?;
         let outcome = self.apply_order(SimOrder {
             request,
@@ -732,17 +746,31 @@ impl TqSim {
     }
 
     fn position_snapshot(&self, symbol: &str) -> Position {
-        let net = self.positions.get(symbol).copied().unwrap_or_default();
-        let (exchange_id, instrument_id) = split_symbol(symbol);
-        let margin = self.margin_for(symbol) * net.unsigned_abs() as f64;
-        let avg_price = self.avg_price_by_symbol.get(symbol).copied().unwrap_or(0.0);
+        let state_symbol = self.execution_symbol_for(symbol);
+        self.position_snapshot_for(symbol, state_symbol)
+    }
+
+    fn position_snapshot_for(&self, report_symbol: &str, state_symbol: &str) -> Position {
+        let net = self
+            .positions
+            .get(state_symbol)
+            .copied()
+            .unwrap_or_default();
+        let (exchange_id, instrument_id) = split_symbol(report_symbol);
+        let margin = self.margin_for(state_symbol) * net.unsigned_abs() as f64;
+        let avg_price = self
+            .avg_price_by_symbol
+            .get(state_symbol)
+            .copied()
+            .unwrap_or(0.0);
         let last_price = self
             .quotes
-            .get(symbol)
+            .get(state_symbol)
+            .or_else(|| self.quotes.get(report_symbol))
             .map(|quote| quote.last_price)
             .unwrap_or_default();
-        let multiplier = self.contract_multiplier_for(symbol);
-        let float_profit = self.float_profit_for(symbol);
+        let multiplier = self.contract_multiplier_for(state_symbol);
+        let float_profit = profit_for_net(net, avg_price, last_price, multiplier);
         let market_value = market_value(net, last_price, multiplier);
         let open_cost = avg_price * net.unsigned_abs() as f64 * multiplier;
         Position {
@@ -784,20 +812,33 @@ impl TqSim {
             account: Some(self.account_snapshot()),
             orders: Vec::new(),
             trades: Vec::new(),
-            positions: self
-                .positions
-                .keys()
-                .map(|symbol| self.position_snapshot(symbol))
-                .collect(),
+            positions: self.snapshot_positions(),
         }
     }
 
-    fn symbol_snapshot_report(&self, symbol: &str) -> TqSimStepReport {
+    fn nonzero_symbols_snapshot_report<'a>(
+        &self,
+        symbols: impl IntoIterator<Item = &'a str>,
+    ) -> TqSimStepReport {
+        let mut unique_symbols = Vec::new();
+        for symbol in symbols {
+            if !unique_symbols.contains(&symbol) {
+                unique_symbols.push(symbol);
+            }
+        }
+        let positions = unique_symbols
+            .into_iter()
+            .map(|symbol| self.position_snapshot(symbol))
+            .filter(|position| position.pos != 0)
+            .collect::<Vec<_>>();
+        if positions.is_empty() {
+            return TqSimStepReport::default();
+        }
         TqSimStepReport {
             account: Some(self.account_snapshot()),
             orders: Vec::new(),
             trades: Vec::new(),
-            positions: vec![self.position_snapshot(symbol)],
+            positions,
         }
     }
 
@@ -811,13 +852,73 @@ impl TqSim {
                 report.trades.push(trade);
             }
             if let Some(position) = outcome.position {
-                report.positions.push(position);
+                self.push_position_with_aliases(&mut report.positions, position);
             }
         }
         if !report.orders.is_empty() || !report.trades.is_empty() || !report.positions.is_empty() {
             report.account = Some(self.account_snapshot());
         }
         report
+    }
+
+    fn update_execution_symbol_alias_from_quote(&mut self, symbol: &str, quote: &Quote) -> String {
+        let underlying_symbol = quote.underlying_symbol.trim();
+        if underlying_symbol.is_empty() {
+            return self.execution_symbol_for(symbol).to_owned();
+        }
+        if underlying_symbol == symbol {
+            self.execution_symbol_by_strategy_symbol.remove(symbol);
+            return symbol.to_owned();
+        }
+        self.execution_symbol_by_strategy_symbol
+            .insert(symbol.to_owned(), underlying_symbol.to_owned());
+        underlying_symbol.to_owned()
+    }
+
+    fn execution_symbol_for<'a>(&'a self, symbol: &'a str) -> &'a str {
+        self.execution_symbol_by_strategy_symbol
+            .get(symbol)
+            .map(String::as_str)
+            .unwrap_or(symbol)
+    }
+
+    fn resolve_order_request(&self, mut request: TqSimOrderRequest) -> TqSimOrderRequest {
+        if let Some(execution_symbol) = self
+            .execution_symbol_by_strategy_symbol
+            .get(&request.symbol)
+        {
+            request.symbol.clone_from(execution_symbol);
+        }
+        request
+    }
+
+    fn snapshot_positions(&self) -> Vec<Position> {
+        let mut positions = Vec::new();
+        let mut symbols = self.positions.keys().cloned().collect::<Vec<_>>();
+        symbols.sort();
+        for symbol in symbols {
+            self.push_position_with_aliases(
+                &mut positions,
+                self.position_snapshot_for(&symbol, &symbol),
+            );
+        }
+        positions
+    }
+
+    fn push_position_with_aliases(&self, positions: &mut Vec<Position>, position: Position) {
+        let execution_symbol = position_symbol(&position);
+        positions.push(position);
+        let mut strategy_symbols = self
+            .execution_symbol_by_strategy_symbol
+            .iter()
+            .filter_map(|(strategy_symbol, mapped_execution_symbol)| {
+                (mapped_execution_symbol == &execution_symbol).then_some(strategy_symbol)
+            })
+            .collect::<Vec<_>>();
+        strategy_symbols.sort();
+        for strategy_symbol in strategy_symbols {
+            positions.push(self.position_snapshot_for(strategy_symbol, &execution_symbol));
+        }
     }
 
     fn margin_for(&self, symbol: &str) -> f64 {
@@ -1243,6 +1344,10 @@ fn market_value(net: i64, last_price: f64, multiplier: f64) -> f64 {
 
 fn split_symbol(symbol: &str) -> (&str, &str) {
     symbol.split_once('.').unwrap_or(("", symbol))
+}
+
+fn position_symbol(position: &Position) -> String {
+    format!("{}.{}", position.exchange_id, position.instrument_id)
 }
 
 fn required_string(payload: &Value, key: &'static str) -> Result<String> {

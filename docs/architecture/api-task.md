@@ -111,15 +111,16 @@
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
   - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先
+  - `TqSim` 会使用 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单解析到实际 underlying symbol 撮合、成交和记账，并把实际持仓镜像回 replay symbol，避免 `TargetPos` / strategy context 在主连路径上反复误判空仓
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
   - 默认 `tqsdk::advanced` 暴露 `KlineDataSeries` / `TickDataSeries` 与 `StrategyReplaySourceBuilder`，且默认 facade 提供 `local_backtest_klines(...)` / `local_backtest_ticks(...)` / `local_backtest_kline_history(...)` / `local_backtest_minute_history(...)` / `local_backtest_tick_history(...)` 便利入口，让 history series 或 history request 可以显式转为本地 replay source；`local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)` 与 `*_histories_as(...)` 可把 underlying history 以 caller-provided replay symbol 分段回放并保留 `underlying_symbol` metadata；`local_backtest_continuous_minute_history(...)` 会复用 `tqsdk-data` 主连 segment 和历史分钟线，在默认 facade 中自动生成这一组分段 request
-  - 当前覆盖 futures 单账户最小闭环：限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
+  - 当前覆盖 futures 单账户最小闭环：主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；逐合约显式配置优先，其次可用已查询的 `InstrumentSpec` 或已 replay quote 的 `price_tick` metadata，最后使用 `default_price_tick(tick)` 全局 fallback；不在本地回测 builder 内自动联网 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交
   - 默认 facade 的 `Tq::target_pos(...)` 在 local backtest 模式下复用该 task host 和 `TqSim`，让策略主体可以在 `Tq::next()` loop 中复用 live 风格 `TargetPos`
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日压缩的资金/权益收益、调用方显式交易日窗口收益、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、峰值余额/权益和最大回撤；官方完整报表仍不在当前最小闭环内，交易日历基础查询由 `tqsdk-data` 提供
   - 这条路径不同于 provider-backed TQKQ sim，也不同于 `FakeBroker`；`FakeBroker` 继续保留 partial fill / latency / disconnect 等测试注入能力
-  - 官方完整报表、主连执行 symbol 自动切换、股票/期权账户语义不在当前最小闭环内；交易日历和主连分段基础查询由 `tqsdk-data` 提供
+  - 官方完整报表、股票/期权账户语义不在当前最小闭环内；交易日历和主连分段基础查询由 `tqsdk-data` 提供
 - `tqsdk-task::testing`
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略

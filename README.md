@@ -173,8 +173,10 @@ equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
 `local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
 已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、显式交易日窗口 returns、
-盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；官方完整报表和执行 symbol
-切换仍是后续范围；交易日历、单主连
+盈利/亏损天数、最长连续盈利/亏损天数、年化收益率和年化日 Sharpe / Sortino / Calmar；
+当 replay quote 带有 `underlying_symbol` 时，本地 `TqSim` 会把主连等 replay symbol
+订单映射到实际 underlying symbol 执行和记账，并把实际持仓镜像回 replay symbol 供策略继续读取；
+官方完整报表仍是后续范围；交易日历、单主连
 date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
