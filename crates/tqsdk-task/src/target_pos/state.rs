@@ -59,6 +59,16 @@ impl TargetPosStore {
         self.tasks.insert(task.task_id, Arc::downgrade(&task));
     }
 
+    pub(super) fn get(&mut self, task_id: TaskId) -> Option<Arc<TargetPosTaskInner>> {
+        match self.tasks.get(&task_id).and_then(Weak::upgrade) {
+            Some(task) => Some(task),
+            None => {
+                self.tasks.remove(&task_id);
+                None
+            }
+        }
+    }
+
     pub(super) fn unregister(&mut self, task_id: TaskId) {
         self.tasks.remove(&task_id);
     }

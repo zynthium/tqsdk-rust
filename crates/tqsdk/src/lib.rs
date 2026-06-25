@@ -177,7 +177,9 @@ impl From<tqsdk_data::DataError> for Error {
 /// while keeping the same public surface (`next()`, `quote()`, etc.).
 pub struct Tq {
     inner: TqInner,
-    default_account_id: Option<String>,
+    default_account_id: DefaultAccountId,
+    #[cfg(feature = "live")]
+    server_side_backtest: bool,
     #[cfg(all(feature = "services", feature = "live"))]
     server_replay: Option<tqsdk_session::ServerReplaySession>,
     #[cfg(all(feature = "services", feature = "live"))]
@@ -187,6 +189,13 @@ pub struct Tq {
 enum TqInner {
     Live(Box<tqsdk_task::TaskHost>),
     LocalBacktest(Box<tqsdk_task::StrategyBacktest>),
+}
+
+enum DefaultAccountId {
+    None,
+    Single(String),
+    #[cfg(feature = "live")]
+    Ambiguous,
 }
 
 impl Tq {
@@ -207,7 +216,22 @@ impl Tq {
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
-            default_account_id: None,
+            default_account_id: DefaultAccountId::None,
+            #[cfg(feature = "live")]
+            server_side_backtest: false,
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay: None,
+            #[cfg(all(feature = "services", feature = "live"))]
+            server_replay_heartbeat: None,
+        }
+    }
+
+    fn from_api_with_server_backtest(api: tqsdk_wait::TqApi) -> Self {
+        Self {
+            inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
+            default_account_id: DefaultAccountId::None,
+            #[cfg(feature = "live")]
+            server_side_backtest: true,
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -223,7 +247,9 @@ impl Tq {
         let server_replay_heartbeat = Some(spawn_server_replay_heartbeat(&server_replay));
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
-            default_account_id: None,
+            default_account_id: DefaultAccountId::None,
+            #[cfg(feature = "live")]
+            server_side_backtest: true,
             server_replay: Some(server_replay),
             server_replay_heartbeat,
         }
@@ -232,7 +258,9 @@ impl Tq {
     fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
         Self {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
-            default_account_id: Some(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
+            default_account_id: DefaultAccountId::Single(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
+            #[cfg(feature = "live")]
+            server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -307,12 +335,21 @@ impl Tq {
 
     #[must_use]
     pub fn default_account_id_opt(&self) -> Option<&str> {
-        self.default_account_id.as_deref()
+        match &self.default_account_id {
+            DefaultAccountId::Single(account_id) => Some(account_id.as_str()),
+            DefaultAccountId::None => None,
+            #[cfg(feature = "live")]
+            DefaultAccountId::Ambiguous => None,
+        }
     }
 
     pub fn default_account_id(&self) -> Result<&str> {
-        self.default_account_id_opt()
-            .ok_or_else(missing_default_account)
+        match &self.default_account_id {
+            DefaultAccountId::Single(account_id) => Ok(account_id.as_str()),
+            DefaultAccountId::None => Err(missing_default_account()),
+            #[cfg(feature = "live")]
+            DefaultAccountId::Ambiguous => Err(ambiguous_default_account()),
+        }
     }
 
     #[cfg(all(feature = "services", feature = "live"))]
@@ -410,6 +447,9 @@ impl Tq {
         account_id: &str,
         password: &str,
     ) -> Result<tqsdk_wait::AccountRef> {
+        if self.server_side_backtest {
+            return Err(server_side_trade_login_error());
+        }
         let account = self
             .api_mut_any()
             .login_trade_account(
@@ -420,7 +460,7 @@ impl Tq {
                 None,
             )
             .await?;
-        self.default_account_id = Some(account_id.to_owned());
+        self.note_trade_login(account_id);
         Ok(account)
     }
 
@@ -447,6 +487,24 @@ impl Tq {
             login.password.as_str(),
         )
         .await
+    }
+
+    #[cfg(feature = "live")]
+    fn note_trade_login(&mut self, account_id: &str) {
+        match &mut self.default_account_id {
+            DefaultAccountId::None => {
+                self.default_account_id = DefaultAccountId::Single(account_id.to_owned());
+            }
+            DefaultAccountId::Single(existing) if existing == account_id => {}
+            DefaultAccountId::Single(_) | DefaultAccountId::Ambiguous => {
+                self.default_account_id = DefaultAccountId::Ambiguous;
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "live"))]
+    fn note_trade_login_for_test(&mut self, account_id: &str) {
+        self.note_trade_login(account_id);
     }
 
     // ── Core loop ──
@@ -1169,6 +1227,17 @@ impl TqBuilder {
             default_price_tick,
         } = self;
 
+        let is_server_side_backtest = backtest
+            .as_ref()
+            .is_some_and(BacktestConfig::is_server_side);
+        if is_server_side_backtest && !trade_targets.is_empty() {
+            return Err(server_side_trade_login_error());
+        }
+        #[cfg(feature = "live")]
+        if is_server_side_backtest && auto_trade_login.is_some() {
+            return Err(server_side_trade_login_error());
+        }
+
         match backtest {
             Some(BacktestConfig::Local { replay }) => {
                 connect_local_backtest(
@@ -1350,6 +1419,17 @@ impl std::fmt::Debug for BacktestConfig {
     }
 }
 
+impl BacktestConfig {
+    fn is_server_side(&self) -> bool {
+        match self {
+            Self::Server { .. } => true,
+            #[cfg(all(feature = "services", feature = "live"))]
+            Self::ServerReplay { .. } => true,
+            Self::Local { .. } => false,
+        }
+    }
+}
+
 async fn connect_local_backtest(
     replay: tqsdk_task::ReplayMarketSource,
     quote_symbols: Vec<String>,
@@ -1403,9 +1483,12 @@ async fn connect_wait_facade(
     let session_builder =
         session_builder(auth, query_enabled, trade_targets, market_url, replay_url)?;
     let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
-    match backtest {
+    let server_side_backtest = backtest
+        .as_ref()
+        .is_some_and(BacktestConfig::is_server_side);
+    match &backtest {
         Some(BacktestConfig::Server { start_ns, end_ns }) => {
-            wait_builder = wait_builder.futures_backtest(start_ns, end_ns)?;
+            wait_builder = wait_builder.futures_backtest(*start_ns, *end_ns)?;
         }
         #[cfg(all(feature = "services", feature = "live"))]
         Some(BacktestConfig::ServerReplay { .. }) => {}
@@ -1415,6 +1498,9 @@ async fn connect_wait_facade(
     #[cfg(all(feature = "services", feature = "live"))]
     if let Some(server_replay) = server_replay_session {
         return Ok(Tq::from_api_with_server_replay(api, server_replay));
+    }
+    if server_side_backtest {
+        return Ok(Tq::from_api_with_server_backtest(api));
     }
     Ok(Tq::from_api(api))
 }
@@ -1622,6 +1708,19 @@ fn missing_default_account() -> Error {
     ))
 }
 
+#[cfg(feature = "live")]
+fn ambiguous_default_account() -> Error {
+    Error::from(tqsdk_session::SessionFacadeError::InvalidState(
+        "default account is ambiguous after multiple trade account logins; use explicit account-specific helpers or configure a single automatic trade login",
+    ))
+}
+
+fn server_side_trade_login_error() -> Error {
+    Error::from(tqsdk_session::SessionFacadeError::InvalidState(
+        "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use local_backtest(...) for simulated fills",
+    ))
+}
+
 #[derive(Debug, Clone)]
 enum TradeTarget {
     Custom {
@@ -1724,6 +1823,23 @@ mod builder_contract_tests {
         assert_eq!(tq.default_account_id().unwrap(), LOCAL_BACKTEST_ACCOUNT_ID);
     }
 
+    #[tokio::test]
+    async fn server_backtest_rejects_auto_trade_login_before_network() {
+        let error = TqBuilder::new()
+            .auth("demo-user", "demo-pass")
+            .backtest(1_000, 2_000)
+            .trade_account("9999", "acct-1", "secret")
+            .connect()
+            .await
+            .err()
+            .expect("server-side backtest must not auto-login a trade account");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid session facade state: server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use local_backtest(...) for simulated fills"
+        );
+    }
+
     #[test]
     fn tqkq_sim_sets_trade_target_and_auto_login() {
         let builder = TqBuilder::new().tqkq_sim_numbered(7);
@@ -1755,6 +1871,27 @@ mod builder_contract_tests {
         let debug = format!("{:?}", builder.auto_trade_login);
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn second_trade_login_makes_default_account_ambiguous() {
+        let mut tq = Tq::from_api(
+            tqsdk_wait::TqApiBuilder::new("demo-user", "demo-pass")
+                .build()
+                .await
+                .expect("session client should build without network"),
+        );
+
+        tq.note_trade_login_for_test("acct-1");
+        assert_eq!(tq.default_account_id().unwrap(), "acct-1");
+
+        tq.note_trade_login_for_test("acct-2");
+
+        assert!(tq.default_account_id_opt().is_none());
+        assert_eq!(
+            tq.default_account_id().unwrap_err().to_string(),
+            "invalid session facade state: default account is ambiguous after multiple trade account logins; use explicit account-specific helpers or configure a single automatic trade login"
+        );
     }
 
     #[tokio::test]

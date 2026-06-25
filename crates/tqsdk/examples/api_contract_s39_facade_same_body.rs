@@ -2,7 +2,7 @@
 //! Scenario 39: Multi-symbol strategy logic shared by local backtest,
 //! simulated trading, and live trading.
 //!
-//! The strategy body only accepts `&mut Tq`, an account id, and symbol config.
+//! The strategy body only accepts `&mut Tq` and symbol config.
 //! Changing execution mode is isolated to the builder code in `main()`.
 
 use tqsdk::advanced::core::Quote;

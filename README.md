@@ -43,6 +43,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
 - 做确定性 replay / 本地回测行情输入：用 `tqsdk-task::ReplayMarketSource`。
+- 需要策略下单并撮合成交的回测：用 `tqsdk` 的 `.local_backtest(...)`；server-side
+  `.backtest(...)` / `.server_replay(...)` 是 market-data-only，不能组合交易目标或自动交易登录。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
 - 自建 facade 或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 

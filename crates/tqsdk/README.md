@@ -5,15 +5,15 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
-- Server-side backtest (`.backtest()`, optional `.replay_url(...)`)
-- Server-side single-day replay (`.server_replay(date)?`)
+- Market-data-only server-side backtest (`.backtest()`, optional `.replay_url(...)`)
+- Market-data-only server-side single-day replay (`.server_replay(date)?`)
 - Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_kline_histories(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_quote_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
 - Local backtest 默认模拟账户常量 `LOCAL_BACKTEST_ACCOUNT_ID`
 - 默认账户 helper：`default_account_id()` / `account_default()` / `position_default()` / `target_pos_default(...)`
-- 交易账户构造 helper：`.tqkq_sim()` / `.tqkq_sim_numbered(...)` / `.trade_account(...)` / `.trade_account_env()`
+- 交易账户构造 helper：`.tqkq_sim()` / `.tqkq_sim_numbered(...)` / `.trade_account(...)` / `.trade_account_env()`，仅用于 live/sim 连接，不可与 server-side backtest/replay 组合
 - Local backtest summary / performance metrics / performance report、cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
@@ -28,6 +28,10 @@ runtime contract；它只提供一个更容易开始的 facade：
 一分钟 K 线进入本地回测；该路径不做隐藏订阅或隐式联网。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
+服务端 `.backtest(...)` 和 `.server_replay(date)?` 只接入官方历史行情 / 复盘行情，
+不会绑定交易目标，也会拒绝 `.trade_target_*()`、`.tqkq_sim()` 和
+`.trade_account(...)` / `.trade_account_env()` 等交易登录入口。需要策略下单并撮合成交的
+回测闭环应使用 `.local_backtest(...)` 及其 history helper。
 服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
 把返回的 `md_url` 接入正常行情 loop，并自动发送 replay heartbeat。复盘速度和
 terminate 可通过 `Tq::set_replay_speed(...)` / `terminate_server_replay()` 显式控制。

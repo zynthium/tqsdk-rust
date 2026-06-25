@@ -1,9 +1,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 //! Scenario 37: Server-side backtest through the `tqsdk` facade.
 //!
-//! Demonstrates that switching from live to backtest requires only adding
-//! `.backtest(start_ns, end_ns)` to the builder — the strategy body stays
-//! exactly the same as in live mode (see `api_contract_s33_default_facade`).
+//! Demonstrates market-data-only server-side backtest through
+//! `.backtest(start_ns, end_ns)`. Trade targets and automatic trade login are
+//! intentionally rejected in this mode; use local backtest for simulated fills.
 
 use tqsdk::prelude::*;
 
@@ -28,7 +28,7 @@ async fn main() -> tqsdk::Result<()> {
 
     let mut tq = Tq::new()
         .auth_env()?
-        .backtest(start_ns, end_ns) // ← only difference from live
+        .backtest(start_ns, end_ns)
         .connect()
         .await?;
 

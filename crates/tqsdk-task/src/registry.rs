@@ -42,6 +42,18 @@ impl TaskRegistry {
         self.register(account_id.as_ref(), symbol.as_ref(), TaskKind::TargetPos)
     }
 
+    pub(crate) fn active_task(
+        &self,
+        account_id: impl AsRef<str>,
+        symbol: impl AsRef<str>,
+    ) -> Option<RegisteredTask> {
+        let key = TaskKey {
+            account_id: account_id.as_ref().to_owned(),
+            symbol: symbol.as_ref().to_owned(),
+        };
+        self.by_key.get(&key).cloned()
+    }
+
     pub(crate) fn register_scheduler(
         &mut self,
         account_id: impl AsRef<str>,

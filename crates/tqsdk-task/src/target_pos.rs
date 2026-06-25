@@ -94,6 +94,9 @@ impl TargetPosBuilder {
     }
 
     pub fn build(self) -> Result<TargetPosTask> {
+        if let Some(task) = self.existing_task_for_same_config()? {
+            return Ok(task);
+        }
         let task = self
             .registry
             .with_mut(|registry| registry.register_target_task(&self.account_id, &self.symbol))?;
@@ -135,6 +138,41 @@ impl TargetPosBuilder {
         }
 
         Ok(TargetPosTask { inner })
+    }
+
+    fn existing_task_for_same_config(&self) -> Result<Option<TargetPosTask>> {
+        let Some(active) = self
+            .registry
+            .with(|registry| registry.active_task(&self.account_id, &self.symbol))
+        else {
+            return Ok(None);
+        };
+
+        if active.kind != crate::TaskKind::TargetPos {
+            return Err(TaskError::OwnershipConflict {
+                account_id: active.account_id,
+                symbol: active.symbol,
+                active_task_kind: active.kind,
+            });
+        }
+
+        let Some(inner) = self.store.with_mut(|store| store.get(active.id)) else {
+            return Err(TaskError::OwnershipConflict {
+                account_id: active.account_id,
+                symbol: active.symbol,
+                active_task_kind: active.kind,
+            });
+        };
+
+        if inner.config == self.config {
+            return Ok(Some(TargetPosTask { inner }));
+        }
+
+        Err(TaskError::OwnershipConflict {
+            account_id: active.account_id,
+            symbol: active.symbol,
+            active_task_kind: active.kind,
+        })
     }
 }
 
@@ -402,5 +440,73 @@ mod tests {
 
         assert!(task.is_finished());
         assert!(matches!(task.last_error(), Some(TaskError::Wait(_))));
+    }
+
+    #[test]
+    fn host_target_pos_builder_reuses_existing_task_for_same_config() {
+        let registry = SharedTaskRegistry::default();
+        let store = SharedTargetPosStore::default();
+        let quote_subscriptions = SharedQuoteSubscriptions::default();
+
+        let first = TargetPosBuilder::new(
+            registry.clone(),
+            store.clone(),
+            quote_subscriptions.clone(),
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .build()
+        .expect("first target position task should build");
+        first.set_target_volume(3).unwrap();
+
+        let second = TargetPosBuilder::new(
+            registry,
+            store,
+            quote_subscriptions,
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .build()
+        .expect("same account/symbol/config should reuse existing task");
+
+        assert_eq!(second.current_target_volume(), Some(3));
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+    }
+
+    #[test]
+    fn host_target_pos_builder_rejects_different_config_for_existing_task() {
+        let registry = SharedTaskRegistry::default();
+        let store = SharedTargetPosStore::default();
+        let quote_subscriptions = SharedQuoteSubscriptions::default();
+
+        let _first = TargetPosBuilder::new(
+            registry.clone(),
+            store.clone(),
+            quote_subscriptions.clone(),
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .build()
+        .expect("first target position task should build");
+
+        let error = TargetPosBuilder::new(
+            registry,
+            store,
+            quote_subscriptions,
+            "sim".to_string(),
+            "SHFE.rb2601".to_string(),
+        )
+        .price_mode(PriceMode::Passive)
+        .build()
+        .err()
+        .expect("different config must not take over an existing task");
+
+        assert!(matches!(
+            error,
+            TaskError::OwnershipConflict {
+                active_task_kind: crate::TaskKind::TargetPos,
+                ..
+            }
+        ));
     }
 }
