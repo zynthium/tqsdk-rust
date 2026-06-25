@@ -163,6 +163,9 @@ heartbeat；复盘速度和 terminate 可通过 `Tq::set_replay_speed(...)` /
 可先用 `quote_symbol("SHFE.rb2601")` 预声明，再调用
 `local_backtest_quote_minute_history(&data, start_ns, end_ns).await?`，它会为已声明
 symbol 显式取一分钟 K 线作为本地 quote fallback，不做隐藏联网订阅。
+多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略
+只接收 `&mut Tq` 和 account id，`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
+决定本地 `TqSim` 回测、快期模拟或实盘账户构造。
 需要把 underlying history 以主连等稳定 replay symbol 回放时，使用
 `local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
 request 使用 `local_backtest_kline_histories_as(...)` /
@@ -292,7 +295,7 @@ let page = client.get_kline_data_page(request).await?;
 | Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote/tick/kline replay + `TqSim`，不连接真实服务 |
 | 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().backtest(...)` 一行切换到服务端回测；需要账号 |
 | 默认 facade 本地回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().local_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
-| 默认 facade live/backtest 同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一策略函数接受 `&mut Tq`，builder 决定 live、服务端回测或本地回测 |
+| 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略接受 `&mut Tq` 和 account id，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
 | 高级 quote stream 消费 | `TQ_STREAM_ONCE=1 cargo run -p tqsdk-stream --example quote_stream` | 多消费者 async 集成示例，需要账号；去掉 `TQ_STREAM_ONCE=1` 后持续运行 |

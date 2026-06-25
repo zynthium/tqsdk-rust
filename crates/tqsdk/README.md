@@ -46,13 +46,20 @@ let mut tq = Tq::futures()
     .connect()
     .await?;
 
-let quote = tq.quote("SHFE.au2602").await?;
-let target = tq.target_pos_tqkq("SHFE.au2602").await?;
+let account_id = tq.tqkq_account_id().await?;
+let near = tq.quote("SHFE.rb2610").await?;
+let far = tq.quote("SHFE.rb2701").await?;
+let near_target = tq.target_pos(&account_id, "SHFE.rb2610")?;
+let far_target = tq.target_pos(&account_id, "SHFE.rb2701")?;
 
 while tq.next().await? {
-    let q = quote.load()?;
-    if q.last_price > 3600.0 {
-        target.set(1)?;
+    let spread = near.load()?.last_price - far.load()?.last_price;
+    if spread > 250.0 {
+        near_target.set(-1)?;
+        far_target.set(1)?;
+    } else if spread < 200.0 {
+        near_target.close()?;
+        far_target.close()?;
     }
 }
 # Ok(())

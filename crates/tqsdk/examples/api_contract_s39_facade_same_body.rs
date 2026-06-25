@@ -1,27 +1,59 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
-//! Scenario 39: Zero-branch strategy logic across multiple execution modes.
+//! Scenario 39: Multi-symbol strategy logic shared by local backtest,
+//! simulated trading, and live trading.
 //!
-//! Demonstrates how to write a strategy body as a single function taking `&mut Tq`,
-//! and then running it identically in live, server backtest, and local backtest modes.
+//! The strategy body only accepts `&mut Tq`, an account id, and symbol config.
+//! Changing execution mode is isolated to the builder code in `main()`.
 
-use tqsdk::advanced::task::ReplayMarketSource;
+use tqsdk::advanced::core::Quote;
+use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 
-// The strategy body knows nothing about the execution mode!
-async fn run_strategy(tq: &mut Tq) -> tqsdk::Result<()> {
-    let quote = tq.quote("SHFE.au2510").await?;
+const NEAR_SYMBOL: &str = "SHFE.rb2610";
+const FAR_SYMBOL: &str = "SHFE.rb2701";
+
+#[derive(Debug, Clone, Copy)]
+struct SpreadLegs<'a> {
+    near: &'a str,
+    far: &'a str,
+    open_threshold: f64,
+    close_threshold: f64,
+}
+
+async fn run_spread_strategy(
+    tq: &mut Tq,
+    account_id: &str,
+    legs: SpreadLegs<'_>,
+) -> tqsdk::Result<()> {
+    let near_quote = tq.quote(legs.near).await?;
+    let far_quote = tq.quote(legs.far).await?;
+    let near_target = tq.target_pos(account_id, legs.near)?;
+    let far_target = tq.target_pos(account_id, legs.far)?;
 
     while tq.next().await? {
-        let snapshot = quote.load()?;
-        println!("{} last_price={}", snapshot.datetime, snapshot.last_price);
-    }
+        let Some(near) = near_quote.snapshot()? else {
+            continue;
+        };
+        let Some(far) = far_quote.snapshot()? else {
+            continue;
+        };
+        if !near.last_price.is_finite() || !far.last_price.is_finite() {
+            continue;
+        }
 
-    // Check if we have a backtest summary (only exists in local backtest)
-    if let Some(summary) = tq.backtest_summary() {
+        let spread = near.last_price - far.last_price;
         println!(
-            "Backtest summary: {} events processed",
-            summary.event_count()
+            "{} near={} far={} spread={}",
+            near.datetime, near.last_price, far.last_price, spread
         );
+
+        if spread > legs.open_threshold {
+            near_target.set(-1)?;
+            far_target.set(1)?;
+        } else if spread < legs.close_threshold {
+            near_target.close()?;
+            far_target.close()?;
+        }
     }
 
     Ok(())
@@ -29,38 +61,137 @@ async fn run_strategy(tq: &mut Tq) -> tqsdk::Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
-    println!("=== 1. Server Backtest ===");
-    // Server backtest (mocked by early return for this example to avoid network calls)
-    /*
-    let mut tq_server = Tq::new()
-        .auth_env()?
-        .backtest(1_735_747_200_000_000_000, 1_748_707_200_000_000_000)
-        .connect()
-        .await?;
-    run_strategy(&mut tq_server).await?;
-    */
+    let mode = std::env::var("TQ_EXAMPLE_MODE").unwrap_or_else(|_| "local-backtest".to_string());
+    let legs = SpreadLegs {
+        near: NEAR_SYMBOL,
+        far: FAR_SYMBOL,
+        open_threshold: 250.0,
+        close_threshold: 200.0,
+    };
 
-    println!("=== 2. Local Offline Backtest ===");
-    // Local backtest
-    let replay = ReplayMarketSource::new(vec![]);
-    let mut tq_local = Tq::new()
-        .local_backtest(replay)
-        .quote_symbol("SHFE.au2510")
-        .price_tick("SHFE.au2510", 0.02)
-        .connect()
-        .await?;
-    run_strategy(&mut tq_local).await?;
-
-    println!("=== 3. Live Trading ===");
-    // Live (mocked by early return for this example)
-    /*
-    let mut tq_live = Tq::new()
-        .auth_env()?
-        .trade_target_tqkq()
-        .connect()
-        .await?;
-    run_strategy(&mut tq_live).await?;
-    */
+    match mode.as_str() {
+        "local-backtest" => {
+            let (mut tq, account_id) = build_local_backtest().await?;
+            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+            print_local_summary(&tq);
+        }
+        #[cfg(feature = "live")]
+        "tqkq-sim" => {
+            let (mut tq, account_id) = build_tqkq_sim().await?;
+            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+        }
+        #[cfg(feature = "live")]
+        "live" => {
+            let (mut tq, account_id) = build_live_account().await?;
+            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+        }
+        other => {
+            eprintln!("unsupported TQ_EXAMPLE_MODE={other}; use local-backtest, tqkq-sim, or live");
+        }
+    }
 
     Ok(())
+}
+
+async fn build_local_backtest() -> tqsdk::Result<(Tq, String)> {
+    let replay = ReplayMarketSource::new(vec![
+        quote_event(1_000, NEAR_SYMBOL, 4_300.0)?,
+        quote_event(2_000, FAR_SYMBOL, 4_080.0)?,
+        quote_event(3_000, NEAR_SYMBOL, 4_350.0)?,
+        quote_event(4_000, FAR_SYMBOL, 4_085.0)?,
+        quote_event(5_000, NEAR_SYMBOL, 4_260.0)?,
+        quote_event(6_000, FAR_SYMBOL, 4_080.0)?,
+        quote_event(7_000, NEAR_SYMBOL, 4_255.0)?,
+        quote_event(8_000, FAR_SYMBOL, 4_085.0)?,
+    ]);
+
+    let tq = Tq::new()
+        .local_backtest(replay)
+        .quote_symbol(NEAR_SYMBOL)
+        .quote_symbol(FAR_SYMBOL)
+        .price_tick(NEAR_SYMBOL, 1.0)
+        .price_tick(FAR_SYMBOL, 1.0)
+        .connect()
+        .await?;
+
+    Ok((tq, LOCAL_BACKTEST_ACCOUNT_ID.to_string()))
+}
+
+#[cfg(feature = "live")]
+async fn build_tqkq_sim() -> tqsdk::Result<(Tq, String)> {
+    let tq = Tq::new().auth_env()?.trade_target_tqkq().connect().await?;
+    let account_id = tq.tqkq_account_id().await?;
+    Ok((tq, account_id))
+}
+
+#[cfg(feature = "live")]
+async fn build_live_account() -> tqsdk::Result<(Tq, String)> {
+    let broker_id = required_env("TQ_TRADE_BROKER_ID")?;
+    let account_id = required_env("TQ_TRADE_ACCOUNT_ID")?;
+    let tq = Tq::new()
+        .auth_env()?
+        .trade_target(broker_id, account_id.clone())
+        .connect()
+        .await?;
+    Ok((tq, account_id))
+}
+
+#[cfg(feature = "live")]
+fn required_env(name: &'static str) -> tqsdk::Result<String> {
+    let value =
+        std::env::var(name).map_err(|source| tqsdk::Error::MissingAuthEnv { name, source })?;
+    if value.is_empty() {
+        return Err(tqsdk::Error::EmptyAuthEnv { name });
+    }
+    Ok(value)
+}
+
+fn quote_event(
+    received_at_ns: i64,
+    symbol: &str,
+    last_price: f64,
+) -> tqsdk::Result<ReplayMarketEvent> {
+    Ok(ReplayMarketEvent::quote(
+        "fixture",
+        symbol,
+        received_at_ns,
+        Some(received_at_ns),
+        Quote {
+            datetime: format!("2025-01-01 09:30:{:02}.000000", received_at_ns / 1_000),
+            last_price,
+            ask_price1: last_price + 1.0,
+            ask_volume1: 10,
+            bid_price1: last_price - 1.0,
+            bid_volume1: 10,
+            price_tick: 1.0,
+            volume_multiple: 10,
+            margin: 1_000.0,
+            commission: 0.0,
+            ..Quote::default()
+        },
+    )?)
+}
+
+fn print_local_summary(tq: &Tq) {
+    let Some(summary) = tq.backtest_summary() else {
+        return;
+    };
+
+    println!(
+        "summary events={} orders={} trades={} balance_change={}",
+        summary.event_count(),
+        summary.orders().len(),
+        summary.trades().len(),
+        summary.balance_change()
+    );
+    for position in summary.final_positions() {
+        println!(
+            "position {}.{} pos={} long={} short={}",
+            position.exchange_id,
+            position.instrument_id,
+            position.pos,
+            position.pos_long,
+            position.pos_short
+        );
+    }
 }
