@@ -107,7 +107,7 @@ impl SessionClient {
             let account_ready = trade.account(&account)?.is_some();
             let trade_more_data_ready = matches!(
                 snapshot
-                    .get_path(&["trade", account_id, "trade_more_data", "value"])
+                    .get_path(&["trade", account_id, "trade_more_data"])
                     .and_then(Value::as_bool),
                 Some(false)
             );

@@ -154,6 +154,57 @@ fn runtime_ingest_preserves_root_market_scalars_in_snapshot_and_market_guard() {
 }
 
 #[test]
+fn runtime_ingest_preserves_trade_more_data_as_protocol_boolean() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            "simnow": {
+                                "trade_more_data": false
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("trade_more_data scalar should publish a commit");
+
+    let snapshot = handle.latest_snapshot();
+    assert_eq!(
+        snapshot.get(["trade", "simnow", "trade_more_data"]),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        snapshot.get(["trade", "simnow", "trade_more_data", "value"]),
+        None
+    );
+
+    let commit = reader.next(&mut cursor).unwrap();
+    assert!(
+        commit
+            .changes
+            .path_hits
+            .contains(&tqsdk_core::StatePath::new([
+                "trade",
+                "simnow",
+                "trade_more_data"
+            ]))
+    );
+}
+
+#[test]
 fn runtime_ingest_materializes_empty_objects_and_keeps_empty_parent_after_delete() {
     let handle = runtime_with_default_adapters();
 
@@ -227,6 +278,49 @@ fn runtime_ingest_materializes_empty_objects_and_keeps_empty_parent_after_delete
     assert_eq!(
         handle.latest_snapshot().get(["quotes", "SHFE.delete"]),
         Some(&json!({}))
+    );
+}
+
+#[test]
+fn runtime_ingest_applies_root_null_delete() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+
+    ingest_quote(&handle, 512.0);
+    assert_eq!(
+        handle
+            .latest_snapshot()
+            .get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(512.0))
+    );
+    reader.next(&mut cursor).unwrap();
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "quotes": null
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("root null delete should publish a commit");
+
+    assert_eq!(handle.latest_snapshot().get(["quotes"]), None);
+    let commit = reader.next(&mut cursor).unwrap();
+    assert!(
+        commit
+            .changes
+            .path_hits
+            .contains(&tqsdk_core::StatePath::new(["quotes"]))
     );
 }
 

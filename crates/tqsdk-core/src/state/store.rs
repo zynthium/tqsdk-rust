@@ -340,8 +340,10 @@ fn apply_mutation_at_partition(
     mutation: &NormalizedMutation,
 ) -> Option<AppliedChange> {
     let mut field_indexes = Vec::new();
-    let structural_changed = if is_direct_root_scalar_path(path) {
-        apply_direct_root_scalar(root, path, &mutation.fields, &mut field_indexes)
+    let structural_changed = if is_partition_root_delete(partition_root, path, &mutation.fields) {
+        apply_partition_root_delete(root, &mut field_indexes)
+    } else if is_direct_scalar_path(partition_root, path) {
+        apply_direct_scalar(root, path, &mutation.fields, &mut field_indexes)
     } else {
         apply_mutation_at_path(
             root,
@@ -589,17 +591,45 @@ fn preserves_null_field(object: Option<&ObjectKey>, field: &str) -> bool {
     matches!(object, Some(ObjectKey::SessionReconnect)) && field == "max_attempts"
 }
 
-fn is_direct_root_scalar_path(path: &[PathSegment]) -> bool {
-    matches!(path, [field] if matches!(field.as_str(), "ins_list" | "mdhis_more_data"))
+fn is_partition_root_delete(
+    partition_root: StateRoot,
+    path: &[PathSegment],
+    fields: &[crate::events::FieldMutation],
+) -> bool {
+    !matches!(partition_root, StateRoot::Other)
+        && path.is_empty()
+        && matches!(fields, [field] if field.field == "value" && field.value.is_null())
 }
 
-fn apply_direct_root_scalar(
+fn apply_partition_root_delete(root: &mut Value, field_indexes: &mut Vec<usize>) -> bool {
+    if is_empty_partition(root) {
+        return false;
+    }
+
+    *root = Value::Object(Map::new());
+    field_indexes.push(0);
+    true
+}
+
+fn is_direct_scalar_path(partition_root: StateRoot, path: &[PathSegment]) -> bool {
+    match partition_root {
+        StateRoot::Other => {
+            matches!(path, [field] if matches!(field.as_str(), "ins_list" | "mdhis_more_data"))
+        }
+        StateRoot::Trade => {
+            matches!(path, [_account_id, field] if field == "trade_more_data")
+        }
+        _ => false,
+    }
+}
+
+fn apply_direct_scalar(
     root: &mut Value,
     path: &[PathSegment],
     fields: &[crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
 ) -> bool {
-    let [segment] = path else {
+    let [parent_path @ .., segment] = path else {
         return false;
     };
     let [field] = fields else {
@@ -609,27 +639,45 @@ fn apply_direct_root_scalar(
         return false;
     }
 
-    if !root.is_object() {
-        *root = Value::Object(Map::new());
+    if field.value.is_null() {
+        let mut cursor = root;
+        for parent in parent_path {
+            let Some(map) = cursor.as_object_mut() else {
+                return false;
+            };
+            let Some(child) = map.get_mut(parent) else {
+                return false;
+            };
+            cursor = child;
+        }
+        let Some(map) = cursor.as_object_mut() else {
+            return false;
+        };
+        if !map.contains_key(segment) {
+            return false;
+        }
+        map.remove(segment);
+        field_indexes.push(0);
+        return true;
     }
-    let Value::Object(map) = root else {
-        unreachable!("direct root scalar partition must be an object");
+
+    let mut cursor = root;
+    for parent in parent_path {
+        let (child, _) = ensure_child_object(cursor, parent);
+        cursor = child;
+    }
+    if !cursor.is_object() {
+        *cursor = Value::Object(Map::new());
+    }
+    let Value::Object(map) = cursor else {
+        unreachable!("direct scalar parent must be an object");
     };
 
-    let changed = if field.value.is_null() {
-        map.contains_key(segment)
-    } else {
-        map.get(segment) != Some(&field.value)
-    };
-    if !changed {
+    if map.get(segment) == Some(&field.value) {
         return false;
     }
 
-    if field.value.is_null() {
-        map.remove(segment);
-    } else {
-        map.insert(segment.clone(), field.value.clone());
-    }
+    map.insert(segment.clone(), field.value.clone());
     field_indexes.push(0);
     true
 }

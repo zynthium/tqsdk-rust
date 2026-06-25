@@ -203,9 +203,15 @@ impl RelayServer {
         raw_client_id: u64,
         text: String,
     ) -> RelayResult<Vec<DownstreamFrame>> {
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|err| RelayError::invalid_protocol(format!("invalid JSON frame: {err}")))?;
-        let command = DownstreamCommand::from_value(value)?;
+        let command = parse_downstream_command(&text)?;
+        self.handle_command(raw_client_id, command).await
+    }
+
+    async fn handle_command(
+        &self,
+        raw_client_id: u64,
+        command: DownstreamCommand,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
         let (frames, upstream_symbols) = {
             let mut engine = self
                 .engine
@@ -260,12 +266,17 @@ impl RelayServer {
     async fn serve_stream(&self, client_id: ClientId, stream: &mut TcpStream) -> RelayResult<()> {
         accept_handshake(stream).await?;
         let mut outbound = self.register_client(client_id)?;
+        let mut peek_credit = false;
         loop {
             tokio::select! {
                 read = read_client_frame(stream) => {
                     match read {
                         Ok(ClientWebSocketFrame::Text(text)) => {
-                            let frames = self.handle_text(client_id.value(), text).await?;
+                            let command = parse_downstream_command(&text)?;
+                            if matches!(command, DownstreamCommand::PeekMessage) {
+                                peek_credit = true;
+                            }
+                            let frames = self.handle_command(client_id.value(), command).await?;
                             self.dispatch_frames(frames)?;
                         }
                         Ok(ClientWebSocketFrame::Ping(payload)) => {
@@ -281,11 +292,12 @@ impl RelayServer {
                         Err(err) => return Err(err),
                     }
                 }
-                payload = outbound.recv() => {
+                payload = outbound.recv(), if peek_credit => {
                     let Some(payload) = payload else {
                         return Ok(());
                     };
                     write_server_text_frame(stream, payload.to_string()).await?;
+                    peek_credit = false;
                 }
             }
         }
@@ -346,6 +358,12 @@ fn ingest_upstream_event(
             engine.ingest_trading_status(status.symbol, status.trading_status)
         }
     }
+}
+
+fn parse_downstream_command(text: &str) -> RelayResult<DownstreamCommand> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|err| RelayError::invalid_protocol(format!("invalid JSON frame: {err}")))?;
+    DownstreamCommand::from_value(value)
 }
 
 async fn accept_handshake(stream: &mut TcpStream) -> RelayResult<()> {

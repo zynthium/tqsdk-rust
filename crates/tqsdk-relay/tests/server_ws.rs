@@ -194,6 +194,53 @@ async fn relay_dispatches_ingested_tick_frames_to_connected_downstream_client() 
         .unwrap();
     assert_eq!(dispatcher.dispatch_frames(frames).unwrap(), 1);
 
+    send_peek_message(&mut stream).await;
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["quotes"]["SHFE.au2602"]["last_price"],
+        610.0
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_waits_for_downstream_peek_before_sending_market_frame() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let dispatcher = server.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
+    )
+    .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
+
+    let frames = engine
+        .lock()
+        .unwrap()
+        .ingest_tick("SHFE.au2602", tick(1, 1_000, 610.0))
+        .unwrap();
+    assert_eq!(dispatcher.dispatch_frames(frames).unwrap(), 1);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), read_unmasked_text(&mut stream))
+            .await
+            .is_err(),
+        "relay must not push downstream market frames without peek_message"
+    );
+
+    send_peek_message(&mut stream).await;
     let payload: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
     assert_eq!(
@@ -235,6 +282,7 @@ async fn relay_pumps_upstream_tick_frames_to_connected_downstream_client() {
         1
     );
 
+    send_peek_message(&mut stream).await;
     let payload: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
     assert_eq!(
@@ -310,6 +358,7 @@ async fn relay_configured_websocket_upstream_fans_out_to_downstream_client() {
     wait_for_quote_subscriptions(&engine, 1).await;
     send_tick_tx.send(()).unwrap();
 
+    send_peek_message(&mut stream).await;
     let payload: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
     assert_eq!(
@@ -391,6 +440,7 @@ async fn relay_configured_upstream_adds_downstream_symbol_immediately() {
     wait_for_dynamic_subscription(dynamic_seen_rx).await;
     send_tick_tx.send(()).unwrap();
 
+    send_peek_message(&mut stream).await;
     let payload: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
     assert_eq!(
@@ -450,8 +500,10 @@ async fn relay_pump_upstream_until_drains_source_to_downstream_client() {
             .unwrap(),
         2
     );
+    send_peek_message(&mut stream).await;
     let first: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    send_peek_message(&mut stream).await;
     let second: serde_json::Value =
         serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
 
@@ -586,6 +638,10 @@ async fn send_masked_text(stream: &mut TcpStream, text: String) {
             .map(|(index, byte)| *byte ^ mask[index % 4]),
     );
     stream.write_all(&frame).await.unwrap();
+}
+
+async fn send_peek_message(stream: &mut TcpStream) {
+    send_masked_text(stream, json!({"aid": "peek_message"}).to_string()).await;
 }
 
 async fn send_masked_ping(stream: &mut TcpStream, payload: &[u8]) {

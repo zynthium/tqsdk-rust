@@ -40,7 +40,7 @@ pub(super) fn trade_login_completed_status(
         return None;
     }
     let trade_more_data = snapshot
-        .get(["trade", account_id, "trade_more_data", "value"])?
+        .get(["trade", account_id, "trade_more_data"])?
         .as_bool()?;
     if trade_more_data {
         return None;

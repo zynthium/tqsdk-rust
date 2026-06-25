@@ -660,6 +660,20 @@ fn flatten_object(
             fields: Vec::new(),
             source,
         });
+    } else if path.is_empty() {
+        for field in fields {
+            if emits_root_delete(field.field.as_str(), &field.value, source) {
+                out.push(NormalizedMutation {
+                    path: StatePath::new([field.field]),
+                    object: None,
+                    fields: vec![FieldMutation {
+                        field: "value".to_string(),
+                        value: Value::Null,
+                    }],
+                    source,
+                });
+            }
+        }
     }
 
     for (field, value) in map {
@@ -715,6 +729,21 @@ fn market_data_row_id(path: &[String]) -> Option<i64> {
 fn emits_scalar_leaf(path: &[String], field: &str) -> bool {
     matches!(path, [] if matches!(field, "ins_list" | "mdhis_more_data"))
         || matches!(path, [root, _account_id] if root == "trade") && field == "trade_more_data"
+}
+
+fn emits_root_delete(field: &str, value: &Value, source: MutationSource) -> bool {
+    value.is_null()
+        && match source {
+            MutationSource::MarketDiff => matches!(
+                field,
+                "quotes" | "trading_status" | "charts" | "klines" | "ticks"
+            ),
+            MutationSource::TradeReply => field == "trade",
+            MutationSource::QueryResult => field == "query",
+            MutationSource::SchemaBootstrap => field == "schema",
+            MutationSource::ReplayStep => field == "replay",
+            MutationSource::SessionControl => matches!(field, "system" | "runtime"),
+        }
 }
 
 fn infer_object_key_from_segments(path: &[String]) -> Option<ObjectKey> {
