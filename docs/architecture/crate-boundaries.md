@@ -316,6 +316,7 @@ sink、WAL、journal 或 cache writer。
 
 - 不向下游 SDK 客户端代理 trade / query / auth / schema / metadata
 - 不进入现有 SDK crate 的默认依赖路径
+- 不进入 Cargo default-members；relay Rust 和 dashboard validation 必须显式运行
 - 不改变 `tqsdk-core` runtime contract
 - 不作为多 provider 行情聚合框架
 

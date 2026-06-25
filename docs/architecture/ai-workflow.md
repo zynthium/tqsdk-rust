@@ -234,6 +234,8 @@ crate 自己维护。
 
 - relay 是为减少多进程、全品种、多周期行情订阅字符串压力的可选部署层，不改变 SDK
   默认直连路径。
+- relay 仍是 workspace member，便于共享依赖和 CI，但不属于 Cargo default-members；
+  SDK 默认验证走 core/session/wait/task/data/tqsdk，relay 用显式 `-p tqsdk-relay` gate。
 - relay 自身可以使用 metadata 查询来构建上游 tick 源，但不得把 query/auth/schema
   代理暴露给下游 SDK 客户端。
 
@@ -405,16 +407,16 @@ git diff --check
 Rust 代码改动的默认验证：
 
 ```bash
-cargo check --workspace --examples
-cargo test --workspace
-cargo clippy --workspace --examples --all-targets -- -D warnings
+cargo check --examples
+cargo test
+cargo clippy --examples --all-targets -- -D warnings
 ```
 
 如果修改了 feature flags、workspace 依赖或 crate feature 传播，还必须验证：
 
 ```bash
-cargo check --workspace --no-default-features
-cargo check --workspace --all-features --examples
+cargo check --no-default-features
+cargo check --all-features --examples
 ```
 
 如果改动会影响格式化，提交前仍应补充：
@@ -431,7 +433,7 @@ cargo fmt --all --check
    desired API sketch 保存在 `docs/scenarios/api_gaps/`，不得放在正式
    examples 中伪装成已支持。
 3. 一旦某个 gap 被修复，应将 sketch 提升为正式 example，并纳入
-   `cargo check --workspace --examples` 与 CI。
+   `cargo check --examples` 或对应 opt-in crate 的 `-p <crate>` example gate 与 CI。
 4. 如果重构导致 example 变长、变绕、暴露更多内部细节，应优先判定为
    API 退化，而不是用户使用问题。
 

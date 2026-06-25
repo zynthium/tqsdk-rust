@@ -13,7 +13,6 @@ default-members = [
     "crates/tqsdk",
     "crates/tqsdk-core",
     "crates/tqsdk-data",
-    "crates/tqsdk-relay",
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
     "crates/tqsdk-task",

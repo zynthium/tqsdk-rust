@@ -119,7 +119,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - `tqsdk-session` 负责 shared session、one-shot request/response/direct-query、GraphQL、schema、metadata、calendar、ranking、EDB、auth refresh、replay control。
 - `tqsdk-wait` 只做 single-owner diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
 - `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait 或调用方自建消费层。
-- `tqsdk-relay` 是可选 market relay/cache service；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
+- `tqsdk-relay` 是可选 market relay/cache service；它是 workspace member 但不属于 Cargo default-members；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
 - 所有可见状态变化必须经过 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`。不得新增旁路通知、第二棵状态树或 facade 私有 revision。
 - domain 状态写入必须经过 `MutationSource` 根路径防线。hot read 优先使用 `read_market_state()`、`read_trade_state()`、`read_market_trade_state()`。
 - command/order 状态必须遵守 runtime 状态机。不得用字符串或 adapter 本地判断绕过 `record_command_status()` 的转换校验。
@@ -154,14 +154,14 @@ git diff --check
 Rust 代码快速自检：
 
 ```bash
-cargo check --workspace --examples
+cargo check --examples
 ```
 
 可提交单元的默认验证：
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --examples --all-targets -- -D warnings
+cargo test
+cargo clippy --examples --all-targets -- -D warnings
 ```
 
 格式化相关改动：
@@ -173,19 +173,23 @@ cargo fmt --all --check
 修改 feature flags、workspace 依赖或 crate feature 传播时，补充：
 
 ```bash
-cargo check --workspace --no-default-features
-cargo check --workspace --no-default-features --examples
+cargo check --no-default-features
+cargo check --no-default-features --examples
 cargo test -p tqsdk-session --no-default-features
-cargo check --workspace --all-features --examples
+cargo check --all-features --examples
 ```
 
 release-check 环境还应对齐：
 
 ```bash
-cargo test --workspace --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo test --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo deny check
-cargo package --workspace --no-verify
+cargo package --no-verify
+cargo test -p tqsdk-relay --tests
+cargo clippy -p tqsdk-relay --all-targets -- -D warnings
+cargo check -p tqsdk-relay --no-default-features
+RUSTDOCFLAGS="-D warnings" cargo doc -p tqsdk-relay --no-deps --all-features
 ```
 
 场景驱动 public API example 是正式契约。改动 public API、crate 拆分、feature flags 或 facade/runtime 消费方式后，必须保证 `crates/*/examples/api_contract_sXX_*.rs` 能继续清晰、可编译地表达目标场景。

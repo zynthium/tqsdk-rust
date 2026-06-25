@@ -6,7 +6,7 @@ on:
 
 jobs:
   rust:
-    name: Rust workspace
+    name: Rust SDK crates
     runs-on: ubuntu-latest
 
     steps:
@@ -21,40 +21,67 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Check examples
-        run: cargo check --workspace --examples
+      - name: Check SDK examples
+        run: cargo check --examples
 
-      - name: Test workspace
-        run: cargo test --workspace
+      - name: Test SDK crates
+        run: cargo test
 
-      - name: Test workspace all features
-        run: cargo test --workspace --all-features
+      - name: Test SDK crates all features
+        run: cargo test --all-features
 
-      - name: Clippy examples and all targets
-        run: cargo clippy --workspace --examples --all-targets -- -D warnings
+      - name: Clippy SDK examples and all targets
+        run: cargo clippy --examples --all-targets -- -D warnings
 
-      - name: Check no default features
-        run: cargo check --workspace --no-default-features
+      - name: Check SDK no default features
+        run: cargo check --no-default-features
 
-      - name: Check no default features examples
-        run: cargo check --workspace --no-default-features --examples
+      - name: Check SDK no default features examples
+        run: cargo check --no-default-features --examples
 
       - name: Test session no default features
         run: cargo test -p tqsdk-session --no-default-features
 
-      - name: Check all features examples
-        run: cargo check --workspace --all-features --examples
+      - name: Check SDK all features examples
+        run: cargo check --all-features --examples
 
-      - name: Strict docs
+      - name: Strict SDK docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --all-features
+        run: cargo doc --no-deps --all-features
 
       - name: Cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
-      - name: Package metadata
-        run: cargo package --workspace --no-verify
+      - name: SDK package metadata
+        run: cargo package --no-verify
+
+  relay-rust:
+    name: Relay Rust
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check relay no default features
+        run: cargo check -p tqsdk-relay --no-default-features
+
+      - name: Test relay
+        run: cargo test -p tqsdk-relay --tests
+
+      - name: Clippy relay
+        run: cargo clippy -p tqsdk-relay --all-targets -- -D warnings
+
+      - name: Strict relay docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p tqsdk-relay --no-deps --all-features
 
   relay-dashboard:
     name: Relay dashboard UI

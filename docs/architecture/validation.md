@@ -155,16 +155,16 @@ facade 或 runtime 消费方式重构后，都必须确认这些 examples 仍能
 
 重构后至少运行：
 
-1. `cargo check --workspace --examples`
-2. `cargo test --workspace`
-3. `cargo clippy --workspace --examples --all-targets -- -D warnings`
+1. `cargo check --examples`
+2. `cargo test`
+3. `cargo clippy --examples --all-targets -- -D warnings`
 
 如果 feature flags、workspace 依赖或 crate feature 传播被修改，还必须运行：
 
-1. `cargo check --workspace --no-default-features`
-2. `cargo check --workspace --no-default-features --examples`
+1. `cargo check --no-default-features`
+2. `cargo check --no-default-features --examples`
 3. `cargo test -p tqsdk-session --no-default-features`
-4. `cargo check --workspace --all-features --examples`
+4. `cargo check --all-features --examples`
 
 examples 的处理原则：
 
@@ -189,17 +189,17 @@ For docs-only public API audit batches, run:
 
 ```bash
 git diff --check
-cargo check --workspace --examples
+cargo check --examples
 ```
 
 If public API source, feature flags, or crate dependencies change, also run:
 
 ```bash
 cargo fmt --all --check
-cargo test --workspace
-cargo check --workspace --no-default-features
-cargo check --workspace --no-default-features --examples
-cargo check --workspace --all-features --examples
+cargo test
+cargo check --no-default-features
+cargo check --no-default-features --examples
+cargo check --all-features --examples
 ```
 
 Regression guards fixed in the facade iteration and still required before a source API narrowing batch:
@@ -216,21 +216,27 @@ Regression guards fixed in the facade iteration and still required before a sour
 内部生产版本发布前，必须在离线 CI 或本地 release-check 环境通过：
 
 1. `cargo fmt --all --check`
-2. `cargo check --workspace --examples`
-3. `cargo test --workspace`
-4. `cargo test --workspace --all-features`
-5. `cargo clippy --workspace --examples --all-targets -- -D warnings`
-6. `cargo check --workspace --no-default-features`
-7. `cargo check --workspace --no-default-features --examples`
+2. `cargo check --examples`
+3. `cargo test`
+4. `cargo test --all-features`
+5. `cargo clippy --examples --all-targets -- -D warnings`
+6. `cargo check --no-default-features`
+7. `cargo check --no-default-features --examples`
 8. `cargo test -p tqsdk-session --no-default-features`
-9. `cargo check --workspace --all-features --examples`
-10. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
+9. `cargo check --all-features --examples`
+10. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`
 11. `cargo deny check`
-12. `cargo package --workspace --no-verify`
-13. `git diff --check`
-14. `cargo +nightly fuzz build`
+12. `cargo package --no-verify`
+13. `cargo test -p tqsdk-relay --tests`
+14. `cargo clippy -p tqsdk-relay --all-targets -- -D warnings`
+15. `cargo check -p tqsdk-relay --no-default-features`
+16. `RUSTDOCFLAGS="-D warnings" cargo doc -p tqsdk-relay --no-deps --all-features`
+17. `git diff --check`
+18. `cargo +nightly fuzz build`
 
-`cargo package --workspace --no-verify` 是内部制品的 manifest/package metadata gate。
+`cargo package --no-verify` 是默认 SDK crates 的 manifest/package metadata gate；
+`tqsdk-relay` 作为可选部署工具用 `-p tqsdk-relay` 单独验证。relay 单包 package
+依赖尚未发布的 sibling crates，不作为默认 CI gate。
 如果切换到 crates.io 或要求完整 registry verify，必须按依赖顺序发布或验证：
 `tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` ->
 `tqsdk-data` -> `tqsdk-task` -> `tqsdk`。

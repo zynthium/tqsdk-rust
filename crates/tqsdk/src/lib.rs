@@ -77,7 +77,7 @@ mod local_backtest;
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Default account id used by [`Tq::local_backtest`].
+/// Default account id used by [`TqBuilder::local_backtest`].
 pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::LOCAL_BACKTEST_ACCOUNT_ID;
 
 #[cfg(all(feature = "services", feature = "live"))]

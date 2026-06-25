@@ -203,6 +203,8 @@ V1 是：
     `/symbol-metrics` 读取低频缓存的 read model，不在请求链路上获取 relay engine 全局锁
   - 新 K 线订阅可用内存 tick ring 回放已闭合的合成 K 线，减少冷启动空窗
   - 现有 SDK crates 不依赖 relay；用户显式配置 market endpoint 时才使用
+  - relay 仍保留为 workspace member，但不属于 Cargo default-members；SDK 默认
+    validation set 不含 relay，relay Rust 和 dashboard gate 单独运行
 
 这两层当前仍然遵守同一个约束：
 

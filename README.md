@@ -336,13 +336,16 @@ direct query 属于 `tqsdk-session`，live diff 消费属于 `tqsdk-wait`，
 
 ## 本地开发
 
-克隆仓库并检查 workspace：
+克隆仓库并检查默认 SDK crates：
 
 ```bash
 git clone https://github.com/zynthium/tqsdk-rust.git
 cd tqsdk-rust
-cargo check --workspace --examples
+cargo check --examples
 ```
+
+`tqsdk-relay` 是可选基础设施，不在默认 SDK validation set 中；修改 relay 时显式运行
+`cargo test -p tqsdk-relay --tests` 等 relay gate。
 
 常用验证命令：
 
@@ -355,14 +358,14 @@ git diff --check
 Rust 代码改动的快速自检：
 
 ```bash
-cargo check --workspace --examples
+cargo check --examples
 ```
 
 可提交改动单元的默认验证：
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --examples --all-targets -- -D warnings
+cargo test
+cargo clippy --examples --all-targets -- -D warnings
 ```
 
 如果改动会影响格式化，提交前补充：
@@ -374,10 +377,10 @@ cargo fmt --all --check
 修改 feature flags、workspace 依赖或 crate feature 传播时，补充：
 
 ```bash
-cargo check --workspace --no-default-features
-cargo check --workspace --no-default-features --examples
+cargo check --no-default-features
+cargo check --no-default-features --examples
 cargo test -p tqsdk-session --no-default-features
-cargo check --workspace --all-features --examples
+cargo check --all-features --examples
 ```
 
 更完整的 release-check / contract 验证矩阵见 `docs/architecture/validation.md`。
