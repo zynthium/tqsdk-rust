@@ -48,6 +48,18 @@ pub mod advanced {
     }
 
     pub mod task {
+        pub mod backtest {
+            pub use tqsdk_task::backtest::*;
+        }
+
+        pub mod replay {
+            pub use tqsdk_task::replay::*;
+        }
+
+        pub mod sim {
+            pub use tqsdk_task::sim::*;
+        }
+
         pub use tqsdk_task::{
             LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
             ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
@@ -78,7 +90,7 @@ mod local_backtest;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Default account id used by [`TqBuilder::local_backtest`].
-pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::LOCAL_BACKTEST_ACCOUNT_ID;
+pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::sim::LOCAL_BACKTEST_ACCOUNT_ID;
 
 #[cfg(all(feature = "services", feature = "live"))]
 const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -166,7 +178,7 @@ impl From<tqsdk_data::DataError> for Error {
 /// `Tq` owns a wait-style API plus task host so common strategy loops can use
 /// one object for `next()`, live refs, history access, and target-position tasks.
 ///
-/// In local-backtest mode the inner driver switches to [`tqsdk_task::StrategyBacktest`]
+/// In local-backtest mode the inner driver switches to [`tqsdk_task::backtest::StrategyBacktest`]
 /// while keeping the same public surface (`next()`, `quote()`, etc.).
 pub struct Tq {
     inner: TqInner,
@@ -181,7 +193,7 @@ pub struct Tq {
 
 enum TqInner {
     Live(Box<tqsdk_task::TaskHost>),
-    LocalBacktest(Box<tqsdk_task::StrategyBacktest>),
+    LocalBacktest(Box<tqsdk_task::backtest::StrategyBacktest>),
 }
 
 enum DefaultAccountId {
@@ -248,7 +260,7 @@ impl Tq {
         }
     }
 
-    fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
+    fn from_local_backtest(backtest: tqsdk_task::backtest::StrategyBacktest) -> Self {
         Self {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
             default_account_id: DefaultAccountId::Single(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
@@ -590,7 +602,7 @@ impl Tq {
     }
 
     /// Returns the backtest summary (local-backtest mode only).
-    pub fn backtest_summary(&self) -> Option<tqsdk_task::StrategyBacktestSummary> {
+    pub fn backtest_summary(&self) -> Option<tqsdk_task::backtest::StrategyBacktestSummary> {
         match &self.inner {
             TqInner::LocalBacktest(bt) => Some(bt.summary()),
             TqInner::Live(_) => None,
@@ -600,7 +612,7 @@ impl Tq {
     /// Returns a balance-based backtest performance snapshot (local-backtest mode only).
     pub fn backtest_performance_metrics(
         &self,
-    ) -> Option<tqsdk_task::StrategyBacktestPerformanceMetrics> {
+    ) -> Option<tqsdk_task::backtest::StrategyBacktestPerformanceMetrics> {
         self.backtest_summary()
             .map(|summary| summary.performance_metrics())
     }
@@ -609,7 +621,7 @@ impl Tq {
     pub fn backtest_performance_report(
         &self,
         rolling_window_len: usize,
-    ) -> Option<tqsdk_task::StrategyBacktestPerformanceReport> {
+    ) -> Option<tqsdk_task::backtest::StrategyBacktestPerformanceReport> {
         self.backtest_summary()
             .map(|summary| summary.performance_report(rolling_window_len))
     }
@@ -761,16 +773,16 @@ impl TqBuilder {
 
     /// Enter local-backtest mode using the provided replay cache.
     ///
-    /// Uses [`tqsdk_task::TqSim`] for matching. The strategy body stays identical to live.
+    /// Uses [`tqsdk_task::sim::TqSim`] for matching. The strategy body stays identical to live.
     #[must_use]
-    pub fn local_backtest(mut self, replay: tqsdk_task::ReplayMarketSource) -> Self {
+    pub fn local_backtest(mut self, replay: tqsdk_task::replay::ReplayMarketSource) -> Self {
         self.backtest = Some(BacktestConfig::Local { replay });
         self
     }
 
     /// Enter local-backtest mode from owned kline history series.
     ///
-    /// This is a convenience wrapper around [`tqsdk_task::StrategyReplaySourceBuilder`].
+    /// This is a convenience wrapper around [`tqsdk_task::replay::StrategyReplaySourceBuilder`].
     pub fn local_backtest_klines(
         self,
         series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
@@ -921,7 +933,7 @@ impl TqBuilder {
 
     /// Enter local-backtest mode from owned tick history series.
     ///
-    /// This is a convenience wrapper around [`tqsdk_task::StrategyReplaySourceBuilder`].
+    /// This is a convenience wrapper around [`tqsdk_task::replay::StrategyReplaySourceBuilder`].
     pub fn local_backtest_ticks(
         self,
         series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
@@ -1334,7 +1346,7 @@ enum BacktestConfig {
         replay_date: NaiveDate,
     },
     Local {
-        replay: tqsdk_task::ReplayMarketSource,
+        replay: tqsdk_task::replay::ReplayMarketSource,
     },
 }
 
@@ -1561,7 +1573,7 @@ mod builder_contract_tests {
 
     #[tokio::test]
     async fn local_backtest_connect_does_not_require_auth() {
-        let replay = tqsdk_task::ReplayMarketSource::new(Vec::new());
+        let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
 
         let result = TqBuilder::new().local_backtest(replay).connect().await;
 
@@ -1570,7 +1582,7 @@ mod builder_contract_tests {
 
     #[tokio::test]
     async fn local_backtest_connect_sets_default_account_id() {
-        let replay = tqsdk_task::ReplayMarketSource::new(Vec::new());
+        let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
 
         let tq = TqBuilder::new()
             .local_backtest(replay)

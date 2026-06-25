@@ -1,5 +1,5 @@
 use tqsdk_core::{Quote, TradeDirection, TradeOffset};
-use tqsdk_task::{TqSim, TqSimOrderRequest};
+use tqsdk_task::sim::{TqSim, TqSimOrderRequest};
 
 #[test]
 fn tqsim_fills_crossing_limit_order_at_order_price_without_partial_fill() {

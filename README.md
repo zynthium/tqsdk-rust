@@ -40,7 +40,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
-- 做确定性 replay / 本地回测行情输入：用 `tqsdk-task::ReplayMarketSource`。
+- 做确定性 replay / 本地回测行情输入：用 `tqsdk_task::replay::ReplayMarketSource`。
 - 需要策略下单并撮合成交的回测：用 `tqsdk` 的 `.local_backtest(...)`；server-side
   `.backtest(...)` / `.server_replay(...)` 是 market-data-only，不能组合交易目标或自动交易登录。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
@@ -150,7 +150,7 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 接入，策略主体仍保持同一套 `next()` / `quote()` loop。server replay 模式会自动发送
 heartbeat；复盘速度和 terminate 可通过 `Tq::set_replay_speed(...)` /
 `terminate_server_replay()` 显式控制。
-`Tq::futures().local_backtest(replay)` 使用本地 `ReplayMarketSource + TqSim`
+`Tq::futures().local_backtest(replay)` 使用本地 `replay::ReplayMarketSource + sim::TqSim`
 撮合，不需要真实服务；已有 owned history series 时也可以用
 `local_backtest_klines([series])` / `local_backtest_ticks([series])` 直接转本地 replay；
 已有 `DataClient` 和 history request 时可以用
@@ -180,12 +180,13 @@ request 使用 `local_backtest_kline_histories_as(...)` /
 明确要直接操作 Python-style wait facade 时，才下钻到
 `tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
 `stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
-能力，则使用 `tqsdk-task::StrategyBacktest` 搭配 task-owned `ReplayMarketSource`。
+能力，则使用 `tqsdk_task::backtest::StrategyBacktest` 搭配 task-owned
+`tqsdk_task::replay::ReplayMarketSource`。
 当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
 自动追踪、`TargetPos` 执行闭环与增量 execution events/trades 读取，以及轻量
 `summary()` / `performance_metrics()` / `performance_report(window)` / trade log / cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
 `tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
-`StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
+`tqsdk_task::replay::StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
 也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
 symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
 `local_backtest_quote_minute_history(...)` 复用已声明 quote symbol 自动生成一分钟 history

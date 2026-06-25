@@ -41,8 +41,8 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use tqsdk_data::{DataClient, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
+use tqsdk_task::replay::{StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySpeed};
 use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{StrategyReplay, StrategyReplayCheckpointStore, StrategyReplaySpeed};
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(key).map_err(|_| format!("missing environment variable: {key}").into())

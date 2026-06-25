@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
+use tqsdk_task::backtest::StrategyBacktest;
+use tqsdk_task::replay::{ReplayMarketSource, StrategyReplaySourceBuilder};
 
 use super::{Result, Tq, data_validation};
 
@@ -13,8 +15,8 @@ const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
 
 pub(super) fn replay_from_klines(
     series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-) -> Result<tqsdk_task::ReplayMarketSource> {
-    let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+) -> Result<ReplayMarketSource> {
+    let mut builder = StrategyReplaySourceBuilder::new();
     for series in series {
         builder = builder.kline_series(series, "history-kline")?;
     }
@@ -24,9 +26,9 @@ pub(super) fn replay_from_klines(
 pub(super) fn replay_from_klines_as(
     replay_symbol: impl AsRef<str>,
     series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-) -> Result<tqsdk_task::ReplayMarketSource> {
+) -> Result<ReplayMarketSource> {
     let replay_symbol = replay_symbol.as_ref().to_owned();
-    let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+    let mut builder = StrategyReplaySourceBuilder::new();
     for series in series {
         builder = builder.kline_series_as(series, replay_symbol.as_str(), "history-kline")?;
     }
@@ -172,8 +174,8 @@ fn continuous_minute_history_requests_for_segments(
 
 pub(super) fn replay_from_ticks(
     series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-) -> Result<tqsdk_task::ReplayMarketSource> {
-    let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+) -> Result<ReplayMarketSource> {
+    let mut builder = StrategyReplaySourceBuilder::new();
     for series in series {
         builder = builder.tick_series(series, "history-tick")?;
     }
@@ -183,9 +185,9 @@ pub(super) fn replay_from_ticks(
 pub(super) fn replay_from_ticks_as(
     replay_symbol: impl AsRef<str>,
     series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-) -> Result<tqsdk_task::ReplayMarketSource> {
+) -> Result<ReplayMarketSource> {
     let replay_symbol = replay_symbol.as_ref().to_owned();
-    let mut builder = tqsdk_task::StrategyReplaySourceBuilder::new();
+    let mut builder = StrategyReplaySourceBuilder::new();
     for series in series {
         builder = builder.tick_series_as(series, replay_symbol.as_str(), "history-tick")?;
     }
@@ -204,13 +206,13 @@ pub(super) async fn fetch_tick_series(
 }
 
 pub(super) async fn connect(
-    replay: tqsdk_task::ReplayMarketSource,
+    replay: ReplayMarketSource,
     quote_symbols: Vec<String>,
     price_ticks: std::collections::HashMap<String, f64>,
     instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
     default_price_tick: Option<f64>,
 ) -> Result<Tq> {
-    let mut builder = tqsdk_task::StrategyBacktest::builder(replay);
+    let mut builder = StrategyBacktest::builder(replay);
     if let Some(default_price_tick) = default_price_tick {
         builder = builder.default_price_tick(default_price_tick);
     }

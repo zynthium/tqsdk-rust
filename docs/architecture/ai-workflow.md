@@ -184,11 +184,11 @@ crate 自己维护。
 
 - 任务层维护业务执行状态，既不是协议 substrate，也不是通用消费 facade。
 - 它可以依赖 `tqsdk-wait` 的稳定截面语义，但不得反向要求 core 改写提交模型。
-- 它拥有 `ReplayMarketEvent` / `ReplayMarketSource` 这类 deterministic replay
+- 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 deterministic replay
   输入类型，并可通过 builder 接收 `tqsdk-data` 的 history series rows。不得把
   JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
   下沉进 data。
-- 它可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供 Python-compatible
+- 它可以在 task/data 上层组合 `backtest::StrategyBacktest + sim::TqSim`，提供 Python-compatible
   本地回测模拟账户能力；这不允许反向改变 core/session/wait 的职责边界。
 
 演进方向：

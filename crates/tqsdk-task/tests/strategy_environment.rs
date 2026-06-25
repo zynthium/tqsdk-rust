@@ -3,15 +3,18 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use tqsdk_core::Quote;
-use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
-use tqsdk_task::{
-    ReplayMarketEvent, ReplayMarketSource, RiskEngine, StrategyDeployment,
-    StrategyDeploymentConfig, StrategyEnvironment, StrategyEnvironmentContext,
-    StrategyEnvironmentKind, StrategyEnvironmentProvider, StrategyLifecycle, StrategyRetryPolicy,
-    StrategyRunStopReason, StrategyShutdownSignal, StrategySupervisor,
+use tqsdk_task::deployment::{
+    StrategyDeployment, StrategyDeploymentConfig, StrategyEnvironmentProvider, StrategyLifecycle,
+    StrategyRetryPolicy, StrategyRunStopReason, StrategyShutdownSignal, StrategySupervisor,
     StrategySupervisorHealthStatus, StrategySupervisorStopReason, StrategyTelemetryEvent,
-    StrategyTelemetryEventKind, TaskError,
+    StrategyTelemetryEventKind,
 };
+use tqsdk_task::environment::{
+    StrategyEnvironment, StrategyEnvironmentContext, StrategyEnvironmentKind,
+};
+use tqsdk_task::replay::{ReplayMarketEvent, ReplayMarketSource, StrategyReplay};
+use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
+use tqsdk_task::{RiskEngine, TaskError};
 
 const SYMBOL: &str = "SHFE.au2602";
 
@@ -75,7 +78,7 @@ async fn strategy_environment_runs_same_strategy_step_on_replay() {
         .unwrap(),
     ]);
 
-    let replay_builder = tqsdk_task::StrategyReplay::builder(replay)
+    let replay_builder = StrategyReplay::builder(replay)
         .market(
             FakeMarket::new()
                 .account("sim", 100_000.0)
@@ -143,7 +146,7 @@ async fn deployment_lifecycle_runs_replay_until_max_steps() {
         )
         .unwrap(),
     ]);
-    let replay_builder = tqsdk_task::StrategyReplay::builder(replay).market(
+    let replay_builder = StrategyReplay::builder(replay).market(
         FakeMarket::new()
             .account("sim", 100_000.0)
             .position("sim", SYMBOL, 0),
@@ -375,7 +378,7 @@ async fn replay_deployment_with_events(
         })
         .collect();
     let replay = ReplayMarketSource::new(events);
-    let replay_builder = tqsdk_task::StrategyReplay::builder(replay).market(
+    let replay_builder = StrategyReplay::builder(replay).market(
         FakeMarket::new()
             .account("sim", 100_000.0)
             .position("sim", SYMBOL, 0),

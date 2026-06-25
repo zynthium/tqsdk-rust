@@ -15,9 +15,9 @@
 //! - fake broker 仍是测试工具，不承担 Python-compatible 账户语义
 
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_task::{
-    ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, StrategyBacktestSummary, TqSim,
-};
+use tqsdk_task::backtest::{StrategyBacktest, StrategyBacktestSummary};
+use tqsdk_task::replay::{ReplayMarketEvent, ReplayMarketSource};
+use tqsdk_task::sim::TqSim;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -39,12 +39,13 @@
 //! 或内置 HTTP health/metrics endpoint 作为 S20 完成标准。
 
 use tqsdk_core::Quote;
-use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{
-    ReplayMarketEvent, StrategyDeployment, StrategyEnvironment, StrategyEnvironmentContext,
-    StrategyLifecycle, StrategyReplay, StrategyRetryPolicy, StrategyShutdownSignal,
+use tqsdk_task::deployment::{
+    StrategyDeployment, StrategyLifecycle, StrategyRetryPolicy, StrategyShutdownSignal,
     StrategySupervisor, StrategyTelemetryEvent,
 };
+use tqsdk_task::environment::{StrategyEnvironment, StrategyEnvironmentContext};
+use tqsdk_task::replay::{ReplayMarketEvent, StrategyReplay};
+use tqsdk_task::testing::{FakeBroker, FakeMarket};
 
 const ACCOUNT_ID: &str = "sim";
 const SYMBOL: &str = "SHFE.au2602";

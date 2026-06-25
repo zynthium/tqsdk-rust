@@ -8,10 +8,8 @@ use tqsdk_core::{
     TradeOffset,
 };
 use tqsdk_session::testing::ManualSession;
-use tqsdk_task::{
-    RiskEngine, TaskError, TaskOrderIntent, TradingDeskOrderState, TradingDeskProfile,
-    TradingLatencyProbe,
-};
+use tqsdk_task::trading_desk::{TradingDeskOrderState, TradingDeskProfile, TradingLatencyProbe};
+use tqsdk_task::{RiskEngine, TaskError, TaskOrderIntent};
 
 fn manual_session() -> (tqsdk_session::SessionClient, RuntimeHandle) {
     let mut adapters = AdapterRegistry::new();

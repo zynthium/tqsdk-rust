@@ -215,11 +215,11 @@ V1 是：
   `tqsdk-data` 的 history series rows 构建 replay source；这是上层集成路径，
   不代表 JSONL cache storage 进入 data public surface，也不代表 strategy
   execution 进入 data
-- `tqsdk-task` 可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供
+- `tqsdk-task` 可以在 task/data 上层组合 `backtest::StrategyBacktest + sim::TqSim`，提供
   Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait
   的 runtime contract 和 facade 边界
 - `tqsdk` 的 local backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
-  `StrategyBacktest + TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
+  `backtest::StrategyBacktest + sim::TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
   和 `TargetPos`，不会创建 facade 私有状态树
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar

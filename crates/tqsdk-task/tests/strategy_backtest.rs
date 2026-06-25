@@ -1,10 +1,10 @@
 use chrono::NaiveDate;
 use tqsdk_core::{Kline, Quote, Symbol, Tick};
 use tqsdk_session::{InstrumentClass, InstrumentSpec};
-use tqsdk_task::{
-    ReplayMarketEvent, ReplayMarketSource, StrategyBacktest, StrategyBacktestDailyReturnWindow,
-    TaskError, TqSim,
-};
+use tqsdk_task::TaskError;
+use tqsdk_task::backtest::{StrategyBacktest, StrategyBacktestDailyReturnWindow};
+use tqsdk_task::replay::{ReplayMarketEvent, ReplayMarketSource};
+use tqsdk_task::sim::TqSim;
 use tqsdk_wait::OrderTicketState;
 
 #[tokio::test]
@@ -1403,8 +1403,8 @@ async fn strategy_backtest_summary_derives_rolling_daily_balance_ratios() {
 }
 
 fn assert_rolling_points_match(
-    actual: &[tqsdk_task::StrategyBacktestRollingRatioPoint],
-    expected: &[tqsdk_task::StrategyBacktestRollingRatioPoint],
+    actual: &[tqsdk_task::backtest::StrategyBacktestRollingRatioPoint],
+    expected: &[tqsdk_task::backtest::StrategyBacktestRollingRatioPoint],
 ) {
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {

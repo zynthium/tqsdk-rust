@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tqsdk_core::{Kline, Quote, Tick};
-use tqsdk_task::testing::{FakeBroker, FakeMarket};
-use tqsdk_task::{
+use tqsdk_task::replay::{
     ReplayMarketEvent, ReplayMarketPayloadKind, ReplayMarketSource, StrategyReplay,
     StrategyReplayCheckpointStore, StrategyReplaySourceBuilder, StrategyReplaySpeed,
 };
+use tqsdk_task::testing::{FakeBroker, FakeMarket};
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_replay_drives_quote_events_into_strategy_context() {

@@ -270,7 +270,7 @@
 - 规划与执行之间的本地任务状态机
 
 它是执行工具层，不是消费 facade，也不是协议 substrate。
-它拥有 `ReplayMarketEvent` / `ReplayMarketSource` 这类 replay/backtest 输入类型；
+它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 replay/backtest 输入类型；
 也可以通过 builder 接收 `tqsdk-data` 的 history series rows 构建 replay source。
 这是上层集成路径，不代表 JSONL cache storage 进入 `tqsdk-data` public surface，
 也不代表 strategy execution 进入 data。
@@ -336,7 +336,7 @@ sink、WAL、journal 或 cache writer。
 
 - `tqsdk-core + tqsdk-session`
 - 如需在同一 hot path 上做 typed risk / order intent / latency report，可使用
-  `tqsdk-task::TradingDeskProfile`
+  `tqsdk_task::trading_desk::TradingDeskProfile`
 
 判断：
 

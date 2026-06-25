@@ -34,13 +34,14 @@
 use std::time::Duration;
 
 use tqsdk_core::{Quote, TradeAccountType};
-use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
-use tqsdk_task::{
-    ReplayMarketEvent, RiskEngine, StrategyDeployment, StrategyDeploymentConfig,
-    StrategyEnvironment, StrategyEnvironmentContext, StrategyLifecycle, StrategyReplay,
-    StrategyReplaySpeed, StrategyRetryPolicy, StrategyShutdownSignal, StrategySupervisor,
-    StrategySupervisorReport,
+use tqsdk_task::RiskEngine;
+use tqsdk_task::deployment::{
+    StrategyDeployment, StrategyDeploymentConfig, StrategyLifecycle, StrategyRetryPolicy,
+    StrategyShutdownSignal, StrategySupervisor, StrategySupervisorReport,
 };
+use tqsdk_task::environment::{StrategyEnvironment, StrategyEnvironmentContext};
+use tqsdk_task::replay::{ReplayMarketEvent, StrategyReplay, StrategyReplaySpeed};
+use tqsdk_task::testing::{FakeBroker, FakeMarket, StrategyTestHarness};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

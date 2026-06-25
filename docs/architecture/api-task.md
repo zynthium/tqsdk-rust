@@ -71,23 +71,29 @@
   - public family seam 是 `tqsdk_task::order_groups::*`；crate root 保持
     `TaskHost`、`TargetPosTask`、typed order builder、risk、strategy、replay
     和 backtest 等普通执行路径入口
+- broad foundation family seams 是 `tqsdk_task::replay::*`、
+  `tqsdk_task::backtest::*`、`tqsdk_task::sim::*`、
+  `tqsdk_task::environment::*`、`tqsdk_task::deployment::*` 和
+  `tqsdk_task::trading_desk::*`；crate root aliases 只作兼容层
 - `StrategyHost` / `StrategyContext`
   - 复用 `TaskHost::wait_update()` 作为单推进点
   - 在同一稳定 context 内读取 quote/account/position
   - 通过同一个 context 进入 typed order builder、target-pos 和 risk gate
-- `StrategyEnvironment`
+- `environment::StrategyEnvironment`
   - 提供 task-host live/sim 与 replay 的最小统一构建入口
   - `StrategyEnvironmentContext` 让同一个策略步骤函数复用 quote/position/orders/target-pos/risk context 方法
   - replay metadata 通过可选 `replay_event()` / `replay_time_ns()` 暴露，不要求 live/sim 策略分叉
-- `StrategyDeploymentConfig` / `StrategyDeployment` / `StrategyLifecycle`
+- `deployment::StrategyDeploymentConfig` / `deployment::StrategyDeployment` /
+  `deployment::StrategyLifecycle`
   - 提供 provider-backed TQKQ sim 和 live trade 的 typed deployment config
   - provider-backed sim 的账号派生与登录由 task 层 builder 处理，不向策略泄漏 TQKQ 内部协议
   - 统一 fake/replay/live deployment wrapper、run loop、typed stop reason 和 graceful shutdown report
-- `StrategySupervisor` / `StrategyRetryPolicy` / `StrategyShutdownSignal`
+- `deployment::StrategySupervisor` / `deployment::StrategyRetryPolicy` /
+  `deployment::StrategyShutdownSignal`
   - 在 `StrategyDeployment` 之上提供 task-layer supervisor foundation
   - 暴露 typed stop reason、health/metrics snapshot、transport-neutral telemetry/export hook、显式有限 retry 和 ctrl-c shutdown hook
   - retry 默认不隐藏启用，避免策略步骤已产生下单副作用后被 SDK 静默重复执行
-- `StrategyReplay`
+- `replay::StrategyReplay`
   - 消费 task-owned `ReplayMarketSource` 的有序 quote/kline/tick replay event
   - 将 replay event 推进为正常 runtime market commit
   - 暴露 deterministic replay time、checkpoint 和 resume-from foundation
@@ -107,10 +113,10 @@
   - 让 replay strategy 复用 `StrategyContext`、typed order builder 和 fake broker
   - 这是 task/data 的上层集成路径，不把 cache storage 搬入 task，也不把
     strategy execution 搬入 data
-- `StrategyBacktest` / `TqSim`
+- `backtest::StrategyBacktest` / `sim::TqSim`
   - 消费 task-owned `ReplayMarketSource` 的本地 quote/tick/kline event，作为 Python-compatible 回测模拟账户 foundation
   - 官方 Python `TqApi(backtest=TqBacktest(...))` 的 same-body wait loop 入口落在 `tqsdk-wait`；本条路径只负责本地历史/cache 行情 + `TqSim` 账户撮合
-  - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `LOCAL_BACKTEST_ACCOUNT_ID` 导出
+  - `TqSim` 默认账户为 `TQSIM`，默认资金为 `10_000_000.0`，支持 per-symbol margin / commission / contract multiplier，并维护净持仓开仓均价、浮盈、平仓盈亏和市值字段；默认账户 id 通过 `sim::LOCAL_BACKTEST_ACCOUNT_ID` 导出
   - `TqSim` 会从 replay quote metadata 补齐缺失的 margin / commission / contract multiplier，显式 `with_*` / `set_*` 配置仍优先，且通过 `margin(symbol)` / `commission(symbol)` 暴露当前每手配置
   - `TqSim` 会使用 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单解析到实际 underlying symbol 撮合、成交和记账，并把实际持仓镜像回 replay symbol，避免 `TargetPos` / strategy context 在主连路径上反复误判空仓
   - 本地回测订单和成交时间字段使用 replay event time；挂单跨 step 成交时订单保留原始插入时间，成交使用成交 step 时间
@@ -128,7 +134,7 @@
   - public `StrategyTestHarness` / `FakeMarket` / `FakeBroker` / `StrategyTestClock`
   - 允许用户不用真实网络、不调用 hidden `*_for_test` API 测试策略
   - 当前覆盖 quote/account/position seed、全成、拒单、单步/跨 step 部分成交、deterministic fake broker clock、step latency 和 broker disconnect/reconnect 注入
-- `TradingDeskProfile`
+- `trading_desk::TradingDeskProfile`
   - 使用 shared `SessionClient + RuntimeReader` 作为行情与下单 hot path
   - builder 在构建时提交 quote subscribe command
   - `next_market_event(deadline)` 消费同一 runtime commit/cursor 语义

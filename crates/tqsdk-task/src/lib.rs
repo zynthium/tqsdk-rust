@@ -13,11 +13,11 @@
 //! ```
 
 mod account_group;
-mod backtest;
+pub mod backtest;
 mod calendar;
 mod config;
-mod deployment;
-mod environment;
+pub mod deployment;
+pub mod environment;
 mod error;
 mod execution_group;
 mod host;
@@ -25,15 +25,15 @@ mod order;
 mod order_projection;
 mod plan;
 mod registry;
-mod replay;
+pub mod replay;
 mod risk;
 mod scheduler;
 mod shared;
-mod sim;
+pub mod sim;
 mod strategy;
 mod target_pos;
 pub mod testing;
-mod trading_desk;
+pub mod trading_desk;
 
 /// Multi-leg and multi-account order foundations.
 ///

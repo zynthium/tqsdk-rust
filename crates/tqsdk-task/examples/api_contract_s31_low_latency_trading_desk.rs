@@ -39,7 +39,8 @@ use std::time::Duration;
 
 use tqsdk_core::{RuntimeCommand, TradeCommand, TradeDirection, TradeOffset};
 use tqsdk_session::SessionClientBuilder;
-use tqsdk_task::{RiskEngine, TaskOrderIntent, TradingDeskProfile, TradingLatencyProbe};
+use tqsdk_task::trading_desk::{TradingDeskProfile, TradingLatencyProbe};
+use tqsdk_task::{RiskEngine, TaskOrderIntent};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

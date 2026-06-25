@@ -248,7 +248,7 @@ tqsdk-wait        tqsdk-data
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界
 - `KlineDataSeries` / `TickDataSeries` 到 replay event/source 的 adapter
-  已经移到 `tqsdk-task::StrategyReplaySourceBuilder`
+  已经移到 `tqsdk_task::replay::StrategyReplaySourceBuilder`
 - `HistoryIntegrityReport` 已经落在 `tqsdk-data`，作为 owned history series 的本地质量报告：
   K 线按 duration 做 calendar-agnostic cadence 缺口检查，tick 不假设固定间隔；
   报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
