@@ -20,15 +20,11 @@ struct SpreadLegs<'a> {
     close_threshold: f64,
 }
 
-async fn run_spread_strategy(
-    tq: &mut Tq,
-    account_id: &str,
-    legs: SpreadLegs<'_>,
-) -> tqsdk::Result<()> {
+async fn run_spread_strategy(tq: &mut Tq, legs: SpreadLegs<'_>) -> tqsdk::Result<()> {
     let near_quote = tq.quote(legs.near).await?;
     let far_quote = tq.quote(legs.far).await?;
-    let near_target = tq.target_pos(account_id, legs.near)?;
-    let far_target = tq.target_pos(account_id, legs.far)?;
+    let near_target = tq.target_pos_default(legs.near)?;
+    let far_target = tq.target_pos_default(legs.far)?;
 
     while tq.next().await? {
         let Some(near) = near_quote.snapshot()? else {
@@ -71,19 +67,19 @@ async fn main() -> tqsdk::Result<()> {
 
     match mode.as_str() {
         "local-backtest" => {
-            let (mut tq, account_id) = build_local_backtest().await?;
-            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+            let mut tq = build_local_backtest().await?;
+            run_spread_strategy(&mut tq, legs).await?;
             print_local_summary(&tq);
         }
         #[cfg(feature = "live")]
         "tqkq-sim" => {
-            let (mut tq, account_id) = build_tqkq_sim().await?;
-            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+            let mut tq = build_tqkq_sim().await?;
+            run_spread_strategy(&mut tq, legs).await?;
         }
         #[cfg(feature = "live")]
         "live" => {
-            let (mut tq, account_id) = build_live_account().await?;
-            run_spread_strategy(&mut tq, account_id.as_str(), legs).await?;
+            let mut tq = build_live_account().await?;
+            run_spread_strategy(&mut tq, legs).await?;
         }
         other => {
             eprintln!("unsupported TQ_EXAMPLE_MODE={other}; use local-backtest, tqkq-sim, or live");
@@ -93,7 +89,7 @@ async fn main() -> tqsdk::Result<()> {
     Ok(())
 }
 
-async fn build_local_backtest() -> tqsdk::Result<(Tq, String)> {
+async fn build_local_backtest() -> tqsdk::Result<Tq> {
     let replay = ReplayMarketSource::new(vec![
         quote_event(1_000, NEAR_SYMBOL, 4_300.0)?,
         quote_event(2_000, FAR_SYMBOL, 4_080.0)?,
@@ -114,36 +110,17 @@ async fn build_local_backtest() -> tqsdk::Result<(Tq, String)> {
         .connect()
         .await?;
 
-    Ok((tq, LOCAL_BACKTEST_ACCOUNT_ID.to_string()))
+    Ok(tq)
 }
 
 #[cfg(feature = "live")]
-async fn build_tqkq_sim() -> tqsdk::Result<(Tq, String)> {
-    let tq = Tq::new().auth_env()?.trade_target_tqkq().connect().await?;
-    let account_id = tq.tqkq_account_id().await?;
-    Ok((tq, account_id))
+async fn build_tqkq_sim() -> tqsdk::Result<Tq> {
+    Tq::new().auth_env()?.tqkq_sim().connect().await
 }
 
 #[cfg(feature = "live")]
-async fn build_live_account() -> tqsdk::Result<(Tq, String)> {
-    let broker_id = required_env("TQ_TRADE_BROKER_ID")?;
-    let account_id = required_env("TQ_TRADE_ACCOUNT_ID")?;
-    let tq = Tq::new()
-        .auth_env()?
-        .trade_target(broker_id, account_id.clone())
-        .connect()
-        .await?;
-    Ok((tq, account_id))
-}
-
-#[cfg(feature = "live")]
-fn required_env(name: &'static str) -> tqsdk::Result<String> {
-    let value =
-        std::env::var(name).map_err(|source| tqsdk::Error::MissingAuthEnv { name, source })?;
-    if value.is_empty() {
-        return Err(tqsdk::Error::EmptyAuthEnv { name });
-    }
-    Ok(value)
+async fn build_live_account() -> tqsdk::Result<Tq> {
+    Tq::new().auth_env()?.trade_account_env()?.connect().await
 }
 
 fn quote_event(

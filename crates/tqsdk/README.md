@@ -12,6 +12,8 @@ runtime contract；它只提供一个更容易开始的 facade：
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
 - Local backtest 默认模拟账户常量 `LOCAL_BACKTEST_ACCOUNT_ID`
+- 默认账户 helper：`default_account_id()` / `account_default()` / `position_default()` / `target_pos_default(...)`
+- 交易账户构造 helper：`.tqkq_sim()` / `.tqkq_sim_numbered(...)` / `.trade_account(...)` / `.trade_account_env()`
 - Local backtest summary / performance metrics / performance report、cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
@@ -42,15 +44,14 @@ use tqsdk::prelude::*;
 # async fn run() -> tqsdk::Result<()> {
 let mut tq = Tq::futures()
     .auth_env()?
-    .trade_target_tqkq()
+    .tqkq_sim()
     .connect()
     .await?;
 
-let account_id = tq.tqkq_account_id().await?;
 let near = tq.quote("SHFE.rb2610").await?;
 let far = tq.quote("SHFE.rb2701").await?;
-let near_target = tq.target_pos(&account_id, "SHFE.rb2610")?;
-let far_target = tq.target_pos(&account_id, "SHFE.rb2701")?;
+let near_target = tq.target_pos_default("SHFE.rb2610")?;
+let far_target = tq.target_pos_default("SHFE.rb2701")?;
 
 while tq.next().await? {
     let spread = near.load()?.last_price - far.load()?.last_price;

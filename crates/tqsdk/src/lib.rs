@@ -89,6 +89,8 @@ const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
 #[cfg(all(feature = "services", feature = "live"))]
 const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(all(feature = "services", feature = "live"))]
+const SERVER_REPLAY_TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Error type for the user-facing facade.
 #[derive(Debug)]
@@ -175,6 +177,7 @@ impl From<tqsdk_data::DataError> for Error {
 /// while keeping the same public surface (`next()`, `quote()`, etc.).
 pub struct Tq {
     inner: TqInner,
+    default_account_id: Option<String>,
     #[cfg(all(feature = "services", feature = "live"))]
     server_replay: Option<tqsdk_session::ServerReplaySession>,
     #[cfg(all(feature = "services", feature = "live"))]
@@ -204,6 +207,7 @@ impl Tq {
     pub fn from_api(api: tqsdk_wait::TqApi) -> Self {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
+            default_account_id: None,
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -219,6 +223,7 @@ impl Tq {
         let server_replay_heartbeat = Some(spawn_server_replay_heartbeat(&server_replay));
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
+            default_account_id: None,
             server_replay: Some(server_replay),
             server_replay_heartbeat,
         }
@@ -227,6 +232,7 @@ impl Tq {
     fn from_local_backtest(backtest: tqsdk_task::StrategyBacktest) -> Self {
         Self {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
+            default_account_id: Some(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
             #[cfg(all(feature = "services", feature = "live"))]
             server_replay: None,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -299,6 +305,16 @@ impl Tq {
         tqsdk_data::DataClient::from_session(self.session().clone())
     }
 
+    #[must_use]
+    pub fn default_account_id_opt(&self) -> Option<&str> {
+        self.default_account_id.as_deref()
+    }
+
+    pub fn default_account_id(&self) -> Result<&str> {
+        self.default_account_id_opt()
+            .ok_or_else(missing_default_account)
+    }
+
     #[cfg(all(feature = "services", feature = "live"))]
     #[must_use]
     pub fn server_replay_session(&self) -> Option<&tqsdk_session::ServerReplaySession> {
@@ -330,9 +346,17 @@ impl Tq {
 
     #[cfg(all(feature = "services", feature = "live"))]
     pub async fn terminate_server_replay(&mut self) -> Result<()> {
-        let session = self.require_server_replay_session()?.clone();
+        let session = self.server_replay.take().ok_or_else(|| {
+            Error::from(tqsdk_session::SessionFacadeError::InvalidState(
+                "server replay control requires server_replay mode",
+            ))
+        })?;
         self.abort_server_replay_heartbeat();
-        session.terminate().await.map_err(Error::from)
+        let result = session.terminate().await;
+        if result.is_err() {
+            self.server_replay = Some(session);
+        }
+        result.map_err(Error::from)
     }
 
     #[cfg(all(feature = "services", feature = "live"))]
@@ -377,6 +401,52 @@ impl Tq {
     ) -> Result<TargetPos> {
         let account_id = self.tqkq_account_id_numbered(number).await?;
         self.target_pos(&account_id, symbol)
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn login_trade_account(
+        &mut self,
+        broker_id: &str,
+        account_id: &str,
+        password: &str,
+    ) -> Result<tqsdk_wait::AccountRef> {
+        let account = self
+            .api_mut_any()
+            .login_trade_account(
+                broker_id,
+                account_id,
+                password,
+                tqsdk_core::TradeAccountType::Future,
+                None,
+            )
+            .await?;
+        self.default_account_id = Some(account_id.to_owned());
+        Ok(account)
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn login_tqkq_account(&mut self) -> Result<tqsdk_wait::AccountRef> {
+        let login = self.session().tqkq_login_command().await?;
+        self.login_trade_account(
+            login.broker_id.as_str(),
+            login.account_id.as_str(),
+            login.password.as_str(),
+        )
+        .await
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn login_tqkq_account_numbered(
+        &mut self,
+        number: u8,
+    ) -> Result<tqsdk_wait::AccountRef> {
+        let login = self.session().tqkq_login_command_numbered(number).await?;
+        self.login_trade_account(
+            login.broker_id.as_str(),
+            login.account_id.as_str(),
+            login.password.as_str(),
+        )
+        .await
     }
 
     // ── Core loop ──
@@ -427,9 +497,17 @@ impl Tq {
         self.api_any().account(account_id)
     }
 
+    pub fn account_default(&self) -> Result<tqsdk_wait::AccountRef> {
+        Ok(self.account(self.default_account_id()?))
+    }
+
     #[must_use]
     pub fn position(&self, account_id: &str, symbol: &str) -> tqsdk_wait::PositionRef {
         self.api_any().position(account_id, symbol)
+    }
+
+    pub fn position_default(&self, symbol: &str) -> Result<tqsdk_wait::PositionRef> {
+        Ok(self.position(self.default_account_id()?, symbol))
     }
 
     pub fn target_pos(&mut self, account_id: &str, symbol: &str) -> Result<TargetPos> {
@@ -447,6 +525,11 @@ impl Tq {
                 Ok(TargetPos::new(task))
             }
         }
+    }
+
+    pub fn target_pos_default(&mut self, symbol: &str) -> Result<TargetPos> {
+        let account_id = self.default_account_id()?.to_owned();
+        self.target_pos(account_id.as_str(), symbol)
     }
 
     /// Returns `true` if this `Tq` is in local-backtest mode.
@@ -485,6 +568,9 @@ impl Tq {
 impl Drop for Tq {
     fn drop(&mut self) {
         self.abort_server_replay_heartbeat();
+        if let Some(session) = self.server_replay.take() {
+            spawn_server_replay_terminate(session);
+        }
     }
 }
 
@@ -494,11 +580,57 @@ fn spawn_server_replay_heartbeat(
 ) -> tokio::task::JoinHandle<()> {
     let replay_session = replay_session.clone();
     tokio::spawn(async move {
+        let _ = replay_session.set_speed(1.0).await;
         loop {
             tokio::time::sleep(SERVER_REPLAY_HEARTBEAT_INTERVAL).await;
             let _ = replay_session.heartbeat().await;
         }
     })
+}
+
+#[cfg(all(feature = "services", feature = "live"))]
+fn spawn_server_replay_terminate(session: tqsdk_session::ServerReplaySession) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let _ = tokio::time::timeout(SERVER_REPLAY_TERMINATE_TIMEOUT, session.terminate())
+                    .await;
+            });
+        });
+        return;
+    };
+    handle.spawn(async move {
+        let _ = tokio::time::timeout(SERVER_REPLAY_TERMINATE_TIMEOUT, session.terminate()).await;
+    });
+}
+
+#[cfg(feature = "live")]
+async fn apply_auto_trade_login(tq: &mut Tq, login: AutoTradeLogin) -> Result<()> {
+    match login {
+        AutoTradeLogin::Futures {
+            broker_id,
+            account_id,
+            password,
+        } => {
+            tq.login_trade_account(broker_id.as_str(), account_id.as_str(), password.as_str())
+                .await?;
+        }
+        AutoTradeLogin::TqKq { number: None } => {
+            tq.login_tqkq_account().await?;
+        }
+        AutoTradeLogin::TqKq {
+            number: Some(number),
+        } => {
+            tq.login_tqkq_account_numbered(number).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Builder for [`Tq`].
@@ -507,6 +639,8 @@ pub struct TqBuilder {
     auth: Option<Auth>,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
+    #[cfg(feature = "live")]
+    auto_trade_login: Option<AutoTradeLogin>,
     market_url: Option<String>,
     replay_url: Option<String>,
     backtest: Option<BacktestConfig>,
@@ -523,6 +657,8 @@ impl TqBuilder {
             auth: None,
             query_enabled: false,
             trade_targets: Vec::new(),
+            #[cfg(feature = "live")]
+            auto_trade_login: None,
             market_url: None,
             replay_url: None,
             backtest: None,
@@ -942,11 +1078,88 @@ impl TqBuilder {
         self
     }
 
+    #[must_use]
+    #[cfg(feature = "live")]
+    pub fn tqkq_sim(mut self) -> Self {
+        self.trade_targets.push(TradeTarget::TqKq);
+        self.auto_trade_login = Some(AutoTradeLogin::TqKq { number: None });
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "live")]
+    pub fn tqkq_sim_numbered(mut self, number: u8) -> Self {
+        self.trade_targets.push(TradeTarget::TqKqNumbered(number));
+        self.auto_trade_login = Some(AutoTradeLogin::TqKq {
+            number: Some(number),
+        });
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "live")]
+    pub fn trade_account(
+        mut self,
+        broker_id: impl Into<String>,
+        account_id: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        let broker_id = broker_id.into();
+        let account_id = account_id.into();
+        let password = password.into();
+        self.trade_targets.push(TradeTarget::Custom {
+            broker_id: broker_id.clone(),
+            account_id: account_id.clone(),
+            trade_url: None,
+        });
+        self.auto_trade_login = Some(AutoTradeLogin::Futures {
+            broker_id,
+            account_id,
+            password,
+        });
+        self
+    }
+
+    #[must_use]
+    #[cfg(feature = "live")]
+    pub fn trade_account_with_url(
+        mut self,
+        broker_id: impl Into<String>,
+        account_id: impl Into<String>,
+        password: impl Into<String>,
+        trade_url: impl Into<String>,
+    ) -> Self {
+        let broker_id = broker_id.into();
+        let account_id = account_id.into();
+        let password = password.into();
+        self.trade_targets.push(TradeTarget::Custom {
+            broker_id: broker_id.clone(),
+            account_id: account_id.clone(),
+            trade_url: Some(trade_url.into()),
+        });
+        self.auto_trade_login = Some(AutoTradeLogin::Futures {
+            broker_id,
+            account_id,
+            password,
+        });
+        self
+    }
+
+    #[cfg(feature = "live")]
+    pub fn trade_account_env(self) -> Result<Self> {
+        let broker_id = read_env("TQ_TRADE_BROKER_ID")?;
+        let account_id = read_env("TQ_TRADE_ACCOUNT_ID")?;
+        let password = read_env("TQ_TRADE_PASSWORD")?;
+        Ok(self.trade_account(broker_id, account_id, password))
+    }
+
     pub async fn connect(self) -> Result<Tq> {
         let Self {
             auth,
             query_enabled,
             trade_targets,
+            #[cfg(feature = "live")]
+            auto_trade_login,
             market_url,
             replay_url,
             backtest,
@@ -968,7 +1181,7 @@ impl TqBuilder {
                 .await
             }
             backtest => {
-                connect_wait_facade(
+                let tq = connect_wait_facade(
                     auth,
                     query_enabled,
                     trade_targets,
@@ -976,7 +1189,19 @@ impl TqBuilder {
                     replay_url,
                     backtest,
                 )
-                .await
+                .await?;
+                #[cfg(feature = "live")]
+                {
+                    let mut tq = tq;
+                    if let Some(auto_trade_login) = auto_trade_login {
+                        apply_auto_trade_login(&mut tq, auto_trade_login).await?;
+                    }
+                    Ok(tq)
+                }
+                #[cfg(not(feature = "live"))]
+                {
+                    Ok(tq)
+                }
             }
         }
     }
@@ -1059,6 +1284,38 @@ impl TargetPos {
 struct Auth {
     user: String,
     pass: String,
+}
+
+#[cfg(feature = "live")]
+#[derive(Clone)]
+enum AutoTradeLogin {
+    Futures {
+        broker_id: String,
+        account_id: String,
+        password: String,
+    },
+    TqKq {
+        number: Option<u8>,
+    },
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for AutoTradeLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Futures {
+                broker_id,
+                account_id,
+                ..
+            } => f
+                .debug_struct("Futures")
+                .field("broker_id", broker_id)
+                .field("account_id", account_id)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Self::TqKq { number } => f.debug_struct("TqKq").field("number", number).finish(),
+        }
+    }
 }
 
 enum BacktestConfig {
@@ -1359,6 +1616,12 @@ fn data_validation(message: impl Into<String>) -> Error {
     Error::Data(Box::new(tqsdk_data::DataError::Validation(message.into())))
 }
 
+fn missing_default_account() -> Error {
+    Error::from(tqsdk_session::SessionFacadeError::InvalidState(
+        "default account is not configured; use local_backtest(...), tqkq_sim(), trade_account(...), or login_trade_account(...)",
+    ))
+}
+
 #[derive(Debug, Clone)]
 enum TradeTarget {
     Custom {
@@ -1434,9 +1697,9 @@ mod builder_contract_tests {
     use serde_json::json;
 
     use super::{
-        Auth, BacktestConfig, Error, Tq, TqBuilder, continuous_minute_history_requests,
-        declared_quote_minute_history_requests, session_builder, trading_day_from_timestamp_ns,
-        trading_day_start_time_ns,
+        Auth, AutoTradeLogin, BacktestConfig, Error, LOCAL_BACKTEST_ACCOUNT_ID, Tq, TqBuilder,
+        continuous_minute_history_requests, declared_quote_minute_history_requests,
+        session_builder, trading_day_from_timestamp_ns, trading_day_start_time_ns,
     };
 
     #[tokio::test]
@@ -1446,6 +1709,52 @@ mod builder_contract_tests {
         let result = TqBuilder::new().local_backtest(replay).connect().await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_backtest_connect_sets_default_account_id() {
+        let replay = tqsdk_task::ReplayMarketSource::new(Vec::new());
+
+        let tq = TqBuilder::new()
+            .local_backtest(replay)
+            .connect()
+            .await
+            .expect("local backtest should connect without auth");
+
+        assert_eq!(tq.default_account_id().unwrap(), LOCAL_BACKTEST_ACCOUNT_ID);
+    }
+
+    #[test]
+    fn tqkq_sim_sets_trade_target_and_auto_login() {
+        let builder = TqBuilder::new().tqkq_sim_numbered(7);
+
+        assert_eq!(builder.trade_targets.len(), 1);
+        assert!(matches!(
+            builder.trade_targets[0],
+            super::TradeTarget::TqKqNumbered(7)
+        ));
+        assert!(matches!(
+            builder.auto_trade_login,
+            Some(AutoTradeLogin::TqKq { number: Some(7) })
+        ));
+    }
+
+    #[test]
+    fn trade_account_sets_target_and_redacts_debug_password() {
+        let builder = TqBuilder::new().trade_account("9999", "acct-1", "secret");
+
+        assert_eq!(builder.trade_targets.len(), 1);
+        assert!(matches!(
+            &builder.trade_targets[0],
+            super::TradeTarget::Custom {
+                broker_id,
+                account_id,
+                trade_url: None,
+            } if broker_id == "9999" && account_id == "acct-1"
+        ));
+        let debug = format!("{:?}", builder.auto_trade_login);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret"));
     }
 
     #[tokio::test]
@@ -1589,6 +1898,47 @@ mod builder_contract_tests {
         assert_eq!(
             error.to_string(),
             "invalid session facade state: server replay control requires server_replay mode"
+        );
+    }
+
+    #[cfg(all(feature = "services", feature = "live"))]
+    #[tokio::test]
+    async fn terminate_server_replay_keeps_session_on_transport_error() {
+        let api = tqsdk_wait::TqApiBuilder::new("demo-user", "demo-pass")
+            .build()
+            .await
+            .expect("session client should build without network");
+        let replay_date = NaiveDate::from_ymd_opt(2026, 6, 25).expect("valid date");
+        let session = tqsdk_session::ServerReplaySession::from_create_session_payload(
+            replay_date,
+            &json!({
+                "ip": "127.0.0.1",
+                "session_port": 18888,
+                "gateway_web_port": 27777,
+                "session": "session-1"
+            }),
+        )
+        .expect("valid session response");
+
+        let mut tq = Tq::from_api_with_server_replay(api, session);
+        assert!(tq.server_replay_heartbeat_active());
+        assert!(tq.server_replay_session().is_some());
+
+        let error = tq
+            .terminate_server_replay()
+            .await
+            .expect_err("terminate requires an authenticated control client");
+
+        assert!(error.to_string().contains(
+            "server replay session was not created with an authenticated control client"
+        ));
+        assert!(
+            tq.server_replay_session().is_some(),
+            "session should be kept for retry"
+        );
+        assert!(
+            !tq.server_replay_heartbeat_active(),
+            "heartbeat should be stopped on terminate attempt"
         );
     }
 

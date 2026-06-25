@@ -15,6 +15,8 @@ use crate::tq_auth::{PasswordCredentials, TqAuthProvider};
 
 const DEFAULT_REPLAY_CREATE_SESSION_URL: &str =
     "http://replay.api.shinnytech.com/t/rmd/replay/create_session";
+const SERVER_REPLAY_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const SERVER_REPLAY_READY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServerReplayBuilder {
@@ -94,9 +96,58 @@ impl ServerReplayBuilder {
         let payload = read_json_response(response, "replay create_session").await?;
         let mut session =
             ServerReplaySession::from_create_session_payload(self.replay_date, &payload)?;
+        wait_for_replay_running(&client, session.session_url()).await?;
         session.control_client = Some(client);
         Ok(session)
     }
+}
+
+async fn wait_for_replay_running(client: &reqwest::Client, session_url: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + SERVER_REPLAY_READY_TIMEOUT;
+    let mut last_status = None::<String>;
+
+    while tokio::time::Instant::now() < deadline {
+        match read_replay_status(client, session_url).await {
+            Ok(status) => {
+                if status == "running" {
+                    return Ok(());
+                }
+                last_status = Some(status);
+            }
+            Err(error) => {
+                if error.diagnostic().kind != super::error::SessionErrorKind::Transport {
+                    return Err(error);
+                }
+            }
+        }
+
+        tokio::time::sleep(SERVER_REPLAY_READY_POLL_INTERVAL).await;
+    }
+
+    Err(SessionFacadeError::from(ContractError::validation(
+        format!(
+            "replay session was not ready after timeout, last status: {:?}",
+            last_status
+        ),
+    )))
+}
+
+async fn read_replay_status(client: &reqwest::Client, session_url: &str) -> Result<String> {
+    let response = client.get(session_url).send().await.map_err(|err| {
+        SessionFacadeError::from(ContractError::transport(format!(
+            "replay status request failed: {err}"
+        )))
+    })?;
+    let payload = read_json_response(response, "replay status").await?;
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SessionFacadeError::from(ContractError::validation(
+                "replay status payload missing status",
+            ))
+        })?;
+    Ok(status.to_string())
 }
 
 #[derive(Clone)]

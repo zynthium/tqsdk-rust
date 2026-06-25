@@ -337,19 +337,14 @@ fn quote_event(
 }
 
 #[test]
-fn facade_does_not_expose_premature_stock_or_hardcoded_trade_login() {
+fn facade_does_not_expose_premature_stock_surface() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
         .expect("read facade source");
 
-    for removed_surface in [
-        "pub fn stock(",
-        "pub async fn login_trade_account(",
-        "MarketKind::Stock",
-        "TradeAccountType::Future,",
-    ] {
+    for removed_surface in ["pub fn stock(", "MarketKind::Stock"] {
         assert!(
             !source.contains(removed_surface),
-            "premature or futures-only facade surface remains: {removed_surface}"
+            "premature stock facade surface remains: {removed_surface}"
         );
     }
 }
@@ -375,6 +370,28 @@ fn facade_exposes_tqkq_target_helpers_instead_of_literal_account_ids() {
         assert!(
             source.contains(required_surface),
             "missing resolved TQKQ facade helper: {required_surface}"
+        );
+    }
+}
+
+#[test]
+fn facade_exposes_default_account_login_helpers() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read facade source");
+
+    for required_surface in [
+        "pub fn default_account_id(&self) -> Result<&str>",
+        "pub fn account_default(&self) -> Result<tqsdk_wait::AccountRef>",
+        "pub fn position_default(&self, symbol: &str) -> Result<tqsdk_wait::PositionRef>",
+        "pub fn target_pos_default(&mut self, symbol: &str) -> Result<TargetPos>",
+        "pub async fn login_trade_account(",
+        "pub async fn login_tqkq_account(&mut self) -> Result<tqsdk_wait::AccountRef>",
+        "pub fn tqkq_sim(mut self) -> Self",
+        "pub fn trade_account_env(self) -> Result<Self>",
+    ] {
+        assert!(
+            source.contains(required_surface),
+            "missing default account facade helper: {required_surface}"
         );
     }
 }
