@@ -322,8 +322,8 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
    `src/<module>/tests.rs`，和 `client/tests.rs` 等模块目录形态保持一致。
 3. 只通过 public crate API 验证行为、跨模块协作、facade surface、runtime contract
    或回归场景的测试放在 `crates/<crate>/tests/*.rs`。这些测试按能力面命名：
-   `runtime_contract_*`、`session_*`、`wait_api_*`、`stream_*`，或清晰的领域名
-   如 `target_pos`、`history_series_cache`。
+   `runtime_contract_*`、`session_*`、`wait_api_*`，或清晰的领域名
+   如 `target_pos`、`history_series_cache`、`relay_*`。
 4. 集成测试共享 fixture 放在 `crates/<crate>/tests/support/`，由需要的测试文件
    `mod support;` 引入；不要为了复用测试 helper 扩大生产 public API。
 5. 需要真实账号、网络、交易权限或会发单的 smoke 测试统一放在
