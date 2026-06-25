@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use chrono::{Datelike, Days, FixedOffset, NaiveDate, Utc};
 use serde_json::Value;
+use tqsdk_core::TradingCalendarDay;
 
 use crate::error::{DataError, Result};
 
@@ -43,12 +44,6 @@ pub struct HistoricalContUnderlyingSegment {
 pub struct TradingCalendarRow {
     pub date: String,
     pub trading: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TradingCalendarDay {
-    date: NaiveDate,
-    trading: bool,
 }
 
 impl DataClient {
