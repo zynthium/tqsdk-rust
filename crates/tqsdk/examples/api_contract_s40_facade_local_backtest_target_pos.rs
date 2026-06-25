@@ -6,7 +6,7 @@
 //! in the builder and account id supplied by the caller.
 
 use tqsdk::advanced::core::Quote;
-use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
+use tqsdk::advanced::task::replay::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 
 const SYMBOL: &str = "SHFE.rb2501";

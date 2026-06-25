@@ -5,7 +5,7 @@
 //! The exact same `while tq.next()` and `quote.load()` strategy code runs
 //! against a locally downloaded market data cache without connecting to servers.
 
-use tqsdk::advanced::task::ReplayMarketSource;
+use tqsdk::advanced::task::replay::ReplayMarketSource;
 use tqsdk::prelude::*;
 
 #[allow(dead_code)]

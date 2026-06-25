@@ -6,7 +6,7 @@
 //! Changing execution mode is isolated to the builder code in `main()`.
 
 use tqsdk::advanced::core::Quote;
-use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
+use tqsdk::advanced::task::replay::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 
 const NEAR_SYMBOL: &str = "SHFE.rb2610";

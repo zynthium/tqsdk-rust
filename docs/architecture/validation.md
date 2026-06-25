@@ -204,6 +204,9 @@ cargo check --all-features --examples
 
 Regression guards fixed in the facade iteration and still required before a source API narrowing batch:
 
+- `cargo test -p tqsdk-task --test public_surface` verifies active docs and
+  examples use `tqsdk-task` family paths for broad task foundations; crate root
+  aliases remain compatibility-only.
 - `cargo test -p tqsdk-task --test scheduler -- --test-threads=1` verifies
   scheduler order dispatch assertions separately from market-interest
   side-effects.
