@@ -100,8 +100,8 @@ pub trait Runtime {
 - `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为
 - schema 刷新结果必须按 `schema_id` 进入状态树，不能把 transport route label 当成逻辑对象键
 - core 是纯 async substrate；HTTP/auth/transport 不得在内部偷偷创建 Tokio runtime，调用方必须提供 async 执行环境
-- V1 不直接公开 `wait_update()`、stream、callback facade
-- 未来 `wait_update` 和 `stream/callback` 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
+- V1 不直接公开 `wait_update()`、callback、fan-out facade
+- 未来 `wait_update` 和 callback/fan-out 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型
 - `CommitLog` 必须是 indexable 且受 retention 约束，不能在长会话里线性退化或无界增长
 - `runtime.commands/*` 属于本地控制面状态，可做 retention-bounded 保留；terminal 命令一旦超出保留上限必须被裁剪且保持幂等写回

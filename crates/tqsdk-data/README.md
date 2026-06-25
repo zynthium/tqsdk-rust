@@ -78,7 +78,7 @@ tokio = { version = "1", features = ["fs", "macros", "rt", "time"] }
 
 在本仓库内做 crate 间开发时使用 `path = "../tqsdk-data"`；正式发布后把 Git
 dependency 换成版本号即可。默认 feature 包含 live history/query 与 service query
-支持；本 crate 不提供 `tqsdk-stream` live bridge，也不为实时行情热路径引入
+支持；本 crate 不提供 live bridge，也不为实时行情热路径引入
 Python-compatible mmap 缓存。
 
 ## 当前已稳定的 surface
@@ -135,9 +135,9 @@ Python-compatible mmap 缓存。
 - live 自动推进
 - 引用型 diff-backed 对象
 - `wait_update()` API
-- stream / callback API
+- callback / fan-out API
 
-这些仍然属于 `tqsdk-wait` / `tqsdk-stream`。
+这些仍然属于 `tqsdk-wait` 或调用方自建 reader/cursor 消费层。
 
 `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
 提供最薄的数据质量报告，包括 requested/returned range、缺口、重复行、时间倒退、
@@ -171,7 +171,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 
 - live session owner
 - `wait_update()` facade
-- stream/event facade
+- event/fan-out facade
 - task runtime
 - 回测报告与 GUI
 
@@ -226,7 +226,7 @@ S28 contract 把这两类能力拆成两个正式场景文件：
 materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
 覆盖 session-backed Greeks research query。它们都继续归属 `tqsdk-data`：
 历史下载、导出和 Greeks 不回流到 `tqsdk-session`、`tqsdk-wait` 或
-`tqsdk-stream`。
+调用方自建 live 消费层。
 
 S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)

@@ -19,7 +19,7 @@
 //! - provider 内部 session / protocol type
 //!
 //! Regression signal:
-//! - 策略必须在 quote stream 和 trade stream 之间自行同步状态
+//! - 策略必须在 quote event feed 和 trade event feed 之间自行同步状态
 //! - 止盈止损可能基于过期持仓
 //! - 用户必须手动防止重复下单
 //!

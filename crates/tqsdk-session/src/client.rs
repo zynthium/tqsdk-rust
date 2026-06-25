@@ -275,7 +275,7 @@ impl SessionProgress {
 ///
 /// [`SessionClient`] owns the live runtime handle plus one-shot direct-query,
 /// schema, replay, auth, and metadata/service helpers. It does not impose a
-/// `wait_update()` or stream/callback consumption model.
+/// `wait_update()` or callback/fan-out consumption model.
 pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,

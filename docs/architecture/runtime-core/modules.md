@@ -166,7 +166,7 @@ impl RuntimeReader {
 职责：
 - 暴露 canonical read-side API
 - 将 commit log 与状态树读锁收敛到同一组低层原语
-- 为后续 wait/stream/callback facade 提供统一底座
+- 为后续 wait/fan-out/callback facade 提供统一底座
 
 ### runtime_contract
 ```rust
@@ -181,7 +181,7 @@ pub trait Runtime {
 ## V1 不应提前出现的模块
 - `TqApi`
 - `wait_adapter`
-- `stream_adapter`
+- `fanout_adapter`
 - `callback_adapter`
 - typed quote / kline / tick views
 - `target_pos_task`
@@ -189,6 +189,6 @@ pub trait Runtime {
 
 ## 从 V1 到后续阶段
 - V1：runtime contract + protocol adapters
-- V2：wait / stream / callback adapters
+- V2：wait / fan-out / callback adapters
 - V3：typed facades
 - V4：task/tooling layer

@@ -141,7 +141,7 @@ pub enum CommitScope {
 
 `CommitResult` 是不可变提交元数据 payload；runtime 发布和 cursor 消费使用
 `SharedCommitResult = Arc<CommitResult>`。这样 `CommitLog`、写侧即时返回值和
-stream fan-out 可以共享同一个提交对象，不深拷贝 `ChangeSet` 或 causality 向量。
+fan-out 可以共享同一个提交对象，不深拷贝 `ChangeSet` 或 causality 向量。
 
 ## `RuntimeReader`
 ```rust

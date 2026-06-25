@@ -19,7 +19,6 @@
 | `tqsdk-core` | protocol-complete runtime substrate |
 | `tqsdk-session` | shared session、one-shot request/response/direct-query |
 | `tqsdk-wait` | Python 风格 single-owner `wait_update()` facade |
-| `tqsdk-stream` | Rust async-native multi-consumer commit stream facade |
 | `tqsdk-task` | 执行工具层、策略 host、risk gate、replay/backtest foundation |
 | `tqsdk-data` | research/offline data、history、cache、export |
 | `tqsdk-relay` | 可选 market relay/cache service，不改变 SDK 默认直连路径 |
@@ -61,7 +60,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **tqsdk-rust** (12945 symbols, 26156 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **tqsdk-rust** (13661 symbols, 27576 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -118,8 +117,8 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - `tqsdk-core` 只负责命令、状态、commit/revision、cursor、adapter、schema types 与底层 runtime contract；不要把 facade、direct query、task/data/downloader 语义塞回 core。
 - `tqsdk` 只做默认入口、prelude、轻量 wrapper 和 curated re-export；不得拥有第二棵状态树、第二套 runtime、第二套 direct query / task / data 实现。
 - `tqsdk-session` 负责 shared session、one-shot request/response/direct-query、GraphQL、schema、metadata、calendar、ranking、EDB、auth refresh、replay control。
-- `tqsdk-wait` 与 `tqsdk-stream` 只做 diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
-- `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait/stream。
+- `tqsdk-wait` 只做 single-owner diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
+- `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait 或调用方自建消费层。
 - `tqsdk-relay` 是可选 market relay/cache service；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
 - 所有可见状态变化必须经过 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`。不得新增旁路通知、第二棵状态树或 facade 私有 revision。
 - domain 状态写入必须经过 `MutationSource` 根路径防线。hot read 优先使用 `read_market_state()`、`read_trade_state()`、`read_market_trade_state()`。

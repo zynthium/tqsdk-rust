@@ -23,9 +23,6 @@ tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = fal
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
 tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
 
-[dev-dependencies]
-tqsdk-stream = { path = "../tqsdk-stream", version = "0.1.0", default-features = false }
-
 [[example]]
 name = "target_pos"
 required-features = ["live"]

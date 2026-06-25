@@ -21,8 +21,8 @@
 //! - `HistorySeriesCache::scan()` 提供 schema/version 与损坏文件 report
 //!
 //! Forbidden:
-//! - `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` 拥有历史文件缓存
-//! - `TqApi::kline` 或 `TqStream` live window 依赖 data cache
+//! - `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 或 live consumer 拥有历史文件缓存
+//! - `TqApi::kline` 或 live window 依赖 data cache
 //! - 高频交易 hot path 依赖历史序列 mmap cache
 //! - 用户手写 cache 文件格式、lock 文件、range 合并或 chart command
 //! - Python 与 Rust SDK 同时写同一历史序列缓存目录

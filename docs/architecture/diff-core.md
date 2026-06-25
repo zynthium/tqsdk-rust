@@ -17,7 +17,7 @@
 - auth / session
 - 用户订阅 API
 - `wait_update()`
-- stream / callback
+- callback / fan-out
 - 高层 view 或 facade
 
 ## 建议核心抽象

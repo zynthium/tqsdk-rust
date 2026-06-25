@@ -3,7 +3,7 @@
 //! User goal:
 //! - 低层 / 高频用户直接使用 session direct-query 能力
 //! - 一次性查询合约列表、主连、期权、交易日历、结算价、排名和 EDB
-//! - 不进入 wait/stream live refs 或 data/research 工作流
+//! - 不进入 wait live refs、自建消费层或 data/research 工作流
 //!
 //! API contract:
 //! - Primary user layer: 低层 / 高频用户；direct-query 用户
@@ -14,13 +14,13 @@
 //!
 //! Forbidden:
 //! - `TqApi` live subscription
-//! - `TqStream`
+//! - live consumer facade
 //! - `DataClient`
 //! - provider 内部 session type
 //! - 需要用户解析的 `serde_json::Value`
 //!
 //! Regression signal:
-//! - metadata/service direct query 被复制到 wait/stream
+//! - metadata/service direct query 被复制到 wait 或自建消费层
 //! - 用户必须通过 live ref、历史下载或 DataFrame/polars 读取这些一次性结果
 //! - 合约、日历、结算价、排名或 EDB 结果退化为用户手动解析 JSON
 //!
@@ -30,7 +30,7 @@
 //! - raw GraphQL escape hatch 是否仍只是低层补洞，而不是主路径？
 //!
 //! Non-goal:
-//! - wait/stream live refs
+//! - wait live refs 或自建 live refs
 //! - 历史下载
 //! - Greeks
 //! - DataFrame/polars

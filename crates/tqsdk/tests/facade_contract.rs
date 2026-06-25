@@ -168,8 +168,6 @@ fn advanced_namespaces_keep_curated_underlying_access() {
         .futures_market();
     let _ = std::any::type_name::<tqsdk::advanced::session::InstrumentSpec>();
     let _ = std::any::type_name::<tqsdk::advanced::session::SymbolInfo>();
-    let _stream =
-        tqsdk::advanced::stream::TqStreamBuilder::new("demo-user", "demo-pass").futures_market();
     let _data = tqsdk::advanced::data::DataClient::new();
     let _split = tqsdk::advanced::task::VolumeSplitPolicy::new(1, 2).unwrap();
 
@@ -186,8 +184,6 @@ fn facade_root_exports_are_curated() {
         ("tqsdk_data", "DataClient"),
         ("tqsdk_session", "SessionClient"),
         ("tqsdk_session", "SessionClientBuilder"),
-        ("tqsdk_stream", "TqStream"),
-        ("tqsdk_stream", "TqStreamBuilder"),
         ("tqsdk_task", "TargetPosTask"),
         ("tqsdk_task", "TaskHost"),
         ("tqsdk_wait", "TqApi"),
@@ -205,7 +201,6 @@ fn facade_root_exports_are_curated() {
         "pub use tqsdk_core::*",
         "pub use tqsdk_data::*",
         "pub use tqsdk_session::*",
-        "pub use tqsdk_stream::*",
         "pub use tqsdk_task::*",
         "pub use tqsdk_wait::*",
     ] {

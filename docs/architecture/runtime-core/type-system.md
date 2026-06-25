@@ -96,7 +96,7 @@ pub struct SessionConfig {
 ## 为什么 V1 要先锁这些类型
 - 它们直接决定 runtime contract 的稳定性
 - 它们会被所有未来 facade 间接复用
-- 一旦这些类型漂移，后续 `wait_update` 和 stream/callback 都会被迫重构
+- 一旦这些类型漂移，后续 `wait_update` 和 callback/fan-out 都会被迫重构
 
 ## 可提前锁定的纯 schema 类型
 - `types::Quote` / `types::Kline` / `types::Tick`

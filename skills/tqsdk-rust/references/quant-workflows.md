@@ -10,13 +10,13 @@
 
 ## Event Pipeline
 
-多个独立 consumer 需要同一份 session state 时使用 `tqsdk-stream`：logging、metrics、signal calculation、persistence、order monitoring。使用 commit filter 或 typed stream，不要在每个 consumer 里 clone snapshot。`tqsdk-stream` 不直接依赖 Python-compatible mmap history cache；需要 live 持久化时使用调用方自有 sidecar。
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 substrate：logging、metrics、signal calculation、persistence、order monitoring。调用方自建 commit filter、typed events、bounded channel 和 lag diagnostics，不要在每个 consumer 里 clone snapshot。SDK 不直接依赖 Python-compatible mmap history cache；需要 live 持久化时使用调用方自有 sidecar。
 
-契约锚点：S2、S4、S20-S22。
+契约锚点：S5、S23、S27、S31；S2、S4、S21、S22、S35 已删除为调用方层能力。
 
 ## One-Shot Research Query
 
-返回单个结果的 metadata 和 service call 使用 `tqsdk-session`。需要时启用 query support；在 wait/stream facade 中复用 session，不要创建重复连接。不要因为 Python 在一个 `TqApi` 上暴露很多 helper，就把 symbol metadata 路由到 live `QuoteRef`。
+返回单个结果的 metadata 和 service call 使用 `tqsdk-session`。需要时启用 query support；在 wait facade 或调用方 event consumer 中复用 session，不要创建重复连接。不要因为 Python 在一个 `TqApi` 上暴露很多 helper，就把 symbol metadata 路由到 live `QuoteRef`。
 
 契约锚点：S23、S27。低层 live substrate：S5。
 
@@ -34,7 +34,7 @@ history pages、time-range series、pull-based downloads、CSV export 和 option
 
 ## Low-Latency Desk Loop
 
-hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading desk profile。一个决策需要同 revision 的 market 和 trade partition 时，用 `read_market_trade_state()`。慢日志或持久化使用 stream sidecar。
+hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading desk profile。一个决策需要同 revision 的 market 和 trade partition 时，用 `read_market_trade_state()`。慢日志或持久化使用调用方 event sidecar。
 
 契约锚点：S5、S31。
 

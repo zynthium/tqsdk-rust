@@ -8,9 +8,9 @@
 //! API contract:
 //! - Primary user layer: 研究 / 数据用户
 //! - Intended crate path: `tqsdk-data`
-//! - Lower-level escape hatch: 需要原始实时 quote 时使用 wait/stream live market API
+//! - Lower-level escape hatch: 需要原始实时 quote 时使用 wait live refs 或自建消费层
 //! - `query_option_greeks` 是 data research query，不公开内部 snapshot helper
-//! - Greeks 能力留在 data，不回流到 session/wait/stream
+//! - Greeks 能力留在 data，不回流到 session/wait/自建消费层
 //!
 //! Forbidden:
 //! - `TqApi::quote` as pre-step
@@ -23,12 +23,12 @@
 //! Regression signal:
 //! - Greeks 查询要求用户先创建 live quote ref
 //! - 内部临时 snapshot helper 变成通用 public API
-//! - Greeks 被移动到 session direct query 或 wait/stream facade
+//! - Greeks 被移动到 session direct query、wait 或自建消费层 facade
 //! - 研究用户需要手写临时订阅状态管理
 //!
 //! Review questions:
 //! - Greeks research query 是否能通过 data crate 的 owned typed API 自然表达？
-//! - 原始实时 quote 需求是否仍明确导向 wait/stream，而不是复用内部 helper？
+//! - 原始实时 quote 需求是否仍明确导向 wait 或自建消费层，而不是复用内部 helper？
 //! - session 是否只作为共享连接 substrate，而不是 Greeks API 归属地？
 
 use std::time::Duration;

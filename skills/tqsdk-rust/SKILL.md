@@ -1,6 +1,6 @@
 ---
 name: tqsdk-rust
-description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、主连/连续合约、期权链、合约规格、metadata/direct query、历史数据下载/缓存/CSV/Greeks、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、stream/fan-out、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力时，即使未明确提到 TQSDK。
+description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、主连/连续合约、期权链、合约规格、metadata/direct query、历史数据下载/缓存/CSV/Greeks、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力时，即使未明确提到 TQSDK。
 ---
 
 # TQSDK Rust
@@ -23,9 +23,9 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 - 写代码前先选择能覆盖场景的最高层入口。普通策略、目标持仓和轻量历史访问优先从默认 `tqsdk` crate 开始；明确需要内部能力时再下钻。
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
-- 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，事件管线放在 `tqsdk-stream`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。
+- 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。多消费者 event/fan-out 是调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建的集成层。
 - history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)` 或显式 `HistorySeriesCache::open(...)` cache-only reader 才生效。
-- `tqsdk-data` 不提供 live stream 写 Python-compatible mmap history cache 的 bridge；`tqsdk-stream` 本身也不读写 mmap/cache，不为热路径增加持久化语义。
+- `tqsdk-data` 不提供 live event 写 Python-compatible mmap history cache 的 bridge；SDK 不为 live 热路径增加内置持久化语义。
 - `HistorySeriesCache` 只服务 offline `get_*_data_series` / cache-only `read_*_data_series` / scan / maintenance；不要使用它作为 live serial 缓存或外部最新行情 API。
 - 官方 Python serial 的 `id` 列来自序列路径 key / 行序号，不要求 raw Kline/Tick payload 自带 `id`；Rust 解码应保持 path-key id 兼容。
 - 只有低层 runtime、自定义 facade、adapter、command 状态机、commit/cursor、hot-path `RuntimeReader` 才使用 `tqsdk-core`。
@@ -38,9 +38,9 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 ## 常见错误
 
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
-- wait/stream app 里不要为了 metadata 再建第二个 client；复用 shared session。
-- 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要持久化 live `KlineRowBatch` / `TickRowBatch` 或 commit stream，使用调用方自己的 sidecar，不要把 Python-compatible mmap history cache 接进 live 热路径。
-- 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、stream、session、task、data 或 core 的完整 surface。
+- live facade 或调用方 event consumer 里不要为了 metadata 再建第二个 client；复用 shared session。
+- 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果要持久化 live `KlineRowBatch` / `TickRowBatch` 或 commit events，使用调用方自己的 sidecar，不要把 Python-compatible mmap history cache 接进 live 热路径。
+- 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、session、task、data、core 或自建 event/fan-out consumer 的完整 surface。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
 - typed ticket、ref 或 status helper 已存在时，不要发明本地订单 overlay，也不要解析 status 字符串。
 - 不要用字符串或 adapter-local 判断绕过 `record_command_status()` 和 runtime command lifecycle。
@@ -49,11 +49,11 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 ## 回答风格
 
-- 开头先说明使用哪个入口或 crate 以及原因：默认 facade、Python-style live ref、event stream、one-shot query、task execution、offline rows 或 runtime substrate。
+- 开头先说明使用哪个入口或 crate 以及原因：默认 facade、Python-style live ref、caller-owned event/fan-out、one-shot query、task execution、offline rows 或 runtime substrate。
 - 优先给和当前 example 匹配的短 Rust snippet，不要写大段伪代码。
 - 覆盖用户角色或宽工作流时，引用 `scenario-contracts.md` 中对应的 `api_contract_sXX_*.rs` 示例。
 - 点名用户下一步应调用的具体 API。
-- 如果 Rust 答案刻意不同于 Python TqSdk，要说明原因是 Rust workspace 有默认 `tqsdk` facade，并把高级能力拆成了 `session`、`wait`、`stream`、`task`、`data`。
+- 如果 Rust 答案刻意不同于 Python TqSdk，要说明原因是 Rust workspace 有默认 `tqsdk` facade，并把高级能力拆成了 `session`、`wait`、`task`、`data` 和低层 runtime substrate；多消费者管线留给调用方组合。
 - 代码会下单、撤单、使用实盘账户或依赖付费行情权限时，先说明安全门槛。
 - 请求不明确时，只问一个形状问题：“你需要一个带 ref 的单 live loop、多个事件消费者、one-shot query、task/order 抽象、历史 rows，还是 runtime commits？”
 

@@ -14,7 +14,7 @@
 //! - `TqApi::kline` 返回 non-blocking diff-backed realtime K 线窗口 handle
 //! - `TqApi::kline_multi` 返回 non-blocking 多合约 K 线窗口 handle，按主合约 binding 对齐
 //! - `TqApi::tick` 返回 non-blocking diff-backed realtime tick 窗口 handle
-//! - Tick serial 保持单合约；多合约 tick 应拆成多个 `tick(...)` handle 或使用 stream/event
+//! - Tick serial 保持单合约；多合约 tick 应拆成多个 `tick(...)` handle 或自建事件消费层
 //! - `TqApi::step_until` 是用户可见状态推进点
 //! - `WaitStep::is_changing` 判断对象是否在当前 commit 中变化
 //! - `WaitStep::is_changing_fields` 判断对象字段是否在当前 commit 中变化

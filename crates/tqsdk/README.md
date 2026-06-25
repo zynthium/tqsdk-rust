@@ -74,7 +74,7 @@ while tq.next().await? {
 ## Features
 
 - `default = ["live", "services"]`：默认用户入口，包含 live 连接与服务查询能力。
-- `live`：向内部 `session` / `wait` / `stream` / `task` / `data` crate 传播 live feature，并启用 TQ auth 派生的 TQKQ helper。
+- `live`：向内部 `session` / `wait` / `task` / `data` crate 传播 live feature，并启用 TQ auth 派生的 TQKQ helper。
 - `services`：向内部 crate 传播服务查询相关 HTTP 能力。
 - `default-features = false`：保留 facade 类型和不依赖 live auth 的组合入口；live-only helper 不参与编译。
 
@@ -83,22 +83,22 @@ while tq.next().await? {
 ```rust
 use tqsdk::advanced::session::SessionClientBuilder;
 use tqsdk::advanced::session::InstrumentSpec;
-use tqsdk::advanced::stream::TqStreamBuilder;
 use tqsdk::advanced::runtime::RuntimeReader;
 use tqsdk::advanced::task::StrategyReplaySourceBuilder;
 ```
 
-需要完整 stream、task、data、session 或 core surface 的用户应直接依赖对应 sibling crate。这样可以让 `tqsdk` 的 semver surface 保持小，同时不限制高级用户使用底层能力。
-其中 `advanced::stream` 面向已经明确需要多消费者 async stream 的用户；普通单 owner
-策略仍应优先通过 `tqsdk::prelude::*` / `Tq::next()` 或直接使用 `tqsdk-wait`。
+需要完整 task、data、session、wait 或 core surface 的用户应直接依赖对应 sibling crate。这样可以让 `tqsdk` 的 semver surface 保持小，同时不限制高级用户使用底层能力。
+需要多消费者 async 消费层的用户应基于 `tqsdk-session` 与 `RuntimeReader` / `UpdateCursor`
+自建 facade；普通单 owner 策略仍应优先通过 `tqsdk::prelude::*` / `Tq::next()`
+或直接使用 `tqsdk-wait`。
 
 ## 边界
 
-`tqsdk` 不拥有第二棵状态树，不复制 direct query、stream、task 或 data
+`tqsdk` 不拥有第二棵状态树，不复制 direct query、task 或 data
 实现。能力归属仍然保持在内部 crate：
 
 - direct query / metadata：`tqsdk-session`
 - single-owner `wait_update()`：`tqsdk-wait`
-- async multi-consumer stream：`tqsdk-stream`
+- async multi-consumer facade：调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建
 - execution tooling：`tqsdk-task`
 - research/offline data：`tqsdk-data`

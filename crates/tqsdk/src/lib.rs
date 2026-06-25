@@ -2,7 +2,7 @@
 //! User-facing facade crate for `tqsdk-rust`.
 //!
 //! This crate gives ordinary users one dependency and one prelude while keeping
-//! the underlying `core` / `session` / `wait` / `stream` / `task` / `data`
+//! the underlying `core` / `session` / `wait` / `task` / `data`
 //! boundaries available under [`advanced`].
 
 use std::env;
@@ -43,11 +43,6 @@ pub mod advanced {
         pub type SessionClient = tqsdk_session::SessionClient;
         pub type SessionClientBuilder = tqsdk_session::SessionClientBuilder;
         pub type SessionFacadeError = tqsdk_session::SessionFacadeError;
-    }
-
-    pub mod stream {
-        pub type TqStream = tqsdk_stream::TqStream;
-        pub type TqStreamBuilder = tqsdk_stream::TqStreamBuilder;
     }
 
     pub mod task {

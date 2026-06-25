@@ -2,7 +2,7 @@
 
 共享的 session / direct-query 薄层。
 
-这个 crate 负责把会话生命周期、route 驱动、schema / metadata / direct query 这类和具体 facade 无关的能力先抽出来，作为 `tqsdk-wait`、`tqsdk-stream` 等上层 facade 的共同底座。
+这个 crate 负责把会话生命周期、route 驱动、schema / metadata / direct query 这类和具体 facade 无关的能力先抽出来，作为 `tqsdk-wait` 和调用方自建消费层的共同底座。
 
 它不是只给 facade 内部复用的隐藏层。对需要“一次性 query / metadata / schema 访问”的用户，`tqsdk-session` 本身就是正确入口。
 
@@ -168,7 +168,7 @@ session facade 上并发调用。raw `query_graphql()` 只提交 command id；�
 
 - `tqsdk-session` 负责一次性 direct query / schema / metadata
 - `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
-- `tqsdk-stream` 负责 stream/event 风格的持续状态消费
+- 多消费者 event/fan-out 风格由调用方基于 `RuntimeReader` / `UpdateCursor` 自建
 
 ## 示例
 
@@ -200,7 +200,7 @@ service direct-query pack：
 
 - 合约列表、主连、期权链和多档期权查询继续属于 session metadata one-shot API
 - 交易日历、结算价、排名和 EDB 继续属于 session service one-shot API
-- wait/stream 可以通过 `session()` 复用同一个底层 session，但不复制这些
+- wait/自建消费层可以通过 `session()` 复用同一个底层 session，但不复制这些
   direct-query API
 
 而 `quote_progress.rs` 展示的是面向高性能用户的纯 substrate live 行情路径：
@@ -226,7 +226,7 @@ service direct-query pack：
 如果上层 facade 需要在策略启动前确认行情和交易初始截面已经可用，可以用
 `StartupRecoverySpec` + `SessionClient::startup_recovery_status(...)` 读取
 revision-bound readiness。这个接口只检查状态，不提交订阅或登录命令；订阅、
-登录和等待形状仍由 `tqsdk-wait` / `tqsdk-stream` 负责。
+登录和等待形状仍由 `tqsdk-wait` 或调用方自建消费层负责。
 
 如果上层 facade 需要对同一用户下单 intent 做进程内/session 内去重，可以用
 `OrderIntentRecord` + `SessionClient::remember_order_intent(...)` 记录稳定
@@ -286,7 +286,7 @@ helper 仍是底层 escape hatch。
 - `query_symbol_ranking(...)`
 - `query_edb_data(...)`
 
-这些接口虽然请求目标是官方独立 HTTP 服务，但语义依然是一次性 request/response，因此继续放在 `tqsdk-session`，而不是进入 `tqsdk-wait` / `tqsdk-stream`。
+这些接口虽然请求目标是官方独立 HTTP 服务，但语义依然是一次性 request/response，因此继续放在 `tqsdk-session`，而不是进入 `tqsdk-wait` 或自建 live 消费层。
 
 `SessionDirectQuery` 只是把这三层统一组合成一个总 trait，便于上层在泛型约束里一次性声明完整 direct-query 能力。
 

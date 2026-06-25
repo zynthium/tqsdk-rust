@@ -55,13 +55,13 @@ public API。
 
 ## 使用者分层
 
-2026-05-22 sequencing rule: a scenario can be active without being first-read default. Default docs should show only the smallest ordinary `tqsdk` / `tqsdk-wait` path. Stream, task, and data scenario contracts remain active when they prove distinct advanced workflows, but they should not expand the default facade or root prelude by default.
+2026-06-25 sequencing rule: a scenario can be active without being first-read default. Default docs should show only the smallest ordinary `tqsdk` / `tqsdk-wait` path. Task and data scenario contracts remain active when they prove distinct advanced workflows; multi-consumer async integration uses caller-owned reader/cursor layers rather than an SDK built-in event facade.
 
 | 使用者 | 主要需求 | Rust 推荐入口 | 对应场景 | 迭代判断 |
 | --- | --- | --- | --- | --- |
 | 低层 / 高频用户 | 自带 Tokio runtime、自己推进 session、热路径读取行情、低延迟柜台链路 | `tqsdk-core` + `tqsdk-session` | 5, 23, 27, 31 | 维持薄底座，不上移厚 facade |
 | 单策略作者 | 低样板、`wait_update()`、稳定状态截面、交易状态易懂 | `tqsdk`，内部路径为 `tqsdk-wait` | 1, 3, 6, 7, 8, 9, 10, 25, 26 | 继承 Python 语义，不复制 Python 单体 |
-| async 系统集成方 | 多消费者、stream、背压、错误事件、健康状态 | `tqsdk::advanced::stream` 或 `tqsdk-stream + tqsdk-session` | 2, 4, 20, 21, 22 | 强化事件和恢复语义 |
+| async 系统集成方 | 多消费者、事件投递、背压、错误事件、健康状态 | `tqsdk-session + RuntimeReader/UpdateCursor` | 2, 4, 20, 21, 22 | 调用方自建事件、背压和恢复语义 |
 | 执行工具用户 | 目标持仓、订单 intent、撤补、两腿套利、风控、多账户 | `tqsdk`，内部路径为 `tqsdk-task` | 10, 11, 12, 13, 19, 29 | 建立执行层抽象，不下沉到 core |
 | 看盘 / 研究 / 数据用户 | 历史数据、批处理、缓存、CSV、离线分析、快速图表回看 | `Tq::history()` / `tqsdk-data` | 16, 17, 18, 28, 30 | 独立数据层，不污染 session/wait |
 | 测试 / 回放用户 | fake market、fake broker、同策略 live/sim/replay 切换 | `tqsdk-task` + 测试支持层 | 15, 16, 24 | 面向策略可测试性设计 |
@@ -95,7 +95,7 @@ public API。
 - 能在官方 Python SDK 的核心使用者语义中找到对应工作流，或是 Rust 分层必需的
   薄基础设施补强。
 - 能清晰落在默认 facade `tqsdk` 或 `tqsdk-core` / `tqsdk-session` /
-  `tqsdk-wait` / `tqsdk-stream` / `tqsdk-task` / `tqsdk-data` 的既有职责内；
+  `tqsdk-wait` / `tqsdk-task` / `tqsdk-data` 或调用方自建消费层的既有职责内；
   真实实现归属仍必须保持在对应内部 crate。
 - 不要求用户理解 provider protocol、私有 session、raw channel、内部 command
   pack、手写 Tokio task 编排或 `Arc<Mutex<_>>`。
@@ -144,7 +144,7 @@ public API。
 
 - `tqsdk-session`：恢复 substrate、订阅意图记录、route/trade sync 状态。
 - `tqsdk-wait`：单策略用户的 `wait_ready()` / `recover_ready()` 风格薄包装。
-- `tqsdk-stream`：多消费者用户的 `recovery_events()` / ready stream。
+- 调用方自建消费层：多消费者用户的 `recovery_events()` / ready event feed。
 
 优先提升的场景：
 
@@ -161,17 +161,13 @@ public API。
 
 已落地：
 
-- 启动 ready barrier 已通过 `TqApi::startup_recovery` 与 `TqStream::recover_state`
-  表达。
+- 启动 ready barrier 已通过 `TqApi::startup_recovery` 表达；多消费者消费层可复用
+  `StartupRecoverySpec` 自建 ready barrier。
 - Market adapter 会保留当前 quote / trading-status / chart 订阅意图；session
   reconnect/resync 完成后，runtime 会根据 adapter recovery commands 重新排队发送订阅，
   因此 `QuoteSubscription` 用户不需要维护第二份订阅集合。
-- `TqStream::health()` 返回 `StreamHealthSnapshot`，覆盖 session phase、最近一次
-  reconnect diagnostics、driver closed 和 revision；`TqStream::reconnect_monitor()`
-  可以等待并报告 existing session reconnect 的恢复、耗尽、超时或关闭结果；
-  strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；
-  `tqsdk-stream` 的 graceful shutdown 现在只负责 outbound flush 与 stream driver
-  关闭；managed sink、WAL、journal、compaction、recovery 和 durable daemon queue /
+- strategy supervisor 的稳定 telemetry/export hook 已落在 `tqsdk-task`；
+  managed sink、WAL、journal、compaction、recovery 和 durable daemon queue /
   runtime state snapshot recovery 均归属用户 sidecar 或后续 daemon/tooling 层。
 
 ### P0：Session direct-query / metadata pack
@@ -186,12 +182,12 @@ public API。
 
 - 一次性 metadata / service request/response 明确归属 `tqsdk-session`。
 - 合约列表、主连、期权、交易日历、结算价、排名和 EDB 有正式可编译契约。
-- wait/stream 只通过 `session()` 复用底层 session，不复制 direct-query API。
+- `tqsdk-wait` 和自建消费层只通过 `session()` 复用底层 session，不复制 direct-query API。
 
 建议落点：
 
 - `tqsdk-session`：metadata/service one-shot direct query 与 raw GraphQL escape hatch。
-- `tqsdk-wait` / `tqsdk-stream`：只保留 live refs / continuous consumption。
+- `tqsdk-wait` / 调用方自建消费层：只保留 live refs / continuous consumption。
 - `tqsdk-data`：历史下载、Greeks、DataFrame/polars 和研究派生。
 
 优先提升的场景：
@@ -227,7 +223,7 @@ public API。
 
 - `tqsdk-core`：只在现有 command/order 状态机确有缺口时补最小 contract。
 - `tqsdk-session`：保存可恢复命令意图和对账 substrate。
-- `tqsdk-wait` / `tqsdk-stream`：提供不同消费形状下的 `OrderRef` / 订单事件。
+- `tqsdk-wait` / 调用方自建消费层：提供不同消费形状下的 `OrderRef` / 订单事件。
 - `tqsdk-task`：执行任务只消费 intent/result，不私造第二套订单状态。
 
 优先提升的场景：
@@ -242,7 +238,7 @@ public API。
 - `TqApi::limit_order(...).client_intent(...).send_once()` 会把稳定 intent id
   映射为 runtime `order_id`，并在同一个 `SessionClient` 内避免相同 intent
   重复提交；同一 session 被重新包装成新的 facade 后仍保留该 intent 记录。
-- `tqsdk-session` 增加 session-scoped `OrderIntentRecord` ledger，作为 wait/stream/task
+- `tqsdk-session` 增加 session-scoped `OrderIntentRecord` ledger，作为 wait/task/自建消费层
   可复用的轻量执行一致性 substrate。
 - `OrderTicket::status()` / `wait_reconnect_safe_terminal*()` 返回 typed
   `OrderTicketState`，业务代码不需要解析 command status 或 `order.status` 字符串。
@@ -291,7 +287,7 @@ public API。
 - `tqsdk-task`：维护当前 `ExecutionGroup` / `AccountGroup` 薄 foundation，
   不继续向自动 hedge/flatten、timed cancel、跨账户 TargetPos 和 audit policy
   膨胀。
-- `tqsdk-wait` / `tqsdk-stream`：只提供所需 live state 和 order event。
+- `tqsdk-wait` / 调用方自建消费层：只提供所需 live state 和 order event。
 
 优先提升的场景：
 
@@ -454,29 +450,17 @@ public API。
 
 建议落点：
 
-- `tqsdk-stream`：health/recovery/error event stream、sink isolation。
+- 调用方自建消费层：health/recovery/error event feed、sink isolation。
 - `tqsdk-session`：底层连接和登录错误分类。
 
 已落地：
 
 - `tqsdk-core::ContractError` 提供 stable `ContractErrorKind` 与 `RetryHint`，
-  只表达底层错误类别和重试提示，不承载 stream/sink 策略。
+  只表达底层错误类别和重试提示，不承载 consumer/sink 策略。
 - `tqsdk-session::SessionFacadeError::diagnostic()` 将 core 错误映射为
   session 级 typed diagnostic，并提供 `is_retryable()`。
-- `tqsdk-stream::StreamFacadeError::diagnostic()` 覆盖 session/contract 错误、
-  `Lagged`、`Closed` 和 missing value，慢消费者 lag 不再需要字符串判断。
-- `tqsdk-stream::StreamRetryPolicy` 提供 stream-facing retry decision 和最小
-  async backoff runner；它不执行 reconnect，也不解释业务拒单。
-- `TqStreamBuilder::commit_channel_capacity(...)` 暴露 root fan-out buffer 配置；
-  `CommitStream` 继续使用 bounded broadcast，落后 consumer 通过 typed `Lagged`
-  观察背压。
-- `StreamHealthSnapshot::status()` / `should_restart()` 补齐生产 health snapshot
-  的最小状态判定。
-- `TqStream::reconnect_monitor()` 提供 typed reconnect wait/report foundation，
-  返回 recovered / exhausted / timed out / closed 等结果，不要求用户自己轮询
-  session phase。
-- `TqStream::graceful_shutdown()` 提供 outbound flush + stream driver close，
-  返回 `StreamGracefulShutdownReport`，避免用户依赖 drop 隐式关闭。
+- 慢消费者 lag、bounded broadcast、重试策略、health snapshot 与 graceful shutdown
+  不再由 SDK 内置 fan-out surface 托管；需要时由调用方自建消费层定义。
 - `tqsdk-task::StrategySupervisor::telemetry_reporter(...)` 暴露
   transport-neutral typed telemetry/export hook，用户可以接入 tracing、日志或外部
   指标系统，不需要 SDK 内置 HTTP endpoint。
@@ -490,14 +474,11 @@ public API。
 优先提升的场景：
 
 - `api_contract_s20_production_daemon`
-- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag diagnostics 已提升为正式 stream example；durable sink/WAL/journal 归属用户 sidecar）
-- `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 和 stream-facing retry policy 子集已提升为正式 stream example）
+- `api_contract_s21_slow_consumer_isolation`（bounded fan-out/lag diagnostics 已降级为调用方自建消费层边界；durable sink/WAL/journal 归属用户 sidecar）
+- `api_contract_s22_error_diagnosis_retry`（low-level diagnostics 和 retry policy 子集已降级为调用方自建消费层边界）
 
 已落地：
 
-- `tqsdk-stream::TqStream::health()` 已提供 typed health snapshot、health status
-  和 restart hint 子集；`TqStream::reconnect_monitor()` 已提供 typed reconnect
-  wait/report foundation。
 - `tqsdk-task::StrategySupervisor` 已新增正式 S20 task example，覆盖 strategy
   deployment 的 typed health/metrics snapshot、显式 retry policy、ctrl-c
   shutdown signal、typed shutdown report 和 typed telemetry/export hook。
@@ -524,7 +505,7 @@ public API。
 建议落点：
 
 - `tqsdk-data`：history page/series/download/export 和 history series mmap cache。
-- `tqsdk-stream`：live sink adapter。
+- 调用方自建消费层：live sink adapter。
 - `tqsdk-task`：策略 replay driver 和 task-owned replay event/source。
 
 已落地：
@@ -534,7 +515,7 @@ public API。
   不再是当前核心 SDK public API。
 - `ReplayMarketEvent` / `ReplayMarketSource` 提供按事件时间、接收时间排序的
   deterministic offline replay iterator，归属 `tqsdk-task`。
-- 当前 active API 不包含 `MarketCacheStreamWriter` 或 live stream pipe；live pipe /
+- 当前 active API 不包含 live cache writer 或 live pipe；live pipe /
   cache service 归属用户工具或未来独立设计边界。
 - queue、lock、index、compaction、reader manifest、recovery scan、writer
   election、service、daemon 和 supervisor 等跨进程或准跨进程编排表面已回退，
@@ -553,9 +534,9 @@ public API。
   覆盖 history series -> task replay source adapter foundation。
 - `api_contract_s18_local_market_cache` 已移除；JSONL cache record /
   reader-writer / replay foundation 不再作为正式 data example。
-- live stream -> cache writer pipe 未提升为当前正式 data example。旧
+- live consumer -> cache writer pipe 未提升为当前正式 data example。旧
   `api_contract_s18_live_market_cache_pipe` 名称只作为历史 gap/sketch 追溯；
-  若后续仍需要 live pipe，应作为 `tqsdk-stream` sink adapter 与
+  若后续仍需要 live pipe，应作为调用方自建消费层与
   `tqsdk-data` writer 边界的独立设计，不属于当前 active API。
 - 已撤回的 S18 cache maintenance / reader manifest / recovery / writer
   election / compaction ownership / service / daemon / supervisor examples 与
@@ -581,7 +562,7 @@ public API。
 - `api_contract_s17_research_kline_batch`
 - `api_contract_s28_download_export` 与 `api_contract_s28_option_greeks`（新增）：
   覆盖历史主连、下载进度、CSV materialization 和 Greeks research query，确认这些
-  能力不进入 session/wait/stream。
+  能力不进入 session/wait/自建消费层。
 
 ### P2：高频交易柜台低延迟 profile
 
@@ -601,7 +582,7 @@ public API。
 
 - `tqsdk-core` / `tqsdk-session`：hot path runtime reader、cursor、session progress 与底层命令提交。
 - `tqsdk-task`：typed order intent、pre-trade risk gate 与 revision-bound report。
-- `tqsdk-stream`：bounded fan-out、lag diagnostics 和 health/reconnect observation。
+- 调用方自建消费层：bounded fan-out、lag diagnostics 和 health/reconnect observation。
 - 不进入 `tqsdk-data`；历史序列缓存和 memmap cache 不是柜台 hot path 能力。
 
 已提升的场景：
@@ -609,7 +590,7 @@ public API。
 - `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`：覆盖
   低延迟柜台链路的 crate 组合、session 自驱动 quote hot path、同 revision
   market/trade 分区读、typed risk/order status、typed latency report 和
-  `tqsdk-stream` sidecar sink isolation；原 desired sketch 已归档到
+  caller-owned sidecar sink isolation；原 desired sketch 已归档到
   `docs/archive/scenarios/2026-05-02/`。
 
 ### P3：多 provider 行情聚合（暂缓）
@@ -633,7 +614,7 @@ public API。
 
 建议落点：
 
-- 仅在未来有明确用户需求时，作为 `tqsdk-stream` 之上的独立用户层 facade
+- 仅在未来有明确用户需求时，作为 `tqsdk-session + RuntimeReader/UpdateCursor` 之上的独立用户层 facade
   或独立项目重新评估。
 - 不下沉到 `tqsdk-core` / `tqsdk-session`，也不作为近期场景驱动批次目标。
 

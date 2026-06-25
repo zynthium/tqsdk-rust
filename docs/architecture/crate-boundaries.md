@@ -25,7 +25,6 @@
 - `tqsdk-core` 是 protocol-complete runtime substrate
 - `tqsdk-session` 是 shared session + one-shot request/response
 - `tqsdk-wait` 是 Python 风格单推进点的 continuous-consumption facade
-- `tqsdk-stream` 是 shared-session multi-consumer stream facade
 - `tqsdk-task` 是高层执行工具与任务编排层
 - `tqsdk-data` 是 research/offline data、history、cache、export 能力层
 
@@ -39,7 +38,7 @@
 - 是否让高性能用户可以停留在足够低的层面
 - 是否让 Python 风格用户可以获得稳定的 `wait_update()` 心智
 - 是否避免把研究工具、执行任务系统和 protocol substrate 混在一起
-- 是否为 `tqsdk-stream`、`tqsdk-task`、downloader 等能力留出清晰落点
+- 是否为 `tqsdk-task`、downloader、自建多消费者消费层等能力留出清晰落点
 
 ## `tqsdk`
 
@@ -60,7 +59,7 @@
 
 - runtime contract 或状态树实现
 - direct query / metadata 的真实实现
-- stream fan-out 的真实实现
+- multi-consumer fan-out 的真实实现
 - task/data 内部状态机或存储能力
 
 ### 判断
@@ -95,7 +94,7 @@
 `tqsdk-core` 不应继续吸收：
 
 - `wait_update()` facade
-- stream / callback facade
+- callback / fan-out facade
 - direct query convenience wrapper
 - downloader
 - `TargetPosTask`
@@ -172,7 +171,7 @@
 - wait facade 的 `kline` / `tick` live serial handles
 - live trade refs
 - `step()` / `step_until(...)`
-- object stream / callback
+- object fan-out / callback
 - downloader
 - `TargetPosTask`
 - DataFrame / polars 形状
@@ -186,7 +185,7 @@
 这部分已经被移出 session substrate。后续仍应继续保持同一条约束：
 
 - `tqsdk-session` 不应演化成“大家都顺手塞一点公共配置”的地方
-- 如果出现更多 wait / stream 共用的消费层配置，应在消费层单独提炼，而不是回灌到 session
+- 如果出现更多 wait / 自建消费层共用的消费配置，应在消费层单独提炼，而不是回灌到 session
 
 ### 判断
 
@@ -240,7 +239,7 @@
 - schema refresh / metadata facade
 - downloader
 - `TargetPosTask`
-- stream / callback
+- callback / fan-out
 - DataFrame / polars / offline analysis helper
 - 本地 overlay 状态树
 
@@ -249,38 +248,6 @@
 这一层当前边界是健康的，而且是最接近你目标用户体验的部分。
 
 后续最大的风险不是“功能不够”，而是重新把 Python 单体 `TqApi` 的其他便利接口全部塞回来。
-
-## `tqsdk-stream`
-
-### 正确职责
-
-`tqsdk-stream` 当前的职责也已经清楚：
-
-- shared-session 多消费者 commit fan-out
-- path / scope / domain / object / field 过滤
-- typed path stream
-- kline / tick row batch stream
-- trade 相关事件流
-- bounded fan-out、typed lag diagnostics、health status 和 sink-free graceful shutdown
-
-它的价值不在于“再造一套 runtime”，而在于让高性能、多消费者、异步系统集成方可以直接消费同一套 commit 语义。
-
-### 不应吸收的能力
-
-`tqsdk-stream` 不应继续吸收：
-
-- GraphQL / HTTP direct query
-- schema / metadata facade
-- downloader
-- `TargetPosTask`
-- DataFrame / polars
-- 本地 overlay 状态树
-
-### 判断
-
-这一层已经有明确而健康的落点。
-
-真正要继续防止的，是把它重新做成一个宽而胖的“第二个总入口”。
 
 ## `tqsdk-task`
 
@@ -367,7 +334,6 @@ sink、WAL、journal 或 cache writer。
 合理路径：
 
 - `tqsdk-core + tqsdk-session`
-- 如需现成但仍很薄的用户 API，再加 `tqsdk-stream`
 - 如需在同一 hot path 上做 typed risk / order intent / latency report，可使用
   `tqsdk-task::TradingDeskProfile`
 
@@ -400,18 +366,18 @@ sink、WAL、journal 或 cache writer。
 
 - 共享 live session
 - 多任务并发消费
-- 事件流 / stream
+- 事件投递 / fan-out
 - 背压可控
 
 合理路径：
 
-- `tqsdk-session`
-- `tqsdk-stream`
+- `tqsdk-session + RuntimeReader/UpdateCursor`
+- 调用方自建 fan-out、背压、事件投影和 health surface
 
 判断：
 
-- 当前边界合理
-- 已经有合适的 stream facade 落点
+- 当前边界刻意不提供内置 fan-out facade
+- 不应为了多消费者需求回灌 core/session 或扩宽 `tqsdk-wait`
 
 ### 场景 4：只做 metadata / calendar / settlement / ranking 查询
 
@@ -513,10 +479,9 @@ Python 的问题是：
 - `tqsdk-core` 继续只做底层统一 contract
 - `tqsdk-session` 继续做 shared session + one-shot control/query
 - `tqsdk-wait` 继续做 Python 风格单推进点 continuous-consumption facade
-- `tqsdk-stream` 继续做多消费者 continuous-consumption facade
 - `tqsdk-task` 继续做执行工具层
 - `tqsdk-data` 继续做 research/offline data、history、cache、export 能力层
 
-接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `stream/task/data` 能力边界。
+接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `task/data` 能力边界。
 
-2026-05-22 overdesign audit conclusion: the crate split remains justified, but the first-read product surface must be smaller than the internal workspace. `tqsdk` / `tqsdk-wait` carry the ordinary strategy path; `tqsdk-stream` / `tqsdk-task` / `tqsdk-data` should be documented as advanced or opt-in unless a scenario clearly belongs in the default SDK path.
+2026-06-25 removal conclusion: the former multi-consumer facade crate has been removed. Multi-consumer async systems should build on `tqsdk-session + RuntimeReader/UpdateCursor`; `tqsdk` / `tqsdk-wait` carry the ordinary strategy path, while `tqsdk-task` and `tqsdk-data` remain advanced or opt-in.

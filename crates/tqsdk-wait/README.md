@@ -13,10 +13,10 @@
 
 - GraphQL / HTTP direct query
 - schema / metadata direct facade
-- downloader / `TargetPosTask` / callback / stream
+- downloader / `TargetPosTask` / callback / fan-out
 - 本地订单 overlay 或第二棵状态树
 
-这些一次性接口的正确归属始终是 `tqsdk-session`，即使后续面向高性能用户增加 `tqsdk-stream` 也不改变这一点。
+这些一次性接口的正确归属始终是 `tqsdk-session`，即使后续面向高性能用户增加自建消费层也不改变这一点。
 
 用户真正会持有和传递的 `Ref` / `Window` 类型都直接从 crate 根导出，不需要再通过 `refs::*` / `views::*` 子模块路径访问。
 
@@ -132,17 +132,17 @@ wait facade。
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - 常见多合约实时行情入口使用 `quotes(...).await`，一次提交批量 quote 订阅并返回
   symbol-indexed `QuoteSet`；单合约 `quote(...)` 仍保留为便利入口。订阅意图由底层
-  `SessionClient` 去重，避免 wait / stream 在同一 session 内重复提交或互相取消。
-- 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，默认入口仍应是 wait facade 的 `quotes(...).await`。`WaitStep::changed_quote_symbols()` 只解释当前 commit 的 quote 变化；`QuoteSet::changed(&step)` 和 `QuoteSet::changed_snapshots(&step)` 用这份 commit metadata 先定位变化 symbol，再过滤到当前 `QuoteSet`，避免每轮扫描所有订阅合约。返回顺序按 `QuoteSet::symbols()` 的 symbol 顺序。`tqsdk-stream` 不应成为单消费者 quote throughput 的默认答案。
+  `SessionClient` 去重，避免同一 session 内重复提交或互相取消。
+- 如果一个策略循环需要订阅大量合约甚至全市场，但消费模型仍然是单 owner 稳定截面，默认入口仍应是 wait facade 的 `quotes(...).await`。`WaitStep::changed_quote_symbols()` 只解释当前 commit 的 quote 变化；`QuoteSet::changed(&step)` 和 `QuoteSet::changed_snapshots(&step)` 用这份 commit metadata 先定位变化 symbol，再过滤到当前 `QuoteSet`，避免每轮扫描所有订阅合约。返回顺序按 `QuoteSet::symbols()` 的 symbol 顺序。
 - serial 数据先暴露为 Rust 原生窗口视图，而不是 DataFrame 兼容层
 - `kline` / `tick` 对齐 Rust handle 心智：只提交 / 复用 `SetChart` 并返回滚动窗口 handle，不强制等待首批 rows；需要等待 chart 初始化时使用 `kline_ready` / `tick_ready`。数据来自同一棵 runtime state tree；它不读写 `tqsdk-data` 的 Python-compatible mmap 历史缓存，也不承担历史下载职责
 - 多合约 K 线使用 `kline_multi([...], duration, data_length)`，一个 `chart_id` 对应逗号拼接的 `ins_list`。和 Python TqSdk 一样，多合约 K 线启动请求使用 `view_width=10000` 让服务端补齐足够窗口；客户端返回 `MultiKlineWindow`，以第一个合约为主合约，并通过主合约 K 线分区下的 `binding/{secondary}/{primary_id}` 把副合约行对齐到同一行。缺少任一副合约 binding 或 row 的主合约行不会进入窗口。
-- Tick serial 不支持多合约。`tick("A,B", ...)` 会直接报错；需要多个合约 tick 时应分别创建多个单合约 `tick(...)` handle 或使用 stream/event 管线。
+- Tick serial 不支持多合约。`tick("A,B", ...)` 会直接报错；需要多个合约 tick 时应分别创建多个单合约 `tick(...)` handle 或自建 event 管线。
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
 - `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
-- `tqsdk-stream` 也只承载这同一批 diff-backed 对象的另一种消费形状，而不会接管 direct query
+- 其他消费形状应复用同一批 diff-backed 对象与底层 session，而不会接管 direct query
 
 ## 示例
 

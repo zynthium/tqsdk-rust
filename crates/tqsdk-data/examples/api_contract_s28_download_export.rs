@@ -10,18 +10,18 @@
 //! - Intended crate path: `tqsdk-data`
 //! - Lower-level escape hatch: `get_kline_data_page` / `get_tick_data_page`
 //! - `query_his_cont_quotes` 使用 `(&[&str], usize, Option<NaiveDate>)`
-//! - download/export 能力留在 data，不回流到 session/wait/stream
+//! - download/export 能力留在 data，不回流到 session/wait/自建消费层
 //!
 //! Forbidden:
 //! - `TqApi` live subscription
-//! - `TqStream` fan-out
+//! - live fan-out
 //! - direct `RuntimeCommand::MarketChartCommand`
 //! - background downloader daemon
 //! - DataFrame/polars
 //! - 需要用户解析的 JSON
 //!
 //! Regression signal:
-//! - 历史下载必须走 live `wait_update()` 或 stream fan-out
+//! - 历史下载必须走 live `wait_update()` 或 live fan-out
 //! - CSV 导出要求用户打开内部 chart command 或手写分页 loop
 //! - 历史主连查询被移动到 session direct query
 //! - download/export 下沉到 wait/session/task

@@ -7,7 +7,7 @@
 - Wait Quote Loop 行情循环
 - Session Metadata Query
 - 品种/合约查询
-- Stream Commit Consumer
+- Caller-Owned Commit Consumer
 - Historical Data Client
 - Trading Task Pattern
 - Direct Order Wrapper
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Session Metadata Query
 
-one-shot metadata 直接使用 `tqsdk-session`；如果已经在 facade 内，则使用 `api.session()` / `stream.session()`。
+one-shot metadata 直接使用 `tqsdk-session`；如果已经在 facade 或 session-backed loop 内，则复用 shared session。
 
 ```rust
 use tqsdk_session::SessionClientBuilder;
@@ -129,26 +129,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 多档期权查询使用 `query_all_level_options`；金融期权多档查询使用 `query_all_level_finance_options`。
 
-## Stream Commit Consumer
+## Caller-Owned Commit Consumer
 
 ```rust
-use futures::StreamExt;
-use tqsdk_stream::TqStreamBuilder;
+use std::time::Duration;
+
+use tokio::time::Instant;
+use tqsdk_core::Symbol;
+use tqsdk_session::SessionClientBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = std::env::var("TQ_AUTH_USER")?;
     let pass = std::env::var("TQ_AUTH_PASS")?;
-    let stream = TqStreamBuilder::new(user, pass).build().await?;
-    let mut commits = stream.commit_stream()?;
+    let symbol = "SHFE.au2602";
+    let symbol_key = Symbol::new(symbol.to_string());
 
-    while let Some(update) = commits.next().await {
-        let commit = update?;
-        let snapshot = stream.reader().read();
-        println!("revision={} scope={:?}", commit.revision, commit.scope);
-        println!("head={}", snapshot.revision());
+    let session = SessionClientBuilder::new(user, pass)
+        .futures_market()
+        .build()?;
+    session.subscribe_quotes([symbol]).await?;
+
+    let reader = session.reader().clone();
+    let mut cursor = reader.cursor();
+
+    loop {
+        while let Some(commit) = reader.next(&mut cursor) {
+            if let Some(quote) = reader.read_market_state().quote(&symbol_key)? {
+                println!(
+                    "revision={:?} symbol={} last_price={}",
+                    commit.revision, symbol, quote.last_price
+                );
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        session.progress_once(Some(deadline)).await?;
     }
-    Ok(())
 }
 ```
 
@@ -187,7 +204,7 @@ println!("rows={}", series.len());
 
 ## Live Persistence Boundary
 
-当前 SDK 不提供 live `tqsdk-stream` row batch 写入 Python-compatible mmap
+当前 SDK 不提供 live event/row batch 写入 Python-compatible mmap
 `HistorySeriesCache` 的 public bridge。实时行情持久化使用调用方自有 sidecar；
 `HistorySeriesCache` 保持 offline
 `get_*_data_series` 缓存和 cache-only reader。

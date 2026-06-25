@@ -60,23 +60,6 @@ V1 不交付任何用户态 facade。
 约束：
 - 不得回改 commit 生成逻辑
 
-### `tqsdk-stream`
-```rust
-pub trait CommitStreamApi {
-    type CommitStream: Stream<Item = SharedCommitResult>;
-    fn commit_stream(&self) -> Self::CommitStream;
-}
-```
-
-适合：
-- tokio/Stream 生态
-- 数据管道
-- 异步 fan-out
-
-约束：
-- 只是 cursor/log 的连续消费包装
-- 不得绕开 `Revision / ChangeSet`
-
 ### `tqsdk-api-callback`
 ```rust
 pub trait CallbackApi {
@@ -96,6 +79,6 @@ pub trait CallbackApi {
 - 不得提前成为 runtime 的主驱动接口
 
 ## 关键判断
-- `wait` / stream / callback 是并列的消费 adapter
+- `wait` / callback / 调用方自建 fan-out 是并列的消费 adapter
 - 它们都晚于 runtime contract
 - 它们的实现差异只能体现在 cursor 消费与读视图包装，不能体现在状态提交模型

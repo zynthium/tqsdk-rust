@@ -2,7 +2,7 @@
 //! Research and offline data tooling for `tqsdk-rust`.
 //!
 //! `tqsdk-data` hosts research/offline helpers that should not widen the
-//! public surface of `tqsdk-session`, `tqsdk-wait`, or `tqsdk-stream`.
+//! public surface of `tqsdk-session`, `tqsdk-wait`, or caller-owned live consumers.
 //!
 //! Current stabilized surfaces stay intentionally narrow:
 //!

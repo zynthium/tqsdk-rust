@@ -6,7 +6,7 @@
 它回答的是：
 
 - `tqsdk-data` 应该承接哪些能力
-- 为什么这些能力不应继续塞进 `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream`
+- 为什么这些能力不应继续塞进 `tqsdk-session` / `tqsdk-wait`
 - 第一阶段只起脚手架时，哪些 public surface 先不要冻结
 
 它不回答：
@@ -34,7 +34,7 @@
 
 换句话说，当前最稳定的做法不是急着导出一堆研究接口，而是先明确：
 
-- live continuous-consumption 继续留在 `tqsdk-wait` / `tqsdk-stream`
+- live continuous-consumption 继续留在 `tqsdk-wait` 或调用方自建 reader/cursor 消费层
 - one-shot direct query 继续留在 `tqsdk-session`
 - 离线批量拉取、研究型表格视图、缓存落盘统一放进 `tqsdk-data`
 
@@ -69,9 +69,9 @@
 
 那么 `session` 会从“thin wrapper”变成“研究入口”，边界会明显变胖。
 
-### 不是 `tqsdk-wait` / `tqsdk-stream`
+### 不是 `tqsdk-wait`
 
-这两层负责的是 diff-backed live 对象消费形状。
+这一层负责的是 diff-backed live 对象消费形状。
 
 而 `tqsdk-data` 面向的是：
 
@@ -80,7 +80,7 @@
 - 文件落盘
 - 表格视图
 
-这不是 `wait_update()` 或 stream/event 模式选择的问题。
+这不是 `wait_update()` 或 live event 模式选择的问题。
 
 ## 第一阶段推荐范围
 
@@ -153,7 +153,7 @@
 - DataFrame / polars public API
 - 路径管理型文件导出 API
 - 后台 downloader task
-- live stream bridge / live serial cache writer
+- live consumer bridge / live serial cache writer
 - live durable cache sink daemon/runtime
 - 多进程 cache 管理服务与跨进程 daemon orchestration
 - Python 与 Rust 进程同时写同一历史序列缓存目录
@@ -208,7 +208,7 @@ tqsdk-session
     |
 -----------------------------
 |            |              |
-tqsdk-wait  tqsdk-stream  tqsdk-data
+tqsdk-wait        tqsdk-data
                 ^
                 |
             tqsdk-task
@@ -218,7 +218,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 
 - `tqsdk-data` 可以依赖 `tqsdk-session`
 - 如有必要，`tqsdk-data` 也可以直接依赖 `tqsdk-core`
-- `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` 不应反向依赖 `tqsdk-data`
+- `tqsdk-session` / `tqsdk-wait` 不应反向依赖 `tqsdk-data`
 
 ## 当前落地策略
 
@@ -240,9 +240,9 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 - `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /
   `MarketCacheReader` / `MarketCacheReplay` 这类 JSONL market cache public API；
   deterministic replay / local backtest 输入属于 `tqsdk-task`
-- live stream pipe、stream feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
+- live pipe、live consumer feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
 - `tqsdk-data` 不再提供 `LiveHistoryCacheWriter`；live diff consumption 留在
-  `tqsdk-stream`，hot-path persistence 由调用方或独立上层服务拥有，Python-compatible
+  `tqsdk-wait` 或调用方自建 reader/cursor 消费层，hot-path persistence 由调用方或独立上层服务拥有，Python-compatible
   mmap history cache 只服务 `get_*_data_series` 的离线时间范围读取
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
@@ -254,7 +254,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
   报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
   cache hit/miss/downloaded 和权限检查状态，不绑定外部数据库或 tabular 框架
 - 它不是新的 session facade
-- 它也不是 live ref / live stream；当前没有 stream window 写 mmap history cache
+- 它也不是 live ref / live consumer；当前没有 live window 写 mmap history cache
   bridge，也不拥有 live 消费 facade
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
@@ -279,7 +279,7 @@ tqsdk-wait  tqsdk-stream  tqsdk-data
 这样做的意义是：
 
 - 不把研究/批量历史接口继续塞进 `tqsdk-session`
-- 不把历史数据读取和 `wait_update()` / stream 模式耦合在一起
+- 不把历史数据读取和 `wait_update()` / live consumer 模式耦合在一起
 - 给 file writer / export / dataframe 预留稳定的 `page -> download -> materialization` 递进路径
 - 后续可以在 `tqsdk-data` 上继续叠加路径管理型文件导出、tabular adapters 或
   history cache maintenance tooling，而不污染 core/session/live facade 的边界；

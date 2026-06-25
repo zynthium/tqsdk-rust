@@ -11,7 +11,7 @@
 
 - V1 到底交付什么
 - 哪些能力必须进入 runtime kernel
-- 为什么 `RuntimeReader` 而不是 `wait_update` / `stream-callback` 才是 V1 的主读契约
+- 为什么 `RuntimeReader` 而不是 `wait_update` / callback / fan-out 才是 V1 的主读契约
 - 如何在不回改内核的前提下，同时承载 Python 风格和 Rust 风格的后续 facade
 - `tqsdk-python` 与现有 `tqsdk-rs` 两种 facade 范式该如何取长补短
 
@@ -19,7 +19,7 @@
 V1 不是：
 
 - `wait_update()` SDK
-- `stream/callback` SDK
+- callback / fan-out SDK
 - `TqApi` SDK
 
 V1 是：
@@ -41,7 +41,7 @@ V1 是：
 
 - `TqApi`
 - `wait_update()` facade
-- stream facade
+- fan-out facade
 - callback facade
 - 各类高层 view
 - `TargetPosTask`
@@ -63,12 +63,12 @@ V1 是：
   - 纯交易时段状态 helper，用于本地日内时段的 open / pre-close / closed 判断与倒计时计算
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
-  - 为 `wait_update`、stream/callback facade 提供共同读面
+  - 为 `wait_update`、callback/fan-out facade 提供共同读面
 - `UpdateCursor`
   - 独立推进的 commit 消费游标
 - `CommitResult` / `SharedCommitResult`
   - `CommitResult` 是不可变提交元数据；`SharedCommitResult = Arc<CommitResult>`
-    是 runtime 发布、cursor 消费和 stream fan-out 的共享所有权句柄
+    是 runtime 发布、cursor 消费和 fan-out 的共享所有权句柄
 
 不属于稳定 public core 主线：
 
@@ -102,7 +102,7 @@ V1 是：
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - local backtest continuous minute helper 可自动查询主连 underlying segment、按交易日窗口裁剪历史分钟线并以主连 symbol 回放
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
-  - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/stream/task/data
+  - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
 - `tqsdk-session`
   - shared session shell
@@ -128,7 +128,7 @@ V1 是：
   - session-scoped order intent ledger，供上层 facade 在同一 session 内对稳定
     client order id 做去重和命令关联
   - 保持“纯 async substrate，调用方自带 Tokio runtime”的约束
-  - 供 `wait` / `stream` 共同依赖
+  - 供 `wait` 和自建消费层共同依赖
 - `tqsdk-wait`
   - `TqApi` 单推进点 facade
   - market/trade 对象引用
@@ -141,16 +141,6 @@ V1 是：
   - 基于 shared session 的 live `wait_update()` 驱动链路
   - trade 命令的 wait 风格薄包装
   - 允许通过 `session()` 落回同一个底层 `SessionClient`，但不复制 direct query API
-- `tqsdk-stream`
-  - shared-session multi-consumer commit stream facade
-  - root fan-out capacity 配置与 typed lag diagnostics
-  - commit/path/scope/domain/object/field filters
-  - 批量 quote stream 入口 `quote_batches(...)`，按 commit 只 decode 本轮
-    changed quote symbols，作为 multi-consumer stream 场景的批量 quote 入口
-  - typed path stream / ready kline-tick row batch / trade session events
-  - bounded fan-out lag diagnostics、health status 和 sink-free graceful shutdown
-  - health status / restart hint
-  - `stream.session()` 仍然是一次性 direct query 的逃生舱，但不改变 direct query 的 crate 归属
 - `tqsdk-task`
   - `TaskHost`
   - `TargetPosTask`
@@ -224,7 +214,7 @@ V1 是：
   不代表 JSONL cache storage 进入 data public surface，也不代表 strategy
   execution 进入 data
 - `tqsdk-task` 可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供
-  Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait/stream
+  Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait
   的 runtime contract 和 facade 边界
 - `tqsdk` 的 local backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
   `StrategyBacktest + TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
@@ -235,32 +225,32 @@ V1 是：
 
 ## API 归属总表
 
-为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或 `stream`，当前架构采用下面这条硬边界：
+为了避免后续实现时再次把“一次性 direct query”误塞进 `wait` 或自建消费层，当前架构采用下面这条硬边界：
 
 - `tqsdk-session` 负责所有一次性 request/response 接口
-- `tqsdk-wait` 和 `tqsdk-stream` 只负责 diff-backed 持续状态消费接口
+- `tqsdk-wait` 只负责 single-owner diff-backed 持续状态消费接口
 
 | 接口类别 | 应归属的 crate | 原因 |
 | :--- | :--- | :--- |
-| GraphQL / HTTP query | `tqsdk-session` | 一次 `await` 请求/响应，不依赖 `wait_update()` 或 stream |
+| GraphQL / HTTP query | `tqsdk-session` | 一次 `await` 请求/响应，不依赖 `wait_update()` |
 | schema refresh / fetch | `tqsdk-session` | 一次性拉取/刷新，不是持续变化对象 |
 | 合约元数据查询 / `SymbolInfo` / `InstrumentSpec` 标准化 | `tqsdk-session` | 属于 direct query / metadata，不需要模式化消费 |
 | 交易日历 | `tqsdk-session` | 一次性结果，不应绑定某种 diff 消费形状；`TradingCalendarDay.date` 是 typed `NaiveDate` |
 | `SymbolSettlement` / `SymbolRanking` / 其他 metadata query | `tqsdk-session` | 都是 query 结果，不是 live object |
-| session 内订单 intent ledger | `tqsdk-session` | 是 shared session substrate，帮助 wait/stream/task 复用同一 client order id 去重语义，但不拥有 live order object |
+| session 内订单 intent ledger | `tqsdk-session` | 是 shared session substrate，帮助 wait/task 和自建消费层复用同一 client order id 去重语义，但不拥有 live order object |
 | 低层行情命令 helper | `tqsdk-session` | 是一次性 runtime command submission，不拥有 live quote object 或消费循环 |
-| stream fan-out capacity / lag diagnostics / health status | `tqsdk-stream` | 属于 continuous consumption 的 consumer/channel 状态，不应下沉到 core/session |
-| `quote` / `trading_status` | `tqsdk-wait` / `tqsdk-stream` | 返回持续变化对象，依赖 commit 持续推进 |
-| `kline` / `tick` | `tqsdk-wait` / `tqsdk-stream` | 返回持续更新窗口，依赖后续 diff |
-| `account` / `position` / `order` / `trade` | `tqsdk-wait` / `tqsdk-stream` | 读取的是同一棵状态树中的 live 对象 |
-| `insert_order` / `cancel_order` / `confirm_settlement` | `tqsdk-wait` / `tqsdk-stream` | 属于 trade diff-backed 消费语义的一部分 |
+| consumer fan-out capacity / lag diagnostics / health status | 调用方自建消费层 | 属于具体 consumer/channel 状态，不下沉到 core/session |
+| `quote` / `trading_status` | `tqsdk-wait`；自建消费层可用 `RuntimeReader` | 返回持续变化对象，依赖 commit 持续推进 |
+| `kline` / `tick` | `tqsdk-wait`；自建消费层可用 `RuntimeReader` | 返回持续更新窗口，依赖后续 diff |
+| `account` / `position` / `order` / `trade` | `tqsdk-wait`；自建消费层可用 `RuntimeReader` | 读取的是同一棵状态树中的 live 对象 |
+| `insert_order` / `cancel_order` / `confirm_settlement` | `tqsdk-wait` / `tqsdk-task` / `tqsdk-session` helper | 属于 trade diff-backed 消费语义或 task 执行语义 |
 
 对用户形态的含义也应明确：
 
 - `tqsdk-session` 不是只给 facade 内部用，用户也可以直接使用它来做 direct query / schema / metadata 访问
 - 对性能极致敏感、希望自己掌控 cursor/commit 驱动的用户，也可以直接使用 `tqsdk-session::SessionClient + progress_once() + RuntimeReader`
 - `tqsdk-wait` 即便提供 `session()` 访问底层 session，也只是复用路径，不改变 direct query 的 crate 归属
-- `tqsdk-stream` 现在也不是 direct query 的归属地，而是给高并发、多消费者、事件流场景提供一层现成但仍然很薄的 diff facade
+- 高并发、多消费者、事件流场景不再有内置 fan-out crate；调用方应基于 `RuntimeReader::cursor()` / `RuntimeReader::next()` 自建 fan-out
 - 对性能极致敏感的用户，仍然可以直接使用 `tqsdk-core + tqsdk-session`
 
 在 `tqsdk-session` 这一层里，建议再按“薄包装 vs 高层研究工具”继续收一刀：
@@ -312,7 +302,6 @@ V1 是：
 | runtime contract：命令、状态、commit、cursor、adapter | [runtime-core/overview.md](runtime-core/overview.md)、[runtime-core/modules.md](runtime-core/modules.md)、[runtime-core/protocol-flow.md](runtime-core/protocol-flow.md)、[runtime-core/data-contracts.md](runtime-core/data-contracts.md)、[runtime-core/type-system.md](runtime-core/type-system.md)、[runtime-core/session-auth.md](runtime-core/session-auth.md) |
 | Python / Rust facade 范式对比 | [facade-paradigms.md](facade-paradigms.md) |
 | `wait_update` facade | [api-wait.md](api-wait.md) |
-| stream facade | [api-stream.md](api-stream.md) |
 | task facade / execution tool | [api-task.md](api-task.md) |
 | data facade / research tooling | [api-data.md](api-data.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
@@ -331,10 +320,9 @@ V1 是：
    - 没有提交权
 4. `shared session layer`
    - 负责会话生命周期、query/schema/direct-query 封装，以及后续 facade 共享的 session 入口
-   - 是 `wait` / `stream` facade 之前的薄层
+   - 是 `wait` facade 和自建消费层之前的薄层
 5. `consumption facades`
    - `wait_update`
-   - stream
    - callback
    - 都只是消费 `RuntimeReader` / `UpdateCursor` 的后续适配层
 6. `user facades`
@@ -358,10 +346,9 @@ V1 是：
 12. [未来 crate 蓝图与能力映射](crate-blueprint.md)
 13. [验收与测试矩阵](validation.md)
 14. [wait facade](api-wait.md)
-15. [stream facade](api-stream.md)
-16. [task facade](api-task.md)
-17. [data facade](api-data.md)
-18. [演进路线](roadmap.md)
+15. [task facade](api-task.md)
+16. [data facade](api-data.md)
+17. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text
@@ -387,5 +374,5 @@ user facades / tools
 - 真正的可复用底层不是原始 WebSocket 客户端，也不是某一种用户 API
 - 真正的可复用底层是：`统一命令模型 + 统一状态树 + 统一 commit/revision/change 模型 + reader-first 读契约`
 - `tqsdk-session` 会先承接 shared session、direct query、schema / metadata 这类薄层职责
-- `wait_update` 和 `stream/callback` 的差异只能体现在“怎么消费 commit / 怎么读取同一棵状态树”，不能体现在“怎么生成 commit”
+- `wait_update` 和 callback/fan-out 的差异只能体现在“怎么消费 commit / 怎么读取同一棵状态树”，不能体现在“怎么生成 commit”
 - V1 的完成标准是 contract 完整，不是 facade 完整

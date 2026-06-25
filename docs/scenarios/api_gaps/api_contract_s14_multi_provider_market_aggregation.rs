@@ -35,7 +35,7 @@
 //! core/session 或污染单 provider 用户路径。
 //!
 //! API gap:
-//! 当前 public API 基本围绕单 `SessionClient` / 单 `TqStream`。`tqsdk-core`
+//! 当前 public API 基本围绕单 `SessionClient` / 单 runtime reader。`tqsdk-core`
 //! 有 aggregated reader 相关底座，但没有终端用户可用的 provider aggregation
 //! facade。
 //!
@@ -48,7 +48,7 @@
 //! 理想用户代码草案：
 //! ```ignore
 //! let mut market = MarketAggregator::new()
-//!     .primary(TqStreamBuilder::new(user, pass).futures_market())
+//!     .primary(SessionClientBuilder::new(user, pass).futures_market())
 //!     .fallback(CustomProvider::new(...))
 //!     .dedupe_by_exchange_timestamp()
 //!     .quote("SHFE.au2602")

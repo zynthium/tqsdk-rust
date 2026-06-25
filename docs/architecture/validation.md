@@ -6,7 +6,7 @@
 重点服务于：
 
 - V1 protocol-complete runtime contract
-- V2+ wait / stream / callback adapters
+- V2+ wait / fan-out / callback adapters
 
 相关文档：
 
@@ -20,7 +20,7 @@
 
 - 约束 V1 的 command-to-commit 完整性
 - 约束统一状态树、统一 revision、统一 cursor/log 语义
-- 为未来 `wait_update`、stream、callback adapter 提供同一套底层验收基线
+- 为未来 `wait_update`、fan-out、callback adapter 提供同一套底层验收基线
 
 ## 验收原则
 V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
@@ -159,11 +159,6 @@ facade 或 runtime 消费方式重构后，都必须确认这些 examples 仍能
 2. `cargo test --workspace`
 3. `cargo clippy --workspace --examples --all-targets -- -D warnings`
 
-stream facade public API 或 row-batch 投影改动后，还应至少运行：
-
-1. `cargo test -p tqsdk-stream`
-2. `cargo check -p tqsdk-stream --examples`
-
 如果 feature flags、workspace 依赖或 crate feature 传播被修改，还必须运行：
 
 1. `cargo check --workspace --no-default-features`
@@ -237,7 +232,7 @@ Regression guards fixed in the facade iteration and still required before a sour
 
 `cargo package --workspace --no-verify` 是内部制品的 manifest/package metadata gate。
 如果切换到 crates.io 或要求完整 registry verify，必须按依赖顺序发布或验证：
-`tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` / `tqsdk-stream` ->
+`tqsdk-core` -> `tqsdk-session` -> `tqsdk-wait` ->
 `tqsdk-data` -> `tqsdk-task` -> `tqsdk`。
 
 `cargo +nightly fuzz build` 只验证 fuzz targets 可编译，不执行长时间 fuzz campaign。
@@ -258,16 +253,15 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 3. `cargo build -p tqsdk-session --no-default-features --features live`
 4. `cargo build -p tqsdk-session --no-default-features --features services`
 5. `cargo build -p tqsdk-wait --no-default-features`
-6. `cargo build -p tqsdk-stream --no-default-features`
-7. `cargo build -p tqsdk-task --no-default-features`
-8. `cargo build -p tqsdk-data --no-default-features`
-9. `cargo build -p tqsdk --no-default-features`
-10. `cargo build -p tqsdk --no-default-features --features live`
-11. `cargo build -p tqsdk --no-default-features --features services`
-12. `cargo build -p tqsdk --all-features`
-13. `cargo test -p tqsdk`
-14. `cargo test -p tqsdk-core`
-15. `cargo test -p tqsdk-session --no-default-features`
+6. `cargo build -p tqsdk-task --no-default-features`
+7. `cargo build -p tqsdk-data --no-default-features`
+8. `cargo build -p tqsdk --no-default-features`
+9. `cargo build -p tqsdk --no-default-features --features live`
+10. `cargo build -p tqsdk --no-default-features --features services`
+11. `cargo build -p tqsdk --all-features`
+12. `cargo test -p tqsdk`
+13. `cargo test -p tqsdk-core`
+14. `cargo test -p tqsdk-session --no-default-features`
 
 生产发布联机 smoke 入口：
 
@@ -287,16 +281,13 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
 7. `cargo test -p tqsdk-session live_tqkq_trade_login_smoke -- --ignored --nocapture`
 8. `cargo test -p tqsdk-wait live_quote_wait_smoke -- --ignored --nocapture`
 9. `cargo test -p tqsdk-wait live_quote_wait_with_session_query_smoke -- --ignored --nocapture`
-10. `cargo test -p tqsdk-stream live_quote_stream_smoke -- --ignored --nocapture`
-11. `cargo test -p tqsdk-stream live_quote_stream_with_session_query_smoke -- --ignored --nocapture`
-12. `cargo test -p tqsdk-stream live_trade_session_event_smoke -- --ignored --nocapture`
-13. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
-14. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
-15. `cargo test -p tqsdk-task live_scheduler_pause_step_smoke -- --ignored --nocapture`
-16. `cargo test -p tqsdk-data live_history_request_pack_smoke -- --ignored --nocapture`
-17. `cargo test -p tqsdk-data live_option_greeks_smoke -- --ignored --nocapture`
-18. `cargo test -p tqsdk-data live_export_kline_csv_smoke -- --ignored --nocapture`
-19. `cargo test -p tqsdk-data live_export_tick_csv_smoke -- --ignored --nocapture`
+10. `cargo test -p tqsdk-task live_task_host_trade_account_ready_smoke -- --ignored --nocapture`
+11. `cargo test -p tqsdk-task live_insert_cancel_guarded_smoke -- --ignored --nocapture`
+12. `cargo test -p tqsdk-task live_scheduler_pause_step_smoke -- --ignored --nocapture`
+13. `cargo test -p tqsdk-data live_history_request_pack_smoke -- --ignored --nocapture`
+14. `cargo test -p tqsdk-data live_option_greeks_smoke -- --ignored --nocapture`
+15. `cargo test -p tqsdk-data live_export_kline_csv_smoke -- --ignored --nocapture`
+16. `cargo test -p tqsdk-data live_export_tick_csv_smoke -- --ignored --nocapture`
    默认走官方内置 `TqKq` 主模拟账户；可选用 `TQ_TRADE_ACCOUNT_NO=<1..99>` 切到辅模拟账户，或同时设置 `TQ_TRADE_BROKER_ID` / `TQ_TRADE_ACCOUNT_ID` / `TQ_TRADE_PASSWORD` 显式覆盖
    只有显式设置 `TQ_SMOKE_ALLOW_ORDER=1` 且提供 `TQ_SMOKE_ORDER_SYMBOL` / `TQ_SMOKE_ORDER_LIMIT_PRICE` 时才会真正发单；
    EDB service query 默认在账号无 EDB 权限时跳过 EDB 断言，设置
@@ -306,10 +297,6 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
 ### wait adapter
 - 能只靠 `RuntimeReader` / `SnapshotReadGuard` / `UpdateCursor` 实现 `wait_update()`
 - 能只靠 `ChangeSet` 实现 `is_changing()`
-
-### stream adapter
-- 能只靠 `RuntimeReader::next()` / `UpdateCursor` 形成连续 commit stream
-- backpressure 策略不回灌 runtime core
 
 ### callback adapter
 - 能只靠 `RuntimeReader::next()` / `UpdateCursor` 实现回调 fan-out
@@ -322,7 +309,7 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
 | 集成测试 | 验证 command-to-commit 全链路与 snapshot 一致性 |
 | contract 测试 | 验证不同协议域共享同一 revision / causality / cursor 模型 |
 | 重连专项 | 验证 session error、重连与 resync 仍走统一提交模型；覆盖有限重试耗尽和默认无限重试直到成功 |
-| adapter 验证 | 验证 wait / stream / callback 只消费 contract，不回改 contract |
+| adapter 验证 | 验证 wait / fan-out / callback 只消费 contract，不回改 contract |
 
 ## Workspace 测试放置原则
 为保持多个 crate 的测试结构一致，新增或移动测试时遵守以下规则：

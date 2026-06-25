@@ -7,7 +7,7 @@
 
 - `tqsdk-core` 只表达协议对象、状态树、adapter、commit / reader contract。
 - `tqsdk-session` 负责提交 market command 和维护 shared session。
-- `tqsdk-wait` / `tqsdk-stream` 负责 diff-backed live object 消费形态。
+- `tqsdk-wait` 负责 single-owner diff-backed live object 消费形态；多消费者消费层由调用方基于 reader/cursor 自建。
 - `tqsdk-relay` 是可选 market relay，不改变默认直连路径。
 
 ## DIFF 协议心智模型

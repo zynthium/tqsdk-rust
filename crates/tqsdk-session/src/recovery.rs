@@ -9,7 +9,7 @@ use crate::SessionClient;
 ///
 /// This type only describes which already-requested live objects must be ready.
 /// It does not submit subscriptions or trade logins; consumption facades such as
-/// `tqsdk-wait` and `tqsdk-stream` own those user-facing workflows.
+/// `tqsdk-wait` and caller-owned live consumers own those user-facing workflows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupRecoverySpec {
     quote_symbols: Vec<String>,

@@ -7,7 +7,7 @@
 
 - 官方 `tqsdk-python` 的 `wait_update()` 范式到底强在哪里，代价又是什么？
 - 现有 `tqsdk-rs` 的 async subscription / event-driven 范式到底做了哪些取舍？
-- 这两种范式里，哪些应当进入当前的 `tqsdk-wait`，哪些应当保留给当前的 `tqsdk-stream` / 可能的 `tqsdk-callback`？
+- 这两种范式里，哪些应当进入当前的 `tqsdk-wait`，哪些应当保留给调用方自建 reader/cursor 消费层或可能的 `tqsdk-callback`？
 - 哪些经验只能停留在 facade 层，不能反向污染 `tqsdk-core`？
 
 ## 调研范围
@@ -41,7 +41,7 @@
 - 用户在两次 `wait_update()` 之间看到的是同一个稳定截面
 
 ### 结论 2
-现有 `tqsdk-rs` 不是纯 stream/callback SDK，而是一个更接近“async state refs + per-subscription waiting + event streams”的混合范式。
+现有 `tqsdk-rs` 不是纯 callback/fan-out SDK，而是一个更接近“async state refs + per-subscription waiting + event feeds”的混合范式。
 
 它的典型接口不是：
 
@@ -72,7 +72,7 @@
 后续 facade 层的正确方向应当是：
 
 - `tqsdk-wait` 继承 Python 的“单推进点 + 单稳定截面”语义
-- `tqsdk-stream` / `tqsdk-callback` 继承 Rust 的“多消费者异步等待 / 事件流”优势
+- 调用方自建消费层 / `tqsdk-callback` 继承 Rust 的“多消费者异步等待 / 事件流”优势
 - 但两者都只能消费同一个 `tqsdk-core`，不能重定义内核
 
 ## 范式 A: `tqsdk-python` 的 `wait_update()` 模型
@@ -187,7 +187,7 @@
   subscription 对象自己起 watch task、自己维护 channel、自己负责 close/drop 行为，这在 facade 层可以接受，但不适合作为 core contract。
 
 - 容易形成“多套可见状态语义”。
-  一部分用户走 `wait_update()`，一部分用户走 `snapshot()`，一部分用户走 event stream，一部分用户走 path watcher，长期会让 public surface 变宽且难以维护。
+  一部分用户走 `wait_update()`，一部分用户走 `snapshot()`，一部分用户走 event feed，一部分用户走 path watcher，长期会让 public surface 变宽且难以维护。
 
 ## 对比矩阵
 
@@ -195,7 +195,7 @@
 | --- | --- | --- |
 | 主控制流 | 单 owner、单推进点 | 多对象、多等待点 |
 | 状态语义 | 强“稳定截面” | 偏对象局部一致性 |
-| 更新解释 | 基于最近一次 `wait_update()` 的 diff | 基于 epoch / watcher / event stream |
+| 更新解释 | 基于最近一次 `wait_update()` 的 diff | 基于 epoch / watcher / event feed |
 | 命令发送语义 | 下一次 `wait_update()` 发出 | 多为接口立即触发订阅或异步动作 |
 | 后台任务模型 | 从属于 `wait_update()` | 依赖 Tokio task / channel |
 | 多消费者 | 弱 | 强 |
@@ -213,12 +213,12 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 当前 `tqsdk-core` 已经明确要求调用方自带 runtime，这是对的，不能回退。
 
 ### 2. `tqsdk-core` 也不应复制 `tqsdk-rs` 的 watcher-first 结构
-`tqsdk-rs` 的 watcher / event stream 适合做 facade，但如果把它们变成 core 的主 contract，会带来两个问题：
+`tqsdk-rs` 的 watcher / event feed 适合做 facade，但如果把它们变成 core 的主 contract，会带来两个问题：
 
 - 统一 commit / revision 语义会被对象级 epoch 观察稀释
 - market / trade / replay / query / schema 的跨域一致性会变得更难表达
 
-因此，watcher / stream 最多只能是 `RuntimeReader + UpdateCursor` 之上的二次消费层。
+因此，watcher / fan-out 最多只能是 `RuntimeReader + UpdateCursor` 之上的二次消费层。
 
 ### 3. `tqsdk-wait` 应优先继承 Python 的语义，不应先继承 `tqsdk-rs` 的形状
 `tqsdk-wait` 的第一目标不是“把 async Rust 用法包装得更自然”，而是：
@@ -229,7 +229,7 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 
 这件事更接近 Python，而不是更接近 `tqsdk-rs` 当前的对象级等待模型。
 
-### 4. `tqsdk-stream` / `tqsdk-callback` 可以吸收 `tqsdk-rs` 的工程经验
+### 4. 自建消费层 / `tqsdk-callback` 可以吸收 `tqsdk-rs` 的工程经验
 真正适合从 `tqsdk-rs` 继承的内容是：
 
 - 按对象或按域的异步等待
@@ -237,11 +237,11 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 - 状态流与可靠事件流分层
 - 多消费者订阅生命周期管理
 
-但这些能力应出现在 `tqsdk-stream` / 可能的 `tqsdk-callback`，而不是抢占 `tqsdk-wait` 的第一优先级。
+但这些能力应出现在调用方自建消费层 / 可能的 `tqsdk-callback`，而不是抢占 `tqsdk-wait` 的第一优先级。
 
 这里还需要明确一条边界：
 
-- `tqsdk-stream` 负责的是 diff-backed 实时对象的异步消费形状
+- 异步消费层负责的是 diff-backed 实时对象的消费形状
 - 它不是 direct query / schema / metadata 的承载层
 - 一次性 query/request-response 接口应继续留在 `tqsdk-session`
 
@@ -255,17 +255,17 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 - `is_changing()` 解释最近一次已消费 commit
 - trade 命令与命令状态可见性应与 `wait_update()` 的推进边界保持一致
 
-### 对 `tqsdk-stream`
+### 对自建异步消费层
 
-- 可以提供按对象 / 按路径 / 按协议域的 stream
+- 可以提供按对象 / 按路径 / 按协议域的 event feed
 - 可以按需引入背压与丢弃策略
 - 可以对订单/成交保留“可靠事件流”而不是快照轮询
-- 但 stream 的更新边界应从 core commit 派生，而不是绕开 core 再建一套 epoch contract
+- 但 event feed 的更新边界应从 core commit 派生，而不是绕开 core 再建一套 epoch contract
 - 不应重新暴露 direct query / schema / metadata facade；这些接口无论服务于研究员还是高性能用户，都应直接来自 `tqsdk-session`
 
 ### 对 `tqsdk-callback`
 
-- callback 应视为 stream 的另一种消费包装
+- callback 应视为 fan-out 的另一种消费包装
 - callback 的触发条件同样应解释为“某个 commit 或 commit 的投影命中了订阅条件”
 - 不应让 callback 直接持有 transport / websocket / raw diff 层能力
 
@@ -280,7 +280,7 @@ Python 的单 owner、单推进点语义值得继承，但 “SDK 自己拥有 l
 
 如果目标是做一个“给高并发、多消费者、异步系统集成方用”的 facade，优先级应该是：
 
-1. 使用 `tqsdk-stream`
+1. 使用 `tqsdk-session + RuntimeReader/UpdateCursor`
 2. 参考 `tqsdk-rs` 的 subscription / event-driven 经验
 3. 但仍然从 `tqsdk-core` 的 commit/revision 读面导出
 

@@ -66,7 +66,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 提供 typed
     本进程 cycle marker；marker 不完整时 `report()` 返回 `None`
   - 慢日志、WAL、journal 和 audit sidecar 由调用方或上层服务拥有，不进入
-    profile public API，也不由 `tqsdk-stream` 托管
+    profile public API，也不由 SDK 内置 fan-out 托管
 - `ExecutionGroup`
   - 通过 typed group id 管理两腿订单 intent
   - 所有腿在提交前统一经过 ownership guard、risk gate 和本地参数校验

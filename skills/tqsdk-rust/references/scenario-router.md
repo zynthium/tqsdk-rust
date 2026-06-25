@@ -16,7 +16,7 @@
 | "实时行情", "quote", "批量订阅", "盘口", "价格变化" 且没有明确要内部 crate | Default live strategy loop | `tqsdk` first; `tqsdk-wait` only when explicit Python-style wait API is needed | `Tq::futures`, `quote`, `quotes`, `next`, `QuoteRef::load`; advanced wait: `TqApiBuilder`, `step`, `WaitStep::is_changing` |
 | "像 Python TqApi", "wait_update", "is_changing", "step_until" | Explicit Python-style live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `quotes`, `step`, `WaitStep::is_changing`, `QuoteRef::load`, `QuoteSet::changed_snapshot` |
 | "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `kline`, `tick`, `trading_status`, `step_until`, window/ref load methods |
-| "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Multi-consumer event pipeline | `tqsdk-stream` | `TqStreamBuilder`, `commit_stream`, filters, `quote_batches`, `quote_stream`, `market_events`, row-batch kline/tick streams, trade/session event streams |
+| "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Caller-owned event/fan-out layer | `tqsdk-session + tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `UpdateCursor`, caller-owned filters/channels/lag diagnostics |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk` for ordinary target-position path; `tqsdk-task` when ownership/risk/task internals are needed; `tqsdk-wait` for thin direct order wrappers | `Tq::target_pos_tqkq`, `TargetPos`; advanced: `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "回测", "策略回测", "TqBacktest", "TqSim", "本地模拟账户", "同一策略跑实盘和回测" | Strategy backtest | `tqsdk` first for ordinary same-body facade; `tqsdk-wait` for explicit Python-style wait builder; `tqsdk-task` + `tqsdk-data` for local deterministic internals | facade: `TqBuilder::backtest`, `local_backtest`, `quote_symbol`, `price_tick`, `Tq::next`, `backtest_summary`; wait: `TqApiBuilder::futures_backtest`, `TqBacktest`, `step`; local internals: `StrategyBacktest`, `TqSim`, `ReplayMarketSource`, `finish_sim_step` |
@@ -50,7 +50,7 @@
 1. 用正确 market route 构造 `SessionClient`。`SessionClientBuilder::build()` 是同步的。
 2. 需要官方 query 语义时添加 `enable_query()`。
 3. 调用具体 one-shot helper。
-4. 如果已经在 wait/stream 中，复用 `api.session()` 或 `stream.session()`。
+4. 如果已经在 wait facade 或 session-backed loop 中，复用 shared session，不要另建 query client。
 
 典型 helper：`query_symbol_info`、`query_instrument_specs`、`query_quotes`、`query_cont_quotes`、`query_options`、`query_atm_options`、`query_all_level_options`、`query_all_level_finance_options`、`get_trading_calendar`、`query_symbol_settlement`、`query_symbol_ranking`、`query_edb_data`。
 
@@ -65,16 +65,16 @@
 
 ### 3. 构建 live data bus
 
-使用 `tqsdk-stream`。
+使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 SDK substrate；event bus、fan-out、慢 consumer 隔离和持久化 sidecar 属于调用方集成层。
 
 调用顺序：
 
-1. 构造 `TqStream`。
-2. 订阅或选择 typed stream/event API。
-3. 能过滤时使用 commit/path/scope/domain/object/field filters。
-4. 慢持久化放在调用方自有 sidecar。
-5. metadata 使用 `stream.session()`，不要另开 query client。
-6. 显式处理 lag/closed/error report；fan-out 是 bounded。
+1. 构造 `SessionClient`，显式 subscribe/login。
+2. 用 `session.reader().clone()` 创建 shared `RuntimeReader`。
+3. 每个 consumer 自己持有 `UpdateCursor`，用 `reader.next(&mut cursor)` 消费 commit 边界。
+4. 用 `read_market_state()` / `read_trade_state()` / `read_market_trade_state()` 读取需要的分区，不要 clone full snapshot。
+5. 过滤、bounded channel、lag/closed/error report、重放和持久化 sidecar 都由调用方实现。
+6. metadata 使用同一个 session 的 query support，不要另开 query client。
 7. 需要持久化 live events 时，使用调用方自有 sidecar；不要把 Python-compatible history mmap cache 接入 live 热路径。
 
 ### 4. 实现 target-position 策略
@@ -132,4 +132,4 @@
 
 只问一个按形状分类的问题，而不是实现细节：
 
-“你需要一个带 refs 的 live loop、multi-consumer event stream、one-shot metadata query、trading task abstraction，还是 historical/offline data？”
+“你需要一个带 refs 的 live loop、多个事件消费者、one-shot metadata query、trading task abstraction，还是 historical/offline data？”

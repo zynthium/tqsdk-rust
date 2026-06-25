@@ -8,7 +8,7 @@
 > 这是一个纯 async substrate。crate 内部不会创建 Tokio runtime。凡是涉及 auth、HTTP、websocket、重连退避、live session 驱动的路径，调用方都必须自行提供 Tokio runtime。
 
 > [!NOTE]
-> 这个 crate 不是 `TqApi`，不是 `wait_update()` SDK，也不是 stream / callback SDK。后续这些高层能力应建立在这个 core 之上，而不是反过来侵入内核。
+> 这个 crate 不是 `TqApi`，不是 `wait_update()` SDK，也不是 callback / fan-out SDK。后续这些高层能力应建立在这个 core 之上，而不是反过来侵入内核。
 
 ## 这个 Crate 提供什么
 
@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 - 不提供高层用户便利 API。
 - 不提供 `wait_update()` facade。
-- 不提供 stream / callback facade。
+- 不提供 callback / fan-out facade。
 - 不提供策略辅助、任务封装、GUI / 报表、下载器、DataFrame / polars 集成、富视图层。
 - 不提供绕过 commit / revision 模型的旁路结果通道。
 
@@ -192,7 +192,7 @@ live 示例另外会用到：
   `Option<u32>` 解读。
 - hot path 应优先使用 `read_market_state()` / `read_trade_state()`；同一决策需要同时
   读取行情与交易状态时使用 `read_market_trade_state()`，不要退回 full snapshot clone。
-- 未来 `wait_update`、stream、callback facade 都应该只消费这个 substrate，而不是重定义内核。
+- 未来 `wait_update`、callback、fan-out facade 都应该只消费这个 substrate，而不是重定义内核。
 - `StateSnapshot`、`CommitLog` 这类兼容/底层原语仍然保留，但它们不定义主要读模型。
 
 ## 验证

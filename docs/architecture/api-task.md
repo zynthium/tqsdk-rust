@@ -7,7 +7,7 @@
 它回答的是：
 
 - `TargetPosTask`、scheduler、ownership 这些能力应该落在哪里
-- 它和 `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` / `tqsdk-stream` 的依赖关系应是什么
+- 它和 `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 的依赖关系应是什么
 - 第一版应该先冻结哪些 public surface，哪些暂时不做
 
 它不回答：
@@ -22,18 +22,16 @@
 - [crate 边界审计](crate-boundaries.md)
 - [crate 蓝图](crate-blueprint.md)
 - [wait facade](api-wait.md)
-- [stream facade](api-stream.md)
 - [路线图](../../ROADMAP.md)
 
 ## 先给结论
 
-`tqsdk-task` 应该是一个独立的高层执行工具 crate，而不是继续向 `wait` / `stream` 塞功能。
+`tqsdk-task` 应该是一个独立的高层执行工具 crate，而不是继续向 `wait` / 自建消费层塞功能。
 
 第一版的最小结论是：
 
 - `tqsdk-core` 不承接任务语义
 - `tqsdk-session` 不承接任务语义
-- `tqsdk-stream` 不承接任务 ownership / scheduler
 - `tqsdk-task` 的 task/scheduler/strategy host 仍以 `tqsdk-wait` 为 canonical substrate；
   S31 trading desk profile 是独立的 session/reader hot-path 薄 profile
 - `tqsdk-task` 第一版只做：
@@ -55,9 +53,9 @@
 
 原因很直接：
 
-- `TargetPosTask` 的核心不是“多消费者 stream”，而是“单个稳定推进点上的规划与执行”
+- `TargetPosTask` 的核心不是“多消费者 event feed”，而是“单个稳定推进点上的规划与执行”
 - Python 官方语义也是绑定在 `wait_update()` 心智上的
-- 这类能力一旦放进 `wait` 或 `stream`，会立刻把 facade 从“消费层”污染成“执行层”
+- 这类能力一旦放进 `wait` 或自建消费层，会立刻把 facade 从“消费层”污染成“执行层”
 
 当前仓库里的落地状态：
 
@@ -220,7 +218,7 @@
 
 ### 也不只是 facade 便利层
 
-`tqsdk-wait` / `tqsdk-stream` 当前只负责“如何消费同一棵状态树”。
+`tqsdk-wait` 和调用方自建消费层只负责“如何消费同一棵状态树”。
 
 `TargetPosTask` 则要负责：
 
@@ -274,7 +272,7 @@ Python 的 `TargetPosTask` 给出了三个关键约束：
 
 ## 为什么 task / scheduler 第一版先绑定 `tqsdk-wait`
 
-`tqsdk-task` 理论上可以建立在 `wait` 或 `stream` 之上，但第一版不应同时抽象两套 substrate。
+`tqsdk-task` 理论上可以建立在 `wait` 或调用方自建 reader/cursor 消费层之上，但第一版不应同时抽象两套 substrate。
 
 推荐第一版先绑定 `tqsdk-wait`，原因：
 
@@ -283,11 +281,11 @@ Python 的 `TargetPosTask` 给出了三个关键约束：
 - ownership / 手动下单冲突控制在单 owner 模式下最容易做对
 - 这条路径最接近 Python 官方行为
 
-为什么第一版不直接建立在 `tqsdk-stream` 上：
+为什么第一版不直接建立在多消费者事件层上：
 
-- stream 适合多消费者与事件投影，不天然提供“谁是唯一推进点”
-- 如果为了 task 再在 stream 上造 registry / planner loop / command guard，很容易重做一遍 `TqRuntime`
-- 这会把 `tqsdk-stream` 从消费层重新变胖
+- 多消费者事件投影不天然提供“谁是唯一推进点”
+- 如果为了 task 再造 registry / planner loop / command guard，很容易重做一遍 `TqRuntime`
+- 这会把消费层重新变胖
 
 结论：
 
@@ -296,7 +294,7 @@ Python 的 `TargetPosTask` 给出了三个关键约束：
 - S31 trading desk profile 是低延迟柜台薄 profile，hot path 固定在
   `tqsdk-session + RuntimeReader`，只复用 task 层 `RiskEngine` / `TaskOrderIntent`
   / typed report 契约
-- 后续若确实需要 stream 驱动的执行任务，再追加单独 adapter，而不是先做泛化抽象
+- 后续若确实需要 event-driven 执行任务，再追加单独 adapter，而不是先做泛化抽象
 
 ## 最小 canonical API 草图
 
@@ -799,7 +797,7 @@ impl TargetPosScheduler {
 
 ## 第一版明确不做
 
-- 不做 stream-based task substrate
+- 不做 event-feed-based task substrate
 - 不做 callback bridge
 - 不做 downloader / DataFrame / polars
 - 不做回测报告
@@ -840,7 +838,7 @@ impl TargetPosScheduler {
    daemon 管理；Rust SDK 不规划 GUI、web helper 或内置 HTTP health/metrics endpoint。
 3. 继续压测 `TargetPosTask` 在部分成交、撤单失败、价格跳变下的保守重规划。
 4. 保持 task runtime 独立，不把 strategy host、test harness、scheduler、report、
-   stream adapter、callback 倒灌进 core/session/wait。
+   fan-out adapter、callback 倒灌进 core/session/wait。
 
 本轮已补充未物化 tracked order 的回归：
 

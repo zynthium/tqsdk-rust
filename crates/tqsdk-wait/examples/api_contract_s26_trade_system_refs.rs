@@ -8,7 +8,7 @@
 //! - `tqsdk-wait`
 //!
 //! Lower-level escape hatch:
-//! - 需要多消费者事件流时使用 `tqsdk-stream`
+//! - 需要多消费者事件流时基于 `RuntimeReader` / `UpdateCursor` 自建
 //!
 //! Non-goal:
 //! - direct query metadata、生产级风控服务、证券交易策略封装

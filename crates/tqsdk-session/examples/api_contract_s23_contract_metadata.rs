@@ -21,9 +21,9 @@
 //! - `serde_json::Value`
 //!
 //! Regression signal:
-//! - metadata 查询必须走 wait/stream facade
+//! - metadata 查询必须走 wait 或自建消费层 facade
 //! - 合约信息或规格需要从字符串 payload 手动解析
-//! - direct query 归属回流到 wait/stream
+//! - direct query 归属回流到 wait 或自建消费层
 //!
 //! Review questions:
 //! - 当前 API 是否自然表达合约信息查询？

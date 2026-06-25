@@ -74,5 +74,5 @@ adapter 可以暴露 recovery commands，但仍然没有提交权：这些命令
 
 ## 与后续 adapter 的关系
 - future `wait_update` adapter 只消费 `RuntimeReader` / `UpdateCursor`
-- future stream adapter 只消费 `RuntimeReader` / `UpdateCursor`
+- future fan-out adapter 只消费 `RuntimeReader` / `UpdateCursor`
 - future callback adapter 只消费 `RuntimeReader` / `UpdateCursor`

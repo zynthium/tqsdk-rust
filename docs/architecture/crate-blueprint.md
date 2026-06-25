@@ -18,16 +18,14 @@
 1. `tqsdk-core`
 2. `tqsdk-session`
 3. `tqsdk-wait`
-4. `tqsdk-stream`
-5. `tqsdk-task`
-6. `tqsdk-data`
-7. `tqsdk-backtest`（可选）
-8. `tqsdk-callback`（可选）
+4. `tqsdk-task`
+5. `tqsdk-data`
+6. `tqsdk-backtest`（可选）
+7. `tqsdk-callback`（可选）
 
 其中：
 
 - 前 3 个是当前已经稳定的基础层
-- `tqsdk-stream` 是最明确的下一层
 - `tqsdk-task` 与 `tqsdk-data` 是承接 Python / 现有 Rust 高层能力外溢的主要位置
 - `tqsdk-backtest` 与 `tqsdk-callback` 是否独立，取决于后续实际复杂度
 
@@ -38,14 +36,11 @@ tqsdk-core
     ^
     |
 tqsdk-session
-    ^        ^
-    |        |
-tqsdk-wait  tqsdk-stream
-    ^        ^        ^
-    |        |        |
-    |     tqsdk-callback
-    |        ^
-    |        |
+    ^
+    |
+tqsdk-wait
+    ^
+    |
     +---- tqsdk-task
     |
     +---- tqsdk-data
@@ -56,10 +51,10 @@ tqsdk-wait  tqsdk-stream
 
 说明：
 
-- `tqsdk-stream` 与 `tqsdk-wait` 是并列消费 facade
+- 多消费者 async 消费层不再是内置 crate；需要时由调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建
 - `tqsdk-task` 依赖 diff-backed facade，但不应反向进入底层
 - `tqsdk-data` 偏离线与研究工具，依赖底层 query / replay / history 能力
-- `tqsdk-backtest` 如果独立，应站在 `core/session + wait/stream + data` 之上
+- `tqsdk-backtest` 如果独立，应站在 `core/session + wait + data` 之上
 
 ## 各 crate 的推荐边界
 
@@ -76,7 +71,7 @@ tqsdk-wait  tqsdk-stream
 永远不建议进入：
 
 - `wait_update()`
-- stream / callback
+- callback / fan-out
 - direct query convenience
 - downloader
 - task runtime
@@ -99,7 +94,7 @@ tqsdk-wait  tqsdk-stream
 不应进入：
 
 - live object refs
-- stream / callback
+- callback / fan-out
 - downloader
 - task orchestration
 
@@ -126,28 +121,7 @@ tqsdk-wait  tqsdk-stream
 - query/schema/metadata direct facade
 - task runtime
 - downloader / dataframe
-- callback / stream fan-out
-
-## `tqsdk-stream`
-
-这是当前最明确的下一层。
-
-它应负责：
-
-- diff-backed live object 的异步 stream 消费
-- 多消费者等待点
-- 按对象 / 按协议域 / 按路径的 stream facade
-- 背压和订阅生命周期管理
-- 可靠事件流与状态流分层
-
-它不应负责：
-
-- direct query / schema / metadata
-- downloader
-- 目标持仓任务
-- DataFrame / polars
-
-它的设计应吸收现有 `tqsdk-rs` 的工程经验，但不得重定义 `tqsdk-core` 的 commit 语义。
+- callback / fan-out
 
 ## `tqsdk-task`
 
@@ -196,7 +170,7 @@ tqsdk-wait  tqsdk-stream
 不应放入：
 
 - live session owner
-- wait/stream continuous facade
+- wait/fan-out continuous facade
 - task runtime
 
 原因：
@@ -210,7 +184,7 @@ tqsdk-wait  tqsdk-stream
 如果未来回放/回测只需要：
 
 - replay control
-- wait/stream 读取
+- wait/fan-out 读取
 
 那么保持 replay contract 在 `core/session` 即可。
 
@@ -241,7 +215,7 @@ tqsdk-wait  tqsdk-stream
 - downloader
 - task runtime
 
-如果 callback 需求很弱，也可以作为 `tqsdk-stream` 的薄包装，而不是马上独立。
+如果 callback 需求很弱，也可以先作为调用方自建 reader/cursor 消费层，而不是马上独立。
 
 ## 按能力分桶映射 `tqsdk-python`
 
@@ -288,7 +262,7 @@ tqsdk-wait  tqsdk-stream
 目标 crate：
 
 - `tqsdk-wait`
-- `tqsdk-stream`
+- 调用方自建 reader/cursor 消费层
 
 能力：
 
@@ -309,7 +283,7 @@ tqsdk-wait  tqsdk-stream
 
 说明：
 
-- wait/stream 只是消费形状不同
+- wait/fan-out 只是消费形状不同
 - direct query 不因消费形状改变归属
 
 ## D. 任务与执行工具
@@ -363,7 +337,7 @@ tqsdk-wait  tqsdk-stream
 
 现有 `tqsdk-rs` 的 public surface 很宽，未来对齐时不应原样复制，而应按语义重新落位。
 
-## 应归入 `tqsdk-wait` / `tqsdk-stream`
+## 应归入 `tqsdk-wait` / 调用方自建消费层
 
 - `Client` 的 live market facade
 - quote / kline / tick live subscriptions
@@ -394,15 +368,13 @@ tqsdk-wait  tqsdk-stream
 建议按照下面顺序扩张，而不是并行膨胀：
 
 1. 稳定当前 `core/session/wait`
-2. 补 `tqsdk-stream`
-3. 补 `tqsdk-task`
-4. 补 `tqsdk-data`
-5. 视复杂度决定是否独立 `tqsdk-backtest`
-6. 最后再看 `tqsdk-callback`
+2. 补 `tqsdk-task`
+3. 补 `tqsdk-data`
+4. 视复杂度决定是否独立 `tqsdk-backtest`
+5. 最后再看 `tqsdk-callback`
 
 原因：
 
-- `tqsdk-stream` 直接决定当前底座能否同时承载 Python 风格与 Rust 风格
 - `tqsdk-task` 是高层执行工具最明确的承接点
 - `tqsdk-data` 是研究与下载类能力的主要外溢点
 - `tqsdk-backtest` 与 `tqsdk-callback` 的独立价值要等前面几层稳定后再判断
@@ -414,7 +386,7 @@ tqsdk-wait  tqsdk-stream
 正确方向是：
 
 - 底层只保留 `core + session`
-- continuous-consumption 按 `wait` / `stream` 分形状
+- continuous-consumption 按 `wait` / fan-out 分形状
 - task、data、backtest、callback 都作为上层独立能力继续长
 
 这样既能对齐 `tqsdk-python` 的语义基准，也能吸收现有 `tqsdk-rs` 的工程经验，同时不破坏你现在这层高性能底座。

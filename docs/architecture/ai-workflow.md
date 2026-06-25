@@ -12,7 +12,7 @@
 4. [`docs/architecture/README.md`](README.md)
 5. [`crate-boundaries.md`](crate-boundaries.md)
 6. 受影响 crate 的 `README.md`
-7. 受影响专题文档，例如 `api-wait.md`、`api-stream.md`、`api-task.md`、`api-data.md`、`runtime-core/*.md`、`validation.md`
+7. 受影响专题文档，例如 `api-wait.md`、`api-task.md`、`api-data.md`、`runtime-core/*.md`、`validation.md`
 
 [`docs/reviews/`](../reviews/) 是当前审查和 public API 决策记录，[`docs/archive/`](../archive/) 是历史审查输入，[`docs/superpowers/`](../superpowers/) 是 specs/plans 执行记录。它们都不是当前架构的唯一权威来源。若审查报告、历史计划与已落地代码或 `docs/architecture` 不一致，必须先核对代码和架构文档，再决定是否把建议转化为新的计划。
 
@@ -27,7 +27,7 @@ tqsdk-core
 tqsdk-session
     ^
     |
-tqsdk-wait / tqsdk-stream / tqsdk-data
+tqsdk-wait / tqsdk-data
     ^
     |
 tqsdk-task
@@ -37,7 +37,7 @@ tqsdk
 ```
 
 实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
-`tqsdk-wait`、`tqsdk-stream`、`tqsdk-task` 和 `tqsdk-data`；内部能力归属仍由这些
+`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`；内部能力归属仍由这些
 crate 自己维护。
 
 设计意图：
@@ -45,8 +45,8 @@ crate 自己维护。
 - 保留一个 protocol-complete runtime contract，先保证所有远端协议域共享同一套状态、revision、commit、causality 和 cursor 语义。
 - 把用户使用形态放在上层 crate 中演进，避免 core 为某一种 facade 心智提前定型。
 - `tqsdk` 是面向普通用户的默认 facade / prelude；它降低入口复杂度，但不拥有
-  第二套 runtime、状态树、direct query、stream、task 或 data 实现。
-- 让高性能用户可以停留在 `tqsdk-core + tqsdk-session`，让 Python 心智用户使用 `tqsdk-wait`，让多消费者异步系统使用 `tqsdk-stream`，让执行和研究能力分别进入 `tqsdk-task` 与 `tqsdk-data`。
+  第二套 runtime、状态树、direct query、task 或 data 实现。
+- 让高性能和多消费者异步系统用户停留在 `tqsdk-core + tqsdk-session` 自建消费层，让 Python 心智用户使用 `tqsdk-wait`，让执行和研究能力分别进入 `tqsdk-task` 与 `tqsdk-data`。
 - 避免回退成单体 `TqApi` crate，也避免把 direct query、task、downloader、research helpers 塞回底层。
 
 ## Crate 职责边界
@@ -64,7 +64,7 @@ crate 自己维护。
 
 - runtime contract、状态树、commit/revision/cursor
 - direct query / metadata 的真实实现
-- stream fan-out 的真实实现
+- 调用方自建 fan-out 的真实实现
 - task/data 能力下沉或重新实现
 
 设计原因：
@@ -85,7 +85,7 @@ crate 自己维护。
 
 非职责：
 
-- `wait_update()` / stream / callback / `TqApi` facade
+- `wait_update()` / fan-out / callback / `TqApi` facade
 - GraphQL / HTTP direct-query convenience wrappers
 - downloader、DataFrame/polars、GUI/report、research workflow
 - `TargetPosTask`、scheduler、业务执行工具
@@ -126,12 +126,12 @@ crate 自己维护。
 设计原因：
 
 - 这些能力是一轮请求/响应或“一次命令 -> 等待完成 -> 返回值”，不要求用户持有持续变化的 live object。
-- `wait` 和 `stream` 都需要共享同一个底层 session，因此 session 是它们之前的薄层，而不是某个 facade 的内部实现细节。
+- `wait` 和调用方自建消费层都需要共享同一个底层 session，因此 session 是它们之前的薄层，而不是某个 facade 的内部实现细节。
 
 禁止回退：
 
-- 不要把 wait facade 的 `quote` / `kline` live handles、live trade refs、`step()` / `step_until(...)`、object stream、task、downloader、research workflow 塞进 session。
-- 不要把 wait/stream 共用的消费层配置塞回 session；消费形态配置应留在消费层。
+- 不要把 wait facade 的 `quote` / `kline` live handles、live trade refs、`step()` / `step_until(...)`、object fan-out、task、downloader、research workflow 塞进 session。
+- 不要把消费层配置塞回 session；消费形态配置应留在消费层或调用方自建层。
 
 ### `tqsdk-wait`
 
@@ -154,28 +154,7 @@ crate 自己维护。
 禁止回退：
 
 - 不要复制 direct query / schema / metadata API；需要时通过 `api.session()` 使用 `tqsdk-session`。
-- 不要加入 downloader、task、DataFrame/polars、callback/stream 语义。
-
-### `tqsdk-stream`
-
-职责：
-
-- shared-session multi-consumer commit fan-out
-- fan-out capacity configuration、lag diagnostics、health status
-- commit/path/scope/domain/object/field filters
-- typed path stream、ready kline/tick row batch stream
-- trade object/session event stream
-- bounded fan-out lag diagnostics、health status 和 sink-free graceful shutdown
-
-设计原因：
-
-- 它面向高并发、多消费者、异步系统集成，价值在于薄薄包装同一套 commit/cursor 语义。
-- 对象级 stream 和事件流应建立在 commit-first 内核之上，而不是重新定义 runtime。
-
-禁止回退：
-
-- 不要把 direct query / schema / metadata、task、downloader、DataFrame/polars、私有 object cache 或第二棵状态树塞进 stream。
-- 需要读取 trade/market 热路径时，优先使用 partition read surface；只有 generic path stream、system 事件或尚无分区读面的窗口读取才保留 full snapshot。
+- 不要加入 downloader、task、DataFrame/polars、callback/fan-out 语义。
 
 ### `tqsdk-task`
 
@@ -210,7 +189,7 @@ crate 自己维护。
   JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
   下沉进 data。
 - 它可以在 task/data 上层组合 `StrategyBacktest + TqSim`，提供 Python-compatible
-  本地回测模拟账户能力；这不允许反向改变 core/session/wait/stream 的职责边界。
+  本地回测模拟账户能力；这不允许反向改变 core/session/wait 的职责边界。
 
 演进方向：
 
@@ -230,11 +209,11 @@ crate 自己维护。
 
 设计原因：
 
-- 这些能力有批量、离线、tabular、缓存物化、衍生计算语义，不应污染 live session、wait 或 stream 的最小心智。
+- 这些能力有批量、离线、tabular、缓存物化、衍生计算语义，不应污染 live session、wait 或调用方自建消费层的最小心智。
 
 禁止回退：
 
-- 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait/stream。
+- 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait 或调用方自建消费层。
 
 ### `tqsdk-relay`
 
@@ -285,14 +264,14 @@ RuntimeCommand / RuntimeInput
 
 设计原因：
 
-- 只有这样，wait、stream、task、data 以及低层用户才能共享同一套因果解释。
+- 只有这样，wait、task、data、自建消费层以及低层用户才能共享同一套因果解释。
 - 旁路 future、私有 watcher 或 adapter 直接通知上层都会破坏 revision 和 causality。
 
 ### 单一 revision / cursor 语义
 
 - 只有 runtime core 可以推进 `Revision`。
 - facade 只能消费 `RuntimeReader::cursor()` / `RuntimeReader::next()` / `RuntimeReader::next_view()`。
-- `CommitResult` 是不可变提交 payload；写侧返回、`CommitLog`、`RuntimeReader::next()` 和 stream fan-out 应共享 `SharedCommitResult = Arc<CommitResult>`，不得用深拷贝绕过同一提交身份。
+- `CommitResult` 是不可变提交 payload；写侧返回、`CommitLog`、`RuntimeReader::next()` 和 fan-out 应共享 `SharedCommitResult = Arc<CommitResult>`，不得用深拷贝绕过同一提交身份。
 - `CommitLog` 是底层共享原语，不是新 facade 的首选 public contract。
 - 慢消费者应得到明确 lag/closed/error surface，不得反向改变 commit 生成策略。
 
@@ -365,7 +344,7 @@ runtime apply 前必须校验 mutation 来源和根路径：
    - 读取相关 crate README 与局部代码即可。
    - 测试覆盖以受影响 crate 为主。
 2. **facade 能力扩展**
-   - 新 live object、stream、wait ref、task/data helper。
+   - 新 live object、fan-out、wait ref、task/data helper。
    - 必须检查本文件的 crate 归属表，确认能力落点。
    - 不得为了便利回改 core/session 边界。
 3. **runtime contract 变更**
@@ -392,7 +371,7 @@ runtime apply 前必须校验 mutation 来源和根路径：
 架构可以演进，但文档必须同轮更新。以下任一行为都属于架构更新：
 
 - 新增、删除或重命名 crate
-- 移动能力归属，例如 direct query 从 session 移到 wait/stream，或 task/data 能力下沉
+- 移动能力归属，例如 direct query 从 session 移到 wait/消费层，或 task/data 能力下沉
 - 改变 `RuntimeHandle` / `RuntimeReader` / `UpdateCursor` / `CommitResult` 的语义
 - 改变状态树、domain partition、mutation guard、command lifecycle 的规则
 - 扩大或收窄 core/session/facade 的 public surface
@@ -462,7 +441,7 @@ cargo fmt --all --check
 rg "pub type ContractFuture|tqsdk_core::ContractFuture" crates
 rg "TqAuthProvider|PasswordCredentials|TqKqAccountConfig|ReqwestHttpExecutor" crates/tqsdk-core
 rg "reqwest|base64" crates/tqsdk-core/Cargo.toml
-rg "reader\\.read\\(\\)" crates/tqsdk-wait/src crates/tqsdk-stream/src
+rg "reader\\.read\\(\\)" crates/tqsdk-wait/src
 ```
 
 这些静态检查不是固定全集；每次应按改动风险补充更贴近当前边界的检查。

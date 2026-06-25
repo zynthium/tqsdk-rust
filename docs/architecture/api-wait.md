@@ -79,12 +79,12 @@ wait adapter 层未来可以提供：
   并把最终 owned window 截断到用户请求的 `data_length`。缺少任一副合约
   binding 或 row 的主合约行不进入窗口。
 - Tick serial 保持单合约语义；wait facade 不提供 multi-tick serial。调用方如需多个
-  tick 窗口，应分别持有多个 `tick(...)` handle，或使用 stream/event 消费形态。
+  tick 窗口，应分别持有多个 `tick(...)` handle，或自建 event 消费形态。
 - 批量实时行情是 wait facade 的一等入口：`TqApi::quotes([...]).await`
   应一次表达一批 quote interest，并返回 symbol-indexed refs。它必须复用
   `tqsdk-session` 的 session-scoped market interest registry，不能在 wait
-  facade 私下维护会与 stream 冲突的订阅真相。
-- full-universe 或大批量 quote 订阅不应被迫走 `tqsdk-stream`。如果消费模型仍是单 owner `wait_update()`，`tqsdk-wait` 提供 step-bound `QuoteSet::changed(&WaitStep)` 和 `QuoteSet::changed_snapshots(&WaitStep)`，避免用户每个 commit 扫描全部 symbol。这两个 helper 必须先用 `WaitStep::changed_quote_symbols()` 定位本轮变化 symbol，再过滤到当前 `QuoteSet`；输出顺序跟随 `QuoteSet::symbols()` 的 symbol 顺序，并且只解释当前 `WaitStep` 对应的 commit，不维护 facade 私有 revision。
+  facade 私下维护订阅真相。
+- full-universe 或大批量 quote 订阅如果消费模型仍是 single-owner `wait_update()`，应继续走 `tqsdk-wait` 的 `quotes(...).await`。`tqsdk-wait` 提供 step-bound `QuoteSet::changed(&WaitStep)` 和 `QuoteSet::changed_snapshots(&WaitStep)`，避免用户每个 commit 扫描全部 symbol。这两个 helper 必须先用 `WaitStep::changed_quote_symbols()` 定位本轮变化 symbol，再过滤到当前 `QuoteSet`；输出顺序跟随 `QuoteSet::symbols()` 的 symbol 顺序，并且只解释当前 `WaitStep` 对应的 commit，不维护 facade 私有 revision。
 - quote handle 可以提供 `changed_snapshot(&WaitStep)` 这类薄便利层，用来把
   `WaitStep::is_changing(&quote)` 和 `snapshot()` 合并成一个读取动作；它不改变
   quote 的 ready / load 语义。
