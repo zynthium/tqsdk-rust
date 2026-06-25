@@ -36,7 +36,8 @@
 use std::time::Duration;
 
 use tqsdk_core::TradeAccountType;
-use tqsdk_task::{ExecutionGroupOutcome, HedgePolicy, RiskEngine, TaskHost};
+use tqsdk_task::order_groups::{ExecutionGroupOutcome, HedgePolicy};
+use tqsdk_task::{RiskEngine, TaskHost};
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]

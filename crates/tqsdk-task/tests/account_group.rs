@@ -6,10 +6,10 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::testing::ManualSession;
-use tqsdk_task::{
+use tqsdk_task::order_groups::{
     AccountFailurePolicy, AccountGroup, MultiAccountOrderOutcome, MultiAccountOrderStatus, Ratio,
-    RiskEngine, RiskRejection, TaskError, TaskHost,
 };
+use tqsdk_task::{RiskEngine, RiskRejection, TaskError, TaskHost};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {

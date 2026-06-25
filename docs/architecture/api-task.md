@@ -68,6 +68,9 @@
   - 这些计数是 task host 本进程内用量，不是跨进程持久风控服务
 - `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
 - `AccountGroup` / `MultiAccountOrderTicket` 多账户执行 foundation
+  - public family seam 是 `tqsdk_task::order_groups::*`；crate root 保持
+    `TaskHost`、`TargetPosTask`、typed order builder、risk、strategy、replay
+    和 backtest 等普通执行路径入口
 - `StrategyHost` / `StrategyContext`
   - 复用 `TaskHost::wait_update()` 作为单推进点
   - 在同一稳定 context 内读取 quote/account/position

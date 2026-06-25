@@ -212,12 +212,17 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 设计基线见 [../../docs/architecture/api-task.md](../../docs/architecture/api-task.md)。
 
+多腿和多账户 order foundation 统一放在 `tqsdk_task::order_groups` family seam 下；
+crate root 保持聚焦于 `TaskHost`、`TargetPosTask`、typed order builder、risk、
+strategy、replay 和 backtest 等普通执行路径入口。
+
 ## 多账户订单 foundation
 
 ```rust
 use std::time::Duration;
 
-use tqsdk_task::{AccountFailurePolicy, MultiAccountOrderOutcome, Ratio, TaskHost};
+use tqsdk_task::order_groups::{AccountFailurePolicy, MultiAccountOrderOutcome, Ratio};
+use tqsdk_task::TaskHost;
 
 # async fn run(mut host: TaskHost) -> tqsdk_task::Result<()> {
 let accounts = host

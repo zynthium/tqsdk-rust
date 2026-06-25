@@ -6,10 +6,8 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::testing::ManualSession;
-use tqsdk_task::{
-    ExecutionGroupOutcome, ExecutionGroupStatus, HedgePolicy, RiskEngine, RiskRejection, TaskError,
-    TaskHost, TaskKind,
-};
+use tqsdk_task::order_groups::{ExecutionGroupOutcome, ExecutionGroupStatus, HedgePolicy};
+use tqsdk_task::{RiskEngine, RiskRejection, TaskError, TaskHost, TaskKind};
 use tqsdk_wait::TqApi;
 
 fn seeded_host() -> TaskHost {

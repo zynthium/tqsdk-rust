@@ -35,13 +35,25 @@ mod target_pos;
 pub mod testing;
 mod trading_desk;
 
-pub use account_group::{
-    AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
-    AccountGroupBuilder, AllocatedAccountOrder, MultiAccountOrderBuilder, MultiAccountOrderDraft,
-    MultiAccountOrderGroupReport, MultiAccountOrderLegTicket, MultiAccountOrderOutcome,
-    MultiAccountOrderReport, MultiAccountOrderState, MultiAccountOrderStatus,
-    MultiAccountOrderTicket, Ratio,
-};
+/// Multi-leg and multi-account order foundations.
+///
+/// These are advanced order-group interfaces. Ordinary task usage should start
+/// with [`TaskHost`], [`TargetPosTask`], or [`RiskEngine`].
+pub mod order_groups {
+    pub use crate::account_group::{
+        AccountAllocation, AccountAllocationPlan, AccountFailurePolicy, AccountGroup,
+        AccountGroupBuilder, AllocatedAccountOrder, MultiAccountOrderBuilder,
+        MultiAccountOrderDraft, MultiAccountOrderGroupReport, MultiAccountOrderLegTicket,
+        MultiAccountOrderOutcome, MultiAccountOrderReport, MultiAccountOrderState,
+        MultiAccountOrderStatus, MultiAccountOrderTicket, Ratio,
+    };
+    pub use crate::execution_group::{
+        ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupReport,
+        ExecutionGroupStatus, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport,
+        ExecutionLegState, ExecutionLegTicket, HedgePolicy,
+    };
+}
+
 pub use backtest::{
     StrategyBacktest, StrategyBacktestBalancePoint, StrategyBacktestBuilder,
     StrategyBacktestClosedProfitPoint, StrategyBacktestContext, StrategyBacktestDailyBalanceReturn,
@@ -69,11 +81,6 @@ pub use environment::{
     StrategyEnvironmentSubscriptions, StrategyEnvironmentTickSubscription,
 };
 pub use error::{Result, TaskError, TaskKind};
-pub use execution_group::{
-    ExecutionExposure, ExecutionGroupBuilder, ExecutionGroupOutcome, ExecutionGroupReport,
-    ExecutionGroupStatus, ExecutionGroupTicket, ExecutionLegIntent, ExecutionLegReport,
-    ExecutionLegState, ExecutionLegTicket, HedgePolicy,
-};
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use replay::{

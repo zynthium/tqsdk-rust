@@ -36,7 +36,8 @@
 use std::time::Duration;
 
 use tqsdk_core::TradeAccountType;
-use tqsdk_task::{AccountFailurePolicy, MultiAccountOrderOutcome, Ratio, TaskHost};
+use tqsdk_task::TaskHost;
+use tqsdk_task::order_groups::{AccountFailurePolicy, MultiAccountOrderOutcome, Ratio};
 use tqsdk_wait::TqApiBuilder;
 
 #[tokio::main(flavor = "current_thread")]
