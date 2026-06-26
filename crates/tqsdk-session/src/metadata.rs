@@ -9,14 +9,15 @@ use crate::error::Result;
 use chrono::Utc;
 use serde_json::{Map, Value, json};
 
+mod decoder;
 #[path = "metadata_helpers.rs"]
 mod helpers;
 
+use self::decoder::MetadataSymbolDecoder;
 use self::helpers::{
-    filter_option_nodes, non_empty_str, parse_option_nodes, parse_query_cont_quotes_result,
-    parse_query_options_result, parse_query_quotes_result, parse_query_symbol_infos,
-    sort_options_and_get_atm_index, validate_finance_nearbys, validate_finance_underlying,
-    validate_option_class, validate_price_levels, validation,
+    non_empty_str, parse_query_cont_quotes_result, parse_query_quotes_result,
+    validate_finance_nearbys, validate_finance_underlying, validate_option_class,
+    validate_price_levels, validation,
 };
 
 const FUTURE_EXCHANGES: &[&str] = &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
@@ -316,7 +317,8 @@ impl SessionClient {
             )
             .await?;
 
-        parse_query_symbol_infos(&payload, &symbol_list, Utc::now().timestamp())
+        MetadataSymbolDecoder::new(Utc::now().timestamp())
+            .decode_symbol_infos(&payload, &symbol_list)
     }
 
     pub async fn query_instrument_specs(
@@ -387,15 +389,8 @@ impl SessionClient {
                 })),
             )
             .await?;
-        Ok(parse_query_options_result(
-            &payload,
-            filter.option_class.as_deref(),
-            filter.exercise_year,
-            filter.exercise_month,
-            filter.strike_price,
-            filter.expired,
-            filter.has_a,
-        ))
+        Ok(MetadataSymbolDecoder::new(Utc::now().timestamp())
+            .decode_option_symbols(&payload, filter))
     }
 
     pub async fn query_atm_options(
@@ -418,33 +413,7 @@ impl SessionClient {
                 })),
             )
             .await?;
-        let mut nodes = filter_option_nodes(
-            parse_option_nodes(&payload),
-            Some(query.option_class.as_str()),
-            query.exercise_year,
-            query.exercise_month,
-            query.has_a,
-            None,
-        );
-        if nodes.is_empty() {
-            return Ok(query.price_levels.iter().map(|_| None).collect());
-        }
-
-        let atm_index = sort_options_and_get_atm_index(
-            &mut nodes,
-            query.underlying_price,
-            query.option_class.as_str(),
-        )?;
-        let mut result = Vec::with_capacity(query.price_levels.len());
-        for price_level in &query.price_levels {
-            let index = atm_index as i64 - *price_level as i64;
-            if index >= 0 && (index as usize) < nodes.len() {
-                result.push(Some(nodes[index as usize].instrument_id.clone()));
-            } else {
-                result.push(None);
-            }
-        }
-        Ok(result)
+        MetadataSymbolDecoder::new(Utc::now().timestamp()).decode_atm_options(&payload, query)
     }
 
     pub async fn query_all_level_options(
@@ -466,33 +435,7 @@ impl SessionClient {
                 })),
             )
             .await?;
-        let mut nodes = filter_option_nodes(
-            parse_option_nodes(&payload),
-            Some(query.option_class.as_str()),
-            query.exercise_year,
-            query.exercise_month,
-            query.has_a,
-            None,
-        );
-        if nodes.is_empty() {
-            return Ok(OptionLevelQuotes::default());
-        }
-        let atm_index = sort_options_and_get_atm_index(
-            &mut nodes,
-            query.underlying_price,
-            query.option_class.as_str(),
-        )?;
-        Ok(OptionLevelQuotes {
-            in_money: nodes[..atm_index]
-                .iter()
-                .map(|node| node.instrument_id.clone())
-                .collect(),
-            at_money: vec![nodes[atm_index].instrument_id.clone()],
-            out_of_money: nodes[atm_index + 1..]
-                .iter()
-                .map(|node| node.instrument_id.clone())
-                .collect(),
-        })
+        MetadataSymbolDecoder::new(Utc::now().timestamp()).decode_option_levels(&payload, query)
     }
 
     pub async fn query_all_level_finance_options(
@@ -516,33 +459,8 @@ impl SessionClient {
                 })),
             )
             .await?;
-        let mut nodes = filter_option_nodes(
-            parse_option_nodes(&payload),
-            Some(query.option_class.as_str()),
-            None,
-            None,
-            query.has_a,
-            Some(&query.nearbys),
-        );
-        if nodes.is_empty() {
-            return Ok(OptionLevelQuotes::default());
-        }
-        let atm_index = sort_options_and_get_atm_index(
-            &mut nodes,
-            query.underlying_price,
-            query.option_class.as_str(),
-        )?;
-        Ok(OptionLevelQuotes {
-            in_money: nodes[..atm_index]
-                .iter()
-                .map(|node| node.instrument_id.clone())
-                .collect(),
-            at_money: vec![nodes[atm_index].instrument_id.clone()],
-            out_of_money: nodes[atm_index + 1..]
-                .iter()
-                .map(|node| node.instrument_id.clone())
-                .collect(),
-        })
+        MetadataSymbolDecoder::new(Utc::now().timestamp())
+            .decode_finance_option_levels(&payload, query)
     }
 }
 

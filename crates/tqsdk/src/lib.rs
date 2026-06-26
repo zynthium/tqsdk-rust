@@ -707,10 +707,7 @@ pub struct TqBuilder {
     market_url: Option<String>,
     replay_url: Option<String>,
     backtest: Option<BacktestConfig>,
-    quote_symbols: Vec<String>,
-    price_ticks: std::collections::HashMap<String, f64>,
-    instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
-    default_price_tick: Option<f64>,
+    local_backtest_recipe: local_backtest::LocalBacktestRecipe,
 }
 
 impl TqBuilder {
@@ -725,10 +722,7 @@ impl TqBuilder {
             market_url: None,
             replay_url: None,
             backtest: None,
-            quote_symbols: Vec::new(),
-            price_ticks: std::collections::HashMap::new(),
-            instrument_specs: Vec::new(),
-            default_price_tick: None,
+            local_backtest_recipe: local_backtest::LocalBacktestRecipe::default(),
         }
     }
 
@@ -893,11 +887,9 @@ impl TqBuilder {
         start_datetime_ns: i64,
         end_datetime_ns: i64,
     ) -> Result<Self> {
-        let requests = local_backtest::declared_quote_minute_history_requests(
-            &self.quote_symbols,
-            start_datetime_ns,
-            end_datetime_ns,
-        )?;
+        let requests = self
+            .local_backtest_recipe
+            .declared_quote_minute_history_requests(start_datetime_ns, end_datetime_ns)?;
         self.local_backtest_kline_histories(data, requests).await
     }
 
@@ -988,20 +980,20 @@ impl TqBuilder {
     /// Pre-declare a symbol for local backtest.
     #[must_use]
     pub fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
-        self.quote_symbols.push(symbol.into());
+        self.local_backtest_recipe = self.local_backtest_recipe.quote_symbol(symbol);
         self
     }
 
     /// Pre-declare a price tick for local backtest (required if replay contains klines).
     #[must_use]
     pub fn price_tick(mut self, symbol: impl Into<String>, tick: f64) -> Self {
-        self.price_ticks.insert(symbol.into(), tick);
+        self.local_backtest_recipe = self.local_backtest_recipe.price_tick(symbol, tick);
         self
     }
 
     #[must_use]
     pub fn instrument_spec(mut self, spec: tqsdk_session::InstrumentSpec) -> Self {
-        self.instrument_specs.push(spec);
+        self.local_backtest_recipe = self.local_backtest_recipe.instrument_spec(spec);
         self
     }
 
@@ -1010,7 +1002,7 @@ impl TqBuilder {
         mut self,
         specs: impl IntoIterator<Item = tqsdk_session::InstrumentSpec>,
     ) -> Self {
-        self.instrument_specs.extend(specs);
+        self.local_backtest_recipe = self.local_backtest_recipe.instrument_specs(specs);
         self
     }
 
@@ -1019,7 +1011,7 @@ impl TqBuilder {
     /// Per-symbol [`TqBuilder::price_tick`] overrides this fallback.
     #[must_use]
     pub fn default_price_tick(mut self, tick: f64) -> Self {
-        self.default_price_tick = Some(tick);
+        self.local_backtest_recipe = self.local_backtest_recipe.default_price_tick(tick);
         self
     }
 
@@ -1170,10 +1162,7 @@ impl TqBuilder {
             market_url,
             replay_url,
             backtest,
-            quote_symbols,
-            price_ticks,
-            instrument_specs,
-            default_price_tick,
+            local_backtest_recipe,
         } = self;
 
         let is_server_side_backtest = backtest
@@ -1188,16 +1177,7 @@ impl TqBuilder {
         }
 
         match backtest {
-            Some(BacktestConfig::Local { replay }) => {
-                local_backtest::connect(
-                    replay,
-                    quote_symbols,
-                    price_ticks,
-                    instrument_specs,
-                    default_price_tick,
-                )
-                .await
-            }
+            Some(BacktestConfig::Local { replay }) => local_backtest_recipe.connect(replay).await,
             backtest => {
                 let tq = connect_wait_facade(
                     auth,

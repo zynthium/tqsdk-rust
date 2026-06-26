@@ -1,36 +1,18 @@
-use chrono::{Datelike, TimeZone, Utc};
-use serde_json::json;
+use chrono::{TimeZone, Utc};
+use serde_json::{Value, json};
+
+use crate::direct_query::{
+    AllLevelOptionQuery, AtmOptionQuery, FinanceOptionLevelQuery, OptionQueryFilter,
+};
 
 use super::{
     build_query_cont_quotes_request, build_query_quotes_request,
+    decoder::MetadataSymbolDecoder,
     helpers::{
-        BisectPriority, OptionNode, bisect_value_index, filter_option_nodes,
-        parse_query_cont_quotes_result, parse_query_options_result, parse_query_quotes_result,
-        parse_query_symbol_infos, sort_options_and_get_atm_index, timestamp_nano_to_datetime,
-        validate_finance_nearbys, validate_finance_underlying, validate_price_levels,
+        parse_query_cont_quotes_result, parse_query_quotes_result, validate_finance_nearbys,
+        validate_finance_underlying, validate_option_class, validate_price_levels,
     },
 };
-
-fn make_option_for_test(
-    instrument_id: &str,
-    strike_price: f64,
-    call_or_put: &str,
-    last_exercise_datetime: i64,
-    english_name: &str,
-    expired: bool,
-) -> OptionNode {
-    let datetime = timestamp_nano_to_datetime(Some(last_exercise_datetime)).unwrap();
-    OptionNode {
-        instrument_id: instrument_id.to_string(),
-        english_name: english_name.to_string(),
-        call_or_put: call_or_put.to_string(),
-        strike_price,
-        expired,
-        last_exercise_datetime,
-        exercise_year: datetime.year(),
-        exercise_month: datetime.month() as i32,
-    }
-}
 
 #[test]
 fn query_quotes_request_omits_unset_optional_filters() {
@@ -113,47 +95,44 @@ fn parse_cont_quotes_filters_exchange_and_product() {
 }
 
 #[test]
-fn parse_options_filters_requested_dimensions() {
-    let ts = Utc
-        .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
-        .unwrap()
-        .timestamp()
-        * 1_000_000_000;
-    let payload = json!({
-        "result": {
-            "multi_symbol_info": [
-                {
-                    "derivatives": {
-                        "edges": [
-                            { "node": { "instrument_id": "SHFE.cu2605C3000", "english_name": "AAA", "call_or_put": "CALL", "strike_price": 3000.0, "expired": false, "last_exercise_datetime": ts } },
-                            { "node": { "instrument_id": "SHFE.cu2605P3100", "english_name": "BBB", "call_or_put": "PUT", "strike_price": 3100.0, "expired": true, "last_exercise_datetime": ts } }
-                        ]
-                    }
-                }
-            ]
-        }
-    });
+fn decoder_filters_option_symbols_by_requested_dimensions() {
+    let payload = option_payload();
+    let decoder = MetadataSymbolDecoder::new(1_700_000_000);
 
+    let call_filter = OptionQueryFilter {
+        option_class: Some("CALL".to_string()),
+        exercise_year: Some(2026),
+        exercise_month: Some(5),
+        ..OptionQueryFilter::default()
+    };
     assert_eq!(
-        parse_query_options_result(&payload, Some("CALL"), None, None, None, None, None),
-        vec!["SHFE.cu2605C3000"]
+        decoder.decode_option_symbols(&payload, &call_filter),
+        vec!["C1".to_string(), "C2".to_string(), "C3".to_string()]
     );
+
+    let put_filter = OptionQueryFilter {
+        option_class: Some("PUT".to_string()),
+        strike_price: Some(590.0),
+        expired: Some(false),
+        ..OptionQueryFilter::default()
+    };
     assert_eq!(
-        parse_query_options_result(&payload, None, Some(2026), Some(12), None, None, None).len(),
-        2
+        decoder.decode_option_symbols(&payload, &put_filter),
+        vec!["P1".to_string()]
     );
+
+    let has_a_filter = OptionQueryFilter {
+        has_a: Some(true),
+        ..OptionQueryFilter::default()
+    };
     assert_eq!(
-        parse_query_options_result(&payload, None, None, None, Some(3100.0), None, None),
-        vec!["SHFE.cu2605P3100"]
-    );
-    assert_eq!(
-        parse_query_options_result(&payload, None, None, None, None, None, Some(true)),
-        vec!["SHFE.cu2605C3000"]
+        decoder.decode_option_symbols(&payload, &has_a_filter),
+        vec!["C2".to_string()]
     );
 }
 
 #[test]
-fn parse_symbol_info_maps_graphql_payload_to_symbol_info_schema() {
+fn decoder_maps_graphql_payload_to_symbol_info_schema() {
     let expire_ts = 1_831_801_600_i64 * 1_000_000_000;
     let exercise_ts = 1_814_492_800_i64 * 1_000_000_000;
     let payload = json!({
@@ -214,12 +193,12 @@ fn parse_symbol_info_maps_graphql_payload_to_symbol_info_schema() {
         }
     });
 
-    let infos = parse_query_symbol_infos(
-        &payload,
-        &["SHFE.cu2605".to_string(), "SHFE.cu2605C3000".to_string()],
-        1_700_000_000,
-    )
-    .unwrap();
+    let infos = MetadataSymbolDecoder::new(1_700_000_000)
+        .decode_symbol_infos(
+            &payload,
+            &["SHFE.cu2605".to_string(), "SHFE.cu2605C3000".to_string()],
+        )
+        .unwrap();
 
     assert_eq!(infos.len(), 2);
     assert_eq!(infos[0].instrument_id.as_str(), "SHFE.cu2605");
@@ -249,82 +228,133 @@ fn parse_symbol_info_maps_graphql_payload_to_symbol_info_schema() {
 }
 
 #[test]
-fn bisect_value_index_prefers_virtual_side_on_equal_distance() {
-    let values = vec![100.0, 110.0];
-    assert_eq!(
-        values[bisect_value_index(&values, 105.0, BisectPriority::Right)],
-        110.0
-    );
-    assert_eq!(
-        values[bisect_value_index(&values, 105.0, BisectPriority::Left)],
-        100.0
-    );
+fn decoder_uses_virtual_contract_side_as_atm_when_distance_ties() {
+    let payload = json!({
+        "result": {
+            "multi_symbol_info": [{
+                "derivatives": {
+                    "edges": [
+                        { "node": option_node("C90", 90.0, "CALL", expiry_nanos(2026, 12), "", false) },
+                        { "node": option_node("C110", 110.0, "CALL", expiry_nanos(2026, 12), "", false) },
+                        { "node": option_node("P90", 90.0, "PUT", expiry_nanos(2026, 12), "", false) },
+                        { "node": option_node("P110", 110.0, "PUT", expiry_nanos(2026, 12), "", false) }
+                    ]
+                }
+            }]
+        }
+    });
+    let decoder = MetadataSymbolDecoder::new(1_700_000_000);
+
+    let calls = decoder
+        .decode_atm_options(&payload, &AtmOptionQuery::new(100.0, vec![0], "CALL"))
+        .unwrap();
+    assert_eq!(calls, vec![Some("C110".to_string())]);
+
+    let puts = decoder
+        .decode_atm_options(&payload, &AtmOptionQuery::new(100.0, vec![0], "PUT"))
+        .unwrap();
+    assert_eq!(puts, vec![Some("P90".to_string())]);
 }
 
 #[test]
-fn sort_options_uses_virtual_contract_as_atm_when_distance_ties() {
-    let ts = Utc
-        .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
-        .unwrap()
-        .timestamp()
-        * 1_000_000_000;
+fn decoder_groups_all_level_options_by_moneyness() {
+    let payload = option_payload();
+    let mut query = AllLevelOptionQuery::new(595.0, "CALL");
+    query.exercise_year = Some(2026);
+    query.exercise_month = Some(5);
 
-    let mut calls = vec![
-        make_option_for_test("C90", 90.0, "CALL", ts, "", false),
-        make_option_for_test("C110", 110.0, "CALL", ts, "", false),
-    ];
-    let call_index = sort_options_and_get_atm_index(&mut calls, 100.0, "CALL").unwrap();
-    assert_eq!(calls[call_index].instrument_id, "C110");
+    let quotes = MetadataSymbolDecoder::new(1_700_000_000)
+        .decode_option_levels(&payload, &query)
+        .unwrap();
 
-    let mut puts = vec![
-        make_option_for_test("P90", 90.0, "PUT", ts, "", false),
-        make_option_for_test("P110", 110.0, "PUT", ts, "", false),
-    ];
-    let put_index = sort_options_and_get_atm_index(&mut puts, 100.0, "PUT").unwrap();
-    assert_eq!(puts[put_index].instrument_id, "P90");
+    assert_eq!(quotes.in_money, vec!["C1"]);
+    assert_eq!(quotes.at_money, vec!["C2"]);
+    assert_eq!(quotes.out_of_money, vec!["C3"]);
 }
 
 #[test]
-fn filter_option_nodes_keeps_requested_nearbys() {
-    let ts1 = Utc
-        .with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
-        .unwrap()
-        .timestamp()
-        * 1_000_000_000;
-    let ts2 = Utc
-        .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
-        .unwrap()
-        .timestamp()
-        * 1_000_000_000;
-    let filtered = filter_option_nodes(
-        vec![
-            make_option_for_test("A1", 100.0, "CALL", ts1, "", false),
-            make_option_for_test("A2", 110.0, "CALL", ts1, "", false),
-            make_option_for_test("B1", 100.0, "CALL", ts2, "", false),
-            make_option_for_test("B2", 110.0, "CALL", ts2, "", false),
-        ],
-        Some("CALL"),
-        None,
-        None,
-        None,
-        Some(&[1]),
-    );
-    let ids: std::collections::HashSet<String> = filtered
-        .into_iter()
-        .map(|option| option.instrument_id)
-        .collect();
-    assert!(ids.contains("B1"));
-    assert!(ids.contains("B2"));
-    assert!(!ids.contains("A1"));
-    assert!(!ids.contains("A2"));
+fn decoder_keeps_requested_finance_option_nearbys() {
+    let payload = json!({
+        "result": {
+            "multi_symbol_info": [{
+                "derivatives": {
+                    "edges": [
+                        { "node": option_node("A1", 100.0, "CALL", expiry_nanos(2026, 11), "", false) },
+                        { "node": option_node("A2", 110.0, "CALL", expiry_nanos(2026, 11), "", false) },
+                        { "node": option_node("B1", 100.0, "CALL", expiry_nanos(2026, 12), "", false) },
+                        { "node": option_node("B2", 110.0, "CALL", expiry_nanos(2026, 12), "", false) }
+                    ]
+                }
+            }]
+        }
+    });
+
+    let quotes = MetadataSymbolDecoder::new(1_700_000_000)
+        .decode_finance_option_levels(
+            &payload,
+            &FinanceOptionLevelQuery::new(105.0, "CALL", vec![1]),
+        )
+        .unwrap();
+
+    assert_eq!(quotes.in_money, vec!["B1"]);
+    assert_eq!(quotes.at_money, vec!["B2"]);
+    assert!(quotes.out_of_money.is_empty());
 }
 
 #[test]
 fn finance_option_validations_match_expected_ranges() {
+    validate_option_class("STRADDLE").unwrap_err();
     validate_price_levels(&[-101]).unwrap_err();
     validate_finance_underlying("SHFE.au2605").unwrap_err();
     validate_finance_nearbys("SSE.000300", &[0, 5]).unwrap();
     validate_finance_nearbys("SSE.000300", &[6]).unwrap_err();
     validate_finance_nearbys("SSE.510300", &[0, 3]).unwrap();
     validate_finance_nearbys("SSE.510300", &[4]).unwrap_err();
+}
+
+fn option_payload() -> Value {
+    let may_2026 = expiry_nanos(2026, 5);
+    json!({
+        "result": {
+            "multi_symbol_info": [{
+                "derivatives": {
+                    "edges": [
+                        { "node": option_node("C1", 590.0, "CALL", may_2026, "Plain Call", true) },
+                        { "node": option_node("C2", 600.0, "CALL", may_2026, "Alpha Call A", false) },
+                        { "node": option_node("C3", 610.0, "CALL", may_2026, "Plain Call", false) },
+                        { "node": option_node("P1", 590.0, "PUT", may_2026, "Plain Put", false) },
+                        { "node": {
+                            "instrument_id": "BROKEN",
+                            "call_or_put": "CALL"
+                        }}
+                    ]
+                }
+            }]
+        }
+    })
+}
+
+fn option_node(
+    instrument_id: &str,
+    strike_price: f64,
+    call_or_put: &str,
+    last_exercise_datetime: i64,
+    english_name: &str,
+    expired: bool,
+) -> Value {
+    json!({
+        "instrument_id": instrument_id,
+        "english_name": english_name,
+        "call_or_put": call_or_put,
+        "strike_price": strike_price,
+        "expired": expired,
+        "last_exercise_datetime": last_exercise_datetime,
+    })
+}
+
+fn expiry_nanos(year: i32, month: u32) -> i64 {
+    Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .unwrap()
+        .timestamp()
+        * 1_000_000_000
 }

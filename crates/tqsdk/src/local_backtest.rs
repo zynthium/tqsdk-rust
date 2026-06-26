@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
@@ -12,6 +13,77 @@ const TRADING_DAY_START_OFFSET_NS: i64 = 6 * 60 * 60 * NANOS_PER_SECOND;
 const TRADING_DAY_END_OFFSET_NS: i64 = 18 * 60 * 60 * NANOS_PER_SECOND;
 const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct LocalBacktestRecipe {
+    quote_symbols: Vec<String>,
+    price_ticks: HashMap<String, f64>,
+    instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
+    default_price_tick: Option<f64>,
+}
+
+impl LocalBacktestRecipe {
+    #[must_use]
+    pub(super) fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.quote_symbols.push(symbol.into());
+        self
+    }
+
+    #[must_use]
+    pub(super) fn price_tick(mut self, symbol: impl Into<String>, tick: f64) -> Self {
+        self.price_ticks.insert(symbol.into(), tick);
+        self
+    }
+
+    #[must_use]
+    pub(super) fn instrument_spec(mut self, spec: tqsdk_session::InstrumentSpec) -> Self {
+        self.instrument_specs.push(spec);
+        self
+    }
+
+    #[must_use]
+    pub(super) fn instrument_specs(
+        mut self,
+        specs: impl IntoIterator<Item = tqsdk_session::InstrumentSpec>,
+    ) -> Self {
+        self.instrument_specs.extend(specs);
+        self
+    }
+
+    #[must_use]
+    pub(super) fn default_price_tick(mut self, tick: f64) -> Self {
+        self.default_price_tick = Some(tick);
+        self
+    }
+
+    pub(super) fn declared_quote_minute_history_requests(
+        &self,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<Vec<tqsdk_data::KlineDataSeriesRequest>> {
+        declared_quote_minute_history_requests(
+            &self.quote_symbols,
+            start_datetime_ns,
+            end_datetime_ns,
+        )
+    }
+
+    pub(super) async fn connect(self, replay: ReplayMarketSource) -> Result<Tq> {
+        let mut builder = StrategyBacktest::builder(replay);
+        if let Some(default_price_tick) = self.default_price_tick {
+            builder = builder.default_price_tick(default_price_tick);
+        }
+        builder = builder.instrument_specs(self.instrument_specs);
+        for symbol in &self.quote_symbols {
+            builder = builder.quote(symbol);
+        }
+        for (symbol, tick) in &self.price_ticks {
+            builder = builder.price_tick(symbol, *tick);
+        }
+        let backtest = builder.build().await?;
+        Ok(Tq::from_local_backtest(backtest))
+    }
+}
 
 pub(super) fn replay_from_klines(
     series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
@@ -205,28 +277,6 @@ pub(super) async fn fetch_tick_series(
     Ok(series)
 }
 
-pub(super) async fn connect(
-    replay: ReplayMarketSource,
-    quote_symbols: Vec<String>,
-    price_ticks: std::collections::HashMap<String, f64>,
-    instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
-    default_price_tick: Option<f64>,
-) -> Result<Tq> {
-    let mut builder = StrategyBacktest::builder(replay);
-    if let Some(default_price_tick) = default_price_tick {
-        builder = builder.default_price_tick(default_price_tick);
-    }
-    builder = builder.instrument_specs(instrument_specs);
-    for symbol in &quote_symbols {
-        builder = builder.quote(symbol);
-    }
-    for (symbol, tick) in &price_ticks {
-        builder = builder.price_tick(symbol, *tick);
-    }
-    let backtest = builder.build().await?;
-    Ok(Tq::from_local_backtest(backtest))
-}
-
 fn trading_day_from_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
     let elapsed = timestamp_ns
         .checked_sub(CST_1990_01_01_NS)
@@ -306,10 +356,13 @@ fn cst_offset() -> FixedOffset {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use tqsdk_core::{Kline, Symbol};
+    use tqsdk_task::ReplayMarketEvent;
 
     use super::{
-        continuous_minute_history_requests_for_segments, declared_quote_minute_history_requests,
-        trading_day_from_timestamp_ns, trading_day_start_time_ns,
+        LocalBacktestRecipe, continuous_minute_history_requests_for_segments,
+        declared_quote_minute_history_requests, trading_day_from_timestamp_ns,
+        trading_day_start_time_ns,
     };
     use crate::Error;
 
@@ -402,6 +455,60 @@ mod tests {
             continuous_minute_history_requests_for_segments("KQ.m@SHFE.rb", start, end, &segments);
 
         assert!(matches!(result, Err(Error::Data(_))));
+    }
+
+    #[tokio::test]
+    async fn local_backtest_recipe_connect_applies_instrument_specs() {
+        let replay = tqsdk_task::ReplayMarketSource::new(vec![
+            ReplayMarketEvent::kline(
+                "fixture",
+                "SHFE.rb2501",
+                1_000,
+                Some(1_000),
+                60_000_000_000,
+                Kline {
+                    id: 1,
+                    datetime: 1_000,
+                    open: 100.0,
+                    high: 105.0,
+                    low: 99.0,
+                    close: 102.0,
+                    volume: 10,
+                    ..Kline::default()
+                },
+            )
+            .unwrap(),
+        ]);
+
+        let mut tq = LocalBacktestRecipe::default()
+            .instrument_spec(instrument_spec("SHFE.rb2501", 0.5, 10))
+            .connect(replay)
+            .await
+            .unwrap();
+        let quote = tq.quote("SHFE.rb2501").await.unwrap();
+
+        assert!(tq.next().await.unwrap());
+        let quote = quote.load().unwrap();
+        assert_eq!(quote.last_price, 102.0);
+        assert_eq!(quote.ask_price1, 102.5);
+        assert_eq!(quote.bid_price1, 101.5);
+    }
+
+    fn instrument_spec(
+        symbol: &str,
+        price_tick: f64,
+        volume_multiple: i64,
+    ) -> tqsdk_session::InstrumentSpec {
+        tqsdk_session::InstrumentSpec {
+            symbol: Symbol::new(symbol),
+            exchange_id: "SHFE".to_string(),
+            product_id: "rb".to_string(),
+            class: tqsdk_session::InstrumentClass::Future,
+            price_tick,
+            volume_multiple,
+            expire_datetime_secs: None,
+            underlying_symbol: None,
+        }
     }
 
     fn cst_datetime_ns(

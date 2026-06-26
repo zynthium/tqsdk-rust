@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod cache;
 pub mod config;
 pub mod dashboard;
+mod dashboard_read_model;
 pub mod diagnostics;
 pub mod engine;
 pub mod error;
@@ -33,13 +34,13 @@ pub use config::{
     BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig,
     UpstreamInsListLimits, next_daily_refresh_delay,
 };
-pub use diagnostics::RelayStartupReport;
-pub use engine::{
+pub use dashboard_read_model::{
     DashboardSnapshot, DashboardSnapshotInputs, DashboardSymbolMetricsSnapshot, DashboardSymbolRow,
     DashboardTimelineHistory, DashboardTimelineHistorySample, DashboardTimelineSample,
     DashboardTimelineScope, DashboardTimelineSeverity, DashboardTimelineSymbolSample,
-    DownstreamFrame, RelayEngine, RelayEvent, RelayEventKind,
 };
+pub use diagnostics::RelayStartupReport;
+pub use engine::{DownstreamFrame, RelayEngine, RelayEvent, RelayEventKind};
 pub use error::{RelayError, RelayResult};
 pub use interest::{ClientId, InterestRegistry, SourceKey};
 pub use kline::KlineSynthesis;

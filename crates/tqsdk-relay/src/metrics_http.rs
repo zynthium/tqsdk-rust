@@ -10,7 +10,8 @@ use tokio::sync::oneshot;
 use tokio::time::MissedTickBehavior;
 
 use crate::dashboard::dashboard_asset;
-use crate::engine::{DashboardSnapshotInputs, DashboardTimelineHistoryCache, RelayEngine};
+use crate::dashboard_read_model::{DashboardSnapshotInputs, DashboardTimelineHistoryCache};
+use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::symbol_metrics::SymbolMetricsQuery;
 
