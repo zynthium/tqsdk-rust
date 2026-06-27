@@ -43,11 +43,19 @@ const KLINE_DATA_COLS: usize = 7;
 const TICK_1_LEVEL_DATA_COLS: usize = 11;
 const TICK_5_LEVEL_DATA_COLS: usize = 27;
 const TICK_TAIL_REFRESH_NS: i64 = 100;
+const DECLARED_COVERAGE_NONE: &str = "-";
 
 type IdRange = (i64, i64);
 type DatetimeRange = (i64, i64);
 type CachedSegment = (IdRange, DatetimeRange);
 type MergeGroup = Vec<(IdRange, i64)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeclaredCoverageEntry {
+    datetime_range: DatetimeRange,
+    rows: usize,
+    id_range: Option<IdRange>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistorySeriesCacheBackend {
@@ -173,7 +181,6 @@ struct HistorySeriesCacheInner {
     active_series: Mutex<HashSet<SeriesKey>>,
     active_series_changed: Condvar,
     range_index: Mutex<RangeIndex>,
-    declared_coverage: Mutex<HashMap<SeriesKey, Vec<DatetimeRange>>>,
 }
 
 impl HistorySeriesCacheInner {
@@ -184,7 +191,6 @@ impl HistorySeriesCacheInner {
             active_series: Mutex::new(HashSet::new()),
             active_series_changed: Condvar::new(),
             range_index: Mutex::new(RangeIndex::default()),
-            declared_coverage: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -287,6 +293,53 @@ impl HistorySeriesCache {
         request: HistorySeriesCoverageRequest,
     ) -> Result<HistorySeriesCoverageReport> {
         self.store.coverage(request)
+    }
+
+    fn coverage_unlocked(
+        &self,
+        request: HistorySeriesCoverageRequest,
+    ) -> Result<HistorySeriesCoverageReport> {
+        let HistorySeriesCoverageRequest {
+            symbol,
+            kind,
+            range_start_ns,
+            range_end_ns,
+        } = request;
+        let duration_ns = kind.duration_ns();
+        let id_ranges = self.cached_id_ranges_unlocked(symbol.as_str(), duration_ns)?;
+        let missing_ranges = match kind {
+            HistorySeriesKind::Kline { duration_ns } => self
+                .missing_kline_datetime_ranges_unlocked(
+                    symbol.as_str(),
+                    duration_ns,
+                    range_start_ns,
+                    range_end_ns,
+                )?,
+            HistorySeriesKind::Tick => self.missing_tick_datetime_ranges_unlocked(
+                symbol.as_str(),
+                range_start_ns,
+                range_end_ns,
+            )?,
+        };
+        let mut cached_ranges =
+            invert_missing_ranges((range_start_ns, range_end_ns), &missing_ranges);
+        cached_ranges.extend(self.declared_coverage_ranges_unlocked(
+            symbol.as_str(),
+            duration_ns,
+            range_start_ns,
+            range_end_ns,
+            &id_ranges,
+        )?);
+        let cached_ranges = merge_datetime_ranges(cached_ranges);
+        let missing_ranges = rangeset_difference(&[(range_start_ns, range_end_ns)], &cached_ranges);
+        Ok(HistorySeriesCoverageReport {
+            symbol,
+            kind,
+            range_start_ns,
+            range_end_ns,
+            cached_ranges,
+            missing_ranges,
+        })
     }
 
     pub fn write_segment(
@@ -394,46 +447,85 @@ impl HistorySeriesCache {
         }
     }
 
-    pub(crate) fn record_declared_coverage_range(
+    fn record_declared_coverage_range_unlocked(
         &self,
         symbol: &str,
         duration_ns: i64,
         start_datetime_ns: i64,
         end_datetime_ns: i64,
+        rows: usize,
+        id_range: Option<IdRange>,
     ) -> Result<()> {
         if start_datetime_ns >= end_datetime_ns {
             return Ok(());
         }
-        let key = SeriesKey::new(symbol, duration_ns);
-        let mut coverage = self
-            .inner
-            .declared_coverage
-            .lock()
-            .map_err(|_| DataError::InvalidState("history series cache coverage poisoned"))?;
-        let ranges = coverage.entry(key).or_default();
-        ranges.push((start_datetime_ns, end_datetime_ns));
-        *ranges = merge_datetime_ranges(std::mem::take(ranges));
+        let mut entries = self.read_declared_coverage_entries(symbol, duration_ns)?;
+        entries.push(DeclaredCoverageEntry {
+            datetime_range: (start_datetime_ns, end_datetime_ns),
+            rows,
+            id_range,
+        });
+        entries.sort_by_key(|entry| (entry.datetime_range, entry.id_range, entry.rows));
+        entries.dedup();
+        self.write_declared_coverage_entries(symbol, duration_ns, &entries)?;
         Ok(())
     }
 
-    fn declared_coverage_ranges(
+    fn declared_coverage_ranges_unlocked(
         &self,
         symbol: &str,
         duration_ns: i64,
         start_datetime_ns: i64,
         end_datetime_ns: i64,
+        id_ranges: &[IdRange],
     ) -> Result<Vec<(i64, i64)>> {
-        let key = SeriesKey::new(symbol, duration_ns);
-        let coverage = self
-            .inner
-            .declared_coverage
-            .lock()
-            .map_err(|_| DataError::InvalidState("history series cache coverage poisoned"))?;
-        let ranges = coverage.get(&key).cloned().unwrap_or_default();
+        let ranges = self
+            .read_declared_coverage_entries(symbol, duration_ns)?
+            .into_iter()
+            .filter(|entry| declared_entry_still_has_rows(entry, id_ranges))
+            .map(|entry| entry.datetime_range)
+            .collect::<Vec<_>>();
         Ok(rangeset_intersection(
             &[(start_datetime_ns, end_datetime_ns)],
             &ranges,
         ))
+    }
+
+    fn read_declared_coverage_entries(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+    ) -> Result<Vec<DeclaredCoverageEntry>> {
+        let path = self.declared_coverage_path(symbol, duration_ns);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(content
+            .lines()
+            .filter_map(parse_declared_coverage_line)
+            .collect())
+    }
+
+    fn write_declared_coverage_entries(
+        &self,
+        symbol: &str,
+        duration_ns: i64,
+        entries: &[DeclaredCoverageEntry],
+    ) -> Result<()> {
+        fs::create_dir_all(&self.inner.root_dir)?;
+        let temp_path = self.declared_coverage_temp_path(symbol, duration_ns);
+        let mut file = File::create(&temp_path)?;
+        {
+            let mut writer = BufWriter::new(&mut file);
+            for entry in entries {
+                write_declared_coverage_line(&mut writer, *entry)?;
+            }
+            writer.flush()?;
+        }
+        file.sync_all()?;
+        fs::rename(temp_path, self.declared_coverage_path(symbol, duration_ns))?;
+        Ok(())
     }
 
     fn root_modified(&self) -> Option<SystemTime> {
@@ -576,7 +668,8 @@ impl HistorySeriesCache {
         request: KlineDataSeriesRequest,
     ) -> Result<KlineDataSeries> {
         let spec = request.validate()?;
-        let coverage = self.coverage(HistorySeriesCoverageRequest {
+        let _guard = self.lock_series(request.symbol(), spec.duration_ns)?;
+        let coverage = self.coverage_unlocked(HistorySeriesCoverageRequest {
             symbol: request.symbol().to_string(),
             kind: HistorySeriesKind::Kline {
                 duration_ns: spec.duration_ns,
@@ -595,7 +688,7 @@ impl HistorySeriesCache {
                 missing_ranges,
             ))));
         }
-        let rows = self.read_kline_window(
+        let rows = self.read_kline_window_unlocked(
             request.symbol(),
             spec.duration_ns,
             spec.start_datetime_ns,
@@ -618,7 +711,8 @@ impl HistorySeriesCache {
 
     pub fn read_tick_data_series(&self, request: TickDataSeriesRequest) -> Result<TickDataSeries> {
         let spec = request.validate()?;
-        let coverage = self.coverage(HistorySeriesCoverageRequest {
+        let _guard = self.lock_series(request.symbol(), 0)?;
+        let coverage = self.coverage_unlocked(HistorySeriesCoverageRequest {
             symbol: request.symbol().to_string(),
             kind: HistorySeriesKind::Tick,
             range_start_ns: spec.start_datetime_ns,
@@ -635,7 +729,7 @@ impl HistorySeriesCache {
                 missing_ranges,
             ))));
         }
-        let rows = self.read_tick_window(
+        let rows = self.read_tick_window_unlocked(
             request.symbol(),
             spec.start_datetime_ns,
             spec.end_datetime_ns,
@@ -664,6 +758,7 @@ impl HistorySeriesCache {
             .write_segment(HistorySeriesWriteSegment {
                 symbol,
                 kind: HistorySeriesKind::Kline { duration_ns },
+                declared_range_ns: None,
                 rows: HistorySeriesWriteRows::Klines(rows),
             })?
             .id_range)
@@ -708,6 +803,7 @@ impl HistorySeriesCache {
             .write_segment(HistorySeriesWriteSegment {
                 symbol,
                 kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
                 rows: HistorySeriesWriteRows::Ticks(rows),
             })?
             .id_range)
@@ -1181,6 +1277,22 @@ impl HistorySeriesCache {
             .root_dir
             .join(format!(".{symbol}.{duration_ns}.lock"))
     }
+
+    fn declared_coverage_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
+        self.inner
+            .root_dir
+            .join(format!(".{symbol}.{duration_ns}.coverage"))
+    }
+
+    fn declared_coverage_temp_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        self.inner
+            .root_dir
+            .join(format!(".{symbol}.{duration_ns}.coverage.{suffix}.temp"))
+    }
 }
 
 fn scan_with_inner(inner: &Arc<HistorySeriesCacheInner>) -> Result<HistorySeriesCacheScanReport> {
@@ -1200,49 +1312,11 @@ fn coverage_with_inner(
     inner: &Arc<HistorySeriesCacheInner>,
     request: HistorySeriesCoverageRequest,
 ) -> Result<HistorySeriesCoverageReport> {
-    let HistorySeriesCoverageRequest {
-        symbol,
-        kind,
-        range_start_ns,
-        range_end_ns,
-    } = request;
     let cache = HistorySeriesCache::from_binary_inner(Arc::clone(inner));
-    let missing_ranges = match kind {
-        HistorySeriesKind::Kline { duration_ns } => {
-            let _guard = cache.lock_series(symbol.as_str(), duration_ns)?;
-            cache.missing_kline_datetime_ranges_unlocked(
-                symbol.as_str(),
-                duration_ns,
-                range_start_ns,
-                range_end_ns,
-            )?
-        }
-        HistorySeriesKind::Tick => {
-            let _guard = cache.lock_series(symbol.as_str(), 0)?;
-            cache.missing_tick_datetime_ranges_unlocked(
-                symbol.as_str(),
-                range_start_ns,
-                range_end_ns,
-            )?
-        }
-    };
-    let mut cached_ranges = invert_missing_ranges((range_start_ns, range_end_ns), &missing_ranges);
-    cached_ranges.extend(cache.declared_coverage_ranges(
-        symbol.as_str(),
-        kind.duration_ns(),
-        range_start_ns,
-        range_end_ns,
-    )?);
-    let cached_ranges = merge_datetime_ranges(cached_ranges);
-    let missing_ranges = rangeset_difference(&[(range_start_ns, range_end_ns)], &cached_ranges);
-    Ok(HistorySeriesCoverageReport {
-        symbol,
-        kind,
-        range_start_ns,
-        range_end_ns,
-        cached_ranges,
-        missing_ranges,
-    })
+    let duration_ns = request.kind.duration_ns();
+    let symbol = request.symbol.clone();
+    let _guard = cache.lock_series(symbol.as_str(), duration_ns)?;
+    cache.coverage_unlocked(request)
 }
 
 fn write_segment_with_inner(
@@ -1254,6 +1328,16 @@ fn write_segment_with_inner(
         (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => {
             let _guard = cache.lock_series(segment.symbol, duration_ns)?;
             let id_range = cache.write_kline_segment_unlocked(segment.symbol, duration_ns, rows)?;
+            if let Some((start_datetime_ns, end_datetime_ns)) = segment.declared_range_ns {
+                cache.record_declared_coverage_range_unlocked(
+                    segment.symbol,
+                    duration_ns,
+                    start_datetime_ns,
+                    end_datetime_ns,
+                    rows.len(),
+                    id_range,
+                )?;
+            }
             let path = id_range
                 .map(|range| cache.data_file_path(segment.symbol, duration_ns, range.0, range.1))
                 .unwrap_or_else(|| cache.root_dir().to_path_buf());
@@ -1272,6 +1356,16 @@ fn write_segment_with_inner(
         (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) => {
             let _guard = cache.lock_series(segment.symbol, 0)?;
             let id_range = cache.write_tick_segment_unlocked(segment.symbol, rows)?;
+            if let Some((start_datetime_ns, end_datetime_ns)) = segment.declared_range_ns {
+                cache.record_declared_coverage_range_unlocked(
+                    segment.symbol,
+                    0,
+                    start_datetime_ns,
+                    end_datetime_ns,
+                    rows.len(),
+                    id_range,
+                )?;
+            }
             let path = id_range
                 .map(|range| cache.data_file_path(segment.symbol, 0, range.0, range.1))
                 .unwrap_or_else(|| cache.root_dir().to_path_buf());
@@ -1332,6 +1426,62 @@ fn open_reader_with_inner(
     Ok(Box::new(VecHistorySeriesReader {
         rows: rows.into_iter(),
     }))
+}
+
+fn declared_entry_still_has_rows(entry: &DeclaredCoverageEntry, id_ranges: &[IdRange]) -> bool {
+    let Some((start_id, end_id)) = entry.id_range else {
+        return entry.rows == 0;
+    };
+    entry.rows > 0
+        && id_ranges
+            .iter()
+            .any(|&(cached_start, cached_end)| cached_start <= start_id && cached_end >= end_id)
+}
+
+fn parse_declared_coverage_line(line: &str) -> Option<DeclaredCoverageEntry> {
+    let parts = line.split('\t').collect::<Vec<_>>();
+    if parts.len() != 5 {
+        return None;
+    }
+    let start_datetime_ns = parts[0].parse::<i64>().ok()?;
+    let end_datetime_ns = parts[1].parse::<i64>().ok()?;
+    if start_datetime_ns >= end_datetime_ns {
+        return None;
+    }
+    let rows = parts[2].parse::<usize>().ok()?;
+    let id_range = match (parts[3], parts[4]) {
+        (DECLARED_COVERAGE_NONE, DECLARED_COVERAGE_NONE) => None,
+        (start, end) => {
+            let start_id = start.parse::<i64>().ok()?;
+            let end_id = end.parse::<i64>().ok()?;
+            Some((start_id < end_id).then_some((start_id, end_id))?)
+        }
+    };
+    Some(DeclaredCoverageEntry {
+        datetime_range: (start_datetime_ns, end_datetime_ns),
+        rows,
+        id_range,
+    })
+}
+
+fn write_declared_coverage_line(
+    writer: &mut impl Write,
+    entry: DeclaredCoverageEntry,
+) -> Result<()> {
+    let (start_datetime_ns, end_datetime_ns) = entry.datetime_range;
+    match entry.id_range {
+        Some((start_id, end_id)) => writeln!(
+            writer,
+            "{start_datetime_ns}\t{end_datetime_ns}\t{}\t{start_id}\t{end_id}",
+            entry.rows
+        )?,
+        None => writeln!(
+            writer,
+            "{start_datetime_ns}\t{end_datetime_ns}\t{}\t{DECLARED_COVERAGE_NONE}\t{DECLARED_COVERAGE_NONE}",
+            entry.rows
+        )?,
+    }
+    Ok(())
 }
 
 fn invert_missing_ranges(request: (i64, i64), missing_ranges: &[(i64, i64)]) -> Vec<(i64, i64)> {

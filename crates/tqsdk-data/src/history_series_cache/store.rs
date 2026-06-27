@@ -59,6 +59,7 @@ pub enum HistorySeriesWriteRows<'a> {
 pub struct HistorySeriesWriteSegment<'a> {
     pub symbol: &'a str,
     pub kind: HistorySeriesKind,
+    pub declared_range_ns: Option<(i64, i64)>,
     pub rows: HistorySeriesWriteRows<'a>,
 }
 

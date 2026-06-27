@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use tqsdk_core::Tick;
 
 use crate::{
-    DataError, HistorySeriesCache, HistorySeriesCoverageRequest, HistorySeriesKind, Result,
-    TickDataSeries, TickDataSeriesRequest,
+    DataError, HistorySeriesCache, HistorySeriesCoverageRequest, HistorySeriesKind,
+    HistorySeriesWriteRows, HistorySeriesWriteSegment, Result, TickDataSeries,
+    TickDataSeriesRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,9 +130,12 @@ impl BacktestTickCache {
         rows.dedup_by(|left, right| {
             left.datetime == right.datetime && left.id == right.id && left.epoch == right.epoch
         });
-        self.history.write_tick_segment(symbol, rows.as_slice())?;
-        self.history
-            .record_declared_coverage_range(symbol, 0, range_start_ns, range_end_ns)?;
+        self.history.write_segment(HistorySeriesWriteSegment {
+            symbol,
+            kind: HistorySeriesKind::Tick,
+            declared_range_ns: Some((range_start_ns, range_end_ns)),
+            rows: HistorySeriesWriteRows::Ticks(rows.as_slice()),
+        })?;
         Ok(BacktestTickCacheWriteReport {
             cache_dir: self.history.root_dir().to_path_buf(),
             symbol: symbol.to_string(),

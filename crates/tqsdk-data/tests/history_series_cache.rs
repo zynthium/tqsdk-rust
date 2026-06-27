@@ -11,6 +11,7 @@ use tqsdk_core::{
 use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
     HistorySeriesCache, HistorySeriesCacheFileStatus, KlineDataSeriesRequest,
+    TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -133,6 +134,54 @@ fn backtest_tick_cache_rejects_ticks_outside_declared_range() {
         DataError::InvalidState(message)
             if message.contains("outside declared backtest tick cache range")
     ));
+}
+
+#[test]
+fn backtest_tick_cache_persists_sparse_declared_coverage_after_reopen() {
+    let dir = temp_dir("backtest-tick-cache-reopen-sparse");
+    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
+    backtest_cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            5_000,
+            vec![tick(1, 1_000, 101.0), tick(2, 3_000, 103.0)],
+        )
+        .unwrap();
+
+    let reopened = BacktestTickCache::open(&dir).unwrap();
+    let coverage = reopened.coverage("SHFE.rb2601", 1_000, 5_000).unwrap();
+
+    assert!(coverage.is_complete());
+    assert_eq!(coverage.cached_ranges, vec![(1_000, 5_000)]);
+    assert!(coverage.missing_ranges.is_empty());
+    let series = reopened
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 5_000))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn backtest_tick_cache_persists_empty_declared_coverage_after_reopen() {
+    let dir = temp_dir("backtest-tick-cache-reopen-empty");
+    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
+    backtest_cache
+        .store_ticks("SHFE.rb2601", 1_000, 5_000, Vec::new())
+        .unwrap();
+
+    let reopened = BacktestTickCache::open(&dir).unwrap();
+    let coverage = reopened.coverage("SHFE.rb2601", 1_000, 5_000).unwrap();
+
+    assert!(coverage.is_complete());
+    assert_eq!(coverage.cached_ranges, vec![(1_000, 5_000)]);
+    assert!(coverage.missing_ranges.is_empty());
+    let series = reopened
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 5_000))
+        .unwrap();
+    assert!(series.is_empty());
 }
 
 #[test]
