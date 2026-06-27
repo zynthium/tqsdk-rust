@@ -66,19 +66,6 @@ impl LocalBacktestRecipe {
         self
     }
 
-    #[cfg(test)]
-    pub(super) fn declared_quote_minute_history_requests(
-        &self,
-        start_datetime_ns: i64,
-        end_datetime_ns: i64,
-    ) -> Result<Vec<tqsdk_data::KlineDataSeriesRequest>> {
-        declared_quote_minute_history_requests(
-            &self.quote_symbols,
-            start_datetime_ns,
-            end_datetime_ns,
-        )
-    }
-
     pub(super) async fn connect(self, replay: ReplayMarketSource) -> Result<Tq> {
         let mut builder = StrategyBacktest::builder(replay);
         if let Some(default_price_tick) = self.default_price_tick {

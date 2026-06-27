@@ -8,18 +8,13 @@ use crate::{
     TickDataSeriesRequest,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BacktestCachePolicy {
     CacheOnly,
+    #[default]
     RemoteOnMiss,
     RefreshMissing,
     RefreshAll,
-}
-
-impl Default for BacktestCachePolicy {
-    fn default() -> Self {
-        Self::RemoteOnMiss
-    }
 }
 
 #[derive(Clone)]
