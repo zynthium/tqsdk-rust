@@ -17,6 +17,8 @@
 - `KlineDataSeries::integrity_report()`
 - `TickDataSeries::integrity_report()`
 - `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
+- `BacktestTickCache::open(...).store_ticks(...)`
+- `BacktestTickCache::open(...).load_series(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
 - `KlineDataDownload::collect_remaining()`
@@ -35,19 +37,22 @@
   calendar-agnostic cadence 缺口检查，tick 不假设固定间隔
 - `DataClient::from_session(...)` 默认不启用历史序列缓存；通过
   `DataClientBuilder::history_cache_enabled(true)` 显式开启后，
-  `get_*_data_series` 会隐式读写 Python 兼容 mmap 历史缓存
+  `get_*_data_series` 会隐式读写 `HistorySeriesCache`
 - 未指定缓存目录时使用 `~/.tqsdk/data_series_1`；可以通过
   `DataClientBuilder::history_cache_dir(...)` 指定目录
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
   `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
-- 历史序列缓存首版使用 Python `DataSeries` 兼容的文件名与二进制列布局：
+- `HistorySeriesCache` 是稳定 facade，底层通过 `HistorySeriesStore` 抽象隔离；
+  默认 `BinaryHistorySeriesStore` 继续使用 Python `DataSeries` 兼容的文件名与二进制列布局：
   `symbol.duration_ns.start_id.end_id`，并通过 mmap 读取大文件窗口
-- Python/Rust 可交替使用同一目录里的历史序列缓存文件，但首版不承诺同目录
-  同时写；Python 官方 `DataSeries` 本身也不支持同一合约周期多进程/线程/
-  协程并发写
+- Python/Rust 可交替使用默认二进制 store 的同一目录文件，但首版不承诺同目录
+  同时写；Python 官方 `DataSeries` 本身也不支持同一合约周期多进程/线程/协程并发写
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 是显式 cache-only reader，
   缺口返回 typed `DataError::CacheMiss`，不会联网补齐
+- `BacktestTickCache` 是 tick-only semantic facade，复用同一个
+  `HistorySeriesCache` / `HistorySeriesStore`，用于回测覆盖检查、tick 写入和 tick
+  replay 读取；它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - `HistorySeriesCache::scan()` 输出 schema version、segment 状态、未完成写入
   和 row-width 损坏报告；首版不额外写 manifest 文件，以保持 Python 目录互通
 - cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用
@@ -98,6 +103,10 @@ Python-compatible mmap 缓存。
 - `HistoryIntegrityReport`
 - `HistoryCacheStatus`
 - `HistoryPermissionStatus`
+- `BacktestCachePolicy`
+- `BacktestTickCache`
+- `BacktestTickCoverage`
+- `BacktestTickCacheWriteReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
@@ -107,6 +116,16 @@ Python-compatible mmap 缓存。
 - `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
+- `HistorySeriesStore`
+- `HistorySeriesCoverageRequest`
+- `HistorySeriesCoverageReport`
+- `HistorySeriesKind`
+- `HistorySeriesReadRequest`
+- `HistorySeriesReader`
+- `HistorySeriesRow`
+- `HistorySeriesSegmentReport`
+- `HistorySeriesWriteRows`
+- `HistorySeriesWriteSegment`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -125,7 +144,8 @@ Python-compatible mmap 缓存。
 - 历史 K 线 / tick 一次性拉取
 - page 级分页读取
 - 按时间范围组装完整历史序列
-- 显式 opt-in 的 Python 兼容 mmap 历史序列缓存
+- 显式 opt-in 的 `HistorySeriesCache` 历史序列缓存
+- tick-only `BacktestTickCache` 回测加速 facade
 - 大时间范围按页推进的批量读
 - research/offline 侧的渐进式 materialization
 - 后续更高层 CSV writer / DataFrame / polars / downloader tool 的底座
@@ -161,6 +181,9 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `HistorySeriesCache::read_tick_data_series(...)`
 - `HistorySeriesCache::scan()`
 - `HistorySeriesCache::enforce_limits(...)`
+- `BacktestTickCache::open(...)`
+- `BacktestTickCache::store_ticks(...)`
+- `BacktestTickCache::load_series(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；

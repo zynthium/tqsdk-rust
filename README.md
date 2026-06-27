@@ -41,8 +41,10 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
 - 做确定性 replay / 本地回测行情输入：用 `tqsdk_task::replay::ReplayMarketSource`。
-- 需要策略下单并撮合成交的回测：用 `tqsdk` 的 `.local_backtest(...)`；server-side
-  `.backtest(...)` / `.server_replay(...)` 是 market-data-only，不能组合交易目标或自动交易登录。
+- 需要策略下单并撮合成交的回测：优先用 `tqsdk` 的
+  `.backtest(start_ns, end_ns)` 持久 tick 缓存路径；需要显式自定义 replay source 时用
+  `.replay_backtest(source)`；官方服务端 market-data-only 回测用
+  `.server_backtest(...)` / `.server_replay(...)`。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
 - 自建 facade、多个异步消费者或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 
@@ -142,61 +144,42 @@ cargo run -p tqsdk-task --example api_contract_s24_testable_strategy
 cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 ```
 
-如果要让普通策略主体在 live / server backtest / local replay backtest 间保持同一套
-`Tq::next()` / `quote()` 写法，优先使用默认 `tqsdk` facade：
-`Tq::futures().backtest(start_ns, end_ns)` 对齐 Python `TqBacktest` 的服务端回测心智，
-需要自定义 replay endpoint 时可链式加 `.replay_url(url)`；单日服务端复盘可用
-`.server_replay(date)?` 对齐 Python `TqReplay(date)` 的会话创建和 replay 行情 endpoint
-接入，策略主体仍保持同一套 `next()` / `quote()` loop。server replay 模式会自动发送
-heartbeat；复盘速度和 terminate 可通过 `Tq::set_replay_speed(...)` /
-`terminate_server_replay()` 显式控制。
-`Tq::futures().local_backtest(replay)` 使用本地 `replay::ReplayMarketSource + sim::TqSim`
-撮合，不需要真实服务；已有 owned history series 时也可以用
-`local_backtest_klines([series])` / `local_backtest_ticks([series])` 直接转本地 replay；
-已有 `DataClient` 和 history request 时可以用
-`local_backtest_kline_history(&data, request).await?` /
-`local_backtest_tick_history(&data, request).await?` 直接取数并进入本地回测。
-多个普通 K 线 request 可以用 `local_backtest_kline_histories(&data, requests).await?`
-一次组合成 replay source。
-分钟线常用路径可进一步用
-`local_backtest_minute_history(&data, symbol, start_ns, end_ns).await?` 省掉 duration 配置。
-如果策略在 live/server backtest/local backtest 间只想保留同一批 quote symbol，
-可先用 `quote_symbol("SHFE.rb2601")` 预声明，再调用
-`local_backtest_quote_minute_history(&data, start_ns, end_ns).await?`，它会为已声明
-symbol 显式取一分钟 K 线作为本地 quote fallback，不做隐藏联网订阅。
-多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略
-只接收 `&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
-决定本地 `TqSim` 回测、快期模拟或实盘账户构造。快期模拟可用 `.tqkq_sim()`，
-实盘可用 `.trade_account_env()` 自动读取并登录 `TQ_TRADE_BROKER_ID` /
-`TQ_TRADE_ACCOUNT_ID` / `TQ_TRADE_PASSWORD`。
-需要把 underlying history 以主连等稳定 replay symbol 回放时，使用
-`local_backtest_klines_as(...)` / `local_backtest_ticks_as(...)`，或对多个显式 history
-request 使用 `local_backtest_kline_histories_as(...)` /
-`local_backtest_tick_histories_as(...)` 组合分段。主连分钟线常用路径可直接用
-`local_backtest_continuous_minute_history(&data, "KQ.m@SHFE.rb", start_ns, end_ns).await?`
-自动查询 date -> underlying segment，并按官方风格交易日窗口裁剪后回放。
-若已通过 `tqsdk-session` 查询到合约 metadata，可把 `InstrumentSpec` 传入
-`instrument_spec(...)`，用于 kline quote synthesis 的 `price_tick` 和本地撮合合约乘数。
-明确要直接操作 Python-style wait facade 时，才下钻到
-`tqsdk-wait` 的 `TqApiBuilder::futures_backtest(...)` /
-`stock_backtest(...)`；如果要本地历史行情或显式 replay 事件 + `TqSim` 账户撮合的内部
-能力，则使用 `tqsdk_task::backtest::StrategyBacktest` 搭配 task-owned
-`tqsdk_task::replay::ReplayMarketSource`。
+如果要让普通策略主体在 backtest / tqkq-sim / live 间保持同一套 `Tq::next()` /
+`quote()` / `target_pos_default(...)` 写法，优先使用默认 `tqsdk` facade。
+`Tq::futures().backtest(start_ns, end_ns)` 是 Python-style 本地撮合回测入口：
+它通过 `BacktestTickCache` 复用 `HistorySeriesCache` 的持久 tick 缓存，再把 tick
+回放到本地 `TqSim`。当前阶段支持 cache-only 与“缓存完整时的默认
+RemoteOnMiss 直接复用”；缺失区间的远程自动补齐、全品种 universe selector 和流式
+heap-merge replay 是后续阶段。
+
+```rust
+let cache_dir = ".tqsdk/backtest_ticks";
+let mut tq = Tq::futures()
+    .backtest(start_ns, end_ns)
+    .cache_dir(cache_dir)?
+    .symbol("SHFE.rb2601")
+    .connect()
+    .await?;
+```
+
+显式离线校验可加 `.cache_only()`；需要自定义内存 replay source、测试 fixture 或外部数据源时用
+`.replay_backtest(source)`。官方服务端 market-data-only 回测改为
+`.server_backtest(start_ns, end_ns)`；单日服务端复盘用 `.server_replay(date)?`。
+`server_backtest` / `server_replay` 不绑定交易目标，也会拒绝自动交易登录；需要策略下单并本地撮合时使用
+`.backtest(...)` 或 `.replay_backtest(...)`。
+
+多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略只接收
+`&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
+决定本地 `TqSim` 回测、快期模拟或实盘账户构造。快期模拟可用 `.tqkq_sim()`，实盘可用
+`.trade_account_env()` 自动读取并登录 `TQ_TRADE_BROKER_ID` / `TQ_TRADE_ACCOUNT_ID` /
+`TQ_TRADE_PASSWORD`。若已通过 `tqsdk-session` 查询到合约 metadata，可把
+`InstrumentSpec` 传入 `instrument_spec(...)`，用于 kline quote synthesis 的
+`price_tick` 和本地撮合合约乘数。
+
 当前本地路径已覆盖 quote/tick/kline replay event 的最小 quote synthesis、replay symbol
 自动追踪、`TargetPos` 执行闭环与增量 execution events/trades 读取，以及轻量
-`summary()` / `performance_metrics()` / `performance_report(window)` / trade log / cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例；默认
-`tqsdk::advanced` 也暴露 `KlineDataSeries` / `TickDataSeries` 与
-`tqsdk_task::replay::StrategyReplaySourceBuilder`，可把 history series 转成本地 replay source；默认 facade
-也提供 `_as` history helper，可将 underlying history 以主连等 caller-provided replay
-symbol 回放，同时保留 quote `underlying_symbol` metadata；也可用
-`local_backtest_quote_minute_history(...)` 复用已声明 quote symbol 自动生成一分钟 history
-request，或用 `local_backtest_continuous_minute_history(...)` 自动完成主连分钟线分段取数。summary
-已含买卖/开平次数、手续费、净实现盈亏、daily cash/equity returns、显式交易日窗口 returns、
-盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar
-和 rolling balance/equity Sharpe / Sortino / Calmar；
-当 replay quote 带有 `underlying_symbol` 时，本地 `TqSim` 会把主连等 replay symbol
-订单映射到实际 underlying symbol 执行和记账，并把实际持仓镜像回 replay symbol 供策略继续读取；
-官方完整报表仍是后续范围；交易日历、单主连
+`summary()` / `performance_metrics()` / `performance_report(window)` / trade log /
+cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例。交易日历、单主连
 date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
@@ -277,8 +260,9 @@ let page = client.get_kline_data_page(request).await?;
 | --- | --- | --- |
 | 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
 | Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote/tick/kline replay + `TqSim`，不连接真实服务 |
-| 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().backtest(...)` 一行切换到服务端回测；需要账号 |
-| 默认 facade 本地回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().local_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
+| 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().server_backtest(...)` 切换到官方服务端 market-data-only 回测；需要账号 |
+| 默认 facade 本地 replay 回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().replay_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
+| 默认 facade 持久缓存回测 | `cargo run -p tqsdk --example api_contract_s43_facade_backtest_history_cache` | `.backtest(...).cache_dir(...).symbol(...)` 通过 `BacktestTickCache` 复用持久 tick 缓存 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |

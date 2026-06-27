@@ -49,8 +49,8 @@
 - 默认安装入口
 - `prelude`
 - `Tq` 主循环和常用 live refs 的轻量包装
-- 零分支跨模态回测统一 API（`backtest` / `local_backtest`）
-- `TargetPos` / history helper 这类低样板组合入口
+- 零分支跨模态入口：`backtest` 持久缓存本地撮合回测、`server_backtest` 官方服务端回测、`server_replay` 官方单日复盘、`replay_backtest` 高级自定义 replay
+- `TargetPos` / backtest cache builder / replay metadata helper 这类低样板组合入口
 - `advanced::*` 下钻到底层 crate
 
 ### 不应承担的职责
@@ -271,9 +271,11 @@
 
 它是执行工具层，不是消费 facade，也不是协议 substrate。
 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 replay/backtest 输入类型；
-也可以通过 builder 接收 `tqsdk-data` 的 history series rows 构建 replay source。
-这是上层集成路径，不代表 JSONL cache storage 进入 `tqsdk-data` public surface，
-也不代表 strategy execution 进入 data。
+也可以通过 builder 接收 `tqsdk-data` 的 history series rows 构建 replay source。持久 tick
+覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
+execution 与本地撮合归 `tqsdk-task`。
+这是上层集成路径，不代表 strategy execution 进入 data，也不代表 task 拥有 durable history
+cache 文件格式。
 S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
 但不复用 `TaskHost::wait_update()` hot path。慢日志、WAL、journal、落盘重试、
 audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有

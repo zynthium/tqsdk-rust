@@ -5,9 +5,10 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
-- Market-data-only server-side backtest (`.backtest()`, optional `.replay_url(...)`)
+- Cache-backed local simulated backtest (`.backtest(start_ns, end_ns)`, `.cache_dir(...)`, `.cache_only()`, `.symbol(...)`)
+- Market-data-only server-side backtest (`.server_backtest()`, optional `.replay_url(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
-- Local offline backtest (`.local_backtest()`, `.local_backtest_klines(...)`, `.local_backtest_ticks(...)`, `.local_backtest_kline_history(...)`, `.local_backtest_kline_histories(...)`, `.local_backtest_minute_history(...)`, `.local_backtest_quote_minute_history(...)`, `.local_backtest_continuous_minute_history(...)`, `_as` alias helpers, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
+- Advanced custom replay backtest (`.replay_backtest(source)`, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
 - 常用 wait-style live refs 和 `Quote` 统一定义
 - `TargetPos` 轻量 wrapper
@@ -18,20 +19,35 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 
-本地回测的 `_as` helper 让 caller-provided replay symbol 与实际 history symbol 分离：
-可以把 `SHFE.rb2601` / `SHFE.rb2605` 等 underlying series 显式组合到
-`KQ.m@SHFE.rb` 这样的主连代码下回放，并保留 quote `underlying_symbol` metadata。
-常用主连分钟线回测可以用 `.local_backtest_continuous_minute_history(...)`
-自动查询 underlying segment、按交易日窗口裁剪并组合 replay source。
-若只需要 Python TqBacktest 风格的分钟线 quote fallback，可先用 `.quote_symbol(...)`
-声明普通合约，再用 `.local_backtest_quote_minute_history(...)` 显式取这些 symbol 的
-一分钟 K 线进入本地回测；该路径不做隐藏订阅或隐式联网。
+`.backtest(start_ns, end_ns)` 是默认 Python-style 本地撮合回测入口。它通过
+`BacktestTickCache` 复用 `tqsdk-data::HistorySeriesCache` 的持久 tick 缓存，并把 tick
+回放到本地 `TqSim`。当前阶段支持显式 `.cache_only()`，也支持默认
+`RemoteOnMiss` 在缓存完整时直接复用本地数据；缺失 tick 区间的远程自动补齐、
+全品种 universe selector 和流式全市场 tick merge 是后续阶段。
+
+```rust
+use tqsdk::prelude::*;
+
+# async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
+let mut tq = Tq::futures()
+    .backtest(start_ns, end_ns)
+    .cache_dir(".tqsdk/backtest_ticks")?
+    .symbol("SHFE.rb2601")
+    .connect()
+    .await?;
+# Ok(())
+# }
+```
+
+`.replay_backtest(source)` 是高级入口，用于测试 fixture、caller-owned 数据源或小型显式
+replay source。它仍支持 `.quote_symbol(...)`、`.price_tick(...)`、
+`.instrument_spec(...)` 和 `.default_price_tick(...)` 这类本地 replay metadata。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
-服务端 `.backtest(...)` 和 `.server_replay(date)?` 只接入官方历史行情 / 复盘行情，
+服务端 `.server_backtest(...)` 和 `.server_replay(date)?` 只接入官方历史行情 / 复盘行情，
 不会绑定交易目标，也会拒绝 `.trade_target_*()`、`.tqkq_sim()` 和
 `.trade_account(...)` / `.trade_account_env()` 等交易登录入口。需要策略下单并撮合成交的
-回测闭环应使用 `.local_backtest(...)` 及其 history helper。
+回测闭环应使用 `.backtest(...)` 或 `.replay_backtest(...)`。
 服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
 把返回的 `md_url` 接入正常行情 loop，并自动发送 replay heartbeat。复盘速度和
 terminate 可通过 `Tq::set_replay_speed(...)` / `terminate_server_replay()` 显式控制。

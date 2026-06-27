@@ -113,6 +113,10 @@
 - `DataClientBuilder::history_cache_dir(...)`
 - `DataClientBuilder::history_cache_max_bytes(...)`
 - `DataClientBuilder::history_cache_retention_days(...)`
+- `BacktestCachePolicy`
+- `BacktestTickCache`
+- `BacktestTickCoverage`
+- `BacktestTickCacheWriteReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
@@ -122,6 +126,16 @@
 - `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
+- `HistorySeriesStore`
+- `HistorySeriesCoverageRequest`
+- `HistorySeriesCoverageReport`
+- `HistorySeriesKind`
+- `HistorySeriesReadRequest`
+- `HistorySeriesReader`
+- `HistorySeriesRow`
+- `HistorySeriesSegmentReport`
+- `HistorySeriesWriteRows`
+- `HistorySeriesWriteSegment`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataDownload::collect_remaining()`
@@ -180,7 +194,7 @@
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`
    - 已有最薄的 `AsyncWrite` CSV export
-   - 已有显式 opt-in 的 Python 兼容 mmap 历史序列缓存：
+   - 已有显式 opt-in 的 `HistorySeriesCache` 历史序列缓存：
      `DataClientBuilder::history_cache_enabled(true)` 让
      `get_kline_data_series` / `get_tick_data_series` 在同一 API 上隐式读写
      `~/.tqsdk/data_series_1` 或自定义目录；cache miss 使用官方
@@ -189,6 +203,12 @@
    - 已有 cache-only history series reader、schema/version scan report、
      typed cache miss，以及最薄的容量/保留期清理策略；Python/Rust 文件格式
      互通但不承诺同目录同时写
+   - `HistorySeriesCache` 已抽象为 `HistorySeriesStore` facade；默认二进制 store
+     继续兼容现有 Python `DataSeries` 文件布局，后续可以替换底层文件格式而不改变
+     data/backtest API
+   - `BacktestTickCache` 已作为 tick-only semantic facade 落在 `tqsdk-data`；
+     它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
+     JSONL tick cache，也不持久化 K 线
    - 后续再考虑路径管理型文件导出
    - deterministic replay / local backtest event source 由 `tqsdk-task` 拥有；
      `tqsdk-data` 只提供 history rows，不提供 JSONL market cache public surface
@@ -235,6 +255,8 @@ tqsdk-wait        tqsdk-data
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
+- `HistorySeriesCache` 的底层存储已通过 `HistorySeriesStore` 抽象；`BacktestTickCache`
+  复用这套抽象承接回测 tick 缓存，不再维护独立 tick replay cache 实现
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /
