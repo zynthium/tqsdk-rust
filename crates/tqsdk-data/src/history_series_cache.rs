@@ -173,6 +173,7 @@ impl HistorySeriesCacheMaintenanceReport {
 pub struct HistorySeriesCache {
     store: Arc<dyn HistorySeriesStore>,
     inner: Arc<HistorySeriesCacheInner>,
+    binary_backed: bool,
 }
 
 struct HistorySeriesCacheInner {
@@ -245,7 +246,11 @@ impl HistorySeriesCache {
         let inner = Arc::new(HistorySeriesCacheInner::new(canonical_or_original(
             store.root_dir(),
         )));
-        Self { store, inner }
+        Self {
+            store,
+            inner,
+            binary_backed: false,
+        }
     }
 
     fn from_binary_inner(inner: Arc<HistorySeriesCacheInner>) -> Self {
@@ -253,6 +258,7 @@ impl HistorySeriesCache {
         Self {
             store: Arc::new(store),
             inner,
+            binary_backed: true,
         }
     }
 
@@ -263,6 +269,7 @@ impl HistorySeriesCache {
         Ok(Self {
             store: Arc::new(store),
             inner,
+            binary_backed: true,
         })
     }
 
@@ -668,6 +675,54 @@ impl HistorySeriesCache {
         request: KlineDataSeriesRequest,
     ) -> Result<KlineDataSeries> {
         let spec = request.validate()?;
+        if !self.binary_backed {
+            let coverage = self.coverage(HistorySeriesCoverageRequest {
+                symbol: request.symbol().to_string(),
+                kind: HistorySeriesKind::Kline {
+                    duration_ns: spec.duration_ns,
+                },
+                range_start_ns: spec.start_datetime_ns,
+                range_end_ns: spec.end_datetime_ns,
+            })?;
+            let missing_ranges = coverage.missing_ranges;
+            if !missing_ranges.is_empty() {
+                return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
+                    self.root_dir().to_path_buf(),
+                    request.symbol(),
+                    spec.duration_ns,
+                    spec.start_datetime_ns,
+                    spec.end_datetime_ns,
+                    missing_ranges,
+                ))));
+            }
+            let mut reader = self.open_reader(HistorySeriesReadRequest {
+                symbol: request.symbol().to_string(),
+                kind: HistorySeriesKind::Kline {
+                    duration_ns: spec.duration_ns,
+                },
+                range_start_ns: spec.start_datetime_ns,
+                range_end_ns: spec.end_datetime_ns,
+            })?;
+            let mut rows = Vec::new();
+            while let Some(row) = reader.next_row()? {
+                if let HistorySeriesRow::Kline(row) = row {
+                    rows.push(row);
+                }
+            }
+            let hit_rows = rows.len();
+            return Ok(KlineDataSeries::new(
+                request.symbol().to_string(),
+                spec.duration_ns,
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+                rows,
+            )
+            .with_cache_report(HistorySeriesCacheReport::new(
+                self.root_dir().to_path_buf(),
+                hit_rows,
+                Vec::new(),
+            )));
+        }
         let _guard = self.lock_series(request.symbol(), spec.duration_ns)?;
         let coverage = self.coverage_unlocked(HistorySeriesCoverageRequest {
             symbol: request.symbol().to_string(),
@@ -711,6 +766,49 @@ impl HistorySeriesCache {
 
     pub fn read_tick_data_series(&self, request: TickDataSeriesRequest) -> Result<TickDataSeries> {
         let spec = request.validate()?;
+        if !self.binary_backed {
+            let coverage = self.coverage(HistorySeriesCoverageRequest {
+                symbol: request.symbol().to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: spec.start_datetime_ns,
+                range_end_ns: spec.end_datetime_ns,
+            })?;
+            let missing_ranges = coverage.missing_ranges;
+            if !missing_ranges.is_empty() {
+                return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
+                    self.root_dir().to_path_buf(),
+                    request.symbol(),
+                    0,
+                    spec.start_datetime_ns,
+                    spec.end_datetime_ns,
+                    missing_ranges,
+                ))));
+            }
+            let mut reader = self.open_reader(HistorySeriesReadRequest {
+                symbol: request.symbol().to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: spec.start_datetime_ns,
+                range_end_ns: spec.end_datetime_ns,
+            })?;
+            let mut rows = Vec::new();
+            while let Some(row) = reader.next_row()? {
+                if let HistorySeriesRow::Tick(row) = row {
+                    rows.push(row);
+                }
+            }
+            let hit_rows = rows.len();
+            return Ok(TickDataSeries::new(
+                request.symbol().to_string(),
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+                rows,
+            )
+            .with_cache_report(HistorySeriesCacheReport::new(
+                self.root_dir().to_path_buf(),
+                hit_rows,
+                Vec::new(),
+            )));
+        }
         let _guard = self.lock_series(request.symbol(), 0)?;
         let coverage = self.coverage_unlocked(HistorySeriesCoverageRequest {
             symbol: request.symbol().to_string(),
@@ -1137,7 +1235,7 @@ impl HistorySeriesCache {
         })
     }
 
-    fn list_segment_files(&self) -> Result<Vec<CacheFileMeta>> {
+    fn list_evictable_cache_files(&self) -> Result<Vec<CacheFileMeta>> {
         if !self.inner.root_dir.exists() {
             return Ok(Vec::new());
         }
@@ -1149,7 +1247,9 @@ impl HistorySeriesCache {
             }
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if parse_data_file_name(&file_name).is_none() {
+            if parse_data_file_name(&file_name).is_none()
+                && !is_declared_coverage_file_name(&file_name)
+            {
                 continue;
             }
             let metadata = entry.metadata()?;
@@ -1172,7 +1272,7 @@ impl HistorySeriesCache {
         };
         let ttl = Duration::from_secs(days.saturating_mul(24 * 60 * 60));
         let cutoff = SystemTime::now().checked_sub(ttl).unwrap_or(UNIX_EPOCH);
-        for file in self.list_segment_files()? {
+        for file in self.list_evictable_cache_files()? {
             if file.modified <= cutoff && fs::remove_file(&file.path).is_ok() {
                 report.record_removed(file.size_bytes);
                 self.invalidate_range_index();
@@ -1189,7 +1289,7 @@ impl HistorySeriesCache {
         let Some(limit) = max_bytes else {
             return Ok(());
         };
-        let mut files = self.list_segment_files()?;
+        let mut files = self.list_evictable_cache_files()?;
         let mut total = files.iter().map(|file| file.size_bytes).sum::<u64>();
         if total <= limit {
             return Ok(());
@@ -1327,6 +1427,10 @@ fn write_segment_with_inner(
     match (segment.kind, segment.rows) {
         (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => {
             let _guard = cache.lock_series(segment.symbol, duration_ns)?;
+            validate_declared_range(
+                segment.declared_range_ns,
+                rows.iter().map(|row| row.datetime),
+            )?;
             let id_range = cache.write_kline_segment_unlocked(segment.symbol, duration_ns, rows)?;
             if let Some((start_datetime_ns, end_datetime_ns)) = segment.declared_range_ns {
                 cache.record_declared_coverage_range_unlocked(
@@ -1355,6 +1459,10 @@ fn write_segment_with_inner(
         }
         (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) => {
             let _guard = cache.lock_series(segment.symbol, 0)?;
+            validate_declared_range(
+                segment.declared_range_ns,
+                rows.iter().map(|row| row.datetime),
+            )?;
             let id_range = cache.write_tick_segment_unlocked(segment.symbol, rows)?;
             if let Some((start_datetime_ns, end_datetime_ns)) = segment.declared_range_ns {
                 cache.record_declared_coverage_range_unlocked(
@@ -1480,6 +1588,33 @@ fn write_declared_coverage_line(
             "{start_datetime_ns}\t{end_datetime_ns}\t{}\t{DECLARED_COVERAGE_NONE}\t{DECLARED_COVERAGE_NONE}",
             entry.rows
         )?,
+    }
+    Ok(())
+}
+
+fn is_declared_coverage_file_name(file_name: &str) -> bool {
+    file_name.starts_with('.') && file_name.ends_with(".coverage")
+}
+
+fn validate_declared_range(
+    declared_range_ns: Option<DatetimeRange>,
+    datetimes: impl IntoIterator<Item = i64>,
+) -> Result<()> {
+    let Some((start_datetime_ns, end_datetime_ns)) = declared_range_ns else {
+        return Ok(());
+    };
+    if start_datetime_ns >= end_datetime_ns {
+        return Err(DataError::InvalidState(
+            "history series declared range start must be less than end",
+        ));
+    }
+    if datetimes
+        .into_iter()
+        .any(|datetime| datetime < start_datetime_ns || datetime >= end_datetime_ns)
+    {
+        return Err(DataError::InvalidState(
+            "history series row is outside declared coverage range",
+        ));
     }
     Ok(())
 }

@@ -10,8 +10,11 @@ use tqsdk_core::{
 };
 use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
-    HistorySeriesCache, HistorySeriesCacheFileStatus, KlineDataSeriesRequest,
-    TickDataSeriesRequest,
+    HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport,
+    HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesCoverageRequest,
+    HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
+    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment, KlineDataSeriesRequest, TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -182,6 +185,71 @@ fn backtest_tick_cache_persists_empty_declared_coverage_after_reopen() {
         .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 5_000))
         .unwrap();
     assert!(series.is_empty());
+}
+
+#[test]
+fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
+    let dir = temp_dir("backtest-tick-cache-empty-retention");
+    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
+    backtest_cache
+        .store_ticks("SHFE.rb2601", 1_000, 5_000, Vec::new())
+        .unwrap();
+    assert!(
+        backtest_cache
+            .coverage("SHFE.rb2601", 1_000, 5_000)
+            .unwrap()
+            .is_complete()
+    );
+
+    let report = backtest_cache
+        .history_cache()
+        .enforce_limits(None, Some(0))
+        .unwrap();
+    let reopened = BacktestTickCache::open(&dir).unwrap();
+    let coverage = reopened.coverage("SHFE.rb2601", 1_000, 5_000).unwrap();
+
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 5_000)]);
+}
+
+#[test]
+fn history_cache_write_segment_rejects_rows_outside_declared_range() {
+    let dir = temp_dir("history-cache-declared-range-validation");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    let err = cache
+        .write_segment(HistorySeriesWriteSegment {
+            symbol: "SHFE.rb2601",
+            kind: HistorySeriesKind::Tick,
+            declared_range_ns: Some((1_000, 2_000)),
+            rows: HistorySeriesWriteRows::Ticks(&[tick(1, 2_000, 102.0)]),
+        })
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DataError::InvalidState(message)
+            if message.contains("outside declared coverage range")
+    ));
+}
+
+#[test]
+fn backtest_tick_cache_load_series_uses_injected_history_store() {
+    let store = Arc::new(TestHistorySeriesStore {
+        root_dir: temp_dir("custom-history-store"),
+        rows: vec![tick(1, 1_000, 101.0), tick(2, 2_000, 102.0)],
+    });
+    let cache = BacktestTickCache::new(HistorySeriesCache::from_store(store));
+
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
+        .unwrap();
+
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -1080,6 +1148,97 @@ fn seed_ready_kline_chart_with_state(handle: &RuntimeHandle, seed: SeedKlineChar
         )
         .unwrap()
         .expect("seed ready kline chart should produce a commit");
+}
+
+struct TestHistorySeriesStore {
+    root_dir: PathBuf,
+    rows: Vec<Tick>,
+}
+
+impl HistorySeriesStore for TestHistorySeriesStore {
+    fn format_id(&self) -> &'static str {
+        "test.history-series-store"
+    }
+
+    fn schema_version(&self) -> u32 {
+        HISTORY_SERIES_CACHE_SCHEMA_VERSION
+    }
+
+    fn root_dir(&self) -> &Path {
+        self.root_dir.as_path()
+    }
+
+    fn uses_mmap_backend(&self) -> bool {
+        false
+    }
+
+    fn scan(&self) -> tqsdk_data::Result<HistorySeriesCacheScanReport> {
+        Ok(HistorySeriesCacheScanReport {
+            cache_dir: self.root_dir.clone(),
+            schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            files: Vec::new(),
+        })
+    }
+
+    fn enforce_limits(
+        &self,
+        _max_bytes: Option<u64>,
+        _retention_days: Option<u64>,
+    ) -> tqsdk_data::Result<HistorySeriesCacheMaintenanceReport> {
+        Ok(HistorySeriesCacheMaintenanceReport::default())
+    }
+
+    fn coverage(
+        &self,
+        request: HistorySeriesCoverageRequest,
+    ) -> tqsdk_data::Result<HistorySeriesCoverageReport> {
+        Ok(HistorySeriesCoverageReport {
+            symbol: request.symbol,
+            kind: request.kind,
+            range_start_ns: request.range_start_ns,
+            range_end_ns: request.range_end_ns,
+            cached_ranges: vec![(request.range_start_ns, request.range_end_ns)],
+            missing_ranges: Vec::new(),
+        })
+    }
+
+    fn write_segment(
+        &self,
+        _segment: HistorySeriesWriteSegment<'_>,
+    ) -> tqsdk_data::Result<HistorySeriesSegmentReport> {
+        Err(DataError::InvalidState("test store is read-only"))
+    }
+
+    fn open_reader(
+        &self,
+        request: HistorySeriesReadRequest,
+    ) -> tqsdk_data::Result<Box<dyn HistorySeriesReader>> {
+        let rows = match request.kind {
+            HistorySeriesKind::Tick => self
+                .rows
+                .iter()
+                .filter(|row| {
+                    row.datetime >= request.range_start_ns && row.datetime < request.range_end_ns
+                })
+                .cloned()
+                .map(HistorySeriesRow::Tick)
+                .collect(),
+            HistorySeriesKind::Kline { .. } => Vec::new(),
+        };
+        Ok(Box::new(TestHistorySeriesReader {
+            rows: rows.into_iter(),
+        }))
+    }
+}
+
+struct TestHistorySeriesReader {
+    rows: std::vec::IntoIter<HistorySeriesRow>,
+}
+
+impl HistorySeriesReader for TestHistorySeriesReader {
+    fn next_row(&mut self) -> tqsdk_data::Result<Option<HistorySeriesRow>> {
+        Ok(self.rows.next())
+    }
 }
 
 fn temp_dir(name: &str) -> PathBuf {
