@@ -1,0 +1,117 @@
+use std::path::{Path, PathBuf};
+
+use tqsdk_core::{Kline, Tick};
+
+use crate::Result;
+
+use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
+
+pub const BINARY_HISTORY_SERIES_FORMAT_ID: &str = "tqsdk.binary-series.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySeriesKind {
+    Kline { duration_ns: i64 },
+    Tick,
+}
+
+impl HistorySeriesKind {
+    #[must_use]
+    pub fn duration_ns(self) -> i64 {
+        match self {
+            Self::Kline { duration_ns } => duration_ns,
+            Self::Tick => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCoverageRequest {
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCoverageReport {
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+    pub cached_ranges: Vec<(i64, i64)>,
+    pub missing_ranges: Vec<(i64, i64)>,
+}
+
+impl HistorySeriesCoverageReport {
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.missing_ranges.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HistorySeriesWriteRows<'a> {
+    Klines(&'a [Kline]),
+    Ticks(&'a [Tick]),
+}
+
+#[derive(Debug, Clone)]
+pub struct HistorySeriesWriteSegment<'a> {
+    pub symbol: &'a str,
+    pub kind: HistorySeriesKind,
+    pub rows: HistorySeriesWriteRows<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesSegmentReport {
+    pub path: PathBuf,
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub id_range: Option<(i64, i64)>,
+    pub range_start_ns: Option<i64>,
+    pub range_end_ns: Option<i64>,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesReadRequest {
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+}
+
+#[derive(Debug, Clone)]
+pub enum HistorySeriesRow {
+    Kline(Kline),
+    Tick(Tick),
+}
+
+pub trait HistorySeriesReader: Send {
+    fn next_row(&mut self) -> Result<Option<HistorySeriesRow>>;
+}
+
+pub trait HistorySeriesStore: Send + Sync {
+    fn format_id(&self) -> &'static str;
+    fn schema_version(&self) -> u32;
+    fn root_dir(&self) -> &Path;
+    fn uses_mmap_backend(&self) -> bool;
+    fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
+    fn enforce_limits(
+        &self,
+        max_bytes: Option<u64>,
+        retention_days: Option<u64>,
+    ) -> Result<HistorySeriesCacheMaintenanceReport>;
+    fn coverage(
+        &self,
+        request: HistorySeriesCoverageRequest,
+    ) -> Result<HistorySeriesCoverageReport>;
+    fn write_segment(
+        &self,
+        segment: HistorySeriesWriteSegment<'_>,
+    ) -> Result<HistorySeriesSegmentReport>;
+    fn open_reader(
+        &self,
+        request: HistorySeriesReadRequest,
+    ) -> Result<Box<dyn HistorySeriesReader>>;
+}

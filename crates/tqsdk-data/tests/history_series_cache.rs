@@ -9,8 +9,8 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput, Tick,
 };
 use tqsdk_data::{
-    DataClientBuilder, DataError, HistorySeriesCache, HistorySeriesCacheFileStatus,
-    KlineDataSeriesRequest,
+    BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+    HistorySeriesCache, HistorySeriesCacheFileStatus, KlineDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -49,6 +49,90 @@ fn builder_enables_python_compatible_cache_with_custom_dir() {
         .expect("enabled builder should install history cache");
     assert_eq!(cache.root_dir(), dir.as_path());
     assert!(cache.uses_mmap_backend());
+}
+
+#[test]
+fn history_cache_open_uses_default_binary_store() {
+    let dir = temp_dir("history-cache-default-store");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+
+    assert_eq!(cache.root_dir(), dir.as_path());
+    assert_eq!(cache.format_id(), "tqsdk.binary-series.v1");
+    assert_eq!(cache.schema_version(), HISTORY_SERIES_CACHE_SCHEMA_VERSION);
+}
+
+#[test]
+fn backtest_tick_cache_reuses_history_series_cache_storage() {
+    let dir = temp_dir("backtest-tick-cache-reuses-history-cache");
+    let history = HistorySeriesCache::open(&dir).unwrap();
+    let backtest_cache = BacktestTickCache::new(history.clone());
+
+    let report = backtest_cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            vec![
+                tick(2, 2_000, 102.0),
+                tick(1, 1_000, 101.0),
+                tick(2, 2_000, 102.0),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(report.symbol, "SHFE.rb2601");
+    assert_eq!(report.rows, 2);
+    assert_eq!(report.range_start_ns, 1_000);
+    assert_eq!(report.range_end_ns, 3_000);
+
+    let rows = history
+        .read_tick_window("SHFE.rb2601", 1_000, 3_000)
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(dir.join("SHFE.rb2601.0.1.3").exists());
+}
+
+#[test]
+fn backtest_tick_cache_reports_missing_ranges_from_history_cache() {
+    let dir = temp_dir("backtest-tick-cache-missing-ranges");
+    let history = HistorySeriesCache::open(&dir).unwrap();
+    let backtest_cache = BacktestTickCache::new(history);
+
+    backtest_cache
+        .store_ticks("SHFE.rb2601", 1_000, 2_000, vec![tick(1, 1_000, 101.0)])
+        .unwrap();
+
+    let coverage = backtest_cache
+        .coverage("SHFE.rb2601", 1_000, 4_000)
+        .unwrap();
+
+    assert_eq!(coverage.cached_ranges, vec![(1_000, 2_000)]);
+    assert_eq!(coverage.missing_ranges, vec![(2_000, 4_000)]);
+    assert!(!coverage.is_complete());
+}
+
+#[test]
+fn backtest_tick_cache_rejects_ticks_outside_declared_range() {
+    let dir = temp_dir("backtest-tick-cache-out-of-range");
+    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
+
+    let err = backtest_cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            vec![tick(1, 1_000, 101.0), tick(2, 3_000, 102.0)],
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DataError::InvalidState(message)
+            if message.contains("outside declared backtest tick cache range")
+    ));
 }
 
 #[test]

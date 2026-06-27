@@ -41,6 +41,7 @@
 //! # Ok::<(), tqsdk_data::DataError>(())
 //! ```
 
+mod backtest_tick_cache;
 mod client;
 mod download;
 mod error;
@@ -70,6 +71,9 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
     name
 }
 
+pub use backtest_tick_cache::{
+    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheWriteReport, BacktestTickCoverage,
+};
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,
     HistoricalContUnderlyingSegment, KlineDataPage, KlineDataPageRequest, KlineDataSeries,
@@ -84,10 +88,13 @@ pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use history_series_cache::{
-    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache, HistorySeriesCacheBackend,
-    HistorySeriesCacheFileKind, HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
-    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
-    HistorySeriesCacheScanReport,
+    BINARY_HISTORY_SERIES_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache,
+    HistorySeriesCacheBackend, HistorySeriesCacheFileKind, HistorySeriesCacheFileReport,
+    HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss,
+    HistorySeriesCacheReport, HistorySeriesCacheScanReport, HistorySeriesCoverageReport,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
+    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,
