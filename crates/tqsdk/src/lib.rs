@@ -15,7 +15,10 @@ use chrono::NaiveDate;
 
 /// Common imports for strategy-oriented users.
 pub mod prelude {
-    pub use crate::{Error, LOCAL_BACKTEST_ACCOUNT_ID, Result, TargetPos, Tq, TqBuilder};
+    pub use crate::{
+        BacktestBuilder, BacktestCachePolicy, BacktestDataReport, BacktestTickCache, Error,
+        LOCAL_BACKTEST_ACCOUNT_ID, PreparedBacktest, Result, TargetPos, Tq, TqBuilder,
+    };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
 
@@ -27,9 +30,10 @@ pub mod advanced {
 
     pub mod data {
         pub use tqsdk_data::{
-            DataClient, DataError, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
-            KlineDataSeries, KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
-            TradingCalendarRow, historical_cont_underlying_segments,
+            BacktestTickCache, DataClient, DataError, HistoricalContUnderlyingRow,
+            HistoricalContUnderlyingSegment, KlineDataSeries, KlineDataSeriesRequest,
+            TickDataSeries, TickDataSeriesRequest, TradingCalendarRow,
+            historical_cont_underlying_segments,
         };
     }
 
@@ -86,10 +90,12 @@ pub mod advanced {
 
 mod local_backtest;
 
+pub use tqsdk_data::{BacktestCachePolicy, BacktestTickCache};
+
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Default account id used by [`TqBuilder::local_backtest`].
+/// Default account id used by local simulated backtests.
 pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::sim::LOCAL_BACKTEST_ACCOUNT_ID;
 
 #[cfg(all(feature = "services", feature = "live"))]
@@ -696,6 +702,190 @@ async fn apply_auto_trade_login(tq: &mut Tq, login: AutoTradeLogin) -> Result<()
     Ok(())
 }
 
+/// Builder for cache-backed local backtests.
+pub struct BacktestBuilder {
+    base: TqBuilder,
+    start_ns: i64,
+    end_ns: i64,
+    cache: Option<tqsdk_data::BacktestTickCache>,
+    cache_policy: BacktestCachePolicy,
+    symbols: Vec<String>,
+}
+
+/// Cache-prepared local backtest that can be connected without remote access.
+pub struct PreparedBacktest {
+    builder: BacktestBuilder,
+    data_report: BacktestDataReport,
+}
+
+/// Minimal data preparation report for a cache-backed local backtest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestDataReport {
+    pub requested_range: (i64, i64),
+    pub cache_policy: BacktestCachePolicy,
+    pub cache_dir: std::path::PathBuf,
+    pub resolved_symbols: usize,
+    pub remote_used: bool,
+}
+
+impl BacktestBuilder {
+    /// Set the persistent tick cache used to prepare this backtest.
+    #[must_use]
+    pub fn cache(mut self, cache: tqsdk_data::BacktestTickCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Open and set the persistent tick cache directory used by this backtest.
+    pub fn cache_dir(mut self, root_dir: impl AsRef<std::path::Path>) -> Result<Self> {
+        self.cache = Some(tqsdk_data::BacktestTickCache::open(root_dir)?);
+        Ok(self)
+    }
+
+    /// Set the cache policy for data preparation.
+    ///
+    /// Phase 1 supports [`BacktestCachePolicy::CacheOnly`] and complete-cache
+    /// [`BacktestCachePolicy::RemoteOnMiss`] runs. Remote filling is added later.
+    #[must_use]
+    pub fn cache_policy(mut self, policy: BacktestCachePolicy) -> Self {
+        self.cache_policy = policy;
+        self
+    }
+
+    /// Require all backtest ticks to already exist in the persistent cache.
+    #[must_use]
+    pub fn cache_only(self) -> Self {
+        self.cache_policy(BacktestCachePolicy::CacheOnly)
+    }
+
+    /// Use remote data for missing tick ranges.
+    ///
+    /// Phase 1 can reuse complete cache coverage but cannot fill missing ranges remotely yet.
+    #[must_use]
+    pub fn remote_on_miss(self) -> Self {
+        self.cache_policy(BacktestCachePolicy::RemoteOnMiss)
+    }
+
+    /// Refresh missing tick ranges even when some cache coverage exists.
+    ///
+    /// Not implemented in phase 1.
+    #[must_use]
+    pub fn refresh_missing(self) -> Self {
+        self.cache_policy(BacktestCachePolicy::RefreshMissing)
+    }
+
+    /// Refresh the full requested tick range before running the backtest.
+    ///
+    /// Not implemented in phase 1.
+    #[must_use]
+    pub fn refresh_all(self) -> Self {
+        self.cache_policy(BacktestCachePolicy::RefreshAll)
+    }
+
+    /// Add a symbol whose tick history must be present in the cache.
+    #[must_use]
+    pub fn symbol(mut self, symbol: impl Into<String>) -> Self {
+        let symbol = symbol.into();
+        if !self.symbols.iter().any(|existing| existing == &symbol) {
+            self.symbols.push(symbol);
+        }
+        self
+    }
+
+    /// Validate cache coverage and prepare the local replay inputs.
+    pub async fn prepare(self) -> Result<PreparedBacktest> {
+        if self.end_ns <= self.start_ns {
+            return Err(data_validation(
+                "backtest end_ns must be greater than start_ns",
+            ));
+        }
+        if self.symbols.is_empty() {
+            return Err(data_validation(
+                "cache-backed backtest requires at least one symbol in phase 1",
+            ));
+        }
+        if self.symbols.iter().any(String::is_empty) {
+            return Err(data_validation(
+                "cache-backed backtest symbol must not be empty",
+            ));
+        }
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+        match self.cache_policy {
+            BacktestCachePolicy::CacheOnly => {
+                for symbol in &self.symbols {
+                    cache.require_coverage(symbol, self.start_ns, self.end_ns)?;
+                }
+            }
+            BacktestCachePolicy::RemoteOnMiss => {
+                for symbol in &self.symbols {
+                    let coverage = cache.coverage(symbol, self.start_ns, self.end_ns)?;
+                    if !coverage.is_complete() {
+                        return Err(data_validation(format!(
+                            "backtest remote-on-miss cache fill is not implemented in phase 1; missing tick ranges for {symbol}: {:?}",
+                            coverage.missing_ranges
+                        )));
+                    }
+                }
+            }
+            BacktestCachePolicy::RefreshMissing | BacktestCachePolicy::RefreshAll => {
+                return Err(data_validation(format!(
+                    "backtest cache policy {:?} is not supported in phase 1",
+                    self.cache_policy
+                )));
+            }
+        }
+
+        let data_report = BacktestDataReport {
+            requested_range: (self.start_ns, self.end_ns),
+            cache_policy: self.cache_policy,
+            cache_dir: cache.history_cache().root_dir().to_path_buf(),
+            resolved_symbols: self.symbols.len(),
+            remote_used: false,
+        };
+        Ok(PreparedBacktest {
+            builder: self,
+            data_report,
+        })
+    }
+
+    /// Prepare and connect the cache-backed local backtest.
+    pub async fn connect(self) -> Result<Tq> {
+        self.prepare().await?.connect().await
+    }
+}
+
+impl PreparedBacktest {
+    /// Return the cache preparation report.
+    #[must_use]
+    pub fn data_report(&self) -> &BacktestDataReport {
+        &self.data_report
+    }
+
+    /// Connect the prepared local backtest without remote access.
+    pub async fn connect(self) -> Result<Tq> {
+        let BacktestBuilder {
+            base,
+            start_ns,
+            end_ns,
+            cache,
+            cache_policy: _,
+            symbols,
+        } = self.builder;
+        let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
+        let mut series = Vec::with_capacity(symbols.len());
+        for symbol in &symbols {
+            series.push(cache.load_series(tqsdk_data::TickDataSeriesRequest::new(
+                symbol, start_ns, end_ns,
+            ))?);
+        }
+        let replay = local_backtest::replay_from_ticks(series)?;
+        base.replay_backtest(replay).connect().await
+    }
+}
+
 /// Builder for [`Tq`].
 #[derive(Debug)]
 pub struct TqBuilder {
@@ -756,235 +946,47 @@ impl TqBuilder {
         Ok(self)
     }
 
-    /// Enter server-side backtest mode (≈ Python `TqBacktest`).
+    /// Prepare a cache-backed local backtest for `[start_ns, end_ns)`.
+    ///
+    /// Phase 1 requires an explicit cache/cache directory and explicit symbols.
+    #[must_use]
+    pub fn backtest(self, start_ns: i64, end_ns: i64) -> BacktestBuilder {
+        BacktestBuilder {
+            base: self,
+            start_ns,
+            end_ns,
+            cache: None,
+            cache_policy: BacktestCachePolicy::default(),
+            symbols: Vec::new(),
+        }
+    }
+
+    /// Enter official server-side backtest mode (≈ Python `TqBacktest`).
     ///
     /// The strategy body (`next()` / `quote()` / etc.) stays identical to live.
     #[must_use]
-    pub fn backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
+    pub fn server_backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
         self.backtest = Some(BacktestConfig::Server { start_ns, end_ns });
         self
     }
 
-    /// Enter local-backtest mode using the provided replay cache.
+    /// Enter local-backtest mode using a custom in-memory replay source.
     ///
     /// Uses [`tqsdk_task::sim::TqSim`] for matching. The strategy body stays identical to live.
     #[must_use]
-    pub fn local_backtest(mut self, replay: tqsdk_task::replay::ReplayMarketSource) -> Self {
+    pub fn replay_backtest(mut self, replay: tqsdk_task::replay::ReplayMarketSource) -> Self {
         self.backtest = Some(BacktestConfig::Local { replay });
         self
     }
 
-    /// Enter local-backtest mode from owned kline history series.
-    ///
-    /// This is a convenience wrapper around [`tqsdk_task::replay::StrategyReplaySourceBuilder`].
-    pub fn local_backtest_klines(
-        self,
-        series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-    ) -> Result<Self> {
-        Ok(self.local_backtest(local_backtest::replay_from_klines(series)?))
-    }
-
-    /// Enter local-backtest mode from owned kline history series under a replay symbol.
-    ///
-    /// This is useful when underlying contract history should drive a synthetic
-    /// symbol such as a continuous-contract code.
-    pub fn local_backtest_klines_as(
-        self,
-        replay_symbol: impl AsRef<str>,
-        series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-    ) -> Result<Self> {
-        Ok(self.local_backtest(local_backtest::replay_from_klines_as(
-            replay_symbol,
-            series,
-        )?))
-    }
-
-    /// Fetch kline history and enter local-backtest mode from the owned series.
-    pub async fn local_backtest_kline_history(
-        self,
-        data: &tqsdk_data::DataClient,
-        request: tqsdk_data::KlineDataSeriesRequest,
-    ) -> Result<Self> {
-        self.local_backtest_kline_histories(data, [request]).await
-    }
-
-    /// Fetch multiple kline history requests and enter local-backtest mode.
-    pub async fn local_backtest_kline_histories(
-        self,
-        data: &tqsdk_data::DataClient,
-        requests: impl IntoIterator<Item = tqsdk_data::KlineDataSeriesRequest>,
-    ) -> Result<Self> {
-        let series = local_backtest::fetch_kline_series(data, requests).await?;
-        self.local_backtest_klines(series)
-    }
-
-    /// Fetch multiple kline history requests and replay them under one symbol.
-    ///
-    /// Use this for explicitly segmented continuous-contract backtests after the
-    /// caller has chosen the date/time windows for each underlying segment.
-    pub async fn local_backtest_kline_histories_as(
-        self,
-        data: &tqsdk_data::DataClient,
-        replay_symbol: impl AsRef<str>,
-        requests: impl IntoIterator<Item = tqsdk_data::KlineDataSeriesRequest>,
-    ) -> Result<Self> {
-        let series = local_backtest::fetch_kline_series(data, requests).await?;
-        self.local_backtest_klines_as(replay_symbol, series)
-    }
-
-    /// Fetch kline history and replay it under a caller-provided symbol.
-    pub async fn local_backtest_kline_history_as(
-        self,
-        data: &tqsdk_data::DataClient,
-        replay_symbol: impl AsRef<str>,
-        request: tqsdk_data::KlineDataSeriesRequest,
-    ) -> Result<Self> {
-        self.local_backtest_kline_histories_as(data, replay_symbol, [request])
-            .await
-    }
-
-    /// Fetch one-minute kline history and enter local-backtest mode.
-    pub async fn local_backtest_minute_history(
-        self,
-        data: &tqsdk_data::DataClient,
-        symbol: impl Into<String>,
-        start_datetime_ns: i64,
-        end_datetime_ns: i64,
-    ) -> Result<Self> {
-        self.local_backtest_kline_history(
-            data,
-            local_backtest::minute_history_request(symbol, start_datetime_ns, end_datetime_ns),
-        )
-        .await
-    }
-
-    /// Fetch one-minute kline history and replay it under a caller-provided symbol.
-    pub async fn local_backtest_minute_history_as(
-        self,
-        data: &tqsdk_data::DataClient,
-        replay_symbol: impl AsRef<str>,
-        symbol: impl Into<String>,
-        start_datetime_ns: i64,
-        end_datetime_ns: i64,
-    ) -> Result<Self> {
-        self.local_backtest_kline_history_as(
-            data,
-            replay_symbol,
-            local_backtest::minute_history_request(symbol, start_datetime_ns, end_datetime_ns),
-        )
-        .await
-    }
-
-    /// Fetch one-minute kline history for pre-declared quote symbols.
-    ///
-    /// This is the explicit local-backtest counterpart to Python TqBacktest's
-    /// minute-line quote fallback: declare symbols with [`TqBuilder::quote_symbol`],
-    /// then call this helper to fetch `[start_datetime_ns, end_datetime_ns)` minute
-    /// histories for those symbols without hidden subscriptions.
-    pub async fn local_backtest_quote_minute_history(
-        self,
-        data: &tqsdk_data::DataClient,
-        start_datetime_ns: i64,
-        end_datetime_ns: i64,
-    ) -> Result<Self> {
-        let requests = self
-            .local_backtest_recipe
-            .declared_quote_minute_history_requests(start_datetime_ns, end_datetime_ns)?;
-        self.local_backtest_kline_histories(data, requests).await
-    }
-
-    /// Fetch one-minute underlying histories for a main continuous contract.
-    ///
-    /// This queries the historical continuous-contract mapping, fetches the
-    /// matching underlying minute series for each contiguous segment, and
-    /// replays every segment under `symbol` while preserving quote
-    /// `underlying_symbol` metadata. The time range is `[start_datetime_ns,
-    /// end_datetime_ns)`.
-    ///
-    /// Kline quote synthesis still needs a `price_tick`, supplied via
-    /// [`TqBuilder::instrument_spec`], [`TqBuilder::instrument_specs`],
-    /// [`TqBuilder::price_tick`], or [`TqBuilder::default_price_tick`].
-    pub async fn local_backtest_continuous_minute_history(
-        self,
-        data: &tqsdk_data::DataClient,
-        symbol: impl AsRef<str>,
-        start_datetime_ns: i64,
-        end_datetime_ns: i64,
-    ) -> Result<Self> {
-        let symbol = symbol.as_ref().to_owned();
-        let requests = local_backtest::continuous_minute_history_requests(
-            data,
-            &symbol,
-            start_datetime_ns,
-            end_datetime_ns,
-        )
-        .await?;
-        self.local_backtest_kline_histories_as(data, symbol, requests)
-            .await
-    }
-
-    /// Enter local-backtest mode from owned tick history series.
-    ///
-    /// This is a convenience wrapper around [`tqsdk_task::replay::StrategyReplaySourceBuilder`].
-    pub fn local_backtest_ticks(
-        self,
-        series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-    ) -> Result<Self> {
-        Ok(self.local_backtest(local_backtest::replay_from_ticks(series)?))
-    }
-
-    /// Enter local-backtest mode from owned tick history series under a replay symbol.
-    ///
-    /// This keeps the strategy-facing symbol stable while preserving each
-    /// series' original symbol as quote `underlying_symbol` metadata.
-    pub fn local_backtest_ticks_as(
-        self,
-        replay_symbol: impl AsRef<str>,
-        series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-    ) -> Result<Self> {
-        Ok(self.local_backtest(local_backtest::replay_from_ticks_as(replay_symbol, series)?))
-    }
-
-    /// Fetch tick history and enter local-backtest mode from the owned series.
-    pub async fn local_backtest_tick_history(
-        self,
-        data: &tqsdk_data::DataClient,
-        request: tqsdk_data::TickDataSeriesRequest,
-    ) -> Result<Self> {
-        let series = local_backtest::fetch_tick_series(data, [request]).await?;
-        self.local_backtest_ticks(series)
-    }
-
-    /// Fetch multiple tick history requests and replay them under one symbol.
-    pub async fn local_backtest_tick_histories_as(
-        self,
-        data: &tqsdk_data::DataClient,
-        replay_symbol: impl AsRef<str>,
-        requests: impl IntoIterator<Item = tqsdk_data::TickDataSeriesRequest>,
-    ) -> Result<Self> {
-        let series = local_backtest::fetch_tick_series(data, requests).await?;
-        self.local_backtest_ticks_as(replay_symbol, series)
-    }
-
-    /// Fetch tick history and replay it under a caller-provided symbol.
-    pub async fn local_backtest_tick_history_as(
-        self,
-        data: &tqsdk_data::DataClient,
-        replay_symbol: impl AsRef<str>,
-        request: tqsdk_data::TickDataSeriesRequest,
-    ) -> Result<Self> {
-        self.local_backtest_tick_histories_as(data, replay_symbol, [request])
-            .await
-    }
-
-    /// Pre-declare a symbol for local backtest.
+    /// Pre-declare a quote symbol for local replay/backtest.
     #[must_use]
     pub fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.local_backtest_recipe = self.local_backtest_recipe.quote_symbol(symbol);
         self
     }
 
-    /// Pre-declare a price tick for local backtest (required if replay contains klines).
+    /// Pre-declare a price tick for local replay/backtest (required if replay contains klines).
     #[must_use]
     pub fn price_tick(mut self, symbol: impl Into<String>, tick: f64) -> Self {
         self.local_backtest_recipe = self.local_backtest_recipe.price_tick(symbol, tick);
@@ -1006,7 +1008,7 @@ impl TqBuilder {
         self
     }
 
-    /// Set fallback price tick for local-backtest kline quote synthesis.
+    /// Set fallback price tick for local replay/backtest kline quote synthesis.
     ///
     /// Per-symbol [`TqBuilder::price_tick`] overrides this fallback.
     #[must_use]
@@ -1455,7 +1457,7 @@ fn data_validation(message: impl Into<String>) -> Error {
 
 fn missing_default_account() -> Error {
     Error::from(tqsdk_session::SessionFacadeError::InvalidState(
-        "default account is not configured; use local_backtest(...), tqkq_sim(), trade_account(...), or login_trade_account(...)",
+        "default account is not configured; use backtest(...).cache(...), replay_backtest(...), tqkq_sim(), trade_account(...), or login_trade_account(...)",
     ))
 }
 
@@ -1468,7 +1470,7 @@ fn ambiguous_default_account() -> Error {
 
 fn server_side_trade_login_error() -> Error {
     Error::from(tqsdk_session::SessionFacadeError::InvalidState(
-        "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use local_backtest(...) for simulated fills",
+        "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache(...) or replay_backtest(...) for simulated fills",
     ))
 }
 
@@ -1552,23 +1554,23 @@ mod builder_contract_tests {
     };
 
     #[tokio::test]
-    async fn local_backtest_connect_does_not_require_auth() {
+    async fn replay_backtest_connect_does_not_require_auth() {
         let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
 
-        let result = TqBuilder::new().local_backtest(replay).connect().await;
+        let result = TqBuilder::new().replay_backtest(replay).connect().await;
 
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn local_backtest_connect_sets_default_account_id() {
+    async fn replay_backtest_connect_sets_default_account_id() {
         let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
 
         let tq = TqBuilder::new()
-            .local_backtest(replay)
+            .replay_backtest(replay)
             .connect()
             .await
-            .expect("local backtest should connect without auth");
+            .expect("replay backtest should connect without auth");
 
         assert_eq!(tq.default_account_id().unwrap(), LOCAL_BACKTEST_ACCOUNT_ID);
     }
@@ -1577,7 +1579,7 @@ mod builder_contract_tests {
     async fn server_backtest_rejects_auto_trade_login_before_network() {
         let error = TqBuilder::new()
             .auth("demo-user", "demo-pass")
-            .backtest(1_000, 2_000)
+            .server_backtest(1_000, 2_000)
             .trade_account("9999", "acct-1", "secret")
             .connect()
             .await
@@ -1586,7 +1588,7 @@ mod builder_contract_tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid session facade state: server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use local_backtest(...) for simulated fills"
+            "invalid session facade state: server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache(...) or replay_backtest(...) for simulated fills"
         );
     }
 

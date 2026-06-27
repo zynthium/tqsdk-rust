@@ -35,7 +35,7 @@ async fn main() -> tqsdk::Result<()> {
         quote_event(3_000, 102.0)?,
     ]);
 
-    let mut tq = Tq::new().local_backtest(replay).connect().await?;
+    let mut tq = Tq::new().replay_backtest(replay).connect().await?;
 
     run_strategy(&mut tq, LOCAL_BACKTEST_ACCOUNT_ID, SYMBOL).await?;
 

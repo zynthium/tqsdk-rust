@@ -58,6 +58,9 @@ name = "api_contract_s40_facade_local_backtest_target_pos"
 name = "api_contract_s41_facade_server_replay"
 required-features = ["live", "services"]
 
+[[example]]
+name = "api_contract_s43_facade_backtest_history_cache"
+
 [lints]
 workspace = true
 

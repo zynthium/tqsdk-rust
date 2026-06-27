@@ -1,6 +1,6 @@
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
-use tqsdk_core::{Kline, Quote, Symbol};
+use tqsdk_core::{Kline, Quote, Symbol, Tick};
 
 #[test]
 fn prelude_exposes_default_strategy_surface() {
@@ -16,20 +16,10 @@ fn prelude_exposes_default_strategy_surface() {
 }
 
 #[tokio::test]
-async fn facade_local_backtest_alias_history_helpers_build_empty_replay() {
-    let kline_series = Vec::<tqsdk::advanced::data::KlineDataSeries>::new();
+async fn facade_replay_backtest_accepts_empty_replay() {
+    let replay = ReplayMarketSource::new(vec![]);
     let mut tq = Tq::futures()
-        .local_backtest_klines_as("KQ.m@SHFE.rb", kline_series)
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
-    assert!(!tq.next().await.unwrap());
-
-    let tick_series = Vec::<tqsdk::advanced::data::TickDataSeries>::new();
-    let mut tq = Tq::futures()
-        .local_backtest_ticks_as("KQ.m@SHFE.rb", tick_series)
-        .unwrap()
+        .replay_backtest(replay)
         .connect()
         .await
         .unwrap();
@@ -37,20 +27,55 @@ async fn facade_local_backtest_alias_history_helpers_build_empty_replay() {
 }
 
 #[tokio::test]
-async fn facade_local_backtest_quote_minute_history_requires_declared_quotes() {
-    let err = Tq::futures()
-        .local_backtest_quote_minute_history(
-            &tqsdk::advanced::data::DataClient::new(),
-            1_000,
-            61_000_000_000,
-        )
-        .await
-        .unwrap_err();
+async fn facade_backtest_cache_mode_requires_declared_symbols() {
+    let cache_dir = temp_cache_dir();
+    let result = Tq::futures()
+        .backtest(1_000, 61_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await;
+    let err = match result {
+        Ok(_) => panic!("cache-backed backtest unexpectedly prepared without symbols"),
+        Err(error) => error,
+    };
 
     assert!(
-        err.to_string().contains("quote_symbol"),
+        err.to_string().contains("at least one symbol"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn facade_backtest_cache_mode_replays_cached_ticks() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let mut tq = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .connect()
+        .await
+        .unwrap();
+    let quote = tq.quote(symbol).await.unwrap();
+
+    assert!(tq.next().await.unwrap());
+    assert_eq!(quote.load().unwrap().last_price, 100.0);
+    assert!(tq.next().await.unwrap());
+    assert_eq!(quote.load().unwrap().last_price, 101.0);
+    assert!(!tq.next().await.unwrap());
 }
 
 #[tokio::test]
@@ -77,7 +102,7 @@ async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
     ]);
 
     let mut tq = Tq::futures()
-        .local_backtest(replay)
+        .replay_backtest(replay)
         .instrument_spec(instrument_spec("SHFE.rb2501", 0.5, 10))
         .connect()
         .await
@@ -105,7 +130,7 @@ async fn facade_local_backtest_target_pos_uses_underlying_for_continuous_replay_
     ]);
 
     let mut tq = Tq::futures()
-        .local_backtest(replay)
+        .replay_backtest(replay)
         .connect()
         .await
         .unwrap();
@@ -457,7 +482,7 @@ fn default_facade_contract_example_exists() {
 }
 
 #[test]
-fn local_backtest_contract_example_exposes_continuous_minute_helper() {
+fn replay_backtest_contract_example_exposes_custom_replay_flow() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/api_contract_s38_facade_local_backtest.rs"
@@ -465,14 +490,61 @@ fn local_backtest_contract_example_exposes_continuous_minute_helper() {
     let source = std::fs::read_to_string(path).expect("read local backtest facade example");
 
     for required in [
-        "local_backtest_continuous_minute_history(",
-        "\"KQ.m@SHFE.rb\"",
-        ".default_price_tick(1.0)",
-        ".local_backtest(replay)",
+        "ReplayMarketSource::new(vec![])",
+        ".replay_backtest(replay)",
+        ".quote_symbol(\"SHFE.au2510\")",
+        ".price_tick(\"SHFE.au2510\", 0.02)",
     ] {
         assert!(
             source.contains(required),
-            "local backtest example missing required flow fragment: {required}"
+            "local replay backtest example missing required flow fragment: {required}"
         );
+    }
+}
+
+#[test]
+fn backtest_contract_example_exposes_cache_backed_flow() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/api_contract_s43_facade_backtest_history_cache.rs"
+    );
+    let source = std::fs::read_to_string(path).expect("read cache-backed backtest example");
+
+    for required in [
+        "BacktestTickCache::open",
+        ".backtest(1_000, 3_000)",
+        ".cache_dir(&cache_dir)?",
+        ".cache_only()",
+        ".symbol(SYMBOL)",
+        "while tq.next().await?",
+    ] {
+        assert!(
+            source.contains(required),
+            "cache-backed backtest example missing required flow fragment: {required}"
+        );
+    }
+}
+
+fn temp_cache_dir() -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "tqsdk-facade-contract-cache-{}-{unique}",
+        std::process::id()
+    ))
+}
+
+fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
+    Tick {
+        id,
+        datetime,
+        last_price,
+        ask_price1: last_price + 0.5,
+        ask_volume1: 1,
+        bid_price1: last_price - 0.5,
+        bid_volume1: 1,
+        ..Tick::default()
     }
 }

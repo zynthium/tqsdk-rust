@@ -1,42 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 //! Scenario 38: Local offline backtest through the `tqsdk` facade.
 //!
-//! Demonstrates the usage of `.local_backtest()` on the TqBuilder.
+//! Demonstrates the usage of `.replay_backtest()` on the TqBuilder.
 //! The exact same `while tq.next()` and `quote.load()` strategy code runs
-//! against a locally downloaded market data cache without connecting to servers.
+//! against an explicit local replay source without connecting to servers.
 
 use tqsdk::advanced::task::replay::ReplayMarketSource;
 use tqsdk::prelude::*;
-
-#[allow(dead_code)]
-async fn build_continuous_minute_backtest(
-    data: &tqsdk::advanced::data::DataClient,
-) -> tqsdk::Result<TqBuilder> {
-    Tq::futures()
-        .default_price_tick(1.0)
-        .local_backtest_continuous_minute_history(
-            data,
-            "KQ.m@SHFE.rb",
-            1_767_715_200_000_000_000,
-            1_768_233_600_000_000_000,
-        )
-        .await
-}
-
-#[allow(dead_code)]
-async fn build_declared_quote_minute_backtest(
-    data: &tqsdk::advanced::data::DataClient,
-) -> tqsdk::Result<TqBuilder> {
-    Tq::futures()
-        .quote_symbol("SHFE.rb2601")
-        .default_price_tick(1.0)
-        .local_backtest_quote_minute_history(
-            data,
-            1_767_715_200_000_000_000,
-            1_768_233_600_000_000_000,
-        )
-        .await
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
@@ -46,7 +16,7 @@ async fn main() -> tqsdk::Result<()> {
 
     let mut tq = Tq::new()
         // No auth_env() or connect to server needed for local backtest
-        .local_backtest(replay)
+        .replay_backtest(replay)
         .quote_symbol("SHFE.au2510")
         .price_tick("SHFE.au2510", 0.02)
         .connect()

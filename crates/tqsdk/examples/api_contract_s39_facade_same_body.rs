@@ -102,7 +102,7 @@ async fn build_local_backtest() -> tqsdk::Result<Tq> {
     ]);
 
     let tq = Tq::new()
-        .local_backtest(replay)
+        .replay_backtest(replay)
         .quote_symbol(NEAR_SYMBOL)
         .quote_symbol(FAR_SYMBOL)
         .price_tick(NEAR_SYMBOL, 1.0)

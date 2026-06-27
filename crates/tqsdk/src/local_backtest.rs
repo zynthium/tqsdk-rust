@@ -1,17 +1,27 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::time::Duration;
 
+#[cfg(test)]
 use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
 use tqsdk_task::backtest::StrategyBacktest;
 use tqsdk_task::replay::{ReplayMarketSource, StrategyReplaySourceBuilder};
 
-use super::{Result, Tq, data_validation};
+#[cfg(test)]
+use super::data_validation;
+use super::{Result, Tq};
 
+#[cfg(test)]
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
+#[cfg(test)]
 const NANOS_PER_DAY: i64 = 86_400 * NANOS_PER_SECOND;
+#[cfg(test)]
 const TRADING_DAY_START_OFFSET_NS: i64 = 6 * 60 * 60 * NANOS_PER_SECOND;
+#[cfg(test)]
 const TRADING_DAY_END_OFFSET_NS: i64 = 18 * 60 * 60 * NANOS_PER_SECOND;
+#[cfg(test)]
 const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+#[cfg(test)]
 const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
 
 #[derive(Debug, Clone, Default)]
@@ -56,6 +66,7 @@ impl LocalBacktestRecipe {
         self
     }
 
+    #[cfg(test)]
     pub(super) fn declared_quote_minute_history_requests(
         &self,
         start_datetime_ns: i64,
@@ -85,39 +96,7 @@ impl LocalBacktestRecipe {
     }
 }
 
-pub(super) fn replay_from_klines(
-    series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-) -> Result<ReplayMarketSource> {
-    let mut builder = StrategyReplaySourceBuilder::new();
-    for series in series {
-        builder = builder.kline_series(series, "history-kline")?;
-    }
-    Ok(builder.build())
-}
-
-pub(super) fn replay_from_klines_as(
-    replay_symbol: impl AsRef<str>,
-    series: impl IntoIterator<Item = tqsdk_data::KlineDataSeries>,
-) -> Result<ReplayMarketSource> {
-    let replay_symbol = replay_symbol.as_ref().to_owned();
-    let mut builder = StrategyReplaySourceBuilder::new();
-    for series in series {
-        builder = builder.kline_series_as(series, replay_symbol.as_str(), "history-kline")?;
-    }
-    Ok(builder.build())
-}
-
-pub(super) async fn fetch_kline_series(
-    data: &tqsdk_data::DataClient,
-    requests: impl IntoIterator<Item = tqsdk_data::KlineDataSeriesRequest>,
-) -> Result<Vec<tqsdk_data::KlineDataSeries>> {
-    let mut series = Vec::new();
-    for request in requests {
-        series.push(data.get_kline_data_series(request).await?);
-    }
-    Ok(series)
-}
-
+#[cfg(test)]
 pub(super) fn minute_history_request(
     symbol: impl Into<String>,
     start_datetime_ns: i64,
@@ -131,6 +110,7 @@ pub(super) fn minute_history_request(
     )
 }
 
+#[cfg(test)]
 pub(super) fn declared_quote_minute_history_requests(
     symbols: &[String],
     start_datetime_ns: i64,
@@ -164,41 +144,7 @@ pub(super) fn declared_quote_minute_history_requests(
     Ok(requests)
 }
 
-pub(super) async fn continuous_minute_history_requests(
-    data: &tqsdk_data::DataClient,
-    symbol: &str,
-    start_datetime_ns: i64,
-    end_datetime_ns: i64,
-) -> Result<Vec<tqsdk_data::KlineDataSeriesRequest>> {
-    if symbol.is_empty() {
-        return Err(data_validation("continuous symbol must not be empty"));
-    }
-    if end_datetime_ns <= start_datetime_ns {
-        return Err(data_validation(
-            "end_datetime_ns must be greater than start_datetime_ns",
-        ));
-    }
-    let trading_start = trading_day_from_timestamp_ns(start_datetime_ns)?;
-    let end_inclusive_ns = end_datetime_ns.checked_sub(1).ok_or_else(|| {
-        data_validation("end_datetime_ns is too small to compute an inclusive end")
-    })?;
-    let trading_end = trading_day_from_timestamp_ns(end_inclusive_ns)?;
-    let trading_days = data.query_trading_days(trading_start, trading_end).await?;
-    if trading_days.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let segments = data
-        .query_his_cont_underlying_segments(symbol, trading_days.len(), Some(trading_end))
-        .await?;
-    continuous_minute_history_requests_for_segments(
-        symbol,
-        start_datetime_ns,
-        end_datetime_ns,
-        &segments,
-    )
-}
-
+#[cfg(test)]
 fn continuous_minute_history_requests_for_segments(
     symbol: &str,
     start_datetime_ns: i64,
@@ -254,29 +200,7 @@ pub(super) fn replay_from_ticks(
     Ok(builder.build())
 }
 
-pub(super) fn replay_from_ticks_as(
-    replay_symbol: impl AsRef<str>,
-    series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-) -> Result<ReplayMarketSource> {
-    let replay_symbol = replay_symbol.as_ref().to_owned();
-    let mut builder = StrategyReplaySourceBuilder::new();
-    for series in series {
-        builder = builder.tick_series_as(series, replay_symbol.as_str(), "history-tick")?;
-    }
-    Ok(builder.build())
-}
-
-pub(super) async fn fetch_tick_series(
-    data: &tqsdk_data::DataClient,
-    requests: impl IntoIterator<Item = tqsdk_data::TickDataSeriesRequest>,
-) -> Result<Vec<tqsdk_data::TickDataSeries>> {
-    let mut series = Vec::new();
-    for request in requests {
-        series.push(data.get_tick_data_series(request).await?);
-    }
-    Ok(series)
-}
-
+#[cfg(test)]
 fn trading_day_from_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
     let elapsed = timestamp_ns
         .checked_sub(CST_1990_01_01_NS)
@@ -297,6 +221,7 @@ fn trading_day_from_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
     timestamp_ns_to_cst_date(trading_day_ns)
 }
 
+#[cfg(test)]
 fn trading_day_start_time_ns(trading_day: NaiveDate) -> Result<i64> {
     let mut start_time = cst_midnight_ns(trading_day)?
         .checked_sub(TRADING_DAY_START_OFFSET_NS)
@@ -313,17 +238,20 @@ fn trading_day_start_time_ns(trading_day: NaiveDate) -> Result<i64> {
     Ok(start_time)
 }
 
+#[cfg(test)]
 fn trading_day_end_time_ns(trading_day: NaiveDate) -> Result<i64> {
     cst_midnight_ns(trading_day)?
         .checked_add(TRADING_DAY_END_OFFSET_NS)
         .ok_or_else(|| data_validation("trading-day end timestamp overflowed"))
 }
 
+#[cfg(test)]
 fn parse_segment_date(value: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|error| data_validation(format!("invalid segment date {value}: {error}")))
 }
 
+#[cfg(test)]
 fn cst_midnight_ns(date: NaiveDate) -> Result<i64> {
     let midnight = date
         .and_hms_opt(0, 0, 0)
@@ -339,6 +267,7 @@ fn cst_midnight_ns(date: NaiveDate) -> Result<i64> {
         .ok_or_else(|| data_validation("CST midnight timestamp overflowed"))
 }
 
+#[cfg(test)]
 fn timestamp_ns_to_cst_date(timestamp_ns: i64) -> Result<NaiveDate> {
     let seconds = timestamp_ns.div_euclid(NANOS_PER_SECOND);
     let nanos = timestamp_ns.rem_euclid(NANOS_PER_SECOND) as u32;
@@ -349,6 +278,7 @@ fn timestamp_ns_to_cst_date(timestamp_ns: i64) -> Result<NaiveDate> {
     Ok(utc.with_timezone(&cst_offset()).date_naive())
 }
 
+#[cfg(test)]
 fn cst_offset() -> FixedOffset {
     FixedOffset::east_opt(CST_OFFSET_SECONDS).expect("CST offset must be valid")
 }
