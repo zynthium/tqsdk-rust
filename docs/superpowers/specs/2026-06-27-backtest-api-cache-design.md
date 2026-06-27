@@ -1,4 +1,4 @@
-# Backtest API and Persistent Tick Cache Design
+# Backtest API and Persistent History Cache Design
 
 Date: 2026-06-27
 
@@ -7,9 +7,10 @@ Date: 2026-06-27
 This design makes `Tq::backtest(start, end)` the primary Python-style backtest
 entrypoint. A normal user should not need to choose between server backtest,
 local replay, local cache, history helpers, and simulated matching. The default
-backtest path resolves a universe, ensures persistent tick coverage, downloads
-remote missing data on first use, reuses the cache on later runs, streams ticks
-through the runtime, and uses local `TqSim` for matching.
+backtest path resolves a universe, ensures persistent tick coverage through the
+shared `HistorySeriesCache`, downloads remote missing data on first use, reuses
+the cache on later runs, streams ticks through the runtime, and uses local
+`TqSim` for matching.
 
 The current `local_backtest_*` helper family is removed instead of preserved for
 compatibility. The replacement is a smaller and more explicit split:
@@ -36,6 +37,10 @@ compatibility. The replacement is a smaller and more explicit split:
   backtests reuse local cache directly.
 - Cache only ticks as the durable source. Klines used by strategies are derived
   from ticks during replay.
+- Reuse `HistorySeriesCache` as the single durable history cache abstraction for
+  both ordinary history series and backtest acceleration.
+- Make the `HistorySeriesCache` storage layer pluggable so the on-disk format can
+  evolve without changing the backtest API or ordinary history API.
 - Avoid loading full-market tick history into memory. The backtest engine must
   stream and merge tick segments.
 - Keep crate boundaries clean: data preparation in `tqsdk-data`, execution and
@@ -48,6 +53,7 @@ compatibility. The replacement is a smaller and more explicit split:
 - No generic market cache daemon in the SDK crates.
 - No relay dependency from the default SDK facade.
 - No kline persistence for backtest acceleration.
+- No second tick-cache storage stack beside `HistorySeriesCache`.
 - No provider aggregation framework.
 - No GUI/report rendering in the SDK core path.
 
@@ -167,12 +173,80 @@ The metadata is required for:
 Relay remains a consumer of this shared universe code. `tqsdk` must not depend on
 `tqsdk-relay`.
 
-## Persistent Tick Cache
+## Persistent History Cache
 
-The durable cache becomes a formal `BacktestTickCache`, replacing the current
-minimal `TickReplayCache` design.
+Backtest does not introduce an independent durable tick-cache implementation.
+The durable cache is the existing `HistorySeriesCache`, evolved into a generic
+history-series cache abstraction with a replaceable storage backend.
 
-Cache layout:
+The public layering is:
+
+```text
+Tq::backtest(...)
+  -> BacktestBuilder / BacktestPrepared
+  -> BacktestTickCache            // tick-only semantic facade
+  -> HistorySeriesCache           // shared durable history cache abstraction
+  -> HistorySeriesStore backend   // replaceable file format
+```
+
+`BacktestTickCache` is therefore not a new storage format. It is a narrow facade
+over `HistorySeriesCache` that enforces the backtest profile:
+
+- tick-only writes
+- tick-only coverage checks
+- no durable kline writes
+- backtest-oriented reports and errors
+- streaming readers suitable for full-universe replay
+
+The current minimal `TickReplayCache` JSONL implementation is removed rather
+than promoted. Its useful behavior, such as coverage reporting and deterministic
+replay loading, is folded into `HistorySeriesCache` and the backtest facade.
+
+### `HistorySeriesCache` Abstraction
+
+`HistorySeriesCache` becomes the stable API surface for durable history data:
+
+```rust
+pub struct HistorySeriesCache {
+    store: Arc<dyn HistorySeriesStore>,
+}
+
+pub trait HistorySeriesStore: Send + Sync {
+    fn format_id(&self) -> &'static str;
+    fn schema_version(&self) -> u32;
+
+    fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
+    fn coverage(&self, request: HistorySeriesCoverageRequest)
+        -> Result<HistorySeriesCoverageReport>;
+
+    fn write_segment(&self, segment: HistorySeriesWriteSegment<'_>)
+        -> Result<HistorySeriesSegmentReport>;
+
+    fn open_reader(&self, request: HistorySeriesReadRequest)
+        -> Result<Box<dyn HistorySeriesReader>>;
+}
+```
+
+The exact trait signatures can be refined during implementation, but the
+boundary is fixed: coverage, reads, writes, scan, integrity checks, locking, and
+eviction are delegated to the store backend. Callers use `HistorySeriesCache`;
+they do not know whether the backend is the current binary format, a future
+columnar format, or a test/in-memory format.
+
+Required backends:
+
+- `BinaryHistorySeriesStore`: default production backend, initially backed by
+  the existing `HistorySeriesCache` binary segment format.
+- `MemoryHistorySeriesStore`: test backend for contract examples and unit tests.
+
+Optional later backends:
+
+- `ParquetHistorySeriesStore` or another columnar store for research workloads.
+- `RelayHistorySeriesStore` if relay later owns a local persistent mirror.
+
+### Cache Layout
+
+The logical layout is backend-neutral:
 
 ```text
 root/
@@ -184,27 +258,38 @@ root/
     2026-01-05.tick.bin
 ```
 
-Coverage means: for each symbol and trading-day window, a valid segment manifest
-exists for the requested interval. It does not mean ticks exist at a fixed
-interval.
+The physical filenames and file encoding are backend details. The default binary
+backend may keep the current id-range segment layout during the first migration,
+then add a manifest/index layer for faster datetime coverage checks. Backtest API
+must not depend on either shape.
+
+Coverage means: for each symbol and requested trading window, the store can prove
+that valid tick segments cover the interval. It does not mean ticks exist at a
+fixed interval.
 
 Segment metadata:
 
 ```rust
-pub struct BacktestCacheSegmentManifest {
+pub struct HistorySeriesSegmentManifest {
     pub schema_version: u32,
+    pub format_id: String,
     pub symbol: String,
-    pub trading_day: NaiveDate,
+    pub kind: HistorySeriesKind,
+    pub trading_day: Option<NaiveDate>,
     pub range_start_ns: i64,
     pub range_end_ns: i64,
-    pub source: BacktestTickSource,
+    pub source: HistorySeriesSource,
     pub row_count: usize,
-    pub first_tick_ns: Option<i64>,
-    pub last_tick_ns: Option<i64>,
+    pub first_row_ns: Option<i64>,
+    pub last_row_ns: Option<i64>,
     pub checksum: String,
     pub created_at_ns: i64,
 }
 ```
+
+For backtest, `kind` is always `HistorySeriesKind::Tick`. Kline entries may still
+exist for ordinary history series users, but `Tq::backtest(...)` never writes or
+requires durable kline segments.
 
 Write requirements:
 
@@ -278,11 +363,12 @@ Replay order:
 (event_time_ns, exchange_id, product_id, symbol, tick_id)
 ```
 
-The tick cache reader opens the relevant symbol/day segments and merges them
-with a min-heap. Heap size is proportional to active segment count, not total
-tick count. A batch contains all events for the same event timestamp unless it
-would exceed a configured batch size limit; if it is split, the split order must
-remain deterministic.
+The `HistorySeriesReader` opened by the selected store backend streams the
+relevant tick segments. The backtest replay layer merges per-symbol/per-segment
+readers with a min-heap. Heap size is proportional to active segment count, not
+total tick count. A batch contains all events for the same event timestamp unless
+it would exceed a configured batch size limit; if it is split, the split order
+must remain deterministic.
 
 Each `Tq::next()` in backtest mode performs:
 
@@ -416,8 +502,10 @@ Owns:
 
 - universe expression parser and resolver
 - `ResolvedBacktestUniverse`
-- `BacktestTickCache`
-- cache manifest, coverage, checksum, and warmer
+- `HistorySeriesCache` as the shared durable history cache abstraction
+- `HistorySeriesStore` backend trait and default binary backend
+- `BacktestTickCache` as a tick-only semantic facade over `HistorySeriesCache`
+- cache manifest, coverage, checksum, locking, eviction, and warmer
 - remote-on-miss data preparation
 - `BacktestDataReport`
 
@@ -502,10 +590,14 @@ All README content and contract examples should migrate to the new API.
    - Update relay to consume the shared implementation.
    - Add backtest `.universe(expr)`.
 
-3. `BacktestTickCache`
-   - Replace the minimal `TickReplayCache`.
-   - Add manifest, checksum, trading-day segmentation, locks, coverage report,
-     and cache-only tests.
+3. `HistorySeriesCache` storage abstraction
+   - Remove the minimal `TickReplayCache` JSONL storage path.
+   - Refactor `HistorySeriesCache` so it owns an `Arc<dyn HistorySeriesStore>`.
+   - Move the current binary segment logic behind `BinaryHistorySeriesStore`.
+   - Add manifest, checksum, trading-day/index metadata, locks, coverage report,
+     eviction, and cache-only tests.
+   - Add `BacktestTickCache` only as a tick-only facade over
+     `HistorySeriesCache`.
 
 4. Remote-on-miss preparation
    - Check coverage.
@@ -516,7 +608,7 @@ All README content and contract examples should migrate to the new API.
 
 5. Streaming replay
    - Add `BacktestMarketStream`.
-   - Add tick segment reader.
+   - Add `HistorySeriesReader` based tick streaming.
    - Add heap merge and deterministic batching.
    - Remove full-market reliance on `Vec<ReplayMarketEvent>`.
 
@@ -546,6 +638,10 @@ All README content and contract examples should migrate to the new API.
 - First run with missing cache downloads remote tick data and writes cache.
 - Second run with the same universe/range uses cache without remote history
   access.
+- Backtest persistent data reuses `HistorySeriesCache`; no independent
+  `TickReplayCache` storage path remains.
+- `HistorySeriesCache` supports replaceable storage backends behind a stable
+  cache API.
 - Full-universe selector syntax matches relay behavior.
 - Relay and backtest use the same universe parser/resolver tests.
 - Backtest replay does not materialize all market events in memory.
