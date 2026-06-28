@@ -11,9 +11,9 @@ use tqsdk_core::{
 use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
     HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport,
-    HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesCoverageRequest,
-    HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
-    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
+    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
     HistorySeriesWriteSegment, KlineDataSeriesRequest, TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
@@ -1207,6 +1207,20 @@ impl HistorySeriesStore for TestHistorySeriesStore {
         _segment: HistorySeriesWriteSegment<'_>,
     ) -> tqsdk_data::Result<HistorySeriesSegmentReport> {
         Err(DataError::InvalidState("test store is read-only"))
+    }
+
+    fn commit_coverage(
+        &self,
+        commit: HistorySeriesCoverageCommit,
+    ) -> tqsdk_data::Result<HistorySeriesCoverageReport> {
+        Ok(HistorySeriesCoverageReport {
+            symbol: commit.symbol,
+            kind: commit.kind,
+            range_start_ns: commit.range_start_ns,
+            range_end_ns: commit.range_end_ns,
+            cached_ranges: vec![(commit.range_start_ns, commit.range_end_ns)],
+            missing_ranges: Vec::new(),
+        })
     }
 
     fn open_reader(

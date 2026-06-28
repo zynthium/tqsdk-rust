@@ -275,7 +275,7 @@ impl HistorySeriesCache {
     }
 
     pub fn open_series_file(root_dir: impl AsRef<Path>) -> Result<Self> {
-        let root_dir = canonical_or_original(root_dir.as_ref());
+        let root_dir = root_dir.as_ref().to_path_buf();
         let store = series_file_store::SeriesFileHistoryStore::new(root_dir)?;
         Ok(Self::from_store(Arc::new(store)))
     }
