@@ -26,6 +26,6 @@ impl BacktestMarketStream for ReplayMarketStream {
     fn next_event<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<ReplayMarketEvent>>> + 'a>> {
-        Box::pin(async move { Ok(self.source.next()) })
+        Box::pin(async move { Ok(self.source.next_event()) })
     }
 }

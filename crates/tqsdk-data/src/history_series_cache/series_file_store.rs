@@ -47,6 +47,10 @@ struct SeriesFileReader {
     index: usize,
 }
 
+type SeriesRowIdRange = Option<(i64, i64)>;
+type SeriesRowDatetimeRange = Option<(i64, i64)>;
+type RowsAppendReport = (usize, SeriesRowIdRange, SeriesRowDatetimeRange);
+
 impl SeriesFileHistoryStore {
     pub(super) fn new(root_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(root_dir.join(ROOT_DIR_NAME))?;
@@ -187,7 +191,7 @@ fn with_exclusive_series_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> 
         .open(path)?;
     lock_file.lock_exclusive()?;
     let result = f();
-    let unlock_result = lock_file.unlock();
+    let unlock_result = fs2::FileExt::unlock(&lock_file);
     match (result, unlock_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
@@ -272,7 +276,7 @@ fn ensure_series_file_initialized(
 fn append_rows_chunk(
     file: &mut File,
     segment: &HistorySeriesWriteSegment<'_>,
-) -> Result<(usize, Option<(i64, i64)>, Option<(i64, i64)>)> {
+) -> Result<RowsAppendReport> {
     let mut payload = Vec::new();
     match (segment.kind, &segment.rows) {
         (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => {

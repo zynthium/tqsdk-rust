@@ -158,7 +158,7 @@ impl StrategyReplay {
     }
 
     pub async fn next(&mut self) -> Result<Option<StrategyReplayContext<'_>>> {
-        let Some(event) = self.replay.next() else {
+        let Some(event) = self.replay.next_event() else {
             return Ok(None);
         };
         let replay_event = StrategyReplayEvent::from_replay_event(&event);
@@ -537,7 +537,7 @@ impl StrategyReplayBuilder {
         drain_initial_commits(&mut strategy).await?;
         let mut replay = self.replay;
         for _ in 0..self.checkpoint.next_event_index {
-            if replay.next().is_none() {
+            if replay.next_event().is_none() {
                 break;
             }
         }
@@ -952,7 +952,7 @@ impl ReplayMarketSource {
             .map(ReplayMarketEvent::symbol)
     }
 
-    pub fn next(&mut self) -> Option<ReplayMarketEvent> {
+    pub fn next_event(&mut self) -> Option<ReplayMarketEvent> {
         let event = self.events.get(self.index).cloned();
         if event.is_some() {
             self.index += 1;
@@ -965,7 +965,7 @@ impl Iterator for ReplayMarketSource {
     type Item = ReplayMarketEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
-        ReplayMarketSource::next(self)
+        self.next_event()
     }
 }
 

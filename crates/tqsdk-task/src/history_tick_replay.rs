@@ -68,7 +68,6 @@ impl BacktestMarketStream for HistoryTickReplayStream {
                 item.tick,
             )
             .map(Some)
-            .map_err(TaskError::from)
         })
     }
 }
