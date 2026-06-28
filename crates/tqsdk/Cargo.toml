@@ -61,6 +61,10 @@ required-features = ["live", "services"]
 [[example]]
 name = "api_contract_s43_facade_backtest_history_cache"
 
+[[example]]
+name = "api_contract_s44_facade_backtest_remote_on_miss"
+required-features = ["live"]
+
 [lints]
 workspace = true
 

@@ -2,11 +2,19 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
-use tqsdk_core::{Quote, TradingTime};
+use tokio::time::Instant;
+use tqsdk_core::{Quote, RuntimeReader, TradingTime};
+use tqsdk_session::{InstrumentClass, SessionClient, SessionClientBuilder, SymbolInfo};
 
 use crate::error::{DataError, Result};
 use crate::{UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind};
+
+pub const DEFAULT_FUTURES_METADATA_BATCH_SIZE: usize = 500;
+
+const FUTURES_ACTIVITY_QUOTE_TIMEOUT: Duration = Duration::from_secs(30);
+const FUTURES_ACTIVITY_QUOTE_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProductScope {
@@ -141,6 +149,21 @@ impl FuturesContract {
         Ok(contract)
     }
 
+    pub fn from_symbol_info(info: SymbolInfo) -> Result<Self> {
+        let mut contract = Self::new_with_trading_time(
+            info.instrument_id.to_string(),
+            info.exchange_id,
+            info.product_id,
+            info.expired,
+            info.trading_time,
+        )?;
+        let instrument_name = info.instrument_name.trim();
+        if !instrument_name.is_empty() {
+            contract.instrument_name = Some(instrument_name.to_string());
+        }
+        Ok(contract)
+    }
+
     fn matches_product(&self, product: &FuturesProductCode) -> bool {
         product
             .exchange_id
@@ -233,6 +256,144 @@ impl FuturesUniverseResolver for StaticFuturesUniverseResolver {
     async fn trading_calendar(&mut self) -> Result<Vec<tqsdk_core::TradingCalendarDay>> {
         Ok(self.trading_calendar.clone())
     }
+}
+
+pub struct SessionFuturesUniverseResolver {
+    client: SessionClient,
+    activity_client: Option<SessionClient>,
+    metadata_batch_size: usize,
+    activity_quote_timeout: Duration,
+}
+
+impl SessionFuturesUniverseResolver {
+    pub fn new(client: SessionClient) -> Self {
+        Self::new_with_metadata_batch_size(client, DEFAULT_FUTURES_METADATA_BATCH_SIZE)
+            .expect("default futures metadata batch size is non-zero")
+    }
+
+    pub fn new_with_metadata_batch_size(
+        client: SessionClient,
+        metadata_batch_size: usize,
+    ) -> Result<Self> {
+        if metadata_batch_size == 0 {
+            return Err(invalid_universe(
+                "futures metadata batch size must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            client,
+            activity_client: None,
+            metadata_batch_size,
+            activity_quote_timeout: FUTURES_ACTIVITY_QUOTE_TIMEOUT,
+        })
+    }
+
+    #[must_use]
+    pub fn with_activity_client(mut self, activity_client: SessionClient) -> Self {
+        self.activity_client = Some(activity_client);
+        self
+    }
+}
+
+pub fn session_client_builder_for_futures_discovery(
+    user: &str,
+    pass: &str,
+) -> SessionClientBuilder {
+    SessionClientBuilder::new(user, pass)
+        .enable_query()
+        .stock_market()
+}
+
+impl FuturesUniverseResolver for SessionFuturesUniverseResolver {
+    async fn active_futures(&mut self) -> Result<Vec<FuturesContract>> {
+        let symbols = self
+            .client
+            .query_quotes(Some("FUTURE"), None, None, Some(false), None)
+            .await?;
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut contracts = Vec::new();
+        for batch in futures_metadata_symbol_batches(&symbols, self.metadata_batch_size)? {
+            let infos = self.client.query_symbol_info(&batch).await?;
+            contracts.extend(futures_contracts_from_symbol_info(infos)?);
+        }
+        Ok(contracts)
+    }
+
+    async fn main_futures(&mut self) -> Result<Vec<String>> {
+        self.client
+            .query_cont_quotes(None, None, None)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn quote_snapshots(&mut self, symbols: &[String]) -> Result<Vec<Quote>> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(client) = self.activity_client.as_ref() else {
+            return Err(invalid_universe(
+                "futures activity ranking requires a futures market session",
+            ));
+        };
+        let lease = client
+            .ensure_quotes(symbols.iter().map(String::as_str))
+            .await?;
+        let snapshots =
+            wait_for_quote_snapshots(client, symbols, self.activity_quote_timeout).await;
+        let _ = lease.close().await;
+        snapshots
+    }
+
+    async fn trading_calendar(&mut self) -> Result<Vec<tqsdk_core::TradingCalendarDay>> {
+        #[cfg(not(feature = "services"))]
+        {
+            Ok(Vec::new())
+        }
+        #[cfg(feature = "services")]
+        {
+            let now = chrono::Utc::now()
+                .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                .date_naive();
+            let start_dt = now - chrono::Days::new(14);
+            let end_dt = now + chrono::Days::new(14);
+            self.client
+                .get_trading_calendar(start_dt, end_dt)
+                .await
+                .map_err(Into::into)
+        }
+    }
+}
+
+pub fn futures_contracts_from_symbol_info(infos: Vec<SymbolInfo>) -> Result<Vec<FuturesContract>> {
+    infos
+        .into_iter()
+        .filter(|info| info.class == InstrumentClass::Future)
+        .map(FuturesContract::from_symbol_info)
+        .collect()
+}
+
+pub fn futures_metadata_symbol_batches(
+    symbols: &[String],
+    batch_size: usize,
+) -> Result<Vec<Vec<&str>>> {
+    if batch_size == 0 {
+        return Err(invalid_universe(
+            "futures metadata batch size must be greater than zero",
+        ));
+    }
+    Ok(symbols
+        .chunks(batch_size)
+        .map(|chunk| chunk.iter().map(String::as_str).collect())
+        .collect())
+}
+
+#[must_use]
+pub fn expression_requires_activity_quotes(expression: &UniverseExpression) -> bool {
+    expression.clauses().iter().any(
+        |clause| matches!(clause.selector().kind(), UniverseSelectorKind::Top(limit) if limit > 1),
+    )
 }
 
 pub async fn resolve_futures_universe_symbols<R>(
@@ -794,6 +955,58 @@ fn compare_activity(
         .cmp(&left_metrics.open_interest)
         .then_with(|| right_metrics.volume.cmp(&left_metrics.volume))
         .then_with(|| left.symbol.cmp(&right.symbol))
+}
+
+async fn wait_for_quote_snapshots(
+    client: &SessionClient,
+    symbols: &[String],
+    timeout: Duration,
+) -> Result<Vec<Quote>> {
+    let reader = client.reader().clone();
+    let mut cursor = reader.cursor();
+    let deadline = Instant::now() + timeout;
+    let mut pending = symbols.iter().cloned().collect::<BTreeSet<_>>();
+    let mut snapshots = BTreeMap::new();
+
+    loop {
+        collect_available_quotes(&reader, &mut pending, &mut snapshots)?;
+        while reader.next(&mut cursor).is_some() {
+            collect_available_quotes(&reader, &mut pending, &mut snapshots)?;
+        }
+        if pending.is_empty() || Instant::now() >= deadline {
+            return Ok(snapshots.into_values().collect());
+        }
+        let now = Instant::now();
+        let route_deadline = (now + FUTURES_ACTIVITY_QUOTE_POLL).min(deadline);
+        let progress = client.progress_once(Some(route_deadline)).await?;
+        if !progress.is_progress() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+fn collect_available_quotes(
+    reader: &RuntimeReader,
+    pending: &mut BTreeSet<String>,
+    snapshots: &mut BTreeMap<String, Quote>,
+) -> Result<()> {
+    let guard = reader.read();
+    let mut received = Vec::new();
+    for symbol in pending.iter() {
+        if let Some(quote) = guard
+            .decode_path::<Quote>(&["quotes", symbol.as_str()])
+            .map_err(|err| DataError::InvalidResponse(err.to_string()))?
+            && (!quote.datetime.is_empty() || quote.open_interest != 0 || quote.volume != 0)
+        {
+            snapshots.insert(symbol.clone(), quote);
+            received.push(symbol.clone());
+        }
+    }
+    drop(guard);
+    for symbol in received {
+        pending.remove(&symbol);
+    }
+    Ok(())
 }
 
 fn supports_index_continuous_contract(exchange_id: &str) -> bool {

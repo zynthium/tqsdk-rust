@@ -712,6 +712,7 @@ pub struct BacktestBuilder {
     cache: Option<tqsdk_data::BacktestTickCache>,
     cache_policy: BacktestCachePolicy,
     symbols: Vec<String>,
+    universe_expression: Option<tqsdk_data::UniverseExpression>,
 }
 
 /// Cache-prepared local backtest that can be connected without remote access.
@@ -791,12 +792,27 @@ impl BacktestBuilder {
         self
     }
 
+    /// Add futures symbols resolved from the shared relay-compatible selector grammar.
+    pub fn universe(mut self, expression: impl AsRef<str>) -> Result<Self> {
+        self.universe_expression =
+            Some(tqsdk_data::UniverseExpression::parse(expression.as_ref())?);
+        Ok(self)
+    }
+
     /// Validate cache coverage and prepare the local replay inputs.
-    pub async fn prepare(self) -> Result<PreparedBacktest> {
+    pub async fn prepare(mut self) -> Result<PreparedBacktest> {
         if self.end_ns <= self.start_ns {
             return Err(data_validation(
                 "backtest end_ns must be greater than start_ns",
             ));
+        }
+        if let Some(expression) = &self.universe_expression {
+            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
+            for symbol in resolved {
+                if !self.symbols.iter().any(|existing| existing == &symbol) {
+                    self.symbols.push(symbol);
+                }
+            }
         }
         if self.symbols.is_empty() {
             return Err(data_validation(
@@ -899,6 +915,7 @@ impl PreparedBacktest {
             cache,
             cache_policy: _,
             symbols,
+            universe_expression: _,
         } = builder;
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
         match mode {
@@ -1001,6 +1018,7 @@ impl TqBuilder {
             cache: None,
             cache_policy: BacktestCachePolicy::default(),
             symbols: Vec::new(),
+            universe_expression: None,
         }
     }
 
@@ -1519,6 +1537,30 @@ fn session_builder(
 
 fn data_validation(message: impl Into<String>) -> Error {
     Error::Data(Box::new(tqsdk_data::DataError::Validation(message.into())))
+}
+
+async fn resolve_backtest_universe(
+    expression: &tqsdk_data::UniverseExpression,
+    auth: Option<&Auth>,
+) -> Result<Vec<String>> {
+    if expression.is_static_symbol_only() {
+        return Ok(tqsdk_data::resolve_static_symbols_with_expression(
+            expression,
+        )?);
+    }
+
+    let auth = auth.ok_or_else(|| data_validation("dynamic backtest universe requires auth"))?;
+    let client =
+        tqsdk_data::session_client_builder_for_futures_discovery(&auth.user, &auth.pass).build()?;
+    let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(client);
+    if tqsdk_data::expression_requires_activity_quotes(expression) {
+        let activity_client =
+            tqsdk_session::SessionClientBuilder::new(auth.user.clone(), auth.pass.clone())
+                .futures_market()
+                .build()?;
+        resolver = resolver.with_activity_client(activity_client);
+    }
+    Ok(tqsdk_data::resolve_futures_universe_symbols(expression, &mut resolver).await?)
 }
 
 fn take_local_backtest_stream(

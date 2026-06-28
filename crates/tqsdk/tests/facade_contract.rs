@@ -79,6 +79,30 @@ async fn facade_backtest_cache_mode_replays_cached_ticks() {
 }
 
 #[tokio::test]
+async fn facade_backtest_universe_accepts_static_selector_expression() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(symbol, 1_000, 3_000, [tick(1, 1_000, 100.0)])
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .universe("symbol:SHFE.rb2501")
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.data_report().resolved_symbols, 1);
+    assert!(!prepared.data_report().remote_used);
+}
+
+#[tokio::test]
 async fn facade_backtest_remote_on_miss_requires_auth_only_when_cache_missing() {
     let symbol = "SHFE.rb2501";
     let cache_dir = temp_cache_dir();
@@ -603,7 +627,7 @@ fn backtest_contract_example_exposes_cache_backed_flow() {
         ".backtest(1_000, 3_000)",
         ".cache_dir(&cache_dir)?",
         ".cache_only()",
-        ".symbol(SYMBOL)",
+        ".universe(format!(\"symbol:{SYMBOL}\"))?",
         "while tq.next().await?",
     ] {
         assert!(

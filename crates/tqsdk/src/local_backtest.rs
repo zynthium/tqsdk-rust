@@ -5,7 +5,7 @@ use std::time::Duration;
 #[cfg(test)]
 use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
 use tqsdk_task::backtest::StrategyBacktest;
-use tqsdk_task::replay::{ReplayMarketSource, StrategyReplaySourceBuilder};
+use tqsdk_task::replay::ReplayMarketSource;
 
 #[cfg(test)]
 use super::data_validation;
@@ -199,16 +199,6 @@ fn continuous_minute_history_requests_for_segments(
     }
 
     Ok(requests)
-}
-
-pub(super) fn replay_from_ticks(
-    series: impl IntoIterator<Item = tqsdk_data::TickDataSeries>,
-) -> Result<ReplayMarketSource> {
-    let mut builder = StrategyReplaySourceBuilder::new();
-    for series in series {
-        builder = builder.tick_series(series, "history-tick")?;
-    }
-    Ok(builder.build())
 }
 
 #[cfg(test)]

@@ -106,9 +106,12 @@ pub use integrity::{
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
 };
 pub use universe::{
-    FuturesContract, FuturesProductCode, FuturesUniverseResolver, StaticFuturesUniverseResolver,
-    contract_from_configured_symbol, resolve_futures_contracts_with_expression,
-    resolve_futures_universe_symbols, resolve_static_symbols_with_expression,
+    DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,
+    FuturesUniverseResolver, SessionFuturesUniverseResolver, StaticFuturesUniverseResolver,
+    contract_from_configured_symbol, expression_requires_activity_quotes,
+    futures_contracts_from_symbol_info, futures_metadata_symbol_batches,
+    resolve_futures_contracts_with_expression, resolve_futures_universe_symbols,
+    resolve_static_symbols_with_expression, session_client_builder_for_futures_discovery,
     static_contracts_with_expression,
 };
 pub use universe_expression::{

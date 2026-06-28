@@ -21,7 +21,7 @@ async fn main() -> tqsdk::Result<()> {
         .backtest(1_000, 3_000)
         .cache_dir(&cache_dir)?
         .cache_only()
-        .symbol(SYMBOL)
+        .universe(format!("symbol:{SYMBOL}"))?
         .connect()
         .await?;
 
