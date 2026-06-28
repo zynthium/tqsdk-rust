@@ -10,6 +10,8 @@ use crate::{Result, data_validation};
 
 const REMOTE_TICK_DATA_LENGTH: usize = 10_000;
 const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
+const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct RemoteBacktestCachingStream {
     api: tqsdk_wait::TqApi,
@@ -17,6 +19,7 @@ pub(crate) struct RemoteBacktestCachingStream {
     cache: BacktestTickCache,
     fills: BTreeMap<String, BacktestTickFill>,
     pending: VecDeque<ReplayMarketEvent>,
+    last_progress: tokio::time::Instant,
     finalized: bool,
 }
 
@@ -75,21 +78,38 @@ impl RemoteBacktestCachingStream {
             cache,
             fills,
             pending: VecDeque::new(),
+            last_progress: tokio::time::Instant::now(),
             finalized: false,
         })
     }
 
     async fn next_remote_event(&mut self) -> Result<Option<ReplayMarketEvent>> {
-        if let Some(event) = self.pending.pop_front() {
-            return Ok(Some(event));
-        }
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.fills_complete()? {
+                self.finalize_cache()?;
+                return Ok(None);
+            }
+            if self.last_progress.elapsed() >= REMOTE_FILL_IDLE_TIMEOUT {
+                self.finalize_cache()?;
+                return Ok(None);
+            }
 
-        while let Some(step) = self.api.step_until(None).await? {
+            let deadline = tokio::time::Instant::now() + REMOTE_STEP_POLL_TIMEOUT;
+            let Some(step) = self.api.step_until(Some(deadline)).await? else {
+                continue;
+            };
+
+            let mut made_progress = false;
             for (symbol, handle) in &self.handles {
                 if !step.is_changing(handle) {
                     continue;
                 }
 
+                let mut accepted_rows = Vec::new();
+                let mut accepted_events = Vec::new();
                 for row in handle.changed_rows(&step)? {
                     let Some(fill) = self.fills.get_mut(symbol) else {
                         continue;
@@ -98,24 +118,36 @@ impl RemoteBacktestCachingStream {
                         continue;
                     }
 
-                    self.cache.append_partial_ticks(symbol, [row.clone()])?;
-                    self.pending.push_back(ReplayMarketEvent::tick(
+                    accepted_events.push(ReplayMarketEvent::tick(
                         "server-backtest",
                         symbol,
                         row.datetime,
                         Some(row.datetime),
-                        row,
+                        row.clone(),
                     )?);
+                    accepted_rows.push(row);
+                }
+
+                if !accepted_rows.is_empty() {
+                    self.cache.append_partial_ticks(symbol, accepted_rows)?;
+                    made_progress = true;
+                    self.pending.extend(accepted_events);
                 }
             }
 
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(Some(event));
+            if made_progress {
+                self.last_progress = tokio::time::Instant::now();
             }
         }
+    }
 
-        self.finalize_cache()?;
-        Ok(None)
+    fn fills_complete(&self) -> Result<bool> {
+        for fill in self.fills.values() {
+            if !fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?.complete {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn finalize_cache(&mut self) -> Result<()> {

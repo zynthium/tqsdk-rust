@@ -326,9 +326,9 @@ async fn facade_backtest_remote_on_miss_live_smoke() {
     let user = std::env::var("TQ_AUTH_USER").unwrap();
     let pass = std::env::var("TQ_AUTH_PASS").unwrap();
     let cache_dir = temp_cache_dir();
-    let symbol = "SHFE.au2608";
-    let start_ns = 1_781_172_000_000_000_000;
-    let end_ns = 1_781_258_401_000_000_000;
+    let symbol = "KQ.i@SHFE.au";
+    let start_ns = 1_781_182_800_000_000_000;
+    let end_ns = 1_781_182_860_000_000_000;
 
     let mut tq = Tq::futures()
         .auth(user, pass)
@@ -371,9 +371,9 @@ async fn facade_backtest_warmup_remote_on_miss_live_smoke() {
     let user = std::env::var("TQ_AUTH_USER").unwrap();
     let pass = std::env::var("TQ_AUTH_PASS").unwrap();
     let cache_dir = temp_cache_dir();
-    let symbol = "SHFE.au2608";
-    let start_ns = 1_781_172_000_000_000_000;
-    let end_ns = 1_781_258_401_000_000_000;
+    let symbol = "KQ.i@SHFE.au";
+    let start_ns = 1_781_182_800_000_000_000;
+    let end_ns = 1_781_182_860_000_000_000;
 
     let first = Tq::futures()
         .auth(user, pass)

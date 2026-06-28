@@ -5,9 +5,9 @@ use tqsdk::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
-    let start_ns = 1_781_172_000_000_000_000;
-    let end_ns = 1_781_258_401_000_000_000;
-    let symbol = "SHFE.au2608";
+    let start_ns = 1_781_182_800_000_000_000;
+    let end_ns = 1_781_182_860_000_000_000;
+    let symbol = "KQ.i@SHFE.au";
 
     let mut tq = Tq::futures()
         .auth_env()?
