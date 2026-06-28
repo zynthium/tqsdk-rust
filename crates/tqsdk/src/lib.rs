@@ -5,6 +5,7 @@
 //! the underlying `core` / `session` / `wait` / `task` / `data`
 //! boundaries available under [`advanced`].
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,8 @@ use chrono::NaiveDate;
 /// Common imports for strategy-oriented users.
 pub mod prelude {
     pub use crate::{
-        BacktestBuilder, BacktestCachePolicy, BacktestDataReport, BacktestTickCache,
+        BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
+        BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestTickCache,
         BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
         PreparedBacktest, Result, TargetPos, Tq, TqBuilder,
     };
@@ -107,6 +109,7 @@ pub const LOCAL_BACKTEST_ACCOUNT_ID: &str = tqsdk_task::sim::LOCAL_BACKTEST_ACCO
 const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(all(feature = "services", feature = "live"))]
 const SERVER_REPLAY_TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_BACKTEST_WARMUP_BATCH_SIZE: usize = 20;
 
 /// Error type for the user-facing facade.
 #[derive(Debug)]
@@ -716,6 +719,7 @@ pub struct BacktestBuilder {
     cache_policy: BacktestCachePolicy,
     symbols: Vec<String>,
     universe_expression: Option<tqsdk_data::UniverseExpression>,
+    warmup_batch_size: usize,
 }
 
 /// Cache-prepared local backtest that can be connected without remote access.
@@ -740,6 +744,38 @@ pub struct BacktestDataReport {
     pub remote_used: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktestCacheWarmupAction {
+    SkippedComplete,
+    MissingCacheOnly,
+    FilledRemote,
+    RefreshedRemote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestCacheWarmupSymbolReport {
+    pub symbol: String,
+    pub action: BacktestCacheWarmupAction,
+    pub before: BacktestTickCacheStatus,
+    pub after: BacktestTickCacheStatus,
+    pub rows_written: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestCacheWarmupReport {
+    pub requested_range: (i64, i64),
+    pub cache_policy: BacktestCachePolicy,
+    pub cache_dir: std::path::PathBuf,
+    pub batch_size: usize,
+    pub symbols_total: usize,
+    pub symbols_skipped: usize,
+    pub symbols_missing: usize,
+    pub symbols_filled: usize,
+    pub rows_written: usize,
+    pub remote_used: bool,
+    pub symbols: Vec<BacktestCacheWarmupSymbolReport>,
+}
+
 impl BacktestBuilder {
     /// Set the cache policy for data preparation.
     #[must_use]
@@ -759,6 +795,12 @@ impl BacktestBuilder {
     pub fn cache_dir(mut self, root_dir: impl AsRef<std::path::Path>) -> Result<Self> {
         self.cache = Some(tqsdk_data::BacktestTickCache::open(root_dir)?);
         Ok(self)
+    }
+
+    #[must_use]
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.warmup_batch_size = batch_size.max(1);
+        self
     }
 
     /// Inspect persistent tick cache coverage for explicitly configured symbols.
@@ -797,6 +839,152 @@ impl BacktestBuilder {
             .iter()
             .map(|symbol| cache.purge_symbol_ticks(symbol).map_err(Error::from))
             .collect()
+    }
+
+    pub async fn warmup(mut self) -> Result<BacktestCacheWarmupReport> {
+        if self.end_ns <= self.start_ns {
+            return Err(data_validation(
+                "backtest end_ns must be greater than start_ns",
+            ));
+        }
+        if let Some(expression) = &self.universe_expression {
+            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
+            for symbol in resolved {
+                if !self.symbols.iter().any(|existing| existing == &symbol) {
+                    self.symbols.push(symbol);
+                }
+            }
+        }
+        if self.symbols.is_empty() {
+            return Err(data_validation(
+                "cache-backed backtest requires at least one symbol in phase 1",
+            ));
+        }
+        if self.symbols.iter().any(String::is_empty) {
+            return Err(data_validation(
+                "cache-backed backtest symbol must not be empty",
+            ));
+        }
+        let cache = self
+            .cache
+            .clone()
+            .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+        let cache_dir = cache.history_cache().root_dir().to_path_buf();
+
+        if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
+            return Err(data_validation(format!(
+                "backtest cache policy {:?} is not supported in phase 1",
+                self.cache_policy
+            )));
+        }
+
+        let refresh = matches!(self.cache_policy, BacktestCachePolicy::Refresh);
+        if refresh && self.base.auth.is_none() {
+            return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+        if refresh {
+            for symbol in &self.symbols {
+                cache.purge_symbol_ticks(symbol)?;
+            }
+        }
+
+        let mut before_by_symbol = BTreeMap::new();
+        let mut remote_symbols = Vec::new();
+        for symbol in &self.symbols {
+            let before = cache.inspect(symbol, self.start_ns, self.end_ns)?;
+            if refresh || !before.is_complete() {
+                remote_symbols.push(symbol.clone());
+            }
+            before_by_symbol.insert(symbol.clone(), before);
+        }
+
+        if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
+            let mut symbols = Vec::new();
+            for symbol in &self.symbols {
+                let before = before_by_symbol
+                    .get(symbol)
+                    .cloned()
+                    .ok_or_else(|| data_validation("warmup symbol status missing"))?;
+                let action = if before.is_complete() {
+                    BacktestCacheWarmupAction::SkippedComplete
+                } else {
+                    BacktestCacheWarmupAction::MissingCacheOnly
+                };
+                symbols.push(BacktestCacheWarmupSymbolReport {
+                    symbol: symbol.clone(),
+                    action,
+                    before: before.clone(),
+                    after: before,
+                    rows_written: 0,
+                });
+            }
+            return Ok(build_warmup_report(
+                self.start_ns,
+                self.end_ns,
+                self.cache_policy,
+                cache_dir,
+                self.warmup_batch_size,
+                false,
+                symbols,
+            ));
+        }
+
+        if !remote_symbols.is_empty() && self.base.auth.is_none() {
+            return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+
+        let mut rows_by_symbol = BTreeMap::new();
+        if !remote_symbols.is_empty() {
+            let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
+            for batch in remote_symbols.chunks(self.warmup_batch_size) {
+                let fill_report = backtest_remote::fill_backtest_tick_cache(
+                    auth.user.clone(),
+                    auth.pass.clone(),
+                    self.start_ns,
+                    self.end_ns,
+                    batch.to_vec(),
+                    cache.clone(),
+                )
+                .await?;
+                for (symbol, rows) in fill_report.rows_by_symbol {
+                    *rows_by_symbol.entry(symbol).or_insert(0) += rows;
+                }
+            }
+        }
+
+        let mut symbols = Vec::new();
+        for symbol in &self.symbols {
+            let before = before_by_symbol
+                .get(symbol)
+                .cloned()
+                .ok_or_else(|| data_validation("warmup symbol status missing"))?;
+            let rows_written = rows_by_symbol.get(symbol).copied().unwrap_or_default();
+            let after = cache.inspect(symbol, self.start_ns, self.end_ns)?;
+            let action = if before.is_complete() && !refresh {
+                BacktestCacheWarmupAction::SkippedComplete
+            } else if refresh {
+                BacktestCacheWarmupAction::RefreshedRemote
+            } else {
+                BacktestCacheWarmupAction::FilledRemote
+            };
+            symbols.push(BacktestCacheWarmupSymbolReport {
+                symbol: symbol.clone(),
+                action,
+                before,
+                after,
+                rows_written,
+            });
+        }
+
+        Ok(build_warmup_report(
+            self.start_ns,
+            self.end_ns,
+            self.cache_policy,
+            cache_dir,
+            self.warmup_batch_size,
+            !remote_symbols.is_empty(),
+            symbols,
+        ))
     }
 
     /// Require all backtest ticks to already exist in the persistent cache.
@@ -943,6 +1131,49 @@ impl BacktestBuilder {
     }
 }
 
+fn build_warmup_report(
+    start_ns: i64,
+    end_ns: i64,
+    cache_policy: BacktestCachePolicy,
+    cache_dir: std::path::PathBuf,
+    batch_size: usize,
+    remote_used: bool,
+    symbols: Vec<BacktestCacheWarmupSymbolReport>,
+) -> BacktestCacheWarmupReport {
+    let symbols_skipped = symbols
+        .iter()
+        .filter(|symbol| symbol.action == BacktestCacheWarmupAction::SkippedComplete)
+        .count();
+    let symbols_missing = symbols
+        .iter()
+        .filter(|symbol| symbol.action == BacktestCacheWarmupAction::MissingCacheOnly)
+        .count();
+    let symbols_filled = symbols
+        .iter()
+        .filter(|symbol| {
+            matches!(
+                symbol.action,
+                BacktestCacheWarmupAction::FilledRemote
+                    | BacktestCacheWarmupAction::RefreshedRemote
+            )
+        })
+        .count();
+    let rows_written = symbols.iter().map(|symbol| symbol.rows_written).sum();
+    BacktestCacheWarmupReport {
+        requested_range: (start_ns, end_ns),
+        cache_policy,
+        cache_dir,
+        batch_size,
+        symbols_total: symbols.len(),
+        symbols_skipped,
+        symbols_missing,
+        symbols_filled,
+        rows_written,
+        remote_used,
+        symbols,
+    }
+}
+
 impl PreparedBacktest {
     /// Return the cache preparation report.
     #[must_use]
@@ -965,6 +1196,7 @@ impl PreparedBacktest {
             cache_policy: _,
             symbols,
             universe_expression: _,
+            warmup_batch_size: _,
         } = builder;
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
         match mode {
@@ -1068,6 +1300,7 @@ impl TqBuilder {
             cache_policy: BacktestCachePolicy::default(),
             symbols: Vec::new(),
             universe_expression: None,
+            warmup_batch_size: DEFAULT_BACKTEST_WARMUP_BATCH_SIZE,
         }
     }
 

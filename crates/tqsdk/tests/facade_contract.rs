@@ -230,6 +230,97 @@ async fn facade_backtest_refresh_purges_symbol_cache_before_remote_fill() {
 }
 
 #[tokio::test]
+async fn facade_backtest_warmup_skips_complete_cache_without_auth() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let report = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .remote_on_miss()
+        .warmup()
+        .await
+        .unwrap();
+
+    assert_eq!(report.symbols_total, 1);
+    assert_eq!(report.symbols_skipped, 1);
+    assert_eq!(report.symbols_missing, 0);
+    assert_eq!(report.symbols_filled, 0);
+    assert_eq!(report.rows_written, 0);
+    assert!(!report.remote_used);
+    assert_eq!(report.symbols[0].symbol, symbol);
+    assert_eq!(
+        report.symbols[0].action,
+        BacktestCacheWarmupAction::SkippedComplete
+    );
+    assert!(report.symbols[0].after.is_complete());
+}
+
+#[tokio::test]
+async fn facade_backtest_warmup_cache_only_reports_missing_ranges() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+
+    let report = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache_only()
+        .warmup()
+        .await
+        .unwrap();
+
+    assert_eq!(report.symbols_total, 1);
+    assert_eq!(report.symbols_skipped, 0);
+    assert_eq!(report.symbols_missing, 1);
+    assert_eq!(report.symbols_filled, 0);
+    assert!(!report.remote_used);
+    assert_eq!(
+        report.symbols[0].action,
+        BacktestCacheWarmupAction::MissingCacheOnly
+    );
+    assert_eq!(
+        report.symbols[0].before.missing_ranges,
+        vec![(1_000, 3_000)]
+    );
+    assert_eq!(report.symbols[0].after.missing_ranges, vec![(1_000, 3_000)]);
+}
+
+#[tokio::test]
+async fn facade_backtest_warmup_remote_on_miss_requires_auth_when_missing() {
+    let cache_dir = temp_cache_dir();
+
+    let error = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol("SHFE.rb2601")
+        .remote_on_miss()
+        .warmup()
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("remote backtest cache fill requires auth"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires TQ_AUTH_USER/TQ_AUTH_PASS and remote backtest service"]
 async fn facade_backtest_remote_on_miss_live_smoke() {
     let user = std::env::var("TQ_AUTH_USER").unwrap();
@@ -272,6 +363,43 @@ async fn facade_backtest_remote_on_miss_live_smoke() {
 
     let mut cached = prepared.connect().await.unwrap();
     assert!(cached.next().await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires TQ_AUTH_USER/TQ_AUTH_PASS and remote backtest service"]
+async fn facade_backtest_warmup_remote_on_miss_live_smoke() {
+    let user = std::env::var("TQ_AUTH_USER").unwrap();
+    let pass = std::env::var("TQ_AUTH_PASS").unwrap();
+    let cache_dir = temp_cache_dir();
+    let symbol = "SHFE.au2608";
+    let start_ns = 1_781_172_000_000_000_000;
+    let end_ns = 1_781_258_401_000_000_000;
+
+    let first = Tq::futures()
+        .auth(user, pass)
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .remote_on_miss()
+        .warmup()
+        .await
+        .unwrap();
+    assert!(first.remote_used);
+    assert_eq!(first.symbols_filled, 1);
+    assert!(first.symbols[0].after.is_complete());
+
+    let second = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .remote_on_miss()
+        .warmup()
+        .await
+        .unwrap();
+    assert!(!second.remote_used);
+    assert_eq!(second.symbols_skipped, 1);
 }
 
 #[tokio::test]

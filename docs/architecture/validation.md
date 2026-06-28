@@ -155,11 +155,14 @@ rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-task --test history_tick_replay
 rtk cargo test -p tqsdk --test facade_contract
 rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss
+rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 ```
 
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；
 该 smoke 验证首次 server-side backtest 补 tick 缓存、二次无 auth 本地缓存命中。
+cache warmup runner 的远端 smoke：
+`rtk cargo test -p tqsdk --test facade_contract facade_backtest_warmup_remote_on_miss_live_smoke -- --ignored`。
 
 ## 场景驱动 public API 契约
 

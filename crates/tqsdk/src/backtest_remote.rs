@@ -20,6 +20,29 @@ pub(crate) struct RemoteBacktestCachingStream {
     finalized: bool,
 }
 
+pub(crate) struct RemoteBacktestCacheFillReport {
+    pub(crate) rows_by_symbol: BTreeMap<String, usize>,
+}
+
+pub(crate) async fn fill_backtest_tick_cache(
+    user: String,
+    pass: String,
+    start_ns: i64,
+    end_ns: i64,
+    symbols: Vec<String>,
+    cache: BacktestTickCache,
+) -> Result<RemoteBacktestCacheFillReport> {
+    let mut stream =
+        RemoteBacktestCachingStream::connect(user, pass, start_ns, end_ns, symbols, cache).await?;
+    let mut rows_by_symbol = BTreeMap::new();
+    while let Some(event) = stream.next_remote_event().await? {
+        *rows_by_symbol
+            .entry(event.symbol().to_string())
+            .or_insert(0) += 1;
+    }
+    Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
+}
+
 impl RemoteBacktestCachingStream {
     pub(crate) async fn connect(
         user: String,

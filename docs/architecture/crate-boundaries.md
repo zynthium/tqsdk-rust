@@ -52,8 +52,8 @@
 - 零分支跨模态入口：`backtest` 持久缓存本地撮合回测、`server_backtest` 官方服务端回测、`server_replay` 官方单日复盘、`replay_backtest` 高级自定义 replay
 - `TargetPos` / backtest cache builder / replay metadata helper 这类低样板组合入口
 - Python-style `.backtest(start_ns, end_ns)` 的 cache policy、lazy auth、remote-on-miss
-  官方回测流补缓存和 `.universe(...)` 选择器接线；cache hit 不要求 auth，cache fill 不使用
-  专业历史下载接口
+  官方回测流补缓存、`.warmup()` 缓存预热 runner 和 `.universe(...)` 选择器接线；
+  cache hit 不要求 auth，cache fill 不使用专业历史下载接口
 - `advanced::*` 下钻到底层 crate
 
 ### 不应承担的职责
