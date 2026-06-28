@@ -771,7 +771,7 @@ impl BacktestBuilder {
     /// Not implemented in phase 1.
     #[must_use]
     pub fn refresh_missing(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::RefreshMissing)
+        self.cache_policy(BacktestCachePolicy::Refresh)
     }
 
     /// Refresh the full requested tick range before running the backtest.
@@ -779,7 +779,7 @@ impl BacktestBuilder {
     /// Not implemented in phase 1.
     #[must_use]
     pub fn refresh_all(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::RefreshAll)
+        self.cache_policy(BacktestCachePolicy::Refresh)
     }
 
     /// Add a symbol whose tick history must be present in the cache.
@@ -830,7 +830,7 @@ impl BacktestBuilder {
                     }
                 }
             }
-            BacktestCachePolicy::RefreshMissing | BacktestCachePolicy::RefreshAll => {
+            BacktestCachePolicy::Disabled | BacktestCachePolicy::Refresh => {
                 return Err(data_validation(format!(
                     "backtest cache policy {:?} is not supported in phase 1",
                     self.cache_policy

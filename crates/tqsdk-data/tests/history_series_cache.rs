@@ -190,7 +190,7 @@ fn backtest_tick_cache_persists_empty_declared_coverage_after_reopen() {
 #[test]
 fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
     let dir = temp_dir("backtest-tick-cache-empty-retention");
-    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
+    let backtest_cache = BacktestTickCache::open_binary_compat(&dir).unwrap();
     backtest_cache
         .store_ticks("SHFE.rb2601", 1_000, 5_000, Vec::new())
         .unwrap();
@@ -205,7 +205,7 @@ fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
         .history_cache()
         .enforce_limits(None, Some(0))
         .unwrap();
-    let reopened = BacktestTickCache::open(&dir).unwrap();
+    let reopened = BacktestTickCache::open_binary_compat(&dir).unwrap();
     let coverage = reopened.coverage("SHFE.rb2601", 1_000, 5_000).unwrap();
 
     assert_eq!(report.removed_files, 1);
