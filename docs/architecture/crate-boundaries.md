@@ -51,6 +51,9 @@
 - `Tq` 主循环和常用 live refs 的轻量包装
 - 零分支跨模态入口：`backtest` 持久缓存本地撮合回测、`server_backtest` 官方服务端回测、`server_replay` 官方单日复盘、`replay_backtest` 高级自定义 replay
 - `TargetPos` / backtest cache builder / replay metadata helper 这类低样板组合入口
+- Python-style `.backtest(start_ns, end_ns)` 的 cache policy、lazy auth、remote-on-miss
+  官方回测流补缓存和 `.universe(...)` 选择器接线；cache hit 不要求 auth，cache fill 不使用
+  专业历史下载接口
 - `advanced::*` 下钻到底层 crate
 
 ### 不应承担的职责
@@ -271,8 +274,9 @@
 
 它是执行工具层，不是消费 facade，也不是协议 substrate。
 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 replay/backtest 输入类型；
-也可以通过 builder 接收 `tqsdk-data` 的 history series rows 构建 replay source。持久 tick
-覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
+也可以通过 `BacktestMarketStream` 接收 caller-owned 或 cache-backed streaming market source。
+cached tick replay 由 `HistoryTickReplayStream` 对 `HistorySeriesReader` 做有界 heap merge。
+持久 tick 覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
 execution 与本地撮合归 `tqsdk-task`。
 这是上层集成路径，不代表 strategy execution 进入 data，也不代表 task 拥有 durable history
 cache 文件格式。
@@ -295,6 +299,34 @@ sink、WAL、journal 或 cache writer。
 这一层当前边界也是合理的。
 
 后续主要工作不是继续拓宽 public surface，而是继续稳固 planner、ownership 和执行报告语义。
+
+## `tqsdk-data`
+
+### 正确职责
+
+`tqsdk-data` 当前应继续承担：
+
+- history page / series / download / export substrate
+- `HistorySeriesCache` 和可替换 `HistorySeriesStore` backend
+- Python-compatible binary history series store
+- single-file `.tqseries` backtest tick store、embedded coverage commit 和 tick-only
+  `BacktestTickCache`
+- remote backtest cache fill 的完整性 accumulator / report 类型
+- relay-compatible futures universe selector parser 与 resolver 抽象
+
+`BacktestTickCache` 是回测加速主存储的 data facade：它只缓存 tick，K 线由 tick
+回放/合成路径派生。默认 `BacktestTickCache::open(...)` 使用每个
+`(symbol, tick)` 一个最终文件的 series-file backend；`HistorySeriesCache::open(...)`
+仍保留 Python `DataSeries` 兼容 binary backend。
+
+### 不应吸收的能力
+
+`tqsdk-data` 不应继续吸收：
+
+- strategy execution / 本地撮合
+- wait-update live object facade
+- remote-on-miss 的 session 推进 loop
+- relay 进程、dashboard 或多客户端 market service
 
 ## `tqsdk-relay`
 
@@ -421,6 +453,7 @@ sink、WAL、journal 或 cache writer。
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
 - Python-compatible history series mmap cache
+- 回测 tick 持久缓存、coverage 检查和 shared universe selector
 - history page/series/download/export
 - DataFrame / polars
 - 衍生计算

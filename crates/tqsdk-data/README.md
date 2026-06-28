@@ -19,6 +19,8 @@
 - `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
 - `BacktestTickCache::open(...).store_ticks(...)`
 - `BacktestTickCache::open(...).load_series(...)`
+- `UniverseExpression::parse(...)`
+- `resolve_futures_universe_symbols(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
 - `DataClient::from_session(...).tick_data_download(...)`
 - `KlineDataDownload::collect_remaining()`
@@ -43,8 +45,12 @@
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
   `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
 - `HistorySeriesCache` 是稳定 facade，底层通过 `HistorySeriesStore` 抽象隔离；
-  默认 `BinaryHistorySeriesStore` 继续使用 Python `DataSeries` 兼容的文件名与二进制列布局：
+  `HistorySeriesCache::open(...)` 继续使用 Python `DataSeries` 兼容的 `BinaryHistorySeriesStore`
+  文件名与二进制列布局：
   `symbol.duration_ns.start_id.end_id`，并通过 mmap 读取大文件窗口
+- `HistorySeriesCache::open_series_file(...)` 使用 single-file `.tqseries` backend；
+  `BacktestTickCache::open(...)` 默认使用这个 backend，每个 `(symbol, tick)` 只有一个最终文件：
+  `series/<symbol>/tick.tqseries`
 - Python/Rust 可交替使用默认二进制 store 的同一目录文件，但首版不承诺同目录
   同时写；Python 官方 `DataSeries` 本身也不支持同一合约周期多进程/线程/协程并发写
 - `HistorySeriesCache::read_kline_data_series` /
@@ -52,7 +58,8 @@
   缺口返回 typed `DataError::CacheMiss`，不会联网补齐
 - `BacktestTickCache` 是 tick-only semantic facade，复用同一个
   `HistorySeriesCache` / `HistorySeriesStore`，用于回测覆盖检查、tick 写入和 tick
-  replay 读取；它不持久化 K 线，也不引入第二套 tick cache 文件格式
+  replay 读取；它把覆盖元数据和 tick rows 写进同一个 `.tqseries` 文件，支持 partial row
+  append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - `HistorySeriesCache::scan()` 输出 schema version、segment 状态、未完成写入
   和 row-width 损坏报告；首版不额外写 manifest 文件，以保持 Python 目录互通
 - cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用
@@ -66,6 +73,9 @@
 - `kline_data_download` / `tick_data_download` 这类同步构造入口仍然只做 best-effort 预检，真正的 history 读取会在首个 async page/export 调用时再次强校验
 - 当 `query_option_greeks` 依赖的 live quote symbols 缺少行情权限时，也会在 facade 层尽早拒绝，而不是等到订阅超时
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到买一卖一中间价 / 单边盘口 / `pre_close`
+- 共享期货 universe selector 语法由 `UniverseExpression` 和 `FuturesUniverseResolver`
+  承载；relay 和 facade backtest 使用同一套解析语义。静态 selector 不需要 auth；
+  动态 selector 可通过 `SessionFuturesUniverseResolver` 调用 session metadata/query 能力解析。
 
 除此之外，它仍然刻意保持极窄，不提前承诺宽 public API。
 
@@ -107,6 +117,8 @@ Python-compatible mmap 缓存。
 - `BacktestTickCache`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
+- `BacktestTickFill`
+- `BacktestTickFillReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
@@ -126,6 +138,12 @@ Python-compatible mmap 缓存。
 - `HistorySeriesSegmentReport`
 - `HistorySeriesWriteRows`
 - `HistorySeriesWriteSegment`
+- `UniverseExpression`
+- `FuturesContract`
+- `FuturesUniverseResolver`
+- `StaticFuturesUniverseResolver`
+- `SessionFuturesUniverseResolver`
+- `resolve_futures_universe_symbols`
 - `DataDownloadProgress`
 - `KlineDataDownload`
 - `KlineDataDownloadPage`
@@ -146,6 +164,7 @@ Python-compatible mmap 缓存。
 - 按时间范围组装完整历史序列
 - 显式 opt-in 的 `HistorySeriesCache` 历史序列缓存
 - tick-only `BacktestTickCache` 回测加速 facade
+- shared futures universe selector / resolver
 - 大时间范围按页推进的批量读
 - research/offline 侧的渐进式 materialization
 - 后续更高层 CSV writer / DataFrame / polars / downloader tool 的底座
@@ -177,6 +196,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `export_tick_data_csv`
 - `DataClientBuilder::history_cache_enabled(true)`
 - `HistorySeriesCache::open(...)`
+- `HistorySeriesCache::open_series_file(...)`
 - `HistorySeriesCache::read_kline_data_series(...)`
 - `HistorySeriesCache::read_tick_data_series(...)`
 - `HistorySeriesCache::scan()`
@@ -184,6 +204,8 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `BacktestTickCache::open(...)`
 - `BacktestTickCache::store_ticks(...)`
 - `BacktestTickCache::load_series(...)`
+- `UniverseExpression::parse(...)`
+- `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；

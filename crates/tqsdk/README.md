@@ -5,7 +5,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
-- Cache-backed local simulated backtest (`.backtest(start_ns, end_ns)`, `.cache_dir(...)`, `.cache_only()`, `.symbol(...)`)
+- Cache-backed local simulated backtest (`.backtest(start_ns, end_ns)`, `.cache_dir(...)`, `.cache_only()`, `.remote_on_miss()`, `.universe(...)`)
 - Market-data-only server-side backtest (`.server_backtest()`, optional `.replay_url(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
 - Advanced custom replay backtest (`.replay_backtest(source)`, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
@@ -21,18 +21,22 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 本地撮合回测入口。它通过
 `BacktestTickCache` 复用 `tqsdk-data::HistorySeriesCache` 的持久 tick 缓存，并把 tick
-回放到本地 `TqSim`。当前阶段支持显式 `.cache_only()`，也支持默认
-`RemoteOnMiss` 在缓存完整时直接复用本地数据；缺失 tick 区间的远程自动补齐、
-全品种 universe selector 和流式全市场 tick merge 是后续阶段。
+流式回放到本地 `TqSim`。显式 `.cache_only()` 只读本地缓存；默认
+`RemoteOnMiss` 在缓存完整时直接复用本地数据且不需要 auth，缓存缺失时通过官方
+server-side backtest market stream 拉取 tick、推进本地回测并写入持久缓存。这个路径不使用
+专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay 对齐的期货
+selector 语法，适合全品种策略。
 
 ```rust
 use tqsdk::prelude::*;
 
 # async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 let mut tq = Tq::futures()
+    .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges
     .backtest(start_ns, end_ns)
     .cache_dir(".tqsdk/backtest_ticks")?
-    .symbol("SHFE.rb2601")
+    .universe("active:all;!CFFEX")?
+    .remote_on_miss()
     .connect()
     .await?;
 # Ok(())

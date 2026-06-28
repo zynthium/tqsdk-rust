@@ -99,6 +99,11 @@ V1 是：
   - 默认用户入口 crate
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
+  - Python-style `.backtest(start_ns, end_ns)` 持久 tick 缓存入口：默认
+    `RemoteOnMiss` 先复用本地 single-file tick cache，缺失时通过官方 server-side
+    backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要 auth，cache fill
+    不使用专业历史下载接口
+  - `.universe(...)` 复用 relay 对齐的期货 universe selector 语法，支持全品种回测策略
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - local backtest continuous minute helper 可自动查询主连 underlying segment、按交易日窗口裁剪历史分钟线并以主连 symbol 回放
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
@@ -152,6 +157,7 @@ V1 是：
   - supervisor typed health/metrics/shutdown report 和 telemetry/export hook；生产观测导出保持
     transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
   - strategy replay foundation with task-owned replay market source
+  - streaming backtest market source trait 和 cached tick heap-merge replay stream
   - Python-compatible local backtest sim foundation
   - S31 低延迟 trading desk thin profile，使用 shared `SessionClient` +
     `RuntimeReader` hot path、task 层 `RiskEngine` / `TaskOrderIntent` 和 typed
@@ -176,6 +182,9 @@ V1 是：
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
   - Python-compatible history series mmap cache
+  - `HistorySeriesCache` / `HistorySeriesStore` 抽象、默认 single-file backtest tick cache
+    backend、embedded coverage commit、tick-only `BacktestTickCache`
+  - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
 - `tqsdk-relay`
   - 可选 market relay / cache service
@@ -221,6 +230,8 @@ V1 是：
 - `tqsdk` 的 local backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
   `backtest::StrategyBacktest + sim::TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
   和 `TargetPos`，不会创建 facade 私有状态树
+- `tqsdk` 的 cache-backed `.backtest(...)` 是 Python 心智入口，`local_backtest`
+  不再是独立用户概念；持久缓存、覆盖检查和 universe 解析归 data/task 内部能力承接
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。
