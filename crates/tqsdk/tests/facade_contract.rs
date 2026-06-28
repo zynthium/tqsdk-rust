@@ -79,6 +79,50 @@ async fn facade_backtest_cache_mode_replays_cached_ticks() {
 }
 
 #[tokio::test]
+async fn facade_backtest_remote_on_miss_requires_auth_only_when_cache_missing() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache(BacktestCachePolicy::RemoteOnMiss)
+        .prepare()
+        .await
+        .unwrap();
+    assert!(!prepared.data_report().remote_used);
+
+    let missing = match Tq::futures()
+        .backtest(1_000, 4_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache(BacktestCachePolicy::RemoteOnMiss)
+        .prepare()
+        .await
+    {
+        Ok(_) => panic!("remote-on-miss unexpectedly prepared with missing cache and no auth"),
+        Err(error) => error,
+    };
+    assert!(
+        missing
+            .to_string()
+            .contains("remote backtest cache fill requires auth")
+    );
+}
+
+#[tokio::test]
 async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
     let replay = ReplayMarketSource::new(vec![
         ReplayMarketEvent::kline(

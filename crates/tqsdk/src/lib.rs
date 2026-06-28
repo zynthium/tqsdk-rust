@@ -729,9 +729,16 @@ pub struct BacktestDataReport {
 }
 
 impl BacktestBuilder {
+    /// Set the cache policy for data preparation.
+    #[must_use]
+    pub fn cache(mut self, policy: BacktestCachePolicy) -> Self {
+        self.cache_policy = policy;
+        self
+    }
+
     /// Set the persistent tick cache used to prepare this backtest.
     #[must_use]
-    pub fn cache(mut self, cache: tqsdk_data::BacktestTickCache) -> Self {
+    pub fn cache_store(mut self, cache: tqsdk_data::BacktestTickCache) -> Self {
         self.cache = Some(cache);
         self
     }
@@ -742,44 +749,28 @@ impl BacktestBuilder {
         Ok(self)
     }
 
-    /// Set the cache policy for data preparation.
-    ///
-    /// Phase 1 supports [`BacktestCachePolicy::CacheOnly`] and complete-cache
-    /// [`BacktestCachePolicy::RemoteOnMiss`] runs. Remote filling is added later.
-    #[must_use]
-    pub fn cache_policy(mut self, policy: BacktestCachePolicy) -> Self {
-        self.cache_policy = policy;
-        self
-    }
-
     /// Require all backtest ticks to already exist in the persistent cache.
     #[must_use]
     pub fn cache_only(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::CacheOnly)
+        self.cache(BacktestCachePolicy::CacheOnly)
     }
 
     /// Use remote data for missing tick ranges.
-    ///
-    /// Phase 1 can reuse complete cache coverage but cannot fill missing ranges remotely yet.
     #[must_use]
     pub fn remote_on_miss(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::RemoteOnMiss)
+        self.cache(BacktestCachePolicy::RemoteOnMiss)
     }
 
-    /// Refresh missing tick ranges even when some cache coverage exists.
-    ///
-    /// Not implemented in phase 1.
+    /// Disable the persistent cache path.
     #[must_use]
-    pub fn refresh_missing(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::Refresh)
+    pub fn disabled_cache(self) -> Self {
+        self.cache(BacktestCachePolicy::Disabled)
     }
 
     /// Refresh the full requested tick range before running the backtest.
-    ///
-    /// Not implemented in phase 1.
     #[must_use]
-    pub fn refresh_all(self) -> Self {
-        self.cache_policy(BacktestCachePolicy::Refresh)
+    pub fn refresh(self) -> Self {
+        self.cache(BacktestCachePolicy::Refresh)
     }
 
     /// Add a symbol whose tick history must be present in the cache.
@@ -813,21 +804,38 @@ impl BacktestBuilder {
             .cache
             .as_ref()
             .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+        let mut missing_symbols = Vec::new();
+        for symbol in &self.symbols {
+            let coverage = cache.coverage(symbol, self.start_ns, self.end_ns)?;
+            if !coverage.is_complete() {
+                missing_symbols.push(coverage);
+            }
+        }
+
+        let needs_remote = match self.cache_policy {
+            BacktestCachePolicy::Disabled | BacktestCachePolicy::Refresh => true,
+            BacktestCachePolicy::RemoteOnMiss => !missing_symbols.is_empty(),
+            BacktestCachePolicy::CacheOnly => false,
+        };
+        if needs_remote && self.base.auth.is_none() {
+            return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+
         match self.cache_policy {
             BacktestCachePolicy::CacheOnly => {
-                for symbol in &self.symbols {
-                    cache.require_coverage(symbol, self.start_ns, self.end_ns)?;
+                if let Some(coverage) = missing_symbols.first() {
+                    return Err(data_validation(format!(
+                        "backtest cache coverage is incomplete for {}: {:?}",
+                        coverage.symbol, coverage.missing_ranges
+                    )));
                 }
             }
             BacktestCachePolicy::RemoteOnMiss => {
-                for symbol in &self.symbols {
-                    let coverage = cache.coverage(symbol, self.start_ns, self.end_ns)?;
-                    if !coverage.is_complete() {
-                        return Err(data_validation(format!(
-                            "backtest remote-on-miss cache fill is not implemented in phase 1; missing tick ranges for {symbol}: {:?}",
-                            coverage.missing_ranges
-                        )));
-                    }
+                if let Some(coverage) = missing_symbols.first() {
+                    return Err(data_validation(format!(
+                        "backtest remote-on-miss cache fill is not implemented in phase 1; missing tick ranges for {}: {:?}",
+                        coverage.symbol, coverage.missing_ranges
+                    )));
                 }
             }
             BacktestCachePolicy::Disabled | BacktestCachePolicy::Refresh => {
