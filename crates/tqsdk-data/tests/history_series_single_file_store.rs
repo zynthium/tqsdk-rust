@@ -63,7 +63,10 @@ fn series_file_store_embeds_coverage_and_reopens_complete_range() {
     let rows = reopened
         .load_series(TickDataSeriesRequest::new("DCE.i2601", 1_000, 5_000))
         .unwrap();
-    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -88,6 +91,35 @@ fn series_file_store_partial_rows_do_not_create_coverage() {
         .unwrap();
     assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
     assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
+}
+
+#[test]
+fn tick_fill_accumulator_marks_continuous_rows_complete() {
+    let mut fill = tqsdk_data::BacktestTickFill::new("SHFE.rb2601", 1_000, 4_000);
+    fill.push(tick(1, 1_000, 100.0)).unwrap();
+    fill.push(tick(2, 2_000, 101.0)).unwrap();
+    fill.push(tick(3, 3_500, 102.0)).unwrap();
+
+    let report = fill.finish(1_000_000_000).unwrap();
+
+    assert!(report.complete);
+    assert_eq!(report.unique_rows, 3);
+    assert_eq!(report.id_range, Some((1, 3)));
+}
+
+#[test]
+fn tick_fill_accumulator_rejects_id_gap() {
+    let mut fill = tqsdk_data::BacktestTickFill::new("SHFE.rb2601", 1_000, 4_000);
+    fill.push(tick(1, 1_000, 100.0)).unwrap();
+    fill.push(tick(3, 3_500, 102.0)).unwrap();
+
+    let report = fill.finish(1_000_000_000).unwrap();
+
+    assert!(!report.complete);
+    assert_eq!(
+        report.gap_summary.as_deref(),
+        Some("tick id range 1..=3 contains 2 unique rows")
+    );
 }
 
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {

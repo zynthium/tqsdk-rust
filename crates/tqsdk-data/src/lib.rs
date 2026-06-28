@@ -73,6 +73,7 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 
 pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheWriteReport, BacktestTickCoverage,
+    BacktestTickFill, BacktestTickFillReport,
 };
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,

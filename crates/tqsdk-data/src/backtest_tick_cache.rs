@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tqsdk_core::Tick;
@@ -46,6 +47,26 @@ pub struct BacktestTickCacheWriteReport {
     pub range_start_ns: i64,
     pub range_end_ns: i64,
     pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickFillReport {
+    pub symbol: String,
+    pub requested_range: (i64, i64),
+    pub unique_rows: usize,
+    pub id_range: Option<(i64, i64)>,
+    pub first_datetime_ns: Option<i64>,
+    pub last_datetime_ns: Option<i64>,
+    pub complete: bool,
+    pub gap_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BacktestTickFill {
+    symbol: String,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    rows_by_id: BTreeMap<i64, Tick>,
 }
 
 impl BacktestTickCache {
@@ -208,6 +229,67 @@ impl BacktestTickCache {
             request.end_datetime_ns(),
         )?;
         self.history.read_tick_data_series(request)
+    }
+}
+
+impl BacktestTickFill {
+    #[must_use]
+    pub fn new(symbol: impl Into<String>, range_start_ns: i64, range_end_ns: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            range_start_ns,
+            range_end_ns,
+            rows_by_id: BTreeMap::new(),
+        }
+    }
+
+    pub fn push(&mut self, row: Tick) -> Result<bool> {
+        if row.datetime < self.range_start_ns || row.datetime >= self.range_end_ns {
+            return Ok(false);
+        }
+        Ok(self.rows_by_id.insert(row.id, row).is_none())
+    }
+
+    #[must_use]
+    pub fn drain_rows(&self) -> Vec<Tick> {
+        self.rows_by_id.values().cloned().collect()
+    }
+
+    pub fn finish(&self, end_tolerance_ns: i64) -> Result<BacktestTickFillReport> {
+        let first = self.rows_by_id.values().next();
+        let last = self.rows_by_id.values().next_back();
+        let id_range = first.zip(last).map(|(first, last)| (first.id, last.id));
+        let unique_rows = self.rows_by_id.len();
+        let first_datetime_ns = first.map(|row| row.datetime);
+        let last_datetime_ns = last.map(|row| row.datetime);
+        let mut complete = first.is_some();
+        let mut gap_summary = None;
+        if let Some((first_id, last_id)) = id_range {
+            let expected = last_id.saturating_sub(first_id).saturating_add(1);
+            if expected != unique_rows as i64 {
+                complete = false;
+                gap_summary = Some(format!(
+                    "tick id range {first_id}..={last_id} contains {unique_rows} unique rows"
+                ));
+            }
+        } else {
+            complete = false;
+        }
+        if last_datetime_ns
+            .is_none_or(|last_ns| last_ns < self.range_end_ns.saturating_sub(end_tolerance_ns))
+        {
+            complete = false;
+        }
+        Ok(BacktestTickFillReport {
+            symbol: self.symbol.clone(),
+            requested_range: (self.range_start_ns, self.range_end_ns),
+            unique_rows,
+            id_range,
+            first_datetime_ns,
+            last_datetime_ns,
+            complete,
+            gap_summary,
+        })
     }
 }
 
