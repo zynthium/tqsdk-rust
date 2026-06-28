@@ -89,6 +89,7 @@ pub mod advanced {
     }
 }
 
+mod backtest_remote;
 mod local_backtest;
 
 pub use tqsdk_data::{BacktestCachePolicy, BacktestTickCache};
@@ -717,6 +718,12 @@ pub struct BacktestBuilder {
 pub struct PreparedBacktest {
     builder: BacktestBuilder,
     data_report: BacktestDataReport,
+    mode: PreparedBacktestMode,
+}
+
+enum PreparedBacktestMode {
+    CacheHit,
+    RemoteCaching { symbols: Vec<String> },
 }
 
 /// Minimal data preparation report for a cache-backed local backtest.
@@ -813,16 +820,7 @@ impl BacktestBuilder {
             }
         }
 
-        let needs_remote = match self.cache_policy {
-            BacktestCachePolicy::Disabled | BacktestCachePolicy::Refresh => true,
-            BacktestCachePolicy::RemoteOnMiss => !missing_symbols.is_empty(),
-            BacktestCachePolicy::CacheOnly => false,
-        };
-        if needs_remote && self.base.auth.is_none() {
-            return Err(data_validation("remote backtest cache fill requires auth"));
-        }
-
-        match self.cache_policy {
+        let mode = match self.cache_policy {
             BacktestCachePolicy::CacheOnly => {
                 if let Some(coverage) = missing_symbols.first() {
                     return Err(data_validation(format!(
@@ -830,33 +828,47 @@ impl BacktestBuilder {
                         coverage.symbol, coverage.missing_ranges
                     )));
                 }
+                PreparedBacktestMode::CacheHit
             }
             BacktestCachePolicy::RemoteOnMiss => {
-                if let Some(coverage) = missing_symbols.first() {
-                    return Err(data_validation(format!(
-                        "backtest remote-on-miss cache fill is not implemented in phase 1; missing tick ranges for {}: {:?}",
-                        coverage.symbol, coverage.missing_ranges
-                    )));
+                if missing_symbols.is_empty() {
+                    PreparedBacktestMode::CacheHit
+                } else {
+                    if self.base.auth.is_none() {
+                        return Err(data_validation("remote backtest cache fill requires auth"));
+                    }
+                    PreparedBacktestMode::RemoteCaching {
+                        symbols: self.symbols.clone(),
+                    }
                 }
             }
-            BacktestCachePolicy::Disabled | BacktestCachePolicy::Refresh => {
+            BacktestCachePolicy::Refresh => {
+                if self.base.auth.is_none() {
+                    return Err(data_validation("remote backtest cache fill requires auth"));
+                }
+                PreparedBacktestMode::RemoteCaching {
+                    symbols: self.symbols.clone(),
+                }
+            }
+            BacktestCachePolicy::Disabled => {
                 return Err(data_validation(format!(
                     "backtest cache policy {:?} is not supported in phase 1",
                     self.cache_policy
                 )));
             }
-        }
+        };
 
         let data_report = BacktestDataReport {
             requested_range: (self.start_ns, self.end_ns),
             cache_policy: self.cache_policy,
             cache_dir: cache.history_cache().root_dir().to_path_buf(),
             resolved_symbols: self.symbols.len(),
-            remote_used: false,
+            remote_used: matches!(mode, PreparedBacktestMode::RemoteCaching { .. }),
         };
         Ok(PreparedBacktest {
             builder: self,
             data_report,
+            mode,
         })
     }
 
@@ -875,6 +887,11 @@ impl PreparedBacktest {
 
     /// Connect the prepared local backtest without remote access.
     pub async fn connect(self) -> Result<Tq> {
+        let PreparedBacktest {
+            builder,
+            data_report: _,
+            mode,
+        } = self;
         let BacktestBuilder {
             base,
             start_ns,
@@ -882,17 +899,33 @@ impl PreparedBacktest {
             cache,
             cache_policy: _,
             symbols,
-        } = self.builder;
+        } = builder;
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
-        let requests = symbols
-            .iter()
-            .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
-            .collect::<Vec<_>>();
-        let stream =
-            tqsdk_task::HistoryTickReplayStream::new(cache.history_cache().clone(), requests)?;
-        base.replay_backtest_stream(Box::new(stream))
-            .connect()
-            .await
+        match mode {
+            PreparedBacktestMode::CacheHit => {
+                let requests = symbols
+                    .iter()
+                    .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
+                    .collect::<Vec<_>>();
+                let stream = tqsdk_task::HistoryTickReplayStream::new(
+                    cache.history_cache().clone(),
+                    requests,
+                )?;
+                base.replay_backtest_stream(Box::new(stream))
+                    .connect()
+                    .await
+            }
+            PreparedBacktestMode::RemoteCaching { symbols } => {
+                let auth = base.auth.clone().ok_or(Error::MissingAuth)?;
+                let stream = backtest_remote::RemoteBacktestCachingStream::connect(
+                    auth.user, auth.pass, start_ns, end_ns, symbols, cache,
+                )
+                .await?;
+                base.replay_backtest_stream(Box::new(stream))
+                    .connect()
+                    .await
+            }
+        }
     }
 }
 

@@ -123,6 +123,50 @@ async fn facade_backtest_remote_on_miss_requires_auth_only_when_cache_missing() 
 }
 
 #[tokio::test]
+async fn facade_backtest_remote_on_miss_prepare_marks_remote_used_when_cache_missing() {
+    let cache_dir = temp_cache_dir();
+    let prepared = Tq::futures()
+        .auth("demo-user", "demo-pass")
+        .backtest(1_000, 4_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol("SHFE.rb2601")
+        .cache(BacktestCachePolicy::RemoteOnMiss)
+        .prepare()
+        .await
+        .unwrap();
+
+    assert!(prepared.data_report().remote_used);
+    assert_eq!(prepared.data_report().resolved_symbols, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TQ_AUTH_USER/TQ_AUTH_PASS and remote backtest service"]
+async fn facade_backtest_remote_on_miss_live_smoke() {
+    let user = std::env::var("TQ_AUTH_USER").unwrap();
+    let pass = std::env::var("TQ_AUTH_PASS").unwrap();
+    let cache_dir = temp_cache_dir();
+    let symbol = "SHFE.au2608";
+    let start_ns = 1_781_172_000_000_000_000;
+    let end_ns = 1_781_258_401_000_000_000;
+
+    let mut tq = Tq::futures()
+        .auth(user, pass)
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache(BacktestCachePolicy::RemoteOnMiss)
+        .connect()
+        .await
+        .unwrap();
+    let quote = tq.quote(symbol).await.unwrap();
+
+    assert!(tq.next().await.unwrap());
+    assert!(quote.load().unwrap().last_price.is_finite());
+}
+
+#[tokio::test]
 async fn facade_local_backtest_accepts_instrument_specs_for_klines() {
     let replay = ReplayMarketSource::new(vec![
         ReplayMarketEvent::kline(
