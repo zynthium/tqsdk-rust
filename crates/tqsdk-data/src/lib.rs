@@ -50,6 +50,8 @@ mod greeks;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
+mod universe;
+mod universe_expression;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
@@ -102,4 +104,13 @@ pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,
     HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
+};
+pub use universe::{
+    FuturesContract, FuturesProductCode, FuturesUniverseResolver, StaticFuturesUniverseResolver,
+    contract_from_configured_symbol, resolve_futures_contracts_with_expression,
+    resolve_futures_universe_symbols, resolve_static_symbols_with_expression,
+    static_contracts_with_expression,
+};
+pub use universe_expression::{
+    UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
 };

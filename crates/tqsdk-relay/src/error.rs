@@ -44,4 +44,10 @@ impl fmt::Display for RelayError {
     }
 }
 
+impl From<tqsdk_data::DataError> for RelayError {
+    fn from(error: tqsdk_data::DataError) -> Self {
+        Self::invalid_config(error.to_string())
+    }
+}
+
 impl std::error::Error for RelayError {}
