@@ -66,7 +66,7 @@ fn history_cache_open_uses_default_binary_store() {
 }
 
 #[test]
-fn backtest_tick_cache_reuses_history_series_cache_storage() {
+fn backtest_tick_cache_can_wrap_binary_history_series_cache_storage() {
     let dir = temp_dir("backtest-tick-cache-reuses-history-cache");
     let history = HistorySeriesCache::open(&dir).unwrap();
     let backtest_cache = BacktestTickCache::new(history.clone());
