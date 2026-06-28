@@ -167,11 +167,15 @@ let mut tq = Tq::futures()
 ```
 
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
-`.refresh()`；需要自定义内存 replay source、测试 fixture 或外部数据源时用
+`.refresh()`，它会按最小缓存颗粒度删除对应 symbol 的 tick 文件后再由官方回测流补齐；
+需要自定义内存 replay source、测试 fixture 或外部数据源时用
 `.replay_backtest(source)`。官方服务端 market-data-only 回测改为
 `.server_backtest(start_ns, end_ns)`；单日服务端复盘用 `.server_replay(date)?`。
 `server_backtest` / `server_replay` 不绑定交易目标，也会拒绝自动交易登录；需要策略下单并本地撮合时使用
 `.backtest(...)` 或 `.replay_backtest(...)`。
+
+显式运维缓存时，可在 builder 上调用 `.inspect_cache()` 查看 backend、文件路径、覆盖区间和
+缺口，或 `.purge_cache_symbols()` 删除已声明 symbol 的 tick 缓存文件。
 
 多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略只接收
 `&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`

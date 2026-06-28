@@ -74,8 +74,8 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 }
 
 pub use backtest_tick_cache::{
-    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheWriteReport, BacktestTickCoverage,
-    BacktestTickFill, BacktestTickFillReport,
+    BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
+    BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
 };
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,
@@ -96,9 +96,9 @@ pub use history_series_cache::{
     HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss,
     HistorySeriesCacheReport, HistorySeriesCacheScanReport, HistorySeriesCoverageCommit,
     HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
-    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
-    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
-    SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HistorySeriesPurgeReport, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
+    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,

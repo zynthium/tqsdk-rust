@@ -312,6 +312,8 @@ sink、WAL、journal 或 cache writer。
 - single-file `.tqseries` backtest tick store、embedded coverage commit 和 tick-only
   `BacktestTickCache`
 - remote backtest cache fill 的完整性 accumulator / report 类型
+- cache inspect / purge 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
+  `(symbol, tick)` 文件粒度清除回测 tick 缓存
 - relay-compatible futures universe selector parser 与 resolver 抽象
 
 `BacktestTickCache` 是回测加速主存储的 data facade：它只缓存 tick，K 线由 tick

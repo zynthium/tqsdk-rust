@@ -17,8 +17,9 @@ use chrono::NaiveDate;
 /// Common imports for strategy-oriented users.
 pub mod prelude {
     pub use crate::{
-        BacktestBuilder, BacktestCachePolicy, BacktestDataReport, BacktestTickCache, Error,
-        LOCAL_BACKTEST_ACCOUNT_ID, PreparedBacktest, Result, TargetPos, Tq, TqBuilder,
+        BacktestBuilder, BacktestCachePolicy, BacktestDataReport, BacktestTickCache,
+        BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
+        PreparedBacktest, Result, TargetPos, Tq, TqBuilder,
     };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
@@ -31,10 +32,10 @@ pub mod advanced {
 
     pub mod data {
         pub use tqsdk_data::{
-            BacktestTickCache, DataClient, DataError, HistoricalContUnderlyingRow,
-            HistoricalContUnderlyingSegment, KlineDataSeries, KlineDataSeriesRequest,
-            TickDataSeries, TickDataSeriesRequest, TradingCalendarRow,
-            historical_cont_underlying_segments,
+            BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus, DataClient,
+            DataError, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
+            KlineDataSeries, KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
+            TradingCalendarRow, historical_cont_underlying_segments,
         };
     }
 
@@ -92,7 +93,9 @@ pub mod advanced {
 mod backtest_remote;
 mod local_backtest;
 
-pub use tqsdk_data::{BacktestCachePolicy, BacktestTickCache};
+pub use tqsdk_data::{
+    BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
+};
 
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -758,6 +761,44 @@ impl BacktestBuilder {
         Ok(self)
     }
 
+    /// Inspect persistent tick cache coverage for explicitly configured symbols.
+    pub fn inspect_cache(&self) -> Result<Vec<BacktestTickCacheStatus>> {
+        if self.symbols.is_empty() {
+            return Err(data_validation(
+                "backtest cache inspection requires at least one explicit symbol",
+            ));
+        }
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| data_validation("backtest cache is required for inspection"))?;
+        self.symbols
+            .iter()
+            .map(|symbol| {
+                cache
+                    .inspect(symbol, self.start_ns, self.end_ns)
+                    .map_err(Error::from)
+            })
+            .collect()
+    }
+
+    /// Remove persistent tick cache files for explicitly configured symbols.
+    pub fn purge_cache_symbols(&self) -> Result<Vec<BacktestTickCachePurgeReport>> {
+        if self.symbols.is_empty() {
+            return Err(data_validation(
+                "backtest cache purge requires at least one explicit symbol",
+            ));
+        }
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| data_validation("backtest cache is required for purge"))?;
+        self.symbols
+            .iter()
+            .map(|symbol| cache.purge_symbol_ticks(symbol).map_err(Error::from))
+            .collect()
+    }
+
     /// Require all backtest ticks to already exist in the persistent cache.
     #[must_use]
     pub fn cache_only(self) -> Self {
@@ -828,6 +869,14 @@ impl BacktestBuilder {
             .cache
             .as_ref()
             .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+        if matches!(self.cache_policy, BacktestCachePolicy::Refresh) {
+            if self.base.auth.is_none() {
+                return Err(data_validation("remote backtest cache fill requires auth"));
+            }
+            for symbol in &self.symbols {
+                cache.purge_symbol_ticks(symbol)?;
+            }
+        }
         let mut missing_symbols = Vec::new();
         for symbol in &self.symbols {
             let coverage = cache.coverage(symbol, self.start_ns, self.end_ns)?;

@@ -60,6 +60,9 @@
   `HistorySeriesCache` / `HistorySeriesStore`，用于回测覆盖检查、tick 写入和 tick
   replay 读取；它把覆盖元数据和 tick rows 写进同一个 `.tqseries` 文件，支持 partial row
   append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
+- `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
+  cached/missing ranges；`tick_series_path(...)` 和 `purge_symbol_ticks(...)` 是按
+  `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、refresh 和磁盘清理复用
 - `HistorySeriesCache::scan()` 输出 schema version、segment 状态、未完成写入
   和 row-width 损坏报告；首版不额外写 manifest 文件，以保持 Python 目录互通
 - cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用

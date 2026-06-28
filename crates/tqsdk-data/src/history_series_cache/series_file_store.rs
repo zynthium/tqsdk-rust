@@ -13,9 +13,10 @@ use super::storage::{SeriesLayout, write_kline_row, write_tick_row};
 use super::{
     HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheMaintenanceReport,
     HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
-    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
+    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
+    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
 };
 
 const ROOT_DIR_NAME: &str = "series";
@@ -88,6 +89,10 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         false
     }
 
+    fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        self.series_path(symbol, kind.duration_ns())
+    }
+
     fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
         super::empty_scan_report(self.root_dir.as_path())
     }
@@ -155,6 +160,30 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
             range_start_ns: commit.range_start_ns,
             range_end_ns: commit.range_end_ns,
         })
+    }
+
+    fn purge_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<HistorySeriesPurgeReport> {
+        let path = self.series_path(symbol, kind.duration_ns());
+        let mut report = HistorySeriesPurgeReport {
+            path: path.clone(),
+            symbol: symbol.to_string(),
+            kind,
+            removed_files: 0,
+            removed_bytes: 0,
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        fs::remove_file(path)?;
+        report.removed_files = 1;
+        report.removed_bytes = metadata.len();
+        Ok(report)
     }
 
     fn open_reader(

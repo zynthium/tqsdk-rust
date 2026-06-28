@@ -86,6 +86,22 @@ pub struct HistorySeriesSegmentReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesPurgeReport {
+    pub path: PathBuf,
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+impl HistorySeriesPurgeReport {
+    #[must_use]
+    pub fn removed(&self) -> bool {
+        self.removed_files > 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySeriesReadRequest {
     pub symbol: String,
     pub kind: HistorySeriesKind,
@@ -108,6 +124,7 @@ pub trait HistorySeriesStore: Send + Sync {
     fn schema_version(&self) -> u32;
     fn root_dir(&self) -> &Path;
     fn uses_mmap_backend(&self) -> bool;
+    fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf;
     fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
     fn enforce_limits(
         &self,
@@ -126,6 +143,11 @@ pub trait HistorySeriesStore: Send + Sync {
         &self,
         commit: HistorySeriesCoverageCommit,
     ) -> Result<HistorySeriesCoverageReport>;
+    fn purge_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<HistorySeriesPurgeReport>;
     fn open_reader(
         &self,
         request: HistorySeriesReadRequest,

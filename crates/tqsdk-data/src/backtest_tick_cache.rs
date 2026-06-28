@@ -41,6 +41,37 @@ impl BacktestTickCoverage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheStatus {
+    pub backend_format: &'static str,
+    pub cache_dir: PathBuf,
+    pub series_path: PathBuf,
+    pub series_path_exists: bool,
+    pub uses_mmap_backend: bool,
+    pub symbol: String,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+    pub cached_ranges: Vec<(i64, i64)>,
+    pub missing_ranges: Vec<(i64, i64)>,
+}
+
+impl BacktestTickCacheStatus {
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.missing_ranges.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCachePurgeReport {
+    pub cache_dir: PathBuf,
+    pub symbol: String,
+    pub series_path: PathBuf,
+    pub removed: bool,
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestTickCacheWriteReport {
     pub cache_dir: PathBuf,
     pub symbol: String,
@@ -112,6 +143,28 @@ impl BacktestTickCache {
         })
     }
 
+    pub fn inspect(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<BacktestTickCacheStatus> {
+        let coverage = self.coverage(symbol, range_start_ns, range_end_ns)?;
+        let series_path = self.tick_series_path(coverage.symbol.as_str());
+        Ok(BacktestTickCacheStatus {
+            backend_format: self.history.format_id(),
+            cache_dir: coverage.cache_dir,
+            series_path_exists: series_path.exists(),
+            series_path,
+            uses_mmap_backend: self.history.uses_mmap_backend(),
+            symbol: coverage.symbol,
+            range_start_ns: coverage.range_start_ns,
+            range_end_ns: coverage.range_end_ns,
+            cached_ranges: coverage.cached_ranges,
+            missing_ranges: coverage.missing_ranges,
+        })
+    }
+
     pub fn require_coverage(
         &self,
         symbol: impl AsRef<str>,
@@ -126,6 +179,33 @@ impl BacktestTickCache {
                 "backtest tick cache coverage is incomplete",
             ))
         }
+    }
+
+    pub fn tick_series_path(&self, symbol: impl AsRef<str>) -> PathBuf {
+        self.history
+            .series_path(symbol.as_ref(), HistorySeriesKind::Tick)
+    }
+
+    pub fn purge_symbol_ticks(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Result<BacktestTickCachePurgeReport> {
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        let report = self.history.purge_series(symbol, HistorySeriesKind::Tick)?;
+        let removed = report.removed();
+        Ok(BacktestTickCachePurgeReport {
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbol: report.symbol,
+            series_path: report.path,
+            removed,
+            removed_files: report.removed_files,
+            removed_bytes: report.removed_bytes,
+        })
     }
 
     pub fn store_ticks(

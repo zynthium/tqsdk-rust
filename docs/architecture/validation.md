@@ -157,6 +157,10 @@ rtk cargo test -p tqsdk --test facade_contract
 rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss
 ```
 
+需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
+`rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；
+该 smoke 验证首次 server-side backtest 补 tick 缓存、二次无 auth 本地缓存命中。
+
 ## 场景驱动 public API 契约
 
 `crates/*/examples/api_contract_sXX_*.rs` 是面向终端用户的 public API

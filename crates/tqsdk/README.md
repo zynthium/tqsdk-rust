@@ -27,6 +27,10 @@ server-side backtest market stream 拉取 tick、推进本地回测并写入持�
 专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay 对齐的期货
 selector 语法，适合全品种策略。
 
+缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
+backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
+缓存文件。`.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
+
 ```rust
 use tqsdk::prelude::*;
 

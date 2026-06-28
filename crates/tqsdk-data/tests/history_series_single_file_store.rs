@@ -70,6 +70,66 @@ fn series_file_store_embeds_coverage_and_reopens_complete_range() {
 }
 
 #[test]
+fn backtest_tick_cache_inspect_reports_backend_path_and_missing_ranges() {
+    let dir = temp_dir("inspect-backend-path-missing");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    let path = cache.tick_series_path("SHFE.rb2601");
+    assert_eq!(
+        path,
+        dir.join("series").join("SHFE.rb2601").join("tick.tqseries")
+    );
+
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let status = cache.inspect("SHFE.rb2601", 1_000, 5_000).unwrap();
+
+    assert_eq!(status.backend_format, SERIES_FILE_FORMAT_ID);
+    assert_eq!(status.cache_dir, dir);
+    assert_eq!(status.series_path, path);
+    assert!(status.series_path_exists);
+    assert!(!status.uses_mmap_backend);
+    assert!(!status.is_complete());
+    assert_eq!(status.cached_ranges, vec![(1_000, 3_000)]);
+    assert_eq!(status.missing_ranges, vec![(3_000, 5_000)]);
+}
+
+#[test]
+fn backtest_tick_cache_purge_symbol_ticks_removes_rows_and_coverage() {
+    let dir = temp_dir("purge-symbol-ticks");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let path = cache.tick_series_path("SHFE.rb2601");
+    assert!(path.exists());
+
+    let report = cache.purge_symbol_ticks("SHFE.rb2601").unwrap();
+    assert_eq!(report.symbol, "SHFE.rb2601");
+    assert_eq!(report.series_path, path);
+    assert!(report.removed);
+    assert!(!report.series_path.exists());
+
+    let coverage = cache.coverage("SHFE.rb2601", 1_000, 3_000).unwrap();
+    assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
+}
+
+#[test]
 fn series_file_store_partial_rows_do_not_create_coverage() {
     let dir = temp_dir("partial-rows-no-coverage");
     let history = HistorySeriesCache::open_series_file(&dir).unwrap();

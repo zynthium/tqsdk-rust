@@ -164,6 +164,71 @@ async fn facade_backtest_remote_on_miss_prepare_marks_remote_used_when_cache_mis
     assert_eq!(prepared.data_report().resolved_symbols, 1);
 }
 
+#[test]
+fn facade_backtest_builder_inspects_and_purges_explicit_symbol_cache() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let builder = Tq::futures()
+        .backtest(1_000, 5_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol);
+
+    let statuses = builder.inspect_cache().unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].symbol, symbol);
+    assert!(!statuses[0].is_complete());
+    assert_eq!(statuses[0].cached_ranges, vec![(1_000, 3_000)]);
+    assert_eq!(statuses[0].missing_ranges, vec![(3_000, 5_000)]);
+    assert!(statuses[0].series_path.is_file());
+
+    let purged = builder.purge_cache_symbols().unwrap();
+    assert_eq!(purged.len(), 1);
+    assert!(purged[0].removed);
+    assert!(!purged[0].series_path.exists());
+}
+
+#[tokio::test]
+async fn facade_backtest_refresh_purges_symbol_cache_before_remote_fill() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .auth("demo-user", "demo-pass")
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .refresh()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert!(prepared.data_report().remote_used);
+    let coverage = cache.coverage(symbol, 1_000, 3_000).unwrap();
+    assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
+}
+
 #[tokio::test]
 #[ignore = "requires TQ_AUTH_USER/TQ_AUTH_PASS and remote backtest service"]
 async fn facade_backtest_remote_on_miss_live_smoke() {
@@ -188,6 +253,25 @@ async fn facade_backtest_remote_on_miss_live_smoke() {
 
     assert!(tq.next().await.unwrap());
     assert!(quote.load().unwrap().last_price.is_finite());
+    while tq.next().await.unwrap() {}
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let status = cache.inspect(symbol, start_ns, end_ns).unwrap();
+    assert!(status.is_complete(), "cache status: {status:?}");
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .remote_on_miss()
+        .prepare()
+        .await
+        .unwrap();
+    assert!(!prepared.data_report().remote_used);
+
+    let mut cached = prepared.connect().await.unwrap();
+    assert!(cached.next().await.unwrap());
 }
 
 #[tokio::test]

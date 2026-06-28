@@ -12,9 +12,10 @@ use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
     HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport,
     HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
-    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment, KlineDataSeriesRequest, TickDataSeriesRequest,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
+    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
+    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment, KlineDataSeriesRequest,
+    TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -1172,6 +1173,11 @@ impl HistorySeriesStore for TestHistorySeriesStore {
         false
     }
 
+    fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        self.root_dir
+            .join(format!("{}.{}", symbol, kind.duration_ns()))
+    }
+
     fn scan(&self) -> tqsdk_data::Result<HistorySeriesCacheScanReport> {
         Ok(HistorySeriesCacheScanReport {
             cache_dir: self.root_dir.clone(),
@@ -1220,6 +1226,20 @@ impl HistorySeriesStore for TestHistorySeriesStore {
             range_end_ns: commit.range_end_ns,
             cached_ranges: vec![(commit.range_start_ns, commit.range_end_ns)],
             missing_ranges: Vec::new(),
+        })
+    }
+
+    fn purge_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> tqsdk_data::Result<HistorySeriesPurgeReport> {
+        Ok(HistorySeriesPurgeReport {
+            path: self.series_path(symbol, kind),
+            symbol: symbol.to_string(),
+            kind,
+            removed_files: 0,
+            removed_bytes: 0,
         })
     }
 

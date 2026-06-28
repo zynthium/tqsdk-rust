@@ -33,9 +33,10 @@ use storage::{
 };
 pub use store::{
     BINARY_HISTORY_SERIES_FORMAT_ID, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
-    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
+    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
+    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
 };
 
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
@@ -302,6 +303,10 @@ impl HistorySeriesCache {
         self.store.schema_version()
     }
 
+    pub fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        self.store.series_path(symbol, kind)
+    }
+
     pub fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,
@@ -368,6 +373,14 @@ impl HistorySeriesCache {
         commit: HistorySeriesCoverageCommit,
     ) -> Result<HistorySeriesCoverageReport> {
         self.store.commit_coverage(commit)
+    }
+
+    pub fn purge_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.store.purge_series(symbol, kind)
     }
 
     pub fn write_tick_rows_without_coverage(&self, symbol: &str, rows: &[Tick]) -> Result<()> {
@@ -1380,6 +1393,54 @@ impl HistorySeriesCache {
             .join(format!("{symbol}.{duration_ns}.{start_id}.{end_id}"))
     }
 
+    fn binary_series_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
+        self.inner.root_dir.join(format!("{symbol}.{duration_ns}"))
+    }
+
+    fn purge_binary_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<HistorySeriesPurgeReport> {
+        let duration_ns = kind.duration_ns();
+        let _guard = self.lock_series(symbol, duration_ns)?;
+        let mut report = HistorySeriesPurgeReport {
+            path: self.binary_series_path(symbol, duration_ns),
+            symbol: symbol.to_string(),
+            kind,
+            removed_files: 0,
+            removed_bytes: 0,
+        };
+        if !self.inner.root_dir.exists() {
+            return Ok(report);
+        }
+        for entry in fs::read_dir(&self.inner.root_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let filename = entry.file_name();
+            let filename = filename.to_string_lossy();
+            let is_data_file = parse_data_file_name(&filename).is_some_and(
+                |(file_symbol, file_duration_ns, _)| {
+                    file_symbol == symbol && file_duration_ns == duration_ns
+                },
+            );
+            let is_coverage_file = filename == format!(".{symbol}.{duration_ns}.coverage");
+            if !is_data_file && !is_coverage_file {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            fs::remove_file(entry.path())?;
+            report.removed_files += 1;
+            report.removed_bytes = report.removed_bytes.saturating_add(metadata.len());
+        }
+        if report.removed() {
+            self.invalidate_range_index();
+        }
+        Ok(report)
+    }
+
     fn temp_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
         self.inner
             .root_dir
@@ -1449,6 +1510,23 @@ fn coverage_with_inner(
     let symbol = request.symbol.clone();
     let _guard = cache.lock_series(symbol.as_str(), duration_ns)?;
     cache.coverage_unlocked(request)
+}
+
+fn series_path_with_inner(
+    inner: &Arc<HistorySeriesCacheInner>,
+    symbol: &str,
+    kind: HistorySeriesKind,
+) -> PathBuf {
+    HistorySeriesCache::from_binary_inner(Arc::clone(inner))
+        .binary_series_path(symbol, kind.duration_ns())
+}
+
+fn purge_series_with_inner(
+    inner: &Arc<HistorySeriesCacheInner>,
+    symbol: &str,
+    kind: HistorySeriesKind,
+) -> Result<HistorySeriesPurgeReport> {
+    HistorySeriesCache::from_binary_inner(Arc::clone(inner)).purge_binary_series(symbol, kind)
 }
 
 fn commit_coverage_with_inner(
