@@ -7,6 +7,7 @@ use tqsdk_core::{
     CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote, RuntimeInput, Tick,
 };
 
+use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
@@ -27,7 +28,8 @@ use ledger::BacktestLedgerSnapshot;
 
 /// Local Python-compatible strategy backtest over task-owned replay market events.
 pub struct StrategyBacktestBuilder {
-    replay: ReplayMarketSource,
+    replay: Box<dyn BacktestMarketStream>,
+    replay_symbols: Vec<String>,
     sim: TqSim,
     quotes: Vec<String>,
     price_ticks: HashMap<String, f64>,
@@ -36,7 +38,7 @@ pub struct StrategyBacktestBuilder {
 
 /// Local Python-compatible strategy backtest host.
 pub struct StrategyBacktest {
-    replay: ReplayMarketSource,
+    replay: Box<dyn BacktestMarketStream>,
     strategy: StrategyHost,
     sim: TqSim,
     tracked_symbols: Vec<String>,
@@ -68,11 +70,18 @@ pub struct StrategyBacktestContext<'a> {
 impl StrategyBacktest {
     #[must_use]
     pub fn builder(replay: ReplayMarketSource) -> StrategyBacktestBuilder {
-        StrategyBacktestBuilder::new(replay)
+        let replay_symbols = replay.symbols().map(str::to_string).collect();
+        StrategyBacktestBuilder::new(Box::new(ReplayMarketStream::new(replay)))
+            .with_replay_symbols(replay_symbols)
+    }
+
+    #[must_use]
+    pub fn builder_from_stream(stream: Box<dyn BacktestMarketStream>) -> StrategyBacktestBuilder {
+        StrategyBacktestBuilder::new(stream)
     }
 
     pub async fn next(&mut self) -> Result<Option<StrategyBacktestContext<'_>>> {
-        let Some(event) = self.replay.next() else {
+        let Some(event) = self.replay.next_event().await? else {
             self.drain_pending_task_updates().await?;
             return Ok(None);
         };
@@ -189,14 +198,21 @@ impl StrategyBacktest {
 
 impl StrategyBacktestBuilder {
     #[must_use]
-    pub fn new(replay: ReplayMarketSource) -> Self {
+    pub fn new(replay: Box<dyn BacktestMarketStream>) -> Self {
         Self {
             replay,
+            replay_symbols: Vec::new(),
             sim: TqSim::new(),
             quotes: Vec::new(),
             price_ticks: HashMap::new(),
             default_price_tick: None,
         }
+    }
+
+    #[must_use]
+    fn with_replay_symbols(mut self, symbols: Vec<String>) -> Self {
+        self.replay_symbols = symbols;
+        self
     }
 
     #[must_use]
@@ -255,6 +271,7 @@ impl StrategyBacktestBuilder {
     pub async fn build(self) -> Result<StrategyBacktest> {
         let Self {
             replay,
+            replay_symbols,
             sim,
             mut quotes,
             price_ticks,
@@ -262,9 +279,9 @@ impl StrategyBacktestBuilder {
         } = self;
         validate_price_ticks(&price_ticks)?;
         validate_default_price_tick(default_price_tick)?;
-        for symbol in replay.symbols() {
-            if !quotes.iter().any(|existing| existing == symbol) {
-                quotes.push(symbol.to_owned());
+        for symbol in replay_symbols {
+            if !quotes.iter().any(|existing| existing == &symbol) {
+                quotes.push(symbol);
             }
         }
         let harness = StrategyTestHarness::new().build()?;

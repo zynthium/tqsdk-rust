@@ -57,6 +57,7 @@ pub enum TaskError {
     },
     Unsupported(&'static str),
     InvalidState(&'static str),
+    External(String),
 }
 
 impl From<tqsdk_core::ContractError> for TaskError {
@@ -138,6 +139,7 @@ impl Display for TaskError {
             }
             Self::Unsupported(message) => write!(f, "unsupported task operation: {message}"),
             Self::InvalidState(message) => write!(f, "invalid task state: {message}"),
+            Self::External(message) => write!(f, "{message}"),
         }
     }
 }
@@ -158,7 +160,8 @@ impl std::error::Error for TaskError {
             | Self::CheckpointIo { .. }
             | Self::InvalidCheckpoint { .. }
             | Self::Unsupported(_)
-            | Self::InvalidState(_) => None,
+            | Self::InvalidState(_)
+            | Self::External(_) => None,
         }
     }
 }

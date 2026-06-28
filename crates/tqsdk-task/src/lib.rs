@@ -14,6 +14,7 @@
 
 mod account_group;
 pub mod backtest;
+mod backtest_stream;
 mod calendar;
 mod config;
 pub mod deployment;
@@ -62,6 +63,7 @@ pub use backtest::{
     StrategyBacktestPerformanceReport, StrategyBacktestRiskRatioPoint,
     StrategyBacktestRollingRatioPoint, StrategyBacktestSummary,
 };
+pub use backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 pub use calendar::TradingDayCalendar;
 pub use config::{
     OffsetPriority, PriceMode, TargetPosConfig, TargetPosSchedulerConfig, VolumeSplitPolicy,

@@ -951,15 +951,21 @@ impl ReplayMarketSource {
             .iter()
             .map(ReplayMarketEvent::symbol)
     }
+
+    pub fn next(&mut self) -> Option<ReplayMarketEvent> {
+        let event = self.events.get(self.index).cloned();
+        if event.is_some() {
+            self.index += 1;
+        }
+        event
+    }
 }
 
 impl Iterator for ReplayMarketSource {
     type Item = ReplayMarketEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let event = self.events.get(self.index)?.clone();
-        self.index += 1;
-        Some(event)
+        ReplayMarketSource::next(self)
     }
 }
 
