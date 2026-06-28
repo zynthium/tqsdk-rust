@@ -16,6 +16,7 @@ use crate::error::{DataError, Result};
 mod binary_store;
 mod paths;
 mod ranges;
+mod series_file_store;
 mod storage;
 mod store;
 
@@ -31,10 +32,10 @@ use storage::{
     write_i64, write_tick_level,
 };
 pub use store::{
-    BINARY_HISTORY_SERIES_FORMAT_ID, HistorySeriesCoverageReport, HistorySeriesCoverageRequest,
-    HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
-    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment,
+    BINARY_HISTORY_SERIES_FORMAT_ID, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
+    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
 };
 
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
@@ -273,6 +274,12 @@ impl HistorySeriesCache {
         })
     }
 
+    pub fn open_series_file(root_dir: impl AsRef<Path>) -> Result<Self> {
+        let root_dir = canonical_or_original(root_dir.as_ref());
+        let store = series_file_store::SeriesFileHistoryStore::new(root_dir)?;
+        Ok(Self::from_store(Arc::new(store)))
+    }
+
     pub fn python_compatible_default() -> Result<Self> {
         Self::open(default_cache_dir())
     }
@@ -354,6 +361,23 @@ impl HistorySeriesCache {
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
         self.store.write_segment(segment)
+    }
+
+    pub fn commit_coverage(
+        &self,
+        commit: HistorySeriesCoverageCommit,
+    ) -> Result<HistorySeriesCoverageReport> {
+        self.store.commit_coverage(commit)
+    }
+
+    pub fn write_tick_rows_without_coverage(&self, symbol: &str, rows: &[Tick]) -> Result<()> {
+        self.write_segment(HistorySeriesWriteSegment {
+            symbol,
+            kind: HistorySeriesKind::Tick,
+            declared_range_ns: None,
+            rows: HistorySeriesWriteRows::Ticks(rows),
+        })?;
+        Ok(())
     }
 
     pub fn open_reader(
@@ -1399,6 +1423,14 @@ fn scan_with_inner(inner: &Arc<HistorySeriesCacheInner>) -> Result<HistorySeries
     HistorySeriesCache::from_binary_inner(Arc::clone(inner)).scan_binary()
 }
 
+fn empty_scan_report(root_dir: &Path) -> Result<HistorySeriesCacheScanReport> {
+    Ok(HistorySeriesCacheScanReport {
+        cache_dir: root_dir.to_path_buf(),
+        schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+        files: Vec::new(),
+    })
+}
+
 fn enforce_limits_with_inner(
     inner: &Arc<HistorySeriesCacheInner>,
     max_bytes: Option<u64>,
@@ -1417,6 +1449,28 @@ fn coverage_with_inner(
     let symbol = request.symbol.clone();
     let _guard = cache.lock_series(symbol.as_str(), duration_ns)?;
     cache.coverage_unlocked(request)
+}
+
+fn commit_coverage_with_inner(
+    inner: &Arc<HistorySeriesCacheInner>,
+    commit: HistorySeriesCoverageCommit,
+) -> Result<HistorySeriesCoverageReport> {
+    let cache = HistorySeriesCache::from_binary_inner(Arc::clone(inner));
+    cache.write_segment(HistorySeriesWriteSegment {
+        symbol: commit.symbol.as_str(),
+        kind: commit.kind,
+        declared_range_ns: Some((commit.range_start_ns, commit.range_end_ns)),
+        rows: match commit.kind {
+            HistorySeriesKind::Tick => HistorySeriesWriteRows::Ticks(&[]),
+            HistorySeriesKind::Kline { .. } => HistorySeriesWriteRows::Klines(&[]),
+        },
+    })?;
+    cache.coverage(HistorySeriesCoverageRequest {
+        symbol: commit.symbol,
+        kind: commit.kind,
+        range_start_ns: commit.range_start_ns,
+        range_end_ns: commit.range_end_ns,
+    })
 }
 
 fn write_segment_with_inner(

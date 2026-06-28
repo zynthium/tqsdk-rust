@@ -5,9 +5,9 @@ use crate::Result;
 
 use super::{
     BINARY_HISTORY_SERIES_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheInner,
-    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesReadRequest, HistorySeriesReader,
-    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteSegment,
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesCoverageCommit,
+    HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesReadRequest,
+    HistorySeriesReader, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteSegment,
 };
 
 #[derive(Clone)]
@@ -73,6 +73,13 @@ impl HistorySeriesStore for BinaryHistorySeriesStore {
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
         super::write_segment_with_inner(&self.inner, segment)
+    }
+
+    fn commit_coverage(
+        &self,
+        commit: HistorySeriesCoverageCommit,
+    ) -> Result<HistorySeriesCoverageReport> {
+        super::commit_coverage_with_inner(&self.inner, commit)
     }
 
     fn open_reader(

@@ -7,6 +7,7 @@ use crate::Result;
 use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
 
 pub const BINARY_HISTORY_SERIES_FORMAT_ID: &str = "tqsdk.binary-series.v1";
+pub const SERIES_FILE_HISTORY_SERIES_FORMAT_ID: &str = "tqsdk.series-file.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistorySeriesKind {
@@ -47,6 +48,16 @@ impl HistorySeriesCoverageReport {
     pub fn is_complete(&self) -> bool {
         self.missing_ranges.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySeriesCoverageCommit {
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+    pub rows: usize,
+    pub id_range: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +122,10 @@ pub trait HistorySeriesStore: Send + Sync {
         &self,
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport>;
+    fn commit_coverage(
+        &self,
+        commit: HistorySeriesCoverageCommit,
+    ) -> Result<HistorySeriesCoverageReport>;
     fn open_reader(
         &self,
         request: HistorySeriesReadRequest,
