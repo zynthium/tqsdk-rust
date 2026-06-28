@@ -68,18 +68,42 @@ impl LocalBacktestRecipe {
 
     pub(super) async fn connect(self, replay: ReplayMarketSource) -> Result<Tq> {
         let mut builder = StrategyBacktest::builder(replay);
-        if let Some(default_price_tick) = self.default_price_tick {
-            builder = builder.default_price_tick(default_price_tick);
-        }
-        builder = builder.instrument_specs(self.instrument_specs);
-        for symbol in &self.quote_symbols {
-            builder = builder.quote(symbol);
-        }
-        for (symbol, tick) in &self.price_ticks {
-            builder = builder.price_tick(symbol, *tick);
-        }
+        builder = self.apply_to_builder(builder);
         let backtest = builder.build().await?;
         Ok(Tq::from_local_backtest(backtest))
+    }
+
+    pub(super) async fn connect_stream(
+        self,
+        stream: Box<dyn tqsdk_task::BacktestMarketStream>,
+    ) -> Result<Tq> {
+        let mut builder = StrategyBacktest::builder_from_stream(stream);
+        builder = self.apply_to_builder(builder);
+        let backtest = builder.build().await?;
+        Ok(Tq::from_local_backtest(backtest))
+    }
+
+    fn apply_to_builder(
+        self,
+        mut builder: tqsdk_task::StrategyBacktestBuilder,
+    ) -> tqsdk_task::StrategyBacktestBuilder {
+        let Self {
+            quote_symbols,
+            price_ticks,
+            instrument_specs,
+            default_price_tick,
+        } = self;
+        if let Some(default_price_tick) = default_price_tick {
+            builder = builder.default_price_tick(default_price_tick);
+        }
+        builder = builder.instrument_specs(instrument_specs);
+        for symbol in &quote_symbols {
+            builder = builder.quote(symbol);
+        }
+        for (symbol, tick) in &price_ticks {
+            builder = builder.price_tick(symbol, *tick);
+        }
+        builder
     }
 }
 

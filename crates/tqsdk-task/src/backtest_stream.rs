@@ -4,7 +4,7 @@ use std::pin::Pin;
 use crate::Result;
 use crate::replay::{ReplayMarketEvent, ReplayMarketSource};
 
-pub trait BacktestMarketStream {
+pub trait BacktestMarketStream: Send {
     fn next_event<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<ReplayMarketEvent>>> + 'a>>;

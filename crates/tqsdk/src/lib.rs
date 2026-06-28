@@ -7,6 +7,7 @@
 
 use std::env;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 #[cfg(all(feature = "services", feature = "live"))]
 use std::time::Duration;
 
@@ -883,14 +884,15 @@ impl PreparedBacktest {
             symbols,
         } = self.builder;
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
-        let mut series = Vec::with_capacity(symbols.len());
-        for symbol in &symbols {
-            series.push(cache.load_series(tqsdk_data::TickDataSeriesRequest::new(
-                symbol, start_ns, end_ns,
-            ))?);
-        }
-        let replay = local_backtest::replay_from_ticks(series)?;
-        base.replay_backtest(replay).connect().await
+        let requests = symbols
+            .iter()
+            .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
+            .collect::<Vec<_>>();
+        let stream =
+            tqsdk_task::HistoryTickReplayStream::new(cache.history_cache().clone(), requests)?;
+        base.replay_backtest_stream(Box::new(stream))
+            .connect()
+            .await
     }
 }
 
@@ -984,6 +986,18 @@ impl TqBuilder {
     #[must_use]
     pub fn replay_backtest(mut self, replay: tqsdk_task::replay::ReplayMarketSource) -> Self {
         self.backtest = Some(BacktestConfig::Local { replay });
+        self
+    }
+
+    /// Enter local-backtest mode using a custom async market stream.
+    #[must_use]
+    pub fn replay_backtest_stream(
+        mut self,
+        stream: Box<dyn tqsdk_task::BacktestMarketStream>,
+    ) -> Self {
+        self.backtest = Some(BacktestConfig::LocalStream {
+            stream: Arc::new(Mutex::new(Some(stream))),
+        });
         self
     }
 
@@ -1188,6 +1202,10 @@ impl TqBuilder {
 
         match backtest {
             Some(BacktestConfig::Local { replay }) => local_backtest_recipe.connect(replay).await,
+            Some(BacktestConfig::LocalStream { stream }) => {
+                let stream = take_local_backtest_stream(stream)?;
+                local_backtest_recipe.connect_stream(stream).await
+            }
             backtest => {
                 let tq = connect_wait_facade(
                     auth,
@@ -1338,7 +1356,13 @@ enum BacktestConfig {
     Local {
         replay: tqsdk_task::replay::ReplayMarketSource,
     },
+    LocalStream {
+        stream: SharedBacktestMarketStream,
+    },
 }
+
+type BacktestMarketStreamBox = Box<dyn tqsdk_task::BacktestMarketStream>;
+type SharedBacktestMarketStream = Arc<Mutex<Option<BacktestMarketStreamBox>>>;
 
 impl std::fmt::Debug for BacktestConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1354,6 +1378,7 @@ impl std::fmt::Debug for BacktestConfig {
                 .field("replay_date", replay_date)
                 .finish(),
             Self::Local { .. } => f.debug_struct("Local").finish_non_exhaustive(),
+            Self::LocalStream { .. } => f.debug_struct("LocalStream").finish_non_exhaustive(),
         }
     }
 }
@@ -1364,7 +1389,7 @@ impl BacktestConfig {
             Self::Server { .. } => true,
             #[cfg(all(feature = "services", feature = "live"))]
             Self::ServerReplay { .. } => true,
-            Self::Local { .. } => false,
+            Self::Local { .. } | Self::LocalStream { .. } => false,
         }
     }
 }
@@ -1409,7 +1434,7 @@ async fn connect_wait_facade(
         }
         #[cfg(all(feature = "services", feature = "live"))]
         Some(BacktestConfig::ServerReplay { .. }) => {}
-        Some(BacktestConfig::Local { .. }) | None => {}
+        Some(BacktestConfig::Local { .. }) | Some(BacktestConfig::LocalStream { .. }) | None => {}
     }
     let api = wait_builder.build().await?;
     #[cfg(all(feature = "services", feature = "live"))]
@@ -1461,6 +1486,17 @@ fn session_builder(
 
 fn data_validation(message: impl Into<String>) -> Error {
     Error::Data(Box::new(tqsdk_data::DataError::Validation(message.into())))
+}
+
+fn take_local_backtest_stream(
+    stream: SharedBacktestMarketStream,
+) -> Result<BacktestMarketStreamBox> {
+    let mut guard = stream
+        .lock()
+        .map_err(|_| data_validation("local backtest stream lock poisoned"))?;
+    guard
+        .take()
+        .ok_or_else(|| data_validation("local backtest stream was already consumed"))
 }
 
 fn missing_default_account() -> Error {

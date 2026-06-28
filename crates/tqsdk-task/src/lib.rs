@@ -21,6 +21,7 @@ pub mod deployment;
 pub mod environment;
 mod error;
 mod execution_group;
+mod history_tick_replay;
 mod host;
 mod order;
 mod order_projection;
@@ -83,6 +84,7 @@ pub use environment::{
     StrategyEnvironmentSubscriptions, StrategyEnvironmentTickSubscription,
 };
 pub use error::{Result, TaskError, TaskKind};
+pub use history_tick_replay::HistoryTickReplayStream;
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use replay::{
