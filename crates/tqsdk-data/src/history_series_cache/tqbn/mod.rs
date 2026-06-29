@@ -334,14 +334,15 @@ fn append_rows_block(
     segment: &HistorySeriesWriteSegment<'_>,
 ) -> Result<TqbnAppendReport> {
     let mut records = Vec::new();
+    let mut record = Vec::new();
     match (segment.kind, &segment.rows) {
         (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => {
             for row in *rows {
-                write_kline_record_bytes(&mut records, &encode_kline_record(row)?)?;
+                record.clear();
+                write_kline_record_bytes(&mut record, &encode_kline_record(row)?)?;
+                append_record_to_blocks(file, &mut records, &record)?;
             }
-            if !records.is_empty() {
-                file.write_all(&encode_block(TqbnBlockType::Records, &records))?;
-            }
+            flush_records_block(file, &mut records)?;
             Ok((
                 rows.len(),
                 id_range(rows.iter().map(|row| row.id))?,
@@ -351,18 +352,18 @@ fn append_rows_block(
         (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) => {
             let five_level = tick_rows_use_five_levels(segment.symbol);
             for row in *rows {
+                record.clear();
                 match encode_tick_record(row, five_level)? {
-                    EncodedTickRecord::Tick1(record) => {
-                        write_tick1_record_bytes(&mut records, &record)?;
+                    EncodedTickRecord::Tick1(encoded) => {
+                        write_tick1_record_bytes(&mut record, &encoded)?;
                     }
-                    EncodedTickRecord::Tick5(record) => {
-                        write_tick5_record_bytes(&mut records, &record)?;
+                    EncodedTickRecord::Tick5(encoded) => {
+                        write_tick5_record_bytes(&mut record, &encoded)?;
                     }
                 }
+                append_record_to_blocks(file, &mut records, &record)?;
             }
-            if !records.is_empty() {
-                file.write_all(&encode_block(TqbnBlockType::Records, &records))?;
-            }
+            flush_records_block(file, &mut records)?;
             Ok((
                 rows.len(),
                 id_range(rows.iter().map(|row| row.id))?,
@@ -376,6 +377,44 @@ fn append_rows_block(
             "history TQBN write row kind does not match segment kind",
         )),
     }
+}
+
+fn append_record_to_blocks(
+    writer: &mut impl Write,
+    records: &mut Vec<u8>,
+    record: &[u8],
+) -> Result<()> {
+    append_record_to_blocks_with_limit(writer, records, record, MAX_TQBN_BLOCK_PAYLOAD_BYTES)
+}
+
+fn append_record_to_blocks_with_limit(
+    writer: &mut impl Write,
+    records: &mut Vec<u8>,
+    record: &[u8],
+    max_payload_bytes: usize,
+) -> Result<()> {
+    if record.len() > max_payload_bytes {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN record length {} exceeds max block payload {max_payload_bytes}",
+            record.len()
+        )));
+    }
+    let next_len = records.len().checked_add(record.len()).ok_or_else(|| {
+        DataError::InvalidResponse("TQBN block records length overflow".to_string())
+    })?;
+    if next_len > max_payload_bytes {
+        flush_records_block(writer, records)?;
+    }
+    records.extend_from_slice(record);
+    Ok(())
+}
+
+fn flush_records_block(writer: &mut impl Write, records: &mut Vec<u8>) -> Result<()> {
+    if !records.is_empty() {
+        writer.write_all(&encode_block(TqbnBlockType::Records, records))?;
+        records.clear();
+    }
+    Ok(())
 }
 
 fn append_coverage_block(
@@ -1611,7 +1650,7 @@ mod tests {
         HistorySeriesWriteRows, HistorySeriesWriteSegment,
     };
 
-    use super::codec::{TqbnBlockType, encode_block, encode_file_prefix};
+    use super::codec::{TqbnBlockType, decode_blocks, encode_block, encode_file_prefix};
     use super::{TqbnHistoryStore, TqbnMetadata, encode_metadata, tick_level_depth};
 
     const SYMBOL: &str = "SHFE.rb2601";
@@ -1651,6 +1690,38 @@ mod tests {
             .unwrap();
         assert_eq!(series.rows()[0].last_price, 618.5);
         assert_eq!(series.rows()[0].ask_price5, 623.5);
+    }
+
+    #[test]
+    fn tqbn_record_block_writer_splits_at_payload_limit() {
+        let mut out = Vec::new();
+        let mut records = Vec::new();
+        let record = vec![7_u8; 4];
+
+        super::append_record_to_blocks_with_limit(&mut out, &mut records, &record, 8).unwrap();
+        super::append_record_to_blocks_with_limit(&mut out, &mut records, &record, 8).unwrap();
+        super::append_record_to_blocks_with_limit(&mut out, &mut records, &record, 8).unwrap();
+        super::flush_records_block(&mut out, &mut records).unwrap();
+
+        let blocks = decode_blocks(&out).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].block_type, TqbnBlockType::Records);
+        assert_eq!(blocks[0].records.len(), 8);
+        assert_eq!(blocks[1].records.len(), 4);
+    }
+
+    #[test]
+    fn tqbn_record_block_writer_rejects_single_record_over_limit() {
+        let mut out = Vec::new();
+        let mut records = Vec::new();
+
+        let error =
+            super::append_record_to_blocks_with_limit(&mut out, &mut records, &[0_u8; 9], 8)
+                .unwrap_err();
+
+        assert!(
+            matches!(error, DataError::InvalidResponse(message) if message.contains("record length 9 exceeds max block payload 8"))
+        );
     }
 
     #[test]
