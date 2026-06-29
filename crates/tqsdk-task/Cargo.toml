@@ -13,6 +13,7 @@ repository = "https://github.com/zynthium/tqsdk-rust"
 default = ["live", "services"]
 live = ["tqsdk-session/live", "tqsdk-wait/live"]
 services = ["tqsdk-session/services", "tqsdk-wait/services"]
+tqbn-zstd = ["tqsdk-data/tqbn-zstd"]
 
 [dependencies]
 chrono.workspace = true

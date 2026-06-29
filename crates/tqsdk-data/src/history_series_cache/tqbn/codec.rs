@@ -1,3 +1,5 @@
+#[cfg(feature = "tqbn-zstd")]
+use std::io::Read;
 use std::mem::size_of;
 
 use crate::error::{DataError, Result};
@@ -15,6 +17,9 @@ const SINGLE_SERIES_INSTRUMENT_ID: u32 = 1;
 const FILE_PREFIX_HEADER_LEN: usize = TQBN_MAGIC.len() + 1 + 4 + 4 + 8;
 const MAX_FILE_PREFIX_METADATA_LEN: usize = 64 * 1024;
 const BLOCK_HEADER_LEN: usize = TQBN_BLOCK_MAGIC.len() + 1 + 3 + 8 + 8;
+pub(super) const TQBN_BLOCK_FLAG_ZSTD: u8 = 0x01;
+#[cfg(feature = "tqbn-zstd")]
+const TQBN_ZSTD_LEVEL: i32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TqbnFilePrefix {
@@ -48,10 +53,10 @@ impl TqbnBlockType {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct TqbnBlock<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TqbnBlock {
     pub(super) block_type: TqbnBlockType,
-    pub(super) records: &'a [u8],
+    pub(super) records: Vec<u8>,
 }
 
 pub(super) fn encode_file_prefix(metadata: &[u8]) -> TqbnFilePrefix {
@@ -140,12 +145,36 @@ pub(super) fn decode_file_prefix(bytes: &[u8]) -> Result<(TqbnFilePrefix, usize)
 }
 
 pub(super) fn encode_block(block_type: TqbnBlockType, records: &[u8]) -> Vec<u8> {
+    encode_block_with_flags(block_type, 0, records)
+}
+
+pub(super) fn encode_records_block(records: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(feature = "tqbn-zstd")]
+    {
+        if !records.is_empty() {
+            let compressed = zstd::bulk::compress(records, TQBN_ZSTD_LEVEL).map_err(|error| {
+                DataError::InvalidResponse(format!("TQBN zstd compression failed: {error}"))
+            })?;
+            if compressed.len() < records.len() {
+                return Ok(encode_block_with_flags(
+                    TqbnBlockType::Records,
+                    TQBN_BLOCK_FLAG_ZSTD,
+                    &compressed,
+                ));
+            }
+        }
+    }
+    Ok(encode_block(TqbnBlockType::Records, records))
+}
+
+fn encode_block_with_flags(block_type: TqbnBlockType, flags: u8, records: &[u8]) -> Vec<u8> {
     let records_len = u64::try_from(records.len()).expect("TQBN block length must fit in u64");
     let records_checksum = checksum64_fnv1a(records);
     let mut bytes = Vec::with_capacity(BLOCK_HEADER_LEN + records.len());
     bytes.extend_from_slice(&TQBN_BLOCK_MAGIC);
     bytes.push(block_type as u8);
-    bytes.extend_from_slice(&[0, 0, 0]);
+    bytes.push(flags);
+    bytes.extend_from_slice(&[0, 0]);
     bytes.extend_from_slice(&records_len.to_le_bytes());
     bytes.extend_from_slice(&records_checksum.to_le_bytes());
     bytes.extend_from_slice(records);
@@ -153,7 +182,7 @@ pub(super) fn encode_block(block_type: TqbnBlockType, records: &[u8]) -> Vec<u8>
 }
 
 #[cfg(test)]
-pub(super) fn decode_blocks(bytes: &[u8]) -> Result<Vec<TqbnBlock<'_>>> {
+pub(super) fn decode_blocks(bytes: &[u8]) -> Result<Vec<TqbnBlock>> {
     let mut offset = 0;
     let mut blocks = Vec::new();
     while offset < bytes.len() {
@@ -175,6 +204,7 @@ pub(super) fn decode_blocks(bytes: &[u8]) -> Result<Vec<TqbnBlock<'_>>> {
         }
 
         let block_type = TqbnBlockType::decode(bytes[offset + TQBN_BLOCK_MAGIC.len()])?;
+        let flags = bytes[offset + TQBN_BLOCK_MAGIC.len() + 1];
         let mut cursor = offset + TQBN_BLOCK_MAGIC.len() + 1 + 3;
         let records_len_u64 = read_u64_at(bytes, &mut cursor, "TQBN block records length")?;
         let records_len = usize::try_from(records_len_u64).map_err(|_| {
@@ -193,13 +223,15 @@ pub(super) fn decode_blocks(bytes: &[u8]) -> Result<Vec<TqbnBlock<'_>>> {
             )));
         }
 
-        let records = &bytes[cursor..end];
-        let actual_checksum = checksum64_fnv1a(records);
+        let payload = &bytes[cursor..end];
+        let actual_checksum = checksum64_fnv1a(payload);
         if actual_checksum != records_checksum {
             return Err(DataError::InvalidResponse(format!(
                 "TQBN block checksum mismatch at offset {offset}: expected {records_checksum}, got {actual_checksum}"
             )));
         }
+        let records =
+            decode_block_payload(block_type as u8, flags, payload.to_vec(), usize::MAX / 2)?;
 
         blocks.push(TqbnBlock {
             block_type,
@@ -208,6 +240,62 @@ pub(super) fn decode_blocks(bytes: &[u8]) -> Result<Vec<TqbnBlock<'_>>> {
         offset = end;
     }
     Ok(blocks)
+}
+
+pub(super) fn decode_block_payload(
+    block_type: u8,
+    flags: u8,
+    payload: Vec<u8>,
+    max_decoded_payload_bytes: usize,
+) -> Result<Vec<u8>> {
+    if flags & !TQBN_BLOCK_FLAG_ZSTD != 0 {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN block flags {flags:#04x} contain unsupported bits"
+        )));
+    }
+    if flags & TQBN_BLOCK_FLAG_ZSTD == 0 {
+        return Ok(payload);
+    }
+    if block_type != TqbnBlockType::Records as u8 {
+        return Err(DataError::InvalidResponse(
+            "TQBN zstd compression is only supported for records blocks".to_string(),
+        ));
+    }
+
+    #[cfg(feature = "tqbn-zstd")]
+    {
+        decode_zstd_payload(&payload, max_decoded_payload_bytes)
+    }
+    #[cfg(not(feature = "tqbn-zstd"))]
+    {
+        let _ = max_decoded_payload_bytes;
+        Err(DataError::InvalidResponse(
+            "TQBN zstd-compressed block requires the tqbn-zstd feature".to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "tqbn-zstd")]
+fn decode_zstd_payload(payload: &[u8], max_decoded_payload_bytes: usize) -> Result<Vec<u8>> {
+    let limit = u64::try_from(max_decoded_payload_bytes.checked_add(1).ok_or_else(|| {
+        DataError::InvalidResponse("TQBN zstd decode limit overflow".to_string())
+    })?)
+    .map_err(|_| DataError::InvalidResponse("TQBN zstd decode limit overflow".to_string()))?;
+    let decoder = zstd::stream::read::Decoder::new(payload).map_err(|error| {
+        DataError::InvalidResponse(format!("TQBN zstd decoder initialization failed: {error}"))
+    })?;
+    let mut reader = decoder.take(limit);
+    let mut decoded = Vec::new();
+    reader.read_to_end(&mut decoded).map_err(|error| {
+        DataError::InvalidResponse(format!("TQBN zstd decompression failed: {error}"))
+    })?;
+    if decoded.len() > max_decoded_payload_bytes {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN zstd decoded payload length {} exceeds max {max_decoded_payload_bytes}",
+            decoded.len()
+        )));
+    }
+    Ok(decoded)
 }
 
 #[derive(Debug)]
@@ -622,6 +710,33 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].block_type, TqbnBlockType::Records);
         assert_eq!(decoded[0].records, records);
+    }
+
+    #[test]
+    fn records_block_encoder_round_trips_payload() {
+        let records = b"record-bytes";
+        let encoded = encode_records_block(records).unwrap();
+
+        let decoded = decode_blocks(&encoded).unwrap();
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].block_type, TqbnBlockType::Records);
+        assert_eq!(decoded[0].records, records);
+    }
+
+    #[cfg(feature = "tqbn-zstd")]
+    #[test]
+    fn records_block_encoder_compresses_repetitive_payload() {
+        let records = vec![7_u8; 16 * 1024];
+        let encoded = encode_records_block(&records).unwrap();
+
+        assert_eq!(encoded[5] & TQBN_BLOCK_FLAG_ZSTD, TQBN_BLOCK_FLAG_ZSTD);
+        assert!(encoded.len() < records.len());
+
+        let decoded = decode_blocks(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].block_type, TqbnBlockType::Records);
+        assert_eq!(decoded[0].records, records.as_slice());
     }
 
     #[test]

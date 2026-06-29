@@ -13,6 +13,7 @@ repository = "https://github.com/zynthium/tqsdk-rust"
 default = ["live", "services"]
 live = ["tqsdk-session/live"]
 services = ["dep:reqwest", "tqsdk-session/services"]
+tqbn-zstd = ["dep:zstd"]
 
 [dependencies]
 chrono.workspace = true
@@ -22,6 +23,7 @@ fs2 = "0.4"
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
 tokio.workspace = true
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

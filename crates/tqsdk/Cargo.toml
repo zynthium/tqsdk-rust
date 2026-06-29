@@ -23,6 +23,7 @@ services = [
     "tqsdk-task/services",
     "tqsdk-wait/services",
 ]
+tqbn-zstd = ["tqsdk-data/tqbn-zstd", "tqsdk-task/tqbn-zstd"]
 
 [dependencies]
 chrono.workspace = true

@@ -22,9 +22,10 @@ use crate::history_series_cache::{
 use fs2::FileExt;
 
 use codec::{
-    DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_file_prefix,
-    decode_kline_record, decode_one_record, decode_tick1_record, decode_tick5_record, encode_block,
-    encode_file_prefix, encode_kline_record, encode_tick_record,
+    DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_block_payload,
+    decode_file_prefix, decode_kline_record, decode_one_record, decode_tick1_record,
+    decode_tick5_record, encode_file_prefix, encode_kline_record, encode_records_block,
+    encode_tick_record,
 };
 use format::{
     FIXED_AMOUNT_SCALE, FIXED_PRICE_SCALE, TqbnCoverageRecordV1, TqbnKlineRecordV1, TqbnRType,
@@ -411,7 +412,7 @@ fn append_record_to_blocks_with_limit(
 
 fn flush_records_block(writer: &mut impl Write, records: &mut Vec<u8>) -> Result<()> {
     if !records.is_empty() {
-        writer.write_all(&encode_block(TqbnBlockType::Records, records))?;
+        writer.write_all(&encode_records_block(records)?)?;
         records.clear();
     }
     Ok(())
@@ -428,7 +429,7 @@ fn append_coverage_block(
     let record = coverage_record(start_ns, end_ns, rows, id_range)?;
     let mut records = Vec::new();
     write_coverage_record_bytes(&mut records, &record)?;
-    file.write_all(&encode_block(TqbnBlockType::Records, &records))?;
+    file.write_all(&encode_records_block(&records)?)?;
     Ok(())
 }
 
@@ -622,6 +623,7 @@ fn decode_blocks_streaming(
         }
 
         let block_type = header[4];
+        let block_flags = header[5];
         let records_len_u64 = u64::from_le_bytes([
             header[8], header[9], header[10], header[11], header[12], header[13], header[14],
             header[15],
@@ -641,20 +643,26 @@ fn decode_blocks_streaming(
             header[23],
         ]);
 
-        let mut records = vec![0_u8; records_len];
-        read_exact_tqbn(file, &mut records, || {
+        let mut payload = vec![0_u8; records_len];
+        read_exact_tqbn(file, &mut payload, || {
             format!(
                 "TQBN block payload is truncated at offset {block_start}: requires {records_len} bytes"
             )
         })?;
         offset = offset.saturating_add(records_len as u64);
 
-        let actual_checksum = checksum64_fnv1a(&records);
+        let actual_checksum = checksum64_fnv1a(&payload);
         if actual_checksum != records_checksum {
             return Err(DataError::InvalidResponse(format!(
                 "TQBN block checksum mismatch at offset {block_start}: expected {records_checksum}, got {actual_checksum}"
             )));
         }
+        let records = decode_block_payload(
+            block_type,
+            block_flags,
+            payload,
+            MAX_TQBN_BLOCK_PAYLOAD_BYTES,
+        )?;
 
         match block_type {
             value if value == TqbnBlockType::Records as u8 => {

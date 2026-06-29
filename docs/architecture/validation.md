@@ -154,6 +154,8 @@ rtk cargo test -p tqsdk-data --test history_series_cache
 rtk cargo test -p tqsdk-data --test history_series_tqbn_compaction
 rtk cargo test -p tqsdk-data --test history_series_tqbn_corruption
 rtk cargo test -p tqsdk-data --lib tqbn
+rtk cargo test -p tqsdk-data --features tqbn-zstd --lib tqbn
+rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector

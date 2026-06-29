@@ -196,6 +196,8 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
+历史序列和回测 tick cache 默认写未压缩 TQBN v1 (`.tqbn`)；显式启用 `tqbn-zstd`
+feature 时，TQBN records block 会使用 zstd level 1 做内部压缩，不新增用户可选 store API。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

@@ -20,6 +20,10 @@ TQBN v1 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 
 codec 和 store adapter 实现。旧 `.tqseries` 不是默认格式，不作为新增缓存文件目标，
 也不提供兼容读取或迁移 store。
 
+默认构建写入未压缩 TQBN blocks。显式启用 Cargo feature `tqbn-zstd` 时，writer 会对
+records block 使用 zstd level 1 做 per-block 压缩，且只有压缩后 payload 更小时才写入压缩
+block；metadata prefix、file identity、schema version 和 public facade 均不改变。
+
 ## Public Interface
 
 public cache interface 保持为：
@@ -66,6 +70,11 @@ TQBN 文件是按记录顺序解码的二进制 record stream。
 record stream 可以包含 metadata、coverage 和 data rows 等内部 record。record type 的枚举值、
 metadata layout 和 codec helper 不进入 public API。
 
+每个 block 使用 `TQBB` block header 包裹 record payload。block header 中的 flags byte 当前只定义
+`0x01 = zstd records payload`。checksum 始终覆盖实际落盘 payload：未压缩 block 校验原始 records，
+zstd block 校验压缩后的 bytes；reader 校验 checksum 后再按 flags 解码 records。未启用
+`tqbn-zstd` 的 reader 遇到 zstd block 必须返回明确的格式错误，不能静默返回坏数据。
+
 ## Price Encoding
 
 价格字段使用固定小数点 `i64` 编码：
@@ -91,6 +100,8 @@ TQBN reader 的兼容规则是：
 3. 如果已知 record type 的长度短于 v1 struct 所需长度，reader 必须拒绝该 record，除非有明确的
    compat module 负责该旧 layout。
 4. 未知 record type 一律按 `length_words * 4` 跳过，不影响同一文件内后续已知 record 的读取。
+
+5. 已知 block flags 按 feature-gated path 处理；未知 block flags 必须拒绝。
 
 这些规则允许后续 record 尾部追加字段，但不允许 silent truncation。任何需要读取旧 layout 的逻辑都应
 集中在 compat module 中，不能散落在 normal decode path。
