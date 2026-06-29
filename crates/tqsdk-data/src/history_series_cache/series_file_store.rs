@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use tqsdk_core::{Kline, Tick};
@@ -11,12 +12,12 @@ use crate::error::{DataError, Result};
 
 use super::storage::{SeriesLayout, write_kline_row, write_tick_row};
 use super::{
-    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheMaintenanceReport,
-    HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
-    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
-    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
-    SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheFileReport,
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesCoverageCommit,
+    HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
+    HistorySeriesPurgeReport, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
+    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
 };
 
 const ROOT_DIR_NAME: &str = "series";
@@ -43,9 +44,25 @@ struct SeriesFileState {
     coverage: Vec<(i64, i64)>,
 }
 
+#[derive(Debug, Default)]
+struct ParsedSeriesFile {
+    state: SeriesFileState,
+    schema_version: Option<u32>,
+    error: Option<String>,
+}
+
 struct SeriesFileReader {
     rows: Vec<HistorySeriesRow>,
     index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SeriesFileMeta {
+    path: PathBuf,
+    symbol: String,
+    kind: HistorySeriesKind,
+    size_bytes: u64,
+    modified: SystemTime,
 }
 
 type SeriesRowIdRange = Option<(i64, i64)>;
@@ -85,24 +102,33 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         self.root_dir.as_path()
     }
 
-    fn uses_mmap_backend(&self) -> bool {
-        false
-    }
-
     fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
         self.series_path(symbol, kind.duration_ns())
     }
 
     fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
-        super::empty_scan_report(self.root_dir.as_path())
+        let mut files = Vec::new();
+        for path in list_series_tree_files(self.root_dir.as_path())? {
+            files.push(scan_series_tree_file(self.root_dir.as_path(), path)?);
+        }
+        files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        Ok(HistorySeriesCacheScanReport {
+            cache_dir: self.root_dir.as_path().to_path_buf(),
+            schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            files,
+        })
     }
 
     fn enforce_limits(
         &self,
-        _max_bytes: Option<u64>,
-        _retention_days: Option<u64>,
+        max_bytes: Option<u64>,
+        retention_days: Option<u64>,
     ) -> Result<HistorySeriesCacheMaintenanceReport> {
-        Ok(HistorySeriesCacheMaintenanceReport::default())
+        let mut report = HistorySeriesCacheMaintenanceReport::default();
+        evict_expired_series_files(self.root_dir.as_path(), retention_days, &mut report)?;
+        compact_series_files(self.root_dir.as_path())?;
+        evict_series_files_by_total_size(self.root_dir.as_path(), max_bytes, &mut report)?;
+        Ok(report)
     }
 
     fn coverage(
@@ -124,7 +150,6 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
             cached_ranges,
             missing_ranges,
             symbol: request.symbol,
-            kind: request.kind,
             range_start_ns: request.range_start_ns,
             range_end_ns: request.range_end_ns,
         })
@@ -171,7 +196,6 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         let mut report = HistorySeriesPurgeReport {
             path: path.clone(),
             symbol: symbol.to_string(),
-            kind,
             removed_files: 0,
             removed_bytes: 0,
         };
@@ -210,6 +234,348 @@ impl HistorySeriesReader for SeriesFileReader {
         }
         Ok(row)
     }
+}
+
+fn list_series_tree_files(root_dir: &Path) -> Result<Vec<PathBuf>> {
+    let series_root = root_dir.join(ROOT_DIR_NAME);
+    if !series_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_regular_files(&series_root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_regular_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_regular_files(&path, files)?;
+        } else if entry.file_type()?.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn list_series_file_metas(root_dir: &Path) -> Result<Vec<SeriesFileMeta>> {
+    let mut files = Vec::new();
+    for path in list_series_tree_files(root_dir)? {
+        let Some((symbol, kind)) = parse_series_tree_path(root_dir, &path) else {
+            continue;
+        };
+        let metadata = fs::metadata(&path)?;
+        files.push(SeriesFileMeta {
+            path,
+            symbol,
+            kind,
+            size_bytes: metadata.len(),
+            modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn scan_series_tree_file(root_dir: &Path, path: PathBuf) -> Result<HistorySeriesCacheFileReport> {
+    let metadata = fs::metadata(&path)?;
+    let size_bytes = metadata.len();
+    let file_name = series_tree_file_name(root_dir, &path);
+    let Some((symbol, kind)) = parse_series_tree_path(root_dir, &path) else {
+        return Ok(HistorySeriesCacheFileReport {
+            path,
+            file_name,
+            status: super::HistorySeriesCacheFileStatus::Ignored,
+            symbol: None,
+            duration_ns: None,
+            id_range: None,
+            row_width: None,
+            rows: 0,
+            size_bytes,
+            schema_version: None,
+            error: None,
+        });
+    };
+
+    if size_bytes == 0 {
+        return Ok(HistorySeriesCacheFileReport {
+            path,
+            file_name,
+            status: super::HistorySeriesCacheFileStatus::EmptySegment,
+            symbol: Some(symbol.clone()),
+            duration_ns: Some(kind.duration_ns()),
+            id_range: None,
+            row_width: Some(layout_for_symbol_kind(&symbol, kind).row_size()),
+            rows: 0,
+            size_bytes,
+            schema_version: Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION),
+            error: None,
+        });
+    }
+
+    match parse_series_file(&path, kind) {
+        Ok(parsed) => Ok(HistorySeriesCacheFileReport {
+            id_range: rows_id_range(&parsed.state.rows)?,
+            row_width: Some(layout_for_symbol_kind(&symbol, kind).row_size()),
+            rows: parsed.state.rows.len(),
+            status: if parsed.error.is_some() {
+                super::HistorySeriesCacheFileStatus::IncompleteWrite
+            } else {
+                super::HistorySeriesCacheFileStatus::Readable
+            },
+            schema_version: parsed.schema_version,
+            error: parsed.error,
+            path,
+            file_name,
+            symbol: Some(symbol),
+            duration_ns: Some(kind.duration_ns()),
+            size_bytes,
+        }),
+        Err(error) => Ok(HistorySeriesCacheFileReport {
+            path,
+            file_name,
+            status: super::HistorySeriesCacheFileStatus::IncompleteWrite,
+            symbol: Some(symbol.clone()),
+            duration_ns: Some(kind.duration_ns()),
+            id_range: None,
+            row_width: Some(layout_for_symbol_kind(&symbol, kind).row_size()),
+            rows: 0,
+            size_bytes,
+            schema_version: None,
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+fn evict_expired_series_files(
+    root_dir: &Path,
+    retention_days: Option<u64>,
+    report: &mut HistorySeriesCacheMaintenanceReport,
+) -> Result<()> {
+    let Some(days) = retention_days else {
+        return Ok(());
+    };
+    let ttl = Duration::from_secs(days.saturating_mul(24 * 60 * 60));
+    let cutoff = SystemTime::now().checked_sub(ttl).unwrap_or(UNIX_EPOCH);
+    for file in list_series_file_metas(root_dir)? {
+        if file.modified <= cutoff {
+            remove_series_file(file.path.as_path(), file.size_bytes, report)?;
+        }
+    }
+    Ok(())
+}
+
+fn compact_series_files(root_dir: &Path) -> Result<()> {
+    for file in list_series_file_metas(root_dir)? {
+        if !file.path.exists() {
+            continue;
+        }
+        compact_series_file(file.path.as_path(), file.symbol.as_str(), file.kind)?;
+    }
+    Ok(())
+}
+
+fn evict_series_files_by_total_size(
+    root_dir: &Path,
+    max_bytes: Option<u64>,
+    report: &mut HistorySeriesCacheMaintenanceReport,
+) -> Result<()> {
+    let Some(limit) = max_bytes else {
+        return Ok(());
+    };
+    let mut files = list_series_file_metas(root_dir)?;
+    let mut total = files.iter().map(|file| file.size_bytes).sum::<u64>();
+    if total <= limit {
+        return Ok(());
+    }
+    files.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for file in files {
+        if total <= limit {
+            break;
+        }
+        if remove_series_file(file.path.as_path(), file.size_bytes, report)? {
+            total = total.saturating_sub(file.size_bytes);
+        }
+    }
+    Ok(())
+}
+
+fn remove_series_file(
+    path: &Path,
+    size_bytes: u64,
+    report: &mut HistorySeriesCacheMaintenanceReport,
+) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            report.removed_files += 1;
+            report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn compact_series_file(path: &Path, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+    with_exclusive_series_lock(path, || compact_series_file_locked(path, symbol, kind))
+}
+
+fn compact_series_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let parsed = parse_series_file(path, kind)?;
+    let rows = compact_rows(parsed.state.rows, kind);
+    let coverage = super::merge_datetime_ranges(parsed.state.coverage);
+    let temp_path = compact_temp_path(path)?;
+    {
+        let mut file = File::create(&temp_path)?;
+        ensure_series_file_initialized(&mut file, symbol, kind)?;
+        write_compacted_rows_chunk(&mut file, symbol, kind, &rows)?;
+        for (start_ns, end_ns) in coverage {
+            append_coverage_chunk(
+                &mut file,
+                start_ns,
+                end_ns,
+                rows.len(),
+                rows_id_range(&rows)?,
+            )?;
+        }
+        file.flush()?;
+        file.sync_all()?;
+    }
+    fs::rename(temp_path, path)?;
+    Ok(())
+}
+
+fn write_compacted_rows_chunk(
+    file: &mut File,
+    symbol: &str,
+    kind: HistorySeriesKind,
+    rows: &[HistorySeriesRow],
+) -> Result<()> {
+    match kind {
+        HistorySeriesKind::Kline { .. } => {
+            let rows = rows
+                .iter()
+                .filter_map(|row| match row {
+                    HistorySeriesRow::Kline(row) => Some(row.clone()),
+                    HistorySeriesRow::Tick(_) => None,
+                })
+                .collect::<Vec<_>>();
+            append_rows_chunk(
+                file,
+                &HistorySeriesWriteSegment {
+                    symbol,
+                    kind,
+                    declared_range_ns: None,
+                    rows: HistorySeriesWriteRows::Klines(&rows),
+                },
+            )?;
+        }
+        HistorySeriesKind::Tick => {
+            let rows = rows
+                .iter()
+                .filter_map(|row| match row {
+                    HistorySeriesRow::Tick(row) => Some(row.clone()),
+                    HistorySeriesRow::Kline(_) => None,
+                })
+                .collect::<Vec<_>>();
+            append_rows_chunk(
+                file,
+                &HistorySeriesWriteSegment {
+                    symbol,
+                    kind,
+                    declared_range_ns: None,
+                    rows: HistorySeriesWriteRows::Ticks(&rows),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn compact_rows(rows: Vec<HistorySeriesRow>, kind: HistorySeriesKind) -> Vec<HistorySeriesRow> {
+    match kind {
+        HistorySeriesKind::Kline { .. } => {
+            let mut by_id = BTreeMap::new();
+            for row in rows {
+                if let HistorySeriesRow::Kline(row) = row {
+                    by_id.insert(row.id, row);
+                }
+            }
+            by_id.into_values().map(HistorySeriesRow::Kline).collect()
+        }
+        HistorySeriesKind::Tick => {
+            let mut by_id = BTreeMap::new();
+            for row in rows {
+                if let HistorySeriesRow::Tick(row) = row {
+                    by_id.insert(row.id, row);
+                }
+            }
+            by_id.into_values().map(HistorySeriesRow::Tick).collect()
+        }
+    }
+}
+
+fn rows_id_range(rows: &[HistorySeriesRow]) -> Result<Option<(i64, i64)>> {
+    id_range(rows.iter().map(|row| match row {
+        HistorySeriesRow::Kline(row) => row.id,
+        HistorySeriesRow::Tick(row) => row.id,
+    }))
+}
+
+fn layout_for_symbol_kind(symbol: &str, kind: HistorySeriesKind) -> SeriesLayout {
+    match kind {
+        HistorySeriesKind::Kline { duration_ns } => SeriesLayout::Kline { duration_ns },
+        HistorySeriesKind::Tick => SeriesLayout::Tick {
+            five_level: tick_rows_use_five_levels(symbol),
+        },
+    }
+}
+
+fn compact_temp_path(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| {
+            DataError::InvalidResponse("history series-file path is invalid".to_string())
+        })?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!("{file_name}.compact")))
+}
+
+fn series_tree_file_name(root_dir: &Path, path: &Path) -> String {
+    let series_root = root_dir.join(ROOT_DIR_NAME);
+    path.strip_prefix(series_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn parse_series_tree_path(root_dir: &Path, path: &Path) -> Option<(String, HistorySeriesKind)> {
+    let series_root = root_dir.join(ROOT_DIR_NAME);
+    let relative = path.strip_prefix(series_root).ok()?;
+    let mut components = relative.components();
+    let symbol = components.next()?.as_os_str().to_string_lossy();
+    let file_name = components.next()?.as_os_str().to_string_lossy();
+    if components.next().is_some() {
+        return None;
+    }
+    let kind = if file_name == TICK_FILE_NAME {
+        HistorySeriesKind::Tick
+    } else {
+        let duration = file_name.strip_suffix(".tqseries")?.parse::<i64>().ok()?;
+        HistorySeriesKind::Kline {
+            duration_ns: duration,
+        }
+    };
+    Some((unescape_symbol_path_component(&symbol), kind))
 }
 
 fn with_exclusive_series_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -374,8 +740,12 @@ fn append_coverage_chunk(
 }
 
 fn scan_series_file(path: &Path, kind: HistorySeriesKind) -> Result<SeriesFileState> {
+    Ok(parse_series_file(path, kind)?.state)
+}
+
+fn parse_series_file(path: &Path, kind: HistorySeriesKind) -> Result<ParsedSeriesFile> {
     if !path.exists() {
-        return Ok(SeriesFileState::default());
+        return Ok(ParsedSeriesFile::default());
     }
     let bytes = fs::read(path)?;
     if bytes.len() < FILE_MAGIC.len() || &bytes[..FILE_MAGIC.len()] != FILE_MAGIC {
@@ -385,9 +755,10 @@ fn scan_series_file(path: &Path, kind: HistorySeriesKind) -> Result<SeriesFileSt
         )));
     }
     let mut offset = FILE_MAGIC.len();
-    let mut state = SeriesFileState::default();
+    let mut parsed = ParsedSeriesFile::default();
     while offset + CHUNK_HEADER_LEN <= bytes.len() {
         if &bytes[offset..offset + 4] != CHUNK_MAGIC {
+            parsed.error = Some("history series-file chunk magic mismatch".to_string());
             break;
         }
         let kind_byte = bytes[offset + 4];
@@ -401,20 +772,34 @@ fn scan_series_file(path: &Path, kind: HistorySeriesKind) -> Result<SeriesFileSt
         let payload_start = offset + CHUNK_HEADER_LEN;
         let payload_end = payload_start.saturating_add(payload_len);
         if payload_end > bytes.len() {
+            parsed.error = Some("history series-file chunk payload is truncated".to_string());
             break;
         }
         let payload = &bytes[payload_start..payload_end];
         if checksum64(payload) != checksum {
+            parsed.error = Some("history series-file chunk checksum mismatch".to_string());
             break;
         }
         match kind_byte {
-            2 => decode_rows_payload(payload, kind, &mut state.rows)?,
-            3 => decode_coverage_payload(payload, &mut state.coverage)?,
+            1 => parsed.schema_version = Some(decode_meta_schema_version(payload)?),
+            2 => decode_rows_payload(payload, kind, &mut parsed.state.rows)?,
+            3 => decode_coverage_payload(payload, &mut parsed.state.coverage)?,
             _ => {}
         }
         offset = payload_end;
     }
-    Ok(state)
+    if offset < bytes.len() && parsed.error.is_none() {
+        parsed.error = Some("history series-file trailing bytes are incomplete".to_string());
+    }
+    Ok(parsed)
+}
+
+fn decode_meta_schema_version(payload: &[u8]) -> Result<u32> {
+    let mut offset = 0;
+    let version = read_u64(payload, &mut offset)?;
+    u32::try_from(version).map_err(|_| {
+        DataError::InvalidResponse("history series-file schema version is too large".to_string())
+    })
 }
 
 fn decode_rows_payload(
@@ -789,4 +1174,8 @@ fn tick_rows_use_five_levels(symbol: &str) -> bool {
 
 fn escape_symbol_path_component(symbol: &str) -> String {
     symbol.replace('/', "%2F")
+}
+
+fn unescape_symbol_path_component(symbol: &str) -> String {
+    symbol.replace("%2F", "/")
 }

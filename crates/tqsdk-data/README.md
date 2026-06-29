@@ -44,27 +44,31 @@
   `DataClientBuilder::history_cache_dir(...)` 指定目录
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
   `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
-- `HistorySeriesCache` 是稳定 facade，底层通过 `HistorySeriesStore` 抽象隔离；
-  `HistorySeriesCache::open(...)` 继续使用 Python `DataSeries` 兼容的 `BinaryHistorySeriesStore`
-  文件名与二进制列布局：
-  `symbol.duration_ns.start_id.end_id`，并通过 mmap 读取大文件窗口
-- `HistorySeriesCache::open_series_file(...)` 使用 single-file `.tqseries` backend；
-  `BacktestTickCache::open(...)` 默认使用这个 backend，每个 `(symbol, tick)` 只有一个最终文件：
+- `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
+  `HistorySeriesCache::open(...)` 使用 canonical single-file `.tqseries` 存储格式；
+  旧 Python `DataSeries` binary/mmap cache 不再作为 public surface 暴露，已有旧文件不会自动迁移
+- `BacktestTickCache::open(...)` 默认使用这个格式，每个 `(symbol, tick)` 只有一个最终文件：
   `series/<symbol>/tick.tqseries`
-- Python/Rust 可交替使用默认二进制 store 的同一目录文件，但首版不承诺同目录
-  同时写；Python 官方 `DataSeries` 本身也不支持同一合约周期多进程/线程/协程并发写
+- `.tqseries` 格式支持递归 `scan()`、按保留期/总大小 `enforce_limits(...)`
+  清理，以及维护调用时的 append-log rewrite/compaction；重复 append 的同一 row id
+  会在 compact 后保留最后一次写入
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 是显式 cache-only reader，
   缺口返回 typed `DataError::CacheMiss`，不会联网补齐
+- `HistorySeriesCache::write_kline_range(...)` / `write_tick_range(...)`
+  是 typed range writer，会把 rows 与 `[start, end)` coverage 一起写入；
+  `kline_coverage(...)` / `tick_coverage(...)`、`kline_series_path(...)` /
+  `tick_series_path(...)` 和 typed purge 方法提供 coverage / 路径 / 清理运维入口；
+  generic kind/request、segment writer、coverage commit 和 row reader 都是 crate 内部实现细节
 - `BacktestTickCache` 是 tick-only semantic facade，复用同一个
-  `HistorySeriesCache` / `HistorySeriesStore`，用于回测覆盖检查、tick 写入和 tick
+  `HistorySeriesCache` 存储接口，用于回测覆盖检查、tick 写入和 tick
   replay 读取；它把覆盖元数据和 tick rows 写进同一个 `.tqseries` 文件，支持 partial row
   append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 和 `purge_symbol_ticks(...)` 是按
   `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、refresh 和磁盘清理复用
-- `HistorySeriesCache::scan()` 输出 schema version、segment 状态、未完成写入
-  和 row-width 损坏报告；首版不额外写 manifest 文件，以保持 Python 目录互通
+- `HistorySeriesCache::scan()` 输出 schema version、series 文件状态、未完成写入
+  和格式损坏报告；首版不额外写 manifest 文件，以保持 `.tqseries` 目录结构简单
 - cache miss 复用官方 `DataSeries` 的 `set_chart` 序列：首包使用
   `focus_datetime=start_datetime_ns`、`focus_position=0`、`view_width=2000`，
   后续用 `left_kline_id=current_id` 翻页，结束后释放 chart
@@ -97,7 +101,7 @@ tokio = { version = "1", features = ["fs", "macros", "rt", "time"] }
 在本仓库内做 crate 间开发时使用 `path = "../tqsdk-data"`；正式发布后把 Git
 dependency 换成版本号即可。默认 feature 包含 live history/query 与 service query
 支持；本 crate 不提供 live bridge，也不为实时行情热路径引入
-Python-compatible mmap 缓存。
+Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surface 废弃。
 
 ## 当前已稳定的 surface
 
@@ -123,24 +127,14 @@ Python-compatible mmap 缓存。
 - `BacktestTickFill`
 - `BacktestTickFillReport`
 - `HistorySeriesCache`
-- `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
 - `HistorySeriesCacheScanReport`
 - `HistorySeriesCacheFileReport`
-- `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
-- `HistorySeriesStore`
-- `HistorySeriesCoverageRequest`
 - `HistorySeriesCoverageReport`
-- `HistorySeriesKind`
-- `HistorySeriesReadRequest`
-- `HistorySeriesReader`
-- `HistorySeriesRow`
-- `HistorySeriesSegmentReport`
-- `HistorySeriesWriteRows`
-- `HistorySeriesWriteSegment`
+- `HistorySeriesPurgeReport`
 - `UniverseExpression`
 - `FuturesContract`
 - `FuturesUniverseResolver`
@@ -199,7 +193,8 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `export_tick_data_csv`
 - `DataClientBuilder::history_cache_enabled(true)`
 - `HistorySeriesCache::open(...)`
-- `HistorySeriesCache::open_series_file(...)`
+- `HistorySeriesCache::write_kline_range(...)`
+- `HistorySeriesCache::write_tick_range(...)`
 - `HistorySeriesCache::read_kline_data_series(...)`
 - `HistorySeriesCache::read_tick_data_series(...)`
 - `HistorySeriesCache::scan()`
@@ -211,9 +206,9 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
-`AsyncWrite`，或在 `get_*_data_series` 上复用 Python 兼容历史序列缓存；
-不负责 live serial 缓存、后台 downloader、GUI viewport 状态、Python/Rust 同目录
-同时写、跨进程 cache service 或高频交易 hot path。
+`AsyncWrite`，或在 `get_*_data_series` 上复用 canonical `.tqseries` 历史序列缓存；
+不负责 live serial 缓存、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
+迁移、跨进程 cache service 或高频交易 hot path。
 
 ## 当前明确不做
 
@@ -278,9 +273,9 @@ materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_cont
 
 S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
-覆盖看盘软件 / 交易终端的历史序列 mmap 缓存。该能力只在 builder 显式开启后
+覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
 影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session`
-仍保持无缓存行为。首版支持 Python 兼容目录和文件格式，但不承诺 Python 与 Rust
-进程同时写同一目录。
+仍保持无缓存行为。默认且唯一存储格式是 `.tqseries`；旧 Python 兼容
+binary/mmap cache 直接废弃，不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

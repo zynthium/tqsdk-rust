@@ -6,8 +6,8 @@ use crate::ids::{CommandId, ProtocolDomain};
 use crate::{ContractError, Result};
 
 use super::frame::map_raw_frame_to_input;
+use super::io::DynTransport;
 use super::topology::{SessionRoute, SessionRouteEndpoint, SessionTarget};
-use super::websocket::DynTransport;
 
 pub struct ConnectedSessionRoute {
     pub route: SessionRoute,

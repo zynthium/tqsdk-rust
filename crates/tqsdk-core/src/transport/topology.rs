@@ -6,7 +6,7 @@ use crate::auth::AuthContext;
 use crate::ids::{AccountId, ProtocolDomain, ReplaySessionId};
 
 use super::config::SessionConfig;
-use super::websocket::WebSocketConnectOptions;
+use super::io::WebSocketConnectOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionTarget {

@@ -5,8 +5,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 mod support;
 
 use support::websocket::{ClientFrame, TestWebSocketServer};
-use tqsdk_core::internal::WebSocketTransport;
-use tqsdk_core::{OutboundFrame, RawFrame, Transport};
+use tqsdk_core::{
+    OutboundFrame,
+    transport::{RawFrame, Transport, WebSocketTransport},
+};
 
 #[test]
 fn websocket_transport_connects_and_round_trips_frames() {

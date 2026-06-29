@@ -869,7 +869,7 @@ impl BacktestBuilder {
             .cache
             .clone()
             .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
-        let cache_dir = cache.history_cache().root_dir().to_path_buf();
+        let cache_dir = cache.cache_dir().to_path_buf();
 
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
             return Err(data_validation(format!(
@@ -1114,7 +1114,7 @@ impl BacktestBuilder {
         let data_report = BacktestDataReport {
             requested_range: (self.start_ns, self.end_ns),
             cache_policy: self.cache_policy,
-            cache_dir: cache.history_cache().root_dir().to_path_buf(),
+            cache_dir: cache.cache_dir().to_path_buf(),
             resolved_symbols: self.symbols.len(),
             remote_used: matches!(mode, PreparedBacktestMode::RemoteCaching { .. }),
         };
@@ -1206,7 +1206,7 @@ impl PreparedBacktest {
                     .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
                     .collect::<Vec<_>>();
                 let stream = tqsdk_task::HistoryTickReplayStream::new(
-                    cache.history_cache().clone(),
+                    tqsdk_data::HistorySeriesCache::open(cache.cache_dir())?,
                     requests,
                 )?;
                 base.replay_backtest_stream(Box::new(stream))

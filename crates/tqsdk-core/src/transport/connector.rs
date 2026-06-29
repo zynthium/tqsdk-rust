@@ -5,8 +5,10 @@ use crate::commands::OutboundFrame;
 use crate::{ContractError, Result};
 
 use super::frame::RawFrame;
+use super::io::{DynTransport, Transport};
 use super::topology::{SessionRoute, SessionRouteEndpoint};
-use super::websocket::{DynTransport, Transport, WebSocketTransport};
+#[cfg(feature = "websocket-transport")]
+use super::websocket::WebSocketTransport;
 
 #[doc(hidden)]
 pub type DynRouteConnectFuture<'a> =
@@ -62,12 +64,17 @@ impl SessionRouteConnector for WebSocketRouteConnector {
     fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
         Box::pin(async move {
             match &route.endpoint {
+                #[cfg(feature = "websocket-transport")]
                 SessionRouteEndpoint::WebSocket { url, connect } => {
                     let mut transport =
                         WebSocketTransport::new(url.clone()).with_connect_options(connect.clone());
                     transport.connect().await?;
                     Ok(Box::new(transport) as Box<dyn DynTransport>)
                 }
+                #[cfg(not(feature = "websocket-transport"))]
+                SessionRouteEndpoint::WebSocket { .. } => Err(ContractError::validation(
+                    "websocket transport feature is disabled",
+                )),
                 other => Err(ContractError::validation(format!(
                     "unsupported route endpoint for websocket connector: {other:?}"
                 ))),
@@ -85,7 +92,12 @@ impl SessionRouteConnector for DefaultRouteConnector {
     fn connect_route<'a>(&'a self, route: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
         Box::pin(async move {
             match &route.endpoint {
+                #[cfg(feature = "websocket-transport")]
                 SessionRouteEndpoint::WebSocket { .. } => self.websocket.connect_route(route).await,
+                #[cfg(not(feature = "websocket-transport"))]
+                SessionRouteEndpoint::WebSocket { .. } => Err(ContractError::validation(
+                    "websocket transport feature is disabled",
+                )),
                 SessionRouteEndpoint::Http { .. } => {
                     Ok(Box::new(PassiveRouteTransport::new("http")) as Box<dyn DynTransport>)
                 }

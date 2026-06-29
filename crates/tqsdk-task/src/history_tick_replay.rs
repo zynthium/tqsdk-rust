@@ -3,21 +3,25 @@ use std::collections::BinaryHeap;
 use std::future::Future;
 use std::pin::Pin;
 
-use tqsdk_data::{
-    HistorySeriesCache, HistorySeriesKind, HistorySeriesReadRequest, HistorySeriesReader,
-    HistorySeriesRow, TickDataSeriesRequest,
-};
+use tqsdk_data::{HistorySeriesCache, TickDataSeriesRequest};
 
-use crate::{BacktestMarketStream, ReplayMarketEvent, Result, TaskError};
+use crate::{BacktestMarketStream, ReplayMarketEvent, Result};
 
 pub struct HistoryTickReplayStream {
-    readers: Vec<Box<dyn HistorySeriesReader>>,
+    cursors: Vec<TickSeriesCursor>,
     heap: BinaryHeap<HeapItem>,
 }
 
 #[derive(Debug, Clone)]
+struct TickSeriesCursor {
+    symbol: String,
+    rows: Vec<tqsdk_core::Tick>,
+    next_index: usize,
+}
+
+#[derive(Debug, Clone)]
 struct HeapItem {
-    reader_index: usize,
+    cursor_index: usize,
     symbol: String,
     tick: tqsdk_core::Tick,
 }
@@ -27,21 +31,20 @@ impl HistoryTickReplayStream {
         cache: HistorySeriesCache,
         requests: impl IntoIterator<Item = TickDataSeriesRequest>,
     ) -> tqsdk_data::Result<Self> {
-        let mut readers = Vec::new();
+        let mut cursors = Vec::new();
         let mut heap = BinaryHeap::new();
         for request in requests {
-            let symbol = request.symbol().to_string();
-            let mut reader = cache.open_reader(HistorySeriesReadRequest {
-                symbol: symbol.clone(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: request.start_datetime_ns(),
-                range_end_ns: request.end_datetime_ns(),
-            })?;
-            let reader_index = readers.len();
-            push_next_tick(&mut *reader, reader_index, &symbol, &mut heap)?;
-            readers.push(reader);
+            let series = cache.read_tick_data_series(request)?;
+            let cursor_index = cursors.len();
+            let mut cursor = TickSeriesCursor {
+                symbol: series.symbol().to_string(),
+                rows: series.into_rows(),
+                next_index: 0,
+            };
+            push_next_tick(&mut cursor, cursor_index, &mut heap);
+            cursors.push(cursor);
         }
-        Ok(Self { readers, heap })
+        Ok(Self { cursors, heap })
     }
 }
 
@@ -54,12 +57,10 @@ impl BacktestMarketStream for HistoryTickReplayStream {
                 return Ok(None);
             };
             push_next_tick(
-                &mut *self.readers[item.reader_index],
-                item.reader_index,
-                &item.symbol,
+                &mut self.cursors[item.cursor_index],
+                item.cursor_index,
                 &mut self.heap,
-            )
-            .map_err(|error| TaskError::External(error.to_string()))?;
+            );
             ReplayMarketEvent::tick(
                 "history-cache",
                 item.symbol,
@@ -80,7 +81,7 @@ impl Ord for HeapItem {
             .cmp(&self.tick.datetime)
             .then_with(|| other.tick.id.cmp(&self.tick.id))
             .then_with(|| other.symbol.cmp(&self.symbol))
-            .then_with(|| other.reader_index.cmp(&self.reader_index))
+            .then_with(|| other.cursor_index.cmp(&self.cursor_index))
     }
 }
 
@@ -92,7 +93,7 @@ impl PartialOrd for HeapItem {
 
 impl PartialEq for HeapItem {
     fn eq(&self, other: &Self) -> bool {
-        self.reader_index == other.reader_index
+        self.cursor_index == other.cursor_index
             && self.symbol == other.symbol
             && self.tick.datetime == other.tick.datetime
             && self.tick.id == other.tick.id
@@ -102,20 +103,16 @@ impl PartialEq for HeapItem {
 impl Eq for HeapItem {}
 
 fn push_next_tick(
-    reader: &mut dyn HistorySeriesReader,
-    reader_index: usize,
-    symbol: &str,
+    cursor: &mut TickSeriesCursor,
+    cursor_index: usize,
     heap: &mut BinaryHeap<HeapItem>,
-) -> tqsdk_data::Result<()> {
-    while let Some(row) = reader.next_row()? {
-        if let HistorySeriesRow::Tick(tick) = row {
-            heap.push(HeapItem {
-                reader_index,
-                symbol: symbol.to_string(),
-                tick,
-            });
-            break;
-        }
+) {
+    if let Some(tick) = cursor.rows.get(cursor.next_index).cloned() {
+        cursor.next_index += 1;
+        heap.push(HeapItem {
+            cursor_index,
+            symbol: cursor.symbol.clone(),
+            tick,
+        });
     }
-    Ok(())
 }

@@ -3,7 +3,9 @@ mod config;
 mod connected;
 mod connector;
 mod frame;
+mod io;
 mod topology;
+#[cfg(feature = "websocket-transport")]
 mod websocket;
 
 pub use bootstrap::SessionBootstrap;
@@ -19,8 +21,10 @@ pub use connector::{
 #[doc(hidden)]
 pub use frame::__fuzz_parse_raw_frame_payload;
 pub use frame::RawFrame;
+pub use io::{DynTransport, Transport, WebSocketConnectOptions};
 pub use topology::{
     BootstrapResult, SessionPhase, SessionRoute, SessionRouteEndpoint, SessionTarget,
     SessionTopology, SessionTopologyResolver,
 };
-pub use websocket::{DynTransport, Transport, WebSocketConnectOptions, WebSocketTransport};
+#[cfg(feature = "websocket-transport")]
+pub use websocket::WebSocketTransport;

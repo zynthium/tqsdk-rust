@@ -61,6 +61,10 @@ V1 是：
     `read_market_trade_state()` 组合读面
 - `TradingSessionSchedule`
   - 纯交易时段状态 helper，用于本地日内时段的 open / pre-close / closed 判断与倒计时计算
+- `tqsdk_core::transport`
+  - transport trait、session route/topology/config contract
+  - yawc-backed `WebSocketTransport` 由默认 feature `websocket-transport` 提供；
+    `--no-default-features` 保留 contract 但不拉取 websocket 实现依赖
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
   - 为 `wait_update`、callback/fan-out facade 提供共同读面
@@ -181,9 +185,9 @@ V1 是：
   - `TradingCalendarRow`
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
-  - Python-compatible history series mmap cache
-  - `HistorySeriesCache` / `HistorySeriesStore` 抽象、默认 single-file backtest tick cache
-    backend、embedded coverage commit、tick-only `BacktestTickCache`
+- canonical `.tqseries` history series cache
+  - `HistorySeriesCache` public facade、crate 内部 store adapter、默认 single-file
+    backtest tick cache backend、embedded coverage commit、tick-only `BacktestTickCache`
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
 - `tqsdk-relay`

@@ -203,7 +203,7 @@ crate 自己维护。
 - research/offline data crate
 - history page/series/download
 - CSV export
-- Python-compatible history series mmap cache
+- canonical `.tqseries` history series cache
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 

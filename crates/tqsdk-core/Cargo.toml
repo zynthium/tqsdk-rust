@@ -9,6 +9,10 @@ readme = "README.md"
 license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
+[features]
+default = ["websocket-transport"]
+websocket-transport = ["dep:yawc"]
+
 [dependencies]
 chrono.workspace = true
 futures.workspace = true
@@ -16,7 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 url.workspace = true
-yawc.workspace = true
+yawc = { workspace = true, optional = true }
 
 [dev-dependencies]
 sha1.workspace = true

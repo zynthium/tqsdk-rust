@@ -10,12 +10,7 @@ use tqsdk_core::{
 };
 use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
-    HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport,
-    HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
-    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
-    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
-    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment, KlineDataSeriesRequest,
-    TickDataSeriesRequest,
+    HistorySeriesCache, KlineDataSeriesRequest, TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -41,7 +36,7 @@ fn builder_history_cache_dir_is_inert_without_enable_flag() {
 }
 
 #[test]
-fn builder_enables_python_compatible_cache_with_custom_dir() {
+fn builder_enables_series_file_cache_with_custom_dir() {
     let dir = temp_dir("builder-custom-dir");
     let client = DataClientBuilder::new()
         .history_cache_enabled(true)
@@ -53,21 +48,21 @@ fn builder_enables_python_compatible_cache_with_custom_dir() {
         .history_cache()
         .expect("enabled builder should install history cache");
     assert_eq!(cache.root_dir(), dir.as_path());
-    assert!(cache.uses_mmap_backend());
+    assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
 }
 
 #[test]
-fn history_cache_open_uses_default_binary_store() {
+fn history_cache_open_uses_series_file_store() {
     let dir = temp_dir("history-cache-default-store");
     let cache = HistorySeriesCache::open(&dir).unwrap();
 
     assert_eq!(cache.root_dir(), dir.as_path());
-    assert_eq!(cache.format_id(), "tqsdk.binary-series.v1");
+    assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
     assert_eq!(cache.schema_version(), HISTORY_SERIES_CACHE_SCHEMA_VERSION);
 }
 
 #[test]
-fn backtest_tick_cache_can_wrap_binary_history_series_cache_storage() {
+fn backtest_tick_cache_can_wrap_history_series_cache_storage() {
     let dir = temp_dir("backtest-tick-cache-reuses-history-cache");
     let history = HistorySeriesCache::open(&dir).unwrap();
     let backtest_cache = BacktestTickCache::new(history.clone());
@@ -90,14 +85,14 @@ fn backtest_tick_cache_can_wrap_binary_history_series_cache_storage() {
     assert_eq!(report.range_start_ns, 1_000);
     assert_eq!(report.range_end_ns, 3_000);
 
-    let rows = history
-        .read_tick_window("SHFE.rb2601", 1_000, 3_000)
+    let series = history
+        .read_tick_data_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
         .unwrap();
     assert_eq!(
-        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(dir.join("SHFE.rb2601.0.1.3").exists());
+    assert!(history.tick_series_path("SHFE.rb2601").exists());
 }
 
 #[test]
@@ -191,7 +186,7 @@ fn backtest_tick_cache_persists_empty_declared_coverage_after_reopen() {
 #[test]
 fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
     let dir = temp_dir("backtest-tick-cache-empty-retention");
-    let backtest_cache = BacktestTickCache::open_binary_compat(&dir).unwrap();
+    let backtest_cache = BacktestTickCache::open(&dir).unwrap();
     backtest_cache
         .store_ticks("SHFE.rb2601", 1_000, 5_000, Vec::new())
         .unwrap();
@@ -202,11 +197,11 @@ fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
             .is_complete()
     );
 
-    let report = backtest_cache
-        .history_cache()
+    let report = HistorySeriesCache::open(&dir)
+        .unwrap()
         .enforce_limits(None, Some(0))
         .unwrap();
-    let reopened = BacktestTickCache::open_binary_compat(&dir).unwrap();
+    let reopened = BacktestTickCache::open(&dir).unwrap();
     let coverage = reopened.coverage("SHFE.rb2601", 1_000, 5_000).unwrap();
 
     assert_eq!(report.removed_files, 1);
@@ -215,17 +210,12 @@ fn backtest_tick_cache_empty_declared_coverage_expires_with_retention() {
 }
 
 #[test]
-fn history_cache_write_segment_rejects_rows_outside_declared_range() {
+fn history_cache_write_tick_range_rejects_rows_outside_declared_range() {
     let dir = temp_dir("history-cache-declared-range-validation");
     let cache = HistorySeriesCache::open(&dir).unwrap();
 
     let err = cache
-        .write_segment(HistorySeriesWriteSegment {
-            symbol: "SHFE.rb2601",
-            kind: HistorySeriesKind::Tick,
-            declared_range_ns: Some((1_000, 2_000)),
-            rows: HistorySeriesWriteRows::Ticks(&[tick(1, 2_000, 102.0)]),
-        })
+        .write_tick_range("SHFE.rb2601", 1_000, 2_000, &[tick(1, 2_000, 102.0)])
         .unwrap_err();
 
     assert!(matches!(
@@ -236,12 +226,19 @@ fn history_cache_write_segment_rejects_rows_outside_declared_range() {
 }
 
 #[test]
-fn backtest_tick_cache_load_series_uses_injected_history_store() {
-    let store = Arc::new(TestHistorySeriesStore {
-        root_dir: temp_dir("custom-history-store"),
-        rows: vec![tick(1, 1_000, 101.0), tick(2, 2_000, 102.0)],
-    });
-    let cache = BacktestTickCache::new(HistorySeriesCache::from_store(store));
+fn backtest_tick_cache_load_series_uses_shared_series_file_history_cache() {
+    let dir = temp_dir("backtest-load-shared-series-file-cache");
+    BacktestTickCache::open(&dir)
+        .unwrap()
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 101.0), tick(2, 2_000, 102.0)],
+        )
+        .unwrap();
+
+    let cache = BacktestTickCache::new(HistorySeriesCache::open(&dir).unwrap());
 
     let series = cache
         .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
@@ -271,13 +268,15 @@ fn builder_reports_cache_open_errors() {
 }
 
 #[test]
-fn kline_cache_reads_python_compatible_raw_file_with_mmap() {
-    let dir = temp_dir("kline-python-compatible");
+fn kline_cache_reads_series_file_rows() {
+    let dir = temp_dir("kline-series-file");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     cache
-        .write_kline_segment(
+        .write_kline_range(
             "SHFE.au2602",
             60_000_000_000,
+            1_000,
+            181_000_000_000,
             &[
                 kline(10, 1_000, 10.0),
                 kline(11, 61_000_000_000, 11.0),
@@ -287,64 +286,74 @@ fn kline_cache_reads_python_compatible_raw_file_with_mmap() {
         .unwrap();
 
     let series = cache
-        .read_kline_window("SHFE.au2602", 60_000_000_000, 1_000, 121_000_000_000)
+        .read_kline_data_series(KlineDataSeriesRequest::new(
+            "SHFE.au2602",
+            Duration::from_secs(60),
+            1_000,
+            121_000_000_000,
+        ))
         .unwrap();
 
     assert_eq!(series.len(), 2);
-    assert_eq!(series[0].id, 10);
-    assert_eq!(series[1].id, 11);
-    assert_eq!(
-        cache
-            .cached_id_ranges("SHFE.au2602", 60_000_000_000)
-            .unwrap(),
-        vec![(10, 13)]
-    );
-    assert!(dir.join("SHFE.au2602.60000000000.10.13").exists());
-}
-
-#[test]
-fn empty_cache_segment_is_ignored_when_computing_missing_ranges() {
-    let dir = temp_dir("empty-segment");
-    std::fs::File::create(dir.join("SHFE.au2602.60000000000.1.2")).unwrap();
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-
-    let missing = cache
-        .missing_kline_datetime_ranges("SHFE.au2602", 60_000_000_000, 0, 60_000_000_000)
-        .unwrap();
-
-    assert_eq!(missing, vec![(0, 60_000_000_000)]);
+    assert_eq!(series.get(0).unwrap().id, 10);
+    assert_eq!(series.get(1).unwrap().id, 11);
     assert!(
         cache
-            .cached_id_ranges("SHFE.au2602", 60_000_000_000)
-            .unwrap()
-            .is_empty()
+            .kline_series_path("SHFE.au2602", 60_000_000_000)
+            .exists()
     );
 }
 
 #[test]
-fn empty_cache_segment_does_not_shift_read_window_segments() {
-    let dir = temp_dir("empty-segment-read-window");
-    std::fs::File::create(dir.join("SHFE.au2602.60000000000.1.2")).unwrap();
+fn history_cache_exposes_typed_coverage_path_and_purge() {
+    let dir = temp_dir("typed-coverage-path-purge");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     cache
-        .write_kline_segment(
+        .write_kline_range(
             "SHFE.au2602",
             60_000_000_000,
-            &[kline(10, 600_000_000_000, 10.0)],
+            0,
+            120_000_000_000,
+            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+        )
+        .unwrap();
+    cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            &[tick(1, 1_000, 101.0), tick(2, 2_000, 102.0)],
         )
         .unwrap();
 
-    let rows = cache
-        .read_kline_window(
-            "SHFE.au2602",
-            60_000_000_000,
-            600_000_000_000,
-            660_000_000_000,
-        )
+    let kline_coverage = cache
+        .kline_coverage("SHFE.au2602", 60_000_000_000, 0, 180_000_000_000)
         .unwrap();
+    assert_eq!(kline_coverage.cached_ranges, vec![(0, 120_000_000_000)]);
+    assert_eq!(
+        kline_coverage.missing_ranges,
+        vec![(120_000_000_000, 180_000_000_000)]
+    );
+    assert!(
+        cache
+            .kline_series_path("SHFE.au2602", 60_000_000_000)
+            .exists()
+    );
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, 10);
+    let tick_coverage = cache.tick_coverage("SHFE.rb2601", 1_000, 4_000).unwrap();
+    assert_eq!(tick_coverage.cached_ranges, vec![(1_000, 3_000)]);
+    assert_eq!(tick_coverage.missing_ranges, vec![(3_000, 4_000)]);
+    assert!(cache.tick_series_path("SHFE.rb2601").exists());
+
+    let kline_purge = cache
+        .purge_kline_series("SHFE.au2602", 60_000_000_000)
+        .unwrap();
+    assert!(kline_purge.removed());
+    assert!(!kline_purge.path.exists());
+
+    let tick_purge = cache.purge_tick_series("SHFE.rb2601").unwrap();
+    assert!(tick_purge.removed());
+    assert!(!tick_purge.path.exists());
 }
 
 #[test]
@@ -352,13 +361,14 @@ fn cache_report_counts_downloaded_rows_not_downloaded_ranges() {
     run_on_tokio(async {
         let dir = temp_dir("cache-report-hit-rows");
         let cache = HistorySeriesCache::open(&dir).unwrap();
-        cache
-            .write_kline_segment(
-                "SHFE.ao2609",
-                60_000_000_000,
-                &[kline(1, 1_713_660_000_000_000_000, 1.0)],
-            )
-            .unwrap();
+        write_kline_coverage(
+            &cache,
+            "SHFE.ao2609",
+            60_000_000_000,
+            1_713_660_000_000_000_000,
+            1_713_660_060_000_000_000,
+            &[kline(1, 1_713_660_000_000_000_000, 1.0)],
+        );
         let (manual, handle) = manual_session_and_handle();
         seed_auth_features(&handle, &["tq_dl"]);
         let client = DataClientBuilder::new()
@@ -370,15 +380,22 @@ fn cache_report_counts_downloaded_rows_not_downloaded_ranges() {
 
         let seed_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(5));
-            for sequence in 1..=64 {
-                seed_ready_kline_chart(
+            for sequence in 1..=512 {
+                let chart_id = format!("data-series-kline-SHFE_ao2609-60000000000-{sequence}");
+                seed_ready_kline_chart_with_state(
                     &handle,
-                    &format!("data-series-kline-SHFE_ao2609-60000000000-{sequence}"),
-                    "SHFE.ao2609",
-                    60_000_000_000,
-                    2,
-                    4,
-                    false,
+                    SeedKlineChart {
+                        chart_id: chart_id.as_str(),
+                        symbol: "SHFE.ao2609",
+                        duration_ns: 60_000_000_000,
+                        left_id: 2,
+                        right_id: 4,
+                        more_data: false,
+                        request_state: ChartRequestState::Focus {
+                            datetime: 1_713_660_060_000_000_000,
+                            position: 0,
+                        },
+                    },
                 );
             }
         });
@@ -401,46 +418,26 @@ fn cache_report_counts_downloaded_rows_not_downloaded_ranges() {
             .cache_report()
             .expect("cache report should be present");
         assert_eq!(series.len(), 3);
+        assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
         assert_eq!(report.hit_rows, 1);
         assert_eq!(report.downloaded_ranges.len(), 1);
     });
 }
 
 #[test]
-fn tick_cache_uses_python_five_level_layout_for_shfe_symbols() {
+fn tick_cache_preserves_five_level_fields_for_shfe_symbols() {
     let dir = temp_dir("tick-five-level");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     cache
-        .write_tick_segment("SHFE.au2602", &[tick(20, 2_000, 20.0)])
+        .write_tick_range("SHFE.au2602", 2_000, 2_100, &[tick(20, 2_000, 20.0)])
         .unwrap();
 
-    let file = dir.join("SHFE.au2602.0.20.21");
-    let len = std::fs::metadata(file).unwrap().len();
-
-    assert_eq!(len, 29 * 8);
-    let rows = cache.read_tick_window("SHFE.au2602", 2_000, 2_100).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, 20);
-    assert_eq!(rows[0].ask_price5, 25.5);
-}
-
-#[test]
-fn cached_datetime_ranges_trim_mutable_tail_before_diff() {
-    let dir = temp_dir("diff-tail");
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
-        )
+    let series = cache
+        .read_tick_data_series(TickDataSeriesRequest::new("SHFE.au2602", 2_000, 2_100))
         .unwrap();
-
-    let missing = cache
-        .missing_kline_datetime_ranges("SHFE.au2602", 60_000_000_000, 0, 120_000_000_000)
-        .unwrap();
-
-    assert_eq!(missing, vec![(60_000_000_000, 120_000_000_000)]);
+    assert_eq!(series.len(), 1);
+    assert_eq!(series.get(0).unwrap().id, 20);
+    assert_eq!(series.get(0).unwrap().ask_price5, 25.5);
 }
 
 #[test]
@@ -448,16 +445,20 @@ fn merge_handles_adjacent_segments_and_duplicate_tail_row() {
     let dir = temp_dir("merge-duplicate-tail");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     cache
-        .write_kline_segment(
+        .write_kline_range(
             "SHFE.au2602",
             60_000_000_000,
+            0,
+            120_000_000_000,
             &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
         )
         .unwrap();
     cache
-        .write_kline_segment(
+        .write_kline_range(
             "SHFE.au2602",
             60_000_000_000,
+            60_000_000_000,
+            180_000_000_000,
             &[
                 kline(2, 60_000_000_000, 22.0),
                 kline(3, 120_000_000_000, 3.0),
@@ -465,19 +466,16 @@ fn merge_handles_adjacent_segments_and_duplicate_tail_row() {
         )
         .unwrap();
 
-    cache
-        .merge_adjacent_files("SHFE.au2602", 60_000_000_000)
-        .unwrap();
     let rows = cache
-        .read_kline_window("SHFE.au2602", 60_000_000_000, 0, 180_000_000_000)
-        .unwrap();
+        .read_kline_data_series(KlineDataSeriesRequest::new(
+            "SHFE.au2602",
+            Duration::from_secs(60),
+            0,
+            180_000_000_000,
+        ))
+        .unwrap()
+        .into_rows();
 
-    assert_eq!(
-        cache
-            .cached_id_ranges("SHFE.au2602", 60_000_000_000)
-            .unwrap(),
-        vec![(1, 4)]
-    );
     assert_eq!(
         rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![1, 2, 3]
@@ -486,93 +484,17 @@ fn merge_handles_adjacent_segments_and_duplicate_tail_row() {
 }
 
 #[test]
-fn corrupted_cache_file_returns_typed_error() {
-    let dir = temp_dir("corrupt");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("SHFE.au2602.60000000000.1.2"), [1_u8, 2, 3]).unwrap();
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-
-    let err = cache
-        .read_kline_window("SHFE.au2602", 60_000_000_000, 0, 60_000_000_000)
-        .unwrap_err();
-
-    assert!(matches!(err, DataError::InvalidResponse(message) if message.contains("row width")));
-}
-
-#[test]
-fn merge_adjacent_files_rejects_segment_shorter_than_filename_range() {
-    let dir = temp_dir("merge-short-segment");
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
-        )
-        .unwrap();
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(3, 120_000_000_000, 3.0)],
-        )
-        .unwrap();
-    std::fs::rename(
-        dir.join("SHFE.au2602.60000000000.1.3"),
-        dir.join("SHFE.au2602.60000000000.1.4"),
-    )
-    .unwrap();
-
-    let err = cache
-        .merge_adjacent_files("SHFE.au2602", 60_000_000_000)
-        .unwrap_err();
-
-    assert!(matches!(err, DataError::InvalidResponse(message)
-        if message.contains("history series cache range does not match row count")));
-    assert!(dir.join("SHFE.au2602.60000000000.1.4").exists());
-    assert!(dir.join("SHFE.au2602.60000000000.3.4").exists());
-}
-
-#[test]
-fn merge_adjacent_files_rejects_copy_count_larger_than_mapped_segment() {
-    let dir = temp_dir("merge-copy-overflow");
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
-        .unwrap();
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(2, 60_000_000_000, 2.0)],
-        )
-        .unwrap();
-    std::fs::rename(
-        dir.join("SHFE.au2602.60000000000.1.2"),
-        dir.join("SHFE.au2602.60000000000.1.3"),
-    )
-    .unwrap();
-
-    let err = cache
-        .merge_adjacent_files("SHFE.au2602", 60_000_000_000)
-        .unwrap_err();
-
-    assert!(matches!(err, DataError::InvalidResponse(message)
-        if message.contains("history series cache range does not match row count")
-            || message.contains("history series merge requested more rows than segment contains")));
-}
-
-#[test]
 fn cache_only_kline_reader_returns_series_without_session() {
     let dir = temp_dir("cache-only-hit");
     let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
-        )
-        .unwrap();
+    write_kline_coverage(
+        &cache,
+        "SHFE.au2602",
+        60_000_000_000,
+        0,
+        120_000_000_000,
+        &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+    );
 
     let series = cache
         .read_kline_data_series(KlineDataSeriesRequest::new(
@@ -613,85 +535,19 @@ fn cache_only_kline_reader_reports_missing_ranges_without_download() {
 }
 
 #[test]
-fn cache_scan_reports_schema_and_corrupt_segment_status() {
-    let dir = temp_dir("scan-corrupt");
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
-        .unwrap();
-    std::fs::write(dir.join("SHFE.au2602.60000000000.10.11"), [1_u8, 2, 3]).unwrap();
-    std::fs::write(dir.join("SHFE.au2602.60000000000.temp"), [1_u8, 2, 3]).unwrap();
-
-    let report = cache.scan().unwrap();
-
-    assert_eq!(report.schema_version, 1);
-    assert!(report.files.iter().any(|file| {
-        file.file_name == "SHFE.au2602.60000000000.1.2"
-            && file.status == HistorySeriesCacheFileStatus::Readable
-            && file.rows == 1
-    }));
-    assert!(report.files.iter().any(|file| {
-        file.file_name == "SHFE.au2602.60000000000.10.11"
-            && file.status == HistorySeriesCacheFileStatus::InvalidRowWidth
-    }));
-    assert!(report.files.iter().any(|file| {
-        file.file_name == "SHFE.au2602.60000000000.temp"
-            && file.status == HistorySeriesCacheFileStatus::IncompleteWrite
-    }));
-}
-
-#[test]
-fn cache_enforce_limits_removes_expired_and_oldest_segments_only() {
-    let dir = temp_dir("enforce-limits");
-    let cache = HistorySeriesCache::open(&dir).unwrap();
-    cache
-        .write_kline_segment("SHFE.au2602", 60_000_000_000, &[kline(1, 0, 1.0)])
-        .unwrap();
-    std::fs::write(dir.join(".SHFE.au2602.60000000000.lock"), b"lock").unwrap();
-    std::fs::write(dir.join("SHFE.au2602.60000000000.temp"), b"temp").unwrap();
-
-    let report = cache.enforce_limits(None, Some(0)).unwrap();
-
-    assert_eq!(report.removed_files, 1);
-    assert!(!dir.join("SHFE.au2602.60000000000.1.2").exists());
-    assert!(dir.join(".SHFE.au2602.60000000000.lock").exists());
-    assert!(dir.join("SHFE.au2602.60000000000.temp").exists());
-
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(10, 600_000_000_000, 10.0)],
-        )
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(5));
-    cache
-        .write_kline_segment(
-            "SHFE.au2602",
-            60_000_000_000,
-            &[kline(20, 1_200_000_000_000, 20.0)],
-        )
-        .unwrap();
-
-    let report = cache.enforce_limits(Some(72), None).unwrap();
-
-    assert_eq!(report.removed_files, 1);
-    assert!(!dir.join("SHFE.au2602.60000000000.10.11").exists());
-    assert!(dir.join("SHFE.au2602.60000000000.20.21").exists());
-}
-
-#[test]
 fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
     run_on_tokio(async {
         let dir = temp_dir("builder-retention-policy");
         let cache = HistorySeriesCache::open(&dir).unwrap();
-        cache
-            .write_kline_segment(
-                "SHFE.ao2609",
-                60_000_000_000,
-                &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
-            )
-            .unwrap();
+        write_kline_coverage(
+            &cache,
+            "SHFE.ao2609",
+            60_000_000_000,
+            0,
+            120_000_000_000,
+            &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
+        );
+        let series_path = cache.kline_series_path("SHFE.ao2609", 60_000_000_000);
         let (manual, handle) = manual_session_and_handle();
         seed_auth_features(&handle, &["tq_dl"]);
         let client = DataClientBuilder::new()
@@ -713,7 +569,7 @@ fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
             .unwrap();
 
         assert_eq!(series.len(), 1);
-        assert!(!dir.join("SHFE.ao2609.60000000000.1.3").exists());
+        assert!(!series_path.exists());
     });
 }
 
@@ -723,9 +579,11 @@ fn cache_hit_still_requires_tq_dl_permission() {
         let dir = temp_dir("hit-requires-permission");
         let cache = HistorySeriesCache::open(&dir).unwrap();
         cache
-            .write_kline_segment(
+            .write_kline_range(
                 "SHFE.ao2609",
                 60_000_000_000,
+                0,
+                120_000_000_000,
                 &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
             )
             .unwrap();
@@ -1151,130 +1009,6 @@ fn seed_ready_kline_chart_with_state(handle: &RuntimeHandle, seed: SeedKlineChar
         .expect("seed ready kline chart should produce a commit");
 }
 
-struct TestHistorySeriesStore {
-    root_dir: PathBuf,
-    rows: Vec<Tick>,
-}
-
-impl HistorySeriesStore for TestHistorySeriesStore {
-    fn format_id(&self) -> &'static str {
-        "test.history-series-store"
-    }
-
-    fn schema_version(&self) -> u32 {
-        HISTORY_SERIES_CACHE_SCHEMA_VERSION
-    }
-
-    fn root_dir(&self) -> &Path {
-        self.root_dir.as_path()
-    }
-
-    fn uses_mmap_backend(&self) -> bool {
-        false
-    }
-
-    fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
-        self.root_dir
-            .join(format!("{}.{}", symbol, kind.duration_ns()))
-    }
-
-    fn scan(&self) -> tqsdk_data::Result<HistorySeriesCacheScanReport> {
-        Ok(HistorySeriesCacheScanReport {
-            cache_dir: self.root_dir.clone(),
-            schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
-            files: Vec::new(),
-        })
-    }
-
-    fn enforce_limits(
-        &self,
-        _max_bytes: Option<u64>,
-        _retention_days: Option<u64>,
-    ) -> tqsdk_data::Result<HistorySeriesCacheMaintenanceReport> {
-        Ok(HistorySeriesCacheMaintenanceReport::default())
-    }
-
-    fn coverage(
-        &self,
-        request: HistorySeriesCoverageRequest,
-    ) -> tqsdk_data::Result<HistorySeriesCoverageReport> {
-        Ok(HistorySeriesCoverageReport {
-            symbol: request.symbol,
-            kind: request.kind,
-            range_start_ns: request.range_start_ns,
-            range_end_ns: request.range_end_ns,
-            cached_ranges: vec![(request.range_start_ns, request.range_end_ns)],
-            missing_ranges: Vec::new(),
-        })
-    }
-
-    fn write_segment(
-        &self,
-        _segment: HistorySeriesWriteSegment<'_>,
-    ) -> tqsdk_data::Result<HistorySeriesSegmentReport> {
-        Err(DataError::InvalidState("test store is read-only"))
-    }
-
-    fn commit_coverage(
-        &self,
-        commit: HistorySeriesCoverageCommit,
-    ) -> tqsdk_data::Result<HistorySeriesCoverageReport> {
-        Ok(HistorySeriesCoverageReport {
-            symbol: commit.symbol,
-            kind: commit.kind,
-            range_start_ns: commit.range_start_ns,
-            range_end_ns: commit.range_end_ns,
-            cached_ranges: vec![(commit.range_start_ns, commit.range_end_ns)],
-            missing_ranges: Vec::new(),
-        })
-    }
-
-    fn purge_series(
-        &self,
-        symbol: &str,
-        kind: HistorySeriesKind,
-    ) -> tqsdk_data::Result<HistorySeriesPurgeReport> {
-        Ok(HistorySeriesPurgeReport {
-            path: self.series_path(symbol, kind),
-            symbol: symbol.to_string(),
-            kind,
-            removed_files: 0,
-            removed_bytes: 0,
-        })
-    }
-
-    fn open_reader(
-        &self,
-        request: HistorySeriesReadRequest,
-    ) -> tqsdk_data::Result<Box<dyn HistorySeriesReader>> {
-        let rows = match request.kind {
-            HistorySeriesKind::Tick => self
-                .rows
-                .iter()
-                .filter(|row| {
-                    row.datetime >= request.range_start_ns && row.datetime < request.range_end_ns
-                })
-                .cloned()
-                .map(HistorySeriesRow::Tick)
-                .collect(),
-            HistorySeriesKind::Kline { .. } => Vec::new(),
-        };
-        Ok(Box::new(TestHistorySeriesReader {
-            rows: rows.into_iter(),
-        }))
-    }
-}
-
-struct TestHistorySeriesReader {
-    rows: std::vec::IntoIter<HistorySeriesRow>,
-}
-
-impl HistorySeriesReader for TestHistorySeriesReader {
-    fn next_row(&mut self) -> tqsdk_data::Result<Option<HistorySeriesRow>> {
-        Ok(self.rows.next())
-    }
-}
-
 fn temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1287,6 +1021,19 @@ fn temp_dir(name: &str) -> PathBuf {
 
 fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn write_kline_coverage(
+    cache: &HistorySeriesCache,
+    symbol: &str,
+    duration_ns: i64,
+    start_ns: i64,
+    end_ns: i64,
+    rows: &[Kline],
+) {
+    cache
+        .write_kline_range(symbol, duration_ns, start_ns, end_ns, rows)
+        .unwrap();
 }
 
 fn kline(id: i64, datetime: i64, close: f64) -> Kline {

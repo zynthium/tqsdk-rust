@@ -6,18 +6,17 @@ use crate::Result;
 
 use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
 
-pub const BINARY_HISTORY_SERIES_FORMAT_ID: &str = "tqsdk.binary-series.v1";
 pub const SERIES_FILE_HISTORY_SERIES_FORMAT_ID: &str = "tqsdk.series-file.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistorySeriesKind {
+pub(crate) enum HistorySeriesKind {
     Kline { duration_ns: i64 },
     Tick,
 }
 
 impl HistorySeriesKind {
     #[must_use]
-    pub fn duration_ns(self) -> i64 {
+    pub(crate) fn duration_ns(self) -> i64 {
         match self {
             Self::Kline { duration_ns } => duration_ns,
             Self::Tick => 0,
@@ -26,7 +25,7 @@ impl HistorySeriesKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorySeriesCoverageRequest {
+pub(crate) struct HistorySeriesCoverageRequest {
     pub symbol: String,
     pub kind: HistorySeriesKind,
     pub range_start_ns: i64,
@@ -36,7 +35,6 @@ pub struct HistorySeriesCoverageRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySeriesCoverageReport {
     pub symbol: String,
-    pub kind: HistorySeriesKind,
     pub range_start_ns: i64,
     pub range_end_ns: i64,
     pub cached_ranges: Vec<(i64, i64)>,
@@ -51,7 +49,7 @@ impl HistorySeriesCoverageReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorySeriesCoverageCommit {
+pub(crate) struct HistorySeriesCoverageCommit {
     pub symbol: String,
     pub kind: HistorySeriesKind,
     pub range_start_ns: i64,
@@ -61,13 +59,13 @@ pub struct HistorySeriesCoverageCommit {
 }
 
 #[derive(Debug, Clone)]
-pub enum HistorySeriesWriteRows<'a> {
+pub(crate) enum HistorySeriesWriteRows<'a> {
     Klines(&'a [Kline]),
     Ticks(&'a [Tick]),
 }
 
 #[derive(Debug, Clone)]
-pub struct HistorySeriesWriteSegment<'a> {
+pub(crate) struct HistorySeriesWriteSegment<'a> {
     pub symbol: &'a str,
     pub kind: HistorySeriesKind,
     pub declared_range_ns: Option<(i64, i64)>,
@@ -75,7 +73,7 @@ pub struct HistorySeriesWriteSegment<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorySeriesSegmentReport {
+pub(crate) struct HistorySeriesSegmentReport {
     pub path: PathBuf,
     pub symbol: String,
     pub kind: HistorySeriesKind,
@@ -89,7 +87,6 @@ pub struct HistorySeriesSegmentReport {
 pub struct HistorySeriesPurgeReport {
     pub path: PathBuf,
     pub symbol: String,
-    pub kind: HistorySeriesKind,
     pub removed_files: usize,
     pub removed_bytes: u64,
 }
@@ -102,7 +99,7 @@ impl HistorySeriesPurgeReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorySeriesReadRequest {
+pub(crate) struct HistorySeriesReadRequest {
     pub symbol: String,
     pub kind: HistorySeriesKind,
     pub range_start_ns: i64,
@@ -110,20 +107,19 @@ pub struct HistorySeriesReadRequest {
 }
 
 #[derive(Debug, Clone)]
-pub enum HistorySeriesRow {
+pub(crate) enum HistorySeriesRow {
     Kline(Kline),
     Tick(Tick),
 }
 
-pub trait HistorySeriesReader: Send {
+pub(crate) trait HistorySeriesReader: Send {
     fn next_row(&mut self) -> Result<Option<HistorySeriesRow>>;
 }
 
-pub trait HistorySeriesStore: Send + Sync {
+pub(crate) trait HistorySeriesStore: Send + Sync {
     fn format_id(&self) -> &'static str;
     fn schema_version(&self) -> u32;
     fn root_dir(&self) -> &Path;
-    fn uses_mmap_backend(&self) -> bool;
     fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf;
     fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
     fn enforce_limits(

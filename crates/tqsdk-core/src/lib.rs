@@ -31,7 +31,7 @@ pub mod runtime;
 mod session_runtime;
 pub mod state;
 mod trading_session;
-mod transport;
+pub mod transport;
 pub mod types;
 
 #[doc(hidden)]
@@ -44,9 +44,11 @@ pub mod internal {
     pub use crate::session_runtime::{
         RouteRequestExecutor, SessionRun, SessionRuntime, SessionRuntimeDeps,
     };
+    #[cfg(feature = "websocket-transport")]
+    pub use crate::transport::WebSocketTransport;
     pub use crate::transport::{
         DefaultRouteConnector, DynRouteConnectFuture, DynTransport, SessionBootstrap,
-        WebSocketRouteConnector, WebSocketTransport,
+        WebSocketRouteConnector,
     };
 }
 
@@ -86,6 +88,8 @@ pub use trading_session::{
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use transport::__fuzz_parse_raw_frame_payload;
+#[cfg(feature = "websocket-transport")]
+pub use transport::WebSocketTransport;
 pub use transport::{
     AuthDerivedTradeTarget, BootstrapResult, EndpointConfig, HeartbeatPolicy, MarketSessionTarget,
     RawFrame, ReconnectPolicy, SessionConfig, SessionPhase, SessionRoute, SessionRouteConnector,

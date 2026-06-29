@@ -1,9 +1,9 @@
-//! Scenario: 看盘软件历史序列 mmap 缓存
+//! Scenario: 看盘软件历史序列持久化缓存
 //!
 //! User goal:
 //! - 看盘软件启动后快速加载最近 K 线 / tick 历史窗口
 //! - 图表缩放、拖拽和回看时只补齐缺失历史区间
-//! - 同一合约周期重复打开时复用 Python 兼容磁盘缓存
+//! - 同一合约周期重复打开时复用本地磁盘缓存
 //! - 从现有 `get_*_data_series` 拿到 typed rows 和 cache report
 //!
 //! API contract:
@@ -11,11 +11,11 @@
 //! - Intended crate path: `tqsdk-data`
 //! - `DataClient::from_session(...)` 默认不启用历史序列缓存
 //! - `DataClientBuilder::history_cache_enabled(true)` 显式开启缓存
-//! - 未设置目录时使用 Python 兼容默认目录 `~/.tqsdk/data_series_1`
+//! - 未设置目录时使用默认目录 `~/.tqsdk/data_series_1`
 //! - `history_cache_dir(...)` 可以指定自定义目录
 //! - `history_cache_max_bytes(...)` / `history_cache_retention_days(...)` 可以配置容量和保留期
-//! - 首版 backend 是 mmap，并使用 Python `DataSeries` 兼容文件名和二进制列布局
-//! - Python/Rust 历史缓存文件可互通和交替使用，但首版不承诺同目录同时写
+//! - 默认且唯一存储格式是 `.tqseries`，对外通过 `format_id()` 识别
+//! - 旧 Python `DataSeries` binary/mmap cache 直接废弃，不做自动迁移
 //! - cache miss 使用官方 `DataSeries` 的 `set_chart` 序列补齐缺口
 //! - `HistorySeriesCache::read_*_data_series` 提供 cache-only 读取，缺口返回 typed miss
 //! - `HistorySeriesCache::scan()` 提供 schema/version 与损坏文件 report
@@ -23,9 +23,9 @@
 //! Forbidden:
 //! - `tqsdk-core` / `tqsdk-session` / `tqsdk-wait` 或 live consumer 拥有历史文件缓存
 //! - `TqApi::kline` 或 live window 依赖 data cache
-//! - 高频交易 hot path 依赖历史序列 mmap cache
+//! - 高频交易 hot path 依赖历史序列 cache
 //! - 用户手写 cache 文件格式、lock 文件、range 合并或 chart command
-//! - Python 与 Rust SDK 同时写同一历史序列缓存目录
+//! - Python/Rust 同目录互写旧 binary compat 历史序列缓存
 //!
 //! Regression signal:
 //! - 开启缓存后仍每次全量下载相同历史窗口
@@ -36,8 +36,8 @@
 //!
 //! Review questions:
 //! - builder opt-in 是否足够显式，且未改变 `DataClient::from_session` 默认行为？
-//! - Python 兼容默认目录和自定义目录是否同时覆盖迁移与隔离需求？
-//! - mmap 首版 contract 是否仍限制在 `tqsdk-data` 的 offline materialization 边界内？
+//! - 默认目录和自定义目录是否同时覆盖迁移与隔离需求？
+//! - 持久化 cache contract 是否仍限制在 `tqsdk-data` 的 offline materialization 边界内？
 //! - mutable tail refresh 是否足以避免把未稳定 K 线永久当作缓存命中？
 
 use std::time::Duration;

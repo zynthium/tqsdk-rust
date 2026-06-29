@@ -36,7 +36,7 @@ mod order_intent;
 mod recovery;
 #[cfg(all(feature = "services", feature = "tq-auth"))]
 mod replay_service;
-#[cfg(feature = "http-client")]
+#[cfg(feature = "tq-auth")]
 mod response_body;
 #[cfg(feature = "services")]
 mod services;

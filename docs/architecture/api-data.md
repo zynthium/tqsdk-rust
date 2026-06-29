@@ -118,24 +118,14 @@
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
 - `HistorySeriesCache`
-- `HistorySeriesCacheBackend`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
 - `HistorySeriesCacheScanReport`
 - `HistorySeriesCacheFileReport`
-- `HistorySeriesCacheFileKind`
 - `HistorySeriesCacheFileStatus`
 - `HistorySeriesCacheMaintenanceReport`
-- `HistorySeriesStore`
-- `HistorySeriesCoverageRequest`
 - `HistorySeriesCoverageReport`
-- `HistorySeriesKind`
-- `HistorySeriesReadRequest`
-- `HistorySeriesReader`
-- `HistorySeriesRow`
-- `HistorySeriesSegmentReport`
-- `HistorySeriesWriteRows`
-- `HistorySeriesWriteSegment`
+- `HistorySeriesPurgeReport`
 - `kline_data_download(KlineDataSeriesRequest)`
 - `tick_data_download(TickDataSeriesRequest)`
 - `KlineDataDownload::collect_remaining()`
@@ -201,11 +191,13 @@
      `DataSeries` 的 `set_chart` / `focus_datetime` / `left_kline_id`
      下载序列补齐缺口
    - 已有 cache-only history series reader、schema/version scan report、
-     typed cache miss，以及最薄的容量/保留期清理策略；Python/Rust 文件格式
-     互通但不承诺同目录同时写
-   - `HistorySeriesCache` 已抽象为 `HistorySeriesStore` facade；默认二进制 store
-     继续兼容现有 Python `DataSeries` 文件布局，后续可以替换底层文件格式而不改变
-     data/backtest API
+     typed cache miss，以及最薄的容量/保留期清理策略；旧 Python `DataSeries`
+     binary/mmap cache 不再作为 public surface 暴露，也不自动迁移
+   - `HistorySeriesCache` 是 public facade，底层 store adapter 只保留为 crate
+     内部 seam；默认且唯一存储格式是 canonical single-file `.tqseries`，
+     对外用 `format_id()` 暴露格式标识，后续若替换底层文件格式，不应重新扩出
+     多 backend public surface；coverage/path/purge 对外使用 typed kline/tick 方法，
+     generic kind/request 只保留为 crate 内部存储语义
    - `BacktestTickCache` 已作为 tick-only semantic facade 落在 `tqsdk-data`；
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
@@ -249,14 +241,17 @@ tqsdk-wait        tqsdk-data
 - `get_kline_data_page` / `get_tick_data_page` 已经落在 `tqsdk-data`
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
-- `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的 Python 兼容
-  mmap 历史序列缓存，也已经落在 `tqsdk-data`
+- `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的历史序列持久化缓存；
+  默认且唯一存储格式是 `.tqseries`，旧 Python 兼容 mmap backend 已废弃，
+  也已经落在 `tqsdk-data`
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
-- `HistorySeriesCache` 的底层存储已通过 `HistorySeriesStore` 抽象；`BacktestTickCache`
-  复用这套抽象承接回测 tick 缓存，不再维护独立 tick replay cache 实现
+- `HistorySeriesCache` 的底层存储通过 crate 内部 store adapter 隔离；`BacktestTickCache`
+  复用这套内部实现承接回测 tick 缓存，不再维护独立 tick replay cache 实现
+- `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
+  coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /
@@ -264,8 +259,8 @@ tqsdk-wait        tqsdk-data
   deterministic replay / local backtest 输入属于 `tqsdk-task`
 - live pipe、live consumer feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
 - `tqsdk-data` 不再提供 `LiveHistoryCacheWriter`；live diff consumption 留在
-  `tqsdk-wait` 或调用方自建 reader/cursor 消费层，hot-path persistence 由调用方或独立上层服务拥有，Python-compatible
-  mmap history cache 只服务 `get_*_data_series` 的离线时间范围读取
+  `tqsdk-wait` 或调用方自建 reader/cursor 消费层，hot-path persistence 由调用方或独立上层服务拥有，
+  history cache 只服务 `get_*_data_series` 的离线时间范围读取
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界
@@ -276,7 +271,7 @@ tqsdk-wait        tqsdk-data
   报告只暴露 requested/returned range、缺口、重复行、时间倒退、越界行、
   cache hit/miss/downloaded 和权限检查状态，不绑定外部数据库或 tabular 框架
 - 它不是新的 session facade
-- 它也不是 live ref / live consumer；当前没有 live window 写 mmap history cache
+- 它也不是 live ref / live consumer；当前没有 live window 写 history cache
   bridge，也不拥有 live 消费 facade
 - `data_page` 是对底层 chart/history contract 的显式单页封装
 - `data_series` 是建立在 `data_page` 之上的时间范围快照封装，语义固定为 `[start_datetime_ns, end_datetime_ns)`
@@ -288,9 +283,9 @@ tqsdk-wait        tqsdk-data
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
-- 历史序列 mmap cache 与 Python `DataSeries` 文件格式兼容，适合迁移和交替使用；
-  同目录同时写仍是 non-goal，因为 Python 官方实现自身也没有承诺同一合约周期
-  多进程/线程/协程并发写
+- 默认 `.tqseries` cache 是 Rust canonical store；旧 Python `DataSeries` binary/mmap
+  文件格式不再支持迁移或交替使用。同目录同时写仍是
+  non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，
   而不是把 live session、进程管理、HTTP endpoint、GUI 或底层文件编排表面
   下沉进 `tqsdk-data`

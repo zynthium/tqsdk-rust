@@ -1,5 +1,5 @@
 use tqsdk_core::Tick;
-use tqsdk_data::{BacktestTickCache, TickDataSeriesRequest};
+use tqsdk_data::{BacktestTickCache, HistorySeriesCache, TickDataSeriesRequest};
 use tqsdk_task::{BacktestMarketStream, HistoryTickReplayStream, ReplayMarketPayload};
 
 #[tokio::test]
@@ -14,7 +14,7 @@ async fn history_tick_replay_merges_symbols_by_datetime_and_tick_id() {
         .unwrap();
 
     let mut stream = HistoryTickReplayStream::new(
-        cache.history_cache().clone(),
+        HistorySeriesCache::open(&dir).unwrap(),
         [
             TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 4_000),
             TickDataSeriesRequest::new("DCE.i2601", 1_000, 4_000),
@@ -28,6 +28,22 @@ async fn history_tick_replay_merges_symbols_by_datetime_and_tick_id() {
     assert_eq!(second.symbol(), "SHFE.rb2601");
     assert!(matches!(first.payload(), ReplayMarketPayload::Tick(_)));
     assert!(stream.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn history_tick_replay_requires_complete_cache_coverage() {
+    let dir = temp_dir("history-tick-replay-incomplete");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .append_partial_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+        .unwrap();
+
+    let result = HistoryTickReplayStream::new(
+        HistorySeriesCache::open(&dir).unwrap(),
+        [TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 4_000)],
+    );
+
+    assert!(result.is_err());
 }
 
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {

@@ -268,12 +268,12 @@ fn public_surface_exports_are_usable_together() {
 }
 
 #[test]
-fn low_level_session_wiring_is_hidden_behind_internal_bridge() {
+fn transport_namespace_is_stable_and_session_runtime_bridge_stays_internal() {
     let lib = include_str!("../src/lib.rs");
 
     assert!(
-        !lib.contains("pub mod transport;"),
-        "transport implementation module should not be part of the stable public surface"
+        lib.contains("pub mod transport;"),
+        "transport contract namespace should be part of the public surface"
     );
     assert!(
         !lib.contains("pub mod session_runtime;"),

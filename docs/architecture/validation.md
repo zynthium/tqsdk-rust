@@ -158,6 +158,10 @@ rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_mi
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 ```
 
+`history_series_single_file_store` 覆盖 `.tqseries` 默认 backend、embedded coverage、
+scan、size-limit maintenance 和 append-log compaction；`history_series_cache` 继续覆盖
+canonical `.tqseries` backend；旧 Python-compatible binary/mmap backend 已废弃。
+
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；
 该 smoke 验证首次 server-side backtest 补 tick 缓存、二次无 auth 本地缓存命中。
@@ -276,19 +280,20 @@ cargo +nightly fuzz run data_history_cache_scan -- -runs=1000
 以下命令用于固定 feature flags 与最小依赖构建基线，防止默认 feature 构建通过但 `--no-default-features` 或单独 feature 组合退化。
 
 1. `cargo build -p tqsdk-core`
-2. `cargo build -p tqsdk-session --no-default-features`
-3. `cargo build -p tqsdk-session --no-default-features --features live`
-4. `cargo build -p tqsdk-session --no-default-features --features services`
-5. `cargo build -p tqsdk-wait --no-default-features`
-6. `cargo build -p tqsdk-task --no-default-features`
-7. `cargo build -p tqsdk-data --no-default-features`
-8. `cargo build -p tqsdk --no-default-features`
-9. `cargo build -p tqsdk --no-default-features --features live`
-10. `cargo build -p tqsdk --no-default-features --features services`
-11. `cargo build -p tqsdk --all-features`
-12. `cargo test -p tqsdk`
-13. `cargo test -p tqsdk-core`
-14. `cargo test -p tqsdk-session --no-default-features`
+2. `cargo build -p tqsdk-core --no-default-features`
+3. `cargo build -p tqsdk-session --no-default-features`
+4. `cargo build -p tqsdk-session --no-default-features --features live`
+5. `cargo build -p tqsdk-session --no-default-features --features services`
+6. `cargo build -p tqsdk-wait --no-default-features`
+7. `cargo build -p tqsdk-task --no-default-features`
+8. `cargo build -p tqsdk-data --no-default-features`
+9. `cargo build -p tqsdk --no-default-features`
+10. `cargo build -p tqsdk --no-default-features --features live`
+11. `cargo build -p tqsdk --no-default-features --features services`
+12. `cargo build -p tqsdk --all-features`
+13. `cargo test -p tqsdk`
+14. `cargo test -p tqsdk-core`
+15. `cargo test -p tqsdk-session --no-default-features`
 
 生产发布联机 smoke 入口：
 

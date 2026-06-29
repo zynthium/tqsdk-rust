@@ -19,7 +19,8 @@
 - 以 `SharedCommitResult = Arc<CommitResult>` 共享提交所有权，避免 commit log、写侧返回和上层 fan-out 深拷贝提交元数据。
 - 官方对象与相关 metadata/query 结果的 typed schema contract。
 - 纯交易时段状态 helper，例如 `TradingSessionSchedule`，用于在无网络和无 runtime side effect 的前提下判断 open / pre-close / closed 与下一边界倒计时。
-- transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语。
+- transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语；
+  yawc-backed websocket transport 由默认 feature `websocket-transport` 提供。
 
 ## 依赖方式
 
@@ -32,6 +33,18 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
 如果后续单独发布到 crates.io，把这里的 `path` 换成版本号即可。
+
+## Feature flags
+
+| Feature | 默认 | 作用 |
+| --- | --- | --- |
+| `websocket-transport` | 是 | 启用 `tqsdk_core::transport::WebSocketTransport` 和默认 websocket route connector 的真实连接实现 |
+
+关闭默认 feature 时，core 仍保留命令、状态树、typed schema、adapter、cursor、transport trait
+和 session topology contract，但不拉取 `yawc`。这适合 offline data、测试 harness、
+自定义 transport adapter，或只需要 schema/状态/commit contract 的上层 crate。
+
+`tqsdk-session` 的 `live` feature 会重新启用 `tqsdk-core/websocket-transport`。
 
 ## 明确不做什么
 
@@ -79,7 +92,8 @@ research 代码反复解析 `YYYY-MM-DD` 字符串。
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
 | `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
-| `WebSocketTransport` / `DefaultRouteConnector` | 底层 websocket route 连接能力 |
+| `tqsdk_core::transport::{Transport, SessionRouteConnector, DefaultRouteConnector}` | 底层 transport seam 与默认 route connector |
+| `tqsdk_core::transport::WebSocketTransport` | yawc-backed websocket transport；需要 `websocket-transport` feature |
 | `TradingSessionSchedule` / `TradingSessionSegment` | 纯交易时段状态 helper，按本地日内时段计算 open / pre-close / closed 与倒计时 |
 
 raw outbox envelope（例如 `OutboundEnvelope`）和 multi-source aggregation helper 不属于稳定 public contract。外部 route 消费者应依赖 `OutboundDispatch`，而不是 runtime 内部队列结构。
@@ -89,7 +103,8 @@ raw outbox envelope（例如 `OutboundEnvelope`）和 multi-source aggregation h
 > `tqsdk-session` 吸收 runtime assembly 细节期间复用底层构件。它不是稳定的
 > 用户可见契约。外部用户应优先使用 crate root 导出的 `RuntimeHandle`、
 > `RuntimeReader`、`UpdateCursor`、protocol commands、schema types，以及
-> transport / session contracts。
+> `tqsdk_core::transport::*` 下的 transport / session contracts。crate root 的
+> transport re-export 仅作为兼容便利存在。
 
 ## 契约模型
 

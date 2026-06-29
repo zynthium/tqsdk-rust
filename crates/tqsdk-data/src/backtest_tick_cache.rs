@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 use tqsdk_core::Tick;
 
-use crate::{
-    DataError, HistorySeriesCache, HistorySeriesCoverageCommit, HistorySeriesCoverageRequest,
-    HistorySeriesKind, HistorySeriesWriteRows, HistorySeriesWriteSegment, Result, TickDataSeries,
-    TickDataSeriesRequest,
+use crate::history_series_cache::{
+    HistorySeriesCoverageCommit, HistorySeriesKind, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment,
 };
+use crate::{DataError, HistorySeriesCache, Result, TickDataSeries, TickDataSeriesRequest};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BacktestCachePolicy {
@@ -18,6 +18,14 @@ pub enum BacktestCachePolicy {
     Refresh,
 }
 
+/// Tick-only backtest cache facade over the canonical history series cache.
+///
+/// The backtest facade does not expose the underlying generic cache handle.
+///
+/// ```compile_fail
+/// let cache = tqsdk_data::BacktestTickCache::open(std::env::temp_dir()).unwrap();
+/// let _ = cache.history_cache();
+/// ```
 #[derive(Clone)]
 pub struct BacktestTickCache {
     history: HistorySeriesCache,
@@ -46,7 +54,6 @@ pub struct BacktestTickCacheStatus {
     pub cache_dir: PathBuf,
     pub series_path: PathBuf,
     pub series_path_exists: bool,
-    pub uses_mmap_backend: bool,
     pub symbol: String,
     pub range_start_ns: i64,
     pub range_end_ns: i64,
@@ -107,16 +114,12 @@ impl BacktestTickCache {
     }
 
     pub fn open(root_dir: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::new(HistorySeriesCache::open_series_file(root_dir)?))
-    }
-
-    pub fn open_binary_compat(root_dir: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::new(HistorySeriesCache::open(root_dir)?))
     }
 
     #[must_use]
-    pub fn history_cache(&self) -> &HistorySeriesCache {
-        &self.history
+    pub fn cache_dir(&self) -> &Path {
+        self.history.root_dir()
     }
 
     pub fn coverage(
@@ -127,12 +130,9 @@ impl BacktestTickCache {
     ) -> Result<BacktestTickCoverage> {
         let symbol = symbol.as_ref();
         validate_range(symbol, range_start_ns, range_end_ns)?;
-        let report = self.history.coverage(HistorySeriesCoverageRequest {
-            symbol: symbol.to_string(),
-            kind: HistorySeriesKind::Tick,
-            range_start_ns,
-            range_end_ns,
-        })?;
+        let report = self
+            .history
+            .tick_coverage(symbol, range_start_ns, range_end_ns)?;
         Ok(BacktestTickCoverage {
             cache_dir: self.history.root_dir().to_path_buf(),
             symbol: report.symbol,
@@ -156,7 +156,6 @@ impl BacktestTickCache {
             cache_dir: coverage.cache_dir,
             series_path_exists: series_path.exists(),
             series_path,
-            uses_mmap_backend: self.history.uses_mmap_backend(),
             symbol: coverage.symbol,
             range_start_ns: coverage.range_start_ns,
             range_end_ns: coverage.range_end_ns,
@@ -182,8 +181,7 @@ impl BacktestTickCache {
     }
 
     pub fn tick_series_path(&self, symbol: impl AsRef<str>) -> PathBuf {
-        self.history
-            .series_path(symbol.as_ref(), HistorySeriesKind::Tick)
+        self.history.tick_series_path(symbol.as_ref())
     }
 
     pub fn purge_symbol_ticks(
@@ -196,7 +194,7 @@ impl BacktestTickCache {
                 "backtest tick cache symbol must not be empty",
             ));
         }
-        let report = self.history.purge_series(symbol, HistorySeriesKind::Tick)?;
+        let report = self.history.purge_tick_series(symbol)?;
         let removed = report.removed();
         Ok(BacktestTickCachePurgeReport {
             cache_dir: self.history.root_dir().to_path_buf(),
@@ -399,6 +397,8 @@ fn tick_id_range(ids: impl IntoIterator<Item = i64>) -> Result<Option<(i64, i64)
     };
     let end = max_id
         .and_then(|id: i64| id.checked_add(1))
-        .ok_or_else(|| DataError::InvalidState("backtest tick cache id range overflow"))?;
+        .ok_or(DataError::InvalidState(
+            "backtest tick cache id range overflow",
+        ))?;
     Ok(Some((start, end)))
 }

@@ -83,6 +83,8 @@
 - auth / bootstrap / transport / session runtime orchestration
 - typed schema contract
 - trade / replay / query / schema / system 的底层 wire/state 语义
+- `websocket-transport` 默认 feature 下的 yawc-backed websocket adapter；关闭默认 feature
+  时仍保留 command / state / schema / cursor / transport trait contract，但不拉取 `yawc`
 
 这些职责当前与实现一致，见：
 
@@ -90,6 +92,7 @@
 - `SessionRuntime`
 - `AdapterRegistry`
 - `EndpointConfig` / `SessionConfig`
+- `tqsdk_core::transport::*` transport namespace
 - typed objects in `types::*`
 
 ### 不应承担的职责
@@ -275,7 +278,7 @@
 它是执行工具层，不是消费 facade，也不是协议 substrate。
 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 replay/backtest 输入类型；
 也可以通过 `BacktestMarketStream` 接收 caller-owned 或 cache-backed streaming market source。
-cached tick replay 由 `HistoryTickReplayStream` 对 `HistorySeriesReader` 做有界 heap merge。
+cached tick replay 由 `HistoryTickReplayStream` 对 owned `TickDataSeries` 做有界 heap merge。
 持久 tick 覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
 execution 与本地撮合归 `tqsdk-task`。
 这是上层集成路径，不代表 strategy execution 进入 data，也不代表 task 拥有 durable history
@@ -307,19 +310,19 @@ sink、WAL、journal 或 cache writer。
 `tqsdk-data` 当前应继续承担：
 
 - history page / series / download / export substrate
-- `HistorySeriesCache` 和可替换 `HistorySeriesStore` backend
-- Python-compatible binary history series store
-- single-file `.tqseries` backtest tick store、embedded coverage commit 和 tick-only
+- `HistorySeriesCache`、canonical `.tqseries` backend 和 crate 内部 store adapter seam
+- canonical single-file `.tqseries` history/backtest tick store、embedded coverage commit 和 tick-only
   `BacktestTickCache`
+- `.tqseries` cache scan / retention / size-limit maintenance 和 append-log compaction
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - cache inspect / purge 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
   `(symbol, tick)` 文件粒度清除回测 tick 缓存
 - relay-compatible futures universe selector parser 与 resolver 抽象
 
-`BacktestTickCache` 是回测加速主存储的 data facade：它只缓存 tick，K 线由 tick
-回放/合成路径派生。默认 `BacktestTickCache::open(...)` 使用每个
-`(symbol, tick)` 一个最终文件的 series-file backend；`HistorySeriesCache::open(...)`
-仍保留 Python `DataSeries` 兼容 binary backend。
+`HistorySeriesCache::open(...)` 和 `BacktestTickCache::open(...)` 默认使用
+single-file `.tqseries` backend；旧 Python `DataSeries` 兼容 binary/mmap backend
+已从 public surface 废弃。`BacktestTickCache` 是回测加速主存储的 data facade：
+它只缓存 tick，K 线由 tick 回放/合成路径派生。
 
 ### 不应吸收的能力
 
@@ -454,7 +457,7 @@ sink、WAL、journal 或 cache writer。
 
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
-- Python-compatible history series mmap cache
+- canonical `.tqseries` history cache；旧 Python-compatible binary/mmap cache 已废弃
 - 回测 tick 持久缓存、coverage 检查和 shared universe selector
 - history page/series/download/export
 - DataFrame / polars

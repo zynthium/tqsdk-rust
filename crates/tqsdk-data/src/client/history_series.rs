@@ -7,7 +7,8 @@ use tqsdk_core::{Kline, Tick};
 
 use crate::error::Result;
 use crate::history_series_cache::{
-    HistorySeriesCache, HistorySeriesCacheReport, rangeset_intersection,
+    HistorySeriesCache, HistorySeriesCacheReport, HistorySeriesKind, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment, rangeset_intersection,
 };
 use crate::integrity::HistoryPermissionStatus;
 
@@ -193,15 +194,17 @@ impl DataClient {
         let mut downloaded_id_ranges = Vec::new();
         let mut downloaded_datetime_ranges = Vec::new();
         let requested_range = (spec.start_datetime_ns, spec.end_datetime_ns);
-        let missing_ranges = {
-            let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            cache.missing_kline_datetime_ranges_unlocked(
+        let kind = HistorySeriesKind::Kline {
+            duration_ns: spec.duration_ns,
+        };
+        let missing_ranges = cache
+            .kline_coverage(
                 request.symbol(),
                 spec.duration_ns,
                 requested_range.0,
                 requested_range.1,
             )?
-        };
+            .missing_ranges;
         for missing in missing_ranges.into_iter().filter(|range| range.0 < range.1) {
             let rows = self
                 .download_official_kline_range(&request, spec.duration_ns, missing.0, missing.1)
@@ -209,38 +212,40 @@ impl DataClient {
             if rows.is_empty() {
                 continue;
             }
-            let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            let still_missing = cache.missing_kline_datetime_ranges_unlocked(
-                request.symbol(),
-                spec.duration_ns,
-                requested_range.0,
-                requested_range.1,
-            )?;
+            let still_missing = cache
+                .kline_coverage(
+                    request.symbol(),
+                    spec.duration_ns,
+                    requested_range.0,
+                    requested_range.1,
+                )?
+                .missing_ranges;
             let write_ranges = rangeset_intersection(&[missing], &still_missing);
-            let rows_to_write = filter_klines_by_datetime_ranges(rows, &write_ranges);
-            if rows_to_write.is_empty() {
-                continue;
-            }
-            if let Some(id_range) = cache.write_kline_segment_unlocked(
-                request.symbol(),
-                spec.duration_ns,
-                &rows_to_write,
-            )? {
-                downloaded_id_ranges.push(id_range);
-                downloaded_datetime_ranges.push(missing);
+            for write_range in write_ranges {
+                let rows_to_write = filter_klines_by_datetime_ranges(rows.clone(), &[write_range]);
+                if rows_to_write.is_empty() {
+                    continue;
+                }
+                let report = cache.write_segment(HistorySeriesWriteSegment {
+                    symbol: request.symbol(),
+                    kind,
+                    declared_range_ns: Some(write_range),
+                    rows: HistorySeriesWriteRows::Klines(&rows_to_write),
+                })?;
+                if let Some(id_range) = report.id_range {
+                    downloaded_id_ranges.push(id_range);
+                    downloaded_datetime_ranges.push(write_range);
+                }
             }
         }
 
-        let rows = {
-            let _guard = cache.lock_series(request.symbol(), spec.duration_ns)?;
-            cache.merge_adjacent_files_unlocked(request.symbol(), spec.duration_ns)?;
-            cache.read_kline_window_unlocked(
-                request.symbol(),
-                spec.duration_ns,
-                spec.start_datetime_ns,
-                spec.end_datetime_ns,
-            )?
-        };
+        let rows = read_cached_klines(
+            cache.as_ref(),
+            request.symbol(),
+            spec.duration_ns,
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
         let hit_rows = cache_hit_rows(&rows, &downloaded_id_ranges);
         let series = KlineDataSeries::new(
             request.symbol().to_string(),
@@ -268,14 +273,10 @@ impl DataClient {
         let mut downloaded_id_ranges = Vec::new();
         let mut downloaded_datetime_ranges = Vec::new();
         let requested_range = (spec.start_datetime_ns, spec.end_datetime_ns);
-        let missing_ranges = {
-            let _guard = cache.lock_series(request.symbol(), 0)?;
-            cache.missing_tick_datetime_ranges_unlocked(
-                request.symbol(),
-                requested_range.0,
-                requested_range.1,
-            )?
-        };
+        let kind = HistorySeriesKind::Tick;
+        let missing_ranges = cache
+            .tick_coverage(request.symbol(), requested_range.0, requested_range.1)?
+            .missing_ranges;
         for missing in missing_ranges.into_iter().filter(|range| range.0 < range.1) {
             let rows = self
                 .download_official_tick_range(&request, missing.0, missing.1)
@@ -283,34 +284,34 @@ impl DataClient {
             if rows.is_empty() {
                 continue;
             }
-            let _guard = cache.lock_series(request.symbol(), 0)?;
-            let still_missing = cache.missing_tick_datetime_ranges_unlocked(
-                request.symbol(),
-                requested_range.0,
-                requested_range.1,
-            )?;
+            let still_missing = cache
+                .tick_coverage(request.symbol(), requested_range.0, requested_range.1)?
+                .missing_ranges;
             let write_ranges = rangeset_intersection(&[missing], &still_missing);
-            let rows_to_write = filter_ticks_by_datetime_ranges(rows, &write_ranges);
-            if rows_to_write.is_empty() {
-                continue;
-            }
-            if let Some(id_range) =
-                cache.write_tick_segment_unlocked(request.symbol(), &rows_to_write)?
-            {
-                downloaded_id_ranges.push(id_range);
-                downloaded_datetime_ranges.push(missing);
+            for write_range in write_ranges {
+                let rows_to_write = filter_ticks_by_datetime_ranges(rows.clone(), &[write_range]);
+                if rows_to_write.is_empty() {
+                    continue;
+                }
+                let report = cache.write_segment(HistorySeriesWriteSegment {
+                    symbol: request.symbol(),
+                    kind,
+                    declared_range_ns: Some(write_range),
+                    rows: HistorySeriesWriteRows::Ticks(&rows_to_write),
+                })?;
+                if let Some(id_range) = report.id_range {
+                    downloaded_id_ranges.push(id_range);
+                    downloaded_datetime_ranges.push(write_range);
+                }
             }
         }
 
-        let rows = {
-            let _guard = cache.lock_series(request.symbol(), 0)?;
-            cache.merge_adjacent_files_unlocked(request.symbol(), 0)?;
-            cache.read_tick_window_unlocked(
-                request.symbol(),
-                spec.start_datetime_ns,
-                spec.end_datetime_ns,
-            )?
-        };
+        let rows = read_cached_ticks(
+            cache.as_ref(),
+            request.symbol(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
         let hit_rows = cache_hit_rows(&rows, &downloaded_id_ranges);
         let series = TickDataSeries::new(
             request.symbol().to_string(),
@@ -474,6 +475,25 @@ fn cache_hit_rows<R: HistoryRow>(rows: &[R], downloaded_id_ranges: &[(i64, i64)]
                 .any(|range| row.id() >= range.0 && row.id() < range.1)
         })
         .count()
+}
+
+fn read_cached_klines(
+    cache: &HistorySeriesCache,
+    symbol: &str,
+    duration_ns: i64,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+) -> Result<Vec<Kline>> {
+    cache.read_kline_window(symbol, duration_ns, start_datetime_ns, end_datetime_ns)
+}
+
+fn read_cached_ticks(
+    cache: &HistorySeriesCache,
+    symbol: &str,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+) -> Result<Vec<Tick>> {
+    cache.read_tick_window(symbol, start_datetime_ns, end_datetime_ns)
 }
 
 fn next_data_series_chart_id(kind: &str, symbol: &str, duration_ns: i64) -> String {

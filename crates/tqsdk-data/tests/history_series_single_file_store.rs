@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tqsdk_core::Tick;
 use tqsdk_data::{
-    BacktestTickCache, HistorySeriesCache, HistorySeriesCoverageRequest, HistorySeriesKind,
-    TickDataSeriesRequest,
+    BacktestTickCache, HistorySeriesCache, HistorySeriesCacheFileStatus, TickDataSeriesRequest,
 };
 
 const SERIES_FILE_FORMAT_ID: &str = "tqsdk.series-file.v1";
@@ -13,9 +12,10 @@ fn backtest_tick_cache_open_uses_single_file_store() {
     let dir = temp_dir("backtest-open-single-file");
 
     let cache = BacktestTickCache::open(&dir).unwrap();
+    let status = cache.inspect("SHFE.rb2601", 1_000, 2_000).unwrap();
 
-    assert_eq!(cache.history_cache().root_dir(), dir.as_path());
-    assert_eq!(cache.history_cache().format_id(), SERIES_FILE_FORMAT_ID);
+    assert_eq!(status.cache_dir, dir);
+    assert_eq!(status.backend_format, SERIES_FILE_FORMAT_ID);
 }
 
 #[test]
@@ -95,7 +95,6 @@ fn backtest_tick_cache_inspect_reports_backend_path_and_missing_ranges() {
     assert_eq!(status.cache_dir, dir);
     assert_eq!(status.series_path, path);
     assert!(status.series_path_exists);
-    assert!(!status.uses_mmap_backend);
     assert!(!status.is_complete());
     assert_eq!(status.cached_ranges, vec![(1_000, 3_000)]);
     assert_eq!(status.missing_ranges, vec![(3_000, 5_000)]);
@@ -132,25 +131,118 @@ fn backtest_tick_cache_purge_symbol_ticks_removes_rows_and_coverage() {
 #[test]
 fn series_file_store_partial_rows_do_not_create_coverage() {
     let dir = temp_dir("partial-rows-no-coverage");
-    let history = HistorySeriesCache::open_series_file(&dir).unwrap();
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let rows = [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)];
 
-    history
-        .write_tick_rows_without_coverage(
-            "SHFE.au2608",
-            &[tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+    cache.append_partial_ticks("SHFE.au2608", rows).unwrap();
+
+    let coverage = cache.coverage("SHFE.au2608", 1_000, 3_000).unwrap();
+    assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
+}
+
+#[test]
+fn series_file_store_scan_reports_series_file_rows() {
+    let dir = temp_dir("scan-reports-series-file");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
         )
         .unwrap();
 
-    let coverage = history
-        .coverage(HistorySeriesCoverageRequest {
-            symbol: "SHFE.au2608".to_string(),
-            kind: HistorySeriesKind::Tick,
-            range_start_ns: 1_000,
-            range_end_ns: 3_000,
-        })
+    let scan = HistorySeriesCache::open(&dir).unwrap().scan().unwrap();
+
+    assert_eq!(scan.files.len(), 1);
+    let file = &scan.files[0];
+    assert_eq!(
+        file.path,
+        dir.join("series").join("SHFE.rb2601").join("tick.tqseries")
+    );
+    assert_eq!(file.status, HistorySeriesCacheFileStatus::Readable);
+    assert_eq!(file.symbol.as_deref(), Some("SHFE.rb2601"));
+    assert_eq!(file.duration_ns, Some(0));
+    assert_eq!(file.id_range, Some((1, 3)));
+    assert_eq!(file.rows, 2);
+    assert_eq!(file.schema_version, Some(1));
+    assert!(file.error.is_none());
+}
+
+#[test]
+fn series_file_store_enforce_limits_removes_series_files_over_size_limit() {
+    let dir = temp_dir("enforce-size-limit");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    for symbol in ["DCE.i2601", "DCE.j2601"] {
+        cache
+            .store_ticks(
+                symbol,
+                1_000,
+                3_000,
+                [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+            )
+            .unwrap();
+    }
+
+    let report = HistorySeriesCache::open(&dir)
+        .unwrap()
+        .enforce_limits(Some(0), None)
         .unwrap();
-    assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
-    assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
+
+    assert_eq!(report.removed_files, 2);
+    assert!(report.removed_bytes > 0);
+    assert!(regular_files(&dir).is_empty());
+}
+
+#[test]
+fn series_file_store_enforce_limits_compacts_duplicate_appends() {
+    let dir = temp_dir("compact-duplicate-appends");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    cache
+        .store_ticks(
+            "DCE.i2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+    cache
+        .store_ticks(
+            "DCE.i2601",
+            1_000,
+            3_000,
+            [tick(1, 1_000, 110.0), tick(2, 2_000, 111.0)],
+        )
+        .unwrap();
+
+    let path = cache.tick_series_path("DCE.i2601");
+    let size_before = std::fs::metadata(&path).unwrap().len();
+
+    let report = HistorySeriesCache::open(&dir)
+        .unwrap()
+        .enforce_limits(None, None)
+        .unwrap();
+
+    let size_after = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(report.removed_files, 0);
+    assert!(
+        size_after < size_before,
+        "expected compacted file to shrink from {size_before} bytes, got {size_after}"
+    );
+
+    let rows = cache
+        .load_series(TickDataSeriesRequest::new("DCE.i2601", 1_000, 3_000))
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().map(|row| row.last_price).collect::<Vec<_>>(),
+        vec![110.0, 111.0]
+    );
 }
 
 #[test]

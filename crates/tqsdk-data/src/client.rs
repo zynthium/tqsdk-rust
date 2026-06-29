@@ -12,7 +12,7 @@ use crate::error::{DataError, Result};
 use crate::greeks::{
     OptionGreeksRequest, OptionGreeksResult, build_option_greeks_row, validate_option_metadata,
 };
-use crate::history_series_cache::HistorySeriesCache;
+use crate::history_series_cache::{HistorySeriesCache, default_cache_dir};
 use crate::live_quote::await_quote_snapshots;
 
 mod chart_ids;
@@ -408,7 +408,7 @@ impl DataClientBuilder {
             let cache = if let Some(dir) = self.history_cache_dir {
                 HistorySeriesCache::open(dir)
             } else {
-                HistorySeriesCache::python_compatible_default()
+                HistorySeriesCache::open(default_cache_dir())
             }?;
             client = client.with_history_cache(cache);
         }

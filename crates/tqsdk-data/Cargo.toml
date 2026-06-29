@@ -19,14 +19,13 @@ chrono.workspace = true
 reqwest = { workspace = true, optional = true }
 serde_json.workspace = true
 fs2 = "0.4"
-memmap2 = "0.9"
-tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
+tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
 tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-tqsdk-core = { path = "../tqsdk-core", version = "0.1.0" }
+tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 
 [lints]
 workspace = true

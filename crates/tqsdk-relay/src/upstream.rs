@@ -8,9 +8,9 @@ use crate::error::{RelayError, RelayResult};
 use crate::protocol::RelayTickRow;
 use serde_json::Value;
 #[cfg(feature = "server")]
-use tqsdk_core::internal::WebSocketTransport;
+use tqsdk_core::OutboundFrame;
 #[cfg(feature = "server")]
-use tqsdk_core::{OutboundFrame, RawFrame, Transport};
+use tqsdk_core::transport::{RawFrame, Transport, WebSocketTransport};
 use tqsdk_core::{Quote, TradingStatus};
 
 #[cfg(feature = "server")]
@@ -210,6 +210,7 @@ pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarket
     decode_upstream_market_report_inner(frame, None, None)
 }
 
+#[cfg(feature = "server")]
 fn decode_upstream_market_report_with_cache(
     frame: Value,
     tick_row_cache: &mut TickRowCache,

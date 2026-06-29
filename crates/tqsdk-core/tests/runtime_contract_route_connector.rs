@@ -5,10 +5,12 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 mod support;
 
 use support::websocket::{ClientFrame, TestWebSocketServer};
-use tqsdk_core::internal::{DefaultRouteConnector, SessionBootstrap};
 use tqsdk_core::{
-    OutboundFrame, ProtocolDomain, SessionRoute, SessionRouteEndpoint, SessionTarget,
-    SessionTopology, WebSocketConnectOptions,
+    OutboundFrame, ProtocolDomain,
+    transport::{
+        DefaultRouteConnector, SessionBootstrap, SessionRoute, SessionRouteEndpoint, SessionTarget,
+        SessionTopology, WebSocketConnectOptions,
+    },
 };
 
 #[test]
@@ -25,6 +27,7 @@ fn transport_is_split_into_focused_modules() {
         "connected.rs",
         "connector.rs",
         "bootstrap.rs",
+        "io.rs",
     ] {
         assert!(
             transport_dir.join(module).exists(),
@@ -40,7 +43,9 @@ fn transport_is_split_into_focused_modules() {
         "mod connected;",
         "mod connector;",
         "mod frame;",
+        "mod io;",
         "mod topology;",
+        "#[cfg(feature = \"websocket-transport\")]",
         "mod websocket;",
     ] {
         assert!(
