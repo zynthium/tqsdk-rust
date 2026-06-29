@@ -1,3 +1,8 @@
+#![expect(
+    dead_code,
+    reason = "legacy .tqseries store is retained privately but no longer default"
+)]
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,16 +17,17 @@ use crate::error::{DataError, Result};
 
 use super::storage::{SeriesLayout, write_kline_row, write_tick_row};
 use super::{
-    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheFileReport,
-    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesCoverageCommit,
-    HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
-    HistorySeriesPurgeReport, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
-    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HistorySeriesCacheFileReport, HistorySeriesCacheMaintenanceReport,
+    HistorySeriesCacheScanReport, HistorySeriesCoverageCommit, HistorySeriesCoverageReport,
+    HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesPurgeReport,
+    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
+    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 
 const ROOT_DIR_NAME: &str = "series";
 const TICK_FILE_NAME: &str = "tick.tqseries";
+const SERIES_FILE_FORMAT_ID: &str = "tqsdk.series-file.v1";
+const SERIES_FILE_SCHEMA_VERSION: u32 = 1;
 const FILE_MAGIC: &[u8; 8] = b"TQHSF1\0\0";
 const CHUNK_MAGIC: &[u8; 4] = b"TQSC";
 const CHUNK_HEADER_LEN: usize = 24;
@@ -91,11 +97,11 @@ impl SeriesFileHistoryStore {
 
 impl HistorySeriesStore for SeriesFileHistoryStore {
     fn format_id(&self) -> &'static str {
-        SERIES_FILE_HISTORY_SERIES_FORMAT_ID
+        SERIES_FILE_FORMAT_ID
     }
 
     fn schema_version(&self) -> u32 {
-        HISTORY_SERIES_CACHE_SCHEMA_VERSION
+        SERIES_FILE_SCHEMA_VERSION
     }
 
     fn root_dir(&self) -> &Path {
@@ -114,7 +120,7 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
         Ok(HistorySeriesCacheScanReport {
             cache_dir: self.root_dir.as_path().to_path_buf(),
-            schema_version: HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            schema_version: SERIES_FILE_SCHEMA_VERSION,
             files,
         })
     }
@@ -310,7 +316,7 @@ fn scan_series_tree_file(root_dir: &Path, path: PathBuf) -> Result<HistorySeries
             row_width: Some(layout_for_symbol_kind(&symbol, kind).row_size()),
             rows: 0,
             size_bytes,
-            schema_version: Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION),
+            schema_version: Some(SERIES_FILE_SCHEMA_VERSION),
             error: None,
         });
     }
@@ -648,7 +654,7 @@ fn ensure_series_file_initialized(
     if file.metadata()?.len() == 0 {
         file.write_all(FILE_MAGIC)?;
         let mut payload = Vec::new();
-        append_u64(&mut payload, u64::from(HISTORY_SERIES_CACHE_SCHEMA_VERSION));
+        append_u64(&mut payload, u64::from(SERIES_FILE_SCHEMA_VERSION));
         append_i64(&mut payload, kind.duration_ns());
         append_string(&mut payload, symbol)?;
         write_chunk(file, ChunkKind::Meta, &payload)?;

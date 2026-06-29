@@ -9,8 +9,9 @@ use tqsdk_core::{
     ProtocolDomain, RuntimeHandle, RuntimeInput, Tick,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
-    HistorySeriesCache, KlineDataSeriesRequest, TickDataSeriesRequest,
+    BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_FORMAT_ID,
+    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache, KlineDataSeriesRequest,
+    TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -36,7 +37,7 @@ fn builder_history_cache_dir_is_inert_without_enable_flag() {
 }
 
 #[test]
-fn builder_enables_series_file_cache_with_custom_dir() {
+fn builder_enables_history_cache_with_custom_dir() {
     let dir = temp_dir("builder-custom-dir");
     let client = DataClientBuilder::new()
         .history_cache_enabled(true)
@@ -48,16 +49,16 @@ fn builder_enables_series_file_cache_with_custom_dir() {
         .history_cache()
         .expect("enabled builder should install history cache");
     assert_eq!(cache.root_dir(), dir.as_path());
-    assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
+    assert_eq!(cache.format_id(), HISTORY_SERIES_CACHE_FORMAT_ID);
 }
 
 #[test]
-fn history_cache_open_uses_series_file_store() {
+fn history_cache_open_uses_tqbn_store() {
     let dir = temp_dir("history-cache-default-store");
     let cache = HistorySeriesCache::open(&dir).unwrap();
 
     assert_eq!(cache.root_dir(), dir.as_path());
-    assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
+    assert_eq!(cache.format_id(), HISTORY_SERIES_CACHE_FORMAT_ID);
     assert_eq!(cache.schema_version(), HISTORY_SERIES_CACHE_SCHEMA_VERSION);
 }
 
@@ -226,8 +227,8 @@ fn history_cache_write_tick_range_rejects_rows_outside_declared_range() {
 }
 
 #[test]
-fn backtest_tick_cache_load_series_uses_shared_series_file_history_cache() {
-    let dir = temp_dir("backtest-load-shared-series-file-cache");
+fn backtest_tick_cache_load_series_uses_shared_history_cache() {
+    let dir = temp_dir("backtest-load-shared-history-cache");
     BacktestTickCache::open(&dir)
         .unwrap()
         .store_ticks(
@@ -268,8 +269,8 @@ fn builder_reports_cache_open_errors() {
 }
 
 #[test]
-fn kline_cache_reads_series_file_rows() {
-    let dir = temp_dir("kline-series-file");
+fn kline_cache_reads_history_cache_rows() {
+    let dir = temp_dir("kline-history-cache");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     cache
         .write_kline_range(
@@ -418,7 +419,7 @@ fn cache_report_counts_downloaded_rows_not_downloaded_ranges() {
             .cache_report()
             .expect("cache report should be present");
         assert_eq!(series.len(), 3);
-        assert_eq!(cache.format_id(), "tqsdk.series-file.v1");
+        assert_eq!(cache.format_id(), HISTORY_SERIES_CACHE_FORMAT_ID);
         assert_eq!(report.hit_rows, 1);
         assert_eq!(report.downloaded_ranges.len(), 1);
     });

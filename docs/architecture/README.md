@@ -185,9 +185,10 @@ V1 是：
   - `TradingCalendarRow`
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
-- canonical `.tqseries` history series cache
-  - `HistorySeriesCache` public facade、crate 内部 store adapter、默认 single-file
-    backtest tick cache backend、embedded coverage commit、tick-only `BacktestTickCache`
+- TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
+  - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded coverage commit、
+    tick-only `BacktestTickCache`
+  - 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
 - `tqsdk-relay`

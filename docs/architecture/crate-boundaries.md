@@ -310,19 +310,24 @@ sink、WAL、journal 或 cache writer。
 `tqsdk-data` 当前应继续承担：
 
 - history page / series / download / export substrate
-- `HistorySeriesCache`、canonical `.tqseries` backend 和 crate 内部 store adapter seam
-- canonical single-file `.tqseries` history/backtest tick store、embedded coverage commit 和 tick-only
-  `BacktestTickCache`
-- `.tqseries` cache scan / retention / size-limit maintenance 和 append-log compaction
+- `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
+- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN v1 history cache format；
+  TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
+  price storage、self-describing metadata、explicit coverage records 和 forward-compatible
+  record lengths；embedded coverage commit 和 tick-only `BacktestTickCache`
+- TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 会执行 append-log compaction，
+  合并重复 rows 并保留 last-write-wins 语义；
+  旧 `.tqseries` 不再作为默认 backend，且没有兼容读取或迁移 store
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - cache inspect / purge 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
   `(symbol, tick)` 文件粒度清除回测 tick 缓存
 - relay-compatible futures universe selector parser 与 resolver 抽象
 
-`HistorySeriesCache::open(...)` 和 `BacktestTickCache::open(...)` 默认使用
-single-file `.tqseries` backend；旧 Python `DataSeries` 兼容 binary/mmap backend
-已从 public surface 废弃。`BacktestTickCache` 是回测加速主存储的 data facade：
-它只缓存 tick，K 线由 tick 回放/合成路径派生。
+`HistorySeriesCache::open(...)` 和 `BacktestTickCache::open(...)` 仍是 public facade
+入口，并默认使用 crate-internal TQBN store。`.tqseries` 不是 public long-term format target；
+旧 Python `DataSeries` 兼容 binary/mmap backend 已从 public surface 废弃。
+`BacktestTickCache` 是回测加速主存储的 data facade：它只缓存 tick，K 线由 tick
+回放/合成路径派生。
 
 ### 不应吸收的能力
 
@@ -457,7 +462,9 @@ single-file `.tqseries` backend；旧 Python `DataSeries` 兼容 binary/mmap bac
 
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
-- canonical `.tqseries` history cache；旧 Python-compatible binary/mmap cache 已废弃
+- TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
+- 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store；旧 Python-compatible
+  binary/mmap cache 已废弃
 - 回测 tick 持久缓存、coverage 检查和 shared universe selector
 - history page/series/download/export
 - DataFrame / polars

@@ -12,19 +12,22 @@ mod ranges;
 mod series_file_store;
 mod storage;
 mod store;
+mod tqbn;
 
 pub(crate) use ranges::{rangeset_difference, rangeset_intersection};
+#[allow(deprecated)]
+pub use store::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;
+pub use store::{
+    HISTORY_SERIES_CACHE_FORMAT_ID, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
+};
 pub(crate) use store::{
     HistorySeriesCoverageCommit, HistorySeriesCoverageRequest, HistorySeriesKind,
     HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
     HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
-pub use store::{
-    HistorySeriesCoverageReport, HistorySeriesPurgeReport, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
-};
 
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
-pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 2;
 const KLINE_DATA_COLS: usize = 7;
 const TICK_1_LEVEL_DATA_COLS: usize = 11;
 const TICK_5_LEVEL_DATA_COLS: usize = 27;
@@ -167,8 +170,8 @@ pub struct HistorySeriesCacheMaintenanceReport {
 /// let _ = cache.missing_tick_datetime_ranges("SHFE.rb2601", 0, 1);
 /// ```
 ///
-/// `.tqseries` is the canonical storage format, so `open` is the public
-/// constructor; storage-format aliases stay internal.
+/// `open` is the public constructor for the current history cache store;
+/// storage-format-specific constructor aliases stay internal.
 ///
 /// ```compile_fail
 /// use tqsdk_data::HistorySeriesCache;
@@ -193,6 +196,15 @@ pub struct HistorySeriesCacheMaintenanceReport {
 /// let _ = HistorySeriesCacheFileKind::Segment;
 /// ```
 ///
+/// TQBN record and metadata structs are internal storage details.
+///
+/// ```compile_fail
+/// use tqsdk_data::{TqbnRecordHeader, TqbnMetadata};
+///
+/// let _ = std::mem::size_of::<TqbnRecordHeader>();
+/// let _ = std::mem::size_of::<TqbnMetadata>();
+/// ```
+///
 /// ```compile_fail
 /// use tqsdk_data::HistorySeriesCache;
 ///
@@ -212,7 +224,7 @@ impl HistorySeriesCache {
 
     pub fn open(root_dir: impl AsRef<Path>) -> Result<Self> {
         let root_dir = root_dir.as_ref().to_path_buf();
-        let store = series_file_store::SeriesFileHistoryStore::new(root_dir)?;
+        let store = tqbn::TqbnHistoryStore::new(root_dir)?;
         Ok(Self::from_store(Arc::new(store)))
     }
 

@@ -90,11 +90,13 @@ pub use download::{
 pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
+#[allow(deprecated)]
+pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;
 pub use history_series_cache::{
-    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache, HistorySeriesCacheFileReport,
-    HistorySeriesCacheFileStatus, HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss,
-    HistorySeriesCacheReport, HistorySeriesCacheScanReport, HistorySeriesCoverageReport,
-    HistorySeriesPurgeReport, SERIES_FILE_HISTORY_SERIES_FORMAT_ID,
+    HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache,
+    HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
+    HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,

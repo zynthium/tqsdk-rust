@@ -203,7 +203,8 @@ crate 自己维护。
 - research/offline data crate
 - history page/series/download
 - CSV export
-- canonical `.tqseries` history series cache
+- TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
+- 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 

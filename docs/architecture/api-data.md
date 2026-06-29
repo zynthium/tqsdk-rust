@@ -19,6 +19,7 @@
 
 - [总架构入口](README.md)
 - [crate 边界审计](crate-boundaries.md)
+- [TQBN 历史缓存格式](history-cache-format.md)
 - [未来 crate 蓝图](crate-blueprint.md)
 - [路线图](../../ROADMAP.md)
 
@@ -194,10 +195,13 @@
      typed cache miss，以及最薄的容量/保留期清理策略；旧 Python `DataSeries`
      binary/mmap cache 不再作为 public surface 暴露，也不自动迁移
    - `HistorySeriesCache` 是 public facade，底层 store adapter 只保留为 crate
-     内部 seam；默认且唯一存储格式是 canonical single-file `.tqseries`，
-     对外用 `format_id()` 暴露格式标识，后续若替换底层文件格式，不应重新扩出
-     多 backend public surface；coverage/path/purge 对外使用 typed kline/tick 方法，
-     generic kind/request 只保留为 crate 内部存储语义
+     内部 seam；`HistorySeriesCache::open(root_dir)` 使用 canonical TQBN v1 history cache
+     format，格式合同见 [history-cache-format.md](history-cache-format.md)。TQBN 是
+     tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point price
+     storage、self-describing metadata、explicit coverage records 和 forward-compatible
+     record lengths；旧 `.tqseries` 不再作为默认格式，没有兼容读取或迁移 store，
+     也不应重新扩成多 backend public surface；coverage/path/purge
+     对外使用 typed kline/tick 方法，generic kind/request 只保留为 crate 内部存储语义
    - `BacktestTickCache` 已作为 tick-only semantic facade 落在 `tqsdk-data`；
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
@@ -242,8 +246,9 @@ tqsdk-wait        tqsdk-data
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
 - `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的历史序列持久化缓存；
-  默认且唯一存储格式是 `.tqseries`，旧 Python 兼容 mmap backend 已废弃，
-  也已经落在 `tqsdk-data`
+  TQBN v1 (`.tqbn`) 是当前默认和 canonical 格式；旧 `.tqseries` 不再作为默认格式，
+  不提供兼容读取或迁移 store。旧 Python 兼容 mmap backend 已废弃，也已经落在
+  `tqsdk-data`
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
@@ -283,8 +288,8 @@ tqsdk-wait        tqsdk-data
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
-- 默认 `.tqseries` cache 是 Rust canonical store；旧 Python `DataSeries` binary/mmap
-  文件格式不再支持迁移或交替使用。同目录同时写仍是
+- TQBN v1 (`.tqbn`) 是当前 Rust history cache 默认和 canonical 格式。旧 `.tqseries`
+  和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是
   non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，
   而不是把 live session、进程管理、HTTP endpoint、GUI 或底层文件编排表面

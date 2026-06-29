@@ -146,11 +146,16 @@ raw timestamp / DIFF row-id 明细；完整合约级审计字段保留在 `/symb
 2. `cargo test -p tqsdk-core -q --test runtime_contract_reader_surface --test runtime_contract_surface`
 3. `cargo test -p tqsdk-core -q`
 
-cache-backed backtest focused validation:
+history cache / cache-backed backtest current focused validation:
 
 ```bash
 rtk cargo test -p tqsdk-data --test history_series_single_file_store
 rtk cargo test -p tqsdk-data --test history_series_cache
+rtk cargo test -p tqsdk-data --test history_series_tqbn_compaction
+rtk cargo test -p tqsdk-data --test history_series_tqbn_corruption
+rtk cargo test -p tqsdk-data --lib tqbn
+rtk cargo test -p tqsdk-data
+rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-task --test history_tick_replay
 rtk cargo test -p tqsdk --test facade_contract
@@ -158,9 +163,20 @@ rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_mi
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 ```
 
-`history_series_single_file_store` 覆盖 `.tqseries` 默认 backend、embedded coverage、
-scan、size-limit maintenance 和 append-log compaction；`history_series_cache` 继续覆盖
-canonical `.tqseries` backend；旧 Python-compatible binary/mmap backend 已废弃。
+`history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
+和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
+scan、损坏报告、size-limit maintenance，以及通过 `enforce_limits(...)` 执行的 append-log
+compaction。旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
+
+TQBN format/store checks currently live in internal lib tests and are covered by
+`rtk cargo test -p tqsdk-data --lib tqbn`; `history_series_tqbn_compaction` and
+`history_series_tqbn_corruption` cover integration-level compaction and corruption paths.
+
+These TQBN tests should cover file identity, record header, little-endian scalar, price
+fixed-point encoding, compatibility skip rules, `HistorySeriesCache` / `BacktestTickCache`
+store semantics, corrupted input reporting, and append-log rewrite/compaction via
+`enforce_limits(...)`. 旧 `.tqseries`
+不是当前默认格式；旧 Python-compatible binary/mmap backend 已废弃。
 
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；

@@ -14,8 +14,8 @@
 //! - 未设置目录时使用默认目录 `~/.tqsdk/data_series_1`
 //! - `history_cache_dir(...)` 可以指定自定义目录
 //! - `history_cache_max_bytes(...)` / `history_cache_retention_days(...)` 可以配置容量和保留期
-//! - 默认且唯一存储格式是 `.tqseries`，对外通过 `format_id()` 识别
-//! - 旧 Python `DataSeries` binary/mmap cache 直接废弃，不做自动迁移
+//! - 默认且 canonical 存储格式是 TQBN v1 (`.tqbn`)，对外通过 `format_id()` 识别
+//! - 旧 `.tqseries` 没有兼容读取或迁移 store；旧 Python `DataSeries` binary/mmap cache 直接废弃，不做自动迁移
 //! - cache miss 使用官方 `DataSeries` 的 `set_chart` 序列补齐缺口
 //! - `HistorySeriesCache::read_*_data_series` 提供 cache-only 读取，缺口返回 typed miss
 //! - `HistorySeriesCache::scan()` 提供 schema/version 与损坏文件 report
@@ -43,7 +43,7 @@
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use tqsdk_data::{DataClientBuilder, KlineDataSeriesRequest};
+use tqsdk_data::{DataClientBuilder, HISTORY_SERIES_CACHE_FORMAT_ID, KlineDataSeriesRequest};
 use tqsdk_session::SessionClientBuilder;
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -68,6 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.history_cache_dir(cache_dir);
     }
     let client = builder.build()?;
+    let cache = client
+        .history_cache()
+        .expect("history_cache_enabled(true) must attach HistorySeriesCache");
+    assert_eq!(cache.format_id(), HISTORY_SERIES_CACHE_FORMAT_ID);
+    assert!(cache.tick_series_path("SHFE.rb2601").ends_with("tick.tqbn"));
 
     let end = Utc::now();
     let start = end - ChronoDuration::hours(4);
