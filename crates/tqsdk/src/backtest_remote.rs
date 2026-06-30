@@ -12,6 +12,16 @@ const REMOTE_TICK_DATA_LENGTH: usize = 10_000;
 const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
 const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_FILL_SLICE_NS: i64 = 2 * 60 * 60 * 1_000_000_000;
+
+pub(crate) struct SlicedRemoteBacktestCachingStream {
+    user: String,
+    pass: String,
+    symbols: Vec<String>,
+    cache: BacktestTickCache,
+    ranges: VecDeque<(i64, i64)>,
+    current: Option<((i64, i64), RemoteBacktestCachingStream)>,
+}
 
 pub(crate) struct RemoteBacktestCachingStream {
     api: tqsdk_wait::TqApi,
@@ -27,6 +37,12 @@ pub(crate) struct RemoteBacktestCacheFillReport {
     pub(crate) rows_by_symbol: BTreeMap<String, usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum FinalizeMode {
+    Strict,
+    Idle,
+}
+
 pub(crate) async fn fill_backtest_tick_cache(
     user: String,
     pass: String,
@@ -35,15 +51,96 @@ pub(crate) async fn fill_backtest_tick_cache(
     symbols: Vec<String>,
     cache: BacktestTickCache,
 ) -> Result<RemoteBacktestCacheFillReport> {
-    let mut stream =
-        RemoteBacktestCachingStream::connect(user, pass, start_ns, end_ns, symbols, cache).await?;
     let mut rows_by_symbol = BTreeMap::new();
-    while let Some(event) = stream.next_remote_event().await? {
-        *rows_by_symbol
-            .entry(event.symbol().to_string())
-            .or_insert(0) += 1;
+    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
+        let mut stream = RemoteBacktestCachingStream::connect(
+            user.clone(),
+            pass.clone(),
+            slice_start_ns,
+            slice_end_ns,
+            symbols.clone(),
+            cache.clone(),
+        )
+        .await
+        .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+        while let Some(event) = stream
+            .next_remote_event()
+            .await
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
+        {
+            *rows_by_symbol
+                .entry(event.symbol().to_string())
+                .or_insert(0) += 1;
+        }
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
+}
+
+fn remote_fill_ranges(start_ns: i64, end_ns: i64) -> Vec<(i64, i64)> {
+    let mut ranges = Vec::new();
+    let mut cursor = start_ns;
+    while cursor < end_ns {
+        let next = cursor.saturating_add(REMOTE_FILL_SLICE_NS).min(end_ns);
+        ranges.push((cursor, next));
+        cursor = next;
+    }
+    ranges
+}
+
+fn remote_slice_error(slice_start_ns: i64, slice_end_ns: i64, error: crate::Error) -> crate::Error {
+    data_validation(format!(
+        "remote backtest cache fill failed for slice [{slice_start_ns}, {slice_end_ns}): {error}"
+    ))
+}
+
+impl SlicedRemoteBacktestCachingStream {
+    pub(crate) fn connect(
+        user: String,
+        pass: String,
+        start_ns: i64,
+        end_ns: i64,
+        symbols: Vec<String>,
+        cache: BacktestTickCache,
+    ) -> Result<Self> {
+        Ok(Self {
+            user,
+            pass,
+            symbols,
+            cache,
+            ranges: remote_fill_ranges(start_ns, end_ns).into(),
+            current: None,
+        })
+    }
+
+    async fn next_remote_event(&mut self) -> Result<Option<ReplayMarketEvent>> {
+        loop {
+            if let Some(((slice_start_ns, slice_end_ns), stream)) = &mut self.current {
+                if let Some(event) = stream
+                    .next_remote_event()
+                    .await
+                    .map_err(|error| remote_slice_error(*slice_start_ns, *slice_end_ns, error))?
+                {
+                    return Ok(Some(event));
+                }
+                self.current = None;
+            }
+
+            let Some((slice_start_ns, slice_end_ns)) = self.ranges.pop_front() else {
+                return Ok(None);
+            };
+            let stream = RemoteBacktestCachingStream::connect(
+                self.user.clone(),
+                self.pass.clone(),
+                slice_start_ns,
+                slice_end_ns,
+                self.symbols.clone(),
+                self.cache.clone(),
+            )
+            .await
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+            self.current = Some(((slice_start_ns, slice_end_ns), stream));
+        }
+    }
 }
 
 impl RemoteBacktestCachingStream {
@@ -89,11 +186,12 @@ impl RemoteBacktestCachingStream {
                 return Ok(Some(event));
             }
             if self.fills_complete()? {
-                self.finalize_cache()?;
+                self.finalize_cache(FinalizeMode::Strict)?;
                 return Ok(None);
             }
             if self.last_progress.elapsed() >= REMOTE_FILL_IDLE_TIMEOUT {
-                self.finalize_cache()?;
+                // Closed-session tails can legitimately idle before the requested slice end.
+                self.finalize_cache(FinalizeMode::Idle)?;
                 return Ok(None);
             }
 
@@ -150,13 +248,16 @@ impl RemoteBacktestCachingStream {
         Ok(true)
     }
 
-    fn finalize_cache(&mut self) -> Result<()> {
+    fn finalize_cache(&mut self, mode: FinalizeMode) -> Result<()> {
         if self.finalized {
             return Ok(());
         }
         self.finalized = true;
         for (symbol, fill) in &self.fills {
-            let report = fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?;
+            let report = match mode {
+                FinalizeMode::Strict => fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?,
+                FinalizeMode::Idle => fill.finish_after_idle(REMOTE_FILL_END_TOLERANCE_NS)?,
+            };
             if !report.complete {
                 return Err(data_validation(format!(
                     "incomplete remote backtest cache fill for {symbol}: {:?}",
@@ -185,5 +286,41 @@ impl BacktestMarketStream for RemoteBacktestCachingStream {
                 .await
                 .map_err(|error| tqsdk_task::TaskError::External(error.to_string()))
         })
+    }
+}
+
+impl BacktestMarketStream for SlicedRemoteBacktestCachingStream {
+    fn next_event<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = tqsdk_task::Result<Option<ReplayMarketEvent>>> + 'a>> {
+        Box::pin(async move {
+            self.next_remote_event()
+                .await
+                .map_err(|error| tqsdk_task::TaskError::External(error.to_string()))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REMOTE_FILL_SLICE_NS, remote_fill_ranges};
+
+    #[test]
+    fn remote_fill_ranges_split_long_requests_into_bounded_slices() {
+        let start_ns = 1_781_182_800_000_000_000;
+        let two_hours_ns = 2 * 60 * 60 * 1_000_000_000;
+        let end_ns = start_ns + 3 * two_hours_ns;
+
+        let ranges = remote_fill_ranges(start_ns, end_ns);
+
+        assert_eq!(REMOTE_FILL_SLICE_NS, two_hours_ns);
+        assert_eq!(
+            ranges,
+            vec![
+                (start_ns, start_ns + two_hours_ns),
+                (start_ns + two_hours_ns, start_ns + 2 * two_hours_ns),
+                (start_ns + 2 * two_hours_ns, end_ns),
+            ]
+        );
     }
 }

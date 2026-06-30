@@ -273,6 +273,21 @@ fn tick_fill_accumulator_rejects_id_gap() {
     );
 }
 
+#[test]
+fn tick_fill_accumulator_accepts_continuous_idle_tail() {
+    let mut fill = tqsdk_data::BacktestTickFill::new("SHFE.rb2601", 1_000, 10_000);
+    fill.push(tick(1, 1_000, 100.0)).unwrap();
+    fill.push(tick(2, 2_000, 101.0)).unwrap();
+
+    let strict = fill.finish(1_000).unwrap();
+    let idle = fill.finish_after_idle(1_000).unwrap();
+
+    assert!(!strict.complete);
+    assert!(idle.complete);
+    assert_eq!(idle.unique_rows, 2);
+    assert_eq!(idle.id_range, Some((1, 2)));
+}
+
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
     Tick {
         id,

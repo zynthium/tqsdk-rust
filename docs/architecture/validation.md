@@ -183,7 +183,7 @@ store semantics, corrupted input reporting, and append-log rewrite/compaction vi
 
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；
-该 smoke 验证首次 server-side backtest 补 tick 缓存、二次无 auth 本地缓存命中。
+该 smoke 验证首次 server-side backtest 按时间片补 tick 缓存、二次无 auth 本地缓存命中。
 cache warmup runner 的远端 smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_warmup_remote_on_miss_live_smoke -- --ignored`。
 

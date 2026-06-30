@@ -1215,10 +1215,9 @@ impl PreparedBacktest {
             }
             PreparedBacktestMode::RemoteCaching { symbols } => {
                 let auth = base.auth.clone().ok_or(Error::MissingAuth)?;
-                let stream = backtest_remote::RemoteBacktestCachingStream::connect(
+                let stream = backtest_remote::SlicedRemoteBacktestCachingStream::connect(
                     auth.user, auth.pass, start_ns, end_ns, symbols, cache,
-                )
-                .await?;
+                )?;
                 base.replay_backtest_stream(Box::new(stream))
                     .connect()
                     .await

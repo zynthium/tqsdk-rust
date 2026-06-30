@@ -344,6 +344,18 @@ impl BacktestTickFill {
     }
 
     pub fn finish(&self, end_tolerance_ns: i64) -> Result<BacktestTickFillReport> {
+        self.finish_inner(end_tolerance_ns, false)
+    }
+
+    pub fn finish_after_idle(&self, end_tolerance_ns: i64) -> Result<BacktestTickFillReport> {
+        self.finish_inner(end_tolerance_ns, true)
+    }
+
+    fn finish_inner(
+        &self,
+        end_tolerance_ns: i64,
+        allow_idle_tail: bool,
+    ) -> Result<BacktestTickFillReport> {
         let first = self.rows_by_id.values().next();
         let last = self.rows_by_id.values().next_back();
         let id_range = first.zip(last).map(|(first, last)| (first.id, last.id));
@@ -363,8 +375,9 @@ impl BacktestTickFill {
         } else {
             complete = false;
         }
-        if last_datetime_ns
-            .is_none_or(|last_ns| last_ns < self.range_end_ns.saturating_sub(end_tolerance_ns))
+        if !allow_idle_tail
+            && last_datetime_ns
+                .is_none_or(|last_ns| last_ns < self.range_end_ns.saturating_sub(end_tolerance_ns))
         {
             complete = false;
         }
