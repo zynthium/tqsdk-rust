@@ -92,6 +92,53 @@ fn tqbn_compaction_preserves_empty_declared_coverage() {
     assert_eq!(coverage.missing_ranges, Vec::<(i64, i64)>::new());
 }
 
+#[test]
+fn backtest_tick_cache_compacts_only_requested_symbol_ticks() {
+    let dir = temp_dir("backtest-symbol-compaction");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+
+    cache
+        .append_partial_ticks("DCE.i2601", [tick(7, 1_000, 100.0)])
+        .unwrap();
+    cache
+        .append_partial_ticks("DCE.i2601", [tick(7, 1_000, 110.0)])
+        .unwrap();
+    cache
+        .mark_complete("DCE.i2601", 1_000, 2_000, 1, Some((7, 8)))
+        .unwrap();
+    cache
+        .append_partial_ticks("SHFE.rb2601", [tick(9, 1_000, 200.0)])
+        .unwrap();
+    cache
+        .append_partial_ticks("SHFE.rb2601", [tick(9, 1_000, 210.0)])
+        .unwrap();
+    cache
+        .mark_complete("SHFE.rb2601", 1_000, 2_000, 1, Some((9, 10)))
+        .unwrap();
+
+    let target_path = cache.tick_series_path("DCE.i2601");
+    let other_path = cache.tick_series_path("SHFE.rb2601");
+    let target_size_before = std::fs::metadata(&target_path).unwrap().len();
+    let other_size_before = std::fs::metadata(&other_path).unwrap().len();
+
+    cache.compact_symbol_ticks("DCE.i2601").unwrap();
+
+    let target_size_after = std::fs::metadata(&target_path).unwrap().len();
+    let other_size_after = std::fs::metadata(&other_path).unwrap().len();
+    assert!(
+        target_size_after < target_size_before,
+        "expected target file to shrink from {target_size_before} bytes, got {target_size_after}"
+    );
+    assert_eq!(other_size_after, other_size_before);
+
+    let history = HistorySeriesCache::open(&dir).unwrap();
+    let rows = history
+        .read_tick_data_series(TickDataSeriesRequest::new("DCE.i2601", 1_000, 2_000))
+        .unwrap();
+    assert_eq!(rows.rows().len(), 1);
+    assert_eq!(rows.rows()[0].last_price, 110.0);
+}
+
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
     Tick {
         id,

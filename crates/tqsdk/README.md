@@ -30,7 +30,8 @@ selector 语法，适合全品种策略。
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
 backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
 缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会按 `.batch_size(n)`
-分批跳过完整缓存、用官方 server-side backtest 流补缺口，并返回每个 symbol 的报告。
+分批跳过完整缓存、用官方 server-side backtest 流补缺口，补齐成功后只 compact 本次 symbol
+的 tick 文件，并返回每个 symbol 的报告。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 
 ```rust

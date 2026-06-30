@@ -319,8 +319,8 @@ sink、WAL、journal 或 cache writer。
   合并重复 rows 并保留 last-write-wins 语义；
   旧 `.tqseries` 不再作为默认 backend，且没有兼容读取或迁移 store
 - remote backtest cache fill 的完整性 accumulator / report 类型
-- cache inspect / purge 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
-  `(symbol, tick)` 文件粒度清除回测 tick 缓存
+- cache inspect / purge / compact 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
+  `(symbol, tick)` 文件粒度清除或合并回测 tick 缓存
 - relay-compatible futures universe selector parser 与 resolver 抽象
 
 `HistorySeriesCache::open(...)` 和 `BacktestTickCache::open(...)` 仍是 public facade

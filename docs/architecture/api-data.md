@@ -257,6 +257,8 @@ tqsdk-wait        tqsdk-data
   复用这套内部实现承接回测 tick 缓存，不再维护独立 tick replay cache 实现
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
+- `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 文件粒度的维护 API；
+  remote-on-miss / warmup 成功回填后只 compact 本次 symbol 的 tick series，不触发全缓存重写
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /

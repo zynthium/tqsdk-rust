@@ -206,6 +206,16 @@ impl BacktestTickCache {
         })
     }
 
+    pub fn compact_symbol_ticks(&self, symbol: impl AsRef<str>) -> Result<()> {
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        self.history.compact_series(symbol, HistorySeriesKind::Tick)
+    }
+
     pub fn store_ticks(
         &self,
         symbol: impl AsRef<str>,

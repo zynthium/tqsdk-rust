@@ -130,6 +130,7 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         max_bytes: Option<u64>,
         retention_days: Option<u64>,
     ) -> Result<HistorySeriesCacheMaintenanceReport>;
+    fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()>;
     fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,

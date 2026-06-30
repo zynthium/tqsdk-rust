@@ -137,6 +137,11 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         Ok(report)
     }
 
+    fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+        let path = self.series_path(symbol, kind.duration_ns());
+        compact_series_file(path.as_path(), symbol, kind)
+    }
+
     fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,

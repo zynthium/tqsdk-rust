@@ -324,6 +324,10 @@ impl HistorySeriesCache {
         self.store.purge_series(symbol, kind)
     }
 
+    pub(crate) fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+        self.store.compact_series(symbol, kind)
+    }
+
     pub(crate) fn open_reader(
         &self,
         request: HistorySeriesReadRequest,

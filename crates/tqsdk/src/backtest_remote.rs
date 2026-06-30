@@ -170,6 +170,7 @@ impl RemoteBacktestCachingStream {
                 report.unique_rows,
                 report.id_range,
             )?;
+            self.cache.compact_symbol_ticks(symbol)?;
         }
         Ok(())
     }

@@ -19,6 +19,7 @@
 - `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
 - `BacktestTickCache::open(...).store_ticks(...)`
 - `BacktestTickCache::open(...).load_series(...)`
+- `BacktestTickCache::open(...).compact_symbol_ticks(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
@@ -71,8 +72,9 @@
   replay 读取；TQBN store 会把覆盖元数据和 tick rows 写进同一个 series 文件，支持
   partial row append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
-  cached/missing ranges；`tick_series_path(...)` 和 `purge_symbol_ticks(...)` 是按
-  `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、refresh 和磁盘清理复用
+  cached/missing ranges；`tick_series_path(...)`、`purge_symbol_ticks(...)` 和
+  `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、
+  refresh、远端补缓存后的碎块合并和磁盘清理复用
 - `HistorySeriesCache::scan()` 输出 schema version、series 文件状态、未完成写入
   和格式损坏报告；当前 TQBN store 不额外写 manifest 文件，并保持 crate-internal
   store adapter 语义
@@ -210,6 +212,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `BacktestTickCache::open(...)`
 - `BacktestTickCache::store_ticks(...)`
 - `BacktestTickCache::load_series(...)`
+- `BacktestTickCache::compact_symbol_ticks(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 

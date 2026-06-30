@@ -168,7 +168,8 @@ rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
 scan、损坏报告、size-limit maintenance，以及通过 `enforce_limits(...)` 执行的 append-log
-compaction。旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
+compaction 和 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol tick 文件 compact。
+旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
 
 TQBN format/store checks currently live in internal lib tests and are covered by
 `rtk cargo test -p tqsdk-data --lib tqbn`; `history_series_tqbn_compaction` and
@@ -177,7 +178,7 @@ TQBN format/store checks currently live in internal lib tests and are covered by
 These TQBN tests should cover file identity, record header, little-endian scalar, price
 fixed-point encoding, compatibility skip rules, `HistorySeriesCache` / `BacktestTickCache`
 store semantics, corrupted input reporting, and append-log rewrite/compaction via
-`enforce_limits(...)`. 旧 `.tqseries`
+`enforce_limits(...)` and symbol-scoped backtest tick compaction. 旧 `.tqseries`
 不是当前默认格式；旧 Python-compatible binary/mmap backend 已废弃。
 
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
