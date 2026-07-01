@@ -118,6 +118,8 @@
 - `BacktestTickCache`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
+- `LiveTickCacheWriter`
+- `LiveTickCacheWriteReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
@@ -158,7 +160,7 @@
 - DataFrame / polars public API
 - 路径管理型文件导出 API
 - 后台 downloader task
-- live consumer bridge / live serial cache writer
+- live session owner / subscription bridge
 - live durable cache sink daemon/runtime
 - 多进程 cache 管理服务与跨进程 daemon orchestration
 - Python 与 Rust 进程同时写同一历史序列缓存目录
@@ -205,6 +207,9 @@
    - `BacktestTickCache` 已作为 tick-only semantic facade 落在 `tqsdk-data`；
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
+   - `LiveTickCacheWriter` 是 `BacktestTickCache` 上的一层纯 writer；它接收调用方已经消费到的
+     live tick rows，追加 rows，并只在 tick id 连续时推进 coverage。session ownership、
+     `wait_update()` 消费、订阅和后台运行不属于这个 writer
    - 后续再考虑路径管理型文件导出
    - deterministic replay / local backtest event source 由 `tqsdk-task` 拥有；
      `tqsdk-data` 只提供 history rows，不提供 JSONL market cache public surface
@@ -260,15 +265,18 @@ tqsdk-wait        tqsdk-data
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 文件粒度的维护 API；
   remote-on-miss / warmup 通过官方 server-side backtest 流按 2 小时时间片回填，成功回填后只
   compact 本次 symbol 的 tick series，不触发全缓存重写
+- `LiveTickCacheWriter::push_ticks(...)` 也已经落在 `tqsdk-data`，作为纯数据层 writer
+  支持 live/session host 将指定 symbol 的实时 tick 行写入同一份回测缓存；它不创建 session，
+  不订阅行情，也不负责后台守护或跨进程协调
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
 - `query_option_greeks` 也已经落在 `tqsdk-data`
 - `tqsdk-data` 不提供 `MarketCacheEvent` / `MarketCacheWriter` /
   `MarketCacheReader` / `MarketCacheReplay` 这类 JSONL market cache public API；
   deterministic replay / local backtest 输入属于 `tqsdk-task`
 - live pipe、live consumer feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
-- `tqsdk-data` 不再提供 `LiveHistoryCacheWriter`；live diff consumption 留在
-  `tqsdk-wait` 或调用方自建 reader/cursor 消费层，hot-path persistence 由调用方或独立上层服务拥有，
-  history cache 只服务 `get_*_data_series` 的离线时间范围读取
+- `tqsdk-data` 不拥有 live diff consumption；`LiveTickCacheWriter` 只接收已解码 tick rows。
+  订阅、`wait_update()` 驱动和实时策略 host 留在 `tqsdk` / `tqsdk-wait` 或调用方自建 reader/cursor
+  消费层，跨进程持久化服务应作为可选上层 host 复用 writer。
 - queue、lock、reader manifest、recovery scan、writer election、compaction
   ownership、service、daemon 和 supervisor 等编排表面已经从当前 public API
   回退；它们不属于 `tqsdk-data` 的稳定边界

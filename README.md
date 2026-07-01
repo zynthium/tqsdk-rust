@@ -166,6 +166,20 @@ let mut tq = Tq::futures()
     .await?;
 ```
 
+实盘或模拟盘策略如果要维护同一份回测可复用的 tick 缓存，可以显式 opt-in：
+
+```rust
+let mut tq = Tq::futures().auth_env()?.connect().await?;
+tq.record_ticks(".tqsdk/backtest_ticks", ["KQ.i@SHFE.au"]).await?;
+while tq.next().await? {
+    // normal strategy body
+}
+```
+
+`record_ticks` 只记录显式 symbol；它不自动记录所有行情订阅，也不启动守护进程。
+写入端只在 tick id 连续时推进 coverage，断线或跳号会保留缺口，后续仍可通过
+`.warmup()` / `.remote_on_miss()` 使用官方 server-side backtest 流补齐。
+
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
 `.refresh()`，它会按最小缓存颗粒度删除对应 symbol 的 tick 文件后再由官方回测流补齐；
 需要自定义内存 replay source、测试 fixture 或外部数据源时用
@@ -279,6 +293,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 本地 replay 回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().replay_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
 | 默认 facade 持久缓存回测 | `cargo run -p tqsdk --example api_contract_s43_facade_backtest_history_cache` | `.backtest(...).cache_dir(...).universe(...)` 通过 `BacktestTickCache` 复用持久 tick 缓存 |
 | 默认 facade remote-on-miss 缓存回测 | `cargo run -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss` | 使用官方 server-side backtest tick stream 填补缺失缓存；需要账号，但不需要专业历史下载权限 |
+| 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |

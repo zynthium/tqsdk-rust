@@ -30,10 +30,12 @@ public cache interface 保持为：
 
 - `HistorySeriesCache`
 - `BacktestTickCache`
+- `LiveTickCacheWriter`
 
 TQBN 的 record struct、metadata struct 和 codec helper 都是 `tqsdk-data` 的
 crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN record；对外只暴露 typed
-history series、coverage、scan report、purge report 和 backtest tick cache 语义。
+history series、coverage、scan report、purge report、backtest tick cache 和 live tick
+row writer 语义。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
 symbol 的 `tick.tqbn` append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
 

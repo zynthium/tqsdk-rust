@@ -20,6 +20,7 @@
 - `BacktestTickCache::open(...).store_ticks(...)`
 - `BacktestTickCache::open(...).load_series(...)`
 - `BacktestTickCache::open(...).compact_symbol_ticks(...)`
+- `LiveTickCacheWriter::new(...).push_ticks(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
@@ -75,6 +76,9 @@
   cached/missing ranges；`tick_series_path(...)`、`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、
   refresh、远端补缓存后的碎块合并和磁盘清理复用
+- `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
+  rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口；它不拥有
+  session、订阅、后台线程或跨进程协调
 - `HistorySeriesCache::scan()` 输出 schema version、series 文件状态、未完成写入
   和格式损坏报告；当前 TQBN store 不额外写 manifest 文件，并保持 crate-internal
   store adapter 语义
@@ -135,6 +139,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestTickCacheWriteReport`
 - `BacktestTickFill`
 - `BacktestTickFillReport`
+- `LiveTickCacheWriter`
+- `LiveTickCacheWriteReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
@@ -213,14 +219,17 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `BacktestTickCache::store_ticks(...)`
 - `BacktestTickCache::load_series(...)`
 - `BacktestTickCache::compact_symbol_ticks(...)`
+- `LiveTickCacheWriter::new(...)`
+- `LiveTickCacheWriter::push_ticks(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
 `AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN v1
 (`.tqbn`) 是该缓存的当前默认和 canonical 格式，旧 `.tqseries` 不提供兼容读取或迁移 store；
-不负责 live serial 缓存、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
-迁移、跨进程 cache service 或高频交易 hot path。
+不负责 live session ownership、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
+迁移、跨进程 cache service 或高频交易 hot path；live 订阅到 writer 的桥接由 `tqsdk`
+facade 或未来可选 relay host 拥有。
 
 ## 当前明确不做
 

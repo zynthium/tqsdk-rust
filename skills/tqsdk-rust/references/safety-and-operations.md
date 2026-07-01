@@ -4,6 +4,7 @@
 
 - 示例默认使用 `TQ_AUTH_USER` 和 `TQ_AUTH_PASS`，除非用户提供其他 auth path。
 - 说明 live 示例需要行情权限；交易示例还需要账户权限。
+- `record_ticks(...)` 是只读行情记录，但仍会连接 live/session 并写本地持久缓存；示例必须显式说明需要行情权限和 cache 目录，live smoke 保持环境变量门控。
 - 工作流依赖特定行情权限时，使用 `has_feature(...)` 或 `check_md_grants(...)`。
 - live smoke test 必须放在显式环境变量后面；普通 unit test 不应依赖官方服务。
 

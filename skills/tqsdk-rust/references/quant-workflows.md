@@ -4,13 +4,13 @@
 
 ## Live Monitoring
 
-普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote`、`target_pos_tqkq` 和 `next()` 写策略主体。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
+普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote`、`target_pos_tqkq` 和 `next()` 写策略主体。需要维护指定合约的回测共享 tick cache 时，在连接后显式调用 `record_ticks(cache_dir, symbols)`。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
 
 契约锚点：S33、S1、S3、S8-S10、S25-S26。
 
 ## Event Pipeline
 
-多个独立 consumer 需要同一份 session state 时使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 substrate：logging、metrics、signal calculation、persistence、order monitoring。调用方自建 commit filter、typed events、bounded channel 和 lag diagnostics，不要在每个 consumer 里 clone snapshot。SDK 不直接依赖 Python-compatible mmap history cache；需要 live 持久化时使用调用方自有 sidecar。
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 substrate：logging、metrics、signal calculation、persistence、order monitoring。调用方自建 commit filter、typed events、bounded channel 和 lag diagnostics，不要在每个 consumer 里 clone snapshot。指定 symbol 的 live tick 持久化优先用 `Tq::record_ticks(...)` 或数据层 `LiveTickCacheWriter`；泛化 commit/event/K 线持久化仍使用调用方自有 sidecar。
 
 契约锚点：S5、S23、S27、S31；S2、S4、S21、S22、S35 已删除为调用方层能力。
 
@@ -22,7 +22,7 @@
 
 ## Historical Research
 
-history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。`HistorySeriesCache` 是 offline `data_series` mmap cache 和 cache-only reader，不是 live 最新行情 API。
+history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。`HistorySeriesCache` 是 offline `data_series` cache 和 cache-only reader，不是 live 最新行情 API；`LiveTickCacheWriter` 只接收已解码 tick rows，并写入回测共享 tick cache。
 
 契约锚点：S17、S28-S30。Replay integration：S16；S18 JSONL local market cache 已移出当前核心 SDK public API。
 
@@ -48,7 +48,7 @@ hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading
 
 官方 Python 回测心智是 `TqApi(account=TqSim(), backtest=TqBacktest(...))`：策略主体继续围绕 live refs 编写，回测配置只在构造阶段切换。Rust 有三条入口要分清：
 
-- 普通策略优先使用默认 `tqsdk` facade。`TqBuilder::backtest(start_ns, end_ns)` 走服务端 backtest market，`TqBuilder::local_backtest(replay)` 走本地 `ReplayMarketSource + TqSim`；策略主体保持 `Tq::next()` / `quote()`，live/backtest 差异留在 builder。契约锚点：S37-S39。
+- 普通策略优先使用默认 `tqsdk` facade。`.backtest(start_ns, end_ns).cache_dir(...)` 走持久 tick cache-backed 本地撮合回测，默认 `RemoteOnMiss` 可用官方 server-side backtest 流补缺口；`.replay_backtest(replay)` 走 caller-owned replay source + `TqSim`。策略主体保持 `Tq::next()` / `quote()`，live/backtest 差异留在 builder。契约锚点：S37-S39、S43-S46。
 - `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` / `TqBacktest` 用于明确要求直接操作 Python-style wait facade 的 same-body loop。策略主体只依赖 `quote` / `kline` handles 和 `step()`，回测结束时 `step()` 返回 `None`。契约锚点：S36。
 - `tqsdk-task` 的 `StrategyBacktest + TqSim` 消费 task-owned `ReplayMarketSource`，用于不连接真实服务的本地确定性回测模拟账户内部能力；历史 rows 可由 `tqsdk-data` 拉取并通过 `StrategyReplaySourceBuilder` 转成 replay source。当前覆盖 quote/tick/kline replay event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义还不是当前最小闭环。契约锚点：S32。
 

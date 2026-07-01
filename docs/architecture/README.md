@@ -187,7 +187,7 @@ V1 是：
   - history integrity report for owned kline/tick series
 - TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
   - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded coverage commit、
-    tick-only `BacktestTickCache`
+    tick-only `BacktestTickCache` 和纯数据层 `LiveTickCacheWriter`
   - 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
@@ -232,7 +232,7 @@ V1 是：
 - `tqsdk-task` 可以在 task/data 上层组合 `backtest::StrategyBacktest + sim::TqSim`，提供
   Python-compatible 本地回测模拟账户最小闭环；这不改变 core/session/wait
   的 runtime contract 和 facade 边界
-- `tqsdk` 的 local backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
+- `tqsdk` 的 local replay / cache-backed backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
   `backtest::StrategyBacktest + sim::TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
   和 `TargetPos`，不会创建 facade 私有状态树
 - `tqsdk` 的 cache-backed `.backtest(...)` 是 Python 心智入口，`local_backtest`

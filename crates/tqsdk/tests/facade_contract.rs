@@ -1,6 +1,12 @@
+use serde_json::json;
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
-use tqsdk_core::{Kline, Quote, Symbol, Tick};
+use tqsdk_core::{
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote,
+    RuntimeHandle, RuntimeInput, Symbol, Tick,
+};
+use tqsdk_data::TickDataSeriesRequest;
+use tqsdk_session::testing::ManualSession;
 
 #[test]
 fn prelude_exposes_default_strategy_surface() {
@@ -13,6 +19,7 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<QuoteRef> = None;
     let _: Option<QuoteSet> = None;
     let _: Option<TargetPos> = None;
+    let _: Option<RecordTicksReport> = None;
 }
 
 #[tokio::test]
@@ -162,6 +169,33 @@ async fn facade_backtest_remote_on_miss_prepare_marks_remote_used_when_cache_mis
 
     assert!(prepared.data_report().remote_used);
     assert_eq!(prepared.data_report().resolved_symbols, 1);
+}
+
+#[tokio::test]
+async fn facade_record_ticks_writes_live_ticks_to_backtest_cache() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    let report = tq.record_ticks(&cache_dir, [symbol]).await.unwrap();
+    assert_eq!(report.symbols, vec![symbol.to_string()]);
+    assert_eq!(report.cache_dir, cache_dir);
+
+    seed_ready_record_tick_chart(&tq, symbol);
+    assert!(tq.next().await.unwrap());
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let series = cache
+        .load_series(TickDataSeriesRequest::new(
+            symbol,
+            1_713_660_000_000_000_000,
+            1_713_660_000_500_000_001,
+        ))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
 }
 
 #[test]
@@ -849,6 +883,27 @@ fn backtest_contract_example_exposes_cache_backed_flow() {
     }
 }
 
+#[test]
+fn record_ticks_contract_example_exposes_live_cache_recording_flow() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/api_contract_s46_facade_record_ticks.rs"
+    );
+    let source = std::fs::read_to_string(path).expect("read record ticks facade example");
+
+    for required in [
+        "TQ_RUN_LIVE_RECORD_TICKS",
+        ".auth_env()?",
+        ".record_ticks(\".tqsdk/backtest_ticks\", [SYMBOL]).await?",
+        "while tq.next().await?",
+    ] {
+        assert!(
+            source.contains(required),
+            "record ticks example missing required flow fragment: {required}"
+        );
+    }
+}
+
 fn temp_cache_dir() -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -858,6 +913,88 @@ fn temp_cache_dir() -> std::path::PathBuf {
         "tqsdk-facade-contract-cache-{}-{unique}",
         std::process::id()
     ))
+}
+
+fn manual_tq_api() -> tqsdk_wait::TqApi {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+
+    let handle = RuntimeHandle::with_adapters(adapters);
+    tqsdk_wait::TqApi::new(ManualSession::from_runtime(handle).into_client())
+}
+
+fn seed_ready_record_tick_chart(tq: &Tq, symbol: &str) {
+    let chart_id = format!("wait-tick-{}-10000", sanitize_chart_token(symbol));
+    tq.api()
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                },
+                                "left_id": 200,
+                                "right_id": 201,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "data": {
+                                    "200": {
+                                        "datetime": 1_713_660_000_000_000_000_i64,
+                                        "last_price": 618.0,
+                                        "average": 618.2,
+                                        "highest": 619.0,
+                                        "lowest": 617.5,
+                                        "ask_price1": 618.2,
+                                        "ask_volume1": 4,
+                                        "bid_price1": 618.0,
+                                        "bid_volume1": 5,
+                                        "volume": 12,
+                                        "amount": 7416.0,
+                                        "open_interest": 101
+                                    },
+                                    "201": {
+                                        "datetime": 1_713_660_000_500_000_000_i64,
+                                        "last_price": 618.5,
+                                        "average": 618.3,
+                                        "highest": 619.2,
+                                        "lowest": 617.5,
+                                        "ask_price1": 618.6,
+                                        "ask_volume1": 3,
+                                        "bid_price1": 618.4,
+                                        "bid_volume1": 6,
+                                        "volume": 15,
+                                        "amount": 9277.5,
+                                        "open_interest": 102
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed ready record tick chart should produce a commit");
+}
+
+fn sanitize_chart_token(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {

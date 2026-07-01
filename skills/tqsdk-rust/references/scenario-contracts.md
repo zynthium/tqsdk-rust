@@ -13,12 +13,12 @@
 
 | 用户角色 | 首选 crate | 契约示例 | 说明 |
 | --- | --- | --- | --- |
-| 单策略作者 | `tqsdk`, `tqsdk-wait`, `tqsdk-task` | S33, S37-S39, S1, S3, S6-S11, S25-S26, S29, S34, S36 | 默认 `tqsdk` facade / prelude；明确 Python-style 时用稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop。 |
+| 单策略作者 | `tqsdk`, `tqsdk-wait`, `tqsdk-task` | S33, S37-S41, S43-S46, S1, S3, S6-S11, S25-S26, S29, S34, S36 | 默认 `tqsdk` facade / prelude；明确 Python-style 时用稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop、cache-backed backtest 和显式 live tick recording。 |
 | Async 系统集成方 | `tqsdk-session`, `tqsdk-core` | S5, S23, S27, S31; S2/S4/S21/S22/S35 removed | Multi-consumer event/fan-out 是调用方层：复用 shared session、`RuntimeReader`、`UpdateCursor`，自建 filters、bounded channels、lag diagnostics 和 sidecar。 |
 | 低层 / 低延迟用户 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S23, S27, S31 | Thin session substrate、direct metadata query、hot-path `RuntimeReader`、same-revision market/trade reads、low-latency desk profile。 |
 | 执行工具用户 | `tqsdk-task`, `tqsdk-wait` | S6-S13, S19, S29, S31 | Typed order tickets、cancel/partial-fill helpers、risk gates、execution groups、account groups、target-pos ownership。 |
-| 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task` | S16-S17, S23, S27-S30, S32 | Historical series、downloads、CSV export、option Greeks、Python-compatible history cache、task-owned replay source、Python-compatible 本地回测模拟账户。 |
-| 测试 / 回放用户 | `tqsdk`, `tqsdk-task`, `tqsdk-data`, `tqsdk-wait` | S15-S16, S24, S30, S32, S36-S39 | Live/sim/replay environment、deterministic fake market/broker、task-owned replay sources、history-row-backed tests、Python-compatible sim backtest、default facade same-body backtest、same-body wait backtest loop。 |
+| 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task`, `tqsdk` | S16-S17, S23, S27-S30, S32, S43-S46 | Historical series、downloads、CSV export、option Greeks、TQBN history cache、tick-only backtest cache、显式 live tick recording、task-owned replay source、Python-compatible 本地回测模拟账户。 |
+| 测试 / 回放用户 | `tqsdk`, `tqsdk-task`, `tqsdk-data`, `tqsdk-wait` | S15-S16, S24, S30, S32, S36-S41, S43-S46 | Live/sim/replay environment、deterministic fake market/broker、task-owned replay sources、history-row-backed tests、Python-compatible sim backtest、default facade same-body backtest、same-body wait backtest loop、cache-backed backtest。 |
 | 生产 runtime 构建者 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S15, S20 task, S31; S21/S22 removed | Session progress、runtime cursor、typed strategy supervisor、caller-owned bounded fan-out 和 lag diagnostics。不内置 HTTP endpoint、GUI、daemon manager、event facade 或 managed sink/WAL。 |
 | Multi-provider 基础设施用户 | 用户层 facade / 未来独立项目 | S14 gap only | Multi-provider aggregation 不是当前 core SDK API。不要把它推入 core/session。 |
 
@@ -31,7 +31,7 @@
 普通策略从 `tqsdk` facade 起步。明确需要 Python-style `wait_update()` / `WaitStep` 时下钻 `tqsdk-wait`；需要 target-position ownership、risk gates、strategy context 或 test harness 内部能力时，再加 `tqsdk-task`。
 
 - 首选示例：S33 default facade、S1 quote loop、S3 snapshot、S25 serial/status、S6-S7 order lifecycle、S8 account/position、S9 startup recovery、S10 reconnect order intent。
-- 执行层升级：S11 simple strategy、S29 target-pos ownership、S34 batch quote interest、S36 wait live/backtest same-body loop、S37-S39 default facade live/backtest same-body loop。
+- 执行层升级：S11 simple strategy、S29 target-pos ownership、S34 batch quote interest、S36 wait live/backtest same-body loop、S37-S41 default facade live/backtest same-body loop、S43-S46 cache-backed backtest/live tick recording。
 - 避免：在 `TqApi` 上复制 direct metadata helpers、本地 order overlay、解析 order status 字符串、隐藏实盘账户副作用。
 
 ### Async 系统集成方
@@ -63,8 +63,8 @@
 owned historical rows、downloads、CSV、Greeks 和 history series cache 从 `tqsdk-data` 起步；deterministic replay source 从 `tqsdk-task` 起步。只有用于框定查询的一次性 metadata 才使用 `tqsdk-session`。
 
 - 首选示例：S17 research K-line batch、S28 download/export and Greeks。
-- Cache/replay 示例：S30 history series cache、S16 replay integration；S18 JSONL local market cache 已移出当前核心 SDK public API。
-- live mmap bridge：当前 SDK 不提供 live events 写入 `HistorySeriesCache` 的 public API；需要 live 持久化时使用调用方 sidecar。
+- Cache/replay 示例：S30 history series cache、S16 replay integration、S43-S45 cache-backed backtest。
+- live tick recording：S46 通过 `Tq::record_ticks(...)` 把指定 symbol 的 live tick 写入共享 `BacktestTickCache`；泛化 live event/K 线/commit persistence 仍用调用方 sidecar。
 - Metadata 示例：S23、S27。
 - 避免：把 history 建模成 live refs、把 DataFrame/polars 语义塞进 session/wait、确定性测试依赖 live credentials。
 
@@ -72,7 +72,7 @@ owned historical rows、downloads、CSV、Greeks 和 history series cache 从 `t
 
 确定性策略测试从 `tqsdk-task::testing` 起步。Replay input 使用 `tqsdk-data` cache/history records。
 
-- 首选示例：S24 testable strategy、S15 live/sim/replay switch、S16 history replay、S30 history cache、S32 Python-compatible backtest sim、S36 wait same-body backtest loop、S37-S39 default facade backtest loop。
+- 首选示例：S24 testable strategy、S15 live/sim/replay switch、S16 history replay、S30 history cache、S32 Python-compatible backtest sim、S36 wait same-body backtest loop、S37-S41 / S43-S46 default facade backtest/cache loop。
 - 避免：hidden `*_for_test` API、provider protocol fixture、`Arc<Mutex<_>>` 测试编排、unit test 依赖 live services。
 
 ### 生产 runtime 构建者
@@ -123,16 +123,22 @@ session progress、runtime cursor、bounded fan-out 和 lag diagnostics 从 `tqs
 | S27 Metadata/service query pack | `crates/tqsdk-session/examples/api_contract_s27_metadata_service_queries.rs` | quotes list、main contracts、options、calendar、settlement、ranking、EDB | `SessionClient` typed one-shot metadata/service APIs；不要复制到 wait 或 caller-owned event layer。 |
 | S28 Download/export/Greeks | `crates/tqsdk-data/examples/api_contract_s28_download_export.rs`; `crates/tqsdk-data/examples/api_contract_s28_option_greeks.rs` | history downloads、CSV export、option Greeks | `DataClient` research/download APIs；不是 live session refs。 |
 | S29 TargetPos ownership | `crates/tqsdk-task/examples/api_contract_s29_target_pos_ownership.rs` | 同 account+symbol task ownership 和 scheduler ownership | `TaskHost::{target_pos,target_pos_scheduler,check_manual_order_allowed}`；cross-account target-pos orchestration 是用户层能力。 |
-| S30 History series cache | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs` | opt-in Python-compatible mmap history cache for data_series | `DataClientBuilder::history_cache_enabled`、cache reports、`HistorySeriesCache::read_*_data_series`、scan/maintenance；Python/Rust 同时写是 non-goal，live serial cache 是 out of scope。 |
+| S30 History series cache | `crates/tqsdk-data/examples/api_contract_s30_history_series_cache.rs` | opt-in TQBN history cache for data_series | `DataClientBuilder::history_cache_enabled`、cache reports、`HistorySeriesCache::read_*_data_series`、scan/maintenance；live tick recording 属于 S46，泛化 live serial cache 仍是 out of scope。 |
 | S31 Low-latency desk | `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs` | same-revision market/trade hot path 和 prechecked orders | `TradingDeskProfile`、`RuntimeReader::read_market_trade_state`、typed latency/order reports；不是 OMS 或 auto-hedger。 |
 | S32 Python-compatible backtest sim | `crates/tqsdk-task/examples/api_contract_s32_python_backtest_sim.rs` | 本地 quote replay + `TqSim` 回测模拟账户 | 不连接真实服务；用于 Python-compatible 本地回测账户闭环。 |
 | S33 Default facade | `crates/tqsdk/examples/api_contract_s33_default_facade.rs` | 默认 `tqsdk` facade / prelude | `Tq` / `TqBuilder`、resolved TQKQ target-position helper、`TargetPos` intent API、curated `advanced::*`。 |
 | S34 Wait batch quote subscription | `crates/tqsdk-wait/examples/api_contract_s34_batch_quote_subscription.rs` | wait facade 批量 quote interest 和 step-bound changed snapshots | 单 owner `wait_update()` / `step()` 消费模型；不是 multi-consumer API。 |
 | S35 Quote batches | Removed / caller-owned layer | async multi-consumer quote batch consumption | 当前无内置 quote batch event facade；调用方基于 `RuntimeReader` / `UpdateCursor` 聚合 quote changes。 |
 | S36 Wait live/backtest same-body loop | `crates/tqsdk-wait/examples/api_contract_s36_wait_live_backtest_same_body.rs` | 同一段 wait 策略主体用于 live 和 backtest builder | 策略主体只依赖 handles 和 `step()` 推进；live/backtest 差异留在 builder 配置。 |
-| S37 Default facade server backtest | `crates/tqsdk/examples/api_contract_s37_facade_server_backtest.rs` | 默认 `tqsdk` facade 一行切换服务端回测 | `TqBuilder::backtest(start_ns,end_ns)`；策略主体继续用 `Tq::next()` / `quote()`。 |
-| S38 Default facade local backtest | `crates/tqsdk/examples/api_contract_s38_facade_local_backtest.rs` | 默认 `tqsdk` facade 本地 replay + `TqSim` 回测 | `TqBuilder::local_backtest(replay)`、`quote_symbol(...)`、`price_tick(...)`、`backtest_summary()`；不连接真实服务。 |
+| S37 Default facade server backtest | `crates/tqsdk/examples/api_contract_s37_facade_server_backtest.rs` | 默认 `tqsdk` facade 一行切换官方服务端回测 | `TqBuilder::server_backtest(start_ns,end_ns)`；策略主体继续用 `Tq::next()` / `quote()`。 |
+| S38 Default facade local replay backtest | `crates/tqsdk/examples/api_contract_s38_facade_local_backtest.rs` | 默认 `tqsdk` facade 本地 replay + `TqSim` 回测 | `TqBuilder::replay_backtest(replay)`、`quote_symbol(...)`、`price_tick(...)`；不连接真实服务。 |
 | S39 Default facade same-body strategy | `crates/tqsdk/examples/api_contract_s39_facade_same_body.rs` | 同一段 `&mut Tq` 策略主体用于 live、服务端回测和本地回测 | builder 决定运行模式；策略函数不分叉。 |
+| S40 Default facade local backtest TargetPos | `crates/tqsdk/examples/api_contract_s40_facade_local_backtest_target_pos.rs` | 本地 replay 回测中复用 `TargetPos` wrapper | 同一 `Tq::next()` 策略主体读取持仓并调仓。 |
+| S41 Default facade server replay | `crates/tqsdk/examples/api_contract_s41_facade_server_replay.rs` | 官方单日复盘行情接入默认 facade | `server_replay(date)?`、replay endpoint 和 heartbeat。 |
+| S43 Cache-backed backtest | `crates/tqsdk/examples/api_contract_s43_facade_backtest_history_cache.rs` | 默认 facade 通过持久 tick cache 做本地撮合回测 | `.backtest(...).cache_dir(...).cache_only().universe(...)`，复用 `BacktestTickCache`。 |
+| S44 Remote-on-miss backtest cache fill | `crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs` | 缓存缺口用官方 server-side backtest tick stream 填补 | 需要账号但不需要专业历史下载权限；cache hit 不需要 auth。 |
+| S45 Backtest cache warmup | `crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs` | 只预热缓存，不创建策略 runtime | `.warmup().await?`，按 batch 跳过完整缓存并填补缺口。 |
+| S46 Live tick recording | `crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs` | 显式把指定 live tick 写入回测共享缓存 | `Tq::record_ticks(cache_dir, symbols)`；由 `next()` / `wait_update()` 推进，跳号保留 coverage 缺口。 |
 
 ## 覆盖规则
 

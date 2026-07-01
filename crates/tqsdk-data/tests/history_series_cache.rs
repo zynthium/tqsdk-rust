@@ -11,7 +11,7 @@ use tqsdk_core::{
 use tqsdk_data::{
     BacktestTickCache, DataClientBuilder, DataError, HISTORY_SERIES_CACHE_FORMAT_ID,
     HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache, KlineDataSeriesRequest,
-    TickDataSeriesRequest,
+    LiveTickCacheWriter, TickDataSeriesRequest,
 };
 use tqsdk_session::testing::ManualSession;
 
@@ -112,6 +112,60 @@ fn backtest_tick_cache_reports_missing_ranges_from_history_cache() {
 
     assert_eq!(coverage.cached_ranges, vec![(1_000, 2_000)]);
     assert_eq!(coverage.missing_ranges, vec![(2_000, 4_000)]);
+    assert!(!coverage.is_complete());
+}
+
+#[test]
+fn live_tick_cache_writer_commits_continuous_tick_ranges_for_backtests() {
+    let dir = temp_dir("live-tick-cache-writer-continuous");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+
+    let report = writer
+        .push_ticks(
+            "SHFE.rb2601",
+            [
+                tick(1, 1_000, 101.0),
+                tick(2, 2_000, 102.0),
+                tick(3, 3_000, 103.0),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(report.symbol, "SHFE.rb2601");
+    assert_eq!(report.appended_rows, 3);
+    assert_eq!(report.committed_ranges, vec![(1_000, 3_001)]);
+    assert!(!report.gap_detected);
+
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_001))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
+fn live_tick_cache_writer_leaves_coverage_gap_when_tick_id_jumps() {
+    let dir = temp_dir("live-tick-cache-writer-gap");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+
+    writer
+        .push_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+        .unwrap();
+    let report = writer
+        .push_ticks("SHFE.rb2601", [tick(3, 3_000, 103.0)])
+        .unwrap();
+
+    assert_eq!(report.appended_rows, 1);
+    assert_eq!(report.committed_ranges, vec![(3_000, 3_001)]);
+    assert!(report.gap_detected);
+
+    let coverage = cache.coverage("SHFE.rb2601", 1_000, 3_001).unwrap();
+    assert_eq!(coverage.cached_ranges, vec![(1_000, 1_001), (3_000, 3_001)]);
+    assert_eq!(coverage.missing_ranges, vec![(1_001, 3_000)]);
     assert!(!coverage.is_complete());
 }
 

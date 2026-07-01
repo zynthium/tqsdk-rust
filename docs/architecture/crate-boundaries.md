@@ -54,6 +54,8 @@
 - Python-style `.backtest(start_ns, end_ns)` 的 cache policy、lazy auth、remote-on-miss
   官方回测流补缓存、`.warmup()` 缓存预热 runner 和 `.universe(...)` 选择器接线；
   cache hit 不要求 auth，cache fill 不使用专业历史下载接口
+- `record_ticks(cache_dir, symbols)` 这类显式 live/session 到持久 tick cache 的组合入口；
+  订阅和 `wait_update()` 驱动留在 facade，实际 rows/coverage 写入复用 `tqsdk-data`
 - `advanced::*` 下钻到底层 crate
 
 ### 不应承担的职责
@@ -319,6 +321,8 @@ sink、WAL、journal 或 cache writer。
   合并重复 rows 并保留 last-write-wins 语义；
   旧 `.tqseries` 不再作为默认 backend，且没有兼容读取或迁移 store
 - remote backtest cache fill 的完整性 accumulator / report 类型
+- `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
+  tick id 推进 coverage，不拥有 session、订阅、wait loop 或后台进程
 - cache inspect / purge / compact 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
   `(symbol, tick)` 文件粒度清除或合并回测 tick 缓存
 - relay-compatible futures universe selector parser 与 resolver 抽象

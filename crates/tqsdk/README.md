@@ -6,6 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Cache-backed local simulated backtest (`.backtest(start_ns, end_ns)`, `.cache_dir(...)`, `.cache_only()`, `.remote_on_miss()`, `.universe(...)`)
+- Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
 - Market-data-only server-side backtest (`.server_backtest()`, optional `.replay_url(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
 - Advanced custom replay backtest (`.replay_backtest(source)`, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
@@ -33,6 +34,12 @@ backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除
 分批跳过完整缓存、用官方 server-side backtest 流按 2 小时时间片补缺口，补齐成功后只
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
+
+实盘或模拟盘运行时可以显式调用 `.record_ticks(cache_dir, symbols).await?`，把指定合约的
+tick serial 写入同一份 `BacktestTickCache`。它不会自动记录所有订阅，也不会后台运行；
+正常策略继续调用 `next()` / `wait_update()`，facade 在每次更新后把新 tick 行追加到缓存。
+coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续仍可用
+`.warmup()` / `.remote_on_miss()` 补齐。
 
 ```rust
 use tqsdk::prelude::*;

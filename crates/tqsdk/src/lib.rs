@@ -21,7 +21,7 @@ pub mod prelude {
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
         BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestTickCache,
         BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
-        PreparedBacktest, Result, TargetPos, Tq, TqBuilder,
+        PreparedBacktest, RecordTicksReport, Result, TargetPos, Tq, TqBuilder,
     };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
@@ -36,8 +36,8 @@ pub mod advanced {
         pub use tqsdk_data::{
             BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus, DataClient,
             DataError, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
-            KlineDataSeries, KlineDataSeriesRequest, TickDataSeries, TickDataSeriesRequest,
-            TradingCalendarRow, historical_cont_underlying_segments,
+            KlineDataSeries, KlineDataSeriesRequest, LiveTickCacheWriter, TickDataSeries,
+            TickDataSeriesRequest, TradingCalendarRow, historical_cont_underlying_segments,
         };
     }
 
@@ -93,8 +93,10 @@ pub mod advanced {
 }
 
 mod backtest_remote;
+mod live_tick_recorder;
 mod local_backtest;
 
+pub use live_tick_recorder::RecordTicksReport;
 pub use tqsdk_data::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
 };
@@ -197,6 +199,7 @@ impl From<tqsdk_data::DataError> for Error {
 pub struct Tq {
     inner: TqInner,
     default_account_id: DefaultAccountId,
+    tick_recorder: Option<live_tick_recorder::LiveTickRecorder>,
     #[cfg(feature = "live")]
     server_side_backtest: bool,
     #[cfg(all(feature = "services", feature = "live"))]
@@ -236,6 +239,7 @@ impl Tq {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
+            tick_recorder: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -249,6 +253,7 @@ impl Tq {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
+            tick_recorder: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -267,6 +272,7 @@ impl Tq {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
+            tick_recorder: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             server_replay: Some(server_replay),
@@ -278,6 +284,7 @@ impl Tq {
         Self {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
             default_account_id: DefaultAccountId::Single(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
+            tick_recorder: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -308,6 +315,13 @@ impl Tq {
             TqInner::Live(host) => host.api(),
             TqInner::LocalBacktest(bt) => bt.strategy().task_host().api(),
         }
+    }
+
+    fn flush_tick_recorder(&mut self) -> Result<()> {
+        if let Some(recorder) = self.tick_recorder.as_mut() {
+            recorder.flush()?;
+        }
+        Ok(())
     }
 
     // ── Public accessors ──
@@ -531,7 +545,7 @@ impl Tq {
     /// Advance one step. Returns `false` when there are no more events
     /// (backtest finished or session closed).
     pub async fn next(&mut self) -> Result<bool> {
-        match &mut self.inner {
+        let updated = match &mut self.inner {
             TqInner::Live(host) => host.wait_update(None).await.map_err(Error::from),
             TqInner::LocalBacktest(bt) => {
                 let Some(mut ctx) = bt.next().await? else {
@@ -540,19 +554,58 @@ impl Tq {
                 ctx.finish_sim_step()?;
                 Ok(true)
             }
+        }?;
+        if updated {
+            self.flush_tick_recorder()?;
         }
+        Ok(updated)
     }
 
     /// Advance one step with a deadline (live mode). In local-backtest mode
     /// the deadline is ignored.
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
         match &mut self.inner {
-            TqInner::Live(host) => host.wait_update(deadline).await.map_err(Error::from),
+            TqInner::Live(host) => {
+                let updated = host.wait_update(deadline).await.map_err(Error::from)?;
+                if updated {
+                    self.flush_tick_recorder()?;
+                }
+                Ok(updated)
+            }
             TqInner::LocalBacktest(_) => self.next().await,
         }
     }
 
     // ── Market data ──
+
+    pub async fn record_ticks<I, S>(
+        &mut self,
+        cache_dir: impl AsRef<std::path::Path>,
+        symbols: I,
+    ) -> Result<RecordTicksReport>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if self.tick_recorder.is_some() {
+            return Err(tqsdk_wait::WaitFacadeError::InvalidState(
+                "record_ticks is already active",
+            )
+            .into());
+        }
+        if matches!(&self.inner, TqInner::LocalBacktest(_)) {
+            return Err(tqsdk_wait::WaitFacadeError::InvalidState(
+                "record_ticks is only available in live/session mode",
+            )
+            .into());
+        }
+
+        let (recorder, report) =
+            live_tick_recorder::LiveTickRecorder::start(self.api_mut_any(), cache_dir, symbols)
+                .await?;
+        self.tick_recorder = Some(recorder);
+        Ok(report)
+    }
 
     pub async fn quote(&mut self, symbol: &str) -> Result<tqsdk_wait::QuoteRef> {
         self.api_mut_any().quote(symbol).await.map_err(Error::from)

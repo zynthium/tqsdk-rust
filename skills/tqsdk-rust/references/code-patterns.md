@@ -204,9 +204,30 @@ println!("rows={}", series.len());
 
 ## Live Persistence Boundary
 
-当前 SDK 不提供 live event/row batch 写入 Python-compatible mmap
-`HistorySeriesCache` 的 public bridge。实时行情持久化使用调用方自有 sidecar；
-`HistorySeriesCache` 保持 offline
+指定合约的 live tick 可以显式写入和回测共享的持久 tick cache。普通策略使用默认
+facade 的 `record_ticks`；它只记录声明的 symbol，并由正常 `next()` / `wait_update()`
+驱动：
+
+```rust
+use tqsdk::prelude::*;
+
+async fn main() -> tqsdk::Result<()> {
+    let mut tq = Tq::futures().auth_env()?.connect().await?;
+    tq.record_ticks(".tqsdk/backtest_ticks", ["KQ.i@SHFE.au"]).await?;
+
+    while tq.next().await? {
+        // normal strategy body
+    }
+    Ok(())
+}
+```
+
+已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
+`LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id
+推进 coverage，不负责 session、订阅或后台运行。
+
+泛化 live event/K 线/commit 持久化、审计 WAL、跨进程 queue 或旧 Python mmap history
+bridge 仍属于调用方 sidecar；`HistorySeriesCache` 保持 offline
 `get_*_data_series` 缓存和 cache-only reader。
 
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。

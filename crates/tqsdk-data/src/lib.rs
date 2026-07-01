@@ -17,6 +17,7 @@
 //! - `DataClient::from_session(...).get_kline_data_series(...)`
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
 //! - `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
+//! - `LiveTickCacheWriter::new(...).push_ticks(...)`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
 //! - `KlineDataDownload::collect_remaining()`
@@ -50,6 +51,7 @@ mod greeks;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
+mod live_tick_cache_writer;
 mod universe;
 mod universe_expression;
 
@@ -103,6 +105,7 @@ pub use integrity::{
     HistoryIntegrityCheck, HistoryIntegrityReport, HistoryPermissionStatus,
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
 };
+pub use live_tick_cache_writer::{LiveTickCacheWriteReport, LiveTickCacheWriter};
 pub use universe::{
     DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,
     FuturesUniverseResolver, SessionFuturesUniverseResolver, StaticFuturesUniverseResolver,
