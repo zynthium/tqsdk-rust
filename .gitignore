@@ -1,5 +1,7 @@
 target/
 .tqsdk/
+__pycache__/
+*.pyc
 Cargo.lock
 .worktrees/
 .DS_Store

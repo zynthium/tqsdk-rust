@@ -28,6 +28,9 @@ pub(crate) struct RemoteBacktestCachingStream {
     cache: BacktestTickCache,
     fills: BTreeMap<String, BacktestTickFill>,
     pending: VecDeque<ReplayMarketEvent>,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    accepted_rows_total: usize,
     last_progress: tokio::time::Instant,
     finalized: bool,
 }
@@ -189,6 +192,9 @@ impl RemoteBacktestCachingStream {
             cache,
             fills,
             pending: VecDeque::new(),
+            range_start_ns: start_ns,
+            range_end_ns: end_ns,
+            accepted_rows_total: 0,
             last_progress: tokio::time::Instant::now(),
             finalized: false,
         })
@@ -205,6 +211,19 @@ impl RemoteBacktestCachingStream {
             }
             if self.last_progress.elapsed() >= remote_fill_idle_timeout() {
                 // Closed-session tails can legitimately idle before the requested slice end.
+                if should_reject_empty_idle_finalize(
+                    self.handles.len(),
+                    self.accepted_rows_total,
+                    remote_fill_allow_empty_idle(),
+                ) {
+                    return Err(data_validation(format!(
+                        "remote backtest cache fill idled without accepted ticks for {} symbols \
+                         in range [{}, {}); refusing to mark complete empty coverage",
+                        self.handles.len(),
+                        self.range_start_ns,
+                        self.range_end_ns
+                    )));
+                }
                 self.finalize_cache(FinalizeMode::Idle)?;
                 return Ok(None);
             }
@@ -241,6 +260,8 @@ impl RemoteBacktestCachingStream {
                 }
 
                 if !accepted_rows.is_empty() {
+                    self.accepted_rows_total =
+                        self.accepted_rows_total.saturating_add(accepted_rows.len());
                     self.cache.append_partial_ticks(symbol, accepted_rows)?;
                     made_progress = true;
                     self.pending.extend(accepted_events);
@@ -296,6 +317,11 @@ fn remote_fill_idle_timeout() -> Duration {
     parse_remote_fill_idle_timeout(value.as_deref())
 }
 
+fn remote_fill_allow_empty_idle() -> bool {
+    let value = std::env::var("TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE").ok();
+    parse_remote_fill_allow_empty_idle(value.as_deref())
+}
+
 fn remote_fill_slice_ns() -> Option<i64> {
     let value = std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS").ok();
     parse_remote_fill_slice_ns(value.as_deref())
@@ -308,12 +334,27 @@ fn parse_remote_fill_idle_timeout(value: Option<&str>) -> Duration {
         .unwrap_or(REMOTE_FILL_IDLE_TIMEOUT)
 }
 
+fn parse_remote_fill_allow_empty_idle(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 fn parse_remote_fill_slice_ns(value: Option<&str>) -> Option<i64> {
     value
         .and_then(|value| value.parse::<u64>().ok())
         .and_then(|secs| secs.checked_mul(1_000_000_000))
         .and_then(|ns| i64::try_from(ns).ok())
         .filter(|ns| *ns > 0)
+}
+
+fn should_reject_empty_idle_finalize(
+    symbol_count: usize,
+    accepted_rows_total: usize,
+    allow_empty_idle: bool,
+) -> bool {
+    symbol_count > 1 && accepted_rows_total == 0 && !allow_empty_idle
 }
 
 impl BacktestMarketStream for RemoteBacktestCachingStream {
@@ -345,8 +386,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        REMOTE_FILL_IDLE_TIMEOUT, parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
+        REMOTE_FILL_IDLE_TIMEOUT, parse_remote_fill_allow_empty_idle,
+        parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
         remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
+        should_reject_empty_idle_finalize,
     };
 
     #[test]
@@ -391,6 +434,25 @@ mod tests {
             parse_remote_fill_idle_timeout(None),
             REMOTE_FILL_IDLE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn remote_fill_empty_idle_flag_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_remote_fill_allow_empty_idle(Some(value)));
+        }
+        for value in [None, Some("0"), Some("false"), Some("off"), Some("invalid")] {
+            assert!(!parse_remote_fill_allow_empty_idle(value));
+        }
+    }
+
+    #[test]
+    fn remote_fill_rejects_multi_symbol_empty_idle_finalize_by_default() {
+        assert!(should_reject_empty_idle_finalize(2, 0, false));
+        assert!(should_reject_empty_idle_finalize(128, 0, false));
+        assert!(!should_reject_empty_idle_finalize(1, 0, false));
+        assert!(!should_reject_empty_idle_finalize(2, 1, false));
+        assert!(!should_reject_empty_idle_finalize(2, 0, true));
     }
 
     #[test]
