@@ -12,6 +12,7 @@ const REMOTE_TICK_DATA_LENGTH: usize = 10_000;
 const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
 const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_FILL_SYMBOL_BATCH_SIZE: usize = 1;
 
 pub(crate) struct SlicedRemoteBacktestCachingStream {
     user: String,
@@ -54,25 +55,27 @@ pub(crate) async fn fill_backtest_tick_cache(
     cache: BacktestTickCache,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let mut rows_by_symbol = BTreeMap::new();
-    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
-        let mut stream = RemoteBacktestCachingStream::connect(
-            user.clone(),
-            pass.clone(),
-            slice_start_ns,
-            slice_end_ns,
-            symbols.clone(),
-            cache.clone(),
-        )
-        .await
-        .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
-        while let Some(event) = stream
-            .next_remote_event()
+    for symbol_batch in symbols.chunks(remote_fill_symbol_batch_size()) {
+        for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
+            let mut stream = RemoteBacktestCachingStream::connect(
+                user.clone(),
+                pass.clone(),
+                slice_start_ns,
+                slice_end_ns,
+                symbol_batch.to_vec(),
+                cache.clone(),
+            )
             .await
-            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
-        {
-            *rows_by_symbol
-                .entry(event.symbol().to_string())
-                .or_insert(0) += 1;
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+            while let Some(event) = stream
+                .next_remote_event()
+                .await
+                .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
+            {
+                *rows_by_symbol
+                    .entry(event.symbol().to_string())
+                    .or_insert(0) += 1;
+            }
         }
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
@@ -322,6 +325,11 @@ fn remote_fill_allow_empty_idle() -> bool {
     parse_remote_fill_allow_empty_idle(value.as_deref())
 }
 
+fn remote_fill_symbol_batch_size() -> usize {
+    let value = std::env::var("TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE").ok();
+    parse_remote_fill_symbol_batch_size(value.as_deref())
+}
+
 fn remote_fill_slice_ns() -> Option<i64> {
     let value = std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS").ok();
     parse_remote_fill_slice_ns(value.as_deref())
@@ -339,6 +347,13 @@ fn parse_remote_fill_allow_empty_idle(value: Option<&str>) -> bool {
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+fn parse_remote_fill_symbol_batch_size(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|batch_size| *batch_size > 0)
+        .unwrap_or(REMOTE_FILL_SYMBOL_BATCH_SIZE)
 }
 
 fn parse_remote_fill_slice_ns(value: Option<&str>) -> Option<i64> {
@@ -388,8 +403,8 @@ mod tests {
     use super::{
         REMOTE_FILL_IDLE_TIMEOUT, parse_remote_fill_allow_empty_idle,
         parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
-        remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
-        should_reject_empty_idle_finalize,
+        parse_remote_fill_symbol_batch_size, remote_fill_ranges_for_slice_ns,
+        remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
     };
 
     #[test]
@@ -453,6 +468,15 @@ mod tests {
         assert!(!should_reject_empty_idle_finalize(1, 0, false));
         assert!(!should_reject_empty_idle_finalize(2, 1, false));
         assert!(!should_reject_empty_idle_finalize(2, 0, true));
+    }
+
+    #[test]
+    fn remote_fill_symbol_batch_defaults_to_single_symbol_safe_mode() {
+        assert_eq!(parse_remote_fill_symbol_batch_size(None), 1);
+        assert_eq!(parse_remote_fill_symbol_batch_size(Some("0")), 1);
+        assert_eq!(parse_remote_fill_symbol_batch_size(Some("invalid")), 1);
+        assert_eq!(parse_remote_fill_symbol_batch_size(Some("2")), 2);
+        assert_eq!(parse_remote_fill_symbol_batch_size(Some("128")), 128);
     }
 
     #[test]

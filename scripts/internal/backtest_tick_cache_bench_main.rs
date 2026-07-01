@@ -86,14 +86,30 @@ async fn main() -> tqsdk::Result<()> {
             .unwrap_or_default();
     }
 
-    let action_counts = warmup
+    let action_counts =
+        warmup
+            .symbols
+            .iter()
+            .fold(BTreeMap::<String, usize>::new(), |mut counts, symbol| {
+                *counts.entry(format!("{:?}", symbol.action)).or_default() += 1;
+                counts
+            });
+    let rows_by_symbol = warmup
         .symbols
         .iter()
-        .fold(BTreeMap::<String, usize>::new(), |mut counts, symbol| {
-            *counts.entry(format!("{:?}", symbol.action)).or_default() += 1;
-            counts
-        });
-    let filled_remote = action_counts.get("FilledRemote").copied().unwrap_or_default();
+        .map(|symbol| format!("{}:{}", symbol.symbol, symbol.rows_written))
+        .collect::<Vec<_>>()
+        .join(",");
+    let actions_by_symbol = warmup
+        .symbols
+        .iter()
+        .map(|symbol| format!("{}:{:?}", symbol.symbol, symbol.action))
+        .collect::<Vec<_>>()
+        .join(",");
+    let filled_remote = action_counts
+        .get("FilledRemote")
+        .copied()
+        .unwrap_or_default();
     let refreshed_remote = action_counts
         .get("RefreshedRemote")
         .copied()
@@ -116,6 +132,8 @@ async fn main() -> tqsdk::Result<()> {
         ("filled_remote", filled_remote.to_string()),
         ("refreshed_remote", refreshed_remote.to_string()),
         ("rows_written", warmup.rows_written.to_string()),
+        ("rows_by_symbol", rows_by_symbol),
+        ("actions_by_symbol", actions_by_symbol),
         ("remote_used", warmup.remote_used.to_string()),
         ("cache_only_missing", cache_only_missing.to_string()),
         ("cache_only_skipped", cache_only_skipped.to_string()),

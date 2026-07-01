@@ -113,6 +113,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow multi-symbol remote fills to complete with zero rows.",
     )
+    parser.add_argument(
+        "--remote-symbol-batch-size",
+        type=positive_int,
+        help="Override the SDK internal remote symbol batch size.",
+    )
     parser.add_argument("--skip-replay", action="store_true", help="Skip cache-only replay timing.")
     parser.add_argument("--skip-cache-only", action="store_true", help="Skip cache-only warmup timing.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned matrix without running cargo.")
@@ -205,6 +210,7 @@ def print_plan(
     print(f"output={output}")
     print(f"range_ns={args.start_ns}..{args.end_ns}")
     print(f"universe={universe}")
+    print(f"remote_symbol_batch_size={args.remote_symbol_batch_size or 'sdk-default'}")
     for batch_size, slice_secs, repeat_index in matrix:
         print(
             "case "
@@ -251,6 +257,8 @@ def run_case(
         env["TQ_BENCH_SKIP_CACHE_ONLY"] = "1"
     if args.allow_zero_rows:
         env["TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE"] = "1"
+    if args.remote_symbol_batch_size is not None:
+        env["TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE"] = str(args.remote_symbol_batch_size)
     if slice_secs is None:
         env.pop("TQSDK_REMOTE_FILL_SLICE_SECS", None)
     else:
@@ -262,6 +270,7 @@ def run_case(
         "batch_size": batch_size,
         "slice_secs": slice_secs,
         "idle_timeout_secs": args.idle_timeout_secs,
+        "remote_symbol_batch_size": args.remote_symbol_batch_size,
         "repeat_index": repeat_index,
         "cache_dir": str(cache_dir),
         "range_start_ns": args.start_ns,
