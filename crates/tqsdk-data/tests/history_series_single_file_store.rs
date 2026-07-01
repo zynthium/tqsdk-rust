@@ -288,6 +288,22 @@ fn tick_fill_accumulator_accepts_continuous_idle_tail() {
     assert_eq!(idle.id_range, Some((1, 2)));
 }
 
+#[test]
+fn tick_fill_accumulator_accepts_empty_idle_slice() {
+    let fill = tqsdk_data::BacktestTickFill::new("SHFE.rb2601", 1_000, 10_000);
+
+    let strict = fill.finish(1_000).unwrap();
+    let idle = fill.finish_after_idle(1_000).unwrap();
+
+    assert!(!strict.complete);
+    assert!(idle.complete);
+    assert_eq!(idle.unique_rows, 0);
+    assert_eq!(idle.id_range, None);
+    assert_eq!(idle.first_datetime_ns, None);
+    assert_eq!(idle.last_datetime_ns, None);
+    assert_eq!(idle.gap_summary, None);
+}
+
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
     Tick {
         id,

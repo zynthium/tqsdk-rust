@@ -156,9 +156,9 @@ impl RemoteBacktestCachingStream {
             .futures_backtest(start_ns, end_ns)?
             .build()
             .await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut handles = BTreeMap::new();
         let mut fills = BTreeMap::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         for symbol in symbols {
             let handle = api
                 .tick_ready(&symbol, REMOTE_TICK_DATA_LENGTH, Some(deadline))
@@ -189,7 +189,7 @@ impl RemoteBacktestCachingStream {
                 self.finalize_cache(FinalizeMode::Strict)?;
                 return Ok(None);
             }
-            if self.last_progress.elapsed() >= REMOTE_FILL_IDLE_TIMEOUT {
+            if self.last_progress.elapsed() >= remote_fill_idle_timeout() {
                 // Closed-session tails can legitimately idle before the requested slice end.
                 self.finalize_cache(FinalizeMode::Idle)?;
                 return Ok(None);
@@ -277,6 +277,18 @@ impl RemoteBacktestCachingStream {
     }
 }
 
+fn remote_fill_idle_timeout() -> Duration {
+    let value = std::env::var("TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS").ok();
+    parse_remote_fill_idle_timeout(value.as_deref())
+}
+
+fn parse_remote_fill_idle_timeout(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(REMOTE_FILL_IDLE_TIMEOUT)
+}
+
 impl BacktestMarketStream for RemoteBacktestCachingStream {
     fn next_event<'a>(
         &'a mut self,
@@ -303,7 +315,12 @@ impl BacktestMarketStream for SlicedRemoteBacktestCachingStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{REMOTE_FILL_SLICE_NS, remote_fill_ranges};
+    use std::time::Duration;
+
+    use super::{
+        REMOTE_FILL_IDLE_TIMEOUT, REMOTE_FILL_SLICE_NS, parse_remote_fill_idle_timeout,
+        remote_fill_ranges,
+    };
 
     #[test]
     fn remote_fill_ranges_split_long_requests_into_bounded_slices() {
@@ -321,6 +338,22 @@ mod tests {
                 (start_ns + two_hours_ns, start_ns + 2 * two_hours_ns),
                 (start_ns + 2 * two_hours_ns, end_ns),
             ]
+        );
+    }
+
+    #[test]
+    fn remote_fill_idle_timeout_can_be_overridden_for_validation() {
+        assert_eq!(
+            parse_remote_fill_idle_timeout(Some("5")),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            parse_remote_fill_idle_timeout(Some("invalid")),
+            REMOTE_FILL_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            parse_remote_fill_idle_timeout(None),
+            REMOTE_FILL_IDLE_TIMEOUT
         );
     }
 }

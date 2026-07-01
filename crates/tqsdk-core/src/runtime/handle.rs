@@ -711,6 +711,7 @@ fn mutation_source_allows_root(source: MutationSource, root: &str) -> bool {
                 root,
                 "ins_list"
                     | "mdhis_more_data"
+                    | "symbols"
                     | "quotes"
                     | "trading_status"
                     | "charts"
@@ -787,11 +788,43 @@ mod tests {
             TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
             TradeVolumeCondition,
         },
+        events::{FieldMutation, MutationSource, NormalizedMutation},
         ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
-        state::CommitScope,
+        state::{CommitScope, StatePath},
     };
 
     use super::{Runtime, RuntimeHandle};
+
+    #[test]
+    fn market_diff_allows_symbols_root_from_market_sessions() {
+        let market_symbols = NormalizedMutation {
+            path: StatePath::new(["symbols", "SHFE.au2602"]),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "instrument_name".to_string(),
+                value: json!("gold 2602"),
+            }],
+            source: MutationSource::MarketDiff,
+        };
+
+        assert!(super::validate_mutation_domains(&[market_symbols]).is_ok());
+
+        let trade_symbols = NormalizedMutation {
+            path: StatePath::new(["symbols", "SHFE.au2602"]),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "instrument_name".to_string(),
+                value: json!("gold 2602"),
+            }],
+            source: MutationSource::TradeReply,
+        };
+
+        let err = super::validate_mutation_domains(&[trade_symbols]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "validation error: trade mutation cannot write state root `symbols`"
+        );
+    }
 
     #[test]
     fn released_terminal_command_statuses_drop_ledger_metadata_but_remain_idempotent() {

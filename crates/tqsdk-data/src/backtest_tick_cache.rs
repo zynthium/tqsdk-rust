@@ -362,7 +362,7 @@ impl BacktestTickFill {
         let unique_rows = self.rows_by_id.len();
         let first_datetime_ns = first.map(|row| row.datetime);
         let last_datetime_ns = last.map(|row| row.datetime);
-        let mut complete = first.is_some();
+        let mut complete = first.is_some() || allow_idle_tail;
         let mut gap_summary = None;
         if let Some((first_id, last_id)) = id_range {
             let expected = last_id.saturating_sub(first_id).saturating_add(1);
@@ -372,7 +372,7 @@ impl BacktestTickFill {
                     "tick id range {first_id}..={last_id} contains {unique_rows} unique rows"
                 ));
             }
-        } else {
+        } else if !allow_idle_tail {
             complete = false;
         }
         if !allow_idle_tail

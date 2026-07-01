@@ -1,4 +1,5 @@
 target/
+.tqsdk/
 Cargo.lock
 .worktrees/
 .DS_Store
