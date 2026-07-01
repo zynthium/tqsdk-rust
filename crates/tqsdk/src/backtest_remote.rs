@@ -13,6 +13,7 @@ const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
 const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_FILL_SYMBOL_BATCH_SIZE: usize = 1;
+const REMOTE_FILL_SYMBOL_CONCURRENCY: usize = 1;
 
 pub(crate) struct SlicedRemoteBacktestCachingStream {
     user: String,
@@ -54,28 +55,81 @@ pub(crate) async fn fill_backtest_tick_cache(
     symbols: Vec<String>,
     cache: BacktestTickCache,
 ) -> Result<RemoteBacktestCacheFillReport> {
+    let requested_symbol_count = symbols.len();
+    let mut pending_batches = symbols
+        .chunks(remote_fill_symbol_batch_size())
+        .map(<[String]>::to_vec)
+        .collect::<VecDeque<_>>();
+    let max_concurrency = remote_fill_symbol_concurrency();
+    let mut tasks = tokio::task::JoinSet::new();
     let mut rows_by_symbol = BTreeMap::new();
-    for symbol_batch in symbols.chunks(remote_fill_symbol_batch_size()) {
-        for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
-            let mut stream = RemoteBacktestCachingStream::connect(
+
+    while !pending_batches.is_empty() || !tasks.is_empty() {
+        while tasks.len() < max_concurrency {
+            let Some(symbol_batch) = pending_batches.pop_front() else {
+                break;
+            };
+            tasks.spawn(fill_backtest_tick_cache_symbol_batch(
                 user.clone(),
                 pass.clone(),
-                slice_start_ns,
-                slice_end_ns,
-                symbol_batch.to_vec(),
+                start_ns,
+                end_ns,
+                symbol_batch,
                 cache.clone(),
-            )
+            ));
+        }
+
+        let Some(result) = tasks.join_next().await else {
+            continue;
+        };
+        let fill_report = result.map_err(|error| {
+            data_validation(format!("remote backtest cache fill task failed: {error}"))
+        })??;
+        for (symbol, rows) in fill_report.rows_by_symbol {
+            *rows_by_symbol.entry(symbol).or_insert(0) += rows;
+        }
+    }
+    let accepted_rows_total = rows_by_symbol.values().copied().sum();
+    if should_reject_empty_remote_fill(
+        requested_symbol_count,
+        accepted_rows_total,
+        remote_fill_allow_empty_idle(),
+    ) {
+        return Err(data_validation(format!(
+            "remote backtest cache fill completed without accepted ticks for {requested_symbol_count} symbols in range [{start_ns}, {end_ns}); refusing to mark complete empty coverage"
+        )));
+    }
+    Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
+}
+
+async fn fill_backtest_tick_cache_symbol_batch(
+    user: String,
+    pass: String,
+    start_ns: i64,
+    end_ns: i64,
+    symbols: Vec<String>,
+    cache: BacktestTickCache,
+) -> Result<RemoteBacktestCacheFillReport> {
+    let mut rows_by_symbol = BTreeMap::new();
+    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
+        let mut stream = RemoteBacktestCachingStream::connect(
+            user.clone(),
+            pass.clone(),
+            slice_start_ns,
+            slice_end_ns,
+            symbols.clone(),
+            cache.clone(),
+        )
+        .await
+        .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+        while let Some(event) = stream
+            .next_remote_event()
             .await
-            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
-            while let Some(event) = stream
-                .next_remote_event()
-                .await
-                .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
-            {
-                *rows_by_symbol
-                    .entry(event.symbol().to_string())
-                    .or_insert(0) += 1;
-            }
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
+        {
+            *rows_by_symbol
+                .entry(event.symbol().to_string())
+                .or_insert(0) += 1;
         }
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
@@ -330,6 +384,11 @@ fn remote_fill_symbol_batch_size() -> usize {
     parse_remote_fill_symbol_batch_size(value.as_deref())
 }
 
+fn remote_fill_symbol_concurrency() -> usize {
+    let value = std::env::var("TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY").ok();
+    parse_remote_fill_symbol_concurrency(value.as_deref())
+}
+
 fn remote_fill_slice_ns() -> Option<i64> {
     let value = std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS").ok();
     parse_remote_fill_slice_ns(value.as_deref())
@@ -356,6 +415,13 @@ fn parse_remote_fill_symbol_batch_size(value: Option<&str>) -> usize {
         .unwrap_or(REMOTE_FILL_SYMBOL_BATCH_SIZE)
 }
 
+fn parse_remote_fill_symbol_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|concurrency| *concurrency > 0)
+        .unwrap_or(REMOTE_FILL_SYMBOL_CONCURRENCY)
+}
+
 fn parse_remote_fill_slice_ns(value: Option<&str>) -> Option<i64> {
     value
         .and_then(|value| value.parse::<u64>().ok())
@@ -365,6 +431,14 @@ fn parse_remote_fill_slice_ns(value: Option<&str>) -> Option<i64> {
 }
 
 fn should_reject_empty_idle_finalize(
+    symbol_count: usize,
+    accepted_rows_total: usize,
+    allow_empty_idle: bool,
+) -> bool {
+    symbol_count > 1 && accepted_rows_total == 0 && !allow_empty_idle
+}
+
+fn should_reject_empty_remote_fill(
     symbol_count: usize,
     accepted_rows_total: usize,
     allow_empty_idle: bool,
@@ -403,8 +477,9 @@ mod tests {
     use super::{
         REMOTE_FILL_IDLE_TIMEOUT, parse_remote_fill_allow_empty_idle,
         parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
-        parse_remote_fill_symbol_batch_size, remote_fill_ranges_for_slice_ns,
-        remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
+        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
+        remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
+        should_reject_empty_idle_finalize, should_reject_empty_remote_fill,
     };
 
     #[test]
@@ -477,6 +552,24 @@ mod tests {
         assert_eq!(parse_remote_fill_symbol_batch_size(Some("invalid")), 1);
         assert_eq!(parse_remote_fill_symbol_batch_size(Some("2")), 2);
         assert_eq!(parse_remote_fill_symbol_batch_size(Some("128")), 128);
+    }
+
+    #[test]
+    fn remote_fill_symbol_concurrency_defaults_to_bounded_parallelism() {
+        assert_eq!(parse_remote_fill_symbol_concurrency(None), 1);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("0")), 1);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("invalid")), 1);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("1")), 1);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("8")), 8);
+    }
+
+    #[test]
+    fn remote_fill_rejects_multi_symbol_empty_overall_fill_by_default() {
+        assert!(should_reject_empty_remote_fill(2, 0, false));
+        assert!(should_reject_empty_remote_fill(128, 0, false));
+        assert!(!should_reject_empty_remote_fill(1, 0, false));
+        assert!(!should_reject_empty_remote_fill(2, 1, false));
+        assert!(!should_reject_empty_remote_fill(2, 0, true));
     }
 
     #[test]

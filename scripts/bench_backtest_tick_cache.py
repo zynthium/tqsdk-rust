@@ -109,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         help="Mark a case failed if rows_written is below this value.",
     )
     parser.add_argument(
+        "--min-rows-per-symbol",
+        type=int,
+        default=0,
+        help="Mark a case failed if any remote-filled symbol has fewer rows.",
+    )
+    parser.add_argument(
         "--allow-zero-rows",
         action="store_true",
         help="Allow multi-symbol remote fills to complete with zero rows.",
@@ -117,6 +123,11 @@ def parse_args() -> argparse.Namespace:
         "--remote-symbol-batch-size",
         type=positive_int,
         help="Override the SDK internal remote symbol batch size.",
+    )
+    parser.add_argument(
+        "--remote-symbol-concurrency",
+        type=positive_int,
+        help="Override the SDK internal remote symbol fill concurrency.",
     )
     parser.add_argument("--skip-replay", action="store_true", help="Skip cache-only replay timing.")
     parser.add_argument("--skip-cache-only", action="store_true", help="Skip cache-only warmup timing.")
@@ -211,6 +222,7 @@ def print_plan(
     print(f"range_ns={args.start_ns}..{args.end_ns}")
     print(f"universe={universe}")
     print(f"remote_symbol_batch_size={args.remote_symbol_batch_size or 'sdk-default'}")
+    print(f"remote_symbol_concurrency={args.remote_symbol_concurrency or 'sdk-default'}")
     for batch_size, slice_secs, repeat_index in matrix:
         print(
             "case "
@@ -259,6 +271,8 @@ def run_case(
         env["TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE"] = "1"
     if args.remote_symbol_batch_size is not None:
         env["TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE"] = str(args.remote_symbol_batch_size)
+    if args.remote_symbol_concurrency is not None:
+        env["TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY"] = str(args.remote_symbol_concurrency)
     if slice_secs is None:
         env.pop("TQSDK_REMOTE_FILL_SLICE_SECS", None)
     else:
@@ -271,6 +285,7 @@ def run_case(
         "slice_secs": slice_secs,
         "idle_timeout_secs": args.idle_timeout_secs,
         "remote_symbol_batch_size": args.remote_symbol_batch_size,
+        "remote_symbol_concurrency": args.remote_symbol_concurrency,
         "repeat_index": repeat_index,
         "cache_dir": str(cache_dir),
         "range_start_ns": args.start_ns,
@@ -318,10 +333,26 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     complete_symbols = int(record.get("complete_symbols") or 0)
     cache_only_missing = int(record.get("cache_only_missing") or 0)
     remote_used = bool(record.get("remote_used"))
+    rows_by_symbol = parse_rows_by_symbol(str(record.get("rows_by_symbol") or ""))
 
     if rows_written < args.min_rows:
         record["success"] = False
         warnings.append(f"rows_written_below_min:{rows_written}<{args.min_rows}")
+    if args.min_rows_per_symbol > 0:
+        short_symbols = [
+            f"{symbol}:{rows}"
+            for symbol, rows in rows_by_symbol.items()
+            if rows < args.min_rows_per_symbol
+        ]
+        if short_symbols:
+            record["success"] = False
+            warnings.append(
+                f"rows_per_symbol_below_min:{','.join(short_symbols)}<{args.min_rows_per_symbol}"
+            )
+    elif remote_used and symbols_total > 1:
+        zero_symbols = [symbol for symbol, rows in rows_by_symbol.items() if rows == 0]
+        if zero_symbols:
+            warnings.append(f"zero_row_remote_symbols:{','.join(zero_symbols)}")
     if not args.allow_zero_rows and remote_used and symbols_total > 1 and rows_written == 0:
         warnings.append("zero_rows_multi_symbol_remote_fill")
     if symbols_total > 0 and complete_symbols != symbols_total:
@@ -336,6 +367,20 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     record["warning_count"] = len(warnings)
     record["warnings"] = warnings
     record["suspicious"] = bool(warnings)
+
+
+def parse_rows_by_symbol(value: str) -> dict[str, int]:
+    rows: dict[str, int] = {}
+    for token in value.split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        symbol, raw_rows = token.rsplit(":", 1)
+        try:
+            rows[symbol] = int(raw_rows)
+        except ValueError:
+            continue
+    return rows
 
 
 def cargo_cmd(action: str, profile: str) -> list[str]:
