@@ -77,10 +77,14 @@ pub(crate) async fn fill_backtest_tick_cache(
 }
 
 fn remote_fill_ranges(start_ns: i64, end_ns: i64) -> Vec<(i64, i64)> {
+    remote_fill_ranges_with_slice_ns(start_ns, end_ns, remote_fill_slice_ns())
+}
+
+fn remote_fill_ranges_with_slice_ns(start_ns: i64, end_ns: i64, slice_ns: i64) -> Vec<(i64, i64)> {
     let mut ranges = Vec::new();
     let mut cursor = start_ns;
     while cursor < end_ns {
-        let next = cursor.saturating_add(REMOTE_FILL_SLICE_NS).min(end_ns);
+        let next = cursor.saturating_add(slice_ns).min(end_ns);
         ranges.push((cursor, next));
         cursor = next;
     }
@@ -282,11 +286,25 @@ fn remote_fill_idle_timeout() -> Duration {
     parse_remote_fill_idle_timeout(value.as_deref())
 }
 
+fn remote_fill_slice_ns() -> i64 {
+    let value = std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS").ok();
+    parse_remote_fill_slice_ns(value.as_deref())
+}
+
 fn parse_remote_fill_idle_timeout(value: Option<&str>) -> Duration {
     value
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(REMOTE_FILL_IDLE_TIMEOUT)
+}
+
+fn parse_remote_fill_slice_ns(value: Option<&str>) -> i64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|secs| secs.checked_mul(1_000_000_000))
+        .and_then(|ns| i64::try_from(ns).ok())
+        .filter(|ns| *ns > 0)
+        .unwrap_or(REMOTE_FILL_SLICE_NS)
 }
 
 impl BacktestMarketStream for RemoteBacktestCachingStream {
@@ -319,7 +337,7 @@ mod tests {
 
     use super::{
         REMOTE_FILL_IDLE_TIMEOUT, REMOTE_FILL_SLICE_NS, parse_remote_fill_idle_timeout,
-        remote_fill_ranges,
+        parse_remote_fill_slice_ns, remote_fill_ranges_with_slice_ns,
     };
 
     #[test]
@@ -328,7 +346,7 @@ mod tests {
         let two_hours_ns = 2 * 60 * 60 * 1_000_000_000;
         let end_ns = start_ns + 3 * two_hours_ns;
 
-        let ranges = remote_fill_ranges(start_ns, end_ns);
+        let ranges = remote_fill_ranges_with_slice_ns(start_ns, end_ns, REMOTE_FILL_SLICE_NS);
 
         assert_eq!(REMOTE_FILL_SLICE_NS, two_hours_ns);
         assert_eq!(
@@ -355,5 +373,19 @@ mod tests {
             parse_remote_fill_idle_timeout(None),
             REMOTE_FILL_IDLE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn remote_fill_slice_can_be_overridden_for_validation() {
+        assert_eq!(
+            parse_remote_fill_slice_ns(Some("172800")),
+            172_800_000_000_000
+        );
+        assert_eq!(parse_remote_fill_slice_ns(Some("0")), REMOTE_FILL_SLICE_NS);
+        assert_eq!(
+            parse_remote_fill_slice_ns(Some("invalid")),
+            REMOTE_FILL_SLICE_NS
+        );
+        assert_eq!(parse_remote_fill_slice_ns(None), REMOTE_FILL_SLICE_NS);
     }
 }
