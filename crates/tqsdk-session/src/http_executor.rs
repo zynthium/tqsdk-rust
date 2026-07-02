@@ -40,7 +40,7 @@ impl ReqwestHttpExecutor {
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
 
-        reqwest::Client::builder()
+        crate::http_client::direct_reqwest_client_builder()
             .default_headers(headers)
             .gzip(true)
             .brotli(true)
@@ -219,7 +219,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn read_response_bytes_rejects_declared_body_larger_than_http_limit() {
         let url = spawn_declared_response("200 OK", 64 * 1024 * 1024 + 1);
-        let response = reqwest::Client::new()
+        let response = crate::http_client::direct_reqwest_client()
             .get(url)
             .send()
             .await

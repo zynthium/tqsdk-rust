@@ -38,6 +38,14 @@ const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continu
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
 pub(crate) const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
+
+#[cfg(feature = "services")]
+fn direct_reqwest_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("direct reqwest client should build")
+}
 const MARKET_POLL_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
@@ -92,7 +100,7 @@ impl DataClient {
             history_cache: None,
             history_cache_maintenance: HistorySeriesCacheMaintenanceConfig::default(),
             #[cfg(feature = "services")]
-            http: reqwest::Client::new(),
+            http: direct_reqwest_client(),
             endpoints: DataServiceEndpoints::default(),
         }
     }
@@ -125,7 +133,7 @@ impl DataClient {
             history_cache: None,
             history_cache_maintenance: HistorySeriesCacheMaintenanceConfig::default(),
             #[cfg(feature = "services")]
-            http: reqwest::Client::new(),
+            http: direct_reqwest_client(),
             endpoints: DataServiceEndpoints {
                 holiday_url: holiday_url.into(),
                 continuous_table_url: continuous_table_url.into(),

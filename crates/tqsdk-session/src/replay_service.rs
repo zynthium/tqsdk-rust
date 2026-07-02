@@ -74,7 +74,7 @@ impl ServerReplayBuilder {
         let provider =
             TqAuthProvider::new(PasswordCredentials::new(&self.auth_user, &self.auth_pass));
         let auth = provider.authenticate().await?;
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::direct_reqwest_client_builder()
             .default_headers(provider.auth_headers(&auth)?)
             .timeout(Duration::from_secs(30))
             .build()

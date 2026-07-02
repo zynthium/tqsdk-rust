@@ -337,7 +337,7 @@ impl SessionClient {
             )),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
-            service_http: reqwest::Client::new(),
+            service_http: crate::http_client::direct_reqwest_client(),
             #[cfg(feature = "services")]
             trading_calendar_holiday_cache: Arc::new(Mutex::new(None)),
             #[cfg(any(feature = "services", all(test, feature = "live")))]
@@ -385,7 +385,7 @@ impl SessionClient {
             )),
             order_intents: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "services")]
-            service_http: reqwest::Client::new(),
+            service_http: crate::http_client::direct_reqwest_client(),
             #[cfg(feature = "services")]
             trading_calendar_holiday_cache: Arc::new(Mutex::new(None)),
             #[cfg(any(feature = "services", all(test, feature = "live")))]

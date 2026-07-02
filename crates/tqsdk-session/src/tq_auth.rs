@@ -97,7 +97,7 @@ impl TqAuthProvider {
     }
 
     fn build_http_client(&self, default_headers: Option<HeaderMap>) -> Result<reqwest::Client> {
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::http_client::direct_reqwest_client_builder()
             .gzip(true)
             .brotli(true)
             .timeout(Duration::from_secs(30));
@@ -529,7 +529,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn read_json_response_rejects_declared_body_larger_than_auth_limit() {
         let url = spawn_declared_response("200 OK", 1024 * 1024 + 1);
-        let response = reqwest::Client::new()
+        let response = crate::http_client::direct_reqwest_client()
             .get(url)
             .send()
             .await
@@ -551,7 +551,7 @@ mod tests {
     async fn read_json_response_truncates_error_response_body() {
         let body = "x".repeat(300) + "TAIL_MARKER";
         let url = spawn_body_response("401 Unauthorized", body.as_bytes());
-        let response = reqwest::Client::new()
+        let response = crate::http_client::direct_reqwest_client()
             .get(url)
             .send()
             .await

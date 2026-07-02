@@ -1474,7 +1474,7 @@ fn test_live_client_with_components(
         market_interests: Arc::new(TokioMutex::new(MarketInterestRegistry::default())),
         order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "services")]
-        service_http: reqwest::Client::new(),
+        service_http: crate::http_client::direct_reqwest_client(),
         #[cfg(feature = "services")]
         trading_calendar_holiday_cache: Arc::new(TokioMutex::new(None)),
         #[cfg(feature = "live")]

@@ -28,6 +28,8 @@ mod builder;
 mod client;
 mod direct_query;
 mod error;
+#[cfg(feature = "http-client")]
+mod http_client;
 #[cfg(feature = "live")]
 mod http_executor;
 mod instrument;
