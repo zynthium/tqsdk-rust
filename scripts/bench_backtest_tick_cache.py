@@ -131,6 +131,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-replay", action="store_true", help="Skip cache-only replay timing.")
     parser.add_argument("--skip-cache-only", action="store_true", help="Skip cache-only warmup timing.")
+    parser.add_argument(
+        "--verify-existing-cache",
+        action="store_true",
+        help="Do not delete the case cache; run cache-only warmup and replay against existing files.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print planned matrix without running cargo.")
     parser.add_argument("--no-prebuild", dest="prebuild", action="store_false", help="Skip cargo build before matrix.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed case.")
@@ -247,14 +252,13 @@ def run_case(
     repeat_index: int,
 ) -> dict[str, Any]:
     cache_dir = case_cache_dir(args, batch_size, slice_secs, repeat_index)
-    if cache_dir.exists():
+    if cache_dir.exists() and not args.verify_existing_cache:
         shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env.update(
         {
-            "TQ_BENCH_UNIVERSE": universe,
             "TQ_BENCH_START_NS": str(args.start_ns),
             "TQ_BENCH_END_NS": str(args.end_ns),
             "TQ_BENCH_BATCH_SIZE": str(batch_size),
@@ -263,6 +267,10 @@ def run_case(
             "TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS": str(args.idle_timeout_secs),
         }
     )
+    if args.verify_existing_cache:
+        env["TQ_BENCH_VERIFY_EXISTING_CACHE"] = "1"
+    else:
+        env["TQ_BENCH_UNIVERSE"] = universe
     if args.skip_replay:
         env["TQ_BENCH_SKIP_REPLAY"] = "1"
     if args.skip_cache_only:
@@ -286,6 +294,7 @@ def run_case(
         "idle_timeout_secs": args.idle_timeout_secs,
         "remote_symbol_batch_size": args.remote_symbol_batch_size,
         "remote_symbol_concurrency": args.remote_symbol_concurrency,
+        "verify_existing_cache": args.verify_existing_cache,
         "repeat_index": repeat_index,
         "cache_dir": str(cache_dir),
         "range_start_ns": args.start_ns,
@@ -327,17 +336,19 @@ def run_case(
 
 def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     warnings: list[str] = []
+    verify_existing_cache = bool(record.get("verify_existing_cache"))
     rows_written = int(record.get("rows_written") or 0)
-    replay_updates = int(record.get("replay_updates") or 0)
+    replay_tick_count = int(record.get("replay_tick_count") or 0)
+    effective_rows = replay_tick_count if verify_existing_cache else rows_written
     symbols_total = int(record.get("symbols_total") or 0)
     complete_symbols = int(record.get("complete_symbols") or 0)
     cache_only_missing = int(record.get("cache_only_missing") or 0)
     remote_used = bool(record.get("remote_used"))
     rows_by_symbol = parse_rows_by_symbol(str(record.get("rows_by_symbol") or ""))
 
-    if rows_written < args.min_rows:
+    if effective_rows < args.min_rows:
         record["success"] = False
-        warnings.append(f"rows_written_below_min:{rows_written}<{args.min_rows}")
+        warnings.append(f"rows_below_min:{effective_rows}<{args.min_rows}")
     if args.min_rows_per_symbol > 0:
         short_symbols = [
             f"{symbol}:{rows}"
@@ -361,8 +372,8 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     if not args.skip_cache_only and cache_only_missing != 0:
         record["success"] = False
         warnings.append(f"cache_only_missing:{cache_only_missing}")
-    if not args.skip_replay and rows_written != replay_updates:
-        warnings.append(f"rows_replay_mismatch:{rows_written}!={replay_updates}")
+    if not verify_existing_cache and not args.skip_replay and rows_written != replay_tick_count:
+        warnings.append(f"rows_replay_mismatch:{rows_written}!={replay_tick_count}")
 
     record["warning_count"] = len(warnings)
     record["warnings"] = warnings
@@ -438,7 +449,8 @@ def print_case_summary(record: dict[str, Any]) -> None:
             f"{status} "
             f"label={record['label']} "
             f"rows={record.get('rows_written')} "
-            f"replay={record.get('replay_updates')} "
+            f"replay_ticks={record.get('replay_tick_count')} "
+            f"replay_updates={record.get('replay_updates')} "
             f"warmup_s={record.get('warmup_elapsed_s')} "
             f"process_s={record.get('process_elapsed_s')} "
             f"warnings={','.join(record.get('warnings', []))}"
@@ -453,7 +465,9 @@ def print_case_summary(record: dict[str, Any]) -> None:
         )
 
 
-def tail_text(text: str, limit: int = 4000) -> str:
+def tail_text(text: str | bytes, limit: int = 4000) -> str:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     return text[-limit:] if len(text) > limit else text
 
 

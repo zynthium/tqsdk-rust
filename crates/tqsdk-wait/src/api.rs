@@ -10,7 +10,9 @@ use tqsdk_core::{
 };
 use tqsdk_session::SessionClient;
 
-use crate::backtest::{BacktestCommitAction, BacktestPump, BacktestSyntheticCommit, TqBacktest};
+use crate::backtest::{
+    BacktestCommitAction, BacktestPump, BacktestPumpMode, BacktestSyntheticCommit, TqBacktest,
+};
 use crate::driver::{WaitDriver, WaitGuard};
 use crate::price::OrderPrice;
 use crate::refs::{
@@ -48,8 +50,17 @@ impl TqApi {
 
     #[must_use]
     pub(crate) fn new_with_backtest(session: SessionClient, backtest: Option<TqBacktest>) -> Self {
+        Self::new_with_backtest_mode(session, backtest, BacktestPumpMode::Strategy)
+    }
+
+    #[must_use]
+    pub(crate) fn new_with_backtest_mode(
+        session: SessionClient,
+        backtest: Option<TqBacktest>,
+        backtest_pump_mode: BacktestPumpMode,
+    ) -> Self {
         let handle = session.handle().clone();
-        Self::from_runtime_parts(handle, session, backtest)
+        Self::from_runtime_parts(handle, session, backtest, backtest_pump_mode)
     }
 
     #[must_use]
@@ -57,6 +68,7 @@ impl TqApi {
         handle: tqsdk_core::RuntimeHandle,
         session: SessionClient,
         backtest: Option<TqBacktest>,
+        backtest_pump_mode: BacktestPumpMode,
     ) -> Self {
         let reader = handle.reader();
         let cursor = reader.cursor();
@@ -73,7 +85,10 @@ impl TqApi {
                 quote_subscriptions: Default::default(),
                 trading_status_subscriptions: Default::default(),
                 serial_charts: Default::default(),
-                backtest_pump: backtest.as_ref().map(|_| BacktestPump::new()),
+                backtest_pump: backtest.as_ref().map(|_| match backtest_pump_mode {
+                    BacktestPumpMode::Strategy => BacktestPump::new(),
+                    BacktestPumpMode::CacheFill => BacktestPump::new_cache_fill(),
+                }),
                 backtest,
                 backtest_finished: false,
             },
@@ -564,6 +579,15 @@ impl TqApi {
         self.wait_until_ready_until(|| serial.is_ready(), deadline, "serial chart not ready")
             .await?;
         Ok(serial)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn backtest_tick_serial_exhausted(&self, handle: &TickHandle) -> Option<bool> {
+        self.driver
+            .backtest_pump
+            .as_ref()?
+            .tick_serial_exhausted(&handle.chart_id)
     }
 
     pub async fn login_trade_account(

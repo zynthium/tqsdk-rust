@@ -1268,8 +1268,22 @@ impl PreparedBacktest {
             }
             PreparedBacktestMode::RemoteCaching { symbols } => {
                 let auth = base.auth.clone().ok_or(Error::MissingAuth)?;
-                let stream = backtest_remote::SlicedRemoteBacktestCachingStream::connect(
-                    auth.user, auth.pass, start_ns, end_ns, symbols, cache,
+                backtest_remote::fill_backtest_tick_cache(
+                    auth.user,
+                    auth.pass,
+                    start_ns,
+                    end_ns,
+                    symbols.clone(),
+                    cache.clone(),
+                )
+                .await?;
+                let requests = symbols
+                    .iter()
+                    .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
+                    .collect::<Vec<_>>();
+                let stream = tqsdk_task::HistoryTickReplayStream::new(
+                    tqsdk_data::HistorySeriesCache::open(cache.cache_dir())?,
+                    requests,
                 )?;
                 base.replay_backtest_stream(Box::new(stream))
                     .connect()

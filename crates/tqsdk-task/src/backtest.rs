@@ -39,6 +39,7 @@ pub struct StrategyBacktestBuilder {
 /// Local Python-compatible strategy backtest host.
 pub struct StrategyBacktest {
     replay: Box<dyn BacktestMarketStream>,
+    pending_event: Option<ReplayMarketEvent>,
     strategy: StrategyHost,
     sim: TqSim,
     tracked_symbols: Vec<String>,
@@ -81,37 +82,29 @@ impl StrategyBacktest {
     }
 
     pub async fn next(&mut self) -> Result<Option<StrategyBacktestContext<'_>>> {
-        let Some(event) = self.replay.next_event().await? else {
+        let Some(event) = self.next_replay_event().await? else {
             self.drain_pending_task_updates().await?;
             return Ok(None);
         };
+        let event_time_ns = event.event_time_ns();
         let backtest_event = StrategyBacktestEvent::from_replay_event(&event);
-        let payload_kind = event.payload_kind();
-        match event.payload() {
-            ReplayMarketPayload::Quote(quote) => {
-                let quote =
-                    quote_with_replay_underlying((**quote).clone(), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
+        self.ingest_replay_event(&event)?;
+
+        loop {
+            let Some(next_event) = self.replay.next_event().await? else {
+                break;
+            };
+            if next_event.event_time_ns() != event_time_ns {
+                self.pending_event = Some(next_event);
+                break;
             }
-            ReplayMarketPayload::Tick(tick) => {
-                let quote =
-                    quote_with_replay_underlying(quote_from_tick(tick), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
-            }
-            ReplayMarketPayload::Kline { row, .. } => {
-                let price_tick = self.price_tick(event.symbol())?;
-                let checkpoints = kline_quote_checkpoints(row, price_tick);
-                for quote in checkpoints {
-                    let quote = quote_with_replay_underlying(quote, event.underlying_symbol());
-                    self.ingest_quote(event.symbol(), &quote, backtest_event.event_time_ns())?;
-                }
-            }
+            self.ingest_replay_event(&next_event)?;
         }
-        self.summary.record_payload(payload_kind);
+
         self.summary.record_snapshot(ledger_snapshot_from_sim(
             &self.sim,
             &self.tracked_symbols,
-            Some(backtest_event.event_time_ns()),
+            Some(event_time_ns),
         ));
 
         let context = self.strategy.next_once().await?;
@@ -122,6 +115,39 @@ impl StrategyBacktest {
             summary: &mut self.summary,
             tracked_symbols: &self.tracked_symbols,
         }))
+    }
+
+    async fn next_replay_event(&mut self) -> Result<Option<ReplayMarketEvent>> {
+        if self.pending_event.is_some() {
+            return Ok(self.pending_event.take());
+        }
+        self.replay.next_event().await
+    }
+
+    fn ingest_replay_event(&mut self, event: &ReplayMarketEvent) -> Result<()> {
+        let event_time_ns = event.event_time_ns();
+        match event.payload() {
+            ReplayMarketPayload::Quote(quote) => {
+                let quote =
+                    quote_with_replay_underlying((**quote).clone(), event.underlying_symbol());
+                self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+            }
+            ReplayMarketPayload::Tick(tick) => {
+                let quote =
+                    quote_with_replay_underlying(quote_from_tick(tick), event.underlying_symbol());
+                self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+            }
+            ReplayMarketPayload::Kline { row, .. } => {
+                let price_tick = self.price_tick(event.symbol())?;
+                let checkpoints = kline_quote_checkpoints(row, price_tick);
+                for quote in checkpoints {
+                    let quote = quote_with_replay_underlying(quote, event.underlying_symbol());
+                    self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+                }
+            }
+        }
+        self.summary.record_payload(event.payload_kind());
+        Ok(())
     }
 
     #[must_use]
@@ -305,6 +331,7 @@ impl StrategyBacktestBuilder {
         ));
         Ok(StrategyBacktest {
             replay,
+            pending_event: None,
             strategy,
             sim,
             tracked_symbols,
@@ -640,6 +667,40 @@ fn insert_i64_if_nonzero(value: &mut Map<String, Value>, key: &str, field: i64) 
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn strategy_backtest_batches_same_timestamp_ticks_into_one_step() {
+        let replay = ReplayMarketSource::new(vec![
+            tick_event("SHFE.a", 1, 1_000, 101.0),
+            tick_event("DCE.b", 2, 1_000, 201.0),
+            tick_event("SHFE.a", 3, 2_000, 102.0),
+        ]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        assert_eq!(first.event().event_time_ns(), 1_000);
+        assert_eq!(first.quote("SHFE.a").unwrap().last_price, 101.0);
+        assert_eq!(first.quote("DCE.b").unwrap().last_price, 201.0);
+        drop(first);
+
+        let second = backtest
+            .next()
+            .await
+            .expect("second step should succeed")
+            .expect("second step should exist");
+        assert_eq!(second.event().event_time_ns(), 2_000);
+        assert_eq!(second.quote("SHFE.a").unwrap().last_price, 102.0);
+        drop(second);
+
+        assert!(backtest.next().await.unwrap().is_none());
+    }
+
     #[test]
     fn kline_quote_checkpoints_include_open_high_low_close_order() {
         let row = Kline {
@@ -664,5 +725,25 @@ mod tests {
         assert_eq!(checkpoints[3].last_price, 99.0);
         assert_eq!(checkpoints[3].ask_price1, 99.5);
         assert_eq!(checkpoints[3].bid_price1, 98.5);
+    }
+
+    fn tick_event(symbol: &str, id: i64, datetime: i64, last_price: f64) -> ReplayMarketEvent {
+        ReplayMarketEvent::tick(
+            "test",
+            symbol,
+            datetime,
+            Some(datetime),
+            Tick {
+                id,
+                datetime,
+                last_price,
+                ask_price1: last_price + 0.5,
+                ask_volume1: 1,
+                bid_price1: last_price - 0.5,
+                bid_volume1: 1,
+                ..Tick::default()
+            },
+        )
+        .expect("tick event should be valid")
     }
 }

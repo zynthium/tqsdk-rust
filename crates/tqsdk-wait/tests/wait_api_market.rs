@@ -1141,7 +1141,7 @@ async fn backtest_tick_page_waits_for_rows_and_mdhis_completion_before_emit() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn backtest_tick_next_page_starts_from_previous_right_id() {
+async fn backtest_tick_next_page_reuses_previous_right_id_boundary() {
     let mut api = support::backtest_api_for_test(1_000, 4_000);
 
     let ticks = api.tick_ready("SHFE.au2602", 2, None).await.unwrap();

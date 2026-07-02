@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use crate::api::TqApi;
-use crate::backtest::{BacktestMarketKind, TqBacktest};
+use crate::backtest::{BacktestMarketKind, BacktestPumpMode, TqBacktest};
 
 /// Builder for the single-owner wait facade.
 ///
@@ -11,6 +11,7 @@ use crate::backtest::{BacktestMarketKind, TqBacktest};
 pub struct TqApiBuilder {
     inner: tqsdk_session::SessionClientBuilder,
     backtest: Option<TqBacktest>,
+    backtest_pump_mode: BacktestPumpMode,
 }
 
 impl TqApiBuilder {
@@ -19,6 +20,7 @@ impl TqApiBuilder {
         Self {
             inner,
             backtest: None,
+            backtest_pump_mode: BacktestPumpMode::Strategy,
         }
     }
 
@@ -31,6 +33,13 @@ impl TqApiBuilder {
             BacktestMarketKind::Stock => self.inner.stock_backtest_market(),
         };
         self.backtest = Some(backtest);
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn backtest_cache_fill_mode(mut self) -> Self {
+        self.backtest_pump_mode = BacktestPumpMode::CacheFill;
         self
     }
 
@@ -52,13 +61,19 @@ impl TqApiBuilder {
 
     pub async fn build(self) -> crate::error::Result<TqApi> {
         let session = self.inner.build()?;
-        Ok(TqApi::new_with_backtest(session, self.backtest))
+        Ok(TqApi::new_with_backtest_mode(
+            session,
+            self.backtest,
+            self.backtest_pump_mode,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use tqsdk_core::MarketSessionTarget;
+
+    use crate::backtest::BacktestPumpMode;
 
     use super::{TqApiBuilder, TqBacktest};
 
@@ -105,6 +120,16 @@ mod tests {
             &MarketSessionTarget::futures_backtest()
         );
         assert_eq!(builder.backtest, Some(backtest));
+    }
+
+    #[test]
+    fn backtest_cache_fill_mode_sets_internal_pump_mode() {
+        let builder = TqApiBuilder::new("demo-user", "demo-pass")
+            .futures_backtest(1_000, 2_000)
+            .unwrap()
+            .backtest_cache_fill_mode();
+
+        assert_eq!(builder.backtest_pump_mode, BacktestPumpMode::CacheFill);
     }
 
     #[test]
