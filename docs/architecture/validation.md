@@ -165,6 +165,7 @@ rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_mi
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks
 rtk cargo check -p tqsdk --example api_contract_s47_facade_market_cache_policy
+rtk python3 scripts/smoke_market_cache_e2e.py --symbols KQ.i@SHFE.au --timeout-secs 300
 ```
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
@@ -178,6 +179,10 @@ symbol 的 tick serial 写入同一份 `BacktestTickCache`，并通过 `LiveTick
 per-symbol last id 和 gap 状态，且跳号 tick 应被保留为 `gap_detected`。从 active recording
 health 派生的 `MarketCachePolicy` 必须能进入 cache-backed local backtest warmup 路径，用于显式
 检查或补齐缺口；该路径不得隐式复用 live session auth。
+`scripts/smoke_market_cache_e2e.py` 是真实服务端到端 smoke：生成临时 Cargo harness，
+用同一份 `MarketCachePolicy` 跑 remote-on-miss warmup、cache-only warmup 和 cache-only
+replay，并要求远端写入行数与 replay tick 数可对齐；交易时段可加 `--live-seconds <N>`
+验证 live recording health，非交易时段默认不跑 live。
 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
 
 TQBN format/store checks currently live in internal lib tests and are covered by
