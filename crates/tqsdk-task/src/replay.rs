@@ -788,6 +788,16 @@ impl ReplayMarketEvent {
         }
     }
 
+    pub(crate) fn into_step_meta(self) -> ReplayStepMeta {
+        ReplayStepMeta {
+            source: self.source,
+            symbol: self.symbol,
+            received_at_ns: self.received_at_ns,
+            event_time_ns: self.event_time_ns,
+            underlying_symbol: self.underlying_symbol,
+        }
+    }
+
     pub fn quote(
         source: impl Into<String>,
         symbol: impl Into<String>,

@@ -113,9 +113,9 @@ impl StrategyBacktest {
             return Ok(None);
         };
         let event_time_ns = event.event_time_ns();
-        let backtest_event = StrategyBacktestEvent::from_replay_event(&event);
         let mut batch = ReplayStepBatch::default();
         self.ingest_replay_event(&event, &mut batch)?;
+        let backtest_event = StrategyBacktestEvent::from_replay_event(event);
 
         loop {
             let Some(next_event) = self.next_stream_event().await? else {
@@ -417,8 +417,8 @@ impl StrategyBacktestBuilder {
 }
 
 impl StrategyBacktestEvent {
-    fn from_replay_event(event: &ReplayMarketEvent) -> Self {
-        event.step_meta().into()
+    fn from_replay_event(event: ReplayMarketEvent) -> Self {
+        event.into_step_meta().into()
     }
 
     #[must_use]
