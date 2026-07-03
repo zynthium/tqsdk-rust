@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Minimum live updates to wait for when live recording is enabled.",
     )
+    parser.add_argument(
+        "--live-min-rows",
+        type=int,
+        default=0,
+        help="Minimum live tick rows expected when live recording is enabled.",
+    )
     parser.add_argument("--skip-remote", action="store_true", help="Skip remote-on-miss warmup.")
     parser.add_argument("--skip-cache-only", action="store_true", help="Skip cache-only warmup.")
     parser.add_argument("--skip-replay", action="store_true", help="Skip cache-only replay.")
@@ -218,6 +224,7 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     replay_ticks = as_int(record.get("replay_tick_count"))
     live_requested = as_bool(record.get("live_requested"))
     live_updates = as_int(record.get("live_updates"))
+    live_rows = as_int(record.get("live_total_appended_rows"))
 
     if not remote_skipped:
         if remote_rows < args.min_rows:
@@ -232,6 +239,8 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
         warnings.append(f"replay_ticks_below_min:{replay_ticks}<{args.min_rows}")
     if live_requested and args.live_min_updates > 0 and live_updates < args.live_min_updates:
         warnings.append(f"live_updates_below_min:{live_updates}<{args.live_min_updates}")
+    if live_requested and args.live_min_rows > 0 and live_rows < args.live_min_rows:
+        warnings.append(f"live_rows_below_min:{live_rows}<{args.live_min_rows}")
 
     record["warnings"] = warnings
     record["warning_count"] = len(warnings)

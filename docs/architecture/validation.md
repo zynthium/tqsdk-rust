@@ -182,7 +182,7 @@ health 派生的 `MarketCachePolicy` 必须能进入 cache-backed local backtest
 `scripts/smoke_market_cache_e2e.py` 是真实服务端到端 smoke：生成临时 Cargo harness，
 用同一份 `MarketCachePolicy` 跑 remote-on-miss warmup、cache-only warmup 和 cache-only
 replay，并要求远端写入行数与 replay tick 数可对齐；交易时段可加 `--live-seconds <N>`
-验证 live recording health，非交易时段默认不跑 live。
+和 `--live-min-rows 1` 验证 live recording health，非交易时段默认不跑 live。
 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
 
 TQBN format/store checks currently live in internal lib tests and are covered by

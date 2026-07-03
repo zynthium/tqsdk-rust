@@ -154,11 +154,16 @@ async fn run_live_recording(
     let mut updates = 0usize;
     while Instant::now() < deadline || updates < live_min_updates {
         let step_deadline = tokio::time::Instant::from_std(deadline);
-        if !tq.wait_update(Some(step_deadline)).await? {
-            break;
+        let updated = tq.wait_update(Some(step_deadline)).await?;
+        if !updated {
+            if Instant::now() >= deadline && updates >= live_min_updates {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
         }
         for quote in &quotes {
-            let _ = quote.load()?;
+            let _ = quote.load();
         }
         updates = updates.saturating_add(1);
         if updates >= live_min_updates && Instant::now() >= deadline {
