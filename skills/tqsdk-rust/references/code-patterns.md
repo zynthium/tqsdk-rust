@@ -9,6 +9,7 @@
 - 品种/合约查询
 - Caller-Owned Commit Consumer
 - Historical Data Client
+- Shared Live/Backtest Tick Cache
 - Trading Task Pattern
 - Direct Order Wrapper
 
@@ -202,25 +203,50 @@ println!("rows={}", series.len());
 # }
 ```
 
-## Live Persistence Boundary
+## Shared Live/Backtest Tick Cache
 
-指定合约的 live tick 可以显式写入和回测共享的持久 tick cache。普通策略使用默认
-facade 的 `record_ticks`；它只记录声明的 symbol，并由正常 `next()` / `wait_update()`
-驱动：
+指定合约的 live tick 可以写入和回测共享的持久 tick cache。普通策略优先用
+`MarketCachePolicy` 一次声明 cache 目录和 symbol 集合；live builder 会在 `connect()`
+后自动启动 recording，backtest builder 可复用同一个 policy 作为默认 cache 输入：
 
 ```rust
 use tqsdk::prelude::*;
 
-async fn main() -> tqsdk::Result<()> {
-    let mut tq = Tq::futures().auth_env()?.connect().await?;
-    tq.record_ticks(".tqsdk/backtest_ticks", ["KQ.i@SHFE.au"]).await?;
+async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
+    let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
+        .record_ticks(["KQ.i@SHFE.au"]);
+
+    let mut tq = Tq::futures()
+        .auth_env()?
+        .market_cache(cache.clone())
+        .connect()
+        .await?;
 
     while tq.next().await? {
-        // normal strategy body
+        if let Some(health) = tq.record_ticks_health() {
+            if health.gap_detected {
+                eprintln!("cache gap detected; schedule explicit warmup later");
+            }
+        }
     }
+
+    let fill_policy = tq.recorded_market_cache_policy().unwrap_or(cache);
+    Tq::futures()
+        .auth_env()? // explicit again; live session auth is not retained for fill
+        .market_cache(fill_policy)
+        .backtest(start_ns, end_ns)
+        .remote_on_miss()
+        .warmup()
+        .await?;
+
     Ok(())
 }
 ```
+
+`Tq::record_ticks(cache_dir, symbols).await?` 仍保留为运行中临时开启 recording 的显式入口。
+两种方式都只记录声明的 symbol，不会自动记录所有订阅，也不会启动后台守护进程。coverage
+只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续需要显式
+`.warmup()` / `.remote_on_miss()` 补齐。
 
 已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
 `LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id

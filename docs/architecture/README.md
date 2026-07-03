@@ -108,6 +108,10 @@ V1 是：
     backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要 auth，cache fill
     不使用专业历史下载接口
   - `.universe(...)` 复用 relay 对齐的期货 universe selector 语法，支持全品种回测策略
+  - `MarketCachePolicy` / `.market_cache(...)` 用同一份配置维护 live tick recording
+    和 cache-backed backtest 的 cache 目录及 symbol 集合；`record_ticks_health()`
+    暴露写入与 gap 状态，`recorded_market_cache_policy()` 只派生补洞 policy，
+    不携带或复用 live session 明文 auth
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - local backtest continuous minute helper 可自动查询主连 underlying segment、按交易日窗口裁剪历史分钟线并以主连 symbol 回放
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
@@ -237,6 +241,9 @@ V1 是：
   和 `TargetPos`，不会创建 facade 私有状态树
 - `tqsdk` 的 cache-backed `.backtest(...)` 是 Python 心智入口，`local_backtest`
   不再是独立用户概念；持久缓存、覆盖检查和 universe 解析归 data/task 内部能力承接
+- `tqsdk` 的 shared market cache policy 只是默认 facade 组合入口：live session/订阅由 facade
+  拥有，tick rows/coverage 仍写入 `tqsdk-data::BacktestTickCache`，本地回测仍由
+  `tqsdk-task` / `TqSim` 消费；它不新增后台守护进程、第二套状态树或 data-owned live session
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。

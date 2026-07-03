@@ -4,7 +4,8 @@
 
 - 示例默认使用 `TQ_AUTH_USER` 和 `TQ_AUTH_PASS`，除非用户提供其他 auth path。
 - 说明 live 示例需要行情权限；交易示例还需要账户权限。
-- `record_ticks(...)` 是只读行情记录，但仍会连接 live/session 并写本地持久缓存；示例必须显式说明需要行情权限和 cache 目录，live smoke 保持环境变量门控。
+- `MarketCachePolicy` / `record_ticks(...)` 是只读行情记录，但仍会连接 live/session 并写本地持久缓存；示例必须显式说明需要行情权限、cache 目录和显式 symbol 列表，live smoke 保持环境变量门控。
+- `recorded_market_cache_policy()` 只能派生 cache 目录和 symbol 集合，不能携带或复用 live session 明文 auth；后续 `.warmup()` / `.remote_on_miss()` 补洞必须由用户显式重新提供 auth。
 - 工作流依赖特定行情权限时，使用 `has_feature(...)` 或 `check_md_grants(...)`。
 - live smoke test 必须放在显式环境变量后面；普通 unit test 不应依赖官方服务。
 - HTTP auth / direct-query 默认强制直连，不使用系统 proxy；如果 Rust resolver 对官方域名异常，可用 `TQSDK_DIRECT_RESOLVE_AUTH_SHINNYTECH_COM` / `TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM` / `TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM` 注入当前环境解析到的 IP。

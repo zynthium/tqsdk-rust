@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 use tqsdk_core::{
@@ -19,6 +19,9 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<QuoteRef> = None;
     let _: Option<QuoteSet> = None;
     let _: Option<TargetPos> = None;
+    let _: Option<MarketCachePolicy> = None;
+    let _: Option<RecordTicksHealth> = None;
+    let _: Option<RecordTicksFlushReport> = None;
     let _: Option<RecordTicksReport> = None;
 }
 
@@ -183,6 +186,14 @@ async fn facade_record_ticks_writes_live_ticks_to_backtest_cache() {
 
     seed_ready_record_tick_chart(&tq, symbol);
     assert!(tq.next().await.unwrap());
+    let health = tq
+        .record_ticks_health()
+        .expect("record ticks health should be available");
+    assert_eq!(health.flush_count, 1);
+    assert_eq!(health.total_appended_rows, 2);
+    assert!(!health.gap_detected);
+    assert_eq!(health.symbols[0].last_seen_id, Some(201));
+    assert_eq!(health.symbols[0].total_appended_rows, 2);
 
     let cache = BacktestTickCache::open(&cache_dir).unwrap();
     let series = cache
@@ -196,6 +207,147 @@ async fn facade_record_ticks_writes_live_ticks_to_backtest_cache() {
         series.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![200, 201]
     );
+}
+
+#[tokio::test]
+async fn facade_record_ticks_health_reports_live_tick_gaps() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    tq.record_ticks(&cache_dir, [symbol]).await.unwrap();
+
+    seed_record_tick_chart_rows(&tq, symbol, [tick(200, 1_713_660_000_000_000_000, 618.0)]);
+    assert!(tq.next().await.unwrap());
+
+    seed_record_tick_chart_rows(&tq, symbol, [tick(202, 1_713_660_000_500_000_000, 619.0)]);
+    assert!(tq.next().await.unwrap());
+
+    let health = tq
+        .record_ticks_health()
+        .expect("record ticks health should be available");
+    assert_eq!(health.flush_count, 2);
+    assert_eq!(health.total_appended_rows, 2);
+    assert!(health.gap_detected);
+    assert_eq!(health.symbols[0].last_seen_id, Some(202));
+    assert!(health.symbols[0].gap_detected);
+
+    let last_flush = health
+        .last_flush
+        .as_ref()
+        .expect("latest flush report should be retained");
+    assert_eq!(last_flush.appended_rows, 1);
+    assert!(last_flush.gap_detected);
+    assert_eq!(last_flush.symbols[0].last_seen_id, Some(202));
+}
+
+#[tokio::test]
+async fn facade_record_ticks_health_can_seed_gap_warmup_policy() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_713_660_000_000_000_000_i64;
+    let end_ns = 1_713_660_000_500_000_001_i64;
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    tq.record_ticks(&cache_dir, [symbol]).await.unwrap();
+    seed_record_tick_chart_rows(&tq, symbol, [tick(200, start_ns, 618.0)]);
+    assert!(tq.next().await.unwrap());
+    seed_record_tick_chart_rows(&tq, symbol, [tick(202, end_ns - 1, 619.0)]);
+    assert!(tq.next().await.unwrap());
+
+    let policy = tq
+        .recorded_market_cache_policy()
+        .expect("active recording should expose a cache policy");
+    assert_eq!(policy.cache_dir(), cache_dir.as_path());
+    assert_eq!(policy.tick_symbols(), &[symbol.to_string()]);
+
+    let report = Tq::futures()
+        .market_cache(policy)
+        .backtest(start_ns, end_ns)
+        .cache_only()
+        .warmup()
+        .await
+        .unwrap();
+
+    assert_eq!(report.symbols_total, 1);
+    assert_eq!(report.symbols_missing, 1);
+    assert_eq!(
+        report.symbols[0].before.missing_ranges,
+        vec![(start_ns + 1, end_ns - 1)]
+    );
+}
+
+#[tokio::test]
+async fn facade_market_cache_policy_starts_live_tick_recording() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    let report = tq
+        .start_market_cache(MarketCachePolicy::new(&cache_dir).record_ticks([symbol]))
+        .await
+        .unwrap()
+        .expect("non-empty market cache policy should start recording");
+    assert_eq!(report.symbols, vec![symbol.to_string()]);
+    assert_eq!(
+        tq.record_ticks_report(),
+        Some(&RecordTicksReport {
+            cache_dir: cache_dir.clone(),
+            symbols: vec![symbol.to_string()],
+            data_length: 10_000,
+        })
+    );
+
+    seed_ready_record_tick_chart(&tq, symbol);
+    assert!(tq.next().await.unwrap());
+    let health = tq
+        .record_ticks_health()
+        .expect("record ticks health should be available");
+    assert_eq!(health.total_appended_rows, 2);
+    assert!(!health.gap_detected);
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let series = cache
+        .load_series(TickDataSeriesRequest::new(
+            symbol,
+            1_713_660_000_000_000_000,
+            1_713_660_000_500_000_001,
+        ))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+}
+
+#[tokio::test]
+async fn facade_market_cache_policy_supplies_backtest_cache_inputs() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let mut tq = Tq::futures()
+        .market_cache(MarketCachePolicy::new(&cache_dir).record_ticks([symbol]))
+        .backtest(1_000, 3_000)
+        .cache_only()
+        .connect()
+        .await
+        .unwrap();
+    let quote = tq.quote(symbol).await.unwrap();
+
+    assert!(tq.next().await.unwrap());
+    assert_eq!(quote.load().unwrap().last_price, 100.0);
+    assert!(tq.next().await.unwrap());
+    assert_eq!(quote.load().unwrap().last_price, 101.0);
+    assert!(!tq.next().await.unwrap());
 }
 
 #[test]
@@ -904,6 +1056,31 @@ fn record_ticks_contract_example_exposes_live_cache_recording_flow() {
     }
 }
 
+#[test]
+fn market_cache_policy_contract_example_exposes_shared_cache_flow() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/api_contract_s47_facade_market_cache_policy.rs"
+    );
+    let source = std::fs::read_to_string(path).expect("read market cache policy facade example");
+
+    for required in [
+        "MarketCachePolicy::new(CACHE_DIR).record_ticks([SYMBOL])",
+        ".market_cache(cache.clone())",
+        ".connect()",
+        "record_ticks_health()",
+        "recorded_market_cache_policy()",
+        ".market_cache(cache)",
+        ".backtest(",
+        ".cache_only()",
+    ] {
+        assert!(
+            source.contains(required),
+            "market cache policy example missing required flow fragment: {required}"
+        );
+    }
+}
+
 fn temp_cache_dir() -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -924,7 +1101,55 @@ fn manual_tq_api() -> tqsdk_wait::TqApi {
 }
 
 fn seed_ready_record_tick_chart(tq: &Tq, symbol: &str) {
+    seed_record_tick_chart_rows(
+        tq,
+        symbol,
+        [
+            Tick {
+                id: 200,
+                datetime: 1_713_660_000_000_000_000_i64,
+                last_price: 618.0,
+                average: 618.2,
+                highest: 619.0,
+                lowest: 617.5,
+                ask_price1: 618.2,
+                ask_volume1: 4,
+                bid_price1: 618.0,
+                bid_volume1: 5,
+                volume: 12,
+                amount: 7416.0,
+                open_interest: 101,
+                ..Tick::default()
+            },
+            Tick {
+                id: 201,
+                datetime: 1_713_660_000_500_000_000_i64,
+                last_price: 618.5,
+                average: 618.3,
+                highest: 619.2,
+                lowest: 617.5,
+                ask_price1: 618.6,
+                ask_volume1: 3,
+                bid_price1: 618.4,
+                bid_volume1: 6,
+                volume: 15,
+                amount: 9277.5,
+                open_interest: 102,
+                ..Tick::default()
+            },
+        ],
+    );
+}
+
+fn seed_record_tick_chart_rows(tq: &Tq, symbol: &str, rows: impl IntoIterator<Item = Tick>) {
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let left_id = rows.first().map_or(0, |row| row.id);
+    let right_id = rows.last().map_or(-1, |row| row.id);
     let chart_id = format!("wait-tick-{}-10000", sanitize_chart_token(symbol));
+    let data = rows
+        .iter()
+        .map(|row| (row.id.to_string(), tick_row_value(row)))
+        .collect::<Map<_, _>>();
     tq.api()
         .session()
         .handle()
@@ -938,50 +1163,21 @@ fn seed_ready_record_tick_chart(tq: &Tq, symbol: &str) {
                         "charts": {
                             chart_id: {
                                 "state": {
-                                    "ins_list": symbol,
-                                    "duration": 0,
-                                },
-                                "left_id": 200,
-                                "right_id": 201,
-                                "more_data": false,
-                                "ready": true,
-                            }
-                        },
-                        "ticks": {
-                            symbol: {
-                                "data": {
-                                    "200": {
-                                        "datetime": 1_713_660_000_000_000_000_i64,
-                                        "last_price": 618.0,
-                                        "average": 618.2,
-                                        "highest": 619.0,
-                                        "lowest": 617.5,
-                                        "ask_price1": 618.2,
-                                        "ask_volume1": 4,
-                                        "bid_price1": 618.0,
-                                        "bid_volume1": 5,
-                                        "volume": 12,
-                                        "amount": 7416.0,
-                                        "open_interest": 101
-                                    },
-                                    "201": {
-                                        "datetime": 1_713_660_000_500_000_000_i64,
-                                        "last_price": 618.5,
-                                        "average": 618.3,
-                                        "highest": 619.2,
-                                        "lowest": 617.5,
-                                        "ask_price1": 618.6,
-                                        "ask_volume1": 3,
-                                        "bid_price1": 618.4,
-                                        "bid_volume1": 6,
-                                        "volume": 15,
-                                        "amount": 9277.5,
-                                        "open_interest": 102
-                                    }
-                                }
-                            }
+                                "ins_list": symbol,
+                                "duration": 0,
+                            },
+                            "left_id": left_id,
+                            "right_id": right_id,
+                            "more_data": false,
+                            "ready": true,
                         }
-                    }]
+                    },
+                    "ticks": {
+                        symbol: {
+                            "data": data
+                        }
+                    }
+                }]
                 })),
             }),
             vec![],
@@ -989,6 +1185,24 @@ fn seed_ready_record_tick_chart(tq: &Tq, symbol: &str) {
         )
         .unwrap()
         .expect("seed ready record tick chart should produce a commit");
+}
+
+fn tick_row_value(row: &Tick) -> Value {
+    json!({
+        "id": row.id,
+        "datetime": row.datetime,
+        "last_price": row.last_price,
+        "average": row.average,
+        "highest": row.highest,
+        "lowest": row.lowest,
+        "ask_price1": row.ask_price1,
+        "ask_volume1": row.ask_volume1,
+        "bid_price1": row.bid_price1,
+        "bid_volume1": row.bid_volume1,
+        "volume": row.volume,
+        "amount": row.amount,
+        "open_interest": row.open_interest,
+    })
 }
 
 fn sanitize_chart_token(raw: &str) -> String {

@@ -6,6 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Cache-backed local simulated backtest (`.backtest(start_ns, end_ns)`, `.cache_dir(...)`, `.cache_only()`, `.remote_on_miss()`, `.universe(...)`)
+- Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`)
 - Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
 - Market-data-only server-side backtest (`.server_backtest()`, optional `.replay_url(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
@@ -38,21 +39,27 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 `TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制，默认值保持保守以避免放大官方服务压力。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 
-实盘或模拟盘运行时可以显式调用 `.record_ticks(cache_dir, symbols).await?`，把指定合约的
-tick serial 写入同一份 `BacktestTickCache`。它不会自动记录所有订阅，也不会后台运行；
-正常策略继续调用 `next()` / `wait_update()`，facade 在每次更新后把新 tick 行追加到缓存。
-coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续仍可用
-`.warmup()` / `.remote_on_miss()` 补齐。
+实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick
+symbols，然后通过 `.market_cache(policy)` 挂到 live builder。facade 会在 `connect()` 后启动
+tick recording；回测 builder 也能复用同一个 policy 作为默认 cache 目录和 symbol 集合。
+仍可显式调用 `.record_ticks(cache_dir, symbols).await?` 作为运行时入口。两种方式都只记录显式
+symbol，不会自动记录所有订阅，也不会后台运行；正常策略继续调用 `next()` / `wait_update()`，
+facade 在每次更新后把新 tick 行追加到缓存。`record_ticks_health()` 返回累计写入行数、最近
+flush、每个 symbol 的 last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording
+health 派生补洞用 policy。coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的
+尾部会留下缺口，后续仍可显式配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 补齐。
 
 ```rust
 use tqsdk::prelude::*;
 
 # async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
+let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
+    .record_ticks(["KQ.i@SHFE.au"]);
+
 let warmup = Tq::futures()
     .auth_env()?
+    .market_cache(cache.clone())
     .backtest(start_ns, end_ns)
-    .cache_dir(".tqsdk/backtest_ticks")?
-    .universe("active:all;!CFFEX")?
     .remote_on_miss()
     .warmup()
     .await?;
@@ -60,9 +67,8 @@ assert!(warmup.symbols_total > 0);
 
 let mut tq = Tq::futures()
     .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges
+    .market_cache(cache)
     .backtest(start_ns, end_ns)
-    .cache_dir(".tqsdk/backtest_ticks")?
-    .universe("active:all;!CFFEX")?
     .remote_on_miss()
     .connect()
     .await?;

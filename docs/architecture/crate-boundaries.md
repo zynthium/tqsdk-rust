@@ -54,8 +54,10 @@
 - Python-style `.backtest(start_ns, end_ns)` 的 cache policy、lazy auth、remote-on-miss
   官方回测流补缓存、`.warmup()` 缓存预热 runner 和 `.universe(...)` 选择器接线；
   cache hit 不要求 auth，cache fill 不使用专业历史下载接口
-- `record_ticks(cache_dir, symbols)` 这类显式 live/session 到持久 tick cache 的组合入口；
-  订阅和 `wait_update()` 驱动留在 facade，实际 rows/coverage 写入复用 `tqsdk-data`
+- `MarketCachePolicy` / `.market_cache(...)` 这类共享 live/backtest tick cache policy 入口，
+  以及 `record_ticks(cache_dir, symbols)` 这类显式 live/session 到持久 tick cache 的组合入口；
+  订阅和 `wait_update()` 驱动留在 facade，实际 rows/coverage 写入复用 `tqsdk-data`；
+  recording health/report 可见，但补洞必须显式重新提供 auth，不隐式复用 live session 明文凭证
 - `advanced::*` 下钻到底层 crate
 
 ### 不应承担的职责
@@ -339,6 +341,7 @@ sink、WAL、journal 或 cache writer。
 
 - strategy execution / 本地撮合
 - wait-update live object facade
+- shared market cache policy、live session 或订阅 ownership
 - remote-on-miss 的 session 推进 loop
 - relay 进程、dashboard 或多客户端 market service
 

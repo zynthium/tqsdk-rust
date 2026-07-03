@@ -107,7 +107,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs`、`crates/tqsdk-core/tests/runtime_contract_domain_state.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`CursorLagged`、共享 commit identity 与兼容 surface |
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
-| 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs`、`crates/tqsdk/examples/api_contract_s37_facade_server_backtest.rs`、`crates/tqsdk/examples/api_contract_s38_facade_local_backtest.rs`、`crates/tqsdk/examples/api_contract_s39_facade_same_body.rs`、`crates/tqsdk/examples/api_contract_s40_facade_local_backtest_target_pos.rs`、`crates/tqsdk/examples/api_contract_s41_facade_server_replay.rs`、`crates/tqsdk/examples/api_contract_s43_facade_backtest_history_cache.rs`、`crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs`、`crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、cache-backed local backtest builder、`BacktestTickCache` facade export、server backtest replay endpoint 透传、server replay session endpoint 接入、自动 heartbeat 和显式 replay 控制、resolved TQKQ target-position helper、`TargetPos` intent API 与增量 execution report、curated `advanced::*` 下钻命名空间，以及默认 facade 的 persistent-cache backtest / remote-on-miss cache fill / live record_ticks cache writer / universe selector / server backtest / server replay / custom replay backtest / live-backtest same-body 策略入口和 local backtest TargetPos 执行闭环 |
+| 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs`、`crates/tqsdk/examples/api_contract_s37_facade_server_backtest.rs`、`crates/tqsdk/examples/api_contract_s38_facade_local_backtest.rs`、`crates/tqsdk/examples/api_contract_s39_facade_same_body.rs`、`crates/tqsdk/examples/api_contract_s40_facade_local_backtest_target_pos.rs`、`crates/tqsdk/examples/api_contract_s41_facade_server_replay.rs`、`crates/tqsdk/examples/api_contract_s43_facade_backtest_history_cache.rs`、`crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs`、`crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs`、`crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs`、`crates/tqsdk/examples/api_contract_s47_facade_market_cache_policy.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、cache-backed local backtest builder、`BacktestTickCache` facade export、server backtest replay endpoint 透传、server replay session endpoint 接入、自动 heartbeat 和显式 replay 控制、resolved TQKQ target-position helper、`TargetPos` intent API 与增量 execution report、curated `advanced::*` 下钻命名空间，以及默认 facade 的 persistent-cache backtest / warmup / remote-on-miss cache fill / live record_ticks cache writer / shared `MarketCachePolicy` / universe selector / server backtest / server replay / custom replay backtest / live-backtest same-body 策略入口和 local backtest TargetPos 执行闭环 |
 | 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、dashboard 5 分钟 `timeline_history` 服务端内存缓存、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、等待首样本或补历史无样本合约 `initializing` 非问题状态、frame/event idle 秒级告警、raw frame 后先发 `peek_message` 再 JSON decode 的顺序 guard、上游 idle 期间周期性 `peek_message` 恢复守卫、peek/decode timing metrics、200 合约 decode guard、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 低频缓存、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
 
@@ -164,15 +164,20 @@ rtk cargo test -p tqsdk --test facade_contract
 rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks
+rtk cargo check -p tqsdk --example api_contract_s47_facade_market_cache_policy
 ```
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
 scan、损坏报告、size-limit maintenance，以及通过 `enforce_limits(...)` 执行的 append-log
 compaction 和 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol tick 文件 compact。
-`facade_contract` 覆盖 `record_ticks(...)` 在 live/session mode 下把显式 symbol 的 tick
-serial 写入同一份 `BacktestTickCache`，并通过 `LiveTickCacheWriter` 的连续 id 语义提交
-回测可读 coverage。
+`facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
+symbol 的 tick serial 写入同一份 `BacktestTickCache`，并通过 `LiveTickCacheWriter` 的连续 id
+语义提交回测可读 coverage；同一个 `MarketCachePolicy` 也必须能为 cache-backed local backtest
+提供默认 cache 目录和 symbol 集合。live recording health 必须暴露累计写入、最近 flush、
+per-symbol last id 和 gap 状态，且跳号 tick 应被保留为 `gap_detected`。从 active recording
+health 派生的 `MarketCachePolicy` 必须能进入 cache-backed local backtest warmup 路径，用于显式
+检查或补齐缺口；该路径不得隐式复用 live session auth。
 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
 
 TQBN format/store checks currently live in internal lib tests and are covered by

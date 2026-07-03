@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 #[cfg(all(feature = "services", feature = "live"))]
 use std::time::Duration;
@@ -21,7 +22,9 @@ pub mod prelude {
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
         BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestTickCache,
         BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
-        PreparedBacktest, RecordTicksReport, Result, TargetPos, Tq, TqBuilder,
+        MarketCachePolicy, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
+        RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, Result,
+        TargetPos, Tq, TqBuilder,
     };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
@@ -96,7 +99,10 @@ mod backtest_remote;
 mod live_tick_recorder;
 mod local_backtest;
 
-pub use live_tick_recorder::RecordTicksReport;
+pub use live_tick_recorder::{
+    RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport, RecordTicksSymbolFlushReport,
+    RecordTicksSymbolHealth,
+};
 pub use tqsdk_data::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
 };
@@ -200,6 +206,7 @@ pub struct Tq {
     inner: TqInner,
     default_account_id: DefaultAccountId,
     tick_recorder: Option<live_tick_recorder::LiveTickRecorder>,
+    tick_record_report: Option<RecordTicksReport>,
     #[cfg(feature = "live")]
     server_side_backtest: bool,
     #[cfg(all(feature = "services", feature = "live"))]
@@ -240,6 +247,7 @@ impl Tq {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
+            tick_record_report: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -254,6 +262,7 @@ impl Tq {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
+            tick_record_report: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -273,6 +282,7 @@ impl Tq {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
+            tick_record_report: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             server_replay: Some(server_replay),
@@ -285,6 +295,7 @@ impl Tq {
             inner: TqInner::LocalBacktest(Box::new(backtest)),
             default_account_id: DefaultAccountId::Single(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
             tick_recorder: None,
+            tick_record_report: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -364,6 +375,31 @@ impl Tq {
     #[must_use]
     pub fn history(&self) -> tqsdk_data::DataClient {
         tqsdk_data::DataClient::from_session(self.session().clone())
+    }
+
+    /// Return the active live tick recording report, if live recording is enabled.
+    #[must_use]
+    pub fn record_ticks_report(&self) -> Option<&RecordTicksReport> {
+        self.tick_record_report.as_ref()
+    }
+
+    /// Return live tick recording health, including gap status and latest flush details.
+    #[must_use]
+    pub fn record_ticks_health(&self) -> Option<&RecordTicksHealth> {
+        self.tick_recorder
+            .as_ref()
+            .map(|recorder| recorder.health())
+    }
+
+    /// Build a cache policy from the active live tick recording health.
+    ///
+    /// This is intended for explicit post-run gap handling: pass the returned
+    /// policy to `Tq::futures().auth_env()?.market_cache(policy).backtest(...).remote_on_miss()`
+    /// to inspect or fill missing recorded ranges.
+    #[must_use]
+    pub fn recorded_market_cache_policy(&self) -> Option<MarketCachePolicy> {
+        self.record_ticks_health()
+            .map(MarketCachePolicy::from_record_ticks_health)
     }
 
     #[must_use]
@@ -604,7 +640,24 @@ impl Tq {
             live_tick_recorder::LiveTickRecorder::start(self.api_mut_any(), cache_dir, symbols)
                 .await?;
         self.tick_recorder = Some(recorder);
+        self.tick_record_report = Some(report.clone());
         Ok(report)
+    }
+
+    /// Apply a market-cache policy to this running facade.
+    ///
+    /// In the current phase this starts explicit live tick recording into the
+    /// shared backtest tick cache. Empty policies are accepted as a no-op.
+    pub async fn start_market_cache(
+        &mut self,
+        policy: MarketCachePolicy,
+    ) -> Result<Option<RecordTicksReport>> {
+        if policy.tick_symbols.is_empty() {
+            return Ok(None);
+        }
+        self.record_ticks(policy.cache_dir(), policy.tick_symbols())
+            .await
+            .map(Some)
     }
 
     pub async fn quote(&mut self, symbol: &str) -> Result<tqsdk_wait::QuoteRef> {
@@ -763,6 +816,66 @@ async fn apply_auto_trade_login(tq: &mut Tq, login: AutoTradeLogin) -> Result<()
     Ok(())
 }
 
+/// Shared market-cache policy for live recording and cache-backed local backtests.
+///
+/// The policy is intentionally tick-first: live mode records the configured tick
+/// symbols into the same persistent cache that local backtests can replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketCachePolicy {
+    cache_dir: PathBuf,
+    tick_symbols: Vec<String>,
+}
+
+impl MarketCachePolicy {
+    #[must_use]
+    pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            cache_dir: cache_dir.into(),
+            tick_symbols: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    #[must_use]
+    pub fn tick_symbols(&self) -> &[String] {
+        &self.tick_symbols
+    }
+
+    #[must_use]
+    pub fn symbol(mut self, symbol: impl Into<String>) -> Self {
+        push_unique_string(&mut self.tick_symbols, symbol.into());
+        self
+    }
+
+    #[must_use]
+    pub fn record_ticks<I, S>(mut self, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for symbol in symbols {
+            push_unique_string(&mut self.tick_symbols, symbol.into());
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn from_record_ticks_health(health: &RecordTicksHealth) -> Self {
+        Self {
+            cache_dir: health.cache_dir.clone(),
+            tick_symbols: health
+                .symbols
+                .iter()
+                .map(|symbol| symbol.symbol.clone())
+                .collect(),
+        }
+    }
+}
+
 /// Builder for cache-backed local backtests.
 pub struct BacktestBuilder {
     base: TqBuilder,
@@ -834,6 +947,19 @@ pub struct BacktestCacheWarmupReport {
 }
 
 impl BacktestBuilder {
+    fn apply_market_cache_policy(&mut self) -> Result<()> {
+        let Some(policy) = self.base.market_cache.as_ref() else {
+            return Ok(());
+        };
+        if self.cache.is_none() {
+            self.cache = Some(tqsdk_data::BacktestTickCache::open(policy.cache_dir())?);
+        }
+        for symbol in policy.tick_symbols() {
+            push_unique_string(&mut self.symbols, symbol.clone());
+        }
+        Ok(())
+    }
+
     /// Set the cache policy for data preparation.
     #[must_use]
     pub fn cache(mut self, policy: BacktestCachePolicy) -> Self {
@@ -909,12 +1035,11 @@ impl BacktestBuilder {
                 "backtest end_ns must be greater than start_ns",
             ));
         }
+        self.apply_market_cache_policy()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
             for symbol in resolved {
-                if !self.symbols.iter().any(|existing| existing == &symbol) {
-                    self.symbols.push(symbol);
-                }
+                push_unique_string(&mut self.symbols, symbol);
             }
         }
         if self.symbols.is_empty() {
@@ -1075,10 +1200,7 @@ impl BacktestBuilder {
     /// Add a symbol whose tick history must be present in the cache.
     #[must_use]
     pub fn symbol(mut self, symbol: impl Into<String>) -> Self {
-        let symbol = symbol.into();
-        if !self.symbols.iter().any(|existing| existing == &symbol) {
-            self.symbols.push(symbol);
-        }
+        push_unique_string(&mut self.symbols, symbol.into());
         self
     }
 
@@ -1096,12 +1218,11 @@ impl BacktestBuilder {
                 "backtest end_ns must be greater than start_ns",
             ));
         }
+        self.apply_market_cache_policy()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
             for symbol in resolved {
-                if !self.symbols.iter().any(|existing| existing == &symbol) {
-                    self.symbols.push(symbol);
-                }
+                push_unique_string(&mut self.symbols, symbol);
             }
         }
         if self.symbols.is_empty() {
@@ -1311,6 +1432,7 @@ pub struct TqBuilder {
     auto_trade_login: Option<AutoTradeLogin>,
     market_url: Option<String>,
     replay_url: Option<String>,
+    market_cache: Option<MarketCachePolicy>,
     backtest: Option<BacktestConfig>,
     local_backtest_recipe: local_backtest::LocalBacktestRecipe,
 }
@@ -1326,6 +1448,7 @@ impl TqBuilder {
             auto_trade_login: None,
             market_url: None,
             replay_url: None,
+            market_cache: None,
             backtest: None,
             local_backtest_recipe: local_backtest::LocalBacktestRecipe::default(),
         }
@@ -1346,6 +1469,17 @@ impl TqBuilder {
     #[must_use]
     pub fn replay_url(mut self, replay_url: impl Into<String>) -> Self {
         self.replay_url = Some(replay_url.into());
+        self
+    }
+
+    /// Configure a shared market-cache policy for this facade.
+    ///
+    /// Live/session modes start tick recording during [`TqBuilder::connect`].
+    /// Cache-backed local backtests use the same policy as their default cache
+    /// directory and symbol set unless explicit builder calls override them.
+    #[must_use]
+    pub fn market_cache(mut self, policy: MarketCachePolicy) -> Self {
+        self.market_cache = Some(policy);
         self
     }
 
@@ -1592,6 +1726,7 @@ impl TqBuilder {
             auto_trade_login,
             market_url,
             replay_url,
+            market_cache,
             backtest,
             local_backtest_recipe,
         } = self;
@@ -1629,10 +1764,14 @@ impl TqBuilder {
                     if let Some(auto_trade_login) = auto_trade_login {
                         apply_auto_trade_login(&mut tq, auto_trade_login).await?;
                     }
+                    if let Some(policy) = market_cache {
+                        tq.start_market_cache(policy).await?;
+                    }
                     Ok(tq)
                 }
                 #[cfg(not(feature = "live"))]
                 {
+                    let _ = market_cache;
                     Ok(tq)
                 }
             }
@@ -1893,6 +2032,12 @@ fn session_builder(
 
 fn data_validation(message: impl Into<String>) -> Error {
     Error::Data(Box::new(tqsdk_data::DataError::Validation(message.into())))
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 async fn resolve_backtest_universe(
