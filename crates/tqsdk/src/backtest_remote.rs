@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::time::Duration;
 
 use tqsdk_core::Tick;
@@ -11,6 +12,7 @@ const REMOTE_TICK_DATA_LENGTH: usize = 10_000;
 const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
 const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_FILL_BATCH_TIMEOUT: Duration = Duration::from_secs(600);
 const REMOTE_FILL_SYMBOL_BATCH_SIZE: usize = 1;
 const REMOTE_FILL_SYMBOL_BATCH_SIZE_MAX: usize = 4;
 const REMOTE_FILL_SYMBOL_CONCURRENCY: usize = 2;
@@ -34,6 +36,13 @@ pub(crate) struct RemoteBacktestCachingStream {
 
 pub(crate) struct RemoteBacktestCacheFillReport {
     pub(crate) rows_by_symbol: BTreeMap<String, usize>,
+}
+
+struct RemoteFillBatchTaskReport {
+    batch_index: usize,
+    symbols: Vec<String>,
+    elapsed: Duration,
+    fill_report: RemoteBacktestCacheFillReport,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,20 +121,42 @@ pub(crate) async fn fill_backtest_tick_cache(
     cache: BacktestTickCache,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let requested_symbol_count = symbols.len();
+    let symbol_batch_size = remote_fill_symbol_batch_size();
     let mut pending_batches = symbols
-        .chunks(remote_fill_symbol_batch_size())
+        .chunks(symbol_batch_size)
         .map(<[String]>::to_vec)
         .collect::<VecDeque<_>>();
     let max_concurrency = remote_fill_symbol_concurrency();
+    let batch_timeout = remote_fill_batch_timeout();
+    let total_batches = pending_batches.len();
+    let mut next_batch_index = 0usize;
+    let mut completed_batches = 0usize;
     let mut tasks = tokio::task::JoinSet::new();
     let mut rows_by_symbol = BTreeMap::new();
+    remote_fill_progress(format_args!(
+        "event=fill_start symbols={requested_symbol_count} batches={total_batches} \
+         batch_size={symbol_batch_size} concurrency={max_concurrency} \
+         batch_timeout_s={} range=[{start_ns},{end_ns})",
+        batch_timeout.as_secs()
+    ));
 
     while !pending_batches.is_empty() || !tasks.is_empty() {
         while tasks.len() < max_concurrency {
             let Some(symbol_batch) = pending_batches.pop_front() else {
                 break;
             };
-            tasks.spawn(fill_backtest_tick_cache_symbol_batch(
+            let batch_index = next_batch_index;
+            next_batch_index = next_batch_index.saturating_add(1);
+            remote_fill_progress(format_args!(
+                "event=batch_start batch={} total_batches={total_batches} pending={} active={} symbols={}",
+                batch_index + 1,
+                pending_batches.len(),
+                tasks.len() + 1,
+                symbol_batch.join(",")
+            ));
+            tasks.spawn(fill_backtest_tick_cache_symbol_batch_timed(
+                batch_index,
+                batch_timeout,
                 user.clone(),
                 pass.clone(),
                 start_ns,
@@ -138,10 +169,30 @@ pub(crate) async fn fill_backtest_tick_cache(
         let Some(result) = tasks.join_next().await else {
             continue;
         };
-        let fill_report = result.map_err(|error| {
+        let task_report = match result.map_err(|error| {
             data_validation(format!("remote backtest cache fill task failed: {error}"))
-        })??;
-        for (symbol, rows) in fill_report.rows_by_symbol {
+        })? {
+            Ok(task_report) => task_report,
+            Err(error) => {
+                remote_fill_progress(format_args!("event=batch_error error={error}"));
+                return Err(error);
+            }
+        };
+        completed_batches = completed_batches.saturating_add(1);
+        let batch_rows = task_report
+            .fill_report
+            .rows_by_symbol
+            .values()
+            .copied()
+            .sum::<usize>();
+        remote_fill_progress(format_args!(
+            "event=batch_done batch={} total_batches={total_batches} completed={completed_batches} \
+             elapsed_ms={} symbols={} rows={batch_rows}",
+            task_report.batch_index + 1,
+            task_report.elapsed.as_millis(),
+            task_report.symbols.join(",")
+        ));
+        for (symbol, rows) in task_report.fill_report.rows_by_symbol {
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
     }
@@ -156,6 +207,42 @@ pub(crate) async fn fill_backtest_tick_cache(
         )));
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
+}
+
+async fn fill_backtest_tick_cache_symbol_batch_timed(
+    batch_index: usize,
+    batch_timeout: Duration,
+    user: String,
+    pass: String,
+    start_ns: i64,
+    end_ns: i64,
+    symbols: Vec<String>,
+    cache: BacktestTickCache,
+) -> Result<RemoteFillBatchTaskReport> {
+    let started = tokio::time::Instant::now();
+    let timeout_symbols = symbols.clone();
+    let result = tokio::time::timeout(
+        batch_timeout,
+        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, symbols, cache),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    match result {
+        Ok(Ok(fill_report)) => Ok(RemoteFillBatchTaskReport {
+            batch_index,
+            symbols: timeout_symbols,
+            elapsed,
+            fill_report,
+        }),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(data_validation(format!(
+            "remote backtest cache fill batch timed out after {}s for {} symbols ({}) \
+             in range [{start_ns}, {end_ns})",
+            batch_timeout.as_secs(),
+            timeout_symbols.len(),
+            timeout_symbols.join(",")
+        ))),
+    }
 }
 
 async fn fill_backtest_tick_cache_symbol_batch(
@@ -180,6 +267,12 @@ async fn fill_backtest_tick_cache_symbol_batch(
         Err(error) if should_split_empty_idle_batch(error, symbols.len())
     ) {
         return result;
+    }
+    if let Err(error) = &result {
+        remote_fill_progress(format_args!(
+            "event=batch_split symbols={} error={error}",
+            symbols.join(",")
+        ));
     }
 
     let mut rows_by_symbol = BTreeMap::new();
@@ -224,8 +317,14 @@ async fn fill_backtest_tick_cache_symbol_batch_once(
             Ok(report) => return Ok(report),
             Err(error)
                 if attempt < REMOTE_CONNECT_RETRY_ATTEMPTS
-                    && should_retry_remote_fill_attempt_error(&error) =>
+                    && should_retry_remote_fill_attempt_error(&error, symbols.len()) =>
             {
+                remote_fill_progress(format_args!(
+                    "event=batch_attempt_retry attempt={} next_attempt={} symbols={} error={error}",
+                    attempt,
+                    attempt + 1,
+                    symbols.join(",")
+                ));
                 tokio::time::sleep(remote_connect_retry_delay(attempt)).await;
                 attempt = attempt.saturating_add(1);
             }
@@ -571,6 +670,11 @@ fn remote_fill_idle_timeout() -> Duration {
     parse_remote_fill_idle_timeout(value.as_deref())
 }
 
+fn remote_fill_batch_timeout() -> Duration {
+    let value = std::env::var("TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS").ok();
+    parse_remote_fill_batch_timeout(value.as_deref())
+}
+
 fn remote_fill_allow_empty_idle() -> bool {
     let value = std::env::var("TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE").ok();
     parse_remote_fill_allow_empty_idle(value.as_deref())
@@ -591,14 +695,41 @@ fn remote_fill_slice_ns() -> Option<i64> {
     parse_remote_fill_slice_ns(value.as_deref())
 }
 
+fn remote_fill_progress_enabled() -> bool {
+    let value = std::env::var("TQSDK_REMOTE_FILL_PROGRESS").ok();
+    parse_remote_fill_progress_enabled(value.as_deref())
+}
+
+fn remote_fill_progress(args: fmt::Arguments<'_>) {
+    if remote_fill_progress_enabled() {
+        eprintln!("TQSDK_REMOTE_FILL_PROGRESS {args}");
+    }
+}
+
 fn parse_remote_fill_idle_timeout(value: Option<&str>) -> Duration {
     value
         .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
         .map(Duration::from_secs)
         .unwrap_or(REMOTE_FILL_IDLE_TIMEOUT)
 }
 
+fn parse_remote_fill_batch_timeout(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(REMOTE_FILL_BATCH_TIMEOUT)
+}
+
 fn parse_remote_fill_allow_empty_idle(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn parse_remote_fill_progress_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
@@ -661,16 +792,17 @@ fn should_split_empty_idle_batch(error: &crate::Error, symbol_count: usize) -> b
         )
 }
 
-fn should_retry_remote_fill_attempt_error(error: &crate::Error) -> bool {
+fn should_retry_remote_fill_attempt_error(error: &crate::Error, symbol_count: usize) -> bool {
     should_retry_remote_connect_error(error)
-        || matches!(
+        || (symbol_count == 1
+            && matches!(
             error,
             crate::Error::Data(data)
                 if matches!(
                     &**data,
                     DataError::Validation(message) if is_remote_fill_idle_error_message(message)
                 )
-        )
+            ))
 }
 
 fn is_remote_fill_idle_error_message(message: &str) -> bool {
@@ -699,13 +831,15 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        REMOTE_FILL_IDLE_TIMEOUT, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
-        parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
-        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
-        remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
-        should_reject_empty_idle_finalize, should_reject_empty_remote_fill,
-        should_reject_incomplete_idle_finalize, should_retry_remote_connect_error,
-        should_retry_remote_fill_attempt_error, should_split_empty_idle_batch,
+        REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteTickWriteBuffer,
+        parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
+        parse_remote_fill_idle_timeout, parse_remote_fill_progress_enabled,
+        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
+        parse_remote_fill_symbol_concurrency, remote_fill_ranges_for_slice_ns,
+        remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
+        should_reject_empty_remote_fill, should_reject_incomplete_idle_finalize,
+        should_retry_remote_connect_error, should_retry_remote_fill_attempt_error,
+        should_split_empty_idle_batch,
     };
     use tqsdk_core::Tick;
     use tqsdk_data::{BacktestTickCache, TickDataSeriesRequest};
@@ -791,6 +925,10 @@ mod tests {
             Duration::from_secs(5)
         );
         assert_eq!(
+            parse_remote_fill_idle_timeout(Some("0")),
+            REMOTE_FILL_IDLE_TIMEOUT
+        );
+        assert_eq!(
             parse_remote_fill_idle_timeout(Some("invalid")),
             REMOTE_FILL_IDLE_TIMEOUT
         );
@@ -801,12 +939,42 @@ mod tests {
     }
 
     #[test]
+    fn remote_fill_batch_timeout_can_be_overridden_for_diagnostics() {
+        assert_eq!(
+            parse_remote_fill_batch_timeout(Some("30")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_remote_fill_batch_timeout(Some("0")),
+            REMOTE_FILL_BATCH_TIMEOUT
+        );
+        assert_eq!(
+            parse_remote_fill_batch_timeout(Some("invalid")),
+            REMOTE_FILL_BATCH_TIMEOUT
+        );
+        assert_eq!(
+            parse_remote_fill_batch_timeout(None),
+            REMOTE_FILL_BATCH_TIMEOUT
+        );
+    }
+
+    #[test]
     fn remote_fill_empty_idle_flag_accepts_common_truthy_values() {
         for value in ["1", "true", "TRUE", "yes", "on"] {
             assert!(parse_remote_fill_allow_empty_idle(Some(value)));
         }
         for value in [None, Some("0"), Some("false"), Some("off"), Some("invalid")] {
             assert!(!parse_remote_fill_allow_empty_idle(value));
+        }
+    }
+
+    #[test]
+    fn remote_fill_progress_flag_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_remote_fill_progress_enabled(Some(value)));
+        }
+        for value in [None, Some("0"), Some("false"), Some("off"), Some("invalid")] {
+            assert!(!parse_remote_fill_progress_enabled(value));
         }
     }
 
@@ -867,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_fill_retries_transient_attempt_idle_errors() {
+    fn remote_fill_retries_single_symbol_transient_attempt_idle_errors() {
         let wrapped_unconfirmed_empty_idle = crate::data_validation(
             "remote backtest cache fill failed for slice [1, 2): invalid data query input: \
              remote backtest cache fill idled before empty tick ranges were confirmed \
@@ -881,12 +1049,22 @@ mod tests {
         let other = crate::data_validation("remote fill rejected empty coverage");
 
         assert!(should_retry_remote_fill_attempt_error(
-            &wrapped_unconfirmed_empty_idle
+            &wrapped_unconfirmed_empty_idle,
+            1
         ));
         assert!(should_retry_remote_fill_attempt_error(
-            &wrapped_unconfirmed_incomplete_idle
+            &wrapped_unconfirmed_incomplete_idle,
+            1
         ));
-        assert!(!should_retry_remote_fill_attempt_error(&other));
+        assert!(!should_retry_remote_fill_attempt_error(&other, 1));
+        assert!(!should_retry_remote_fill_attempt_error(
+            &wrapped_unconfirmed_empty_idle,
+            4
+        ));
+        assert!(!should_retry_remote_fill_attempt_error(
+            &wrapped_unconfirmed_incomplete_idle,
+            4
+        ));
     }
 
     #[test]

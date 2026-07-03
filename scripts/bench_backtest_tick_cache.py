@@ -92,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated slice seconds. Use 'none' for the default single-session path.",
     )
     parser.add_argument("--idle-timeout-secs", type=int, default=120, help="Remote idle timeout override.")
+    parser.add_argument(
+        "--remote-batch-timeout-secs",
+        type=positive_int,
+        help="Override the SDK internal remote batch timeout.",
+    )
     parser.add_argument("--repeat", type=positive_int, default=1, help="Repeat each matrix case.")
     parser.add_argument(
         "--cache-root",
@@ -128,6 +133,11 @@ def parse_args() -> argparse.Namespace:
         "--remote-symbol-concurrency",
         type=positive_int,
         help="Override the SDK internal remote symbol fill concurrency.",
+    )
+    parser.add_argument(
+        "--remote-progress",
+        action="store_true",
+        help="Enable SDK remote fill progress diagnostics on stderr.",
     )
     parser.add_argument("--skip-replay", action="store_true", help="Skip cache-only replay timing.")
     parser.add_argument("--skip-cache-only", action="store_true", help="Skip cache-only warmup timing.")
@@ -228,6 +238,8 @@ def print_plan(
     print(f"universe={universe}")
     print(f"remote_symbol_batch_size={args.remote_symbol_batch_size or 'sdk-default'}")
     print(f"remote_symbol_concurrency={args.remote_symbol_concurrency or 'sdk-default'}")
+    print(f"remote_batch_timeout_secs={args.remote_batch_timeout_secs or 'sdk-default'}")
+    print(f"remote_progress={args.remote_progress}")
     for batch_size, slice_secs, repeat_index in matrix:
         print(
             "case "
@@ -281,6 +293,10 @@ def run_case(
         env["TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE"] = str(args.remote_symbol_batch_size)
     if args.remote_symbol_concurrency is not None:
         env["TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY"] = str(args.remote_symbol_concurrency)
+    if args.remote_batch_timeout_secs is not None:
+        env["TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS"] = str(args.remote_batch_timeout_secs)
+    if args.remote_progress:
+        env["TQSDK_REMOTE_FILL_PROGRESS"] = "1"
     if slice_secs is None:
         env.pop("TQSDK_REMOTE_FILL_SLICE_SECS", None)
     else:
@@ -292,8 +308,10 @@ def run_case(
         "batch_size": batch_size,
         "slice_secs": slice_secs,
         "idle_timeout_secs": args.idle_timeout_secs,
+        "remote_batch_timeout_secs": args.remote_batch_timeout_secs,
         "remote_symbol_batch_size": args.remote_symbol_batch_size,
         "remote_symbol_concurrency": args.remote_symbol_concurrency,
+        "remote_progress": args.remote_progress,
         "verify_existing_cache": args.verify_existing_cache,
         "repeat_index": repeat_index,
         "cache_dir": str(cache_dir),
@@ -325,6 +343,8 @@ def run_case(
     record["process_elapsed_s"] = round(time.monotonic() - started, 3)
     record["returncode"] = completed.returncode
     record.update(parse_harness_result(completed.stdout))
+    if args.remote_progress and completed.stderr:
+        record["stderr_tail"] = tail_text(completed.stderr)
     if completed.returncode == 0 and "rows_written" in record:
         record["success"] = True
     else:
