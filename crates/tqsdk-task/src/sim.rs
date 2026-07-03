@@ -30,6 +30,7 @@ pub struct TqSim {
     quotes: HashMap<String, Quote>,
     orders: HashMap<String, SimOrder>,
     positions: HashMap<String, i64>,
+    nonzero_position_count: usize,
     avg_price_by_symbol: HashMap<String, f64>,
     trades: HashMap<String, Trade>,
     next_seq: i64,
@@ -115,6 +116,7 @@ impl TqSim {
             quotes: HashMap::new(),
             orders: HashMap::new(),
             positions: HashMap::new(),
+            nonzero_position_count: 0,
             avg_price_by_symbol: HashMap::new(),
             trades: HashMap::new(),
             next_seq: 1,
@@ -268,6 +270,10 @@ impl TqSim {
             self.apply_quote_metadata(execution_symbol, quote);
             self.quotes
                 .insert(execution_symbol.to_owned(), quote.clone());
+        }
+
+        if self.orders.is_empty() && self.nonzero_position_count == 0 {
+            return TqSimStepReport::default();
         }
 
         if self.orders.is_empty()
@@ -650,6 +656,7 @@ impl TqSim {
         self.balance += close_profit;
         let position = self.positions.entry(request.symbol.clone()).or_default();
         *position += delta;
+        update_nonzero_position_count(&mut self.nonzero_position_count, previous, *position);
         update_average_price(
             &mut self.avg_price_by_symbol,
             &request.symbol,
@@ -1261,6 +1268,14 @@ impl TqSimStepReport {
     }
 }
 
+fn update_nonzero_position_count(count: &mut usize, previous: i64, next: i64) {
+    match (previous == 0, next == 0) {
+        (true, false) => *count += 1,
+        (false, true) => *count = count.saturating_sub(1),
+        _ => {}
+    }
+}
+
 fn ingest_trade_report(
     host: &TaskHost,
     account_id: &str,
@@ -1455,4 +1470,63 @@ fn required_i64(payload: &Value, key: &'static str) -> Result<i64> {
         .get(key)
         .and_then(Value::as_i64)
         .ok_or(TaskError::InvalidState("sim payload missing integer field"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sim_skips_empty_quote_reports_when_no_orders_or_positions() {
+        let mut sim = TqSim::new();
+        sim.ensure_position("SHFE.rb2601");
+
+        let empty = sim.update_quote_at("SHFE.rb2601", quote(100.0), 1_000);
+        assert!(empty.is_empty());
+        assert_eq!(sim.nonzero_position_count, 0);
+
+        let open = sim
+            .insert_order(TqSimOrderRequest::limit(
+                "open-1",
+                "SHFE.rb2601",
+                TradeDirection::Buy,
+                TradeOffset::Open,
+                1,
+                101.0,
+            ))
+            .expect("open order should fill against quote");
+        assert!(!open.is_empty());
+        assert_eq!(sim.nonzero_position_count, 1);
+
+        let position_report = sim.update_quote_at("SHFE.rb2601", quote(101.0), 2_000);
+        assert!(!position_report.is_empty());
+
+        let close = sim
+            .insert_order(TqSimOrderRequest::limit(
+                "close-1",
+                "SHFE.rb2601",
+                TradeDirection::Sell,
+                TradeOffset::Close,
+                1,
+                100.0,
+            ))
+            .expect("close order should fill against quote");
+        assert!(!close.is_empty());
+        assert_eq!(sim.nonzero_position_count, 0);
+
+        let empty_again = sim.update_quote_at("SHFE.rb2601", quote(102.0), 3_000);
+        assert!(empty_again.is_empty());
+    }
+
+    fn quote(last_price: f64) -> Quote {
+        Quote {
+            last_price,
+            ask_price1: last_price + 0.5,
+            ask_volume1: 10,
+            bid_price1: last_price - 0.5,
+            bid_volume1: 10,
+            volume_multiple: 10,
+            ..Quote::default()
+        }
+    }
 }
