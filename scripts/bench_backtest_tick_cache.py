@@ -146,11 +146,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not delete the case cache; run cache-only warmup and replay against existing files.",
     )
+    parser.add_argument(
+        "--resume-cache",
+        action="store_true",
+        help="Do not delete the case cache; keep normal remote warmup to fill missing coverage.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print planned matrix without running cargo.")
     parser.add_argument("--no-prebuild", dest="prebuild", action="store_false", help="Skip cargo build before matrix.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed case.")
     parser.set_defaults(prebuild=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.verify_existing_cache and args.resume_cache:
+        parser.error("--resume-cache cannot be used with --verify-existing-cache")
+    return args
 
 
 def positive_int(value: str) -> int:
@@ -240,6 +248,7 @@ def print_plan(
     print(f"remote_symbol_concurrency={args.remote_symbol_concurrency or 'sdk-default'}")
     print(f"remote_batch_timeout_secs={args.remote_batch_timeout_secs or 'sdk-default'}")
     print(f"remote_progress={args.remote_progress}")
+    print(f"resume_cache={args.resume_cache}")
     for batch_size, slice_secs, repeat_index in matrix:
         print(
             "case "
@@ -264,7 +273,7 @@ def run_case(
     repeat_index: int,
 ) -> dict[str, Any]:
     cache_dir = case_cache_dir(args, batch_size, slice_secs, repeat_index)
-    if cache_dir.exists() and not args.verify_existing_cache:
+    if cache_dir.exists() and not args.verify_existing_cache and not args.resume_cache:
         shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -313,6 +322,7 @@ def run_case(
         "remote_symbol_concurrency": args.remote_symbol_concurrency,
         "remote_progress": args.remote_progress,
         "verify_existing_cache": args.verify_existing_cache,
+        "resume_cache": args.resume_cache,
         "repeat_index": repeat_index,
         "cache_dir": str(cache_dir),
         "range_start_ns": args.start_ns,
@@ -364,7 +374,14 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     complete_symbols = int(record.get("complete_symbols") or 0)
     cache_only_missing = int(record.get("cache_only_missing") or 0)
     remote_used = bool(record.get("remote_used"))
+    resume_cache = bool(record.get("resume_cache"))
     rows_by_symbol = parse_rows_by_symbol(str(record.get("rows_by_symbol") or ""))
+    actions_by_symbol = parse_actions_by_symbol(str(record.get("actions_by_symbol") or ""))
+    remote_action_symbols = {
+        symbol
+        for symbol, action in actions_by_symbol.items()
+        if action in {"FilledRemote", "RefreshedRemote"}
+    }
 
     if effective_rows < args.min_rows:
         record["success"] = False
@@ -381,7 +398,11 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
                 f"rows_per_symbol_below_min:{','.join(short_symbols)}<{args.min_rows_per_symbol}"
             )
     elif remote_used and symbols_total > 1:
-        zero_symbols = [symbol for symbol, rows in rows_by_symbol.items() if rows == 0]
+        zero_symbols = [
+            symbol
+            for symbol, rows in rows_by_symbol.items()
+            if rows == 0 and (not resume_cache or symbol in remote_action_symbols)
+        ]
         if zero_symbols:
             warnings.append(f"zero_row_remote_symbols:{','.join(zero_symbols)}")
     if not args.allow_zero_rows and remote_used and symbols_total > 1 and rows_written == 0:
@@ -392,7 +413,12 @@ def annotate_record(args: argparse.Namespace, record: dict[str, Any]) -> None:
     if not args.skip_cache_only and cache_only_missing != 0:
         record["success"] = False
         warnings.append(f"cache_only_missing:{cache_only_missing}")
-    if not verify_existing_cache and not args.skip_replay and rows_written != replay_tick_count:
+    if (
+        not verify_existing_cache
+        and not resume_cache
+        and not args.skip_replay
+        and rows_written != replay_tick_count
+    ):
         warnings.append(f"rows_replay_mismatch:{rows_written}!={replay_tick_count}")
 
     record["warning_count"] = len(warnings)
@@ -412,6 +438,17 @@ def parse_rows_by_symbol(value: str) -> dict[str, int]:
         except ValueError:
             continue
     return rows
+
+
+def parse_actions_by_symbol(value: str) -> dict[str, str]:
+    actions: dict[str, str] = {}
+    for token in value.split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        symbol, action = token.rsplit(":", 1)
+        actions[symbol] = action
+    return actions
 
 
 def cargo_cmd(action: str, profile: str) -> list[str]:
