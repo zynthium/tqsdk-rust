@@ -567,17 +567,24 @@ fn ingest_quote_events(host: &TaskHost, quotes: Vec<(String, ReplayStepQuote)>) 
         .into_iter()
         .map(|(symbol, quote)| (Symbol::new(symbol), quote_state_fields(&quote)))
         .collect::<Vec<_>>();
-    host.api().session().handle().ingest_market_quote_fields(
-        quote_fields,
-        vec![],
-        CommitScope::ReplayStep,
-    )?;
+    host.api()
+        .session()
+        .handle()
+        .ingest_presorted_market_quote_fields(quote_fields, vec![], CommitScope::ReplayStep)?;
     Ok(())
 }
 
 fn quote_state_fields(quote: &ReplayStepQuote) -> Vec<FieldMutation> {
     let mut fields = Vec::new();
     let quote_data = &quote.quote;
+    push_f64_if_finite(&mut fields, "amount", quote_data.amount);
+    push_f64_if_finite(&mut fields, "ask_price1", quote_data.ask_price1);
+    push_i64_if_nonzero(&mut fields, "ask_volume1", quote_data.ask_volume1);
+    push_f64_if_finite(&mut fields, "average", quote_data.average);
+    push_f64_if_finite(&mut fields, "bid_price1", quote_data.bid_price1);
+    push_i64_if_nonzero(&mut fields, "bid_volume1", quote_data.bid_volume1);
+    push_f64_if_finite(&mut fields, "close", quote_data.close);
+    push_f64_if_finite(&mut fields, "commission", quote_data.commission);
     if let Some(datetime_ns) = quote.datetime_ns {
         push_field(
             &mut fields,
@@ -587,23 +594,14 @@ fn quote_state_fields(quote: &ReplayStepQuote) -> Vec<FieldMutation> {
     } else {
         push_string_if_present(&mut fields, "datetime", &quote_data.datetime);
     }
-    push_f64_if_finite(&mut fields, "last_price", quote_data.last_price);
+    push_string_if_present(&mut fields, "exchange_id", &quote_data.exchange_id);
     push_f64_if_finite(&mut fields, "highest", quote_data.highest);
+    push_string_if_present(&mut fields, "ins_class", &quote_data.ins_class);
+    push_string_if_present(&mut fields, "instrument_id", &quote_data.instrument_id);
+    push_string_if_present(&mut fields, "instrument_name", &quote_data.instrument_name);
+    push_f64_if_finite(&mut fields, "last_price", quote_data.last_price);
     push_f64_if_finite(&mut fields, "lowest", quote_data.lowest);
-    push_f64_if_finite(&mut fields, "open", quote_data.open);
-    push_f64_if_finite(&mut fields, "close", quote_data.close);
-    push_f64_if_finite(&mut fields, "average", quote_data.average);
-    push_f64_if_finite(&mut fields, "ask_price1", quote_data.ask_price1);
-    push_i64_if_nonzero(&mut fields, "ask_volume1", quote_data.ask_volume1);
-    push_f64_if_finite(&mut fields, "bid_price1", quote_data.bid_price1);
-    push_i64_if_nonzero(&mut fields, "bid_volume1", quote_data.bid_volume1);
-    push_i64_if_nonzero(&mut fields, "volume", quote_data.volume);
-    push_f64_if_finite(&mut fields, "amount", quote_data.amount);
-    push_i64_if_nonzero(&mut fields, "open_interest", quote_data.open_interest);
-    push_f64_if_finite(&mut fields, "price_tick", quote_data.price_tick);
-    push_i64_if_nonzero(&mut fields, "price_decs", quote_data.price_decs);
-    push_i64_if_nonzero(&mut fields, "volume_multiple", quote_data.volume_multiple);
-    push_i64_if_nonzero(&mut fields, "open_limit", quote_data.open_limit);
+    push_f64_if_finite(&mut fields, "margin", quote_data.margin);
     push_i64_if_nonzero(
         &mut fields,
         "max_limit_order_volume",
@@ -624,19 +622,20 @@ fn quote_state_fields(quote: &ReplayStepQuote) -> Vec<FieldMutation> {
         "min_market_order_volume",
         quote_data.min_market_order_volume,
     );
+    push_f64_if_finite(&mut fields, "open", quote_data.open);
+    push_i64_if_nonzero(&mut fields, "open_interest", quote_data.open_interest);
+    push_i64_if_nonzero(&mut fields, "open_limit", quote_data.open_limit);
+    push_i64_if_nonzero(&mut fields, "price_decs", quote_data.price_decs);
+    push_f64_if_finite(&mut fields, "price_tick", quote_data.price_tick);
+    push_string_if_present(&mut fields, "product_id", &quote_data.product_id);
+    push_f64_if_finite(&mut fields, "strike_price", quote_data.strike_price);
     push_string_if_present(
         &mut fields,
         "underlying_symbol",
         &quote_data.underlying_symbol,
     );
-    push_f64_if_finite(&mut fields, "strike_price", quote_data.strike_price);
-    push_string_if_present(&mut fields, "ins_class", &quote_data.ins_class);
-    push_string_if_present(&mut fields, "instrument_id", &quote_data.instrument_id);
-    push_string_if_present(&mut fields, "instrument_name", &quote_data.instrument_name);
-    push_string_if_present(&mut fields, "exchange_id", &quote_data.exchange_id);
-    push_string_if_present(&mut fields, "product_id", &quote_data.product_id);
-    push_f64_if_finite(&mut fields, "margin", quote_data.margin);
-    push_f64_if_finite(&mut fields, "commission", quote_data.commission);
+    push_i64_if_nonzero(&mut fields, "volume", quote_data.volume);
+    push_i64_if_nonzero(&mut fields, "volume_multiple", quote_data.volume_multiple);
 
     fields
 }
@@ -893,6 +892,49 @@ mod tests {
         assert_eq!(checkpoints[3].last_price, 99.0);
         assert_eq!(checkpoints[3].ask_price1, 99.5);
         assert_eq!(checkpoints[3].bid_price1, 98.5);
+    }
+
+    #[test]
+    fn quote_state_fields_are_sorted_for_presorted_ingest() {
+        let fields = quote_state_fields(&ReplayStepQuote::tick(
+            Quote {
+                datetime: "1000".to_string(),
+                last_price: 100.0,
+                highest: 101.0,
+                lowest: 99.0,
+                open: 100.0,
+                close: 100.5,
+                average: 100.25,
+                ask_price1: 100.5,
+                ask_volume1: 1,
+                bid_price1: 99.5,
+                bid_volume1: 2,
+                volume: 10,
+                amount: 1_000.0,
+                open_interest: 20,
+                price_tick: 0.5,
+                price_decs: 1,
+                volume_multiple: 10,
+                open_limit: 100,
+                max_limit_order_volume: 500,
+                max_market_order_volume: 100,
+                min_limit_order_volume: 1,
+                min_market_order_volume: 1,
+                underlying_symbol: "SHFE.rb2601".to_string(),
+                strike_price: 10.0,
+                ins_class: "FUTURE".to_string(),
+                instrument_id: "rb2601".to_string(),
+                instrument_name: "rb2601".to_string(),
+                exchange_id: "SHFE".to_string(),
+                product_id: "rb".to_string(),
+                margin: 1_000.0,
+                commission: 1.0,
+                ..Quote::default()
+            },
+            1_000,
+        ));
+
+        assert!(fields.windows(2).all(|pair| pair[0].field <= pair[1].field));
     }
 
     fn tick_event(symbol: &str, id: i64, datetime: i64, last_price: f64) -> ReplayMarketEvent {

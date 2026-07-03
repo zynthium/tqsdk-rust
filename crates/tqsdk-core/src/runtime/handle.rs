@@ -189,10 +189,38 @@ impl RuntimeHandle {
     where
         I: IntoIterator<Item = (Symbol, Vec<FieldMutation>)>,
     {
+        self.ingest_market_quote_fields_inner(quotes, caused_by, scope, true)
+    }
+
+    #[doc(hidden)]
+    pub fn ingest_presorted_market_quote_fields<I>(
+        &self,
+        quotes: I,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<SharedCommitResult>>
+    where
+        I: IntoIterator<Item = (Symbol, Vec<FieldMutation>)>,
+    {
+        self.ingest_market_quote_fields_inner(quotes, caused_by, scope, false)
+    }
+
+    fn ingest_market_quote_fields_inner<I>(
+        &self,
+        quotes: I,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+        sort_fields: bool,
+    ) -> Result<Option<SharedCommitResult>>
+    where
+        I: IntoIterator<Item = (Symbol, Vec<FieldMutation>)>,
+    {
         let mutations = quotes
             .into_iter()
             .map(|(symbol, mut fields)| {
-                sort_field_mutations(&mut fields);
+                if sort_fields {
+                    sort_field_mutations(&mut fields);
+                }
                 NormalizedMutation {
                     path: StatePath::new(["quotes".to_string(), symbol.as_str().to_string()]),
                     object: Some(ObjectKey::Quote { symbol }),
