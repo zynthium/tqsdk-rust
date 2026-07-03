@@ -819,6 +819,10 @@ pub struct BacktestCacheWarmupReport {
     pub requested_range: (i64, i64),
     pub cache_policy: BacktestCachePolicy,
     pub cache_dir: std::path::PathBuf,
+    /// Compatibility field for callers that still record a warmup batch hint.
+    ///
+    /// Remote cache fill is scheduled by the internal bounded remote scheduler;
+    /// tune `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` for network parallelism.
     pub batch_size: usize,
     pub symbols_total: usize,
     pub symbols_skipped: usize,
@@ -850,6 +854,11 @@ impl BacktestBuilder {
         Ok(self)
     }
 
+    /// Set the compatibility warmup batch-size hint reported by [`BacktestCacheWarmupReport`].
+    ///
+    /// Missing symbols are submitted to the internal bounded remote scheduler in one pass;
+    /// this method no longer serially chunks remote fills. Use
+    /// `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` to tune remote fill parallelism.
     #[must_use]
     pub fn batch_size(mut self, batch_size: usize) -> Self {
         self.warmup_batch_size = batch_size.max(1);
@@ -987,21 +996,20 @@ impl BacktestBuilder {
         }
 
         let mut rows_by_symbol = BTreeMap::new();
+        let remote_used = !remote_symbols.is_empty();
         if !remote_symbols.is_empty() {
             let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
-            for batch in remote_symbols.chunks(self.warmup_batch_size) {
-                let fill_report = backtest_remote::fill_backtest_tick_cache(
-                    auth.user.clone(),
-                    auth.pass.clone(),
-                    self.start_ns,
-                    self.end_ns,
-                    batch.to_vec(),
-                    cache.clone(),
-                )
-                .await?;
-                for (symbol, rows) in fill_report.rows_by_symbol {
-                    *rows_by_symbol.entry(symbol).or_insert(0) += rows;
-                }
+            let fill_report = backtest_remote::fill_backtest_tick_cache(
+                auth.user,
+                auth.pass,
+                self.start_ns,
+                self.end_ns,
+                remote_symbols,
+                cache.clone(),
+            )
+            .await?;
+            for (symbol, rows) in fill_report.rows_by_symbol {
+                *rows_by_symbol.entry(symbol).or_insert(0) += rows;
             }
         }
 
@@ -1035,7 +1043,7 @@ impl BacktestBuilder {
             self.cache_policy,
             cache_dir,
             self.warmup_batch_size,
-            !remote_symbols.is_empty(),
+            remote_used,
             symbols,
         ))
     }

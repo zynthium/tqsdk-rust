@@ -5,6 +5,10 @@ use crate::Result;
 use crate::replay::{ReplayMarketEvent, ReplayMarketSource};
 
 pub trait BacktestMarketStream: Send {
+    fn next_event_ready(&mut self) -> Option<Result<Option<ReplayMarketEvent>>> {
+        None
+    }
+
     fn next_event<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<ReplayMarketEvent>>> + 'a>>;
@@ -23,6 +27,10 @@ impl ReplayMarketStream {
 }
 
 impl BacktestMarketStream for ReplayMarketStream {
+    fn next_event_ready(&mut self) -> Option<Result<Option<ReplayMarketEvent>>> {
+        Some(Ok(self.source.next_event()))
+    }
+
     fn next_event<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<ReplayMarketEvent>>> + 'a>> {

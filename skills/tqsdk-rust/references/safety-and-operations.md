@@ -7,6 +7,7 @@
 - `record_ticks(...)` 是只读行情记录，但仍会连接 live/session 并写本地持久缓存；示例必须显式说明需要行情权限和 cache 目录，live smoke 保持环境变量门控。
 - 工作流依赖特定行情权限时，使用 `has_feature(...)` 或 `check_md_grants(...)`。
 - live smoke test 必须放在显式环境变量后面；普通 unit test 不应依赖官方服务。
+- HTTP auth / direct-query 默认强制直连，不使用系统 proxy；如果 Rust resolver 对官方域名异常，可用 `TQSDK_DIRECT_RESOLVE_AUTH_SHINNYTECH_COM` / `TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM` / `TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM` 注入当前环境解析到的 IP。
 
 ## 优先模拟
 

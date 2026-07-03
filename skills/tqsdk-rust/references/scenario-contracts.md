@@ -137,7 +137,7 @@ session progress、runtime cursor、bounded fan-out 和 lag diagnostics 从 `tqs
 | S41 Default facade server replay | `crates/tqsdk/examples/api_contract_s41_facade_server_replay.rs` | 官方单日复盘行情接入默认 facade | `server_replay(date)?`、replay endpoint 和 heartbeat。 |
 | S43 Cache-backed backtest | `crates/tqsdk/examples/api_contract_s43_facade_backtest_history_cache.rs` | 默认 facade 通过持久 tick cache 做本地撮合回测 | `.backtest(...).cache_dir(...).cache_only().universe(...)`，复用 `BacktestTickCache`。 |
 | S44 Remote-on-miss backtest cache fill | `crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs` | 缓存缺口用官方 server-side backtest tick stream 填补 | 需要账号但不需要专业历史下载权限；cache hit 不需要 auth。 |
-| S45 Backtest cache warmup | `crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs` | 只预热缓存，不创建策略 runtime | `.warmup().await?`，按 batch 跳过完整缓存并填补缺口。 |
+| S45 Backtest cache warmup | `crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs` | 只预热缓存，不创建策略 runtime | `.warmup().await?`，先跳过完整缓存，再用内部有界远端调度器填补缺口。 |
 | S46 Live tick recording | `crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs` | 显式把指定 live tick 写入回测共享缓存 | `Tq::record_ticks(cache_dir, symbols)`；由 `next()` / `wait_update()` 推进，跳号保留 coverage 缺口。 |
 
 ## 覆盖规则

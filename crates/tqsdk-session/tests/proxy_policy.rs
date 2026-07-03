@@ -34,7 +34,7 @@ fn reqwest_clients_are_explicitly_direct() {
 
     assert!(
         violations.is_empty(),
-        "reqwest clients must be built through direct no_proxy helpers:\n{}",
+        "reqwest clients must be built through direct no_proxy HTTP/1 helpers:\n{}",
         violations.join("\n")
     );
 }
@@ -49,7 +49,12 @@ fn builder_chain_is_direct(lines: &[&str]) -> bool {
     let Some(no_proxy) = chain.find(".no_proxy()") else {
         return false;
     };
-    chain.find(".build()").is_none_or(|build| no_proxy < build)
+    let Some(http1_only) = chain.find(".http1_only()") else {
+        return false;
+    };
+    chain
+        .find(".build()")
+        .is_none_or(|build| no_proxy < build && http1_only < build)
 }
 
 fn collect_rust_files(dir: &Path, output: &mut Vec<PathBuf>) {

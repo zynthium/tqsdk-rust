@@ -2,6 +2,28 @@ use tqsdk_core::{Quote, TradeDirection, TradeOffset};
 use tqsdk_task::sim::{TqSim, TqSimOrderRequest};
 
 #[test]
+fn tqsim_skips_empty_report_for_quote_without_orders_or_positions() {
+    let mut sim = TqSim::new();
+
+    let report = sim.update_quote(
+        "SHFE.rb2501",
+        Quote {
+            last_price: 101.0,
+            ask_price1: 101.0,
+            ask_volume1: 10,
+            bid_price1: 100.0,
+            bid_volume1: 8,
+            ..Quote::default()
+        },
+    );
+
+    assert!(report.is_empty());
+    let position = sim.position("SHFE.rb2501");
+    assert_eq!(position.pos, 0);
+    assert_eq!(position.last_price, 101.0);
+}
+
+#[test]
 fn tqsim_fills_crossing_limit_order_at_order_price_without_partial_fill() {
     let mut sim = TqSim::new()
         .with_margin("SHFE.rb2501", 1_000.0)

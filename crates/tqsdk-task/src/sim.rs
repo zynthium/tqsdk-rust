@@ -235,7 +235,8 @@ impl TqSim {
     }
 
     pub fn update_quote(&mut self, symbol: impl Into<String>, quote: Quote) -> TqSimStepReport {
-        self.update_quote_inner(symbol.into(), quote)
+        let symbol = symbol.into();
+        self.update_quote_ref_inner(&symbol, &quote)
     }
 
     pub fn update_quote_at(
@@ -244,26 +245,51 @@ impl TqSim {
         quote: Quote,
         event_time_ns: i64,
     ) -> TqSimStepReport {
+        let symbol = symbol.into();
         self.current_time_ns = event_time_ns;
-        self.update_quote_inner(symbol.into(), quote)
+        self.update_quote_ref_inner(&symbol, &quote)
     }
 
-    fn update_quote_inner(&mut self, symbol: String, quote: Quote) -> TqSimStepReport {
-        let execution_symbol = self.update_execution_symbol_alias_from_quote(&symbol, &quote);
-        self.apply_quote_metadata(&symbol, &quote);
-        self.quotes.insert(symbol.clone(), quote.clone());
-        if execution_symbol != symbol {
-            self.apply_quote_metadata(&execution_symbol, &quote);
-            self.quotes.insert(execution_symbol.clone(), quote);
+    pub(crate) fn update_quote_ref_at(
+        &mut self,
+        symbol: &str,
+        quote: &Quote,
+        event_time_ns: i64,
+    ) -> TqSimStepReport {
+        self.current_time_ns = event_time_ns;
+        self.update_quote_ref_inner(symbol, quote)
+    }
+
+    fn update_quote_ref_inner(&mut self, symbol: &str, quote: &Quote) -> TqSimStepReport {
+        let execution_symbol = self.update_execution_symbol_alias_from_quote(symbol, quote);
+        self.apply_quote_metadata(symbol, quote);
+        self.quotes.insert(symbol.to_owned(), quote.clone());
+        if let Some(execution_symbol) = execution_symbol.as_deref() {
+            self.apply_quote_metadata(execution_symbol, quote);
+            self.quotes
+                .insert(execution_symbol.to_owned(), quote.clone());
         }
 
-        let mut report = self.match_pending_for_symbol(&symbol);
-        if execution_symbol != symbol {
-            report.extend(self.match_pending_for_symbol(&execution_symbol));
+        if self.orders.is_empty()
+            && !self.has_nonzero_position(symbol)
+            && execution_symbol
+                .as_deref()
+                .is_none_or(|execution_symbol| !self.has_nonzero_position(execution_symbol))
+        {
+            return TqSimStepReport::default();
+        }
+
+        let mut report = self.match_pending_for_symbol(symbol);
+        if let Some(execution_symbol) = execution_symbol.as_deref() {
+            report.extend(self.match_pending_for_symbol(execution_symbol));
         }
 
         if report.is_empty() {
-            self.nonzero_symbols_snapshot_report([symbol.as_str(), execution_symbol.as_str()])
+            if let Some(execution_symbol) = execution_symbol.as_deref() {
+                self.nonzero_symbols_snapshot_report([symbol, execution_symbol])
+            } else {
+                self.nonzero_symbols_snapshot_report([symbol])
+            }
         } else {
             report
         }
@@ -802,6 +828,12 @@ impl TqSim {
         self.position_snapshot_for(symbol, state_symbol)
     }
 
+    fn has_nonzero_position(&self, symbol: &str) -> bool {
+        self.positions
+            .get(symbol)
+            .is_some_and(|position| *position != 0)
+    }
+
     fn position_snapshot_for(&self, report_symbol: &str, state_symbol: &str) -> Position {
         let net = self
             .positions
@@ -913,18 +945,26 @@ impl TqSim {
         report
     }
 
-    fn update_execution_symbol_alias_from_quote(&mut self, symbol: &str, quote: &Quote) -> String {
+    fn update_execution_symbol_alias_from_quote(
+        &mut self,
+        symbol: &str,
+        quote: &Quote,
+    ) -> Option<String> {
         let underlying_symbol = quote.underlying_symbol.trim();
         if underlying_symbol.is_empty() {
-            return self.execution_symbol_for(symbol).to_owned();
+            return self
+                .execution_symbol_by_strategy_symbol
+                .get(symbol)
+                .cloned();
         }
         if underlying_symbol == symbol {
             self.execution_symbol_by_strategy_symbol.remove(symbol);
-            return symbol.to_owned();
+            return None;
         }
+        let underlying_symbol = underlying_symbol.to_owned();
         self.execution_symbol_by_strategy_symbol
-            .insert(symbol.to_owned(), underlying_symbol.to_owned());
-        underlying_symbol.to_owned()
+            .insert(symbol.to_owned(), underlying_symbol.clone());
+        Some(underlying_symbol)
     }
 
     fn execution_symbol_for<'a>(&'a self, symbol: &'a str) -> &'a str {
@@ -1211,7 +1251,7 @@ impl TqSimStepReport {
             && self.positions.is_empty()
     }
 
-    fn extend(&mut self, other: Self) {
+    pub(crate) fn extend(&mut self, other: Self) {
         if other.account.is_some() {
             self.account = other.account;
         }

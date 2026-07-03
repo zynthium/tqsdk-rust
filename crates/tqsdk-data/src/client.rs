@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::HashSet;
+#[cfg(feature = "services")]
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,13 +40,51 @@ const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continu
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
 pub(crate) const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
+#[cfg(feature = "services")]
+const DIRECT_HTTPS_HOSTS: &[(&str, &str)] = &[
+    (
+        "auth.shinnytech.com",
+        "TQSDK_DIRECT_RESOLVE_AUTH_SHINNYTECH_COM",
+    ),
+    (
+        "api.shinnytech.com",
+        "TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM",
+    ),
+    (
+        "files.shinnytech.com",
+        "TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM",
+    ),
+];
 
 #[cfg(feature = "services")]
 fn direct_reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("direct reqwest client should build")
+    let mut builder = reqwest::Client::builder().no_proxy().http1_only();
+    for (host, env_name) in DIRECT_HTTPS_HOSTS {
+        if let Some(addrs) = resolve_https_host(host, env_name) {
+            builder = builder.resolve_to_addrs(host, &addrs);
+        }
+    }
+    builder.build().expect("direct reqwest client should build")
+}
+
+#[cfg(feature = "services")]
+fn resolve_https_host(host: &str, env_name: &str) -> Option<Vec<SocketAddr>> {
+    if let Some(addrs) = resolve_https_host_from_env(env_name) {
+        return Some(addrs);
+    }
+    let addrs = (host, 443).to_socket_addrs().ok()?.collect::<Vec<_>>();
+    (!addrs.is_empty()).then_some(addrs)
+}
+
+#[cfg(feature = "services")]
+fn resolve_https_host_from_env(env_name: &str) -> Option<Vec<SocketAddr>> {
+    let addrs = std::env::var(env_name)
+        .ok()?
+        .split(',')
+        .filter_map(|value| value.trim().parse::<IpAddr>().ok())
+        .map(|ip| SocketAddr::new(ip, 443))
+        .collect::<Vec<_>>();
+    (!addrs.is_empty()).then_some(addrs)
 }
 const MARKET_POLL_BUDGET: Duration = Duration::from_millis(250);
 

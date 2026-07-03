@@ -161,7 +161,7 @@ impl TqAuthProvider {
                 .header(ACCEPT, "application/json")
                 .send()
                 .await
-                .map_err(|err| ContractError::auth(format!("token request failed: {err}")))?;
+                .map_err(|err| ContractError::auth(format_reqwest_error("token request", err)))?;
             let payload = self.read_json_response(response, "token request").await?;
             let access_token = payload
                 .get("access_token")
@@ -234,7 +234,7 @@ impl TqAuthProvider {
                 .send()
                 .await
                 .map_err(|err| {
-                    ContractError::auth(format!("market endpoint request failed: {err}"))
+                    ContractError::auth(format_reqwest_error("market endpoint request", err))
                 })?;
             let payload = self
                 .read_json_response(response, "market endpoint request")
@@ -275,7 +275,7 @@ impl TqAuthProvider {
                 .send()
                 .await
                 .map_err(|err| {
-                    ContractError::auth(format!("trade broker request failed: {err}"))
+                    ContractError::auth(format_reqwest_error("trade broker request", err))
                 })?;
             let payload = self
                 .read_json_response(response, "trade broker request")
@@ -314,6 +314,17 @@ fn require_tokio_runtime() -> Result<()> {
         ContractError::validation("tq auth provider requires an active Tokio runtime")
     })?;
     Ok(())
+}
+
+fn format_reqwest_error(context: &str, err: reqwest::Error) -> String {
+    format!(
+        "{context} failed: {err}; timeout={}; connect={}; request={}; body={}; decode={}; debug={err:?}",
+        err.is_timeout(),
+        err.is_connect(),
+        err.is_request(),
+        err.is_body(),
+        err.is_decode(),
+    )
 }
 
 impl AuthProvider for TqAuthProvider {

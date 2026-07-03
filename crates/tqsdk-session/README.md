@@ -12,6 +12,19 @@
 - 调用方必须自己提供 Tokio runtime
 - direct service helper（交易日历、结算价、排名、EDB）也要求当前已经处于 Tokio runtime 中
 
+HTTP auth / direct-query client 明确走直连路径：内部 reqwest client 使用 `no_proxy()`
+和 HTTP/1.1，不读取系统 proxy。少数网络环境下如果 Rust resolver 对官方域名解析不稳定，
+可以显式注入直连 DNS 结果：
+
+```bash
+export TQSDK_DIRECT_RESOLVE_AUTH_SHINNYTECH_COM=<auth-ip>
+export TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM=<api-ip>
+export TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM=<files-ip>
+```
+
+这些变量只覆盖对应 host 的 reqwest 解析结果，不启用 proxy，也不影响 WebSocket route
+选择。IP 应按运行环境实际解析结果设置。
+
 ## 依赖方式
 
 Cargo 包名是 `tqsdk-session`，代码里的 crate 路径是 `tqsdk_session`。

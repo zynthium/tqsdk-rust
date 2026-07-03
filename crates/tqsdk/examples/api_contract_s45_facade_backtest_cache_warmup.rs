@@ -15,7 +15,6 @@ async fn main() -> tqsdk::Result<()> {
         .cache_dir(".tqsdk/backtest_ticks")?
         .universe(format!("symbol:{symbol}"))?
         .remote_on_miss()
-        .batch_size(10)
         .warmup()
         .await?;
 

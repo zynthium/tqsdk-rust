@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
@@ -68,6 +68,34 @@ pub struct StrategyBacktestContext<'a> {
     tracked_symbols: &'a [String],
 }
 
+#[derive(Debug, Default)]
+struct ReplayStepBatch {
+    latest_quotes: BTreeMap<String, ReplayStepQuote>,
+    sim_report: TqSimStepReport,
+}
+
+#[derive(Debug)]
+struct ReplayStepQuote {
+    quote: Quote,
+    datetime_ns: Option<i64>,
+}
+
+impl ReplayStepQuote {
+    fn quote(quote: Quote) -> Self {
+        Self {
+            quote,
+            datetime_ns: None,
+        }
+    }
+
+    fn tick(quote: Quote, datetime_ns: i64) -> Self {
+        Self {
+            quote,
+            datetime_ns: Some(datetime_ns),
+        }
+    }
+}
+
 impl StrategyBacktest {
     #[must_use]
     pub fn builder(replay: ReplayMarketSource) -> StrategyBacktestBuilder {
@@ -88,18 +116,20 @@ impl StrategyBacktest {
         };
         let event_time_ns = event.event_time_ns();
         let backtest_event = StrategyBacktestEvent::from_replay_event(&event);
-        self.ingest_replay_event(&event)?;
+        let mut batch = ReplayStepBatch::default();
+        self.ingest_replay_event(&event, &mut batch)?;
 
         loop {
-            let Some(next_event) = self.replay.next_event().await? else {
+            let Some(next_event) = self.next_stream_event().await? else {
                 break;
             };
             if next_event.event_time_ns() != event_time_ns {
                 self.pending_event = Some(next_event);
                 break;
             }
-            self.ingest_replay_event(&next_event)?;
+            self.ingest_replay_event(&next_event, &mut batch)?;
         }
+        self.ingest_replay_batch(batch)?;
 
         self.summary.record_snapshot(ledger_snapshot_from_sim(
             &self.sim,
@@ -121,32 +151,65 @@ impl StrategyBacktest {
         if self.pending_event.is_some() {
             return Ok(self.pending_event.take());
         }
+        self.next_stream_event().await
+    }
+
+    async fn next_stream_event(&mut self) -> Result<Option<ReplayMarketEvent>> {
+        if let Some(result) = self.replay.next_event_ready() {
+            return result;
+        }
         self.replay.next_event().await
     }
 
-    fn ingest_replay_event(&mut self, event: &ReplayMarketEvent) -> Result<()> {
+    fn ingest_replay_event(
+        &mut self,
+        event: &ReplayMarketEvent,
+        batch: &mut ReplayStepBatch,
+    ) -> Result<()> {
         let event_time_ns = event.event_time_ns();
         match event.payload() {
             ReplayMarketPayload::Quote(quote) => {
                 let quote =
                     quote_with_replay_underlying((**quote).clone(), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+                self.ingest_quote(
+                    event.symbol(),
+                    ReplayStepQuote::quote(quote),
+                    event_time_ns,
+                    batch,
+                );
             }
             ReplayMarketPayload::Tick(tick) => {
                 let quote =
                     quote_with_replay_underlying(quote_from_tick(tick), event.underlying_symbol());
-                self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+                self.ingest_quote(
+                    event.symbol(),
+                    ReplayStepQuote::tick(quote, tick.datetime),
+                    event_time_ns,
+                    batch,
+                );
             }
             ReplayMarketPayload::Kline { row, .. } => {
                 let price_tick = self.price_tick(event.symbol())?;
                 let checkpoints = kline_quote_checkpoints(row, price_tick);
                 for quote in checkpoints {
                     let quote = quote_with_replay_underlying(quote, event.underlying_symbol());
-                    self.ingest_quote(event.symbol(), &quote, event_time_ns)?;
+                    self.ingest_quote(
+                        event.symbol(),
+                        ReplayStepQuote::quote(quote),
+                        event_time_ns,
+                        batch,
+                    );
                 }
             }
         }
         self.summary.record_payload(event.payload_kind());
+        Ok(())
+    }
+
+    fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<()> {
+        ingest_quote_events(self.strategy.task_host(), batch.latest_quotes)?;
+        self.sim
+            .ingest_step_report(self.strategy.task_host(), &batch.sim_report)?;
         Ok(())
     }
 
@@ -181,15 +244,19 @@ impl StrategyBacktest {
         summary
     }
 
-    fn ingest_quote(&mut self, symbol: &str, quote: &Quote, event_time_ns: i64) -> Result<()> {
-        self.remember_quote_metadata(symbol, quote);
-        ingest_quote_event(self.strategy.task_host(), symbol, quote)?;
+    fn ingest_quote(
+        &mut self,
+        symbol: &str,
+        quote: ReplayStepQuote,
+        event_time_ns: i64,
+        batch: &mut ReplayStepBatch,
+    ) {
+        self.remember_quote_metadata(symbol, &quote.quote);
         let report = self
             .sim
-            .update_quote_at(symbol.to_owned(), quote.clone(), event_time_ns);
-        self.sim
-            .ingest_step_report(self.strategy.task_host(), &report)?;
-        Ok(())
+            .update_quote_ref_at(symbol, &quote.quote, event_time_ns);
+        batch.latest_quotes.insert(symbol.to_owned(), quote);
+        batch.sim_report.extend(report);
     }
 
     fn price_tick(&self, symbol: &str) -> Result<f64> {
@@ -473,14 +540,23 @@ fn ledger_snapshot_from_sim(
     BacktestLedgerSnapshot::new(event_time_ns, sim.account(), orders, trades, positions)
 }
 
-fn ingest_quote_event(host: &TaskHost, symbol: &str, quote: &Quote) -> Result<()> {
+fn ingest_quote_events(host: &TaskHost, quotes: BTreeMap<String, ReplayStepQuote>) -> Result<()> {
+    if quotes.is_empty() {
+        return Ok(());
+    }
+    let quote_nodes = quotes
+        .into_iter()
+        .map(|(symbol, quote)| (symbol, quote_state_value(&quote)))
+        .collect::<Map<_, _>>();
     host.api().session().handle().ingest(
         RuntimeInput::Io(IoEvent {
             route: "backtest".to_string(),
             domains: vec![ProtocolDomain::Market],
             payload: InputPayload::Json(json!({
                 "aid": "rtn_data",
-                "data": [quote_update(symbol, quote)]
+                "data": [{
+                    "quotes": Value::Object(quote_nodes)
+                }]
             })),
         }),
         vec![],
@@ -489,70 +565,78 @@ fn ingest_quote_event(host: &TaskHost, symbol: &str, quote: &Quote) -> Result<()
     Ok(())
 }
 
-fn quote_update(symbol: &str, quote: &Quote) -> Value {
+fn quote_state_value(quote: &ReplayStepQuote) -> Value {
     let mut quote_value = Map::new();
-    insert_string_if_present(&mut quote_value, "datetime", &quote.datetime);
-    insert_f64_if_finite(&mut quote_value, "last_price", quote.last_price);
-    insert_f64_if_finite(&mut quote_value, "highest", quote.highest);
-    insert_f64_if_finite(&mut quote_value, "lowest", quote.lowest);
-    insert_f64_if_finite(&mut quote_value, "open", quote.open);
-    insert_f64_if_finite(&mut quote_value, "close", quote.close);
-    insert_f64_if_finite(&mut quote_value, "average", quote.average);
-    insert_f64_if_finite(&mut quote_value, "ask_price1", quote.ask_price1);
-    insert_i64_if_nonzero(&mut quote_value, "ask_volume1", quote.ask_volume1);
-    insert_f64_if_finite(&mut quote_value, "bid_price1", quote.bid_price1);
-    insert_i64_if_nonzero(&mut quote_value, "bid_volume1", quote.bid_volume1);
-    insert_i64_if_nonzero(&mut quote_value, "volume", quote.volume);
-    insert_f64_if_finite(&mut quote_value, "amount", quote.amount);
-    insert_i64_if_nonzero(&mut quote_value, "open_interest", quote.open_interest);
-    insert_f64_if_finite(&mut quote_value, "price_tick", quote.price_tick);
-    insert_i64_if_nonzero(&mut quote_value, "price_decs", quote.price_decs);
-    insert_i64_if_nonzero(&mut quote_value, "volume_multiple", quote.volume_multiple);
-    insert_i64_if_nonzero(&mut quote_value, "open_limit", quote.open_limit);
+    let quote_data = &quote.quote;
+    if let Some(datetime_ns) = quote.datetime_ns {
+        quote_value.insert("datetime".to_string(), Value::from(datetime_ns.to_string()));
+    } else {
+        insert_string_if_present(&mut quote_value, "datetime", &quote_data.datetime);
+    }
+    insert_f64_if_finite(&mut quote_value, "last_price", quote_data.last_price);
+    insert_f64_if_finite(&mut quote_value, "highest", quote_data.highest);
+    insert_f64_if_finite(&mut quote_value, "lowest", quote_data.lowest);
+    insert_f64_if_finite(&mut quote_value, "open", quote_data.open);
+    insert_f64_if_finite(&mut quote_value, "close", quote_data.close);
+    insert_f64_if_finite(&mut quote_value, "average", quote_data.average);
+    insert_f64_if_finite(&mut quote_value, "ask_price1", quote_data.ask_price1);
+    insert_i64_if_nonzero(&mut quote_value, "ask_volume1", quote_data.ask_volume1);
+    insert_f64_if_finite(&mut quote_value, "bid_price1", quote_data.bid_price1);
+    insert_i64_if_nonzero(&mut quote_value, "bid_volume1", quote_data.bid_volume1);
+    insert_i64_if_nonzero(&mut quote_value, "volume", quote_data.volume);
+    insert_f64_if_finite(&mut quote_value, "amount", quote_data.amount);
+    insert_i64_if_nonzero(&mut quote_value, "open_interest", quote_data.open_interest);
+    insert_f64_if_finite(&mut quote_value, "price_tick", quote_data.price_tick);
+    insert_i64_if_nonzero(&mut quote_value, "price_decs", quote_data.price_decs);
+    insert_i64_if_nonzero(
+        &mut quote_value,
+        "volume_multiple",
+        quote_data.volume_multiple,
+    );
+    insert_i64_if_nonzero(&mut quote_value, "open_limit", quote_data.open_limit);
     insert_i64_if_nonzero(
         &mut quote_value,
         "max_limit_order_volume",
-        quote.max_limit_order_volume,
+        quote_data.max_limit_order_volume,
     );
     insert_i64_if_nonzero(
         &mut quote_value,
         "max_market_order_volume",
-        quote.max_market_order_volume,
+        quote_data.max_market_order_volume,
     );
     insert_i64_if_nonzero(
         &mut quote_value,
         "min_limit_order_volume",
-        quote.min_limit_order_volume,
+        quote_data.min_limit_order_volume,
     );
     insert_i64_if_nonzero(
         &mut quote_value,
         "min_market_order_volume",
-        quote.min_market_order_volume,
+        quote_data.min_market_order_volume,
     );
     insert_string_if_present(
         &mut quote_value,
         "underlying_symbol",
-        &quote.underlying_symbol,
+        &quote_data.underlying_symbol,
     );
-    insert_f64_if_finite(&mut quote_value, "strike_price", quote.strike_price);
-    insert_string_if_present(&mut quote_value, "ins_class", &quote.ins_class);
-    insert_string_if_present(&mut quote_value, "instrument_id", &quote.instrument_id);
-    insert_string_if_present(&mut quote_value, "instrument_name", &quote.instrument_name);
-    insert_string_if_present(&mut quote_value, "exchange_id", &quote.exchange_id);
-    insert_string_if_present(&mut quote_value, "product_id", &quote.product_id);
-    insert_f64_if_finite(&mut quote_value, "margin", quote.margin);
-    insert_f64_if_finite(&mut quote_value, "commission", quote.commission);
+    insert_f64_if_finite(&mut quote_value, "strike_price", quote_data.strike_price);
+    insert_string_if_present(&mut quote_value, "ins_class", &quote_data.ins_class);
+    insert_string_if_present(&mut quote_value, "instrument_id", &quote_data.instrument_id);
+    insert_string_if_present(
+        &mut quote_value,
+        "instrument_name",
+        &quote_data.instrument_name,
+    );
+    insert_string_if_present(&mut quote_value, "exchange_id", &quote_data.exchange_id);
+    insert_string_if_present(&mut quote_value, "product_id", &quote_data.product_id);
+    insert_f64_if_finite(&mut quote_value, "margin", quote_data.margin);
+    insert_f64_if_finite(&mut quote_value, "commission", quote_data.commission);
 
-    json!({
-        "quotes": {
-            symbol: Value::Object(quote_value)
-        }
-    })
+    Value::Object(quote_value)
 }
 
 fn quote_from_tick(tick: &Tick) -> Quote {
     Quote {
-        datetime: tick.datetime.to_string(),
         last_price: tick.last_price,
         average: tick.average,
         highest: tick.highest,
@@ -696,6 +780,41 @@ mod tests {
             .expect("second step should exist");
         assert_eq!(second.event().event_time_ns(), 2_000);
         assert_eq!(second.quote("SHFE.a").unwrap().last_price, 102.0);
+        drop(second);
+
+        assert!(backtest.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_keeps_latest_quote_for_duplicate_timestamp_symbol() {
+        let replay = ReplayMarketSource::new(vec![
+            tick_event("SHFE.a", 1, 1_000, 101.0),
+            tick_event("SHFE.a", 2, 1_000, 102.0),
+            tick_event("SHFE.a", 3, 2_000, 103.0),
+        ]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        assert_eq!(first.event().event_time_ns(), 1_000);
+        let first_quote = first.quote("SHFE.a").unwrap();
+        assert_eq!(first_quote.last_price, 102.0);
+        assert_eq!(first_quote.datetime, "1000");
+        drop(first);
+
+        let second = backtest
+            .next()
+            .await
+            .expect("second step should succeed")
+            .expect("second step should exist");
+        assert_eq!(second.event().event_time_ns(), 2_000);
+        assert_eq!(second.quote("SHFE.a").unwrap().last_price, 103.0);
         drop(second);
 
         assert!(backtest.next().await.unwrap().is_none());
