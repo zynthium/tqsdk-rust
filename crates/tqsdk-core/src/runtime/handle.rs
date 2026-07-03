@@ -10,7 +10,7 @@ use crate::{
     commands::{CommandStatus, OutboundDispatch, OutboundRequest, RuntimeCommand},
     error::{ContractError, Result},
     events::{FieldMutation, MutationSource, NormalizedMutation, RuntimeInput},
-    ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision},
+    ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
     order_lifecycle::OrderLifecycle,
     state::{
         CommitScope, ObjectKey, SharedCommitResult, StatePartitionReadGuard, StatePath,
@@ -177,6 +177,34 @@ impl RuntimeHandle {
             caused_by,
             scope,
         )
+    }
+
+    #[doc(hidden)]
+    pub fn ingest_market_quote_fields<I>(
+        &self,
+        quotes: I,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<SharedCommitResult>>
+    where
+        I: IntoIterator<Item = (Symbol, Vec<FieldMutation>)>,
+    {
+        let mutations = quotes
+            .into_iter()
+            .map(|(symbol, mut fields)| {
+                sort_field_mutations(&mut fields);
+                NormalizedMutation {
+                    path: StatePath::new(["quotes".to_string(), symbol.as_str().to_string()]),
+                    object: Some(ObjectKey::Quote { symbol }),
+                    fields,
+                    source: MutationSource::MarketDiff,
+                }
+            })
+            .collect::<Vec<_>>();
+        if mutations.is_empty() {
+            return Ok(None);
+        }
+        self.record_mutations(mutations, vec![ProtocolDomain::Market], caused_by, scope)
     }
 
     pub fn record_command_status(
@@ -788,7 +816,9 @@ mod tests {
             TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
             TradeVolumeCondition,
         },
-        events::{FieldMutation, MutationSource, NormalizedMutation},
+        events::{
+            FieldMutation, InputPayload, IoEvent, MutationSource, NormalizedMutation, RuntimeInput,
+        },
         ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
         state::{CommitScope, StatePath},
     };
@@ -962,6 +992,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repeated, None);
+    }
+
+    #[test]
+    fn typed_market_quote_ingest_matches_json_quote_fast_path() {
+        let json_handle = runtime_with_default_adapters();
+        let typed_handle = runtime_with_default_adapters();
+
+        let json_commit = json_handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "backtest".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "quotes": {
+                                "SHFE.rb2601": {
+                                    "datetime": "1781182800000000000",
+                                    "last_price": 3012.5,
+                                    "volume": 12
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::ReplayStep,
+            )
+            .unwrap()
+            .expect("json quote ingest should publish a commit");
+
+        let typed_commit = typed_handle
+            .ingest_market_quote_fields(
+                [(
+                    Symbol::new("SHFE.rb2601"),
+                    vec![
+                        FieldMutation {
+                            field: "volume".to_string(),
+                            value: json!(12),
+                        },
+                        FieldMutation {
+                            field: "datetime".to_string(),
+                            value: json!("1781182800000000000"),
+                        },
+                        FieldMutation {
+                            field: "last_price".to_string(),
+                            value: json!(3012.5),
+                        },
+                    ],
+                )],
+                vec![],
+                CommitScope::ReplayStep,
+            )
+            .unwrap()
+            .expect("typed quote ingest should publish a commit");
+
+        assert_eq!(typed_commit.domains, json_commit.domains);
+        assert_eq!(typed_commit.scope, json_commit.scope);
+        assert_eq!(typed_commit.changes, json_commit.changes);
+        assert_eq!(
+            typed_handle
+                .latest_snapshot()
+                .get(["quotes", "SHFE.rb2601", "last_price"]),
+            json_handle
+                .latest_snapshot()
+                .get(["quotes", "SHFE.rb2601", "last_price"])
+        );
     }
 
     fn runtime_with_default_adapters() -> RuntimeHandle {

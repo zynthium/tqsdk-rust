@@ -224,6 +224,13 @@ impl StrategyBacktestSummary {
         }
     }
 
+    pub(crate) fn record_unchanged_account_observation(&mut self, event_time_ns: Option<i64>) {
+        self.record_event_time(event_time_ns);
+        self.record_balance_point(event_time_ns);
+        self.record_equity_point(event_time_ns);
+        self.record_risk_ratio_point(event_time_ns);
+    }
+
     pub(crate) fn record_snapshot(&mut self, snapshot: BacktestLedgerSnapshot) {
         let event_time_ns = snapshot.event_time_ns;
         let previous_close_profit = self.final_account.close_profit;

@@ -2,10 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{Map, Number, Value, json};
-use tqsdk_core::{
-    CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote, RuntimeInput, Tick,
-};
+use serde_json::{Number, Value};
+use tqsdk_core::{CommitScope, FieldMutation, Kline, Quote, Symbol, Tick};
 
 use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
@@ -129,13 +127,8 @@ impl StrategyBacktest {
             }
             self.ingest_replay_event(&next_event, &mut batch)?;
         }
-        self.ingest_replay_batch(batch)?;
-
-        self.summary.record_snapshot(ledger_snapshot_from_sim(
-            &self.sim,
-            &self.tracked_symbols,
-            Some(event_time_ns),
-        ));
+        let sim_report = self.ingest_replay_batch(batch)?;
+        self.record_summary_step(event_time_ns, &sim_report);
 
         let context = self.strategy.next_once().await?;
         Ok(Some(StrategyBacktestContext {
@@ -206,11 +199,24 @@ impl StrategyBacktest {
         Ok(())
     }
 
-    fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<()> {
+    fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<TqSimStepReport> {
         ingest_quote_events(self.strategy.task_host(), batch.latest_quotes)?;
         self.sim
             .ingest_step_report(self.strategy.task_host(), &batch.sim_report)?;
-        Ok(())
+        Ok(batch.sim_report)
+    }
+
+    fn record_summary_step(&mut self, event_time_ns: i64, sim_report: &TqSimStepReport) {
+        if sim_report.is_empty() {
+            self.summary
+                .record_unchanged_account_observation(Some(event_time_ns));
+        } else {
+            self.summary.record_snapshot(ledger_snapshot_from_sim(
+                &self.sim,
+                &self.tracked_symbols,
+                Some(event_time_ns),
+            ));
+        }
     }
 
     #[must_use]
@@ -501,11 +507,16 @@ impl StrategyBacktestContext<'_> {
 
     pub fn finish_sim_step(&mut self) -> Result<TqSimStepReport> {
         let report = self.sim.process_host_orders(self.context.task_host())?;
-        self.summary.record_snapshot(ledger_snapshot_from_sim(
-            self.sim,
-            self.tracked_symbols,
-            Some(self.event.event_time_ns()),
-        ));
+        if report.is_empty() {
+            self.summary
+                .record_unchanged_account_observation(Some(self.event.event_time_ns()));
+        } else {
+            self.summary.record_snapshot(ledger_snapshot_from_sim(
+                self.sim,
+                self.tracked_symbols,
+                Some(self.event.event_time_ns()),
+            ));
+        }
         Ok(report)
     }
 }
@@ -544,95 +555,82 @@ fn ingest_quote_events(host: &TaskHost, quotes: BTreeMap<String, ReplayStepQuote
     if quotes.is_empty() {
         return Ok(());
     }
-    let quote_nodes = quotes
+    let quote_fields = quotes
         .into_iter()
-        .map(|(symbol, quote)| (symbol, quote_state_value(&quote)))
-        .collect::<Map<_, _>>();
-    host.api().session().handle().ingest(
-        RuntimeInput::Io(IoEvent {
-            route: "backtest".to_string(),
-            domains: vec![ProtocolDomain::Market],
-            payload: InputPayload::Json(json!({
-                "aid": "rtn_data",
-                "data": [{
-                    "quotes": Value::Object(quote_nodes)
-                }]
-            })),
-        }),
+        .map(|(symbol, quote)| (Symbol::new(symbol), quote_state_fields(&quote)))
+        .collect::<Vec<_>>();
+    host.api().session().handle().ingest_market_quote_fields(
+        quote_fields,
         vec![],
         CommitScope::ReplayStep,
     )?;
     Ok(())
 }
 
-fn quote_state_value(quote: &ReplayStepQuote) -> Value {
-    let mut quote_value = Map::new();
+fn quote_state_fields(quote: &ReplayStepQuote) -> Vec<FieldMutation> {
+    let mut fields = Vec::new();
     let quote_data = &quote.quote;
     if let Some(datetime_ns) = quote.datetime_ns {
-        quote_value.insert("datetime".to_string(), Value::from(datetime_ns.to_string()));
+        push_field(
+            &mut fields,
+            "datetime",
+            Value::from(datetime_ns.to_string()),
+        );
     } else {
-        insert_string_if_present(&mut quote_value, "datetime", &quote_data.datetime);
+        push_string_if_present(&mut fields, "datetime", &quote_data.datetime);
     }
-    insert_f64_if_finite(&mut quote_value, "last_price", quote_data.last_price);
-    insert_f64_if_finite(&mut quote_value, "highest", quote_data.highest);
-    insert_f64_if_finite(&mut quote_value, "lowest", quote_data.lowest);
-    insert_f64_if_finite(&mut quote_value, "open", quote_data.open);
-    insert_f64_if_finite(&mut quote_value, "close", quote_data.close);
-    insert_f64_if_finite(&mut quote_value, "average", quote_data.average);
-    insert_f64_if_finite(&mut quote_value, "ask_price1", quote_data.ask_price1);
-    insert_i64_if_nonzero(&mut quote_value, "ask_volume1", quote_data.ask_volume1);
-    insert_f64_if_finite(&mut quote_value, "bid_price1", quote_data.bid_price1);
-    insert_i64_if_nonzero(&mut quote_value, "bid_volume1", quote_data.bid_volume1);
-    insert_i64_if_nonzero(&mut quote_value, "volume", quote_data.volume);
-    insert_f64_if_finite(&mut quote_value, "amount", quote_data.amount);
-    insert_i64_if_nonzero(&mut quote_value, "open_interest", quote_data.open_interest);
-    insert_f64_if_finite(&mut quote_value, "price_tick", quote_data.price_tick);
-    insert_i64_if_nonzero(&mut quote_value, "price_decs", quote_data.price_decs);
-    insert_i64_if_nonzero(
-        &mut quote_value,
-        "volume_multiple",
-        quote_data.volume_multiple,
-    );
-    insert_i64_if_nonzero(&mut quote_value, "open_limit", quote_data.open_limit);
-    insert_i64_if_nonzero(
-        &mut quote_value,
+    push_f64_if_finite(&mut fields, "last_price", quote_data.last_price);
+    push_f64_if_finite(&mut fields, "highest", quote_data.highest);
+    push_f64_if_finite(&mut fields, "lowest", quote_data.lowest);
+    push_f64_if_finite(&mut fields, "open", quote_data.open);
+    push_f64_if_finite(&mut fields, "close", quote_data.close);
+    push_f64_if_finite(&mut fields, "average", quote_data.average);
+    push_f64_if_finite(&mut fields, "ask_price1", quote_data.ask_price1);
+    push_i64_if_nonzero(&mut fields, "ask_volume1", quote_data.ask_volume1);
+    push_f64_if_finite(&mut fields, "bid_price1", quote_data.bid_price1);
+    push_i64_if_nonzero(&mut fields, "bid_volume1", quote_data.bid_volume1);
+    push_i64_if_nonzero(&mut fields, "volume", quote_data.volume);
+    push_f64_if_finite(&mut fields, "amount", quote_data.amount);
+    push_i64_if_nonzero(&mut fields, "open_interest", quote_data.open_interest);
+    push_f64_if_finite(&mut fields, "price_tick", quote_data.price_tick);
+    push_i64_if_nonzero(&mut fields, "price_decs", quote_data.price_decs);
+    push_i64_if_nonzero(&mut fields, "volume_multiple", quote_data.volume_multiple);
+    push_i64_if_nonzero(&mut fields, "open_limit", quote_data.open_limit);
+    push_i64_if_nonzero(
+        &mut fields,
         "max_limit_order_volume",
         quote_data.max_limit_order_volume,
     );
-    insert_i64_if_nonzero(
-        &mut quote_value,
+    push_i64_if_nonzero(
+        &mut fields,
         "max_market_order_volume",
         quote_data.max_market_order_volume,
     );
-    insert_i64_if_nonzero(
-        &mut quote_value,
+    push_i64_if_nonzero(
+        &mut fields,
         "min_limit_order_volume",
         quote_data.min_limit_order_volume,
     );
-    insert_i64_if_nonzero(
-        &mut quote_value,
+    push_i64_if_nonzero(
+        &mut fields,
         "min_market_order_volume",
         quote_data.min_market_order_volume,
     );
-    insert_string_if_present(
-        &mut quote_value,
+    push_string_if_present(
+        &mut fields,
         "underlying_symbol",
         &quote_data.underlying_symbol,
     );
-    insert_f64_if_finite(&mut quote_value, "strike_price", quote_data.strike_price);
-    insert_string_if_present(&mut quote_value, "ins_class", &quote_data.ins_class);
-    insert_string_if_present(&mut quote_value, "instrument_id", &quote_data.instrument_id);
-    insert_string_if_present(
-        &mut quote_value,
-        "instrument_name",
-        &quote_data.instrument_name,
-    );
-    insert_string_if_present(&mut quote_value, "exchange_id", &quote_data.exchange_id);
-    insert_string_if_present(&mut quote_value, "product_id", &quote_data.product_id);
-    insert_f64_if_finite(&mut quote_value, "margin", quote_data.margin);
-    insert_f64_if_finite(&mut quote_value, "commission", quote_data.commission);
+    push_f64_if_finite(&mut fields, "strike_price", quote_data.strike_price);
+    push_string_if_present(&mut fields, "ins_class", &quote_data.ins_class);
+    push_string_if_present(&mut fields, "instrument_id", &quote_data.instrument_id);
+    push_string_if_present(&mut fields, "instrument_name", &quote_data.instrument_name);
+    push_string_if_present(&mut fields, "exchange_id", &quote_data.exchange_id);
+    push_string_if_present(&mut fields, "product_id", &quote_data.product_id);
+    push_f64_if_finite(&mut fields, "margin", quote_data.margin);
+    push_f64_if_finite(&mut fields, "commission", quote_data.commission);
 
-    Value::Object(quote_value)
+    fields
 }
 
 fn quote_from_tick(tick: &Tick) -> Quote {
@@ -729,22 +727,29 @@ fn validate_default_price_tick(price_tick: Option<f64>) -> Result<()> {
     Ok(())
 }
 
-fn insert_string_if_present(value: &mut Map<String, Value>, key: &str, field: &str) {
+fn push_string_if_present(fields: &mut Vec<FieldMutation>, key: &str, field: &str) {
     if !field.is_empty() {
-        value.insert(key.to_string(), Value::from(field));
+        push_field(fields, key, Value::from(field));
     }
 }
 
-fn insert_f64_if_finite(value: &mut Map<String, Value>, key: &str, field: f64) {
+fn push_f64_if_finite(fields: &mut Vec<FieldMutation>, key: &str, field: f64) {
     if let Some(number) = Number::from_f64(field) {
-        value.insert(key.to_string(), Value::Number(number));
+        push_field(fields, key, Value::Number(number));
     }
 }
 
-fn insert_i64_if_nonzero(value: &mut Map<String, Value>, key: &str, field: i64) {
+fn push_i64_if_nonzero(fields: &mut Vec<FieldMutation>, key: &str, field: i64) {
     if field != 0 {
-        value.insert(key.to_string(), Value::from(field));
+        push_field(fields, key, Value::from(field));
     }
+}
+
+fn push_field(fields: &mut Vec<FieldMutation>, key: &str, value: Value) {
+    fields.push(FieldMutation {
+        field: key.to_string(),
+        value,
+    });
 }
 
 #[cfg(test)]
@@ -818,6 +823,42 @@ mod tests {
         drop(second);
 
         assert!(backtest.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_empty_sim_steps_keep_summary_counts_and_times() {
+        let replay = ReplayMarketSource::new(vec![
+            tick_event("SHFE.a", 1, 1_000, 101.0),
+            tick_event("SHFE.a", 2, 2_000, 102.0),
+        ]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let mut first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        assert!(first.finish_sim_step().unwrap().is_empty());
+        drop(first);
+
+        let mut second = backtest
+            .next()
+            .await
+            .expect("second step should succeed")
+            .expect("second step should exist");
+        assert!(second.finish_sim_step().unwrap().is_empty());
+        drop(second);
+
+        assert!(backtest.next().await.unwrap().is_none());
+        let summary = backtest.summary();
+        assert_eq!(summary.event_count(), 2);
+        assert_eq!(summary.tick_count(), 2);
+        assert_eq!(summary.start_event_time_ns(), Some(1_000));
+        assert_eq!(summary.end_event_time_ns(), Some(2_000));
+        assert_eq!(summary.final_positions().len(), 1);
     }
 
     #[test]
