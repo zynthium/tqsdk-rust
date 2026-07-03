@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Number, Value};
 use tqsdk_core::{CommitScope, FieldMutation, Kline, Quote, Symbol, Tick};
@@ -68,7 +68,7 @@ pub struct StrategyBacktestContext<'a> {
 
 #[derive(Debug, Default)]
 struct ReplayStepBatch {
-    latest_quotes: BTreeMap<String, ReplayStepQuote>,
+    latest_quotes: Vec<(String, ReplayStepQuote)>,
     sim_report: TqSimStepReport,
 }
 
@@ -261,7 +261,15 @@ impl StrategyBacktest {
         let report = self
             .sim
             .update_quote_ref_at(symbol, &quote.quote, event_time_ns);
-        batch.latest_quotes.insert(symbol.to_owned(), quote);
+        if let Some((_, existing)) = batch
+            .latest_quotes
+            .iter_mut()
+            .find(|(existing, _)| existing == symbol)
+        {
+            *existing = quote;
+        } else {
+            batch.latest_quotes.push((symbol.to_owned(), quote));
+        }
         batch.sim_report.extend(report);
     }
 
@@ -551,7 +559,7 @@ fn ledger_snapshot_from_sim(
     BacktestLedgerSnapshot::new(event_time_ns, sim.account(), orders, trades, positions)
 }
 
-fn ingest_quote_events(host: &TaskHost, quotes: BTreeMap<String, ReplayStepQuote>) -> Result<()> {
+fn ingest_quote_events(host: &TaskHost, quotes: Vec<(String, ReplayStepQuote)>) -> Result<()> {
     if quotes.is_empty() {
         return Ok(());
     }
