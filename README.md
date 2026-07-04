@@ -31,7 +31,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN v1 (`.tqbn`) 默认 history cache、single-file backtest tick cache 和共享 universe selector |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -227,8 +227,10 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
-历史序列和回测 tick cache 默认写未压缩 TQBN v1 (`.tqbn`)；显式启用 `tqbn-zstd`
-feature 时，TQBN records block 会使用 zstd level 1 做内部压缩，不新增用户可选 store API。
+历史序列和回测 tick cache 默认写按交易日分区的未压缩 TQBN daily v2 (`.tqbn`)；
+tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。显式启用
+`tqbn-zstd` feature 时，TQBN records block 会使用 zstd level 1 做内部压缩，
+不新增用户可选 store API。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

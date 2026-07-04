@@ -2,9 +2,9 @@
 
 ## 文档定位
 
-本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN v1 (`.tqbn`) 格式。
+本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN daily v2 (`.tqbn`) 格式。
 它只约束本仓库 Rust cache 的默认持久化合同，不扩大 public API，也不承诺兼容旧 Python
-`DataSeries` binary/mmap cache 或旧 `.tqseries` cache。
+`DataSeries` binary/mmap cache、旧 `.tqseries` cache 或旧单文件 `.tqbn` layout。
 
 相关文档：
 
@@ -14,10 +14,12 @@
 
 ## Current Decision
 
-TQBN v1 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
+TQBN daily v2 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
 
-TQBN v1 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 的 crate-internal
-codec 和 store adapter 实现。旧 `.tqseries` 不是默认格式，不作为新增缓存文件目标，
+TQBN daily v2 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 的
+crate-internal codec 和 store adapter 实现。每个交易日分区文件仍是 append-only TQBN
+record stream；store layout 按交易日拆分，避免扩展回填区间时重写单个大型 series 文件。
+旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
 也不提供兼容读取或迁移 store。
 
 默认构建写入未压缩 TQBN blocks。显式启用 Cargo feature `tqbn-zstd` 时，writer 会对
@@ -37,7 +39,7 @@ crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN re
 history series、coverage、scan report、purge report、backtest tick cache 和 live tick
 row writer 语义。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
-symbol 的 `tick.tqbn` append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
+symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
 
 后续如果 TQBN 的内部 record layout 需要演进，应先保持这两个 public facade 不变；只有当
 用户可见语义改变时，才同步调整 public API 文档和 contract examples。
@@ -46,19 +48,22 @@ symbol 的 `tick.tqbn` append-log；默认远端回测补缓存成功后会走�
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.tqbn.v1` |
+| format id | `tqsdk.tqbn.daily.v2` |
 | schema version | `2` |
 | file extension | `.tqbn` |
-| root layout | `series/<escaped-symbol>/tick.tqbn` 和 `series/<escaped-symbol>/<duration_ns>.tqbn` |
+| root layout | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` |
 
 路径语义：
 
-- `series/<escaped-symbol>/tick.tqbn` 存储 tick history series，也是
-  `BacktestTickCache` 的 tick-only 持久缓存文件。
-- `series/<escaped-symbol>/<duration_ns>.tqbn` 存储 K 线 history series；
+- `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 存储某一交易日的 tick history series，
+  也是 `BacktestTickCache` 的 tick-only 持久缓存分区文件。
+- `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 存储某一交易日的 K 线 history series；
   `duration_ns` 是该 K 线周期的纳秒整数值。
+- `<YYYYMMDD>` 是中国市场交易日；18:00 CST 之后归下一交易日，周末归并到下一个周一交易日。
 - `<escaped-symbol>` 是用于文件系统路径的 symbol escape 结果；它是 cache 内部路径合同，
   不是新的 public symbol 表示法。
+- `HistorySeriesCache::tick_series_path(...)` / `kline_series_path(...)` 返回逻辑 series
+  路径，不代表单个物理文件；`scan()`、coverage、purge 和 compact 会遍历匹配的全部日分区文件。
 
 ## Binary Contract
 
@@ -109,3 +114,7 @@ TQBN reader 的兼容规则是：
 
 这些规则允许后续 record 尾部追加字段，但不允许 silent truncation。任何需要读取旧 layout 的逻辑都应
 集中在 compat module 中，不能散落在 normal decode path。
+
+layout 兼容性单独处理：当前 store 只识别 daily v2 路径。旧单文件 `.tqbn`
+(`series/<escaped-symbol>/tick.tqbn` / `series/<escaped-symbol>/<duration_ns>.tqbn`) 和旧
+`.tqseries` 文件不会参与 coverage/read/purge/compact，也不会自动迁移。

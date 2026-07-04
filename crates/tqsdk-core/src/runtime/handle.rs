@@ -222,7 +222,7 @@ impl RuntimeHandle {
                     sort_field_mutations(&mut fields);
                 }
                 NormalizedMutation {
-                    path: StatePath::new(["quotes".to_string(), symbol.as_str().to_string()]),
+                    path: StatePath::quote(&symbol),
                     object: Some(ObjectKey::Quote { symbol }),
                     fields,
                     source: MutationSource::MarketDiff,

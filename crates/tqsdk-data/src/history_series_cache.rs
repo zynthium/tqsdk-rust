@@ -216,6 +216,40 @@ pub struct HistorySeriesCache {
     store: Arc<dyn HistorySeriesStore>,
 }
 
+pub struct TickDataSeriesReader {
+    symbol: String,
+    start_datetime_ns: i64,
+    end_datetime_ns: i64,
+    reader: Box<dyn HistorySeriesReader>,
+}
+
+impl TickDataSeriesReader {
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn start_datetime_ns(&self) -> i64 {
+        self.start_datetime_ns
+    }
+
+    #[must_use]
+    pub fn end_datetime_ns(&self) -> i64 {
+        self.end_datetime_ns
+    }
+
+    pub fn next_tick(&mut self) -> Result<Option<Tick>> {
+        match self.reader.next_row()? {
+            Some(HistorySeriesRow::Tick(row)) => Ok(Some(row)),
+            Some(HistorySeriesRow::Kline(_)) => Err(DataError::InvalidState(
+                "tick data series reader returned a kline row",
+            )),
+            None => Ok(None),
+        }
+    }
+}
+
 impl HistorySeriesCache {
     #[must_use]
     fn from_store(store: Arc<dyn HistorySeriesStore>) -> Self {
@@ -252,6 +286,10 @@ impl HistorySeriesCache {
 
     pub(crate) fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
         self.store.series_path(symbol, kind)
+    }
+
+    pub(crate) fn series_exists(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
+        self.store.series_exists(symbol, kind)
     }
 
     pub fn kline_coverage(
@@ -379,33 +417,14 @@ impl HistorySeriesCache {
     }
 
     pub fn read_tick_data_series(&self, request: TickDataSeriesRequest) -> Result<TickDataSeries> {
-        let spec = request.validate()?;
-        let coverage = self.tick_coverage(
-            request.symbol(),
-            spec.start_datetime_ns,
-            spec.end_datetime_ns,
-        )?;
-        if !coverage.missing_ranges.is_empty() {
-            return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
-                self.root_dir().to_path_buf(),
-                request.symbol(),
-                0,
-                spec.start_datetime_ns,
-                spec.end_datetime_ns,
-                coverage.missing_ranges,
-            ))));
-        }
+        let (start_datetime_ns, end_datetime_ns) = self.validate_tick_cache_hit(&request)?;
 
-        let rows = self.read_tick_window(
-            request.symbol(),
-            spec.start_datetime_ns,
-            spec.end_datetime_ns,
-        )?;
+        let rows = self.read_tick_window(request.symbol(), start_datetime_ns, end_datetime_ns)?;
         let hit_rows = rows.len();
         Ok(TickDataSeries::new(
             request.symbol().to_string(),
-            spec.start_datetime_ns,
-            spec.end_datetime_ns,
+            start_datetime_ns,
+            end_datetime_ns,
             rows,
         )
         .with_cache_report(HistorySeriesCacheReport::new(
@@ -413,6 +432,25 @@ impl HistorySeriesCache {
             hit_rows,
             Vec::new(),
         )))
+    }
+
+    pub fn open_tick_data_series_reader(
+        &self,
+        request: TickDataSeriesRequest,
+    ) -> Result<TickDataSeriesReader> {
+        let (start_datetime_ns, end_datetime_ns) = self.validate_tick_cache_hit(&request)?;
+        let reader = self.open_reader(HistorySeriesReadRequest {
+            symbol: request.symbol().to_string(),
+            kind: HistorySeriesKind::Tick,
+            range_start_ns: start_datetime_ns,
+            range_end_ns: end_datetime_ns,
+        })?;
+        Ok(TickDataSeriesReader {
+            symbol: request.symbol().to_string(),
+            start_datetime_ns,
+            end_datetime_ns,
+            reader,
+        })
     }
 
     pub fn write_kline_range(
@@ -491,6 +529,26 @@ impl HistorySeriesCache {
             }
         }
         Ok(rows)
+    }
+
+    fn validate_tick_cache_hit(&self, request: &TickDataSeriesRequest) -> Result<(i64, i64)> {
+        let spec = request.validate()?;
+        let coverage = self.tick_coverage(
+            request.symbol(),
+            spec.start_datetime_ns,
+            spec.end_datetime_ns,
+        )?;
+        if !coverage.missing_ranges.is_empty() {
+            return Err(DataError::CacheMiss(Box::new(HistorySeriesCacheMiss::new(
+                self.root_dir().to_path_buf(),
+                request.symbol(),
+                0,
+                spec.start_datetime_ns,
+                spec.end_datetime_ns,
+                coverage.missing_ranges,
+            ))));
+        }
+        Ok((spec.start_datetime_ns, spec.end_datetime_ns))
     }
 
     pub fn scan(&self) -> Result<HistorySeriesCacheScanReport> {

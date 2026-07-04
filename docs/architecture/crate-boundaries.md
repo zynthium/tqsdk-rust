@@ -315,13 +315,13 @@ sink、WAL、journal 或 cache writer。
 
 - history page / series / download / export substrate
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
-- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN v1 history cache format；
+- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format；
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
   record lengths；embedded coverage commit 和 tick-only `BacktestTickCache`
 - TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 会执行 append-log compaction，
   合并重复 rows 并保留 last-write-wins 语义；
-  旧 `.tqseries` 不再作为默认 backend，且没有兼容读取或迁移 store
+  旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage，不拥有 session、订阅、wait loop 或后台进程
@@ -469,10 +469,10 @@ sink、WAL、journal 或 cache writer。
 
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
-- TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
+- TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - 可选 `tqbn-zstd` feature 只压缩 TQBN internal records block；`tqsdk-data` 是实现点，
   `tqsdk-task` / `tqsdk` 仅做同名 feature 转发
-- 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store；旧 Python-compatible
+- 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store；旧 Python-compatible
   binary/mmap cache 已废弃
 - 回测 tick 持久缓存、coverage 检查和 shared universe selector
 - history page/series/download/export

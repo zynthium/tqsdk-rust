@@ -93,7 +93,32 @@ fn backtest_tick_cache_can_wrap_history_series_cache_storage() {
         series.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(history.tick_series_path("SHFE.rb2601").exists());
+    assert_series_file_exists(&history, "19700101/tick/SHFE.rb2601.tqbn");
+}
+
+#[test]
+fn tick_data_series_reader_reads_cached_ticks_in_order() {
+    let dir = temp_dir("tick-data-series-reader");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            1_000,
+            4_000,
+            &[tick(2, 2_000, 102.0), tick(1, 1_000, 101.0)],
+        )
+        .unwrap();
+
+    let mut reader = cache
+        .open_tick_data_series_reader(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 4_000))
+        .unwrap();
+
+    assert_eq!(reader.symbol(), "SHFE.rb2601");
+    assert_eq!(reader.start_datetime_ns(), 1_000);
+    assert_eq!(reader.end_datetime_ns(), 4_000);
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
+    assert!(reader.next_tick().unwrap().is_none());
 }
 
 #[test]
@@ -352,11 +377,7 @@ fn kline_cache_reads_history_cache_rows() {
     assert_eq!(series.len(), 2);
     assert_eq!(series.get(0).unwrap().id, 10);
     assert_eq!(series.get(1).unwrap().id, 11);
-    assert!(
-        cache
-            .kline_series_path("SHFE.au2602", 60_000_000_000)
-            .exists()
-    );
+    assert_series_file_exists(&cache, "19700101/kline/60000000000/SHFE.au2602.tqbn");
 }
 
 #[test]
@@ -389,26 +410,22 @@ fn history_cache_exposes_typed_coverage_path_and_purge() {
         kline_coverage.missing_ranges,
         vec![(120_000_000_000, 180_000_000_000)]
     );
-    assert!(
-        cache
-            .kline_series_path("SHFE.au2602", 60_000_000_000)
-            .exists()
-    );
+    assert_series_file_exists(&cache, "19700101/kline/60000000000/SHFE.au2602.tqbn");
 
     let tick_coverage = cache.tick_coverage("SHFE.rb2601", 1_000, 4_000).unwrap();
     assert_eq!(tick_coverage.cached_ranges, vec![(1_000, 3_000)]);
     assert_eq!(tick_coverage.missing_ranges, vec![(3_000, 4_000)]);
-    assert!(cache.tick_series_path("SHFE.rb2601").exists());
+    assert_series_file_exists(&cache, "19700101/tick/SHFE.rb2601.tqbn");
 
     let kline_purge = cache
         .purge_kline_series("SHFE.au2602", 60_000_000_000)
         .unwrap();
     assert!(kline_purge.removed());
-    assert!(!kline_purge.path.exists());
+    assert_series_file_missing(&cache, "19700101/kline/60000000000/SHFE.au2602.tqbn");
 
     let tick_purge = cache.purge_tick_series("SHFE.rb2601").unwrap();
     assert!(tick_purge.removed());
-    assert!(!tick_purge.path.exists());
+    assert_series_file_missing(&cache, "19700101/tick/SHFE.rb2601.tqbn");
 }
 
 #[test]
@@ -602,7 +619,6 @@ fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
             120_000_000_000,
             &[kline(1, 0, 1.0), kline(2, 60_000_000_000, 2.0)],
         );
-        let series_path = cache.kline_series_path("SHFE.ao2609", 60_000_000_000);
         let (manual, handle) = manual_session_and_handle();
         seed_auth_features(&handle, &["tq_dl"]);
         let client = DataClientBuilder::new()
@@ -624,7 +640,7 @@ fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
             .unwrap();
 
         assert_eq!(series.len(), 1);
-        assert!(!series_path.exists());
+        assert_series_file_missing(&cache, "19700101/kline/60000000000/SHFE.ao2609.tqbn");
     });
 }
 
@@ -1089,6 +1105,22 @@ fn write_kline_coverage(
     cache
         .write_kline_range(symbol, duration_ns, start_ns, end_ns, rows)
         .unwrap();
+}
+
+fn assert_series_file_exists(cache: &HistorySeriesCache, file_name: &str) {
+    let scan = cache.scan().unwrap();
+    assert!(
+        scan.files.iter().any(|file| file.file_name == file_name),
+        "missing {file_name} in {scan:?}"
+    );
+}
+
+fn assert_series_file_missing(cache: &HistorySeriesCache, file_name: &str) {
+    let scan = cache.scan().unwrap();
+    assert!(
+        scan.files.iter().all(|file| file.file_name != file_name),
+        "unexpected {file_name} in {scan:?}"
+    );
 }
 
 fn kline(id: i64, datetime: i64, close: f64) -> Kline {

@@ -3,20 +3,20 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::future::Future;
 use std::pin::Pin;
 
-use tqsdk_data::{HistorySeriesCache, TickDataSeriesRequest};
+use tqsdk_data::{HistorySeriesCache, TickDataSeriesReader, TickDataSeriesRequest};
 
-use crate::{BacktestMarketStream, ReplayMarketEvent, Result};
+use crate::{BacktestMarketStream, ReplayMarketEvent, Result, TaskError};
 
 pub struct HistoryTickReplayStream {
     cursors: Vec<TickSeriesCursor>,
     heap: BinaryHeap<HeapItem>,
 }
 
-#[derive(Debug, Clone)]
 struct TickSeriesCursor {
     symbol: String,
     symbol_rank: usize,
-    rows: Vec<tqsdk_core::Tick>,
+    reader: TickDataSeriesReader,
+    next_tick: Option<tqsdk_core::Tick>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,14 +35,13 @@ impl HistoryTickReplayStream {
         let mut cursors = Vec::new();
         let mut heap = BinaryHeap::new();
         for request in requests {
-            let series = cache.read_tick_data_series(request)?;
-            let symbol = series.symbol().to_string();
-            let mut rows = series.into_rows();
-            rows.reverse();
+            let symbol = request.symbol().to_string();
+            let reader = cache.open_tick_data_series_reader(request)?;
             let cursor = TickSeriesCursor {
                 symbol,
                 symbol_rank: 0,
-                rows,
+                reader,
+                next_tick: None,
             };
             cursors.push(cursor);
         }
@@ -60,7 +59,7 @@ impl HistoryTickReplayStream {
                 .get(cursor.symbol.as_str())
                 .copied()
                 .unwrap_or(cursor_index);
-            push_next_tick(cursor, cursor_index, &mut heap);
+            push_next_tick(cursor, cursor_index, &mut heap)?;
         }
         Ok(Self { cursors, heap })
     }
@@ -86,12 +85,12 @@ impl HistoryTickReplayStream {
         let cursor = &mut self.cursors[item.cursor_index];
         let symbol = cursor.symbol.clone();
         let tick = cursor
-            .rows
-            .pop()
+            .next_tick
+            .take()
             .expect("heap item must reference a non-empty tick cursor");
         debug_assert_eq!(tick.datetime, item.datetime);
         debug_assert_eq!(tick.id, item.tick_id);
-        push_next_tick(cursor, item.cursor_index, &mut self.heap);
+        push_next_tick(cursor, item.cursor_index, &mut self.heap).map_err(data_error_to_task)?;
         ReplayMarketEvent::tick(
             "history-cache",
             symbol,
@@ -135,8 +134,11 @@ fn push_next_tick(
     cursor: &mut TickSeriesCursor,
     cursor_index: usize,
     heap: &mut BinaryHeap<HeapItem>,
-) {
-    if let Some(tick) = cursor.rows.last() {
+) -> tqsdk_data::Result<()> {
+    if cursor.next_tick.is_none() {
+        cursor.next_tick = cursor.reader.next_tick()?;
+    }
+    if let Some(tick) = cursor.next_tick.as_ref() {
         heap.push(HeapItem {
             cursor_index,
             datetime: tick.datetime,
@@ -144,4 +146,9 @@ fn push_next_tick(
             symbol_rank: cursor.symbol_rank,
         });
     }
+    Ok(())
+}
+
+fn data_error_to_task(error: tqsdk_data::DataError) -> TaskError {
+    TaskError::External(error.to_string())
 }

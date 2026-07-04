@@ -3,7 +3,7 @@ use tqsdk_data::{DataError, HistorySeriesCache, HistorySeriesCacheFileStatus};
 #[test]
 fn tqbn_scan_reports_bad_magic_as_incomplete_write() {
     let dir = temp_dir("bad-magic");
-    let path = dir.join("series").join("SHFE.rb2601").join("tick.tqbn");
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, b"BAD!").unwrap();
 
@@ -20,7 +20,7 @@ fn tqbn_scan_reports_bad_magic_as_incomplete_write() {
 #[test]
 fn tqbn_read_rejects_truncated_block() {
     let dir = temp_dir("truncated-block");
-    let path = dir.join("series").join("SHFE.rb2601").join("tick.tqbn");
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = tqbn_valid_tick_prefix("SHFE.rb2601");
     bytes.extend_from_slice(b"TQBB\x02\x00\x00");
@@ -38,7 +38,7 @@ fn tqbn_read_rejects_truncated_block() {
 #[test]
 fn tqbn_rejects_checksum_valid_invalid_metadata() {
     let dir = temp_dir("invalid-metadata");
-    let path = dir.join("series").join("SHFE.rb2601").join("tick.tqbn");
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, tqbn_prefix_with_invalid_schema_metadata()).unwrap();
 
@@ -128,4 +128,11 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn daily_tick_file(root: &std::path::Path, day: &str, symbol: &str) -> std::path::PathBuf {
+    root.join("series")
+        .join(day)
+        .join("tick")
+        .join(format!("{}.tqbn", symbol.replace('/', "%2F")))
 }

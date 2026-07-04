@@ -47,17 +47,17 @@
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
   `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
-  `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN v1 history cache format。
+  `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；旧 `.tqseries` 不是默认 backend，也没有兼容读取或迁移 store。
+  record lengths；旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
   可选 Cargo feature `tqbn-zstd` 会对 TQBN records block 使用 zstd level 1 做
   per-block 压缩，且只在压缩后更小时写入压缩 block；默认 feature 不启用压缩，
   `tqsdk` / `tqsdk-task` facade 提供同名 feature 转发。
   旧 Python `DataSeries` binary/mmap cache
   不再作为 public surface 暴露，已有旧文件不会自动迁移
-- `BacktestTickCache::open(...)` 复用同一个 store adapter；默认 tick 文件路径是
-  `series/<escaped-symbol>/tick.tqbn`
+- `BacktestTickCache::open(...)` 复用同一个 store adapter；默认 tick 日分区文件路径是
+  `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`
 - TQBN store 支持递归 `scan()`、按保留期/总大小 `enforce_limits(...)` 清理和格式损坏报告；
   `enforce_limits(...)` 也会执行 append-log compaction，合并重复 rows 并保留 last-write-wins 语义
 - `HistorySeriesCache::read_kline_data_series` /
@@ -70,11 +70,11 @@
   generic kind/request、segment writer、coverage commit 和 row reader 都是 crate 内部实现细节
 - `BacktestTickCache` 是 tick-only semantic facade，复用同一个
   `HistorySeriesCache` 存储接口，用于回测覆盖检查、tick 写入和 tick
-  replay 读取；TQBN store 会把覆盖元数据和 tick rows 写进同一个 series 文件，支持
+  replay 读取；TQBN store 会把覆盖元数据和 tick rows 写进同一个交易日分区文件，支持
   partial row append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
-  cached/missing ranges；`tick_series_path(...)`、`purge_symbol_ticks(...)` 和
-  `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 文件粒度的运维入口，供回测 warmup、
+  cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
+  `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、
   refresh、远端补缓存后的碎块合并和磁盘清理复用
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
   rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口；它不拥有
@@ -225,8 +225,9 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
-`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN v1
-(`.tqbn`) 是该缓存的当前默认和 canonical 格式，旧 `.tqseries` 不提供兼容读取或迁移 store；
+`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN daily v2
+(`.tqbn`) 是该缓存的当前默认和 canonical 格式，旧 `.tqseries` 和旧单文件 `.tqbn`
+layout 不提供兼容读取或迁移 store；
 不负责 live session ownership、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
 迁移、跨进程 cache service 或高频交易 hot path；live 订阅到 writer 的桥接由 `tqsdk`
 facade 或未来可选 relay host 拥有。
@@ -296,8 +297,10 @@ S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
 影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session`
-仍保持无缓存行为。TQBN v1 (`.tqbn`) 是当前默认和 canonical 格式。旧 `.tqseries`
-直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
+仍保持无缓存行为。TQBN daily v2 (`.tqbn`) 是当前默认和 canonical 格式，使用
+`series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
+`series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 日分区布局。旧 `.tqseries`
+和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
 同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。需要降低磁盘占用时可显式启用
 `tqbn-zstd` feature；该 feature 只改变 TQBN internal block payload，不新增用户可选 store API。
 

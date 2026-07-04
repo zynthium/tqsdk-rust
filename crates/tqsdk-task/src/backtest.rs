@@ -43,6 +43,7 @@ pub struct StrategyBacktest {
     tracked_symbols: Vec<String>,
     price_ticks: HashMap<String, f64>,
     quote_metadata_price_ticks: HashMap<String, f64>,
+    last_replay_quotes: HashMap<String, ReplayStepQuote>,
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
 }
@@ -200,10 +201,29 @@ impl StrategyBacktest {
     }
 
     fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<TqSimStepReport> {
-        ingest_quote_events(self.strategy.task_host(), batch.latest_quotes)?;
+        let quote_fields = self.quote_fields_for_replay_batch(batch.latest_quotes);
+        ingest_quote_fields(self.strategy.task_host(), quote_fields)?;
         self.sim
             .ingest_step_report(self.strategy.task_host(), &batch.sim_report)?;
         Ok(batch.sim_report)
+    }
+
+    fn quote_fields_for_replay_batch(
+        &mut self,
+        quotes: Vec<(String, ReplayStepQuote)>,
+    ) -> Vec<(Symbol, Vec<FieldMutation>)> {
+        quotes
+            .into_iter()
+            .filter_map(|(symbol, quote)| {
+                let fields = quote_state_fields_since(self.last_replay_quotes.get(&symbol), &quote);
+                self.last_replay_quotes.insert(symbol.clone(), quote);
+                if fields.is_empty() {
+                    None
+                } else {
+                    Some((Symbol::new(symbol), fields))
+                }
+            })
+            .collect()
     }
 
     fn record_summary_step(&mut self, event_time_ns: i64, sim_report: &TqSimStepReport) {
@@ -418,6 +438,7 @@ impl StrategyBacktestBuilder {
             tracked_symbols,
             price_ticks,
             quote_metadata_price_ticks: HashMap::new(),
+            last_replay_quotes: HashMap::new(),
             default_price_tick,
             summary,
         })
@@ -559,14 +580,13 @@ fn ledger_snapshot_from_sim(
     BacktestLedgerSnapshot::new(event_time_ns, sim.account(), orders, trades, positions)
 }
 
-fn ingest_quote_events(host: &TaskHost, quotes: Vec<(String, ReplayStepQuote)>) -> Result<()> {
-    if quotes.is_empty() {
+fn ingest_quote_fields(
+    host: &TaskHost,
+    quote_fields: Vec<(Symbol, Vec<FieldMutation>)>,
+) -> Result<()> {
+    if quote_fields.is_empty() {
         return Ok(());
     }
-    let quote_fields = quotes
-        .into_iter()
-        .map(|(symbol, quote)| (Symbol::new(symbol), quote_state_fields(&quote)))
-        .collect::<Vec<_>>();
     host.api()
         .session()
         .handle()
@@ -574,68 +594,199 @@ fn ingest_quote_events(host: &TaskHost, quotes: Vec<(String, ReplayStepQuote)>) 
     Ok(())
 }
 
+#[cfg(test)]
 fn quote_state_fields(quote: &ReplayStepQuote) -> Vec<FieldMutation> {
-    let mut fields = Vec::new();
+    quote_state_fields_since(None, quote)
+}
+
+fn quote_state_fields_since(
+    previous: Option<&ReplayStepQuote>,
+    quote: &ReplayStepQuote,
+) -> Vec<FieldMutation> {
+    let mut fields = Vec::with_capacity(16);
     let quote_data = &quote.quote;
-    push_f64_if_finite(&mut fields, "amount", quote_data.amount);
-    push_f64_if_finite(&mut fields, "ask_price1", quote_data.ask_price1);
-    push_i64_if_nonzero(&mut fields, "ask_volume1", quote_data.ask_volume1);
-    push_f64_if_finite(&mut fields, "average", quote_data.average);
-    push_f64_if_finite(&mut fields, "bid_price1", quote_data.bid_price1);
-    push_i64_if_nonzero(&mut fields, "bid_volume1", quote_data.bid_volume1);
-    push_f64_if_finite(&mut fields, "close", quote_data.close);
-    push_f64_if_finite(&mut fields, "commission", quote_data.commission);
-    if let Some(datetime_ns) = quote.datetime_ns {
-        push_field(
-            &mut fields,
-            "datetime",
-            Value::from(datetime_ns.to_string()),
-        );
-    } else {
-        push_string_if_present(&mut fields, "datetime", &quote_data.datetime);
-    }
-    push_string_if_present(&mut fields, "exchange_id", &quote_data.exchange_id);
-    push_f64_if_finite(&mut fields, "highest", quote_data.highest);
-    push_string_if_present(&mut fields, "ins_class", &quote_data.ins_class);
-    push_string_if_present(&mut fields, "instrument_id", &quote_data.instrument_id);
-    push_string_if_present(&mut fields, "instrument_name", &quote_data.instrument_name);
-    push_f64_if_finite(&mut fields, "last_price", quote_data.last_price);
-    push_f64_if_finite(&mut fields, "lowest", quote_data.lowest);
-    push_f64_if_finite(&mut fields, "margin", quote_data.margin);
-    push_i64_if_nonzero(
+    let previous_quote = previous.map(|previous| &previous.quote);
+    push_f64_if_changed(
         &mut fields,
+        previous_quote.map(|quote| quote.amount),
+        "amount",
+        quote_data.amount,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.ask_price1),
+        "ask_price1",
+        quote_data.ask_price1,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.ask_volume1),
+        "ask_volume1",
+        quote_data.ask_volume1,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.average),
+        "average",
+        quote_data.average,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.bid_price1),
+        "bid_price1",
+        quote_data.bid_price1,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.bid_volume1),
+        "bid_volume1",
+        quote_data.bid_volume1,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.close),
+        "close",
+        quote_data.close,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.commission),
+        "commission",
+        quote_data.commission,
+    );
+    push_datetime_if_changed(&mut fields, previous, quote);
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.exchange_id.as_str()),
+        "exchange_id",
+        &quote_data.exchange_id,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.highest),
+        "highest",
+        quote_data.highest,
+    );
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.ins_class.as_str()),
+        "ins_class",
+        &quote_data.ins_class,
+    );
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.instrument_id.as_str()),
+        "instrument_id",
+        &quote_data.instrument_id,
+    );
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.instrument_name.as_str()),
+        "instrument_name",
+        &quote_data.instrument_name,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.last_price),
+        "last_price",
+        quote_data.last_price,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.lowest),
+        "lowest",
+        quote_data.lowest,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.margin),
+        "margin",
+        quote_data.margin,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.max_limit_order_volume),
         "max_limit_order_volume",
         quote_data.max_limit_order_volume,
     );
-    push_i64_if_nonzero(
+    push_i64_if_changed(
         &mut fields,
+        previous_quote.map(|quote| quote.max_market_order_volume),
         "max_market_order_volume",
         quote_data.max_market_order_volume,
     );
-    push_i64_if_nonzero(
+    push_i64_if_changed(
         &mut fields,
+        previous_quote.map(|quote| quote.min_limit_order_volume),
         "min_limit_order_volume",
         quote_data.min_limit_order_volume,
     );
-    push_i64_if_nonzero(
+    push_i64_if_changed(
         &mut fields,
+        previous_quote.map(|quote| quote.min_market_order_volume),
         "min_market_order_volume",
         quote_data.min_market_order_volume,
     );
-    push_f64_if_finite(&mut fields, "open", quote_data.open);
-    push_i64_if_nonzero(&mut fields, "open_interest", quote_data.open_interest);
-    push_i64_if_nonzero(&mut fields, "open_limit", quote_data.open_limit);
-    push_i64_if_nonzero(&mut fields, "price_decs", quote_data.price_decs);
-    push_f64_if_finite(&mut fields, "price_tick", quote_data.price_tick);
-    push_string_if_present(&mut fields, "product_id", &quote_data.product_id);
-    push_f64_if_finite(&mut fields, "strike_price", quote_data.strike_price);
-    push_string_if_present(
+    push_f64_if_changed(
         &mut fields,
+        previous_quote.map(|quote| quote.open),
+        "open",
+        quote_data.open,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.open_interest),
+        "open_interest",
+        quote_data.open_interest,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.open_limit),
+        "open_limit",
+        quote_data.open_limit,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.price_decs),
+        "price_decs",
+        quote_data.price_decs,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.price_tick),
+        "price_tick",
+        quote_data.price_tick,
+    );
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.product_id.as_str()),
+        "product_id",
+        &quote_data.product_id,
+    );
+    push_f64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.strike_price),
+        "strike_price",
+        quote_data.strike_price,
+    );
+    push_string_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.underlying_symbol.as_str()),
         "underlying_symbol",
         &quote_data.underlying_symbol,
     );
-    push_i64_if_nonzero(&mut fields, "volume", quote_data.volume);
-    push_i64_if_nonzero(&mut fields, "volume_multiple", quote_data.volume_multiple);
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.volume),
+        "volume",
+        quote_data.volume,
+    );
+    push_i64_if_changed(
+        &mut fields,
+        previous_quote.map(|quote| quote.volume_multiple),
+        "volume_multiple",
+        quote_data.volume_multiple,
+    );
 
     fields
 }
@@ -734,22 +885,86 @@ fn validate_default_price_tick(price_tick: Option<f64>) -> Result<()> {
     Ok(())
 }
 
-fn push_string_if_present(fields: &mut Vec<FieldMutation>, key: &str, field: &str) {
-    if !field.is_empty() {
-        push_field(fields, key, Value::from(field));
+fn push_datetime_if_changed(
+    fields: &mut Vec<FieldMutation>,
+    previous: Option<&ReplayStepQuote>,
+    quote: &ReplayStepQuote,
+) {
+    if quote_datetime_matches(previous, quote) {
+        return;
+    }
+    let Some(datetime) = quote_datetime_value(quote) else {
+        return;
+    };
+    push_field(fields, "datetime", Value::from(datetime));
+}
+
+fn quote_datetime_value(quote: &ReplayStepQuote) -> Option<String> {
+    if let Some(datetime_ns) = quote.datetime_ns {
+        Some(datetime_ns.to_string())
+    } else if quote.quote.datetime.is_empty() {
+        None
+    } else {
+        Some(quote.quote.datetime.clone())
     }
 }
 
-fn push_f64_if_finite(fields: &mut Vec<FieldMutation>, key: &str, field: f64) {
-    if let Some(number) = Number::from_f64(field) {
-        push_field(fields, key, Value::Number(number));
+fn quote_datetime_matches(previous: Option<&ReplayStepQuote>, quote: &ReplayStepQuote) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    match (previous.datetime_ns, quote.datetime_ns) {
+        (Some(previous_ns), Some(current_ns)) => previous_ns == current_ns,
+        (None, None) => {
+            !quote.quote.datetime.is_empty() && previous.quote.datetime == quote.quote.datetime
+        }
+        (Some(previous_ns), None) => {
+            !quote.quote.datetime.is_empty() && previous_ns.to_string() == quote.quote.datetime
+        }
+        (None, Some(current_ns)) => {
+            !previous.quote.datetime.is_empty() && previous.quote.datetime == current_ns.to_string()
+        }
     }
 }
 
-fn push_i64_if_nonzero(fields: &mut Vec<FieldMutation>, key: &str, field: i64) {
-    if field != 0 {
-        push_field(fields, key, Value::from(field));
+fn push_string_if_changed(
+    fields: &mut Vec<FieldMutation>,
+    previous: Option<&str>,
+    key: &str,
+    current: &str,
+) {
+    if current.is_empty() || previous == Some(current) {
+        return;
     }
+    push_field(fields, key, Value::from(current));
+}
+
+fn push_f64_if_changed(
+    fields: &mut Vec<FieldMutation>,
+    previous: Option<f64>,
+    key: &str,
+    current: f64,
+) {
+    let Some(number) = Number::from_f64(current) else {
+        return;
+    };
+    if previous.is_some_and(|previous| Number::from_f64(previous).is_some() && previous == current)
+    {
+        return;
+    }
+    push_field(fields, key, Value::Number(number));
+}
+
+fn push_i64_if_changed(
+    fields: &mut Vec<FieldMutation>,
+    previous: Option<i64>,
+    key: &str,
+    current: i64,
+) {
+    if current == 0 || previous == Some(current) {
+        return;
+    }
+    push_field(fields, key, Value::from(current));
 }
 
 fn push_field(fields: &mut Vec<FieldMutation>, key: &str, value: Value) {
@@ -935,6 +1150,65 @@ mod tests {
         ));
 
         assert!(fields.windows(2).all(|pair| pair[0].field <= pair[1].field));
+    }
+
+    #[test]
+    fn quote_state_fields_since_keeps_only_changed_present_fields() {
+        let previous = ReplayStepQuote::tick(
+            Quote {
+                last_price: 100.0,
+                volume: 10,
+                open_interest: 20,
+                underlying_symbol: "SHFE.rb2601".to_string(),
+                ..Quote::default()
+            },
+            1_000,
+        );
+        let current = ReplayStepQuote::tick(
+            Quote {
+                last_price: 101.0,
+                volume: 11,
+                open_interest: 0,
+                underlying_symbol: "SHFE.rb2601".to_string(),
+                ..Quote::default()
+            },
+            2_000,
+        );
+
+        let fields = quote_state_fields_since(Some(&previous), &current);
+        let names = fields
+            .iter()
+            .map(|field| field.field.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["datetime", "last_price", "volume"]);
+        assert_eq!(fields[0].value, Value::from("2000"));
+        assert_eq!(fields[1].value, Value::from(101.0));
+        assert_eq!(fields[2].value, Value::from(11));
+    }
+
+    #[test]
+    fn quote_state_fields_since_skips_unchanged_tick_quote() {
+        let previous = ReplayStepQuote::tick(
+            Quote {
+                last_price: 100.0,
+                volume: 10,
+                underlying_symbol: "SHFE.rb2601".to_string(),
+                ..Quote::default()
+            },
+            1_000,
+        );
+        let current = ReplayStepQuote::tick(
+            Quote {
+                last_price: 100.0,
+                volume: 10,
+                underlying_symbol: "SHFE.rb2601".to_string(),
+                ..Quote::default()
+            },
+            1_000,
+        );
+
+        assert!(quote_state_fields_since(Some(&previous), &current).is_empty());
     }
 
     fn tick_event(symbol: &str, id: i64, datetime: i64, last_price: f64) -> ReplayMarketEvent {

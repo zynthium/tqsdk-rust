@@ -151,10 +151,13 @@ impl BacktestTickCache {
     ) -> Result<BacktestTickCacheStatus> {
         let coverage = self.coverage(symbol, range_start_ns, range_end_ns)?;
         let series_path = self.tick_series_path(coverage.symbol.as_str());
+        let series_path_exists = self
+            .history
+            .series_exists(coverage.symbol.as_str(), HistorySeriesKind::Tick)?;
         Ok(BacktestTickCacheStatus {
             backend_format: self.history.format_id(),
             cache_dir: coverage.cache_dir,
-            series_path_exists: series_path.exists(),
+            series_path_exists,
             series_path,
             symbol: coverage.symbol,
             range_start_ns: coverage.range_start_ns,

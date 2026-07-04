@@ -19,7 +19,12 @@ use crate::history_series_cache::{
     HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
     HistorySeriesWriteSegment,
 };
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone,
+    Utc, Weekday,
+};
 use fs2::FileExt;
+use tqsdk_core::{Kline, Tick};
 
 use codec::{
     DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_block_payload,
@@ -36,8 +41,12 @@ use metadata::{TqbnMetadata, TqbnSchema, decode_metadata, encode_metadata};
 pub(super) use format::{TQBN_FORMAT_ID, TQBN_SCHEMA_VERSION};
 
 const ROOT_DIR_NAME: &str = "series";
-const TICK_FILE_NAME: &str = "tick.tqbn";
+const TICK_DIR_NAME: &str = "tick";
+const KLINE_DIR_NAME: &str = "kline";
+const TQBN_FILE_EXTENSION: &str = "tqbn";
 const LOCK_FILE_NAME: &str = ".tqbn.lock";
+const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const TQBN_PREFIX_HEADER_LEN: usize = 4 + 1 + 4 + 4 + 8;
 const MAX_TQBN_PREFIX_METADATA_LEN: usize = 64 * 1024;
 const TQBN_BLOCK_HEADER_LEN: usize = 4 + 1 + 3 + 8 + 8;
@@ -70,9 +79,21 @@ struct TqbnSeriesMeta {
     modified: SystemTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TqbnPartitionRange {
+    day: String,
+    start_ns: i64,
+    end_ns: i64,
+}
+
 struct TqbnReader {
+    paths: Vec<PathBuf>,
+    path_index: usize,
+    symbol: String,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
     rows: Vec<HistorySeriesRow>,
-    index: usize,
 }
 
 type TqbnRowIdRange = Option<(i64, i64)>;
@@ -88,15 +109,291 @@ impl TqbnHistoryStore {
     }
 
     pub(super) fn series_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
-        self.root_dir
-            .join(ROOT_DIR_NAME)
-            .join(escape_symbol_path_component(symbol))
-            .join(if duration_ns == 0 {
-                TICK_FILE_NAME.to_string()
-            } else {
-                format!("{duration_ns}.tqbn")
-            })
+        let kind = if duration_ns == 0 {
+            HistorySeriesKind::Tick
+        } else {
+            HistorySeriesKind::Kline { duration_ns }
+        };
+        self.representative_series_path(symbol, kind)
     }
+
+    fn representative_series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        match kind {
+            HistorySeriesKind::Tick => self
+                .root_dir
+                .join(ROOT_DIR_NAME)
+                .join(TICK_DIR_NAME)
+                .join(escape_symbol_path_component(symbol)),
+            HistorySeriesKind::Kline { duration_ns } => self
+                .root_dir
+                .join(ROOT_DIR_NAME)
+                .join(KLINE_DIR_NAME)
+                .join(duration_ns.to_string())
+                .join(escape_symbol_path_component(symbol)),
+        }
+    }
+
+    fn partition_series_path(&self, day: &str, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        let file_name = format!(
+            "{}.{}",
+            escape_symbol_path_component(symbol),
+            TQBN_FILE_EXTENSION
+        );
+        match kind {
+            HistorySeriesKind::Tick => self
+                .root_dir
+                .join(ROOT_DIR_NAME)
+                .join(day)
+                .join(TICK_DIR_NAME)
+                .join(file_name),
+            HistorySeriesKind::Kline { duration_ns } => self
+                .root_dir
+                .join(ROOT_DIR_NAME)
+                .join(day)
+                .join(KLINE_DIR_NAME)
+                .join(duration_ns.to_string())
+                .join(file_name),
+        }
+    }
+
+    fn partition_paths_for_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Vec<PathBuf>> {
+        partition_ranges(start_ns, end_ns).map(|partitions| {
+            partitions
+                .into_iter()
+                .map(|partition| self.partition_series_path(partition.day.as_str(), symbol, kind))
+                .collect()
+        })
+    }
+
+    fn partition_paths_for_series(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for file in list_tqbn_file_metas(self.root_dir.as_path())? {
+            if file.symbol == symbol && file.kind == kind {
+                paths.push(file.path);
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn series_has_files(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
+        Ok(list_tqbn_file_metas(self.root_dir.as_path())?
+            .into_iter()
+            .any(|file| file.symbol == symbol && file.kind == kind))
+    }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn append_coverage_to_partition_file(
+    path: &Path,
+    symbol: &str,
+    kind: HistorySeriesKind,
+    start_ns: i64,
+    end_ns: i64,
+    rows: usize,
+    id_range: Option<(i64, i64)>,
+) -> Result<()> {
+    let commit = HistorySeriesCoverageCommit {
+        symbol: symbol.to_string(),
+        kind,
+        range_start_ns: start_ns,
+        range_end_ns: end_ns,
+        rows,
+        id_range,
+    };
+    ensure_parent_dir(path)?;
+    with_exclusive_tqbn_lock(path, || append_coverage_to_file(path, &commit))
+}
+
+fn segment_rows_summary(segment: &HistorySeriesWriteSegment<'_>) -> Result<TqbnAppendReport> {
+    match (segment.kind, &segment.rows) {
+        (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => Ok((
+            rows.len(),
+            id_range(rows.iter().map(|row| row.id))?,
+            datetime_range(rows.iter().map(|row| row.datetime), duration_ns)?,
+        )),
+        (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) => Ok((
+            rows.len(),
+            id_range(rows.iter().map(|row| row.id))?,
+            datetime_range(
+                rows.iter().map(|row| row.datetime),
+                super::TICK_TAIL_REFRESH_NS,
+            )?,
+        )),
+        _ => Err(DataError::InvalidState(
+            "history TQBN write row kind does not match segment kind",
+        )),
+    }
+}
+
+fn partition_kline_slices(rows: &[Kline]) -> Result<Vec<(String, &[Kline])>> {
+    partition_rows_by_trading_day(rows, |row| row.datetime)
+}
+
+fn partition_tick_slices(rows: &[Tick]) -> Result<Vec<(String, &[Tick])>> {
+    partition_rows_by_trading_day(rows, |row| row.datetime)
+}
+
+fn partition_rows_by_trading_day<T>(
+    rows: &[T],
+    datetime: impl Fn(&T) -> i64,
+) -> Result<Vec<(String, &[T])>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut partitions = Vec::new();
+    let mut start = 0;
+    let mut current_day = partition_day_for_timestamp_ns(datetime(&rows[0]))?;
+    for index in 1..rows.len() {
+        let day = partition_day_for_timestamp_ns(datetime(&rows[index]))?;
+        if day != current_day {
+            partitions.push((current_day, &rows[start..index]));
+            start = index;
+            current_day = day;
+        }
+    }
+    partitions.push((current_day, &rows[start..]));
+    Ok(partitions)
+}
+
+fn id_range_for_klines(rows: &[Kline]) -> Result<Option<(i64, i64)>> {
+    id_range(rows.iter().map(|row| row.id))
+}
+
+fn id_range_for_ticks(rows: &[Tick]) -> Result<Option<(i64, i64)>> {
+    id_range(rows.iter().map(|row| row.id))
+}
+
+fn merge_id_ranges(left: Option<(i64, i64)>, right: Option<(i64, i64)>) -> Option<(i64, i64)> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some((left.0.min(right.0), left.1.max(right.1))),
+        (Some(range), None) | (None, Some(range)) => Some(range),
+        (None, None) => None,
+    }
+}
+
+fn partition_day_for_timestamp_ns(timestamp_ns: i64) -> Result<String> {
+    Ok(format_partition_day(trading_day_for_timestamp_ns(
+        timestamp_ns,
+    )?))
+}
+
+fn partition_ranges(start_ns: i64, end_ns: i64) -> Result<Vec<TqbnPartitionRange>> {
+    validate_coverage_range(start_ns, end_ns)?;
+    let mut ranges = Vec::new();
+    let mut cursor = start_ns;
+    while cursor < end_ns {
+        let day = trading_day_for_timestamp_ns(cursor)?;
+        let boundary = trading_day_end_ns(day)?;
+        let next = if boundary <= cursor {
+            cursor.checked_add(1).ok_or_else(|| {
+                DataError::InvalidResponse("TQBN partition range overflow".to_string())
+            })?
+        } else {
+            boundary.min(end_ns)
+        };
+        if next <= cursor {
+            return Err(DataError::InvalidResponse(
+                "TQBN partition range did not advance".to_string(),
+            ));
+        }
+        ranges.push(TqbnPartitionRange {
+            day: format_partition_day(day),
+            start_ns: cursor,
+            end_ns: next,
+        });
+        cursor = next;
+    }
+    Ok(ranges)
+}
+
+fn trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
+    let seconds = timestamp_ns.div_euclid(NANOS_PER_SECOND);
+    let nanos = timestamp_ns.rem_euclid(NANOS_PER_SECOND) as u32;
+    let utc = DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or_else(|| {
+        DataError::InvalidResponse(format!("TQBN timestamp {timestamp_ns} is out of range"))
+    })?;
+    let local = utc.with_timezone(&cst_offset());
+    let cutoff =
+        NaiveTime::from_hms_opt(18, 0, 0).expect("fixed TQBN trading-day cutoff time is valid");
+    let mut day = local.date_naive();
+    if local.time() >= cutoff {
+        day = add_days(day, 1)?;
+    }
+    normalize_weekend_trading_day(day)
+}
+
+fn trading_day_end_ns(day: NaiveDate) -> Result<i64> {
+    trading_day_boundary_ns(day, 18)
+}
+
+fn trading_day_boundary_ns(day: NaiveDate, hours_from_midnight: i64) -> Result<i64> {
+    let midnight = day
+        .and_hms_opt(0, 0, 0)
+        .expect("fixed TQBN trading-day midnight is valid");
+    let local = midnight
+        .checked_add_signed(ChronoDuration::hours(hours_from_midnight))
+        .ok_or_else(|| {
+            DataError::InvalidResponse("TQBN trading-day boundary overflow".to_string())
+        })?;
+    let local = cst_offset()
+        .from_local_datetime(&local)
+        .single()
+        .ok_or_else(|| DataError::InvalidResponse("TQBN CST timestamp is ambiguous".to_string()))?;
+    datetime_to_timestamp_ns(local)
+}
+
+fn datetime_to_timestamp_ns(datetime: DateTime<FixedOffset>) -> Result<i64> {
+    let seconds_ns = datetime
+        .timestamp()
+        .checked_mul(NANOS_PER_SECOND)
+        .ok_or_else(|| DataError::InvalidResponse("TQBN timestamp seconds overflow".to_string()))?;
+    seconds_ns
+        .checked_add(i64::from(datetime.timestamp_subsec_nanos()))
+        .ok_or_else(|| DataError::InvalidResponse("TQBN timestamp nanos overflow".to_string()))
+}
+
+fn normalize_weekend_trading_day(mut day: NaiveDate) -> Result<NaiveDate> {
+    while matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+        day = add_days(day, 1)?;
+    }
+    Ok(day)
+}
+
+fn add_days(day: NaiveDate, days: i64) -> Result<NaiveDate> {
+    day.checked_add_signed(ChronoDuration::days(days))
+        .ok_or_else(|| DataError::InvalidResponse("TQBN trading-day date overflow".to_string()))
+}
+
+fn cst_offset() -> FixedOffset {
+    FixedOffset::east_opt(CST_OFFSET_SECONDS).expect("fixed CST offset is valid")
+}
+
+fn format_partition_day(day: NaiveDate) -> String {
+    day.format("%Y%m%d").to_string()
+}
+
+fn is_partition_day(value: &str) -> bool {
+    value.len() == 8
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && NaiveDate::parse_from_str(value, "%Y%m%d").is_ok()
 }
 
 impl HistorySeriesStore for TqbnHistoryStore {
@@ -114,6 +411,10 @@ impl HistorySeriesStore for TqbnHistoryStore {
 
     fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
         self.series_path(symbol, kind.duration_ns())
+    }
+
+    fn series_exists(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
+        self.series_has_files(symbol, kind)
     }
 
     fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
@@ -142,21 +443,30 @@ impl HistorySeriesStore for TqbnHistoryStore {
     }
 
     fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
-        let path = self.series_path(symbol, kind.duration_ns());
-        compact_tqbn_file(&path, symbol, kind)
+        for path in self.partition_paths_for_series(symbol, kind)? {
+            compact_tqbn_file(&path, symbol, kind)?;
+        }
+        Ok(())
     }
 
     fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,
     ) -> Result<HistorySeriesCoverageReport> {
-        let path = self.series_path(request.symbol.as_str(), request.kind.duration_ns());
-        let parsed = parse_tqbn_series_file(&path, request.symbol.as_str(), request.kind)?;
-        if let Some(error) = parsed.error {
-            return Err(DataError::InvalidResponse(error));
+        let mut coverage = Vec::new();
+        for path in self.partition_paths_for_range(
+            request.symbol.as_str(),
+            request.kind,
+            request.range_start_ns,
+            request.range_end_ns,
+        )? {
+            let parsed = parse_tqbn_series_file(&path, request.symbol.as_str(), request.kind)?;
+            if let Some(error) = parsed.error {
+                return Err(DataError::InvalidResponse(error));
+            }
+            coverage.extend(parsed.state.coverage);
         }
-        let state = parsed.state;
-        let cached_ranges = super::merge_datetime_ranges(state.coverage);
+        let cached_ranges = super::merge_datetime_ranges(coverage);
         let cached_ranges = super::rangeset_intersection(
             &[(request.range_start_ns, request.range_end_ns)],
             &cached_ranges,
@@ -179,11 +489,94 @@ impl HistorySeriesStore for TqbnHistoryStore {
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
         validate_segment_rows(&segment)?;
-        let path = self.series_path(segment.symbol, segment.kind.duration_ns());
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let (rows, id_range, datetime_range) = segment_rows_summary(&segment)?;
+        let mut touched_path = None;
+        let mut partition_stats = BTreeMap::new();
+
+        match (segment.kind, &segment.rows) {
+            (HistorySeriesKind::Kline { .. }, HistorySeriesWriteRows::Klines(rows_slice)) => {
+                for (day, rows) in partition_kline_slices(rows_slice)? {
+                    let path =
+                        self.partition_series_path(day.as_str(), segment.symbol, segment.kind);
+                    let id_range = id_range_for_klines(rows)?;
+                    let stats = partition_stats.entry(day).or_insert((0, None));
+                    stats.0 += rows.len();
+                    stats.1 = merge_id_ranges(stats.1, id_range);
+                    ensure_parent_dir(&path)?;
+                    let partition_segment = HistorySeriesWriteSegment {
+                        symbol: segment.symbol,
+                        kind: segment.kind,
+                        declared_range_ns: None,
+                        rows: HistorySeriesWriteRows::Klines(rows),
+                    };
+                    with_exclusive_tqbn_lock(&path, || {
+                        append_segment_to_file(&path, &partition_segment)
+                    })?;
+                    touched_path.get_or_insert(path);
+                }
+            }
+            (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows_slice)) => {
+                for (day, rows) in partition_tick_slices(rows_slice)? {
+                    let path =
+                        self.partition_series_path(day.as_str(), segment.symbol, segment.kind);
+                    let id_range = id_range_for_ticks(rows)?;
+                    let stats = partition_stats.entry(day).or_insert((0, None));
+                    stats.0 += rows.len();
+                    stats.1 = merge_id_ranges(stats.1, id_range);
+                    ensure_parent_dir(&path)?;
+                    let partition_segment = HistorySeriesWriteSegment {
+                        symbol: segment.symbol,
+                        kind: segment.kind,
+                        declared_range_ns: None,
+                        rows: HistorySeriesWriteRows::Ticks(rows),
+                    };
+                    with_exclusive_tqbn_lock(&path, || {
+                        append_segment_to_file(&path, &partition_segment)
+                    })?;
+                    touched_path.get_or_insert(path);
+                }
+            }
+            _ => {
+                return Err(DataError::InvalidState(
+                    "history TQBN write row kind does not match segment kind",
+                ));
+            }
         }
-        with_exclusive_tqbn_lock(&path, || append_segment_to_file(&path, &segment))
+
+        if let Some((start_ns, end_ns)) = segment.declared_range_ns {
+            for partition in partition_ranges(start_ns, end_ns)? {
+                let path = self.partition_series_path(
+                    partition.day.as_str(),
+                    segment.symbol,
+                    segment.kind,
+                );
+                let (partition_rows, partition_id_range) = partition_stats
+                    .get(partition.day.as_str())
+                    .copied()
+                    .unwrap_or((0, None));
+                append_coverage_to_partition_file(
+                    &path,
+                    segment.symbol,
+                    segment.kind,
+                    partition.start_ns,
+                    partition.end_ns,
+                    partition_rows,
+                    partition_id_range,
+                )?;
+                touched_path.get_or_insert(path);
+            }
+        }
+
+        Ok(HistorySeriesSegmentReport {
+            path: touched_path
+                .unwrap_or_else(|| self.series_path(segment.symbol, segment.kind.duration_ns())),
+            symbol: segment.symbol.to_string(),
+            kind: segment.kind,
+            id_range,
+            range_start_ns: datetime_range.map(|range| range.0),
+            range_end_ns: datetime_range.map(|range| range.1),
+            rows,
+        })
     }
 
     fn commit_coverage(
@@ -193,11 +586,18 @@ impl HistorySeriesStore for TqbnHistoryStore {
         validate_coverage_range(commit.range_start_ns, commit.range_end_ns)?;
         let symbol = commit.symbol.clone();
         let kind = commit.kind;
-        let path = self.series_path(symbol.as_str(), kind.duration_ns());
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        for partition in partition_ranges(commit.range_start_ns, commit.range_end_ns)? {
+            let path = self.partition_series_path(partition.day.as_str(), symbol.as_str(), kind);
+            append_coverage_to_partition_file(
+                &path,
+                symbol.as_str(),
+                kind,
+                partition.start_ns,
+                partition.end_ns,
+                commit.rows,
+                commit.id_range,
+            )?;
         }
-        with_exclusive_tqbn_lock(&path, || append_coverage_to_file(&path, &commit))?;
         self.coverage(HistorySeriesCoverageRequest {
             symbol,
             kind,
@@ -218,48 +618,63 @@ impl HistorySeriesStore for TqbnHistoryStore {
             removed_files: 0,
             removed_bytes: 0,
         };
-        let Some(parent) = path.parent() else {
-            return Ok(report);
-        };
-        if !parent.exists() {
-            return Ok(report);
+        for file_path in self.partition_paths_for_series(symbol, kind)? {
+            with_exclusive_tqbn_lock(&file_path, || {
+                if let Some(size_bytes) = remove_tqbn_file_locked(&file_path)? {
+                    report.removed_files += 1;
+                    report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
+                }
+                Ok(())
+            })?;
         }
-        with_exclusive_tqbn_lock(&path, || {
-            if let Some(size_bytes) = remove_tqbn_file_locked(&path)? {
-                report.removed_files = 1;
-                report.removed_bytes = size_bytes;
-            }
-            Ok(report)
-        })
+        Ok(report)
     }
 
     fn open_reader(
         &self,
         request: HistorySeriesReadRequest,
     ) -> Result<Box<dyn HistorySeriesReader>> {
-        let path = self.series_path(request.symbol.as_str(), request.kind.duration_ns());
-        let parsed = parse_tqbn_series_file(&path, request.symbol.as_str(), request.kind)?;
-        if let Some(error) = parsed.error {
-            return Err(DataError::InvalidResponse(error));
-        }
-        let state = parsed.state;
-        let rows = rows_for_request(
-            state.rows,
+        let paths = self.partition_paths_for_range(
+            request.symbol.as_str(),
             request.kind,
             request.range_start_ns,
             request.range_end_ns,
-        );
-        Ok(Box::new(TqbnReader { rows, index: 0 }))
+        )?;
+        Ok(Box::new(TqbnReader {
+            paths,
+            path_index: 0,
+            symbol: request.symbol,
+            kind: request.kind,
+            range_start_ns: request.range_start_ns,
+            range_end_ns: request.range_end_ns,
+            rows: Vec::new(),
+        }))
     }
 }
 
 impl HistorySeriesReader for TqbnReader {
     fn next_row(&mut self) -> Result<Option<HistorySeriesRow>> {
-        let row = self.rows.get(self.index).cloned();
-        if row.is_some() {
-            self.index += 1;
+        loop {
+            if let Some(row) = self.rows.pop() {
+                return Ok(Some(row));
+            }
+            if self.path_index >= self.paths.len() {
+                return Ok(None);
+            }
+            let path = &self.paths[self.path_index];
+            self.path_index += 1;
+            let parsed = parse_tqbn_series_file(path, self.symbol.as_str(), self.kind)?;
+            if let Some(error) = parsed.error {
+                return Err(DataError::InvalidResponse(error));
+            }
+            self.rows = rows_for_request(
+                parsed.state.rows,
+                self.kind,
+                self.range_start_ns,
+                self.range_end_ns,
+            );
+            self.rows.reverse();
         }
-        Ok(row)
     }
 }
 
@@ -1195,20 +1610,41 @@ fn parse_series_tree_path(root_dir: &Path, path: &Path) -> Option<(String, Histo
     let series_root = root_dir.join(ROOT_DIR_NAME);
     let relative = path.strip_prefix(series_root).ok()?;
     let mut components = relative.components();
-    let symbol = components.next()?.as_os_str().to_string_lossy();
-    let file_name = components.next()?.as_os_str().to_string_lossy();
-    if components.next().is_some() {
+    let day = components.next()?.as_os_str().to_string_lossy();
+    if !is_partition_day(&day) {
         return None;
     }
-    let kind = if file_name == TICK_FILE_NAME {
-        HistorySeriesKind::Tick
-    } else {
-        let duration = file_name.strip_suffix(".tqbn")?.parse::<i64>().ok()?;
-        HistorySeriesKind::Kline {
-            duration_ns: duration,
+    let kind_dir = components.next()?.as_os_str().to_string_lossy();
+    let (symbol_file, kind) = match kind_dir.as_ref() {
+        TICK_DIR_NAME => {
+            let symbol_file = components.next()?.as_os_str().to_string_lossy();
+            if components.next().is_some() {
+                return None;
+            }
+            (symbol_file, HistorySeriesKind::Tick)
         }
+        KLINE_DIR_NAME => {
+            let duration = components
+                .next()?
+                .as_os_str()
+                .to_string_lossy()
+                .parse::<i64>()
+                .ok()?;
+            let symbol_file = components.next()?.as_os_str().to_string_lossy();
+            if components.next().is_some() {
+                return None;
+            }
+            (
+                symbol_file,
+                HistorySeriesKind::Kline {
+                    duration_ns: duration,
+                },
+            )
+        }
+        _ => return None,
     };
-    Some((unescape_symbol_path_component(&symbol), kind))
+    let symbol = symbol_file.strip_suffix(".tqbn")?;
+    Some((unescape_symbol_path_component(symbol), kind))
 }
 
 fn series_tree_file_name(root_dir: &Path, path: &Path) -> String {
@@ -1809,7 +2245,7 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_series_path_uses_existing_series_layout_with_tqbn_extension() {
+    fn tqbn_series_path_reports_logical_daily_series_path() {
         let store = tqbn_store("path");
 
         assert_eq!(
@@ -1817,16 +2253,17 @@ mod tests {
             store
                 .root_dir()
                 .join("series")
+                .join("kline")
+                .join(DURATION_NS.to_string())
                 .join("SHFE%2Frb2601")
-                .join(format!("{DURATION_NS}.tqbn"))
         );
         assert_eq!(
             store.series_path("SHFE/rb2601", 0),
             store
                 .root_dir()
                 .join("series")
+                .join("tick")
                 .join("SHFE%2Frb2601")
-                .join("tick.tqbn")
         );
     }
 
@@ -1931,7 +2368,7 @@ mod tests {
     }
 
     fn write_truncated_tick_file(store: &TqbnHistoryStore) {
-        let path = store.series_path(SYMBOL, 0);
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let prefix = valid_tick_prefix();
         let mut bytes = prefix.bytes;
@@ -1942,7 +2379,7 @@ mod tests {
     }
 
     fn write_oversized_tick_block_header(store: &TqbnHistoryStore) {
-        let path = store.series_path(SYMBOL, 0);
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let prefix = valid_tick_prefix();
         let mut bytes = prefix.bytes;

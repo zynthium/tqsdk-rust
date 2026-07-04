@@ -45,7 +45,7 @@ def main() -> int:
     started_at = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     output = args.output or RESULTS_DIR / f"backtest_tick_cache_{started_at}.jsonl"
 
-    prepare_harness(args.profile)
+    prepare_harness(args.profile, args.tqbn_zstd)
     matrix = [
         (batch_size, slice_secs, repeat_index)
         for repeat_index in range(args.repeat)
@@ -59,7 +59,7 @@ def main() -> int:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     if args.prebuild:
-        run_prebuild(args.profile)
+        run_prebuild(args.profile, args.cargo_offline)
 
     failures = 0
     with output.open("a", encoding="utf-8") as out:
@@ -106,6 +106,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path, help="JSONL result file.")
     parser.add_argument("--profile", choices=["dev", "release"], default="dev", help="Cargo profile for harness.")
+    parser.add_argument(
+        "--tqbn-zstd",
+        action="store_true",
+        help="Build the temporary benchmark harness with the tqsdk/tqbn-zstd feature enabled.",
+    )
+    parser.add_argument(
+        "--cargo-offline",
+        action="store_true",
+        help="Pass --offline to cargo build/run for the temporary benchmark harness.",
+    )
     parser.add_argument("--timeout-secs", type=int, help="Per-case subprocess timeout.")
     parser.add_argument(
         "--min-rows",
@@ -201,7 +211,7 @@ def parse_slice_list(value: str) -> list[int | None]:
     return values
 
 
-def prepare_harness(profile: str) -> None:
+def prepare_harness(profile: str, tqbn_zstd: bool) -> None:
     src_dir = HARNESS_DIR / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
     cargo_toml = HARNESS_DIR / "Cargo.toml"
@@ -218,7 +228,7 @@ def prepare_harness(profile: str) -> None:
                 "[workspace]",
                 "",
                 "[dependencies]",
-                f'tqsdk = {{ path = "{(REPO_ROOT / "crates" / "tqsdk").as_posix()}" }}',
+                tqsdk_dependency_line(tqbn_zstd),
                 'tokio = { version = "1", features = ["macros", "rt", "time"] }',
                 "",
                 "[profile.release]",
@@ -231,6 +241,13 @@ def prepare_harness(profile: str) -> None:
     main_rs.write_text(HARNESS_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
     if profile == "release":
         return
+
+
+def tqsdk_dependency_line(tqbn_zstd: bool) -> str:
+    path = (REPO_ROOT / "crates" / "tqsdk").as_posix()
+    if tqbn_zstd:
+        return f'tqsdk = {{ path = "{path}", features = ["tqbn-zstd"] }}'
+    return f'tqsdk = {{ path = "{path}" }}'
 
 
 def print_plan(
@@ -248,6 +265,8 @@ def print_plan(
     print(f"remote_symbol_concurrency={args.remote_symbol_concurrency or 'sdk-default'}")
     print(f"remote_batch_timeout_secs={args.remote_batch_timeout_secs or 'sdk-default'}")
     print(f"remote_progress={args.remote_progress}")
+    print(f"tqbn_zstd={args.tqbn_zstd}")
+    print(f"cargo_offline={args.cargo_offline}")
     print(f"resume_cache={args.resume_cache}")
     for batch_size, slice_secs, repeat_index in matrix:
         print(
@@ -259,8 +278,8 @@ def print_plan(
         )
 
 
-def run_prebuild(profile: str) -> None:
-    cmd = cargo_cmd("build", profile)
+def run_prebuild(profile: str, cargo_offline: bool) -> None:
+    cmd = cargo_cmd("build", profile, cargo_offline)
     print(f"BENCH_PREBUILD {' '.join(cmd)}")
     subprocess.run(cmd, cwd=HARNESS_DIR, check=True)
 
@@ -311,7 +330,7 @@ def run_case(
     else:
         env["TQSDK_REMOTE_FILL_SLICE_SECS"] = str(slice_secs)
 
-    cmd = cargo_cmd("run", args.profile)
+    cmd = cargo_cmd("run", args.profile, args.cargo_offline)
     record: dict[str, Any] = {
         "label": env["TQ_BENCH_LABEL"],
         "batch_size": batch_size,
@@ -328,6 +347,8 @@ def run_case(
         "range_start_ns": args.start_ns,
         "range_end_ns": args.end_ns,
         "profile": args.profile,
+        "tqbn_zstd": args.tqbn_zstd,
+        "cargo_offline": args.cargo_offline,
         "universe": universe,
         "success": False,
         "started_at": dt.datetime.now(dt.UTC).isoformat(),
@@ -451,10 +472,12 @@ def parse_actions_by_symbol(value: str) -> dict[str, str]:
     return actions
 
 
-def cargo_cmd(action: str, profile: str) -> list[str]:
+def cargo_cmd(action: str, profile: str, cargo_offline: bool) -> list[str]:
     cmd = ["cargo", action, "--manifest-path", str(HARNESS_DIR / "Cargo.toml")]
     if profile == "release":
         cmd.append("--release")
+    if cargo_offline:
+        cmd.append("--offline")
     return cmd
 
 

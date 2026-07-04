@@ -166,12 +166,14 @@ rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks
 rtk cargo check -p tqsdk --example api_contract_s47_facade_market_cache_policy
 rtk python3 scripts/smoke_market_cache_e2e.py --symbols KQ.i@SHFE.au --timeout-secs 300
+rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd --cargo-offline --verify-existing-cache --cache-root <existing-zstd-cache-root> --batch-sizes 32 --slice-secs none
 ```
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
-scan、损坏报告、size-limit maintenance，以及通过 `enforce_limits(...)` 执行的 append-log
-compaction 和 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol tick 文件 compact。
+daily partition file identity、scan、损坏报告、size-limit maintenance，以及通过
+`enforce_limits(...)` 执行的 append-log compaction 和
+`BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 的 tick serial 写入同一份 `BacktestTickCache`，并通过 `LiveTickCacheWriter` 的连续 id
 语义提交回测可读 coverage；同一个 `MarketCachePolicy` 也必须能为 cache-backed local backtest
@@ -183,7 +185,7 @@ health 派生的 `MarketCachePolicy` 必须能进入 cache-backed local backtest
 用同一份 `MarketCachePolicy` 跑 remote-on-miss warmup、cache-only warmup 和 cache-only
 replay，并要求远端写入行数与 replay tick 数可对齐；交易时段可加 `--live-seconds <N>`
 和 `--live-min-rows 1` 验证 live recording health，非交易时段默认不跑 live。
-旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store。
+旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store。
 
 TQBN format/store checks currently live in internal lib tests and are covered by
 `rtk cargo test -p tqsdk-data --lib tqbn`; `history_series_tqbn_compaction` and
@@ -193,7 +195,7 @@ These TQBN tests should cover file identity, record header, little-endian scalar
 fixed-point encoding, compatibility skip rules, `HistorySeriesCache` / `BacktestTickCache`
 store semantics, corrupted input reporting, and append-log rewrite/compaction via
 `enforce_limits(...)` and symbol-scoped backtest tick compaction. 旧 `.tqseries`
-不是当前默认格式；旧 Python-compatible binary/mmap backend 已废弃。
+和旧单文件 `.tqbn` layout 不是当前默认格式；旧 Python-compatible binary/mmap backend 已废弃。
 
 需要真实 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 时，可手动运行 ignored smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_remote_on_miss_live_smoke -- --ignored`；

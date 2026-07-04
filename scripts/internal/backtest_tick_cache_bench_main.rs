@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -295,43 +295,98 @@ fn read_usize_env(name: &str) -> usize {
 
 fn read_cache_symbols(cache_dir: &Path) -> tqsdk::Result<Vec<String>> {
     let series_dir = cache_dir.join("series");
-    let entries = std::fs::read_dir(&series_dir).map_err(|source| {
+    let day_entries = std::fs::read_dir(&series_dir).map_err(|source| {
         tqsdk::advanced::data::DataError::Validation(format!(
             "failed to read cache series dir {}: {source}",
             series_dir.display()
         ))
     })?;
-    let mut symbols = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| {
+    let mut symbols = BTreeSet::new();
+    for day_entry in day_entries {
+        let day_entry = day_entry.map_err(|source| {
             tqsdk::advanced::data::DataError::Validation(format!(
-                "failed to read cache series entry in {}: {source}",
+                "failed to read cache series day entry in {}: {source}",
                 series_dir.display()
             ))
         })?;
-        if !entry
+        if !day_entry
             .file_type()
             .map_err(|source| {
                 tqsdk::advanced::data::DataError::Validation(format!(
                     "failed to read cache series file type {}: {source}",
-                    entry.path().display()
+                    day_entry.path().display()
                 ))
             })?
             .is_dir()
         {
             continue;
         }
-        symbols.push(entry.file_name().to_string_lossy().into_owned());
+        let day = day_entry.file_name().to_string_lossy().into_owned();
+        if !is_cache_partition_day(&day) {
+            continue;
+        }
+        let tick_dir = day_entry.path().join("tick");
+        let tick_entries = match std::fs::read_dir(&tick_dir) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(tqsdk::advanced::data::DataError::Validation(format!(
+                    "failed to read cache tick dir {}: {source}",
+                    tick_dir.display()
+                ))
+                .into());
+            }
+        };
+        for tick_entry in tick_entries {
+            let tick_entry = tick_entry.map_err(|source| {
+                tqsdk::advanced::data::DataError::Validation(format!(
+                    "failed to read cache tick entry in {}: {source}",
+                    tick_dir.display()
+                ))
+            })?;
+            let path = tick_entry.path();
+            if !tick_entry
+                .file_type()
+                .map_err(|source| {
+                    tqsdk::advanced::data::DataError::Validation(format!(
+                        "failed to read cache tick file type {}: {source}",
+                        path.display()
+                    ))
+                })?
+                .is_file()
+            {
+                continue;
+            }
+            if !path
+                .extension()
+                .is_some_and(|extension| extension == "tqbn")
+            {
+                continue;
+            }
+            let Some(stem) = path.file_stem() else {
+                continue;
+            };
+            symbols.insert(unescape_cache_symbol_path_component(
+                stem.to_string_lossy().as_ref(),
+            ));
+        }
     }
-    symbols.sort();
     if symbols.is_empty() {
         return Err(tqsdk::advanced::data::DataError::Validation(format!(
-            "cache series dir {} contains no symbols",
+            "cache series dir {} contains no daily tick symbols",
             series_dir.display()
         ))
         .into());
     }
-    Ok(symbols)
+    Ok(symbols.into_iter().collect())
+}
+
+fn is_cache_partition_day(value: &str) -> bool {
+    value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn unescape_cache_symbol_path_component(value: &str) -> String {
+    value.replace("%2F", "/")
 }
 
 fn print_result(fields: &[(&str, String)]) {

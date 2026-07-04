@@ -63,12 +63,17 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
+        let field_hit_capacity = mutations.iter().map(|mutation| mutation.fields.len()).sum();
         let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(mutations.len());
         let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(mutations.len());
         let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
-            HashSet::with_capacity(mutations.len());
+            HashSet::with_capacity(field_hit_capacity);
 
-        let mut changes = Self::default();
+        let mut changes = Self {
+            path_hits: Vec::with_capacity(mutations.len()),
+            object_hits: Vec::with_capacity(mutations.len()),
+            field_hits: Vec::with_capacity(field_hit_capacity),
+        };
 
         for mutation in mutations {
             if path_seen.insert(&mutation.path) {
@@ -99,12 +104,20 @@ impl ChangeSet {
         changes: &[AppliedChange],
         mutations: &[NormalizedMutation],
     ) -> Self {
+        let field_hit_capacity = changes
+            .iter()
+            .map(|change| change.field_indexes.len())
+            .sum();
         let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(changes.len());
         let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(changes.len());
         let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
-            HashSet::with_capacity(changes.len());
+            HashSet::with_capacity(field_hit_capacity);
 
-        let mut change_set = Self::default();
+        let mut change_set = Self {
+            path_hits: Vec::with_capacity(changes.len()),
+            object_hits: Vec::with_capacity(changes.len()),
+            field_hits: Vec::with_capacity(field_hit_capacity),
+        };
 
         for change in changes {
             debug_assert!(!change.root.is_empty());

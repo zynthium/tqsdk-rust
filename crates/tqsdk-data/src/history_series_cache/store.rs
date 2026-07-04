@@ -6,7 +6,7 @@ use crate::Result;
 
 use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
 
-pub const HISTORY_SERIES_CACHE_FORMAT_ID: &str = "tqsdk.tqbn.v1";
+pub const HISTORY_SERIES_CACHE_FORMAT_ID: &str = "tqsdk.tqbn.daily.v2";
 
 #[deprecated(note = "use HISTORY_SERIES_CACHE_FORMAT_ID")]
 pub const SERIES_FILE_HISTORY_SERIES_FORMAT_ID: &str = HISTORY_SERIES_CACHE_FORMAT_ID;
@@ -124,6 +124,9 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
     fn schema_version(&self) -> u32;
     fn root_dir(&self) -> &Path;
     fn series_path(&self, symbol: &str, kind: HistorySeriesKind) -> PathBuf;
+    fn series_exists(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
+        Ok(self.series_path(symbol, kind).exists())
+    }
     fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
     fn enforce_limits(
         &self,

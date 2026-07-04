@@ -16,7 +16,7 @@ pub(crate) struct CommitEngine;
 impl CommitEngine {
     pub(crate) fn apply(
         snapshot: &StateStore,
-        mutations: Vec<NormalizedMutation>,
+        mut mutations: Vec<NormalizedMutation>,
         domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
         scope: CommitScope,
@@ -27,19 +27,30 @@ impl CommitEngine {
         }
 
         let next_revision = Revision::new(snapshot.revision().get() + 1);
-        snapshot.apply_with(next_revision, &mutations, |applied| {
-            let changes = ChangeSet::from_applied_changes(&applied, &mutations);
-            let commit = Arc::new(CommitResult::new(
-                next_revision,
-                domains,
-                changes,
-                caused_by,
-                scope,
-            ));
-            on_commit(Arc::clone(&commit));
-            commit
+        snapshot.apply_with(next_revision, &mut mutations, |applied, mutations| {
+            let changes = ChangeSet::from_applied_changes(&applied, mutations);
+            publish_commit(next_revision, domains, changes, caused_by, scope, on_commit)
         })
     }
+}
+
+fn publish_commit(
+    next_revision: Revision,
+    domains: Vec<ProtocolDomain>,
+    changes: ChangeSet,
+    caused_by: Vec<CommandId>,
+    scope: CommitScope,
+    on_commit: impl FnOnce(SharedCommitResult),
+) -> SharedCommitResult {
+    let commit = Arc::new(CommitResult::new(
+        next_revision,
+        domains,
+        changes,
+        caused_by,
+        scope,
+    ));
+    on_commit(Arc::clone(&commit));
+    commit
 }
 
 pub(crate) fn session_snapshot_mutations(result: &BootstrapResult) -> Vec<NormalizedMutation> {

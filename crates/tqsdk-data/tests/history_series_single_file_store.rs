@@ -31,7 +31,7 @@ fn history_cache_store_uses_one_final_file_per_symbol_period() {
         )
         .unwrap();
 
-    let tick_file = dir.join("series").join("SHFE.rb2601").join("tick.tqbn");
+    let tick_file = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
     assert!(tick_file.is_file(), "missing {}", tick_file.display());
 
     let files = regular_files(&dir);
@@ -74,10 +74,7 @@ fn backtest_tick_cache_inspect_reports_backend_path_and_missing_ranges() {
     let cache = BacktestTickCache::open(&dir).unwrap();
 
     let path = cache.tick_series_path("SHFE.rb2601");
-    assert_eq!(
-        path,
-        dir.join("series").join("SHFE.rb2601").join("tick.tqbn")
-    );
+    assert_eq!(path, dir.join("series").join("tick").join("SHFE.rb2601"));
 
     cache
         .store_ticks(
@@ -114,13 +111,14 @@ fn backtest_tick_cache_purge_symbol_ticks_removes_rows_and_coverage() {
         .unwrap();
 
     let path = cache.tick_series_path("SHFE.rb2601");
-    assert!(path.exists());
+    let tick_file = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    assert!(tick_file.exists());
 
     let report = cache.purge_symbol_ticks("SHFE.rb2601").unwrap();
     assert_eq!(report.symbol, "SHFE.rb2601");
     assert_eq!(report.series_path, path);
     assert!(report.removed);
-    assert!(!report.series_path.exists());
+    assert!(!tick_file.exists());
 
     let coverage = cache.coverage("SHFE.rb2601", 1_000, 3_000).unwrap();
     assert_eq!(coverage.cached_ranges, Vec::<(i64, i64)>::new());
@@ -158,10 +156,7 @@ fn history_cache_store_scan_reports_tqbn_rows() {
 
     assert_eq!(scan.files.len(), 1);
     let file = &scan.files[0];
-    assert_eq!(
-        file.path,
-        dir.join("series").join("SHFE.rb2601").join("tick.tqbn")
-    );
+    assert_eq!(file.path, daily_tick_file(&dir, "19700101", "SHFE.rb2601"));
     assert_eq!(file.status, HistorySeriesCacheFileStatus::Readable);
     assert_eq!(file.symbol.as_deref(), Some("SHFE.rb2601"));
     assert_eq!(file.duration_ns, Some(0));
@@ -169,6 +164,55 @@ fn history_cache_store_scan_reports_tqbn_rows() {
     assert_eq!(file.rows, 2);
     assert_eq!(file.schema_version, Some(2));
     assert!(file.error.is_none());
+}
+
+#[test]
+fn history_cache_store_partitions_tick_files_by_trading_day() {
+    let dir = temp_dir("daily-partition-ticks");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let before_boundary = 35_999_999_999_000;
+    let after_boundary = 36_000_000_000_000;
+
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            before_boundary,
+            after_boundary + 1_000,
+            [
+                tick(1, before_boundary, 100.0),
+                tick(2, after_boundary, 101.0),
+            ],
+        )
+        .unwrap();
+
+    let day1 = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let day2 = daily_tick_file(&dir, "19700102", "SHFE.rb2601");
+    assert!(day1.is_file(), "missing {}", day1.display());
+    assert!(day2.is_file(), "missing {}", day2.display());
+
+    let scan = HistorySeriesCache::open(&dir).unwrap().scan().unwrap();
+    assert_eq!(
+        scan.files
+            .iter()
+            .map(|file| file.file_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "19700101/tick/SHFE.rb2601.tqbn",
+            "19700102/tick/SHFE.rb2601.tqbn"
+        ]
+    );
+
+    let rows = cache
+        .load_series(TickDataSeriesRequest::new(
+            "SHFE.rb2601",
+            before_boundary,
+            after_boundary + 1_000,
+        ))
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -219,15 +263,15 @@ fn history_cache_store_enforce_limits_compacts_duplicate_appends() {
         )
         .unwrap();
 
-    let path = cache.tick_series_path("DCE.i2601");
-    let size_before = std::fs::metadata(&path).unwrap().len();
+    let tick_file = daily_tick_file(&dir, "19700101", "DCE.i2601");
+    let size_before = std::fs::metadata(&tick_file).unwrap().len();
 
     let report = HistorySeriesCache::open(&dir)
         .unwrap()
         .enforce_limits(None, None)
         .unwrap();
 
-    let size_after = std::fs::metadata(&path).unwrap().len();
+    let size_after = std::fs::metadata(&tick_file).unwrap().len();
     assert_eq!(report.removed_files, 0);
     assert!(
         size_after < size_before,
@@ -332,6 +376,13 @@ fn temp_dir(name: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn daily_tick_file(root: &Path, day: &str, symbol: &str) -> PathBuf {
+    root.join("series")
+        .join(day)
+        .join("tick")
+        .join(format!("{}.tqbn", symbol.replace('/', "%2F")))
 }
 
 fn regular_files(root: &Path) -> Vec<PathBuf> {

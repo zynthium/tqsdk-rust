@@ -203,8 +203,8 @@ crate 自己维护。
 - research/offline data crate
 - history page/series/download
 - CSV export
-- TQBN v1 (`.tqbn`) 当前默认和 canonical 格式
-- 旧 `.tqseries` 不是默认 backend，也不提供兼容读取或迁移 store
+- TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
+- 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   live 订阅、`wait_update()` 驱动和后台进程不属于 `tqsdk-data`
 - history page/series/download/export

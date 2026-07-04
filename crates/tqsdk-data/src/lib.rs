@@ -17,6 +17,7 @@
 //! - `DataClient::from_session(...).get_kline_data_series(...)`
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
 //! - `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
+//! - `HistorySeriesCache::open_tick_data_series_reader(...)`
 //! - `LiveTickCacheWriter::new(...).push_ticks(...)`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
@@ -99,6 +100,7 @@ pub use history_series_cache::{
     HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
     HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
+    TickDataSeriesReader,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,

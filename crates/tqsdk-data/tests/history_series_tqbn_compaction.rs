@@ -26,12 +26,16 @@ fn tqbn_scan_ignores_sidecar_lock_files() {
         .write_tick_range("DCE.i2601", 1_000, 2_000, &[tick(7, 1_000, 100.0)])
         .unwrap();
 
-    let lock_path = dir.join("series").join("DCE.i2601").join(".tqbn.lock");
+    let lock_path = dir
+        .join("series")
+        .join("19700101")
+        .join("tick")
+        .join(".tqbn.lock");
     assert!(lock_path.is_file(), "missing {}", lock_path.display());
 
     let scan = cache.scan().unwrap();
     assert_eq!(scan.files.len(), 1);
-    assert_eq!(scan.files[0].file_name, "DCE.i2601/tick.tqbn");
+    assert_eq!(scan.files[0].file_name, "19700101/tick/DCE.i2601.tqbn");
 }
 
 #[test]
@@ -46,7 +50,7 @@ fn tqbn_enforce_limits_compacts_duplicate_rows_last_write_wins() {
         .write_tick_range("DCE.i2601", 1_000, 2_000, &[tick(7, 1_000, 110.0)])
         .unwrap();
 
-    let path = dir.join("series").join("DCE.i2601").join("tick.tqbn");
+    let path = daily_tick_file(&dir, "19700101", "DCE.i2601");
     let size_before = std::fs::metadata(&path).unwrap().len();
 
     let report = cache.enforce_limits(None, None).unwrap();
@@ -116,8 +120,8 @@ fn backtest_tick_cache_compacts_only_requested_symbol_ticks() {
         .mark_complete("SHFE.rb2601", 1_000, 2_000, 1, Some((9, 10)))
         .unwrap();
 
-    let target_path = cache.tick_series_path("DCE.i2601");
-    let other_path = cache.tick_series_path("SHFE.rb2601");
+    let target_path = daily_tick_file(&dir, "19700101", "DCE.i2601");
+    let other_path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
     let target_size_before = std::fs::metadata(&target_path).unwrap().len();
     let other_size_before = std::fs::metadata(&other_path).unwrap().len();
 
@@ -164,4 +168,11 @@ fn temp_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn daily_tick_file(root: &std::path::Path, day: &str, symbol: &str) -> PathBuf {
+    root.join("series")
+        .join(day)
+        .join("tick")
+        .join(format!("{}.tqbn", symbol.replace('/', "%2F")))
 }

@@ -230,18 +230,19 @@ impl StateStore {
         revision: Revision,
         mutations: &[NormalizedMutation],
     ) -> Vec<AppliedChange> {
-        self.apply_with(revision, mutations, |applied| applied)
+        let mut mutations = mutations.to_vec();
+        self.apply_with(revision, &mut mutations, |applied, _| applied)
             .unwrap_or_default()
     }
 
     pub(crate) fn apply_with<T, F>(
         &self,
         revision: Revision,
-        mutations: &[NormalizedMutation],
+        mutations: &mut [NormalizedMutation],
         on_applied: F,
     ) -> Option<T>
     where
-        F: FnOnce(Vec<AppliedChange>) -> T,
+        F: FnOnce(Vec<AppliedChange>, &[NormalizedMutation]) -> T,
     {
         let first = mutations.first()?;
         let first_root = partition_path(first).0;
@@ -253,7 +254,7 @@ impl StateStore {
         }
 
         let mut roots = BTreeSet::new();
-        for mutation in mutations {
+        for mutation in mutations.iter() {
             roots.insert(partition_path(mutation).0);
         }
 
@@ -262,25 +263,37 @@ impl StateStore {
             .map(|root| (root, rwlock_write(root.partition(self))))
             .collect::<Vec<_>>();
 
-        let mut applied = Vec::new();
-        for (mutation_index, mutation) in mutations.iter().enumerate() {
-            let (root, path) = partition_path(mutation);
+        let mut applied = Vec::with_capacity(mutations.len());
+        for (mutation_index, mutation) in mutations.iter_mut().enumerate() {
+            let NormalizedMutation {
+                path,
+                object,
+                fields,
+                ..
+            } = mutation;
+            let (root, relative_path) = partition_path_segments(path.segments());
             let Some((_, partition)) = guards
                 .iter_mut()
                 .find(|(partition_root, _)| *partition_root == root)
             else {
                 continue;
             };
-            if let Some(changed) =
-                apply_mutation_at_partition(root, &mut *partition, path, mutation_index, mutation)
-            {
+            if let Some(changed) = apply_mutation_at_partition(
+                root,
+                &mut *partition,
+                relative_path,
+                mutation_index,
+                path,
+                object,
+                fields,
+            ) {
                 applied.push(changed);
             }
         }
 
         if !applied.is_empty() {
             self.revision.store(revision.get(), Ordering::SeqCst);
-            Some(on_applied(applied))
+            Some(on_applied(applied, mutations))
         } else {
             None
         }
@@ -290,19 +303,31 @@ impl StateStore {
         &self,
         revision: Revision,
         root: StateRoot,
-        mutations: &[NormalizedMutation],
+        mutations: &mut [NormalizedMutation],
         on_applied: F,
     ) -> Option<T>
     where
-        F: FnOnce(Vec<AppliedChange>) -> T,
+        F: FnOnce(Vec<AppliedChange>, &[NormalizedMutation]) -> T,
     {
         let mut partition = rwlock_write(root.partition(self));
-        let mut applied = Vec::new();
-        for (mutation_index, mutation) in mutations.iter().enumerate() {
-            let (_, path) = partition_path(mutation);
-            if let Some(changed) =
-                apply_mutation_at_partition(root, &mut partition, path, mutation_index, mutation)
-            {
+        let mut applied = Vec::with_capacity(mutations.len());
+        for (mutation_index, mutation) in mutations.iter_mut().enumerate() {
+            let NormalizedMutation {
+                path,
+                object,
+                fields,
+                ..
+            } = mutation;
+            let (_, relative_path) = partition_path_segments(path.segments());
+            if let Some(changed) = apply_mutation_at_partition(
+                root,
+                &mut partition,
+                relative_path,
+                mutation_index,
+                path,
+                object,
+                fields,
+            ) {
                 applied.push(changed);
             }
         }
@@ -311,7 +336,7 @@ impl StateStore {
             None
         } else {
             self.revision.store(revision.get(), Ordering::SeqCst);
-            Some(on_applied(applied))
+            Some(on_applied(applied, mutations))
         }
     }
 
@@ -337,19 +362,21 @@ fn apply_mutation_at_partition(
     root: &mut Value,
     path: &[PathSegment],
     mutation_index: usize,
-    mutation: &NormalizedMutation,
+    mutation_path: &super::StatePath,
+    object: &Option<ObjectKey>,
+    fields: &mut [crate::events::FieldMutation],
 ) -> Option<AppliedChange> {
-    let mut field_indexes = Vec::new();
-    let structural_changed = if is_partition_root_delete(partition_root, path, &mutation.fields) {
+    let mut field_indexes = Vec::with_capacity(fields.len());
+    let structural_changed = if is_partition_root_delete(partition_root, path, fields) {
         apply_partition_root_delete(root, &mut field_indexes)
     } else if is_direct_scalar_path(partition_root, path) {
-        apply_direct_scalar(root, path, &mutation.fields, &mut field_indexes)
+        apply_direct_scalar(root, path, fields, &mut field_indexes)
     } else {
         apply_mutation_at_path(
             root,
             path,
-            mutation.object.as_ref(),
-            &mutation.fields,
+            object.as_ref(),
+            fields,
             &mut field_indexes,
             partition_root == StateRoot::Runtime,
         )
@@ -358,11 +385,10 @@ fn apply_mutation_at_partition(
     if field_indexes.is_empty() && !structural_changed {
         None
     } else {
-        let (root, _) = partition_path(mutation);
         Some(AppliedChange::new(
-            root.as_str(),
-            mutation.path.clone(),
-            mutation.object.clone(),
+            partition_root.as_str(),
+            mutation_path.clone(),
+            object.clone(),
             mutation_index,
             field_indexes,
         ))
@@ -462,7 +488,10 @@ impl StateRoot {
 }
 
 fn partition_path(mutation: &NormalizedMutation) -> (StateRoot, &[PathSegment]) {
-    let segments = mutation.path.segments();
+    partition_path_segments(mutation.path.segments())
+}
+
+fn partition_path_segments(segments: &[PathSegment]) -> (StateRoot, &[PathSegment]) {
     let Some(root) = segments.first() else {
         return (StateRoot::Other, segments);
     };
@@ -511,7 +540,7 @@ fn apply_mutation_at_path(
     cursor: &mut Value,
     path: &[PathSegment],
     object: Option<&ObjectKey>,
-    fields: &[crate::events::FieldMutation],
+    fields: &mut [crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
     prune_empty_parents: bool,
 ) -> bool {
@@ -549,7 +578,7 @@ fn apply_mutation_at_path(
 fn apply_fields(
     cursor: &mut Value,
     object: Option<&ObjectKey>,
-    fields: &[crate::events::FieldMutation],
+    fields: &mut [crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
 ) -> bool {
     let mut changed = false;
@@ -562,7 +591,7 @@ fn apply_fields(
         unreachable!("state snapshot path targets must always resolve to objects");
     };
 
-    for (field_index, field) in fields.iter().enumerate() {
+    for (field_index, field) in fields.iter_mut().enumerate() {
         let preserve_null = preserves_null_field(object, &field.field);
         let has_changed = if field.value.is_null() && !preserve_null {
             map.contains_key(&field.field)
@@ -577,7 +606,8 @@ fn apply_fields(
         if field.value.is_null() && !preserve_null {
             map.remove(&field.field);
         } else {
-            map.insert(field.field.clone(), field.value.clone());
+            let value = std::mem::replace(&mut field.value, Value::Null);
+            map.insert(field.field.clone(), value);
         }
 
         changed = true;
@@ -626,7 +656,7 @@ fn is_direct_scalar_path(partition_root: StateRoot, path: &[PathSegment]) -> boo
 fn apply_direct_scalar(
     root: &mut Value,
     path: &[PathSegment],
-    fields: &[crate::events::FieldMutation],
+    fields: &mut [crate::events::FieldMutation],
     field_indexes: &mut Vec<usize>,
 ) -> bool {
     let [parent_path @ .., segment] = path else {
@@ -677,7 +707,8 @@ fn apply_direct_scalar(
         return false;
     }
 
-    map.insert(segment.clone(), field.value.clone());
+    let value = std::mem::replace(&mut field.value, Value::Null);
+    map.insert(segment.clone(), value);
     field_indexes.push(0);
     true
 }

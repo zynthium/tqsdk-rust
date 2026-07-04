@@ -17,6 +17,10 @@ impl StatePath {
         Self(segments.into_iter().map(Into::into).collect())
     }
 
+    pub(crate) fn quote(symbol: &Symbol) -> Self {
+        Self(vec!["quotes".to_string(), symbol.as_str().to_string()])
+    }
+
     pub fn segments(&self) -> &[PathSegment] {
         &self.0
     }
@@ -123,6 +127,16 @@ mod tests {
                 "orders".to_string(),
                 "ORDER-1".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn quote_path_uses_quotes_root_and_symbol() {
+        let path = StatePath::quote(&Symbol::new("SHFE.au2606"));
+
+        assert_eq!(
+            path.segments(),
+            &["quotes".to_string(), "SHFE.au2606".to_string()]
         );
     }
 

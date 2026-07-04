@@ -376,12 +376,12 @@ fn facade_backtest_builder_inspects_and_purges_explicit_symbol_cache() {
     assert!(!statuses[0].is_complete());
     assert_eq!(statuses[0].cached_ranges, vec![(1_000, 3_000)]);
     assert_eq!(statuses[0].missing_ranges, vec![(3_000, 5_000)]);
-    assert!(statuses[0].series_path.is_file());
+    assert!(statuses[0].series_path_exists);
 
     let purged = builder.purge_cache_symbols().unwrap();
     assert_eq!(purged.len(), 1);
     assert!(purged[0].removed);
-    assert!(!purged[0].series_path.exists());
+    assert!(purged[0].removed_files > 0);
 }
 
 #[tokio::test]
