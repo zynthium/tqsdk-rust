@@ -8,10 +8,13 @@ Cargo.lock
 # Development tool configurations
 .claude/
 .agents/
+.codex/
+.codegraph/
 .code-review-graph/
 .cursor/
 .kiro/
 .trae/
+.understand-anything/
 .mcp.json
 .opencode.json
 skills-lock.json
