@@ -897,7 +897,10 @@ pub struct PreparedBacktest {
 
 enum PreparedBacktestMode {
     CacheHit,
-    RemoteCaching { symbols: Vec<String> },
+    RemoteCaching {
+        replay_symbols: Vec<String>,
+        fill_requests: Vec<backtest_remote::RemoteBacktestCacheFillRequest>,
+    },
 }
 
 /// Minimal data preparation report for a cache-backed local backtest.
@@ -982,7 +985,7 @@ impl BacktestBuilder {
 
     /// Set the compatibility warmup batch-size hint reported by [`BacktestCacheWarmupReport`].
     ///
-    /// Missing symbols are submitted to the internal bounded remote scheduler in one pass;
+    /// Missing cache ranges are submitted to the internal bounded remote scheduler in one pass;
     /// this method no longer serially chunks remote fills. Use
     /// `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` to tune remote fill parallelism.
     #[must_use]
@@ -1076,11 +1079,11 @@ impl BacktestBuilder {
         }
 
         let mut before_by_symbol = BTreeMap::new();
-        let mut remote_symbols = Vec::new();
+        let mut fill_requests = Vec::new();
         for symbol in &self.symbols {
             let before = cache.inspect(symbol, self.start_ns, self.end_ns)?;
             if refresh || !before.is_complete() {
-                remote_symbols.push(symbol.clone());
+                fill_requests.extend(fill_requests_from_status(&before));
             }
             before_by_symbol.insert(symbol.clone(), before);
         }
@@ -1116,20 +1119,18 @@ impl BacktestBuilder {
             ));
         }
 
-        if !remote_symbols.is_empty() && self.base.auth.is_none() {
+        if !fill_requests.is_empty() && self.base.auth.is_none() {
             return Err(data_validation("remote backtest cache fill requires auth"));
         }
 
         let mut rows_by_symbol = BTreeMap::new();
-        let remote_used = !remote_symbols.is_empty();
-        if !remote_symbols.is_empty() {
+        let remote_used = !fill_requests.is_empty();
+        if !fill_requests.is_empty() {
             let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
             let fill_report = backtest_remote::fill_backtest_tick_cache(
                 auth.user,
                 auth.pass,
-                self.start_ns,
-                self.end_ns,
-                remote_symbols,
+                fill_requests,
                 cache.clone(),
             )
             .await?;
@@ -1248,9 +1249,11 @@ impl BacktestBuilder {
             }
         }
         let mut missing_symbols = Vec::new();
+        let mut fill_requests = Vec::new();
         for symbol in &self.symbols {
             let coverage = cache.coverage(symbol, self.start_ns, self.end_ns)?;
             if !coverage.is_complete() {
+                fill_requests.extend(fill_requests_from_coverage(&coverage));
                 missing_symbols.push(coverage);
             }
         }
@@ -1273,7 +1276,8 @@ impl BacktestBuilder {
                         return Err(data_validation("remote backtest cache fill requires auth"));
                     }
                     PreparedBacktestMode::RemoteCaching {
-                        symbols: self.symbols.clone(),
+                        replay_symbols: self.symbols.clone(),
+                        fill_requests,
                     }
                 }
             }
@@ -1282,7 +1286,8 @@ impl BacktestBuilder {
                     return Err(data_validation("remote backtest cache fill requires auth"));
                 }
                 PreparedBacktestMode::RemoteCaching {
-                    symbols: self.symbols.clone(),
+                    replay_symbols: self.symbols.clone(),
+                    fill_requests,
                 }
             }
             BacktestCachePolicy::Disabled => {
@@ -1311,6 +1316,30 @@ impl BacktestBuilder {
     pub async fn connect(self) -> Result<Tq> {
         self.prepare().await?.connect().await
     }
+}
+
+fn fill_requests_from_status(
+    status: &BacktestTickCacheStatus,
+) -> Vec<backtest_remote::RemoteBacktestCacheFillRequest> {
+    fill_requests_from_ranges(status.symbol.as_str(), &status.missing_ranges)
+}
+
+fn fill_requests_from_coverage(
+    coverage: &tqsdk_data::BacktestTickCoverage,
+) -> Vec<backtest_remote::RemoteBacktestCacheFillRequest> {
+    fill_requests_from_ranges(coverage.symbol.as_str(), &coverage.missing_ranges)
+}
+
+fn fill_requests_from_ranges(
+    symbol: &str,
+    ranges: &[(i64, i64)],
+) -> Vec<backtest_remote::RemoteBacktestCacheFillRequest> {
+    ranges
+        .iter()
+        .map(|(start_ns, end_ns)| {
+            backtest_remote::RemoteBacktestCacheFillRequest::new(symbol, *start_ns, *end_ns)
+        })
+        .collect()
 }
 
 fn build_warmup_report(
@@ -1395,18 +1424,19 @@ impl PreparedBacktest {
                     .connect()
                     .await
             }
-            PreparedBacktestMode::RemoteCaching { symbols } => {
+            PreparedBacktestMode::RemoteCaching {
+                replay_symbols,
+                fill_requests,
+            } => {
                 let auth = base.auth.clone().ok_or(Error::MissingAuth)?;
                 backtest_remote::fill_backtest_tick_cache(
                     auth.user,
                     auth.pass,
-                    start_ns,
-                    end_ns,
-                    symbols.clone(),
+                    fill_requests,
                     cache.clone(),
                 )
                 .await?;
-                let requests = symbols
+                let requests = replay_symbols
                     .iter()
                     .map(|symbol| tqsdk_data::TickDataSeriesRequest::new(symbol, start_ns, end_ns))
                     .collect::<Vec<_>>();
@@ -2142,7 +2172,9 @@ fn parse_env_value(name: &'static str, value: String) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, parse_env_value};
+    use std::path::PathBuf;
+
+    use super::{BacktestTickCacheStatus, Error, fill_requests_from_status, parse_env_value};
 
     #[test]
     fn parse_env_value_trims_non_empty_credentials() {
@@ -2160,6 +2192,29 @@ mod tests {
                 name: "TQ_AUTH_PASS"
             })
         ));
+    }
+
+    #[test]
+    fn fill_requests_use_only_sparse_cache_missing_ranges() {
+        let status = BacktestTickCacheStatus {
+            backend_format: "tqbn",
+            cache_dir: PathBuf::from("/tmp/cache"),
+            series_path: PathBuf::from("/tmp/cache/series"),
+            series_path_exists: true,
+            symbol: "SHFE.rb2601".to_string(),
+            range_start_ns: 1_000,
+            range_end_ns: 7_000,
+            cached_ranges: vec![(1_000, 2_000), (4_000, 5_000)],
+            missing_ranges: vec![(2_000, 4_000), (5_000, 7_000)],
+        };
+
+        let requests = fill_requests_from_status(&status);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].symbol, "SHFE.rb2601");
+        assert_eq!((requests[0].start_ns, requests[0].end_ns), (2_000, 4_000));
+        assert_eq!(requests[1].symbol, "SHFE.rb2601");
+        assert_eq!((requests[1].start_ns, requests[1].end_ns), (5_000, 7_000));
     }
 }
 

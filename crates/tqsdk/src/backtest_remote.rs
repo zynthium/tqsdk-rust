@@ -38,9 +38,35 @@ pub(crate) struct RemoteBacktestCacheFillReport {
     pub(crate) rows_by_symbol: BTreeMap<String, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteBacktestCacheFillRequest {
+    pub(crate) symbol: String,
+    pub(crate) start_ns: i64,
+    pub(crate) end_ns: i64,
+}
+
+impl RemoteBacktestCacheFillRequest {
+    pub(crate) fn new(symbol: impl Into<String>, start_ns: i64, end_ns: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            start_ns,
+            end_ns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteFillBatch {
+    start_ns: i64,
+    end_ns: i64,
+    symbols: Vec<String>,
+}
+
 struct RemoteFillBatchTaskReport {
     batch_index: usize,
     symbols: Vec<String>,
+    start_ns: i64,
+    end_ns: i64,
     elapsed: Duration,
     fill_report: RemoteBacktestCacheFillReport,
 }
@@ -115,17 +141,16 @@ impl RemoteTickWriteBuffer {
 pub(crate) async fn fill_backtest_tick_cache(
     user: String,
     pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
+    requests: Vec<RemoteBacktestCacheFillRequest>,
     cache: BacktestTickCache,
 ) -> Result<RemoteBacktestCacheFillReport> {
-    let requested_symbol_count = symbols.len();
+    let requested_symbol_count = requests
+        .iter()
+        .map(|request| request.symbol.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let symbol_batch_size = remote_fill_symbol_batch_size();
-    let mut pending_batches = symbols
-        .chunks(symbol_batch_size)
-        .map(<[String]>::to_vec)
-        .collect::<VecDeque<_>>();
+    let mut pending_batches = remote_fill_batches(requests, symbol_batch_size)?;
     let max_concurrency = remote_fill_symbol_concurrency();
     let batch_timeout = remote_fill_batch_timeout();
     let total_batches = pending_batches.len();
@@ -136,32 +161,33 @@ pub(crate) async fn fill_backtest_tick_cache(
     remote_fill_progress(format_args!(
         "event=fill_start symbols={requested_symbol_count} batches={total_batches} \
          batch_size={symbol_batch_size} concurrency={max_concurrency} \
-         batch_timeout_s={} range=[{start_ns},{end_ns})",
+         batch_timeout_s={}",
         batch_timeout.as_secs()
     ));
 
     while !pending_batches.is_empty() || !tasks.is_empty() {
         while tasks.len() < max_concurrency {
-            let Some(symbol_batch) = pending_batches.pop_front() else {
+            let Some(batch) = pending_batches.pop_front() else {
                 break;
             };
             let batch_index = next_batch_index;
             next_batch_index = next_batch_index.saturating_add(1);
             remote_fill_progress(format_args!(
-                "event=batch_start batch={} total_batches={total_batches} pending={} active={} symbols={}",
+                "event=batch_start batch={} total_batches={total_batches} pending={} active={} \
+                 range=[{}, {}) symbols={}",
                 batch_index + 1,
                 pending_batches.len(),
                 tasks.len() + 1,
-                symbol_batch.join(",")
+                batch.start_ns,
+                batch.end_ns,
+                batch.symbols.join(",")
             ));
             tasks.spawn(fill_backtest_tick_cache_symbol_batch_timed(
                 batch_index,
                 batch_timeout,
                 user.clone(),
                 pass.clone(),
-                start_ns,
-                end_ns,
-                symbol_batch,
+                batch,
                 cache.clone(),
             ));
         }
@@ -187,9 +213,11 @@ pub(crate) async fn fill_backtest_tick_cache(
             .sum::<usize>();
         remote_fill_progress(format_args!(
             "event=batch_done batch={} total_batches={total_batches} completed={completed_batches} \
-             elapsed_ms={} symbols={} rows={batch_rows}",
+             elapsed_ms={} range=[{}, {}) symbols={} rows={batch_rows}",
             task_report.batch_index + 1,
             task_report.elapsed.as_millis(),
+            task_report.start_ns,
+            task_report.end_ns,
             task_report.symbols.join(",")
         ));
         for (symbol, rows) in task_report.fill_report.rows_by_symbol {
@@ -203,10 +231,49 @@ pub(crate) async fn fill_backtest_tick_cache(
         remote_fill_allow_empty_idle(),
     ) {
         return Err(data_validation(format!(
-            "remote backtest cache fill completed without accepted ticks for {requested_symbol_count} symbols in range [{start_ns}, {end_ns}); refusing to mark complete empty coverage"
+            "remote backtest cache fill completed without accepted ticks for {requested_symbol_count} symbols; refusing to mark complete empty coverage"
         )));
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
+}
+
+fn remote_fill_batches(
+    requests: Vec<RemoteBacktestCacheFillRequest>,
+    symbol_batch_size: usize,
+) -> Result<VecDeque<RemoteFillBatch>> {
+    let symbol_batch_size = symbol_batch_size.max(1);
+    let mut by_range: BTreeMap<(i64, i64), Vec<String>> = BTreeMap::new();
+    for request in requests {
+        if request.symbol.is_empty() {
+            return Err(data_validation(
+                "remote backtest cache fill symbol is empty",
+            ));
+        }
+        if request.start_ns >= request.end_ns {
+            return Err(data_validation(format!(
+                "remote backtest cache fill range is invalid for {}: [{}, {})",
+                request.symbol, request.start_ns, request.end_ns
+            )));
+        }
+        by_range
+            .entry((request.start_ns, request.end_ns))
+            .or_default()
+            .push(request.symbol);
+    }
+
+    let mut batches = VecDeque::new();
+    for ((start_ns, end_ns), mut symbols) in by_range {
+        symbols.sort();
+        symbols.dedup();
+        for chunk in symbols.chunks(symbol_batch_size) {
+            batches.push_back(RemoteFillBatch {
+                start_ns,
+                end_ns,
+                symbols: chunk.to_vec(),
+            });
+        }
+    }
+    Ok(batches)
 }
 
 async fn fill_backtest_tick_cache_symbol_batch_timed(
@@ -214,16 +281,16 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
     batch_timeout: Duration,
     user: String,
     pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
+    batch: RemoteFillBatch,
     cache: BacktestTickCache,
 ) -> Result<RemoteFillBatchTaskReport> {
     let started = tokio::time::Instant::now();
-    let timeout_symbols = symbols.clone();
+    let timeout_symbols = batch.symbols.clone();
+    let start_ns = batch.start_ns;
+    let end_ns = batch.end_ns;
     let result = tokio::time::timeout(
         batch_timeout,
-        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, symbols, cache),
+        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, batch.symbols, cache),
     )
     .await;
     let elapsed = started.elapsed();
@@ -231,6 +298,8 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
         Ok(Ok(fill_report)) => Ok(RemoteFillBatchTaskReport {
             batch_index,
             symbols: timeout_symbols,
+            start_ns,
+            end_ns,
             elapsed,
             fill_report,
         }),
@@ -831,11 +900,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteTickWriteBuffer,
-        parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
+        REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest,
+        RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
         parse_remote_fill_idle_timeout, parse_remote_fill_progress_enabled,
         parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
-        parse_remote_fill_symbol_concurrency, remote_fill_ranges_for_slice_ns,
+        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_ranges_for_slice_ns,
         remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
         should_reject_empty_remote_fill, should_reject_incomplete_idle_finalize,
         should_retry_remote_connect_error, should_retry_remote_fill_attempt_error,
@@ -873,6 +942,32 @@ mod tests {
     }
 
     #[test]
+    fn remote_fill_batches_group_only_equal_missing_ranges() {
+        let requests = vec![
+            RemoteBacktestCacheFillRequest::new("SHFE.rb2601", 1_000, 2_000),
+            RemoteBacktestCacheFillRequest::new("DCE.m2601", 1_000, 2_000),
+            RemoteBacktestCacheFillRequest::new("SHFE.rb2601", 3_000, 4_000),
+            RemoteBacktestCacheFillRequest::new("SHFE.rb2601", 1_000, 2_000),
+        ];
+
+        let batches = remote_fill_batches(requests, 2)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].start_ns, 1_000);
+        assert_eq!(batches[0].end_ns, 2_000);
+        assert_eq!(
+            batches[0].symbols,
+            vec!["DCE.m2601".to_string(), "SHFE.rb2601".to_string()]
+        );
+        assert_eq!(batches[1].start_ns, 3_000);
+        assert_eq!(batches[1].end_ns, 4_000);
+        assert_eq!(batches[1].symbols, vec!["SHFE.rb2601".to_string()]);
+    }
+
+    #[test]
     fn remote_tick_write_buffer_batches_cache_appends() {
         let symbol = "SHFE.rb2601";
         let cache_dir = temp_cache_dir("remote-tick-write-buffer");
@@ -888,7 +983,12 @@ mod tests {
         buffer
             .push_rows(&cache, symbol, vec![tick(2, 2_000, 101.0)])
             .unwrap();
-        assert!(cache.tick_series_path(symbol).exists());
+        assert!(
+            cache
+                .inspect(symbol, 1_000, 3_000)
+                .unwrap()
+                .series_path_exists
+        );
         cache
             .mark_complete(symbol, 1_000, 3_000, 2, Some((1, 3)))
             .unwrap();

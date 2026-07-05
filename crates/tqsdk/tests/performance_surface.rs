@@ -11,7 +11,7 @@ fn backtest_warmup_does_not_serially_chunk_remote_symbols() {
 
     assert!(
         !warmup_source.contains("remote_symbols.chunks("),
-        "warmup must pass all missing symbols to the bounded remote scheduler; \
+        "warmup must pass all missing cache ranges to the bounded remote scheduler; \
          facade-level serial chunking defeats remote fill concurrency"
     );
     assert!(

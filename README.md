@@ -207,8 +207,9 @@ let backtest = Tq::futures()
 显式运维缓存时，可在 builder 上调用 `.inspect_cache()` 查看 backend、文件路径、覆盖区间和
 缺口，或 `.purge_cache_symbols()` 删除已声明 symbol 的 tick 缓存文件。
 需要先预热全品种缓存而不运行策略时，用同一个 builder 调 `.warmup().await?`；它会按
-`.batch_size(n)` 分批解析 universe、跳过完整缓存、用官方 server-side backtest 流按 2 小时
-时间片补缺口，并返回每个 symbol 的 skipped / missing / filled 报告。远端补齐成功后只
+`.batch_size(n)` 记录兼容 batch hint、解析 universe、跳过完整缓存、用官方 server-side
+backtest 流按每个 symbol 的 `missing_ranges` 只补缺口，并返回每个 symbol 的 skipped /
+missing / filled 报告。远端补齐成功后只
 compact 本次 symbol 的 tick 文件，用于合并回填时产生的碎片 blocks。
 
 多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略只接收

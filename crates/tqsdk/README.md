@@ -32,7 +32,7 @@ selector 语法，适合全品种策略。
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
 backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
 缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会先跳过完整缓存，再把
-所有缺失 symbol 交给内部有界远端调度器，用官方 server-side backtest 流补缺口。默认不做
+每个 symbol 的 `missing_ranges` 交给内部有界远端调度器，用官方 server-side backtest 流只补缺口。默认不做
 时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。补齐成功后只
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由

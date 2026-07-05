@@ -104,9 +104,9 @@ V1 是：
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
   - Python-style `.backtest(start_ns, end_ns)` 持久 tick 缓存入口：默认
-    `RemoteOnMiss` 先复用本地 single-file tick cache，缺失时通过官方 server-side
-    backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要 auth，cache fill
-    不使用专业历史下载接口
+    `RemoteOnMiss` 先复用本地 TQBN daily tick cache，缺失时按每个 symbol 的
+    `missing_ranges` 通过官方 server-side backtest market stream 填充缓存并驱动本地
+    `TqSim`；cache hit 不需要 auth，cache fill 不使用专业历史下载接口
   - `.universe(...)` 复用 relay 对齐的期货 universe selector 语法，支持全品种回测策略
   - `MarketCachePolicy` / `.market_cache(...)` 用同一份配置维护 live tick recording
     和 cache-backed backtest 的 cache 目录及 symbol 集合；`record_ticks_health()`
