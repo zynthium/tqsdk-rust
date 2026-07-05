@@ -1,0 +1,21 @@
+[package]
+name = "tqsdk-monitor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Optional embedded monitoring dashboard for tqsdk-rust"
+documentation = "https://docs.rs/tqsdk-monitor"
+readme = "README.md"
+license.workspace = true
+repository = "https://github.com/zynthium/tqsdk-rust"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

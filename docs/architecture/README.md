@@ -195,6 +195,14 @@ V1 是：
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
+- `tqsdk-monitor`
+  - 可选同进程 observability module
+  - 提供低开销 `MonitorSink`、进程内 `MonitorRegistry`、序列化 `MonitorSnapshot`
+    和只读 localhost HTTP dashboard
+  - 默认不启用，不进入 core/session/wait/task/data 的 hot path 依赖；`tqsdk` 仅在
+    `monitoring` feature 下转发 builder 配置和只读访问器
+  - 当前只聚合运行态延迟、tick/cache write、订单事件占位和 bounded incidents；cache inventory、
+    补数据、compact、删除等重型历史管理必须继续放在后台/显式管理路径，不能进入行情推进路径
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
@@ -244,6 +252,9 @@ V1 是：
 - `tqsdk` 的 shared market cache policy 只是默认 facade 组合入口：live session/订阅由 facade
   拥有，tick rows/coverage 仍写入 `tqsdk-data::BacktestTickCache`，本地回测仍由
   `tqsdk-task` / `TqSim` 消费；它不新增后台守护进程、第二套状态树或 data-owned live session
+- `tqsdk-monitor` 是可选观察者 module：它读取 facade/task/data 暴露的报告或接收 batch 级
+  sink 事件，不拥有行情 session、交易 session、持久缓存格式或回测推进逻辑；HTTP handler 只能读取
+  预聚合 snapshot，不得反向持有 runtime 大锁或触发重型 cache scan
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。

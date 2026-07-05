@@ -19,6 +19,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - 交易账户构造 helper：`.tqkq_sim()` / `.tqkq_sim_numbered(...)` / `.trade_account(...)` / `.trade_account_env()`，仅用于 live/sim 连接，不可与 server-side backtest/replay 组合
 - Local backtest summary / performance metrics / performance report、cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
 - `Tq::history()` helper
+- Optional embedded monitoring dashboard with `feature = "monitoring"` and `.monitoring(MonitoringConfig::localhost(port))`
 - `tqsdk::advanced::*` 下钻到底层 crate
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 本地撮合回测入口。它通过
@@ -48,6 +49,25 @@ facade 在每次更新后把新 tick 行追加到缓存。`record_ticks_health()
 flush、每个 symbol 的 last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording
 health 派生补洞用 policy。coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的
 尾部会留下缺口，后续仍可显式配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 补齐。
+
+启用 `monitoring` feature 后，builder 可启动同进程只读 localhost dashboard。监控关闭时不启动
+HTTP task；开启后 `Tq::monitor_addr()` 返回绑定地址，`Tq::monitor_snapshot()` 可读取当前
+snapshot。第一版 surface 聚合 wait step latency、tick/cache write、order event 占位、
+history panel 占位和 bounded incidents；重型 cache inventory / 管理操作不在行情 hot path 执行。
+
+```rust
+use tqsdk::prelude::*;
+
+# async fn run() -> tqsdk::Result<()> {
+let mut tq = Tq::futures()
+    .auth_env()?
+    .monitoring(MonitoringConfig::localhost(18688))
+    .connect()
+    .await?;
+println!("monitor: {:?}", tq.monitor_addr());
+# Ok(())
+# }
+```
 
 ```rust
 use tqsdk::prelude::*;
@@ -129,6 +149,8 @@ while tq.next().await? {
 - `default = ["live", "services"]`：默认用户入口，包含 live 连接与服务查询能力。
 - `live`：向内部 `session` / `wait` / `task` / `data` crate 传播 live feature，并启用 TQ auth 派生的 TQKQ helper。
 - `services`：向内部 crate 传播服务查询相关 HTTP 能力。
+- `monitoring`：启用可选 `tqsdk-monitor` 依赖，提供同进程只读 dashboard 和
+  `Tq::monitor_snapshot()` / `Tq::monitor_addr()`。
 - `default-features = false`：保留 facade 类型和不依赖 live auth 的组合入口；live-only helper 不参与编译。
 
 `tqsdk::advanced::*` 是 curated convenience，不是完整 sibling crate mirror。它只暴露默认 facade 常见下钻点：

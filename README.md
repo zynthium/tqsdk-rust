@@ -32,6 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
+| [`tqsdk-monitor`](crates/tqsdk-monitor) | 可选同进程监控 module：低开销指标 sink、snapshot read model 和只读 localhost dashboard；默认 SDK 路径不启用 |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -196,6 +197,24 @@ let backtest = Tq::futures()
 配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 使用官方 server-side backtest 流补齐；
 运行中的 `Tq` 不会隐式保存或复用明文 auth。
 
+需要在同一进程内观察回测或实盘运行状态时，可启用可选 `monitoring` feature，并在 builder
+上配置 localhost dashboard。关闭 feature 或不调用 `.monitoring(...)` 时没有 HTTP task；
+开启后 hot path 只记录聚合计数、延迟和 bounded 事件，dashboard 读取预聚合 snapshot。
+
+```toml
+tqsdk = { path = "crates/tqsdk", features = ["monitoring"] }
+```
+
+```rust
+let mut tq = Tq::futures()
+    .auth_env()?
+    .market_cache(cache)
+    .monitoring(MonitoringConfig::localhost(18688))
+    .connect()
+    .await?;
+println!("monitor: {:?}", tq.monitor_addr());
+```
+
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
 `.refresh()`，它会按最小缓存颗粒度删除对应 symbol 的 tick 文件后再由官方回测流补齐；
 需要自定义内存 replay source、测试 fixture 或外部数据源时用
@@ -347,8 +366,8 @@ tqsdk
 ```
 
 实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
-`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`；内部能力归属仍由这些
-crate 自己维护。
+`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`；启用 `monitoring` feature 时额外依赖
+`tqsdk-monitor`。内部能力归属仍由这些 crate 自己维护。
 
 所有对外可见的状态变化都经过同一套 runtime commit model：
 

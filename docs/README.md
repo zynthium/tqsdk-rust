@@ -16,6 +16,7 @@
 | 目录 | 职责 | 使用规则 |
 | --- | --- | --- |
 | [`architecture/`](architecture/) | 当前架构权威、crate 边界、runtime contract、API 归属和验证矩阵 | 改动 crate 边界、public API、runtime 状态模型或 facade 归属时必须同步检查 |
+| [`../crates/tqsdk-monitor`](../crates/tqsdk-monitor) | 可选嵌入式监控 module：低开销 sink、snapshot 和只读 dashboard | 修改监控 snapshot schema、HTTP surface 或 facade monitoring feature 时同步架构和验证矩阵 |
 | [`scenarios/`](scenarios/) | 用户场景、API gap sketch、使用者分层迭代顺序 | gap 修复后要提升为 `crates/*/examples/api_contract_sXX_*.rs` 并更新 review |
 | [`reviews/`](reviews/) | 当前仍有决策价值的审查和 public API disposition 记录 | 作为计划输入和决策证据；与架构文档冲突时以 `architecture/` 为准 |
 | [`archive/`](archive/) | 已闭环或已转化为计划的历史审查输入、已归档 gap sketch、旧 spec 与闭环 plan | 只作追溯，不直接驱动代码改动 |

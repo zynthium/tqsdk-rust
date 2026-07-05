@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 #[cfg(all(feature = "services", feature = "live"))]
 use std::time::Duration;
+#[cfg(feature = "monitoring")]
+use std::time::Instant;
 
 #[cfg(all(feature = "services", feature = "live"))]
 use chrono::NaiveDate;
@@ -26,6 +28,8 @@ pub mod prelude {
         RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, Result,
         TargetPos, Tq, TqBuilder,
     };
+    #[cfg(feature = "monitoring")]
+    pub use crate::{MonitorSnapshot, MonitoringConfig, MonitoringMode};
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
 
@@ -93,6 +97,11 @@ pub mod advanced {
             TqApiBuilder, TradingStatusRef, WaitFacadeError, WaitStep,
         };
     }
+
+    #[cfg(feature = "monitoring")]
+    pub mod monitor {
+        pub use tqsdk_monitor::*;
+    }
 }
 
 mod backtest_remote;
@@ -106,6 +115,10 @@ pub use live_tick_recorder::{
 pub use tqsdk_data::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
 };
+#[cfg(feature = "monitoring")]
+use tqsdk_monitor::MonitorSink;
+#[cfg(feature = "monitoring")]
+pub use tqsdk_monitor::{MonitorSnapshot, MonitoringConfig, MonitoringMode};
 
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -134,6 +147,8 @@ pub enum Error {
     Wait(Box<tqsdk_wait::WaitFacadeError>),
     Task(Box<tqsdk_task::TaskError>),
     Data(Box<tqsdk_data::DataError>),
+    #[cfg(feature = "monitoring")]
+    Monitor(Box<tqsdk_monitor::MonitorError>),
 }
 
 impl fmt::Display for Error {
@@ -153,6 +168,8 @@ impl fmt::Display for Error {
             Self::Wait(error) => write!(f, "{error}"),
             Self::Task(error) => write!(f, "{error}"),
             Self::Data(error) => write!(f, "{error}"),
+            #[cfg(feature = "monitoring")]
+            Self::Monitor(error) => write!(f, "{error}"),
         }
     }
 }
@@ -167,6 +184,8 @@ impl std::error::Error for Error {
             Self::Wait(error) => Some(&**error),
             Self::Task(error) => Some(&**error),
             Self::Data(error) => Some(&**error),
+            #[cfg(feature = "monitoring")]
+            Self::Monitor(error) => Some(&**error),
         }
     }
 }
@@ -195,6 +214,13 @@ impl From<tqsdk_data::DataError> for Error {
     }
 }
 
+#[cfg(feature = "monitoring")]
+impl From<tqsdk_monitor::MonitorError> for Error {
+    fn from(error: tqsdk_monitor::MonitorError) -> Self {
+        Self::Monitor(Box::new(error))
+    }
+}
+
 /// Strategy-oriented entrypoint.
 ///
 /// `Tq` owns a wait-style API plus task host so common strategy loops can use
@@ -207,6 +233,10 @@ pub struct Tq {
     default_account_id: DefaultAccountId,
     tick_recorder: Option<live_tick_recorder::LiveTickRecorder>,
     tick_record_report: Option<RecordTicksReport>,
+    #[cfg(feature = "monitoring")]
+    monitor: Option<tqsdk_monitor::EmbeddedMonitor>,
+    #[cfg(feature = "monitoring")]
+    monitor_handle: Option<tqsdk_monitor::MonitorHandle>,
     #[cfg(feature = "live")]
     server_side_backtest: bool,
     #[cfg(all(feature = "services", feature = "live"))]
@@ -248,6 +278,10 @@ impl Tq {
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
             tick_record_report: None,
+            #[cfg(feature = "monitoring")]
+            monitor: None,
+            #[cfg(feature = "monitoring")]
+            monitor_handle: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -263,6 +297,10 @@ impl Tq {
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
             tick_record_report: None,
+            #[cfg(feature = "monitoring")]
+            monitor: None,
+            #[cfg(feature = "monitoring")]
+            monitor_handle: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -283,6 +321,10 @@ impl Tq {
             default_account_id: DefaultAccountId::None,
             tick_recorder: None,
             tick_record_report: None,
+            #[cfg(feature = "monitoring")]
+            monitor: None,
+            #[cfg(feature = "monitoring")]
+            monitor_handle: None,
             #[cfg(feature = "live")]
             server_side_backtest: true,
             server_replay: Some(server_replay),
@@ -296,6 +338,10 @@ impl Tq {
             default_account_id: DefaultAccountId::Single(LOCAL_BACKTEST_ACCOUNT_ID.to_string()),
             tick_recorder: None,
             tick_record_report: None,
+            #[cfg(feature = "monitoring")]
+            monitor: None,
+            #[cfg(feature = "monitoring")]
+            monitor_handle: None,
             #[cfg(feature = "live")]
             server_side_backtest: false,
             #[cfg(all(feature = "services", feature = "live"))]
@@ -329,10 +375,52 @@ impl Tq {
     }
 
     fn flush_tick_recorder(&mut self) -> Result<()> {
+        #[cfg(feature = "monitoring")]
+        let started = self.monitor_handle.as_ref().map(|_| Instant::now());
         if let Some(recorder) = self.tick_recorder.as_mut() {
+            #[cfg(not(feature = "monitoring"))]
             recorder.flush()?;
+            #[cfg(feature = "monitoring")]
+            let report = recorder.flush()?;
+            #[cfg(feature = "monitoring")]
+            self.observe_record_ticks_flush(&report, started);
         }
         Ok(())
+    }
+
+    #[cfg(feature = "monitoring")]
+    fn monitor_step_start(&self) -> Option<Instant> {
+        self.monitor_handle.as_ref().map(|_| Instant::now())
+    }
+
+    #[cfg(feature = "monitoring")]
+    fn observe_wait_step(&self, started: Option<Instant>) {
+        if let (Some(handle), Some(started)) = (&self.monitor_handle, started) {
+            handle.observe_wait_step(saturating_elapsed_ns(started));
+        }
+    }
+
+    #[cfg(feature = "monitoring")]
+    fn observe_record_ticks_flush(
+        &self,
+        report: &RecordTicksFlushReport,
+        started: Option<Instant>,
+    ) {
+        if report.appended_rows == 0 && !report.gap_detected {
+            return;
+        }
+        if let Some(handle) = &self.monitor_handle {
+            let elapsed_ns = started.map_or(0, saturating_elapsed_ns);
+            handle.observe_tick_batch(tqsdk_monitor::TickBatchStats {
+                symbol_count: report.symbols.len(),
+                tick_count: report.appended_rows,
+            });
+            handle.observe_cache_write(tqsdk_monitor::CacheWriteStats {
+                rows: report.appended_rows,
+                elapsed_ns,
+                gap_detected: report.gap_detected,
+            });
+        }
     }
 
     // ── Public accessors ──
@@ -400,6 +488,24 @@ impl Tq {
     pub fn recorded_market_cache_policy(&self) -> Option<MarketCachePolicy> {
         self.record_ticks_health()
             .map(MarketCachePolicy::from_record_ticks_health)
+    }
+
+    /// Return the embedded monitoring dashboard address, if monitoring is enabled.
+    #[cfg(feature = "monitoring")]
+    #[must_use]
+    pub fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
+        self.monitor
+            .as_ref()
+            .map(tqsdk_monitor::EmbeddedMonitor::bound_addr)
+    }
+
+    /// Return the current embedded monitoring snapshot, if monitoring is enabled.
+    #[cfg(feature = "monitoring")]
+    #[must_use]
+    pub fn monitor_snapshot(&self) -> Option<MonitorSnapshot> {
+        self.monitor_handle
+            .as_ref()
+            .map(tqsdk_monitor::MonitorHandle::snapshot)
     }
 
     #[must_use]
@@ -581,35 +687,48 @@ impl Tq {
     /// Advance one step. Returns `false` when there are no more events
     /// (backtest finished or session closed).
     pub async fn next(&mut self) -> Result<bool> {
+        #[cfg(feature = "monitoring")]
+        let monitor_started = self.monitor_step_start();
         let updated = match &mut self.inner {
             TqInner::Live(host) => host.wait_update(None).await.map_err(Error::from),
             TqInner::LocalBacktest(bt) => {
-                let Some(mut ctx) = bt.next().await? else {
-                    return Ok(false);
-                };
-                ctx.finish_sim_step()?;
-                Ok(true)
+                if let Some(mut ctx) = bt.next().await? {
+                    ctx.finish_sim_step()?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
             }
         }?;
         if updated {
             self.flush_tick_recorder()?;
         }
+        #[cfg(feature = "monitoring")]
+        self.observe_wait_step(monitor_started);
         Ok(updated)
     }
 
     /// Advance one step with a deadline (live mode). In local-backtest mode
     /// the deadline is ignored.
     pub async fn wait_update(&mut self, deadline: Option<tokio::time::Instant>) -> Result<bool> {
-        match &mut self.inner {
+        if matches!(&self.inner, TqInner::LocalBacktest(_)) {
+            return self.next().await;
+        }
+        #[cfg(feature = "monitoring")]
+        let monitor_started = self.monitor_step_start();
+        let updated = match &mut self.inner {
             TqInner::Live(host) => {
                 let updated = host.wait_update(deadline).await.map_err(Error::from)?;
                 if updated {
                     self.flush_tick_recorder()?;
                 }
-                Ok(updated)
+                updated
             }
-            TqInner::LocalBacktest(_) => self.next().await,
-        }
+            TqInner::LocalBacktest(_) => self.next().await?,
+        };
+        #[cfg(feature = "monitoring")]
+        self.observe_wait_step(monitor_started);
+        Ok(updated)
     }
 
     // ── Market data ──
@@ -745,6 +864,11 @@ impl Tq {
         self.backtest_summary()
             .map(|summary| summary.performance_report(rolling_window_len))
     }
+}
+
+#[cfg(feature = "monitoring")]
+fn saturating_elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[cfg(all(feature = "services", feature = "live"))]
@@ -967,6 +1091,14 @@ impl BacktestBuilder {
     #[must_use]
     pub fn cache(mut self, policy: BacktestCachePolicy) -> Self {
         self.cache_policy = policy;
+        self
+    }
+
+    /// Enable the embedded monitoring dashboard for this backtest.
+    #[cfg(feature = "monitoring")]
+    #[must_use]
+    pub fn monitoring(mut self, config: MonitoringConfig) -> Self {
+        self.base = self.base.monitoring(config);
         self
     }
 
@@ -1463,6 +1595,8 @@ pub struct TqBuilder {
     market_url: Option<String>,
     replay_url: Option<String>,
     market_cache: Option<MarketCachePolicy>,
+    #[cfg(feature = "monitoring")]
+    monitoring: Option<MonitoringConfig>,
     backtest: Option<BacktestConfig>,
     local_backtest_recipe: local_backtest::LocalBacktestRecipe,
 }
@@ -1479,6 +1613,8 @@ impl TqBuilder {
             market_url: None,
             replay_url: None,
             market_cache: None,
+            #[cfg(feature = "monitoring")]
+            monitoring: None,
             backtest: None,
             local_backtest_recipe: local_backtest::LocalBacktestRecipe::default(),
         }
@@ -1510,6 +1646,14 @@ impl TqBuilder {
     #[must_use]
     pub fn market_cache(mut self, policy: MarketCachePolicy) -> Self {
         self.market_cache = Some(policy);
+        self
+    }
+
+    /// Enable the embedded monitoring dashboard for this facade.
+    #[cfg(feature = "monitoring")]
+    #[must_use]
+    pub fn monitoring(mut self, config: MonitoringConfig) -> Self {
+        self.monitoring = Some(config);
         self
     }
 
@@ -1757,10 +1901,14 @@ impl TqBuilder {
             market_url,
             replay_url,
             market_cache,
+            #[cfg(feature = "monitoring")]
+            monitoring,
             backtest,
             local_backtest_recipe,
         } = self;
 
+        #[cfg(feature = "monitoring")]
+        let monitor_runtime_mode = monitor_runtime_mode_for_backtest(backtest.as_ref());
         let is_server_side_backtest = backtest
             .as_ref()
             .is_some_and(BacktestConfig::is_server_side);
@@ -1773,10 +1921,28 @@ impl TqBuilder {
         }
 
         match backtest {
-            Some(BacktestConfig::Local { replay }) => local_backtest_recipe.connect(replay).await,
+            Some(BacktestConfig::Local { replay }) => {
+                let tq = local_backtest_recipe.connect(replay).await?;
+                #[cfg(feature = "monitoring")]
+                {
+                    attach_monitoring(tq, monitoring, monitor_runtime_mode).await
+                }
+                #[cfg(not(feature = "monitoring"))]
+                {
+                    Ok(tq)
+                }
+            }
             Some(BacktestConfig::LocalStream { stream }) => {
                 let stream = take_local_backtest_stream(stream)?;
-                local_backtest_recipe.connect_stream(stream).await
+                let tq = local_backtest_recipe.connect_stream(stream).await?;
+                #[cfg(feature = "monitoring")]
+                {
+                    attach_monitoring(tq, monitoring, monitor_runtime_mode).await
+                }
+                #[cfg(not(feature = "monitoring"))]
+                {
+                    Ok(tq)
+                }
             }
             backtest => {
                 let tq = connect_wait_facade(
@@ -1788,22 +1954,26 @@ impl TqBuilder {
                     backtest,
                 )
                 .await?;
+                #[cfg(any(feature = "live", feature = "monitoring"))]
+                let mut tq = tq;
                 #[cfg(feature = "live")]
                 {
-                    let mut tq = tq;
                     if let Some(auto_trade_login) = auto_trade_login {
                         apply_auto_trade_login(&mut tq, auto_trade_login).await?;
                     }
                     if let Some(policy) = market_cache {
                         tq.start_market_cache(policy).await?;
                     }
-                    Ok(tq)
                 }
                 #[cfg(not(feature = "live"))]
                 {
                     let _ = market_cache;
-                    Ok(tq)
                 }
+                #[cfg(feature = "monitoring")]
+                {
+                    tq = attach_monitoring(tq, monitoring, monitor_runtime_mode).await?;
+                }
+                Ok(tq)
             }
         }
     }
@@ -1968,6 +2138,42 @@ impl BacktestConfig {
             Self::Local { .. } | Self::LocalStream { .. } => false,
         }
     }
+}
+
+#[cfg(feature = "monitoring")]
+fn monitor_runtime_mode_for_backtest(
+    backtest: Option<&BacktestConfig>,
+) -> tqsdk_monitor::MonitorRuntimeMode {
+    match backtest {
+        Some(BacktestConfig::Server { .. })
+        | Some(BacktestConfig::Local { .. })
+        | Some(BacktestConfig::LocalStream { .. }) => tqsdk_monitor::MonitorRuntimeMode::Backtest,
+        #[cfg(all(feature = "services", feature = "live"))]
+        Some(BacktestConfig::ServerReplay { .. }) => tqsdk_monitor::MonitorRuntimeMode::Replay,
+        None => tqsdk_monitor::MonitorRuntimeMode::Live,
+    }
+}
+
+#[cfg(feature = "monitoring")]
+async fn attach_monitoring(
+    mut tq: Tq,
+    config: Option<MonitoringConfig>,
+    mode: tqsdk_monitor::MonitorRuntimeMode,
+) -> Result<Tq> {
+    let Some(config) = config else {
+        return Ok(tq);
+    };
+    if !config.is_enabled() {
+        return Ok(tq);
+    }
+    let registry = Arc::new(tqsdk_monitor::MonitorRegistry::with_config(
+        mode,
+        config.clone(),
+    ));
+    let monitor = tqsdk_monitor::EmbeddedMonitor::start(config, registry.clone()).await?;
+    tq.monitor_handle = Some(tqsdk_monitor::MonitorHandle::new(registry));
+    tq.monitor = Some(monitor);
+    Ok(tq)
 }
 
 async fn connect_wait_facade(
@@ -2248,6 +2454,48 @@ mod builder_contract_tests {
             .expect("replay backtest should connect without auth");
 
         assert_eq!(tq.default_account_id().unwrap(), LOCAL_BACKTEST_ACCOUNT_ID);
+    }
+
+    #[cfg(feature = "monitoring")]
+    #[tokio::test]
+    async fn replay_backtest_connect_starts_embedded_monitor() {
+        let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
+
+        let mut tq = TqBuilder::new()
+            .monitoring(crate::MonitoringConfig::localhost(0))
+            .replay_backtest(replay)
+            .connect()
+            .await
+            .expect("replay backtest should connect with monitoring");
+
+        assert!(tq.monitor_addr().is_some());
+        let first = tq.monitor_snapshot().expect("monitor snapshot");
+        assert_eq!(
+            first.process.mode,
+            tqsdk_monitor::MonitorRuntimeMode::Backtest
+        );
+
+        let updated = tq.next().await.expect("backtest can advance to finish");
+
+        assert!(!updated);
+        let second = tq.monitor_snapshot().expect("monitor snapshot");
+        assert!(second.latency.wait_steps >= 1);
+    }
+
+    #[cfg(feature = "monitoring")]
+    #[tokio::test]
+    async fn disabled_monitoring_does_not_start_embedded_monitor() {
+        let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
+
+        let tq = TqBuilder::new()
+            .monitoring(crate::MonitoringConfig::disabled())
+            .replay_backtest(replay)
+            .connect()
+            .await
+            .expect("replay backtest should connect with disabled monitoring");
+
+        assert!(tq.monitor_addr().is_none());
+        assert!(tq.monitor_snapshot().is_none());
     }
 
     #[tokio::test]

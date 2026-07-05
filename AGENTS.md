@@ -21,6 +21,7 @@
 | `tqsdk-wait` | Python 风格 single-owner `wait_update()` facade |
 | `tqsdk-task` | 执行工具层、策略 host、risk gate、replay/backtest foundation |
 | `tqsdk-data` | research/offline data、history、cache、export |
+| `tqsdk-monitor` | 可选同进程监控、snapshot、只读 dashboard |
 | `tqsdk-relay` | 可选 market relay/cache service，不改变 SDK 默认直连路径 |
 
 ## 开始任务前
@@ -119,6 +120,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - `tqsdk-session` 负责 shared session、one-shot request/response/direct-query、GraphQL、schema、metadata、calendar、ranking、EDB、auth refresh、replay control。
 - `tqsdk-wait` 只做 single-owner diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
 - `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait 或调用方自建消费层。
+- `tqsdk-monitor` 是可选观察者层；不得拥有 session、状态树、持久缓存格式或回测推进逻辑，也不得进入默认 hot path。
 - `tqsdk-relay` 是可选 market relay/cache service；它是 workspace member 但不属于 Cargo default-members；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
 - 所有可见状态变化必须经过 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`。不得新增旁路通知、第二棵状态树或 facade 私有 revision。
 - domain 状态写入必须经过 `MutationSource` 根路径防线。hot read 优先使用 `read_market_state()`、`read_trade_state()`、`read_market_trade_state()`。
