@@ -108,7 +108,6 @@ replay source。它仍支持 `.quote_symbol(...)`、`.price_tick(...)`、
 不会绑定交易目标，也会拒绝 `.trade_target_*()`、`.tqkq_sim()` 和
 `.trade_account(...)` / `.trade_account_env()` 等交易登录入口。需要策略下单并撮合成交的
 回测闭环应使用配置了 cache 的 `.backtest(...)` 或 `.replay_backtest(...)`。
-`server_backtest(...)` 仅保留为兼容 alias，新代码应使用 `.backtest(...).connect()` 的无缓存模式。
 服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
 把返回的 `md_url` 接入正常行情 loop，并自动发送 replay heartbeat。复盘速度和
 terminate 可通过 `Tq::set_replay_speed(...)` / `terminate_server_replay()` 显式控制。

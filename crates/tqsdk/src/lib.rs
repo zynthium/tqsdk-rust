@@ -291,7 +291,7 @@ impl Tq {
         }
     }
 
-    fn from_api_with_server_backtest(api: tqsdk_wait::TqApi) -> Self {
+    fn from_api_with_remote_backtest(api: tqsdk_wait::TqApi) -> Self {
         Self {
             inner: TqInner::Live(Box::new(tqsdk_task::TaskHost::new(api))),
             default_account_id: DefaultAccountId::None,
@@ -623,7 +623,7 @@ impl Tq {
         password: &str,
     ) -> Result<tqsdk_wait::AccountRef> {
         if self.server_side_backtest {
-            return Err(server_side_trade_login_error());
+            return Err(remote_backtest_trade_login_error());
         }
         let account = self
             .api_mut_any()
@@ -1089,12 +1089,12 @@ impl BacktestBuilder {
         Ok(())
     }
 
-    fn into_server_backtest(mut self) -> TqBuilder {
+    fn into_remote_backtest(mut self) -> TqBuilder {
         // No-cache backtest mode is intentionally remote-only and must not
         // start live tick cache recording even if a shared market cache policy
         // was configured before `.backtest(...)`.
         self.base.market_cache = None;
-        self.base.with_server_backtest(self.start_ns, self.end_ns)
+        self.base.with_remote_backtest(self.start_ns, self.end_ns)
     }
 
     fn apply_market_cache_policy(&mut self) -> Result<()> {
@@ -1486,12 +1486,12 @@ impl BacktestBuilder {
     pub async fn connect(mut self) -> Result<Tq> {
         self.validate_range()?;
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
-            return self.into_server_backtest().connect().await;
+            return self.into_remote_backtest().connect().await;
         }
         self.apply_market_cache_policy()?;
         if self.cache.is_none() {
             return match self.cache_policy {
-                BacktestCachePolicy::RemoteOnMiss => self.into_server_backtest().connect().await,
+                BacktestCachePolicy::RemoteOnMiss => self.into_remote_backtest().connect().await,
                 BacktestCachePolicy::CacheOnly => Err(missing_backtest_cache_error("cache_only")),
                 BacktestCachePolicy::Refresh => Err(missing_backtest_cache_error("refresh")),
                 BacktestCachePolicy::Disabled => unreachable!("handled above"),
@@ -1769,21 +1769,9 @@ impl TqBuilder {
         }
     }
 
-    fn with_server_backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
+    fn with_remote_backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
         self.backtest = Some(BacktestConfig::Server { start_ns, end_ns });
         self
-    }
-
-    /// Deprecated compatibility alias for official server-side backtest mode.
-    ///
-    /// Prefer [`TqBuilder::backtest`] and call
-    /// [`BacktestBuilder::connect`] without configuring a cache.
-    #[deprecated(
-        note = "use backtest(start_ns, end_ns).connect() without cache for official server-side backtest"
-    )]
-    #[must_use]
-    pub fn server_backtest(self, start_ns: i64, end_ns: i64) -> Self {
-        self.with_server_backtest(start_ns, end_ns)
     }
 
     /// Enter local-backtest mode using a custom in-memory replay source.
@@ -2004,11 +1992,11 @@ impl TqBuilder {
             .as_ref()
             .is_some_and(BacktestConfig::is_server_side);
         if is_server_side_backtest && !trade_targets.is_empty() {
-            return Err(server_side_trade_login_error());
+            return Err(remote_backtest_trade_login_error());
         }
         #[cfg(feature = "live")]
         if is_server_side_backtest && auto_trade_login.is_some() {
-            return Err(server_side_trade_login_error());
+            return Err(remote_backtest_trade_login_error());
         }
 
         match backtest {
@@ -2298,7 +2286,7 @@ async fn connect_wait_facade(
     let session_builder =
         session_builder(auth, query_enabled, trade_targets, market_url, replay_url)?;
     let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
-    let server_side_backtest = backtest
+    let remote_backtest = backtest
         .as_ref()
         .is_some_and(BacktestConfig::is_server_side);
     match &backtest {
@@ -2314,8 +2302,8 @@ async fn connect_wait_facade(
     if let Some(server_replay) = server_replay_session {
         return Ok(Tq::from_api_with_server_replay(api, server_replay));
     }
-    if server_side_backtest {
-        return Ok(Tq::from_api_with_server_backtest(api));
+    if remote_backtest {
+        return Ok(Tq::from_api_with_remote_backtest(api));
     }
     Ok(Tq::from_api(api))
 }
@@ -2415,7 +2403,7 @@ fn ambiguous_default_account() -> Error {
     ))
 }
 
-fn server_side_trade_login_error() -> Error {
+fn remote_backtest_trade_login_error() -> Error {
     Error::from(tqsdk_session::SessionFacadeError::InvalidState(
         "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache_dir(...) / market_cache(...) or replay_backtest(...) for simulated fills",
     ))
