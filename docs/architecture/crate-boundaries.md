@@ -271,6 +271,7 @@
 - `MonitorRegistry` / `MonitorSnapshot` read model
 - 只读 localhost HTTP dashboard
 - bounded incidents / latency counters / cache write counters / order event projection 的承载面
+- 低频后台读取 `tqsdk-data::BacktestTickCache::inventory()` 并投影到 snapshot 的 history inventory
 
 ### 不应吸收的能力
 
@@ -282,11 +283,13 @@
 - TQBN 文件格式、cache coverage 写入或 compact 实现
 - 默认启用的 GUI / HTTP 依赖
 - 在 HTTP handler 或 hot path 中执行 cache 目录全量扫描
+- 直接修改、补齐或删除持久缓存文件
 
 ### 判断
 
 这一层是观察者，不是新的执行层。它可以被 `tqsdk` 的 `monitoring` feature 和未来
-`tqsdk-relay` dashboard 复用，但不能成为 SDK 默认直连路径的一部分。
+`tqsdk-relay` dashboard 复用，但不能成为 SDK 默认直连路径的一部分。monitor 可以依赖 data
+层的只读 inventory 报告，但不能拥有或复制 TQBN 格式逻辑。
 
 ## `tqsdk-task`
 

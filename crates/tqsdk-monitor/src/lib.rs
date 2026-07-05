@@ -5,10 +5,11 @@ use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,6 +18,9 @@ use tokio::net::{TcpListener, TcpStream};
 const SCHEMA_VERSION: u16 = 1;
 const INCIDENT_LIMIT: usize = 128;
 const HTTP_READ_LIMIT: usize = 4096;
+const HISTORY_SYMBOL_LIMIT: usize = 32;
+const DEFAULT_CACHE_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const MIN_CACHE_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Runtime monitoring mode requested by the caller.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,6 +40,14 @@ pub struct MonitoringConfig {
     mode: MonitoringMode,
     bind_addr: SocketAddr,
     admin_enabled: bool,
+    cache_inventory_refresh_interval: Duration,
+    cache_inventory: Option<CacheInventoryConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheInventoryConfig {
+    cache_dir: PathBuf,
+    refresh_interval: Duration,
 }
 
 impl MonitoringConfig {
@@ -46,6 +58,8 @@ impl MonitoringConfig {
             mode: MonitoringMode::Light,
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
             admin_enabled: false,
+            cache_inventory_refresh_interval: DEFAULT_CACHE_INVENTORY_REFRESH_INTERVAL,
+            cache_inventory: None,
         }
     }
 
@@ -56,6 +70,8 @@ impl MonitoringConfig {
             mode: MonitoringMode::Off,
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             admin_enabled: false,
+            cache_inventory_refresh_interval: DEFAULT_CACHE_INVENTORY_REFRESH_INTERVAL,
+            cache_inventory: None,
         }
     }
 
@@ -76,6 +92,30 @@ impl MonitoringConfig {
         self
     }
 
+    /// Enable low-frequency persistent tick cache inventory scanning.
+    ///
+    /// The scan runs in a background blocking task and never from the hot
+    /// market/backtest update path.
+    #[must_use]
+    pub fn with_cache_inventory(mut self, cache_dir: impl Into<PathBuf>) -> Self {
+        self.cache_inventory = Some(CacheInventoryConfig {
+            cache_dir: cache_dir.into(),
+            refresh_interval: self.cache_inventory_refresh_interval,
+        });
+        self
+    }
+
+    /// Set the cache inventory refresh interval.
+    #[must_use]
+    pub fn with_cache_inventory_refresh_interval(mut self, interval: Duration) -> Self {
+        let interval = interval.max(MIN_CACHE_INVENTORY_REFRESH_INTERVAL);
+        self.cache_inventory_refresh_interval = interval;
+        if let Some(cache_inventory) = &mut self.cache_inventory {
+            cache_inventory.refresh_interval = interval;
+        }
+        self
+    }
+
     #[must_use]
     pub fn mode(&self) -> MonitoringMode {
         self.mode
@@ -92,8 +132,25 @@ impl MonitoringConfig {
     }
 
     #[must_use]
+    pub fn cache_inventory_config(&self) -> Option<&CacheInventoryConfig> {
+        self.cache_inventory.as_ref()
+    }
+
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         !matches!(self.mode, MonitoringMode::Off)
+    }
+}
+
+impl CacheInventoryConfig {
+    #[must_use]
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    #[must_use]
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
     }
 }
 
@@ -242,9 +299,27 @@ pub struct OrderPanel {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HistoryPanel {
+    pub cache_dir: Option<String>,
     pub inventory_symbols: u64,
     pub inventory_days: u64,
+    pub inventory_files: u64,
+    pub inventory_rows: u64,
+    pub inventory_bytes: u64,
+    pub problem_files: u64,
     pub missing_ranges: u64,
+    pub last_refresh_unix_millis: Option<u64>,
+    pub last_error: Option<String>,
+    pub top_symbols: Vec<HistorySymbolPanel>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HistorySymbolPanel {
+    pub symbol: String,
+    pub files: u64,
+    pub rows: u64,
+    pub bytes: u64,
+    pub days: u64,
+    pub problem_files: u64,
 }
 
 /// In-memory monitor registry optimized for cheap writes and snapshot reads.
@@ -266,6 +341,7 @@ pub struct MonitorRegistry {
     last_tick_batch: Mutex<Option<TickBatchStats>>,
     last_cache_write: Mutex<Option<CacheWriteStats>>,
     last_order_event: Mutex<Option<OrderMonitorEvent>>,
+    history: Mutex<HistoryPanel>,
     incidents: Mutex<VecDeque<MonitorIncident>>,
 }
 
@@ -294,6 +370,7 @@ impl MonitorRegistry {
             last_tick_batch: Mutex::new(None),
             last_cache_write: Mutex::new(None),
             last_order_event: Mutex::new(None),
+            history: Mutex::new(HistoryPanel::default()),
             incidents: Mutex::new(VecDeque::with_capacity(INCIDENT_LIMIT)),
         }
     }
@@ -301,6 +378,12 @@ impl MonitorRegistry {
     pub fn set_mode(&self, mode: MonitorRuntimeMode) {
         if let Ok(mut current) = self.mode.lock() {
             *current = mode;
+        }
+    }
+
+    pub fn set_history_panel(&self, history: HistoryPanel) {
+        if let Ok(mut current) = self.history.lock() {
+            *current = history;
         }
     }
 
@@ -358,7 +441,10 @@ impl MonitorRegistry {
                     .lock()
                     .map_or(None, |last| last.clone()),
             },
-            history: HistoryPanel::default(),
+            history: self
+                .history
+                .lock()
+                .map_or_else(|_| HistoryPanel::default(), |history| history.clone()),
             incidents: self.incidents.lock().map_or_else(
                 |_| Vec::new(),
                 |incidents| incidents.iter().cloned().collect(),
@@ -472,7 +558,7 @@ impl MonitorSink for MonitorHandle {
 pub struct EmbeddedMonitor {
     bound_addr: SocketAddr,
     registry: Arc<MonitorRegistry>,
-    task: tokio::task::JoinHandle<()>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl EmbeddedMonitor {
@@ -483,16 +569,24 @@ impl EmbeddedMonitor {
         if !config.is_enabled() {
             return Err(MonitorError::Disabled);
         }
+        let cache_inventory = config.cache_inventory_config().cloned();
         let listener = TcpListener::bind(config.bind_addr()).await?;
         let bound_addr = listener.local_addr()?;
         let task_registry = registry.clone();
-        let task = tokio::spawn(async move {
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn(async move {
             serve(listener, task_registry).await;
-        });
+        }));
+        if let Some(cache_inventory) = cache_inventory {
+            let inventory_registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                run_cache_inventory_worker(inventory_registry, cache_inventory).await;
+            }));
+        }
         Ok(Self {
             bound_addr,
             registry,
-            task,
+            tasks,
         })
     }
 
@@ -509,7 +603,9 @@ impl EmbeddedMonitor {
 
 impl Drop for EmbeddedMonitor {
     fn drop(&mut self) {
-        self.task.abort();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -690,6 +786,89 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+async fn run_cache_inventory_worker(
+    registry: Arc<MonitorRegistry>,
+    cache_inventory: CacheInventoryConfig,
+) {
+    loop {
+        refresh_cache_inventory_once(registry.clone(), cache_inventory.clone()).await;
+        tokio::time::sleep(cache_inventory.refresh_interval()).await;
+    }
+}
+
+async fn refresh_cache_inventory_once(
+    registry: Arc<MonitorRegistry>,
+    cache_inventory: CacheInventoryConfig,
+) {
+    let cache_dir = cache_inventory.cache_dir().to_path_buf();
+    let panel = match tokio::task::spawn_blocking(move || {
+        let cache = tqsdk_data::BacktestTickCache::open(&cache_dir)?;
+        cache.inventory()
+    })
+    .await
+    {
+        Ok(Ok(inventory)) => history_panel_from_inventory(inventory),
+        Ok(Err(error)) => history_panel_from_error(cache_inventory.cache_dir(), error.to_string()),
+        Err(error) => history_panel_from_error(cache_inventory.cache_dir(), error.to_string()),
+    };
+    registry.set_history_panel(panel);
+}
+
+fn history_panel_from_inventory(inventory: tqsdk_data::BacktestTickCacheInventory) -> HistoryPanel {
+    let tqsdk_data::BacktestTickCacheInventory {
+        cache_dir,
+        symbols,
+        total_files,
+        total_rows,
+        total_bytes,
+        total_days,
+        problem_files,
+        ..
+    } = inventory;
+    let inventory_symbols = symbols.len();
+    let mut top_symbols = symbols
+        .into_iter()
+        .map(|symbol| HistorySymbolPanel {
+            symbol: symbol.symbol,
+            files: saturating_usize_to_u64(symbol.files),
+            rows: saturating_usize_to_u64(symbol.rows),
+            bytes: symbol.bytes,
+            days: saturating_usize_to_u64(symbol.days),
+            problem_files: saturating_usize_to_u64(symbol.problem_files),
+        })
+        .collect::<Vec<_>>();
+    top_symbols.sort_by(|left, right| {
+        right
+            .rows
+            .cmp(&left.rows)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    top_symbols.truncate(HISTORY_SYMBOL_LIMIT);
+
+    HistoryPanel {
+        cache_dir: Some(cache_dir.display().to_string()),
+        inventory_symbols: saturating_usize_to_u64(inventory_symbols),
+        inventory_days: saturating_usize_to_u64(total_days),
+        inventory_files: saturating_usize_to_u64(total_files),
+        inventory_rows: saturating_usize_to_u64(total_rows),
+        inventory_bytes: total_bytes,
+        problem_files: saturating_usize_to_u64(problem_files),
+        missing_ranges: 0,
+        last_refresh_unix_millis: Some(now_unix_millis()),
+        last_error: None,
+        top_symbols,
+    }
+}
+
+fn history_panel_from_error(cache_dir: &Path, error: String) -> HistoryPanel {
+    HistoryPanel {
+        cache_dir: Some(cache_dir.display().to_string()),
+        last_refresh_unix_millis: Some(now_unix_millis()),
+        last_error: Some(error),
+        ..HistoryPanel::default()
+    }
+}
+
 const MONITOR_HTML: &str = r#"<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -764,6 +943,20 @@ mod tests {
         assert_eq!(snapshot.orders.events, 1);
     }
 
+    #[test]
+    fn cache_inventory_refresh_interval_is_order_independent() {
+        let config = MonitoringConfig::localhost(0)
+            .with_cache_inventory_refresh_interval(Duration::from_secs(7))
+            .with_cache_inventory("/tmp/tqsdk-monitor-cache");
+
+        assert_eq!(
+            config
+                .cache_inventory_config()
+                .map(CacheInventoryConfig::refresh_interval),
+            Some(Duration::from_secs(7))
+        );
+    }
+
     #[tokio::test]
     async fn embedded_monitor_serves_snapshot_json() {
         let config = MonitoringConfig::localhost(0);
@@ -793,5 +986,51 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"mode\":\"backtest\""));
         assert!(response.contains("\"wait_steps\":1"));
+    }
+
+    #[tokio::test]
+    async fn embedded_monitor_refreshes_cache_inventory() {
+        let cache_dir = temp_dir("cache-inventory");
+        let config = MonitoringConfig::localhost(0)
+            .with_cache_inventory(cache_dir.clone())
+            .with_cache_inventory_refresh_interval(Duration::from_millis(1));
+        let registry = Arc::new(MonitorRegistry::with_config(
+            MonitorRuntimeMode::Backtest,
+            config.clone(),
+        ));
+        let _monitor = EmbeddedMonitor::start(config, registry.clone())
+            .await
+            .expect("monitor starts");
+
+        for _ in 0..50 {
+            let snapshot = registry.snapshot();
+            if snapshot.history.last_refresh_unix_millis.is_some() {
+                assert_eq!(
+                    snapshot.history.cache_dir.as_deref(),
+                    Some(cache_dir.display().to_string().as_str())
+                );
+                assert_eq!(snapshot.history.inventory_symbols, 0);
+                assert_eq!(snapshot.history.problem_files, 0);
+                assert!(snapshot.history.last_error.is_none());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("cache inventory did not refresh");
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "tqsdk-monitor-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

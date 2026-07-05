@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use tqsdk_core::Tick;
 
 use crate::history_series_cache::{
-    HistorySeriesCoverageCommit, HistorySeriesKind, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment,
+    HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit, HistorySeriesKind,
+    HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 use crate::{DataError, HistorySeriesCache, Result, TickDataSeries, TickDataSeriesRequest};
 
@@ -85,6 +85,29 @@ pub struct BacktestTickCacheWriteReport {
     pub range_start_ns: i64,
     pub range_end_ns: i64,
     pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheInventory {
+    pub backend_format: &'static str,
+    pub cache_dir: PathBuf,
+    pub symbols: Vec<BacktestTickCacheInventorySymbol>,
+    pub total_files: usize,
+    pub total_rows: usize,
+    pub total_bytes: u64,
+    pub total_days: usize,
+    pub problem_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheInventorySymbol {
+    pub symbol: String,
+    pub files: usize,
+    pub rows: usize,
+    pub bytes: u64,
+    pub days: usize,
+    pub id_range: Option<(i64, i64)>,
+    pub problem_files: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +208,60 @@ impl BacktestTickCache {
 
     pub fn tick_series_path(&self, symbol: impl AsRef<str>) -> PathBuf {
         self.history.tick_series_path(symbol.as_ref())
+    }
+
+    pub fn inventory(&self) -> Result<BacktestTickCacheInventory> {
+        let scan = self.history.scan()?;
+        let mut days = BTreeSet::new();
+        let mut symbols = BTreeMap::<String, InventorySymbolAccumulator>::new();
+        let mut total_files = 0usize;
+        let mut total_rows = 0usize;
+        let mut total_bytes = 0u64;
+        let mut problem_files = 0usize;
+
+        for file in scan.files {
+            if file.duration_ns != Some(0) {
+                continue;
+            }
+            let Some(symbol) = file.symbol.clone() else {
+                continue;
+            };
+            total_files = total_files.saturating_add(1);
+            total_rows = total_rows.saturating_add(file.rows);
+            total_bytes = total_bytes.saturating_add(file.size_bytes);
+            let is_problem = is_problem_file_status(file.status);
+            if is_problem {
+                problem_files = problem_files.saturating_add(1);
+            }
+            let day = tick_inventory_day(file.file_name.as_str());
+            if let Some(day) = day.as_ref() {
+                days.insert(day.clone());
+            }
+            symbols
+                .entry(symbol.clone())
+                .or_insert_with(|| InventorySymbolAccumulator::new(symbol))
+                .push(
+                    file.rows,
+                    file.size_bytes,
+                    file.id_range,
+                    day.as_deref(),
+                    is_problem,
+                );
+        }
+
+        Ok(BacktestTickCacheInventory {
+            backend_format: self.history.format_id(),
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbols: symbols
+                .into_values()
+                .map(InventorySymbolAccumulator::finish)
+                .collect(),
+            total_files,
+            total_rows,
+            total_bytes,
+            total_days: days.len(),
+            problem_files,
+        })
     }
 
     pub fn purge_symbol_ticks(
@@ -394,6 +471,81 @@ impl BacktestTickFill {
             complete,
             gap_summary,
         })
+    }
+}
+
+#[derive(Debug, Default)]
+struct InventorySymbolAccumulator {
+    symbol: String,
+    files: usize,
+    rows: usize,
+    bytes: u64,
+    days: BTreeSet<String>,
+    id_range: Option<(i64, i64)>,
+    problem_files: usize,
+}
+
+impl InventorySymbolAccumulator {
+    fn new(symbol: String) -> Self {
+        Self {
+            symbol,
+            ..Self::default()
+        }
+    }
+
+    fn push(
+        &mut self,
+        rows: usize,
+        bytes: u64,
+        id_range: Option<(i64, i64)>,
+        day: Option<&str>,
+        is_problem: bool,
+    ) {
+        self.files = self.files.saturating_add(1);
+        self.rows = self.rows.saturating_add(rows);
+        self.bytes = self.bytes.saturating_add(bytes);
+        if let Some(day) = day {
+            self.days.insert(day.to_string());
+        }
+        if let Some((start, end)) = id_range {
+            self.id_range = Some(match self.id_range {
+                Some((current_start, current_end)) => {
+                    (current_start.min(start), current_end.max(end))
+                }
+                None => (start, end),
+            });
+        }
+        if is_problem {
+            self.problem_files = self.problem_files.saturating_add(1);
+        }
+    }
+
+    fn finish(self) -> BacktestTickCacheInventorySymbol {
+        BacktestTickCacheInventorySymbol {
+            symbol: self.symbol,
+            files: self.files,
+            rows: self.rows,
+            bytes: self.bytes,
+            days: self.days.len(),
+            id_range: self.id_range,
+            problem_files: self.problem_files,
+        }
+    }
+}
+
+fn is_problem_file_status(status: HistorySeriesCacheFileStatus) -> bool {
+    !matches!(
+        status,
+        HistorySeriesCacheFileStatus::Readable | HistorySeriesCacheFileStatus::EmptySegment
+    )
+}
+
+fn tick_inventory_day(file_name: &str) -> Option<String> {
+    let (day, rest) = file_name.split_once('/')?;
+    if rest.starts_with("tick/") {
+        Some(day.to_string())
+    } else {
+        None
     }
 }
 

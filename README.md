@@ -200,6 +200,10 @@ let backtest = Tq::futures()
 需要在同一进程内观察回测或实盘运行状态时，可启用可选 `monitoring` feature，并在 builder
 上配置 localhost dashboard。关闭 feature 或不调用 `.monitoring(...)` 时没有 HTTP task；
 开启后 hot path 只记录聚合计数、延迟和 bounded 事件，dashboard 读取预聚合 snapshot。
+如果 builder 同时配置了 `.market_cache(...)`，monitor 会自动把同一 cache 目录作为
+history inventory 来源；也可以显式使用
+`MonitoringConfig::localhost(...).with_cache_inventory(path)`。inventory 扫描在后台低频执行，
+默认 30 秒刷新一次，不在 HTTP handler 或行情推进路径里全量扫描目录。
 
 ```toml
 tqsdk = { path = "crates/tqsdk", features = ["monitoring"] }

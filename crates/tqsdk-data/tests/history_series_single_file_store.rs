@@ -167,6 +167,61 @@ fn history_cache_store_scan_reports_tqbn_rows() {
 }
 
 #[test]
+fn backtest_tick_cache_inventory_groups_tick_files_by_symbol() {
+    let dir = temp_dir("tick-inventory-groups-symbols");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let before_boundary = 35_999_999_999_000;
+    let after_boundary = 36_000_000_000_000;
+
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            before_boundary,
+            after_boundary + 1_000,
+            [
+                tick(1, before_boundary, 100.0),
+                tick(2, after_boundary, 101.0),
+            ],
+        )
+        .unwrap();
+    cache
+        .store_ticks("DCE.i2601", 1_000, 3_000, [tick(7, 1_000, 200.0)])
+        .unwrap();
+
+    let inventory = cache.inventory().unwrap();
+
+    assert_eq!(inventory.cache_dir, dir);
+    assert_eq!(inventory.backend_format, HISTORY_SERIES_CACHE_FORMAT_ID);
+    assert_eq!(inventory.total_files, 3);
+    assert_eq!(inventory.total_rows, 3);
+    assert_eq!(inventory.total_days, 2);
+    assert_eq!(inventory.problem_files, 0);
+    assert_eq!(inventory.symbols.len(), 2);
+
+    let dce = inventory
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "DCE.i2601")
+        .unwrap();
+    assert_eq!(dce.files, 1);
+    assert_eq!(dce.rows, 1);
+    assert_eq!(dce.days, 1);
+    assert_eq!(dce.id_range, Some((7, 8)));
+    assert_eq!(dce.problem_files, 0);
+
+    let shfe = inventory
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol == "SHFE.rb2601")
+        .unwrap();
+    assert_eq!(shfe.files, 2);
+    assert_eq!(shfe.rows, 2);
+    assert_eq!(shfe.days, 2);
+    assert_eq!(shfe.id_range, Some((1, 3)));
+    assert!(shfe.bytes > 0);
+}
+
+#[test]
 fn history_cache_store_partitions_tick_files_by_trading_day() {
     let dir = temp_dir("daily-partition-ticks");
     let cache = BacktestTickCache::open(&dir).unwrap();

@@ -135,6 +135,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `HistoryPermissionStatus`
 - `BacktestCachePolicy`
 - `BacktestTickCache`
+- `BacktestTickCacheInventory`
+- `BacktestTickCacheInventorySymbol`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
 - `BacktestTickFill`
@@ -177,6 +179,7 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - 按时间范围组装完整历史序列
 - 显式 opt-in 的 `HistorySeriesCache` 历史序列缓存
 - tick-only `BacktestTickCache` 回测加速 facade
+- tick-only `BacktestTickCache::inventory()` 聚合持久缓存文件、行数、字节数和问题文件
 - shared futures universe selector / resolver
 - 大时间范围按页推进的批量读
 - research/offline 侧的渐进式 materialization

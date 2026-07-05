@@ -53,7 +53,10 @@ health 派生补洞用 policy。coverage 只在 tick id 连续时推进；断线
 启用 `monitoring` feature 后，builder 可启动同进程只读 localhost dashboard。监控关闭时不启动
 HTTP task；开启后 `Tq::monitor_addr()` 返回绑定地址，`Tq::monitor_snapshot()` 可读取当前
 snapshot。第一版 surface 聚合 wait step latency、tick/cache write、order event 占位、
-history panel 占位和 bounded incidents；重型 cache inventory / 管理操作不在行情 hot path 执行。
+history inventory 和 bounded incidents；重型 cache 管理操作不在行情 hot path 执行。若同一个
+builder 配置了 `.market_cache(...)`，monitor 会自动读取这份 cache 目录；backtest builder
+上的 `.cache_dir(...)` / `.cache_store(...)` 也会作为默认 inventory 来源。需要覆盖默认来源时，
+可显式调用 `MonitoringConfig::localhost(...).with_cache_inventory(path)`。
 
 ```rust
 use tqsdk::prelude::*;

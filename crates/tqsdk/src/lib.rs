@@ -29,7 +29,7 @@ pub mod prelude {
         TargetPos, Tq, TqBuilder,
     };
     #[cfg(feature = "monitoring")]
-    pub use crate::{MonitorSnapshot, MonitoringConfig, MonitoringMode};
+    pub use crate::{CacheInventoryConfig, MonitorSnapshot, MonitoringConfig, MonitoringMode};
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
 
@@ -118,7 +118,7 @@ pub use tqsdk_data::{
 #[cfg(feature = "monitoring")]
 use tqsdk_monitor::MonitorSink;
 #[cfg(feature = "monitoring")]
-pub use tqsdk_monitor::{MonitorSnapshot, MonitoringConfig, MonitoringMode};
+pub use tqsdk_monitor::{CacheInventoryConfig, MonitorSnapshot, MonitoringConfig, MonitoringMode};
 
 /// Result type for the user-facing facade.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1075,12 +1075,15 @@ pub struct BacktestCacheWarmupReport {
 
 impl BacktestBuilder {
     fn apply_market_cache_policy(&mut self) -> Result<()> {
-        let Some(policy) = self.base.market_cache.as_ref() else {
+        let Some(policy) = self.base.market_cache.clone() else {
             return Ok(());
         };
         if self.cache.is_none() {
             self.cache = Some(tqsdk_data::BacktestTickCache::open(policy.cache_dir())?);
         }
+        #[cfg(feature = "monitoring")]
+        self.base
+            .set_monitoring_cache_dir_if_empty(policy.cache_dir());
         for symbol in policy.tick_symbols() {
             push_unique_string(&mut self.symbols, symbol.clone());
         }
@@ -1098,6 +1101,15 @@ impl BacktestBuilder {
     #[cfg(feature = "monitoring")]
     #[must_use]
     pub fn monitoring(mut self, config: MonitoringConfig) -> Self {
+        let config = if config.cache_inventory_config().is_some() {
+            config
+        } else if let Some(cache) = &self.cache {
+            config.with_cache_inventory(cache.cache_dir().to_path_buf())
+        } else if let Some(policy) = &self.base.market_cache {
+            config.with_cache_inventory(policy.cache_dir().to_path_buf())
+        } else {
+            config
+        };
         self.base = self.base.monitoring(config);
         self
     }
@@ -1105,13 +1117,20 @@ impl BacktestBuilder {
     /// Set the persistent tick cache used to prepare this backtest.
     #[must_use]
     pub fn cache_store(mut self, cache: tqsdk_data::BacktestTickCache) -> Self {
+        #[cfg(feature = "monitoring")]
+        self.base
+            .set_monitoring_cache_dir_if_empty(cache.cache_dir());
         self.cache = Some(cache);
         self
     }
 
     /// Open and set the persistent tick cache directory used by this backtest.
     pub fn cache_dir(mut self, root_dir: impl AsRef<std::path::Path>) -> Result<Self> {
-        self.cache = Some(tqsdk_data::BacktestTickCache::open(root_dir)?);
+        let cache = tqsdk_data::BacktestTickCache::open(root_dir)?;
+        #[cfg(feature = "monitoring")]
+        self.base
+            .set_monitoring_cache_dir_if_empty(cache.cache_dir());
+        self.cache = Some(cache);
         Ok(self)
     }
 
@@ -1645,6 +1664,8 @@ impl TqBuilder {
     /// directory and symbol set unless explicit builder calls override them.
     #[must_use]
     pub fn market_cache(mut self, policy: MarketCachePolicy) -> Self {
+        #[cfg(feature = "monitoring")]
+        self.set_monitoring_cache_dir_if_empty(policy.cache_dir());
         self.market_cache = Some(policy);
         self
     }
@@ -1653,8 +1674,32 @@ impl TqBuilder {
     #[cfg(feature = "monitoring")]
     #[must_use]
     pub fn monitoring(mut self, config: MonitoringConfig) -> Self {
-        self.monitoring = Some(config);
+        self.monitoring = Some(self.monitoring_config_with_default_cache(config));
         self
+    }
+
+    #[cfg(feature = "monitoring")]
+    fn monitoring_config_with_default_cache(&self, config: MonitoringConfig) -> MonitoringConfig {
+        if config.cache_inventory_config().is_some() {
+            return config;
+        }
+        if let Some(policy) = &self.market_cache {
+            config.with_cache_inventory(policy.cache_dir().to_path_buf())
+        } else {
+            config
+        }
+    }
+
+    #[cfg(feature = "monitoring")]
+    fn set_monitoring_cache_dir_if_empty(&mut self, cache_dir: &Path) {
+        let Some(config) = self.monitoring.take() else {
+            return;
+        };
+        self.monitoring = Some(if config.cache_inventory_config().is_some() {
+            config
+        } else {
+            config.with_cache_inventory(cache_dir.to_path_buf())
+        });
     }
 
     /// Enter server-side single-day replay mode (≈ Python `TqReplay(date)`).
@@ -2429,6 +2474,8 @@ mod builder_contract_tests {
     use chrono::NaiveDate;
     use serde_json::json;
 
+    #[cfg(feature = "monitoring")]
+    use super::MarketCachePolicy;
     use super::{
         Auth, AutoTradeLogin, BacktestConfig, Error, LOCAL_BACKTEST_ACCOUNT_ID, Tq, TqBuilder,
         session_builder,
@@ -2496,6 +2543,44 @@ mod builder_contract_tests {
 
         assert!(tq.monitor_addr().is_none());
         assert!(tq.monitor_snapshot().is_none());
+    }
+
+    #[cfg(feature = "monitoring")]
+    #[test]
+    fn monitoring_uses_market_cache_inventory_by_default() {
+        let cache_dir = std::path::PathBuf::from("/tmp/tqsdk-monitor-market-cache");
+        let builder = TqBuilder::new()
+            .monitoring(crate::MonitoringConfig::localhost(0))
+            .market_cache(MarketCachePolicy::new(cache_dir.clone()));
+
+        let config = builder.monitoring.as_ref().expect("monitoring config");
+
+        assert_eq!(
+            config
+                .cache_inventory_config()
+                .map(|config| config.cache_dir()),
+            Some(cache_dir.as_path())
+        );
+    }
+
+    #[cfg(feature = "monitoring")]
+    #[test]
+    fn backtest_monitoring_uses_explicit_cache_dir_by_default() {
+        let cache_dir = std::env::temp_dir().join("tqsdk-monitor-backtest-cache");
+        let builder = TqBuilder::new()
+            .backtest(1_000, 2_000)
+            .cache_dir(&cache_dir)
+            .expect("cache opens")
+            .monitoring(crate::MonitoringConfig::localhost(0));
+
+        let config = builder.base.monitoring.as_ref().expect("monitoring config");
+
+        assert_eq!(
+            config
+                .cache_inventory_config()
+                .map(|config| config.cache_dir()),
+            Some(cache_dir.as_path())
+        );
     }
 
     #[tokio::test]

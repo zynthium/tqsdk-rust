@@ -77,7 +77,8 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 }
 
 pub use backtest_tick_cache::{
-    BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
+    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheInventory,
+    BacktestTickCacheInventorySymbol, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
     BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
 };
 pub use client::{

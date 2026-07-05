@@ -13,6 +13,7 @@ repository = "https://github.com/zynthium/tqsdk-rust"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -21,7 +21,7 @@
 | `tqsdk-wait` | Python 风格 single-owner `wait_update()` facade |
 | `tqsdk-task` | 执行工具层、策略 host、risk gate、replay/backtest foundation |
 | `tqsdk-data` | research/offline data、history、cache、export |
-| `tqsdk-monitor` | 可选同进程监控、snapshot、只读 dashboard |
+| `tqsdk-monitor` | 可选同进程监控、snapshot、cache inventory projection、只读 dashboard |
 | `tqsdk-relay` | 可选 market relay/cache service，不改变 SDK 默认直连路径 |
 
 ## 开始任务前
