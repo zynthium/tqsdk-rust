@@ -27,7 +27,7 @@
 - `tqsdk-wait` 是 Python 风格单推进点的 continuous-consumption facade
 - `tqsdk-task` 是高层执行工具与任务编排层
 - `tqsdk-data` 是 research/offline data、history、cache、export 能力层
-- `tqsdk-monitor` 是可选观测层，只提供同进程低开销 sink、snapshot 和只读 dashboard
+- `tqsdk-monitor` 是可选观测层，只提供同进程低开销 sink、snapshot、cache inventory projection 和只读 dashboard
 
 内部层依然是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。`tqsdk` 只把这些能力组织成默认用户入口。
 
@@ -570,7 +570,7 @@ Python 的问题是：
 - `tqsdk-wait` 继续做 Python 风格单推进点 continuous-consumption facade
 - `tqsdk-task` 继续做执行工具层
 - `tqsdk-data` 继续做 research/offline data、history、cache、export 能力层
-- `tqsdk-monitor` 继续做可选观测层；默认关闭，不能拥有数据/任务/session 状态
+- `tqsdk-monitor` 继续做可选观测层；默认关闭，只能投影 snapshot / cache inventory，不能拥有数据/任务/session 状态
 
 接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `task/data` 能力边界。
 

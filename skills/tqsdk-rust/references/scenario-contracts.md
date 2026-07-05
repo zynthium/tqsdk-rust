@@ -13,13 +13,13 @@
 
 | 用户角色 | 首选 crate | 契约示例 | 说明 |
 | --- | --- | --- | --- |
-| 单策略作者 | `tqsdk`, `tqsdk-wait`, `tqsdk-task` | S33, S37-S41, S43-S47, S1, S3, S6-S11, S25-S26, S29, S34, S36 | 默认 `tqsdk` facade / prelude；明确 Python-style 时用稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop、cache-backed backtest、显式 live tick recording 和共享 cache policy。 |
+| 单策略作者 | `tqsdk`, `tqsdk-wait`, `tqsdk-task`, `tqsdk-monitor` | S33, S37-S41, S43-S48, S1, S3, S6-S11, S25-S26, S29, S34, S36 | 默认 `tqsdk` facade / prelude；明确 Python-style 时用稳定 `wait_update()` 循环、live refs、薄 order wrapper、startup recovery、reconnect-safe order intent、target-pos ownership、batch quote interest、live/backtest same-body loop、cache-backed backtest、显式 live tick recording、共享 cache policy 和可选 same-process monitoring。 |
 | Async 系统集成方 | `tqsdk-session`, `tqsdk-core` | S5, S23, S27, S31; S2/S4/S21/S22/S35 removed | Multi-consumer event/fan-out 是调用方层：复用 shared session、`RuntimeReader`、`UpdateCursor`，自建 filters、bounded channels、lag diagnostics 和 sidecar。 |
 | 低层 / 低延迟用户 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S23, S27, S31 | Thin session substrate、direct metadata query、hot-path `RuntimeReader`、same-revision market/trade reads、low-latency desk profile。 |
 | 执行工具用户 | `tqsdk-task`, `tqsdk-wait` | S6-S13, S19, S29, S31 | Typed order tickets、cancel/partial-fill helpers、risk gates、execution groups、account groups、target-pos ownership。 |
 | 研究 / 行情数据用户 | `tqsdk-data`, `tqsdk-session`, `tqsdk-task`, `tqsdk` | S16-S17, S23, S27-S30, S32, S43-S47 | Historical series、downloads、CSV export、option Greeks、TQBN history cache、tick-only backtest cache、显式 live tick recording、共享 live/backtest cache policy、task-owned replay source、Python-compatible 本地回测模拟账户。 |
 | 测试 / 回放用户 | `tqsdk`, `tqsdk-task`, `tqsdk-data`, `tqsdk-wait` | S15-S16, S24, S30, S32, S36-S41, S43-S47 | Live/sim/replay environment、deterministic fake market/broker、task-owned replay sources、history-row-backed tests、Python-compatible sim backtest、default facade same-body backtest、same-body wait backtest loop、cache-backed backtest 和 shared cache policy。 |
-| 生产 runtime 构建者 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task` | S5, S15, S20 task, S31; S21/S22 removed | Session progress、runtime cursor、typed strategy supervisor、caller-owned bounded fan-out 和 lag diagnostics。不内置 HTTP endpoint、GUI、daemon manager、event facade 或 managed sink/WAL。 |
+| 生产 runtime 构建者 | `tqsdk-session`, `tqsdk-core`, `tqsdk-task`, `tqsdk-monitor` | S5, S15, S20 task, S31, S48; S21/S22 removed | Session progress、runtime cursor、typed strategy supervisor、caller-owned bounded fan-out 和 lag diagnostics。需要同进程只读运行面板时用可选 `tqsdk-monitor`；不内置 daemon manager、event facade 或 managed sink/WAL。 |
 | Multi-provider 基础设施用户 | 用户层 facade / 未来独立项目 | S14 gap only | Multi-provider aggregation 不是当前 core SDK API。不要把它推入 core/session。 |
 
 ## 角色回答模板
@@ -32,6 +32,7 @@
 
 - 首选示例：S33 default facade、S1 quote loop、S3 snapshot、S25 serial/status、S6-S7 order lifecycle、S8 account/position、S9 startup recovery、S10 reconnect order intent。
 - 执行层升级：S11 simple strategy、S29 target-pos ownership、S34 batch quote interest、S36 wait live/backtest same-body loop、S37-S41 default facade live/backtest same-body loop、S43-S47 cache-backed backtest/live tick recording/shared cache policy。
+- 运行观测：S48 启用 `monitoring` feature，通过 `.monitoring(MonitoringConfig::localhost(port))` 读取同进程 snapshot；cache inventory 由 `.market_cache(...)` 或 backtest cache 配置自动接入，也可显式 `with_cache_inventory(path)`。
 - 避免：在 `TqApi` 上复制 direct metadata helpers、本地 order overlay、解析 order status 字符串、隐藏实盘账户副作用。
 
 ### Async 系统集成方
@@ -80,6 +81,7 @@ owned historical rows、downloads、CSV、Greeks 和 history series cache 从 `t
 session progress、runtime cursor、bounded fan-out 和 lag diagnostics 从 `tqsdk-session + RuntimeReader/UpdateCursor` 起步；fan-out 是调用方层。策略生命周期再加 `tqsdk-task` supervisor。
 
 - 首选示例：S5 bare market fast path、S20 strategy supervisor、S31 low-latency desk。
+- 可选观测：`tqsdk-monitor` 只提供同进程 read-only dashboard / snapshot / cache inventory projection；不要把它当作 session owner、HTTP write API、daemon manager 或 cache 管理器。
 - 已删除场景：S21 slow consumer isolation、S22 retry diagnostics 不再对应内置 SDK facade。
 - 避免：声称内置 HTTP health endpoint、GUI、process manager、distributed queue、event facade、runtime state snapshot recovery 或 cross-process daemon orchestration。
 
@@ -140,6 +142,7 @@ session progress、runtime cursor、bounded fan-out 和 lag diagnostics 从 `tqs
 | S45 Backtest cache warmup | `crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs` | 只预热缓存，不创建策略 runtime | `.warmup().await?`，先跳过完整缓存，再用内部有界远端调度器填补缺口。 |
 | S46 Live tick recording | `crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs` | 显式把指定 live tick 写入回测共享缓存 | `Tq::record_ticks(cache_dir, symbols)`；由 `next()` / `wait_update()` 推进，跳号保留 coverage 缺口。 |
 | S47 Shared market cache policy | `crates/tqsdk/examples/api_contract_s47_facade_market_cache_policy.rs` | 用同一份配置维护 live tick recording 和 cache-backed backtest 输入 | `MarketCachePolicy::new(cache_dir).record_ticks(symbols)`、`.market_cache(policy)`、`record_ticks_health()`、`recorded_market_cache_policy()`；补洞仍需显式 `.auth_env()?` + `.warmup()` / `.remote_on_miss()`。 |
+| S48 Embedded monitoring dashboard | `crates/tqsdk/examples/api_contract_s48_facade_monitoring_dashboard.rs` | 启用和查看同进程监控面板、snapshot、cache inventory projection | `MonitoringConfig::localhost(port)`、`.monitoring(...)`、`Tq::monitor_addr()`、`Tq::monitor_snapshot()`、`with_cache_inventory(path)`；默认离线 replay demo，不需要账号。 |
 
 ## 覆盖规则
 

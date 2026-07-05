@@ -72,6 +72,10 @@ required-features = ["live"]
 name = "api_contract_s45_facade_backtest_cache_warmup"
 required-features = ["live"]
 
+[[example]]
+name = "api_contract_s48_facade_monitoring_dashboard"
+required-features = ["monitoring"]
+
 [lints]
 workspace = true
 

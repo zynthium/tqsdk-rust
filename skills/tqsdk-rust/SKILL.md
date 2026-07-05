@@ -1,6 +1,6 @@
 ---
 name: tqsdk-rust
-description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、主连/连续合约、期权链、合约规格、metadata/direct query、历史数据下载/缓存/CSV/Greeks、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力时，即使未明确提到 TQSDK。
+description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、主连/连续合约、期权链、合约规格、metadata/direct query、历史数据下载/缓存/CSV/Greeks、回测/实盘共享 tick cache、监控面板/latency/cache inventory、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力、运行监控能力时，即使未明确提到 TQSDK。
 ---
 
 # TQSDK Rust
@@ -29,6 +29,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；跳号/断线保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
 - `record_ticks_health()` 暴露累计写入、最近 flush、per-symbol last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording health 派生补洞用 policy，但补洞仍要用户显式重新提供 auth，不隐式复用 live session 明文凭证。
 - `tqsdk-data` 的 `LiveTickCacheWriter` 是纯数据层 writer，接收已解码 tick rows 并写共享回测缓存；它不拥有 session、订阅、后台线程或跨进程协调。
+- `tqsdk-monitor` 是可选同进程观察者层：启用 `monitoring` feature 后用 `MonitoringConfig::localhost(port)`，通过 `Tq::monitor_addr()` / `Tq::monitor_snapshot()` 或 `/monitor/api/snapshot` 读取预聚合状态；如果 builder 同时配置 `.market_cache(...)`、backtest `.cache_dir(...)` 或 `.cache_store(...)`，monitor 会自动把该 cache 目录作为 history inventory 来源，也可显式 `with_cache_inventory(path)` 覆盖。
+- cache inventory 只能由 monitor 后台低频 worker 调用 `BacktestTickCache::inventory()` 读取；不要在行情 hot path 或 HTTP handler 中 scan cache 目录，也不要让 monitor 写 coverage、补数据、compact 或删除缓存。
 - `HistorySeriesCache` 只服务 offline `get_*_data_series` / cache-only `read_*_data_series` / scan / maintenance；不要使用它作为 live serial 缓存或外部最新行情 API。
 - 官方 Python serial 的 `id` 列来自序列路径 key / 行序号，不要求 raw Kline/Tick payload 自带 `id`；Rust 解码应保持 path-key id 兼容。
 - 只有低层 runtime、自定义 facade、adapter、command 状态机、commit/cursor、hot-path `RuntimeReader` 才使用 `tqsdk-core`。
@@ -43,6 +45,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - live facade 或调用方 event consumer 里不要为了 metadata 再建第二个 client；复用 shared session。
 - 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果用户要维护指定合约的 live/backtest 共享 tick 缓存，优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启可用 `Tq::record_ticks(...)`；如果要持久化 live K 线、任意 row batch、commit events、跨进程 WAL 或审计流，使用调用方自己的 sidecar，不要把旧 Python mmap history cache 接进 live 热路径。
+- 不要把监控面板做成新的 relay、session owner 或 cache 管理器；`tqsdk-monitor` 只读 snapshot 和 data 层 inventory 报告，管理/补齐/删除 cache 仍走显式 data/facade API。
 - 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、session、task、data、core 或自建 event/fan-out consumer 的完整 surface。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
 - typed ticket、ref 或 status helper 已存在时，不要发明本地订单 overlay，也不要解析 status 字符串。

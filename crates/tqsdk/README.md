@@ -19,7 +19,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - 交易账户构造 helper：`.tqkq_sim()` / `.tqkq_sim_numbered(...)` / `.trade_account(...)` / `.trade_account_env()`，仅用于 live/sim 连接，不可与 server-side backtest/replay 组合
 - Local backtest summary / performance metrics / performance report、cash/equity 曲线点、买卖/开平次数、日收益统计（含显式交易日窗口）和最大回撤
 - `Tq::history()` helper
-- Optional embedded monitoring dashboard with `feature = "monitoring"` and `.monitoring(MonitoringConfig::localhost(port))`
+- Optional embedded monitoring dashboard/cache inventory projection with `feature = "monitoring"` and `.monitoring(MonitoringConfig::localhost(port))`
 - `tqsdk::advanced::*` 下钻到底层 crate
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 本地撮合回测入口。它通过
@@ -147,13 +147,19 @@ while tq.next().await? {
 # }
 ```
 
+监控面板示例：
+
+```bash
+cargo run -p tqsdk --features monitoring --example api_contract_s48_facade_monitoring_dashboard
+```
+
 ## Features
 
 - `default = ["live", "services"]`：默认用户入口，包含 live 连接与服务查询能力。
 - `live`：向内部 `session` / `wait` / `task` / `data` crate 传播 live feature，并启用 TQ auth 派生的 TQKQ helper。
 - `services`：向内部 crate 传播服务查询相关 HTTP 能力。
-- `monitoring`：启用可选 `tqsdk-monitor` 依赖，提供同进程只读 dashboard 和
-  `Tq::monitor_snapshot()` / `Tq::monitor_addr()`。
+- `monitoring`：启用可选 `tqsdk-monitor` 依赖，提供同进程只读 dashboard、
+  cache inventory projection 和 `Tq::monitor_snapshot()` / `Tq::monitor_addr()`。
 - `default-features = false`：保留 facade 类型和不依赖 live auth 的组合入口；live-only helper 不参与编译。
 
 `tqsdk::advanced::*` 是 curated convenience，不是完整 sibling crate mirror。它只暴露默认 facade 常见下钻点：

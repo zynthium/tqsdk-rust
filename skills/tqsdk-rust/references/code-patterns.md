@@ -10,6 +10,7 @@
 - Caller-Owned Commit Consumer
 - Historical Data Client
 - Shared Live/Backtest Tick Cache
+- Embedded Monitoring Snapshot
 - Trading Task Pattern
 - Direct Order Wrapper
 
@@ -257,6 +258,58 @@ bridge 仍属于调用方 sidecar；`HistorySeriesCache` 保持 offline
 `get_*_data_series` 缓存和 cache-only reader。
 
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。
+
+## Embedded Monitoring Snapshot
+
+同进程监控使用默认 `tqsdk` facade 的 `monitoring` feature。HTTP task 默认不启用；
+启用后 hot path 只写聚合计数，dashboard 和 `monitor_snapshot()` 读取预聚合 snapshot。
+如果 builder 同时配置了 `.market_cache(...)`，monitor 会自动把同一 cache 目录作为
+history inventory 来源；也可显式 `with_cache_inventory(path)`。
+
+```toml
+[dependencies]
+tqsdk = { path = "../tqsdk-rust/crates/tqsdk", features = ["monitoring"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+```
+
+```rust
+use tqsdk::prelude::*;
+
+# async fn run() -> tqsdk::Result<()> {
+let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
+    .record_ticks(["KQ.i@SHFE.au"]);
+
+let mut tq = Tq::futures()
+    .auth_env()?
+    .market_cache(cache)
+    .monitoring(MonitoringConfig::localhost(18688))
+    .connect()
+    .await?;
+
+println!("monitor={:?}", tq.monitor_addr());
+if let Some(snapshot) = tq.monitor_snapshot() {
+    println!(
+        "mode={:?} rows={}",
+        snapshot.process.mode, snapshot.history.inventory_rows
+    );
+}
+
+while tq.next().await? {
+    // normal strategy body
+}
+# Ok(())
+# }
+```
+
+没有 `MarketCachePolicy` / backtest cache builder 时，显式指定 inventory 来源：
+
+```rust
+# use tqsdk::prelude::*;
+let monitoring = MonitoringConfig::localhost(18688)
+    .with_cache_inventory(".tqsdk/backtest_ticks");
+```
+
+cache inventory worker 默认低频后台刷新；不要把 cache scan 放到策略循环或 HTTP handler。
 
 ## Trading Task Pattern
 

@@ -14,6 +14,19 @@
 
 契约锚点：S5、S23、S27、S31；S2、S4、S21、S22、S35 已删除为调用方层能力。
 
+## Runtime Observability
+
+同进程低开销监控使用 `tqsdk` 的 `monitoring` feature 和
+`.monitoring(MonitoringConfig::localhost(port))`。它适合观察 wait-step latency、tick/cache
+write counters、order event projection、bounded incidents 和共享持久 tick cache inventory。
+`.market_cache(...)`、backtest `.cache_dir(...)` 或 `.cache_store(...)` 会自动作为默认 inventory
+来源；没有这些配置时用 `with_cache_inventory(path)`。HTTP handler 只读 snapshot，cache scan
+由后台低频 worker 调用 `BacktestTickCache::inventory()`，不要把监控实现成新 session owner、
+relay daemon 或 cache 管理器。
+
+契约锚点：S48。验证锚点：`cargo test -p tqsdk-monitor` 和
+`cargo check -p tqsdk --features monitoring --example api_contract_s48_facade_monitoring_dashboard`。
+
 ## One-Shot Research Query
 
 返回单个结果的 metadata 和 service call 使用 `tqsdk-session`。需要时启用 query support；在 wait facade 或调用方 event consumer 中复用 session，不要创建重复连接。不要因为 Python 在一个 `TqApi` 上暴露很多 helper，就把 symbol metadata 路由到 live `QuoteRef`。

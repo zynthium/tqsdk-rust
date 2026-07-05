@@ -869,35 +869,747 @@ fn history_panel_from_error(cache_dir: &Path, error: String) -> HistoryPanel {
     }
 }
 
-const MONITOR_HTML: &str = r#"<!doctype html>
+const MONITOR_HTML: &str = r##"<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>tqsdk monitor</title>
+  <title>tqsdk 监控面板</title>
   <style>
-    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0f172a; color: #e5edf5; }
-    main { max-width: 1080px; margin: 0 auto; padding: 24px; }
-    pre { overflow: auto; border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #020617; }
+    :root {
+      color-scheme: dark;
+      --bg: #101113;
+      --panel: #171b1f;
+      --panel-strong: #1d2429;
+      --panel-soft: #121619;
+      --line: #2b3d42;
+      --line-strong: #3db7c4;
+      --text: #edf5f6;
+      --muted: #8fa2a7;
+      --live: #40d889;
+      --info: #3db7c4;
+      --warn: #f0b84a;
+      --bad: #f06470;
+      --accent: #c98bff;
+      --shadow: 0 18px 44px rgb(0 0 0 / 36%), inset 0 1px 0 rgb(255 255 255 / 4%);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        linear-gradient(180deg, rgb(255 255 255 / 2%), transparent 220px),
+        linear-gradient(90deg, rgb(61 183 196 / 7%) 1px, transparent 1px),
+        linear-gradient(0deg, rgb(61 183 196 / 5%) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, 48px 48px, 48px 48px, auto;
+      color: var(--text);
+    }
+    main {
+      display: grid;
+      gap: 10px;
+      width: min(1500px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 12px;
+    }
+    button {
+      min-width: 58px;
+      min-height: 30px;
+      border: 1px solid rgb(61 183 196 / 48%);
+      border-radius: 7px;
+      background: rgb(24 35 38 / 94%);
+      color: #c9fbff;
+      font: inherit;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--info); }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    .monitor-header {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      align-items: center;
+      gap: 12px;
+      min-height: 44px;
+    }
+    .monitor-header::after {
+      content: "";
+      position: absolute;
+      right: 18%;
+      bottom: -1px;
+      left: 18%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--info), transparent);
+      box-shadow: 0 0 12px rgb(61 183 196 / 70%);
+    }
+    .brand, .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .controls { justify-content: flex-end; }
+    .brand-chip {
+      border: 1px solid rgb(64 216 137 / 54%);
+      border-radius: 7px;
+      padding: 5px 9px;
+      background: rgb(64 216 137 / 8%);
+      color: #9cf6c4;
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(20px, 1.7vw, 27px);
+      line-height: 1.1;
+      text-align: center;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+    h2 {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      border: 1px solid rgb(61 183 196 / 36%);
+      border-radius: 999px;
+      padding: 6px 11px;
+      background: rgb(61 183 196 / 8%);
+      color: #c9fbff;
+      font-weight: 750;
+    }
+    .chip.live { border-color: rgb(64 216 137 / 45%); background: rgb(64 216 137 / 10%); color: #c8ffdf; }
+    .chip.warn { border-color: rgb(240 184 74 / 52%); background: rgb(240 184 74 / 11%); color: #ffe0a0; }
+    .chip.bad { border-color: rgb(240 100 112 / 56%); background: rgb(240 100 112 / 12%); color: #ffd1d5; }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+    }
+    .panel, .metric-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--panel), var(--panel-soft));
+      box-shadow: var(--shadow);
+    }
+    .panel::after, .metric-card::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      right: 12px;
+      left: 12px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgb(61 183 196 / 70%), transparent);
+      opacity: .8;
+      pointer-events: none;
+    }
+    .panel-header {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 36px;
+      padding: 10px 12px 0;
+    }
+    .panel-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #d8fbff;
+      font-weight: 850;
+    }
+    .panel-title::before {
+      content: "";
+      width: 3px;
+      height: 13px;
+      border-radius: 2px;
+      background: var(--info);
+      box-shadow: 0 0 10px var(--info);
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(260px, .9fr) minmax(0, 2.1fr);
+      gap: 12px;
+      align-items: stretch;
+      padding: 16px;
+    }
+    .hero-main {
+      display: grid;
+      align-content: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .eyebrow, .label, .muted {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+    .hero-value {
+      overflow-wrap: anywhere;
+      font-size: clamp(30px, 4vw, 54px);
+      line-height: .95;
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+    .hero-meta {
+      overflow-wrap: anywhere;
+      color: var(--muted);
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid rgb(255 255 255 / 5%);
+      border-radius: 8px;
+      background: rgb(255 255 255 / 5%);
+    }
+    .hero-cell {
+      min-width: 0;
+      padding: 13px;
+      background: rgb(17 22 25 / 84%);
+    }
+    .value {
+      display: block;
+      overflow-wrap: anywhere;
+      margin-top: 5px;
+      font-size: clamp(20px, 2.2vw, 34px);
+      line-height: 1;
+      font-weight: 900;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 10px;
+    }
+    .metric-card {
+      display: grid;
+      gap: 6px;
+      min-height: 86px;
+      padding: 12px;
+    }
+    .metric-card.info { border-color: rgb(61 183 196 / 40%); }
+    .metric-card.live { border-color: rgb(64 216 137 / 40%); }
+    .metric-card.warn { border-color: rgb(240 184 74 / 40%); }
+    .metric-card.bad { border-color: rgb(240 100 112 / 46%); }
+    .metric-value {
+      overflow-wrap: anywhere;
+      font-size: 25px;
+      line-height: 1;
+      font-weight: 900;
+    }
+    .metric-foot {
+      overflow-wrap: anywhere;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .content-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.65fr) minmax(330px, .85fr);
+      gap: 10px;
+      align-items: start;
+    }
+    .side-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .panel-body {
+      position: relative;
+      z-index: 1;
+      padding: 10px 12px 12px;
+    }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid rgb(255 255 255 / 5%);
+      border-radius: 8px;
+      background: rgb(255 255 255 / 5%);
+    }
+    .kv {
+      min-width: 0;
+      padding: 10px;
+      background: rgb(18 24 27 / 78%);
+    }
+    .kv strong {
+      display: block;
+      overflow-wrap: anywhere;
+      margin-top: 4px;
+      font-size: 20px;
+      line-height: 1.1;
+    }
+    .table-wrap {
+      overflow: auto;
+      max-height: 360px;
+      margin-top: 10px;
+      border: 1px solid rgb(255 255 255 / 6%);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 620px;
+    }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid rgb(255 255 255 / 6%);
+      text-align: right;
+      white-space: nowrap;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel-strong);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .list {
+      display: grid;
+      gap: 7px;
+      max-height: 272px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .row {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+      border: 1px solid rgb(255 255 255 / 6%);
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: rgb(18 24 27 / 72%);
+    }
+    .row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+    .row-head strong, .row p { overflow-wrap: anywhere; }
+    .badge {
+      flex: none;
+      min-width: 48px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 2px 6px;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+    .badge.info { color: #c9fbff; border-color: rgb(61 183 196 / 48%); }
+    .badge.warn { color: #ffe0a0; border-color: rgb(240 184 74 / 56%); }
+    .badge.error { color: #ffd1d5; border-color: rgb(240 100 112 / 56%); }
+    .empty {
+      display: grid;
+      min-height: 96px;
+      place-items: center;
+      border: 1px dashed rgb(255 255 255 / 10%);
+      border-radius: 8px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .error-panel {
+      border-color: rgb(240 100 112 / 58%);
+      background: rgb(64 12 19 / 82%);
+      color: #ffd1d5;
+      padding: 10px 12px;
+    }
+    details.panel { padding: 0; }
+    details > summary {
+      position: relative;
+      z-index: 1;
+      min-height: 42px;
+      padding: 13px 14px;
+      cursor: pointer;
+      color: #d8fbff;
+      font-weight: 850;
+    }
+    pre {
+      position: relative;
+      z-index: 1;
+      overflow: auto;
+      max-height: 420px;
+      margin: 0;
+      padding: 0 14px 14px;
+      color: #d7e9ec;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    [hidden] { display: none !important; }
+    @media (max-width: 1180px) {
+      .metric-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+      .content-grid { grid-template-columns: 1fr; }
+      .hero { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      main { padding: 10px; }
+      .monitor-header {
+        grid-template-columns: 1fr;
+        justify-items: start;
+      }
+      h1 { text-align: left; white-space: normal; }
+      .brand, .controls { flex-wrap: wrap; white-space: normal; justify-content: flex-start; }
+      .hero-grid, .kv-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hero-cell, .kv { padding: 10px; }
+    }
+    @media (max-width: 480px) {
+      .hero-grid, .kv-grid, .metric-grid { grid-template-columns: 1fr; }
+      button { flex: 1; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>tqsdk monitor</h1>
-    <pre id="snapshot">loading</pre>
+    <header class="monitor-header">
+      <div class="brand">
+        <span class="brand-chip">TQSDK</span>
+        <span>Asia/Shanghai</span>
+        <span id="clock">--:--:--</span>
+      </div>
+      <h1>策略进程监控面板</h1>
+      <div class="controls">
+        <span id="status-chip" class="chip warn"><span class="dot"></span><span id="status-label">读取中</span></span>
+        <button id="pause-button" type="button">暂停</button>
+        <button id="fullscreen-button" type="button">全屏</button>
+      </div>
+    </header>
+
+    <section id="error-panel" class="panel error-panel" hidden></section>
+
+    <section class="panel hero">
+      <div class="hero-main">
+        <div class="eyebrow">runtime</div>
+        <div id="mode" class="hero-value">--</div>
+        <div id="runtime-meta" class="hero-meta">等待 snapshot</div>
+      </div>
+      <div class="hero-grid" aria-label="核心监控指标">
+        <div class="hero-cell">
+          <div class="label">tick rows</div>
+          <span id="hero-ticks" class="value">--</span>
+        </div>
+        <div class="hero-cell">
+          <div class="label">cache rows</div>
+          <span id="hero-cache-rows" class="value">--</span>
+        </div>
+        <div class="hero-cell">
+          <div class="label">inventory</div>
+          <span id="hero-inventory-rows" class="value">--</span>
+        </div>
+        <div class="hero-cell">
+          <div class="label">p95 proxy</div>
+          <span id="hero-latency" class="value">--</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="metric-grid" aria-label="运行指标">
+      <article class="metric-card live">
+        <div class="label">行情批次</div>
+        <div id="metric-tick-batches" class="metric-value">--</div>
+        <div id="metric-tick-foot" class="metric-foot">--</div>
+      </article>
+      <article class="metric-card info">
+        <div class="label">wait_update</div>
+        <div id="metric-wait-steps" class="metric-value">--</div>
+        <div id="metric-wait-foot" class="metric-foot">--</div>
+      </article>
+      <article class="metric-card info">
+        <div class="label">回测推进</div>
+        <div id="metric-backtest-steps" class="metric-value">--</div>
+        <div id="metric-backtest-foot" class="metric-foot">--</div>
+      </article>
+      <article class="metric-card live">
+        <div class="label">缓存写入</div>
+        <div id="metric-cache-writes" class="metric-value">--</div>
+        <div id="metric-cache-foot" class="metric-foot">--</div>
+      </article>
+      <article class="metric-card warn">
+        <div class="label">缺口</div>
+        <div id="metric-gaps" class="metric-value">--</div>
+        <div id="metric-gaps-foot" class="metric-foot">--</div>
+      </article>
+      <article class="metric-card info">
+        <div class="label">订单事件</div>
+        <div id="metric-orders" class="metric-value">--</div>
+        <div id="metric-orders-foot" class="metric-foot">--</div>
+      </article>
+    </section>
+
+    <section class="content-grid">
+      <section class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">历史缓存资产</h2>
+          <span id="history-refresh" class="muted">未扫描</span>
+        </div>
+        <div class="panel-body">
+          <div class="kv-grid">
+            <div class="kv"><div class="label">symbols</div><strong id="history-symbols">--</strong></div>
+            <div class="kv"><div class="label">days</div><strong id="history-days">--</strong></div>
+            <div class="kv"><div class="label">files</div><strong id="history-files">--</strong></div>
+            <div class="kv"><div class="label">bytes</div><strong id="history-bytes">--</strong></div>
+          </div>
+          <div id="history-error" class="error-panel" hidden></div>
+          <div id="history-table" class="table-wrap"></div>
+          <div id="history-empty" class="empty" hidden>暂无缓存资产数据</div>
+        </div>
+      </section>
+
+      <aside class="side-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">订单与交易监控</h2>
+            <span id="order-count" class="muted">0 events</span>
+          </div>
+          <div class="panel-body">
+            <div id="order-last" class="empty">暂无订单事件</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">状态变化事件</h2>
+            <span id="incident-count" class="muted">0 incidents</span>
+          </div>
+          <div class="panel-body">
+            <div id="incident-list" class="list"></div>
+            <div id="incident-empty" class="empty">暂无事件</div>
+          </div>
+        </section>
+      </aside>
+    </section>
+
+    <details class="panel">
+      <summary>原始 snapshot</summary>
+      <pre id="snapshot">loading</pre>
+    </details>
   </main>
   <script>
-    async function load() {
-      const response = await fetch('/monitor/api/snapshot', { cache: 'no-store' });
-      document.getElementById('snapshot').textContent =
-        JSON.stringify(await response.json(), null, 2);
+    const POLL_INTERVAL_MS = 2000;
+    const state = { paused: false, timer: null, sequence: 0, latest: null };
+    const byId = (id) => document.getElementById(id);
+    const text = (id, value) => { byId(id).textContent = value == null || value === '' ? '--' : String(value); };
+    const show = (id, visible) => { byId(id).hidden = !visible; };
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[char]));
+
+    function fmtNumber(value) {
+      if (value == null) return '--';
+      return Number(value).toLocaleString('en-US');
     }
-    load();
-    setInterval(load, 2000);
+    function fmtBytes(value) {
+      if (value == null) return '--';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let size = Number(value);
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+      }
+      return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+    }
+    function fmtNs(value) {
+      if (!value) return '0 ns';
+      if (value < 1000) return `${fmtNumber(value)} ns`;
+      if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} µs`;
+      if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)} ms`;
+      return `${(value / 1_000_000_000).toFixed(2)} s`;
+    }
+    function fmtTime(value) {
+      if (!value) return '--';
+      return new Date(Number(value)).toLocaleTimeString('zh-CN', { hour12: false });
+    }
+    function fmtDateTime(value) {
+      if (!value) return '--';
+      return new Date(Number(value)).toLocaleString('zh-CN', { hour12: false });
+    }
+    function modeLabel(mode) {
+      return {
+        idle: 'Idle',
+        live: 'Live',
+        backtest: 'Backtest',
+        replay: 'Replay',
+        cache_only: 'Cache Only'
+      }[mode] ?? String(mode ?? '--');
+    }
+    function statusModel(snapshot) {
+      if (!snapshot) return { label: '读取中', tone: 'warn' };
+      if (snapshot.history?.last_error) return { label: '缓存扫描异常', tone: 'bad' };
+      if ((snapshot.incidents ?? []).some((item) => item.severity === 'error')) {
+        return { label: '存在错误事件', tone: 'bad' };
+      }
+      if ((snapshot.cache?.gaps_detected ?? 0) > 0) return { label: '发现缺口', tone: 'warn' };
+      if (snapshot.process?.mode === 'live') return { label: '实时监控中', tone: 'live' };
+      if (snapshot.process?.mode === 'backtest') return { label: '回测监控中', tone: 'live' };
+      return { label: '监控中', tone: 'live' };
+    }
+    function setStatus(snapshot) {
+      const model = statusModel(snapshot);
+      byId('status-chip').className = `chip ${model.tone}`;
+      text('status-label', state.paused ? '已暂停' : model.label);
+    }
+    function renderHistory(history) {
+      text('history-symbols', fmtNumber(history.inventory_symbols ?? 0));
+      text('history-days', fmtNumber(history.inventory_days ?? 0));
+      text('history-files', fmtNumber(history.inventory_files ?? 0));
+      text('history-bytes', fmtBytes(history.inventory_bytes ?? 0));
+      text('history-refresh', history.last_refresh_unix_millis ? `扫描 ${fmtTime(history.last_refresh_unix_millis)}` : '未扫描');
+      const hasError = Boolean(history.last_error);
+      show('history-error', hasError);
+      if (hasError) byId('history-error').textContent = history.last_error;
+      const rows = history.top_symbols ?? [];
+      show('history-empty', rows.length === 0);
+      byId('history-table').hidden = rows.length === 0;
+      byId('history-table').innerHTML = rows.length === 0 ? '' : `
+        <table>
+          <thead><tr><th>symbol</th><th>rows</th><th>days</th><th>files</th><th>bytes</th><th>problems</th></tr></thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.symbol)}</td>
+                <td>${fmtNumber(row.rows)}</td>
+                <td>${fmtNumber(row.days)}</td>
+                <td>${fmtNumber(row.files)}</td>
+                <td>${fmtBytes(row.bytes)}</td>
+                <td>${fmtNumber(row.problem_files)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`;
+    }
+    function renderOrder(order) {
+      text('order-count', `${fmtNumber(order.events ?? 0)} events`);
+      const event = order.last_event;
+      byId('order-last').className = event ? 'row' : 'empty';
+      byId('order-last').innerHTML = event ? `
+        <div class="row-head"><strong>${escapeHtml(event.symbol)}</strong><span class="badge info">${escapeHtml(event.state)}</span></div>
+        <p class="muted">account ${escapeHtml(event.account_id)} · order ${escapeHtml(event.order_id)}</p>
+        <p class="muted">elapsed ${fmtNs(event.elapsed_ns)}</p>
+      ` : '暂无订单事件';
+    }
+    function renderIncidents(incidents) {
+      const rows = [...(incidents ?? [])].reverse().slice(0, 12);
+      text('incident-count', `${fmtNumber(incidents?.length ?? 0)} incidents`);
+      show('incident-empty', rows.length === 0);
+      byId('incident-list').hidden = rows.length === 0;
+      byId('incident-list').innerHTML = rows.map((item) => `
+        <div class="row">
+          <div class="row-head">
+            <strong>${fmtDateTime(item.at_unix_millis)}</strong>
+            <span class="badge ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span>
+          </div>
+          <p class="muted">${escapeHtml(item.message)}</p>
+        </div>
+      `).join('');
+    }
+    function render(snapshot) {
+      state.latest = snapshot;
+      setStatus(snapshot);
+      text('mode', modeLabel(snapshot.process?.mode));
+      text('runtime-meta', `pid ${snapshot.process?.pid ?? '--'} · seq ${fmtNumber(snapshot.process?.snapshot_seq)} · ${snapshot.process?.monitoring_mode ?? 'unknown'} · admin ${snapshot.process?.admin_enabled ? 'on' : 'off'} · started ${fmtDateTime(snapshot.process?.started_at_unix_millis)}`);
+      text('hero-ticks', fmtNumber(snapshot.market?.ticks_observed ?? 0));
+      text('hero-cache-rows', fmtNumber(snapshot.cache?.rows_written ?? 0));
+      text('hero-inventory-rows', fmtNumber(snapshot.history?.inventory_rows ?? 0));
+      text('hero-latency', fmtNs(Math.max(snapshot.latency?.wait_step_max_ns ?? 0, snapshot.latency?.cache_write_max_ns ?? 0, snapshot.latency?.backtest_step_max_ns ?? 0)));
+
+      text('metric-tick-batches', fmtNumber(snapshot.market?.tick_batches ?? 0));
+      text('metric-tick-foot', `${fmtNumber(snapshot.market?.symbols_observed ?? 0)} symbols · last ${fmtNumber(snapshot.market?.last_tick_batch?.tick_count ?? 0)} ticks`);
+      text('metric-wait-steps', fmtNumber(snapshot.latency?.wait_steps ?? 0));
+      text('metric-wait-foot', `avg ${fmtNs(snapshot.latency?.wait_step_avg_ns)} · max ${fmtNs(snapshot.latency?.wait_step_max_ns)}`);
+      text('metric-backtest-steps', fmtNumber(snapshot.latency?.backtest_steps ?? 0));
+      text('metric-backtest-foot', `avg ${fmtNs(snapshot.latency?.backtest_step_avg_ns)} · max ${fmtNs(snapshot.latency?.backtest_step_max_ns)}`);
+      text('metric-cache-writes', fmtNumber(snapshot.cache?.writes ?? 0));
+      text('metric-cache-foot', `${fmtNumber(snapshot.cache?.rows_written ?? 0)} rows · avg ${fmtNs(snapshot.latency?.cache_write_avg_ns)}`);
+      text('metric-gaps', fmtNumber(snapshot.cache?.gaps_detected ?? 0));
+      text('metric-gaps-foot', `${fmtNumber(snapshot.history?.problem_files ?? 0)} problem files · missing ${fmtNumber(snapshot.history?.missing_ranges ?? 0)}`);
+      text('metric-orders', fmtNumber(snapshot.orders?.events ?? 0));
+      text('metric-orders-foot', snapshot.orders?.last_event ? `${snapshot.orders.last_event.symbol} · ${snapshot.orders.last_event.state}` : 'no order events');
+
+      renderHistory(snapshot.history ?? {});
+      renderOrder(snapshot.orders ?? {});
+      renderIncidents(snapshot.incidents ?? []);
+      text('snapshot', JSON.stringify(snapshot, null, 2));
+    }
+    async function load() {
+      const sequence = ++state.sequence;
+      try {
+        const response = await fetch('/monitor/api/snapshot', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const snapshot = await response.json();
+        if (sequence !== state.sequence) return;
+        show('error-panel', false);
+        render(snapshot);
+      } catch (error) {
+        byId('error-panel').textContent = `读取 snapshot 失败：${error instanceof Error ? error.message : String(error)}`;
+        show('error-panel', true);
+        byId('status-chip').className = 'chip bad';
+        text('status-label', '读取异常');
+      }
+    }
+    function schedule() {
+      if (state.timer) window.clearTimeout(state.timer);
+      if (!state.paused) {
+        state.timer = window.setTimeout(async function tick() {
+          await load();
+          schedule();
+        }, POLL_INTERVAL_MS);
+      }
+    }
+    byId('pause-button').addEventListener('click', () => {
+      state.paused = !state.paused;
+      text('pause-button', state.paused ? '继续' : '暂停');
+      setStatus(state.latest);
+      if (!state.paused) void load();
+      schedule();
+    });
+    byId('fullscreen-button').addEventListener('click', async () => {
+      if (!document.fullscreenEnabled) return;
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      text('fullscreen-button', document.fullscreenElement ? '退出' : '全屏');
+    });
+    if (!document.fullscreenEnabled) byId('fullscreen-button').disabled = true;
+    setInterval(() => text('clock', new Date().toLocaleTimeString('zh-CN', { hour12: false })), 1000);
+    text('clock', new Date().toLocaleTimeString('zh-CN', { hour12: false }));
+    async function start() {
+      await load();
+      schedule();
+    }
+    void start();
   </script>
 </body>
 </html>
-"#;
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -955,6 +1667,45 @@ mod tests {
                 .map(CacheInventoryConfig::refresh_interval),
             Some(Duration::from_secs(7))
         );
+    }
+
+    #[test]
+    fn monitor_html_exposes_dashboard_shell() {
+        assert!(MONITOR_HTML.contains("策略进程监控面板"));
+        assert!(MONITOR_HTML.contains("历史缓存资产"));
+        assert!(MONITOR_HTML.contains("状态变化事件"));
+        assert!(MONITOR_HTML.contains("/monitor/api/snapshot"));
+    }
+
+    #[tokio::test]
+    async fn embedded_monitor_serves_dashboard_html() {
+        let config = MonitoringConfig::localhost(0);
+        let registry = Arc::new(MonitorRegistry::with_config(
+            MonitorRuntimeMode::Backtest,
+            config.clone(),
+        ));
+        let monitor = EmbeddedMonitor::start(config, registry)
+            .await
+            .expect("monitor starts");
+
+        let mut stream = TcpStream::connect(monitor.bound_addr())
+            .await
+            .expect("connect monitor");
+        stream
+            .write_all(b"GET /monitor HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf8 response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("content-type: text/html; charset=utf-8"));
+        assert!(response.contains("策略进程监控面板"));
+        assert!(response.contains("/monitor/api/snapshot"));
     }
 
     #[tokio::test]
