@@ -43,9 +43,9 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
 - 做确定性 replay / 本地回测行情输入：用 `tqsdk_task::replay::ReplayMarketSource`。
 - 需要策略下单并撮合成交的回测：优先用 `tqsdk` 的
-  `.backtest(start_ns, end_ns)` 持久 tick 缓存路径；需要显式自定义 replay source 时用
-  `.replay_backtest(source)`；官方服务端 market-data-only 回测用
-  `.server_backtest(...)` / `.server_replay(...)`。
+  `.backtest(start_ns, end_ns)` 单一入口；未配置缓存时直连官方服务端回测行情，配置
+  `cache_dir` / `market_cache` 后复用持久 tick 缓存；需要显式自定义 replay source 时用
+  `.replay_backtest(source)`；官方单日复盘用 `.server_replay(...)`。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
 - 自建 facade、多个异步消费者或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 
@@ -147,13 +147,14 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 
 如果要让普通策略主体在 backtest / tqkq-sim / live 间保持同一套 `Tq::next()` /
 `quote()` / `target_pos_default(...)` 写法，优先使用默认 `tqsdk` facade。
-`Tq::futures().backtest(start_ns, end_ns)` 是 Python-style 本地撮合回测入口：
-它通过 `BacktestTickCache` 复用 `HistorySeriesCache` 的持久 tick 缓存，再把 tick
-流式回放到本地 `TqSim`。默认 `RemoteOnMiss` 会先检查本地缓存；缓存完整时不需要
-auth，缓存缺失时使用官方 server-side backtest market stream 边推进策略边写入持久缓存。
-这个补缓存路径不使用专业历史下载接口，也不需要专业历史下载权限。全品种策略使用和 relay
-一致的 universe selector 语法；K 线回测仍以 tick replay 为主存储来源，需要 K 线时由 tick
-合成。
+`Tq::futures().backtest(start_ns, end_ns)` 是唯一推荐回测入口：未配置缓存时直接使用
+官方 server-side backtest market stream，不落盘；配置 `cache_dir(...)`、`cache_store(...)`
+或 `.market_cache(...)` 后，它通过 `BacktestTickCache` 复用 `HistorySeriesCache`
+的持久 tick 缓存，再把 tick 流式回放到本地 `TqSim`。默认 `RemoteOnMiss`
+会先检查本地缓存；缓存完整时不需要 auth，缓存缺失时使用官方 server-side backtest market
+stream 补齐缺口并写入持久缓存。这个补缓存路径不使用专业历史下载接口，也不需要专业历史下载权限。
+全品种策略使用和 relay 一致的 universe selector 语法；K 线回测仍以 tick replay 为主存储来源，
+需要 K 线时由 tick 合成。
 
 ```rust
 let cache_dir = ".tqsdk/backtest_ticks";
@@ -222,10 +223,10 @@ println!("monitor: {:?}", tq.monitor_addr());
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
 `.refresh()`，它会按最小缓存颗粒度删除对应 symbol 的 tick 文件后再由官方回测流补齐；
 需要自定义内存 replay source、测试 fixture 或外部数据源时用
-`.replay_backtest(source)`。官方服务端 market-data-only 回测改为
-`.server_backtest(start_ns, end_ns)`；单日服务端复盘用 `.server_replay(date)?`。
-`server_backtest` / `server_replay` 不绑定交易目标，也会拒绝自动交易登录；需要策略下单并本地撮合时使用
-`.backtest(...)` 或 `.replay_backtest(...)`。
+`.replay_backtest(source)`。官方服务端 market-data-only 回测就是同一个
+`.backtest(start_ns, end_ns)` 在未配置缓存时的默认行为；单日服务端复盘仍用
+`.server_replay(date)?`。无缓存回测和 `server_replay` 不绑定交易目标，也会拒绝自动交易登录；
+需要策略下单并本地撮合时配置 cache-backed `.backtest(...)` 或使用 `.replay_backtest(...)`。
 
 显式运维缓存时，可在 builder 上调用 `.inspect_cache()` 查看 backend、文件路径、覆盖区间和
 缺口，或 `.purge_cache_symbols()` 删除已声明 symbol 的 tick 缓存文件。
@@ -331,7 +332,7 @@ let page = client.get_kline_data_page(request).await?;
 | --- | --- | --- |
 | 不依赖真实账号的策略测试 harness | `cargo run -p tqsdk-task --example api_contract_s24_testable_strategy` | 使用 fake market / fake broker，不连接真实服务 |
 | Python-compatible 本地回测模拟账户 | `cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim` | 使用本地 quote/tick/kline replay + `TqSim`，不连接真实服务 |
-| 默认 facade 服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().server_backtest(...)` 切换到官方服务端 market-data-only 回测；需要账号 |
+| 默认 facade 无缓存服务端回测 | `cargo run -p tqsdk --example api_contract_s37_facade_server_backtest` | `Tq::futures().backtest(...).connect()` 未配置缓存时切换到官方服务端 market-data-only 回测；需要账号 |
 | 默认 facade 本地 replay 回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().replay_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
 | 默认 facade 持久缓存回测 | `cargo run -p tqsdk --example api_contract_s43_facade_backtest_history_cache` | `.backtest(...).cache_dir(...).universe(...)` 通过 `BacktestTickCache` 复用持久 tick 缓存 |
 | 默认 facade remote-on-miss 缓存回测 | `cargo run -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss` | 使用官方 server-side backtest tick stream 填补缺失缓存；需要账号，但不需要专业历史下载权限 |

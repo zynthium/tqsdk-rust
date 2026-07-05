@@ -121,9 +121,10 @@
   - `TqSim` 会使用 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单解析到实际 underlying symbol 撮合、成交和记账，并把实际持仓镜像回 replay symbol，避免 `TargetPos` / strategy context 在主连路径上反复误判空仓
   - 本地回测订单和成交时间字段使用 replay event time；挂单跨 step 成交时订单保留原始插入时间，成交使用成交 step 时间
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
-  - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns).cache_dir(...)`、`.remote_on_miss()`、
-    `.warmup()` 和 `.replay_backtest(...)`：持久 tick cache 与远端补缺由 `BacktestBuilder`
-    承接，caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`
+  - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
+    无缓存 `.backtest(...)` 使用官方服务端回测行情；配置 `cache_dir` / `market_cache` 后，
+    持久 tick cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`
     继续暴露 `KlineDataSeries` / `TickDataSeries` / `StrategyReplaySourceBuilder`，供上层 host
     把已有 history rows 或自定义事件转为 replay source，但 `local_backtest_*` 不再作为新的
     用户心智入口扩展

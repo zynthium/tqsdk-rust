@@ -1000,7 +1000,13 @@ impl MarketCachePolicy {
     }
 }
 
-/// Builder for cache-backed local backtests.
+/// Builder for strategy backtests.
+///
+/// Without a persistent cache configured, [`BacktestBuilder::connect`] uses the
+/// official server-side backtest market stream. Once a cache is configured
+/// through [`BacktestBuilder::cache_dir`], [`BacktestBuilder::cache_store`], or
+/// [`TqBuilder::market_cache`], the builder prepares a cache-backed local
+/// backtest and fills missing ranges according to [`BacktestCachePolicy`].
 pub struct BacktestBuilder {
     base: TqBuilder,
     start_ns: i64,
@@ -1074,6 +1080,23 @@ pub struct BacktestCacheWarmupReport {
 }
 
 impl BacktestBuilder {
+    fn validate_range(&self) -> Result<()> {
+        if self.end_ns <= self.start_ns {
+            return Err(data_validation(
+                "backtest end_ns must be greater than start_ns",
+            ));
+        }
+        Ok(())
+    }
+
+    fn into_server_backtest(mut self) -> TqBuilder {
+        // No-cache backtest mode is intentionally remote-only and must not
+        // start live tick cache recording even if a shared market cache policy
+        // was configured before `.backtest(...)`.
+        self.base.market_cache = None;
+        self.base.with_server_backtest(self.start_ns, self.end_ns)
+    }
+
     fn apply_market_cache_policy(&mut self) -> Result<()> {
         let Some(policy) = self.base.market_cache.clone() else {
             return Ok(());
@@ -1184,11 +1207,7 @@ impl BacktestBuilder {
     }
 
     pub async fn warmup(mut self) -> Result<BacktestCacheWarmupReport> {
-        if self.end_ns <= self.start_ns {
-            return Err(data_validation(
-                "backtest end_ns must be greater than start_ns",
-            ));
-        }
+        self.validate_range()?;
         self.apply_market_cache_policy()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
@@ -1365,11 +1384,7 @@ impl BacktestBuilder {
 
     /// Validate cache coverage and prepare the local replay inputs.
     pub async fn prepare(mut self) -> Result<PreparedBacktest> {
-        if self.end_ns <= self.start_ns {
-            return Err(data_validation(
-                "backtest end_ns must be greater than start_ns",
-            ));
-        }
+        self.validate_range()?;
         self.apply_market_cache_policy()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
@@ -1463,8 +1478,25 @@ impl BacktestBuilder {
         })
     }
 
-    /// Prepare and connect the cache-backed local backtest.
-    pub async fn connect(self) -> Result<Tq> {
+    /// Connect the backtest.
+    ///
+    /// Without a configured cache, this uses the official server-side backtest
+    /// market stream and does not persist data. With a configured cache, it
+    /// prepares the cache-backed local replay path first.
+    pub async fn connect(mut self) -> Result<Tq> {
+        self.validate_range()?;
+        if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
+            return self.into_server_backtest().connect().await;
+        }
+        self.apply_market_cache_policy()?;
+        if self.cache.is_none() {
+            return match self.cache_policy {
+                BacktestCachePolicy::RemoteOnMiss => self.into_server_backtest().connect().await,
+                BacktestCachePolicy::CacheOnly => Err(missing_backtest_cache_error("cache_only")),
+                BacktestCachePolicy::Refresh => Err(missing_backtest_cache_error("refresh")),
+                BacktestCachePolicy::Disabled => unreachable!("handled above"),
+            };
+        }
         self.prepare().await?.connect().await
     }
 }
@@ -1534,6 +1566,12 @@ fn build_warmup_report(
         remote_used,
         symbols,
     }
+}
+
+fn missing_backtest_cache_error(mode: &str) -> Error {
+    data_validation(format!(
+        "{mode} backtest requires cache_dir(...), cache_store(...), or market_cache(...)"
+    ))
 }
 
 impl PreparedBacktest {
@@ -1731,13 +1769,21 @@ impl TqBuilder {
         }
     }
 
-    /// Enter official server-side backtest mode (≈ Python `TqBacktest`).
-    ///
-    /// The strategy body (`next()` / `quote()` / etc.) stays identical to live.
-    #[must_use]
-    pub fn server_backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
+    fn with_server_backtest(mut self, start_ns: i64, end_ns: i64) -> Self {
         self.backtest = Some(BacktestConfig::Server { start_ns, end_ns });
         self
+    }
+
+    /// Deprecated compatibility alias for official server-side backtest mode.
+    ///
+    /// Prefer [`TqBuilder::backtest`] and call
+    /// [`BacktestBuilder::connect`] without configuring a cache.
+    #[deprecated(
+        note = "use backtest(start_ns, end_ns).connect() without cache for official server-side backtest"
+    )]
+    #[must_use]
+    pub fn server_backtest(self, start_ns: i64, end_ns: i64) -> Self {
+        self.with_server_backtest(start_ns, end_ns)
     }
 
     /// Enter local-backtest mode using a custom in-memory replay source.
@@ -2358,7 +2404,7 @@ fn take_local_backtest_stream(
 
 fn missing_default_account() -> Error {
     Error::from(tqsdk_session::SessionFacadeError::InvalidState(
-        "default account is not configured; use backtest(...).cache(...), replay_backtest(...), tqkq_sim(), trade_account(...), or login_trade_account(...)",
+        "default account is not configured; use backtest(...).cache_dir(...), replay_backtest(...), tqkq_sim(), trade_account(...), or login_trade_account(...)",
     ))
 }
 
@@ -2371,7 +2417,7 @@ fn ambiguous_default_account() -> Error {
 
 fn server_side_trade_login_error() -> Error {
     Error::from(tqsdk_session::SessionFacadeError::InvalidState(
-        "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache(...) or replay_backtest(...) for simulated fills",
+        "server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache_dir(...) / market_cache(...) or replay_backtest(...) for simulated fills",
     ))
 }
 
@@ -2584,19 +2630,37 @@ mod builder_contract_tests {
     }
 
     #[tokio::test]
-    async fn server_backtest_rejects_auto_trade_login_before_network() {
+    async fn backtest_without_cache_rejects_auto_trade_login_before_network() {
         let error = TqBuilder::new()
             .auth("demo-user", "demo-pass")
-            .server_backtest(1_000, 2_000)
             .trade_account("9999", "acct-1", "secret")
+            .backtest(1_000, 2_000)
             .connect()
             .await
             .err()
-            .expect("server-side backtest must not auto-login a trade account");
+            .expect("no-cache backtest must not auto-login a trade account");
 
         assert_eq!(
             error.to_string(),
-            "invalid session facade state: server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache(...) or replay_backtest(...) for simulated fills"
+            "invalid session facade state: server-side backtest/replay cannot be combined with trade targets or automatic trade account login; use backtest(...).cache_dir(...) / market_cache(...) or replay_backtest(...) for simulated fills"
+        );
+    }
+
+    #[tokio::test]
+    async fn backtest_cache_only_requires_cache_before_network() {
+        let error = TqBuilder::new()
+            .backtest(1_000, 2_000)
+            .cache_only()
+            .connect()
+            .await
+            .err()
+            .expect("cache_only without a cache must fail before auth or network");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cache_only backtest requires cache_dir"),
+            "unexpected error: {error}"
         );
     }
 
