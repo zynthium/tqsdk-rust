@@ -61,7 +61,7 @@ hot path 使用 `tqsdk-session + RuntimeReader`，或使用 `tqsdk-task` trading
 
 官方 Python 回测心智是 `TqApi(account=TqSim(), backtest=TqBacktest(...))`：策略主体继续围绕 live refs 编写，回测配置只在构造阶段切换。Rust 有三条入口要分清：
 
-- 普通策略优先使用默认 `tqsdk` facade。`.backtest(start_ns, end_ns)` 是统一回测入口：不配置缓存时走官方 server-side backtest 行情；配置 `.cache_dir(...)` 或 `.market_cache(policy)` 后走持久 tick cache-backed 本地撮合回测，默认 `RemoteOnMiss` 可用官方 server-side backtest 流补缺口；`.replay_backtest(replay)` 走 caller-owned replay source + `TqSim`。策略主体保持 `Tq::next()` / `quote()`，live/backtest 差异留在 builder。契约锚点：S37-S39、S43-S47。
+- 普通策略优先使用默认 `tqsdk` facade。`.backtest(start_ns, end_ns)` 是统一回测入口：不配置缓存时走官方 server-side backtest 行情；配置 `.cache_dir(...)` 或 `.market_cache(policy)` 后走持久 tick cache-backed 本地撮合回测，默认 `RemoteOnMiss` 可用官方 server-side backtest 流补缺口；`.replay_backtest(replay)` 走 caller-owned replay source + `TqSim`。不要再使用或迁移到 `server_backtest(...)`，旧代码应替换成无缓存 `.backtest(...).connect()` 或显式 cache/replay 形态。策略主体保持 `Tq::next()` / `quote()`，live/backtest 差异留在 builder。契约锚点：S37-S39、S43-S47。
 - `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` / `TqBacktest` 用于明确要求直接操作 Python-style wait facade 的 same-body loop。策略主体只依赖 `quote` / `kline` handles 和 `step()`，回测结束时 `step()` 返回 `None`。契约锚点：S36。
 - `tqsdk-task` 的 `StrategyBacktest + TqSim` 消费 task-owned `ReplayMarketSource`，用于不连接真实服务的本地确定性回测模拟账户内部能力；历史 rows 可由 `tqsdk-data` 拉取并通过 `StrategyReplaySourceBuilder` 转成 replay source。当前覆盖 quote/tick/kline replay event、futures 单账户、基础限价/市价撮合、保证金和手续费配置、kline `price_tick(...)` quote synthesis 和轻量 `summary()`；完整回测报告、自动分钟线、主连合约表、股票/期权完整账户语义还不是当前最小闭环。契约锚点：S32。
 

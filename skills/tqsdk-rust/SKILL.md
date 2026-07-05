@@ -25,6 +25,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
 - 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。多消费者 event/fan-out 是调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建的集成层。
 - 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：不配置 cache 时使用官方服务端回测行情；配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 时使用持久 tick cache 本地撮合，缺口由 `RemoteOnMiss` / `.warmup()` 显式补齐。
+- 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码迁移为 `.backtest(start_ns, end_ns).connect().await?` 的无缓存模式，或按需要补 `.cache_dir(...)` / `.market_cache(...)` / `.replay_backtest(...)`。
 - history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)`、显式 `HistorySeriesCache::open(...)` cache-only reader、回测 `.cache_dir(...)` / `.market_cache(...)`，或 live/session mode 下显式 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)` 才写持久缓存。
 - `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
 - `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；跳号/断线保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
@@ -46,6 +47,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - live facade 或调用方 event consumer 里不要为了 metadata 再建第二个 client；复用 shared session。
 - 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果用户要维护指定合约的 live/backtest 共享 tick 缓存，优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启可用 `Tq::record_ticks(...)`；如果要持久化 live K 线、任意 row batch、commit events、跨进程 WAL 或审计流，使用调用方自己的 sidecar，不要把旧 Python mmap history cache 接进 live 热路径。
+- 不要把官方服务端回测写成 `server_backtest(...)` 或 `TqBuilder::server_backtest(...)`；唯一默认 facade public 入口是 `.backtest(start_ns, end_ns)`，是否配置 cache 决定 remote market stream 还是本地 cache-backed 回测。
 - 不要把监控面板做成新的 relay、session owner 或 cache 管理器；`tqsdk-monitor` 只读 snapshot 和 data 层 inventory 报告，管理/补齐/删除 cache 仍走显式 data/facade API。
 - 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、session、task、data、core 或自建 event/fan-out consumer 的完整 surface。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。
