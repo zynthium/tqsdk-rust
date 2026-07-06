@@ -153,8 +153,12 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 的持久 tick 缓存，再把 tick 流式回放到本地 `TqSim`。默认 `RemoteOnMiss`
 会先检查本地缓存；缓存完整时不需要 auth，缓存缺失时使用官方 server-side backtest market
 stream 补齐缺口并写入持久缓存。这个补缓存路径不使用专业历史下载接口，也不需要专业历史下载权限。
-全品种策略使用和 relay 一致的 universe selector 语法；K 线回测仍以 tick replay 为主存储来源，
-需要 K 线时由 tick 合成。
+全品种策略使用和 relay 一致的 universe selector 语法；显式 `.tick(symbol, width)` 会复用
+tick cache，显式 `.kline(symbol, duration, width)` 中 `duration <= 60s` 的 K 线从本地 tick
+流合成且不写入 native K 线缓存，`duration > 60s` 的 K 线按官方 Python 行为读取 native
+history K 线缓存，缺口由 history series 接口远程补齐。K 线 replay 需要 quote synthesis
+metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
+`.default_price_tick(...)` 显式提供。
 
 ```rust
 let cache_dir = ".tqsdk/backtest_ticks";
@@ -162,6 +166,8 @@ let mut tq = Tq::futures()
     .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges
     .backtest(start_ns, end_ns)
     .cache_dir(cache_dir)?
+    .default_price_tick(1.0)
+    .kline("KQ.i@SHFE.au", std::time::Duration::from_secs(60), 200)?
     .universe("active:all;!CFFEX")?
     .remote_on_miss()
     .connect()

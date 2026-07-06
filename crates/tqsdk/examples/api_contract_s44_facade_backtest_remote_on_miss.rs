@@ -13,6 +13,8 @@ async fn main() -> tqsdk::Result<()> {
         .auth_env()?
         .backtest(start_ns, end_ns)
         .cache_dir(".tqsdk/backtest_ticks")?
+        .default_price_tick(1.0)
+        .kline(symbol, std::time::Duration::from_secs(60), 200)?
         .universe(format!("symbol:{symbol}"))?
         .remote_on_miss()
         .connect()

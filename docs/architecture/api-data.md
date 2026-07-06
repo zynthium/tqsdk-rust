@@ -261,6 +261,9 @@ tqsdk-wait        tqsdk-data
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
 - `HistorySeriesCache` 的底层存储通过 crate 内部 store adapter 隔离；`BacktestTickCache`
   复用这套内部实现承接回测 tick 缓存，不再维护独立 tick replay cache 实现
+- facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`，
+  `duration > 60s` 的 K 线输入经 `HistorySeriesCache` native K 线 series；
+  `duration <= 60s` 的 K 线合成和 mixed replay 推进属于 `tqsdk-task`，不在数据层持久化
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；

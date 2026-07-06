@@ -161,7 +161,11 @@ rtk cargo test -p tqsdk-data
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-task --test history_tick_replay
+rtk cargo test -p tqsdk-task --test history_backtest_replay
+rtk cargo test -p tqsdk-task kline_synth
+rtk cargo test -p tqsdk backtest_kline
 rtk cargo test -p tqsdk --test facade_contract
+rtk cargo check -p tqsdk --example api_contract_s43_facade_backtest_history_cache
 rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks

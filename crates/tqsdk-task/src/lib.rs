@@ -21,13 +21,16 @@ pub mod deployment;
 pub mod environment;
 mod error;
 mod execution_group;
+mod history_backtest_replay;
 mod history_tick_replay;
 mod host;
+mod kline_synth;
 mod order;
 mod order_projection;
 mod plan;
 mod registry;
 pub mod replay;
+mod replay_runtime;
 mod risk;
 mod scheduler;
 mod shared;
@@ -84,6 +87,9 @@ pub use environment::{
     StrategyEnvironmentSubscriptions, StrategyEnvironmentTickSubscription,
 };
 pub use error::{Result, TaskError, TaskKind};
+pub use history_backtest_replay::{
+    HistoryBacktestKlineRequest, HistoryBacktestReplayRequest, HistoryBacktestReplayStream,
+};
 pub use history_tick_replay::HistoryTickReplayStream;
 pub use host::TaskHost;
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};

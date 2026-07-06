@@ -1,12 +1,16 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use serde_json::{Number, Value};
 use tqsdk_core::{CommitScope, FieldMutation, Kline, Quote, Symbol, Tick};
 
 use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
+use crate::replay_runtime::{
+    ReplayKlineSpec, ReplayTickSpec, ingest_replay_market_event, seed_replay_serials,
+};
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
 use crate::testing::StrategyTestHarness;
@@ -30,6 +34,8 @@ pub struct StrategyBacktestBuilder {
     replay_symbols: Vec<String>,
     sim: TqSim,
     quotes: Vec<String>,
+    klines: Vec<ReplayKlineSpec>,
+    ticks: Vec<ReplayTickSpec>,
     price_ticks: HashMap<String, f64>,
     default_price_tick: Option<f64>,
 }
@@ -41,6 +47,8 @@ pub struct StrategyBacktest {
     strategy: StrategyHost,
     sim: TqSim,
     tracked_symbols: Vec<String>,
+    klines: Vec<ReplayKlineSpec>,
+    ticks: Vec<ReplayTickSpec>,
     price_ticks: HashMap<String, f64>,
     quote_metadata_price_ticks: HashMap<String, f64>,
     last_replay_quotes: HashMap<String, ReplayStepQuote>,
@@ -160,6 +168,7 @@ impl StrategyBacktest {
         event: &ReplayMarketEvent,
         batch: &mut ReplayStepBatch,
     ) -> Result<()> {
+        ingest_replay_market_event(self.strategy.task_host(), event, &self.klines, &self.ticks)?;
         let event_time_ns = event.event_time_ns();
         match event.payload() {
             ReplayMarketPayload::Quote(quote) => {
@@ -331,6 +340,8 @@ impl StrategyBacktestBuilder {
             replay_symbols: Vec::new(),
             sim: TqSim::new(),
             quotes: Vec::new(),
+            klines: Vec::new(),
+            ticks: Vec::new(),
             price_ticks: HashMap::new(),
             default_price_tick: None,
         }
@@ -353,6 +364,31 @@ impl StrategyBacktestBuilder {
         let symbol = symbol.as_ref();
         if !self.quotes.iter().any(|existing| existing == symbol) {
             self.quotes.push(symbol.to_owned());
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn kline(mut self, symbol: impl AsRef<str>, duration: Duration, view_width: usize) -> Self {
+        let spec = ReplayKlineSpec {
+            symbol: symbol.as_ref().to_owned(),
+            duration_ns: duration_to_ns(duration),
+            view_width,
+        };
+        if !self.klines.iter().any(|existing| existing == &spec) {
+            self.klines.push(spec);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn tick(mut self, symbol: impl AsRef<str>, view_width: usize) -> Self {
+        let spec = ReplayTickSpec {
+            symbol: symbol.as_ref().to_owned(),
+            view_width,
+        };
+        if !self.ticks.iter().any(|existing| existing == &spec) {
+            self.ticks.push(spec);
         }
         self
     }
@@ -401,6 +437,8 @@ impl StrategyBacktestBuilder {
             replay_symbols,
             sim,
             mut quotes,
+            klines,
+            ticks,
             price_ticks,
             default_price_tick,
         } = self;
@@ -418,9 +456,20 @@ impl StrategyBacktestBuilder {
             sim.ensure_position(quote);
         }
         sim.seed_runtime(&host)?;
+        seed_replay_serials(&host, &klines, &ticks)?;
         let mut builder = StrategyHostBuilder::new(host).account(sim.account_id());
         for quote in &quotes {
             builder = builder.quote(quote);
+        }
+        for spec in &klines {
+            builder = builder.kline(
+                &spec.symbol,
+                Duration::from_nanos(spec.duration_ns as u64),
+                spec.view_width,
+            );
+        }
+        for spec in &ticks {
+            builder = builder.tick(&spec.symbol, spec.view_width);
         }
         let mut strategy = builder.build().await?;
         drain_initial_commits(&mut strategy).await?;
@@ -436,6 +485,8 @@ impl StrategyBacktestBuilder {
             strategy,
             sim,
             tracked_symbols,
+            klines,
+            ticks,
             price_ticks,
             quote_metadata_price_ticks: HashMap::new(),
             last_replay_quotes: HashMap::new(),
@@ -496,6 +547,18 @@ impl StrategyBacktestContext<'_> {
 
     pub fn quote(&self, symbol: impl AsRef<str>) -> Result<Quote> {
         self.context.quote(symbol)
+    }
+
+    pub fn kline(
+        &self,
+        symbol: impl AsRef<str>,
+        duration: Duration,
+    ) -> Result<tqsdk_wait::KlineWindow> {
+        self.context.kline(symbol, duration)
+    }
+
+    pub fn tick(&self, symbol: impl AsRef<str>) -> Result<tqsdk_wait::TickWindow> {
+        self.context.tick(symbol)
     }
 
     pub fn account(&self, account_id: impl AsRef<str>) -> Result<tqsdk_core::Account> {
@@ -885,6 +948,10 @@ fn validate_default_price_tick(price_tick: Option<f64>) -> Result<()> {
     Ok(())
 }
 
+fn duration_to_ns(duration: Duration) -> i64 {
+    (duration.as_secs() as i64) * 1_000_000_000 + i64::from(duration.subsec_nanos())
+}
+
 fn push_datetime_if_changed(
     fields: &mut Vec<FieldMutation>,
     previous: Option<&ReplayStepQuote>,
@@ -1045,6 +1112,55 @@ mod tests {
         drop(second);
 
         assert!(backtest.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_updates_declared_tick_serial() {
+        let replay = ReplayMarketSource::new(vec![tick_event("SHFE.a", 1, 1_000, 101.0)]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .tick("SHFE.a", 10)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        let ticks = first.tick("SHFE.a").expect("tick window should load");
+
+        assert_eq!(ticks.symbol(), "SHFE.a");
+        assert_eq!(ticks.view_width(), 10);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks.last().expect("last tick").last_price, 101.0);
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_updates_declared_kline_serial() {
+        let replay =
+            ReplayMarketSource::new(vec![kline_event("SHFE.a", 1, 1_000, 60_000_000_000, 101.0)]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .kline("SHFE.a", Duration::from_secs(60), 10)
+            .default_price_tick(0.5)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        let klines = first
+            .kline("SHFE.a", Duration::from_secs(60))
+            .expect("kline window should load");
+
+        assert_eq!(klines.symbol(), "SHFE.a");
+        assert_eq!(klines.duration_ns(), 60_000_000_000);
+        assert_eq!(klines.view_width(), 10);
+        assert_eq!(klines.len(), 1);
+        assert_eq!(klines.last().expect("last kline").close, 101.0);
     }
 
     #[tokio::test]
@@ -1229,5 +1345,32 @@ mod tests {
             },
         )
         .expect("tick event should be valid")
+    }
+
+    fn kline_event(
+        symbol: &str,
+        id: i64,
+        datetime: i64,
+        duration_ns: i64,
+        close: f64,
+    ) -> ReplayMarketEvent {
+        ReplayMarketEvent::kline(
+            "test",
+            symbol,
+            datetime,
+            Some(datetime),
+            duration_ns,
+            Kline {
+                id,
+                datetime,
+                open: close,
+                high: close,
+                low: close,
+                close,
+                volume: 1,
+                ..Kline::default()
+            },
+        )
+        .expect("kline event should be valid")
     }
 }

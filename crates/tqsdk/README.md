@@ -30,6 +30,14 @@ auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tic
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
 对齐的期货 selector 语法，适合全品种策略。
 
+cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
+tick cache；`.kline(symbol, duration, view_width)` 对 `duration <= 60s` 的 K 线从本地 tick
+流合成，不写入 native K 线缓存；`duration > 60s` 的 K 线对齐官方 Python 行为，读取
+`HistorySeriesCache` 里的 native K 线，缺口通过 history series 远程补齐。只有缺 tick
+或缺 native K 线时才需要 auth。K 线 replay 需要 quote synthesis metadata；可在
+backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
+`.default_price_tick(...)` 显式提供。
+
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
 backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
 缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会先跳过完整缓存，再把
@@ -92,6 +100,8 @@ let mut tq = Tq::futures()
     .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges
     .market_cache(cache)
     .backtest(start_ns, end_ns)
+    .default_price_tick(1.0)
+    .kline("KQ.i@SHFE.au", std::time::Duration::from_secs(60), 200)?
     .remote_on_miss()
     .connect()
     .await?;

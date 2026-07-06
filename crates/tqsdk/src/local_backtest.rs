@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-#[cfg(test)]
 use std::time::Duration;
 
 #[cfg(test)]
@@ -27,15 +26,60 @@ const CST_1990_01_01_NS: i64 = 631_123_200_000_000_000;
 #[derive(Debug, Clone, Default)]
 pub(super) struct LocalBacktestRecipe {
     quote_symbols: Vec<String>,
+    kline_specs: Vec<LocalBacktestKlineSpec>,
+    tick_specs: Vec<LocalBacktestTickSpec>,
     price_ticks: HashMap<String, f64>,
     instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
     default_price_tick: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalBacktestKlineSpec {
+    symbol: String,
+    duration: Duration,
+    view_width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalBacktestTickSpec {
+    symbol: String,
+    view_width: usize,
 }
 
 impl LocalBacktestRecipe {
     #[must_use]
     pub(super) fn quote_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.quote_symbols.push(symbol.into());
+        self
+    }
+
+    #[must_use]
+    pub(super) fn kline_symbol(
+        mut self,
+        symbol: impl Into<String>,
+        duration: Duration,
+        view_width: usize,
+    ) -> Self {
+        let spec = LocalBacktestKlineSpec {
+            symbol: symbol.into(),
+            duration,
+            view_width,
+        };
+        if !self.kline_specs.iter().any(|existing| existing == &spec) {
+            self.kline_specs.push(spec);
+        }
+        self
+    }
+
+    #[must_use]
+    pub(super) fn tick_symbol(mut self, symbol: impl Into<String>, view_width: usize) -> Self {
+        let spec = LocalBacktestTickSpec {
+            symbol: symbol.into(),
+            view_width,
+        };
+        if !self.tick_specs.iter().any(|existing| existing == &spec) {
+            self.tick_specs.push(spec);
+        }
         self
     }
 
@@ -89,6 +133,8 @@ impl LocalBacktestRecipe {
     ) -> tqsdk_task::StrategyBacktestBuilder {
         let Self {
             quote_symbols,
+            kline_specs,
+            tick_specs,
             price_ticks,
             instrument_specs,
             default_price_tick,
@@ -99,6 +145,12 @@ impl LocalBacktestRecipe {
         builder = builder.instrument_specs(instrument_specs);
         for symbol in &quote_symbols {
             builder = builder.quote(symbol);
+        }
+        for spec in &kline_specs {
+            builder = builder.kline(&spec.symbol, spec.duration, spec.view_width);
+        }
+        for spec in &tick_specs {
+            builder = builder.tick(&spec.symbol, spec.view_width);
         }
         for (symbol, tick) in &price_ticks {
             builder = builder.price_tick(symbol, *tick);

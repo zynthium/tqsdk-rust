@@ -72,6 +72,9 @@
   `HistorySeriesCache` 存储接口，用于回测覆盖检查、tick 写入和 tick
   replay 读取；TQBN store 会把覆盖元数据和 tick rows 写进同一个交易日分区文件，支持
   partial row append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
+- cache-backed facade backtest 的 `duration > 60s` K 线复用同一 cache root 下的
+  `HistorySeriesCache` native K 线 series；`duration <= 60s` K 线由 `tqsdk-task`
+  从 tick rows 临时合成，不写入 durable K 线文件
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、

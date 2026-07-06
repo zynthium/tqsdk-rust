@@ -108,6 +108,10 @@ V1 是：
     本地 TQBN daily tick cache，缺失时按每个 symbol 的 `missing_ranges` 通过官方
     server-side backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要
     auth，cache fill 不使用专业历史下载接口
+  - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
+    本地 replay runtime：`duration <= 60s` 的 K 线从 tick cache 本地合成，`duration > 60s`
+    的 K 线读取 native `HistorySeriesCache` 并按 history series 远程补缺；K 线 quote
+    synthesis 的 price tick / instrument spec 由 facade 显式 builder metadata 转发，不自动联网查询
   - `.universe(...)` 复用 relay 对齐的期货 universe selector 语法，支持全品种回测策略
   - `MarketCachePolicy` / `.market_cache(...)` 用同一份配置维护 live tick recording
     和 cache-backed backtest 的 cache 目录及 symbol 集合；`record_ticks_health()`

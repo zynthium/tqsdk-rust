@@ -123,7 +123,11 @@
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
   - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
     无缓存 `.backtest(...)` 使用官方服务端回测行情；配置 `cache_dir` / `market_cache` 后，
-    持久 tick cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    持久 tick cache、native K 线 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    `duration <= 60s` 的 backtest K 线从 tick cache 本地合成，`duration > 60s` 的 backtest
+    K 线读取 native history series cache，并通过 `HistoryBacktestReplayStream` 与 tick /
+    synthetic K 线事件按时间合并回放；K 线 quote synthesis 所需 price tick / instrument spec
+    仍由显式 builder metadata 提供；
     caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`
     继续暴露 `KlineDataSeries` / `TickDataSeries` / `StrategyReplaySourceBuilder`，供上层 host
     把已有 history rows 或自定义事件转为 replay source，但 `local_backtest_*` 不再作为新的
