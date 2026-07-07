@@ -65,7 +65,7 @@ owned historical rows、downloads、CSV、Greeks 和 history series cache 从 `t
 
 - 首选示例：S17 research K-line batch、S28 download/export and Greeks。
 - Cache/replay 示例：S30 history series cache、S16 replay integration、S43-S45 cache-backed backtest。
-- live tick recording：S46 通过 `Tq::record_ticks(...)` 把指定 symbol 的 live tick 写入共享 `BacktestTickCache`；S47 用 `MarketCachePolicy` 把 live recording 和 cache-backed backtest 的 cache 目录/symbol 集合统一到同一份 policy；泛化 live event/K 线/commit persistence 仍用调用方 sidecar。
+- live tick recording：S46 通过 `Tq::record_ticks(...)` 把指定 symbol 的 live tick 写入共享 `BacktestTickCache`；S47 用 `MarketCachePolicy` 把 live recording 和 cache-backed backtest 的 cache 目录/symbol 或 selector 集合统一到同一份 policy；泛化 live event/K 线/commit persistence 仍用调用方 sidecar。
 - Metadata 示例：S23、S27。
 - 避免：把 history 建模成 live refs、把 DataFrame/polars 语义塞进 session/wait、确定性测试依赖 live credentials。
 
@@ -141,7 +141,7 @@ session progress、runtime cursor、bounded fan-out 和 lag diagnostics 从 `tqs
 | S44 Remote-on-miss backtest cache fill | `crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs` | 缓存缺口用官方 server-side backtest tick stream 填补 | 需要账号但不需要专业历史下载权限；cache hit 不需要 auth。 |
 | S45 Backtest cache warmup | `crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs` | 只预热缓存，不创建策略 runtime | `.warmup().await?`，先跳过完整缓存，再用内部有界远端调度器填补缺口。 |
 | S46 Live tick recording | `crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs` | 显式把指定 live tick 写入回测共享缓存 | `Tq::record_ticks(cache_dir, symbols)`；由 `next()` / `wait_update()` 推进，跳号保留 coverage 缺口。 |
-| S47 Shared market cache policy | `crates/tqsdk/examples/api_contract_s47_facade_market_cache_policy.rs` | 用同一份配置维护 live tick recording 和 cache-backed backtest 输入 | `MarketCachePolicy::new(cache_dir).record_ticks(symbols)`、`.market_cache(policy)`、`record_ticks_health()`、`recorded_market_cache_policy()`；补洞仍需显式 `.auth_env()?` + `.warmup()` / `.remote_on_miss()`。 |
+| S47 Shared market cache policy | `crates/tqsdk/examples/api_contract_s47_facade_market_cache_policy.rs` | 用同一份配置维护 live tick recording 和 cache-backed backtest 输入 | `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?`、`.market_cache(policy)`、`record_ticks_health()`、`recorded_market_cache_policy()`；补洞仍需显式 `.auth_env()?` + `.warmup()` / `.remote_on_miss()`。 |
 | S48 Embedded monitoring dashboard | `crates/tqsdk/examples/api_contract_s48_facade_monitoring_dashboard.rs` | 启用和查看同进程监控面板、snapshot、cache inventory projection | `MonitoringConfig::localhost(port)`、`.monitoring(...)`、`Tq::monitor_addr()`、`Tq::monitor_snapshot()`、`with_cache_inventory(path)`；默认离线 replay demo，不需要账号。 |
 
 ## 覆盖规则

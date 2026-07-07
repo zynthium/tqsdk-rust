@@ -4,13 +4,13 @@
 
 ## Live Monitoring
 
-普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote`、`target_pos_tqkq` 和 `next()` 写策略主体。需要维护指定合约的回测共享 tick cache 时，优先用 `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` + `.market_cache(policy)`，让 live recording 和 cache-backed backtest 复用同一份配置；运行中临时开启可显式调用 `record_ticks(cache_dir, symbols)`。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
+普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote` / `quotes_universe`、`target_pos_tqkq` 和 `next()` 写策略主体。需要维护指定合约或 selector 集合的回测共享 tick cache 时，优先用 `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `.market_cache(policy)`，让 live recording 和 cache-backed backtest 复用同一份配置；运行中临时开启可显式调用 `record_ticks(cache_dir, symbols)`。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
 
 契约锚点：S33、S46-S47、S1、S3、S8-S10、S25-S26。
 
 ## Event Pipeline
 
-多个独立 consumer 需要同一份 session state 时使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 substrate：logging、metrics、signal calculation、persistence、order monitoring。调用方自建 commit filter、typed events、bounded channel 和 lag diagnostics，不要在每个 consumer 里 clone snapshot。指定 symbol 的 live tick 持久化优先用 `MarketCachePolicy` / `Tq::record_ticks(...)` 或数据层 `LiveTickCacheWriter`；泛化 commit/event/K 线持久化仍使用调用方自有 sidecar。
+多个独立 consumer 需要同一份 session state 时使用 `tqsdk-session + RuntimeReader/UpdateCursor` 作为 substrate：logging、metrics、signal calculation、persistence、order monitoring。调用方自建 commit filter、typed events、bounded channel 和 lag diagnostics，不要在每个 consumer 里 clone snapshot。指定 symbol 或 selector 集合的 live tick 持久化优先用 `MarketCachePolicy` / `Tq::record_ticks(...)` 或数据层 `LiveTickCacheWriter`；泛化 commit/event/K 线持久化仍使用调用方自有 sidecar。
 
 契约锚点：S5、S23、S27、S31；S2、S4、S21、S22、S35 已删除为调用方层能力。
 

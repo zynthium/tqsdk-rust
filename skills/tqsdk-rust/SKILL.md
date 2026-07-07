@@ -27,7 +27,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：不配置 cache 时使用官方服务端回测行情；配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 时使用持久 tick cache 本地撮合，缺口由 `RemoteOnMiss` / `.warmup()` 显式补齐。
 - 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码迁移为 `.backtest(start_ns, end_ns).connect().await?` 的无缓存模式，或按需要补 `.cache_dir(...)` / `.market_cache(...)` / `.replay_backtest(...)`。
 - history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)`、显式 `HistorySeriesCache::open(...)` cache-only reader、回测 `.cache_dir(...)` / `.market_cache(...)`，或 live/session mode 下显式 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)` 才写持久缓存。
-- `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
+- `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
+- 共享期货 universe selector 在默认 facade 的 `.backtest(...).universe(...)`、实时 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 上复用同一套解析语义；动态 selector 需要 live/session 或显式 auth，静态 `symbol:...` selector 可本地解析。
 - `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；跳号/断线保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
 - `record_ticks_health()` 暴露累计写入、最近 flush、per-symbol last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording health 派生补洞用 policy，但补洞仍要用户显式重新提供 auth，不隐式复用 live session 明文凭证。
 - `tqsdk-data` 的 `LiveTickCacheWriter` 是纯数据层 writer，接收已解码 tick rows 并写共享回测缓存；它不拥有 session、订阅、后台线程或跨进程协调。

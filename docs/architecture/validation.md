@@ -185,9 +185,11 @@ daily partition file identity、scan、损坏报告、size-limit maintenance，�
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
-symbol 的 tick serial 写入同一份 `BacktestTickCache`，并通过 `LiveTickCacheWriter` 的连续 id
-语义提交回测可读 coverage；同一个 `MarketCachePolicy` 也必须能为 cache-backed local backtest
-提供默认 cache 目录和 symbol 集合。live recording health 必须暴露累计写入、最近 flush、
+symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过
+`LiveTickCacheWriter` 的连续 id 语义提交回测可读 coverage；同一个 `MarketCachePolicy`
+也必须能为 cache-backed local backtest 提供默认 cache 目录和 symbol 集合。
+`quotes_universe(...)`、`.backtest(...).universe(...)` 和
+`MarketCachePolicy::record_universe(...)` 复用同一套 universe selector 语义。live recording health 必须暴露累计写入、最近 flush、
 per-symbol last id 和 gap 状态，且跳号 tick 应被保留为 `gap_detected`。从 active recording
 health 派生的 `MarketCachePolicy` 必须能进入 cache-backed local backtest warmup 路径，用于显式
 检查或补齐缺口；该路径不得隐式复用 live session auth。

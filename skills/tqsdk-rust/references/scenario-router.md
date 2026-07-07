@@ -13,14 +13,14 @@
 | 用户说 | 大概率需要 | 入口 / Crate | 主要调用 |
 | --- | --- | --- | --- |
 | "普通策略", "默认入口", "先跑起来", "目标持仓", "轻量历史", "一个 crate" | Ordinary strategy facade | `tqsdk` | `tqsdk::prelude::*`, `Tq::futures`, `auth_env`, `trade_target_tqkq`, `connect`, `quote`, `target_pos_tqkq`, `next`, `history` |
-| "实时行情", "quote", "批量订阅", "盘口", "价格变化" 且没有明确要内部 crate | Default live strategy loop | `tqsdk` first; `tqsdk-wait` only when explicit Python-style wait API is needed | `Tq::futures`, `quote`, `quotes`, `next`, `QuoteRef::load`; advanced wait: `TqApiBuilder`, `step`, `WaitStep::is_changing` |
+| "实时行情", "quote", "批量订阅", "盘口", "价格变化", "按 selector 订阅" 且没有明确要内部 crate | Default live strategy loop | `tqsdk` first; `tqsdk-wait` only when explicit Python-style wait API is needed | `Tq::futures`, `quote`, `quotes`, `quotes_universe`, `next`, `QuoteRef::load`; advanced wait: `TqApiBuilder`, `step`, `WaitStep::is_changing` |
 | "像 Python TqApi", "wait_update", "is_changing", "step_until" | Explicit Python-style live quote/trade loop | `tqsdk-wait` | `TqApiBuilder`, `quote`, `quotes`, `step`, `WaitStep::is_changing`, `QuoteRef::load`, `QuoteSet::changed_snapshot` |
 | "K线 serial", "tick serial", "窗口", "bar 更新", "trading_status" | Live serial/window/status view | `tqsdk-wait` | `kline`, `tick`, `trading_status`, `step_until`, window/ref load methods |
 | "多消费者", "事件流", "stream", "fan-out", "异步管道", "lag" | Caller-owned event/fan-out layer | `tqsdk-session + tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `UpdateCursor`, caller-owned filters/channels/lag diagnostics |
 | "查合约", "查品种", "合约列表", "所有合约代码", "主连", "连续合约", "期权链", "交易日历", "结算价", "排名", "EDB", "schema", "metadata" | One-shot metadata/service query | `tqsdk-session` | `SessionClientBuilder`, `enable_query`, `query_quotes`, `query_instrument_specs`, `query_cont_quotes`, `get_trading_calendar` |
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk` for ordinary target-position path; `tqsdk-task` when ownership/risk/task internals are needed; `tqsdk-wait` for thin direct order wrappers | `Tq::target_pos_tqkq`, `TargetPos`; advanced: `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "回测", "策略回测", "TqBacktest", "TqSim", "本地模拟账户", "同一策略跑实盘和回测" | Strategy backtest | `tqsdk` first for ordinary same-body facade; `tqsdk-wait` for explicit Python-style wait builder; `tqsdk-task` + `tqsdk-data` for local deterministic internals | facade: `.backtest(...)`, `.backtest(...).cache_dir(...)`, `.replay_backtest(...)`, `quote_symbol`, `price_tick`, `Tq::next`, `backtest_summary`; wait: `TqApiBuilder::futures_backtest`, `TqBacktest`, `step`; local internals: `StrategyBacktest`, `TqSim`, `ReplayMarketSource`, `finish_sim_step` |
-| "实时 tick 写缓存", "record_ticks", "维护指定合约持久化 tick 缓存", "实盘增量填充回测缓存" | Shared live/backtest tick cache | `tqsdk` first; `tqsdk-data` only for pure row writer | facade: `MarketCachePolicy::new(cache_dir).record_ticks(symbols)`, `TqBuilder::market_cache(policy)`, `Tq::record_ticks(cache_dir, symbols)`, `record_ticks_health`, `recorded_market_cache_policy`, `Tq::next`; data writer: `LiveTickCacheWriter::push_ticks` |
+| "实时 tick 写缓存", "record_ticks", "record_universe", "维护指定合约持久化 tick 缓存", "维护 selector 集合缓存", "实盘增量填充回测缓存" | Shared live/backtest tick cache | `tqsdk` first; `tqsdk-data` only for pure row writer | facade: `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?`, `TqBuilder::market_cache(policy)`, `Tq::record_ticks(cache_dir, symbols)`, `record_ticks_health`, `recorded_market_cache_policy`, `Tq::next`; data writer: `LiveTickCacheWriter::push_ticks` |
 | "监控面板", "dashboard", "latency", "cache inventory", "历史缓存统计", "订单监控" | Same-process monitoring snapshot | `tqsdk` with `monitoring` feature; `tqsdk-monitor` for advanced embedding | facade: `.monitoring(MonitoringConfig::localhost(port))`, `Tq::monitor_addr`, `Tq::monitor_snapshot`; inventory: `.market_cache(...)` / backtest `.cache_dir(...)` default source or `MonitoringConfig::with_cache_inventory(path)` |
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` for rows/cache/export; `tqsdk-task` for replay source | data: `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, `BacktestTickCache`; task replay: `ReplayMarketSource`, `StrategyReplaySourceBuilder` |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
@@ -77,7 +77,7 @@
 4. 用 `read_market_state()` / `read_trade_state()` / `read_market_trade_state()` 读取需要的分区，不要 clone full snapshot。
 5. 过滤、bounded channel、lag/closed/error report、重放和持久化 sidecar 都由调用方实现。
 6. metadata 使用同一个 session 的 query support，不要另开 query client。
-7. 指定 symbol 的 live tick 要写入回测共享缓存时，普通策略优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启用 `Tq::record_ticks(cache_dir, symbols)`；泛化 live events/K 线/commit persistence 使用调用方自有 sidecar。
+7. 指定 symbol 或 selector 集合的 live tick 要写入回测共享缓存时，普通策略优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启用 `Tq::record_ticks(cache_dir, symbols)`；泛化 live events/K 线/commit persistence 使用调用方自有 sidecar。
 8. 只需要同进程运行观测时，启用 `monitoring` feature 和 `.monitoring(MonitoringConfig::localhost(port))`；cache inventory 由后台 worker 读取 data 层只读报告，不要在 event bus 或 hot path 里扫描目录。
 
 ### 4. 实现 target-position 策略
@@ -106,7 +106,7 @@
 3. 选择 page、series、download、CSV export、cache 或 replay API。
 4. 输出保持 owned/materialized；不要建模成 live refs。
 5. 确定性策略测试尽量用 task-owned replay source 或 fake harness，而不是 live credentials。
-6. `HistorySeriesCache` 只用于 offline data_series cache；如果用户要求指定 live tick 写入回测共享缓存，路由到 `MarketCachePolicy` / `Tq::record_ticks(...)` 或 `LiveTickCacheWriter`。如果要求 live K 线/任意 window/commit 写入持久化，说明当前 SDK 不提供这个 public API，使用调用方 sidecar。
+6. `HistorySeriesCache` 只用于 offline data_series cache；如果用户要求指定 live tick 或 selector 集合写入回测共享缓存，路由到 `MarketCachePolicy` / `Tq::record_ticks(...)` 或 `LiveTickCacheWriter`。如果要求 live K 线/任意 window/commit 写入持久化，说明当前 SDK 不提供这个 public API，使用调用方 sidecar。
 
 ### 6. 运行策略回测
 

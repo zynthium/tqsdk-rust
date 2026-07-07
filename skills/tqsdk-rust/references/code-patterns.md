@@ -215,7 +215,7 @@ use tqsdk::prelude::*;
 
 async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
     let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
-        .record_ticks(["KQ.i@SHFE.au"]);
+        .record_universe("symbol:KQ.i@SHFE.au")?;
 
     let mut tq = Tq::futures()
         .auth_env()?
@@ -244,8 +244,10 @@ async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 }
 ```
 
-`Tq::record_ticks(cache_dir, symbols).await?` 仍保留为运行中临时开启 recording 的显式入口。
-两种方式都只记录声明的 symbol，不会自动记录所有订阅，也不会启动后台守护进程。coverage
+`MarketCachePolicy` 可以用 `.record_ticks([...])` 显式列 symbol，也可以用
+`.record_universe("active:all;!CFFEX")?` 复用共享 selector。`Tq::record_ticks(cache_dir, symbols).await?`
+仍保留为运行中临时开启 recording 的显式入口。两种方式都只记录 policy 解析出的 symbol，
+不会自动记录所有订阅，也不会启动后台守护进程。coverage
 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续需要显式
 `.warmup()` / `.remote_on_miss()` 补齐。
 
@@ -277,7 +279,7 @@ use tqsdk::prelude::*;
 
 # async fn run() -> tqsdk::Result<()> {
 let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
-    .record_ticks(["KQ.i@SHFE.au"]);
+    .record_universe("symbol:KQ.i@SHFE.au")?;
 
 let mut tq = Tq::futures()
     .auth_env()?
