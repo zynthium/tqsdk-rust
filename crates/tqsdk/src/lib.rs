@@ -1880,13 +1880,11 @@ impl BacktestBuilder {
     /// Connect the cache-backed local replay path. Use
     /// [`BacktestBuilder::disabled_cache`] to force the official server-side
     /// backtest stream without local persistence.
-    pub async fn connect(mut self) -> Result<Tq> {
+    pub async fn connect(self) -> Result<Tq> {
         self.validate_range()?;
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
             return self.into_remote_backtest().connect().await;
         }
-        self.apply_market_cache_policy().await?;
-        self.apply_default_cache_if_needed()?;
         self.prepare().await?.connect().await
     }
 }
