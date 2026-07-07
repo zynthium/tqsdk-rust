@@ -10,7 +10,7 @@ license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
 
 [features]
-default = ["live", "services"]
+default = ["live", "services", "tqbn-zstd"]
 live = ["tqsdk-session/live"]
 services = ["dep:reqwest", "tqsdk-session/services"]
 tqbn-zstd = ["dep:zstd"]

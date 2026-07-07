@@ -52,8 +52,8 @@
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
   record lengths；旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
-  可选 Cargo feature `tqbn-zstd` 会对 TQBN records block 使用 zstd level 1 做
-  per-block 压缩，且只在压缩后更小时写入压缩 block；默认 feature 不启用压缩，
+  默认 Cargo features 启用 `tqbn-zstd`，会对 TQBN records block 使用 zstd level 1 做
+  per-block 压缩，且只在压缩后更小时写入压缩 block；`--no-default-features` 可关闭该支持，
   `tqsdk` / `tqsdk-task` facade 提供同名 feature 转发。
   旧 Python `DataSeries` binary/mmap cache
   不再作为 public surface 暴露，已有旧文件不会自动迁移
@@ -308,7 +308,7 @@ S30 contract
 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 日分区布局。旧 `.tqseries`
 和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
-同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。需要降低磁盘占用时可显式启用
-`tqbn-zstd` feature；该 feature 只改变 TQBN internal block payload，不新增用户可选 store API。
+同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。默认 features 启用
+`tqbn-zstd`，只改变 TQBN internal block payload，不新增用户可选 store API。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

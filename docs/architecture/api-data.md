@@ -310,8 +310,8 @@ tqsdk-wait        tqsdk-data
   `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn`。旧 `.tqseries`、旧单文件
   `.tqbn` layout 和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是
   non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
-- 可选 feature `tqbn-zstd` 只做 TQBN internal records block 的 zstd level 1 压缩；
-  默认 feature 仍写未压缩 block，不引入用户自选 store、manifest 或第二套 cache API
+- 默认 feature `tqbn-zstd` 只做 TQBN internal records block 的 zstd level 1 压缩；
+  `--no-default-features` 可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，
   而不是把 live session、进程管理、HTTP endpoint、GUI 或底层文件编排表面
   下沉进 `tqsdk-data`

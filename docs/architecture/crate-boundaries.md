@@ -502,8 +502,8 @@ sink、WAL、journal 或 cache writer。
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
-- 可选 `tqbn-zstd` feature 只压缩 TQBN internal records block；`tqsdk-data` 是实现点，
-  `tqsdk-task` / `tqsdk` 仅做同名 feature 转发
+- 默认 `tqbn-zstd` feature 只压缩 TQBN internal records block；`tqsdk-data` 是实现点，
+  `tqsdk-task` / `tqsdk` 仅做同名 feature 转发，`--no-default-features` 可关闭
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store；旧 Python-compatible
   binary/mmap cache 已废弃
 - 回测 tick 持久缓存、coverage 检查和 shared universe selector

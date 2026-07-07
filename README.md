@@ -259,10 +259,10 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
-历史序列和回测 tick cache 默认写按交易日分区的未压缩 TQBN daily v2 (`.tqbn`)；
-tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。显式启用
-`tqbn-zstd` feature 时，TQBN records block 会使用 zstd level 1 做内部压缩，
-不新增用户可选 store API。
+历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v2 (`.tqbn`)；
+tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 features 启用
+`tqbn-zstd`，TQBN records block 会使用 zstd level 1 做内部压缩，且只在压缩后更小时
+写入压缩 block；`--no-default-features` 可关闭该支持，不新增用户可选 store API。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

@@ -22,9 +22,10 @@ record stream；store layout 按交易日拆分，避免扩展回填区间时重
 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
 也不提供兼容读取或迁移 store。
 
-默认构建写入未压缩 TQBN blocks。显式启用 Cargo feature `tqbn-zstd` 时，writer 会对
-records block 使用 zstd level 1 做 per-block 压缩，且只有压缩后 payload 更小时才写入压缩
-block；metadata prefix、file identity、schema version 和 public facade 均不改变。
+默认构建启用 Cargo feature `tqbn-zstd`，writer 会对 records block 使用 zstd level 1 做
+per-block 压缩，且只有压缩后 payload 更小时才写入压缩 block；metadata prefix、file
+identity、schema version 和 public facade 均不改变。`--no-default-features` 可关闭该支持，
+此时 writer 写未压缩 blocks。
 
 ## Public Interface
 
