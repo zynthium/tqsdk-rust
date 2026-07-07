@@ -88,6 +88,36 @@ async fn facade_backtest_cache_mode_replays_cached_ticks() {
     assert!(!tq.next().await.unwrap());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn facade_backtest_uses_default_history_cache_when_cache_dir_is_omitted() {
+    static HISTORY_CACHE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    let _lock = HISTORY_CACHE_ENV_LOCK.lock().await;
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    let _env = EnvVarGuard::set("TQSDK_HISTORY_CACHE_DIR", &cache_dir);
+    let cache = BacktestTickCache::open(tqsdk_data::default_history_cache_dir()).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .backtest(1_000, 3_000)
+        .symbol(symbol)
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.data_report().cache_dir, cache_dir);
+    assert!(!prepared.data_report().remote_used);
+}
+
 #[tokio::test]
 async fn facade_backtest_universe_accepts_static_selector_expression() {
     let symbol = "SHFE.rb2501";
@@ -1090,6 +1120,34 @@ fn temp_cache_dir() -> std::path::PathBuf {
         "tqsdk-facade-contract-cache-{}-{unique}",
         std::process::id()
     ))
+}
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(name);
+        // Tests hold a process-local mutex while this override is active.
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.name, previous);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
 }
 
 fn manual_tq_api() -> tqsdk_wait::TqApi {

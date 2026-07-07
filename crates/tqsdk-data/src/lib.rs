@@ -101,7 +101,7 @@ pub use history_series_cache::{
     HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
     HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
-    TickDataSeriesReader,
+    TickDataSeriesReader, default_history_cache_dir,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,

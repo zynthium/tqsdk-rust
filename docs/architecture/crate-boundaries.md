@@ -50,9 +50,9 @@
 - 默认安装入口
 - `prelude`
 - `Tq` 主循环和常用 live refs 的轻量包装
-- 零分支跨模态入口：`backtest` 统一回测入口（无缓存走官方服务端行情，有缓存走持久缓存本地撮合）、`server_replay` 官方单日复盘、`replay_backtest` 高级自定义 replay
+- 零分支跨模态入口：`backtest` 统一回测入口（默认走共享 history cache-backed 本地撮合，显式 `disabled_cache` 走官方服务端行情）、`server_replay` 官方单日复盘、`replay_backtest` 高级自定义 replay
 - `TargetPos` / backtest cache builder / replay metadata helper 这类低样板组合入口
-- Python-style `.backtest(start_ns, end_ns)` 的 no-cache 官方服务端行情、cache policy、lazy auth、
+- Python-style `.backtest(start_ns, end_ns)` 的默认共享 history cache、显式 disabled-cache 官方服务端行情、cache policy、lazy auth、
   remote-on-miss 官方回测流补缓存、`.warmup()` 缓存预热 runner 和 `.universe(...)`
   选择器接线；cache hit 不要求 auth，cache fill 不使用专业历史下载接口
 - `MarketCachePolicy` / `.market_cache(...)` 这类共享 live/backtest tick cache policy 入口，

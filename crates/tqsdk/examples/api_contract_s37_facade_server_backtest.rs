@@ -2,10 +2,10 @@
 //! Scenario 37: Server-side backtest through the `tqsdk` facade.
 //!
 //! Demonstrates market-data-only server-side backtest through the default
-//! `.backtest(start_ns, end_ns)` entry without configuring a cache. Trade
-//! targets and automatic trade login are intentionally rejected in this mode;
-//! configure `.cache_dir(...)` / `.market_cache(...)` or use
-//! `.replay_backtest(...)` for local simulated fills.
+//! `.backtest(start_ns, end_ns).disabled_cache()` entry. Trade targets and
+//! automatic trade login are intentionally rejected in this mode; omit
+//! `.disabled_cache()`, configure `.cache_dir(...)` / `.market_cache(...)`, or
+//! use `.replay_backtest(...)` for local simulated fills.
 
 use tqsdk::prelude::*;
 
@@ -18,7 +18,8 @@ fn build_with_custom_replay_endpoint(
     Ok(Tq::futures()
         .auth_env()?
         .replay_url(replay_url)
-        .backtest(start_ns, end_ns))
+        .backtest(start_ns, end_ns)
+        .disabled_cache())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -31,6 +32,7 @@ async fn main() -> tqsdk::Result<()> {
     let mut tq = Tq::new()
         .auth_env()?
         .backtest(start_ns, end_ns)
+        .disabled_cache()
         .connect()
         .await?;
 

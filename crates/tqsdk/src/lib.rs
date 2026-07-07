@@ -1003,11 +1003,11 @@ impl MarketCachePolicy {
 
 /// Builder for strategy backtests.
 ///
-/// Without a persistent cache configured, [`BacktestBuilder::connect`] uses the
-/// official server-side backtest market stream. Once a cache is configured
-/// through [`BacktestBuilder::cache_dir`], [`BacktestBuilder::cache_store`], or
-/// [`TqBuilder::market_cache`], the builder prepares a cache-backed local
-/// backtest and fills missing ranges according to [`BacktestCachePolicy`].
+/// Backtests use the shared persistent history cache by default. Explicit
+/// [`BacktestBuilder::cache_dir`], [`BacktestBuilder::cache_store`], or
+/// [`TqBuilder::market_cache`] configuration overrides that default. Use
+/// [`BacktestBuilder::disabled_cache`] to request the official server-side
+/// backtest stream without local persistence.
 pub struct BacktestBuilder {
     base: TqBuilder,
     start_ns: i64,
@@ -1267,6 +1267,29 @@ impl BacktestBuilder {
         Ok(())
     }
 
+    fn apply_default_cache_if_needed(&mut self) -> Result<()> {
+        if self.cache.is_some() {
+            return Ok(());
+        }
+        let cache = tqsdk_data::BacktestTickCache::open(tqsdk_data::default_history_cache_dir())?;
+        #[cfg(feature = "monitoring")]
+        self.base
+            .set_monitoring_cache_dir_if_empty(cache.cache_dir());
+        self.cache = Some(cache);
+        Ok(())
+    }
+
+    fn resolved_cache(&self) -> Result<tqsdk_data::BacktestTickCache> {
+        if let Some(cache) = &self.cache {
+            return Ok(cache.clone());
+        }
+        if let Some(policy) = &self.base.market_cache {
+            return tqsdk_data::BacktestTickCache::open(policy.cache_dir()).map_err(Error::from);
+        }
+        tqsdk_data::BacktestTickCache::open(tqsdk_data::default_history_cache_dir())
+            .map_err(Error::from)
+    }
+
     fn planned_inputs(&self) -> Result<BacktestPlannedInputs> {
         let mut tick_specs = self.tick_specs.clone();
         for symbol in &self.symbols {
@@ -1344,10 +1367,7 @@ impl BacktestBuilder {
                 "backtest cache inspection requires at least one explicit symbol",
             ));
         }
-        let cache = self
-            .cache
-            .as_ref()
-            .ok_or_else(|| data_validation("backtest cache is required for inspection"))?;
+        let cache = self.resolved_cache()?;
         self.symbols
             .iter()
             .map(|symbol| {
@@ -1365,10 +1385,7 @@ impl BacktestBuilder {
                 "backtest cache purge requires at least one explicit symbol",
             ));
         }
-        let cache = self
-            .cache
-            .as_ref()
-            .ok_or_else(|| data_validation("backtest cache is required for purge"))?;
+        let cache = self.resolved_cache()?;
         self.symbols
             .iter()
             .map(|symbol| cache.purge_symbol_ticks(symbol).map_err(Error::from))
@@ -1378,6 +1395,7 @@ impl BacktestBuilder {
     pub async fn warmup(mut self) -> Result<BacktestCacheWarmupReport> {
         self.validate_range()?;
         self.apply_market_cache_policy()?;
+        self.apply_default_cache_if_needed()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
             for symbol in resolved {
@@ -1397,7 +1415,7 @@ impl BacktestBuilder {
         let cache = self
             .cache
             .clone()
-            .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+            .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let cache_dir = cache.cache_dir().to_path_buf();
 
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
@@ -1619,6 +1637,7 @@ impl BacktestBuilder {
     pub async fn prepare(mut self) -> Result<PreparedBacktest> {
         self.validate_range()?;
         self.apply_market_cache_policy()?;
+        self.apply_default_cache_if_needed()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
             for symbol in resolved {
@@ -1638,7 +1657,7 @@ impl BacktestBuilder {
         let cache = self
             .cache
             .as_ref()
-            .ok_or_else(|| data_validation("backtest cache is required in phase 1"))?;
+            .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let planned = self.planned_inputs()?;
         let mut synthetic_klines = planned.synthetic_klines.clone();
         synthetic_klines.extend(planned.auto_quote_klines.clone());
@@ -1798,23 +1817,16 @@ impl BacktestBuilder {
 
     /// Connect the backtest.
     ///
-    /// Without a configured cache, this uses the official server-side backtest
-    /// market stream and does not persist data. With a configured cache, it
-    /// prepares the cache-backed local replay path first.
+    /// Connect the cache-backed local replay path. Use
+    /// [`BacktestBuilder::disabled_cache`] to force the official server-side
+    /// backtest stream without local persistence.
     pub async fn connect(mut self) -> Result<Tq> {
         self.validate_range()?;
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
             return self.into_remote_backtest().connect().await;
         }
         self.apply_market_cache_policy()?;
-        if self.cache.is_none() {
-            return match self.cache_policy {
-                BacktestCachePolicy::RemoteOnMiss => self.into_remote_backtest().connect().await,
-                BacktestCachePolicy::CacheOnly => Err(missing_backtest_cache_error("cache_only")),
-                BacktestCachePolicy::Refresh => Err(missing_backtest_cache_error("refresh")),
-                BacktestCachePolicy::Disabled => unreachable!("handled above"),
-            };
-        }
+        self.apply_default_cache_if_needed()?;
         self.prepare().await?.connect().await
     }
 }
@@ -1884,12 +1896,6 @@ fn build_warmup_report(
         remote_used,
         symbols,
     }
-}
-
-fn missing_backtest_cache_error(mode: &str) -> Error {
-    data_validation(format!(
-        "{mode} backtest requires cache_dir(...), cache_store(...), or market_cache(...)"
-    ))
 }
 
 impl PreparedBacktest {
@@ -2114,7 +2120,8 @@ impl TqBuilder {
 
     /// Prepare a cache-backed local backtest for `[start_ns, end_ns)`.
     ///
-    /// Phase 1 requires an explicit cache/cache directory and explicit symbols.
+    /// The shared `tqsdk-data` default history cache root is used unless an
+    /// explicit cache directory, cache store, or market cache policy is set.
     #[must_use]
     pub fn backtest(self, start_ns: i64, end_ns: i64) -> BacktestBuilder {
         BacktestBuilder {
@@ -3149,6 +3156,34 @@ mod builder_contract_tests {
         std::env::temp_dir().join(format!("tqsdk-{prefix}-{nanos}"))
     }
 
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            // Tests hold a process-local mutex while this override is active.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.name, previous);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn replay_backtest_connect_does_not_require_auth() {
         let replay = tqsdk_task::replay::ReplayMarketSource::new(Vec::new());
@@ -3252,15 +3287,16 @@ mod builder_contract_tests {
     }
 
     #[tokio::test]
-    async fn backtest_without_cache_rejects_auto_trade_login_before_network() {
+    async fn backtest_disabled_cache_rejects_auto_trade_login_before_network() {
         let error = TqBuilder::new()
             .auth("demo-user", "demo-pass")
             .trade_account("9999", "acct-1", "secret")
             .backtest(1_000, 2_000)
+            .disabled_cache()
             .connect()
             .await
             .err()
-            .expect("no-cache backtest must not auto-login a trade account");
+            .expect("server-side backtest must not auto-login a trade account");
 
         assert_eq!(
             error.to_string(),
@@ -3268,20 +3304,26 @@ mod builder_contract_tests {
         );
     }
 
-    #[tokio::test]
-    async fn backtest_cache_only_requires_cache_before_network() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn backtest_cache_only_uses_default_cache_before_network() {
+        static HISTORY_CACHE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        let _lock = HISTORY_CACHE_ENV_LOCK.lock().await;
+        let cache_dir = temp_cache_dir("facade-default-cache-only");
+        let _env = EnvVarGuard::set("TQSDK_HISTORY_CACHE_DIR", &cache_dir);
         let error = TqBuilder::new()
             .backtest(1_000, 2_000)
+            .symbol("SHFE.rb2601")
             .cache_only()
             .connect()
             .await
             .err()
-            .expect("cache_only without a cache must fail before auth or network");
+            .expect("cache_only default cache without data must fail before auth or network");
 
         assert!(
             error
                 .to_string()
-                .contains("cache_only backtest requires cache_dir"),
+                .contains("backtest cache coverage is incomplete for SHFE.rb2601"),
             "unexpected error: {error}"
         );
     }

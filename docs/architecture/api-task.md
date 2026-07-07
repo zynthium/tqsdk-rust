@@ -122,7 +122,8 @@
   - 本地回测订单和成交时间字段使用 replay event time；挂单跨 step 成交时订单保留原始插入时间，成交使用成交 step 时间
   - replay 事件里的 symbol 会自动进入 strategy/backtest 跟踪集合；显式 `quote(symbol)` 只用于额外预声明
   - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
-    无缓存 `.backtest(...)` 使用官方服务端回测行情；配置 `cache_dir` / `market_cache` 后，
+    `.backtest(...)` 默认使用 `tqsdk-data` 共享 history cache root；配置 `cache_dir` /
+    `market_cache` 可覆盖 root，显式 `.disabled_cache()` 使用官方服务端回测行情且不落盘；
     持久 tick cache、native K 线 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
     `duration <= 60s` 的 backtest K 线从 tick cache 本地合成，`duration > 60s` 的 backtest
     K 线读取 native history series cache，并通过 `HistoryBacktestReplayStream` 与 tick /

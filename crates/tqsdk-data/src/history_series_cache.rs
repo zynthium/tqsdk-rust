@@ -26,6 +26,7 @@ pub(crate) use store::{
     HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 
+const DEFAULT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_DIR";
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
 pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 2;
 const KLINE_DATA_COLS: usize = 7;
@@ -564,7 +565,15 @@ impl HistorySeriesCache {
     }
 }
 
-pub(crate) fn default_cache_dir() -> PathBuf {
+/// Return the default persistent history cache root.
+///
+/// `TQSDK_HISTORY_CACHE_DIR` has priority when set. Otherwise the default is
+/// `$HOME/.tqsdk/data_series_1`, falling back to the system temporary directory
+/// when `HOME` is unavailable.
+pub fn default_history_cache_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os(DEFAULT_CACHE_DIR_ENV) {
+        return PathBuf::from(path);
+    }
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(DEFAULT_CACHE_DIR))

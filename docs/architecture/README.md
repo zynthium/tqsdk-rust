@@ -103,11 +103,13 @@ V1 是：
   - 默认用户入口 crate
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
-  - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：未配置缓存时直接使用
-    官方 server-side backtest market stream；配置 cache 后默认 `RemoteOnMiss` 先复用
-    本地 TQBN daily tick cache，缺失时按每个 symbol 的 `missing_ranges` 通过官方
-    server-side backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要
-    auth，cache fill 不使用专业历史下载接口
+  - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
+    共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
+    `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
+    tick cache，缺失时按每个 symbol 的 `missing_ranges` 通过官方 server-side
+    backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要 auth，
+    cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
+    server-side backtest market stream 且不落盘
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
     本地 replay runtime：`duration <= 60s` 的 K 线从 tick cache 本地合成，`duration > 60s`
     的 K 线读取 native `HistorySeriesCache` 并按 history series 远程补缺；K 线 quote
@@ -253,8 +255,8 @@ V1 是：
 - `tqsdk` 的 local replay / cache-backed backtest facade 可以复用同一套 `TargetPos` wrapper 驱动
   `backtest::StrategyBacktest + sim::TqSim`；策略主体仍只依赖 `Tq::next()`、quote/position refs
   和 `TargetPos`，不会创建 facade 私有状态树
-- `tqsdk` 的 `.backtest(...)` 是 Python 心智入口：无缓存走官方远端行情，有缓存走
-  cache-backed 本地撮合；`local_backtest` 不再是独立用户概念；持久缓存、覆盖检查和
+- `tqsdk` 的 `.backtest(...)` 是 Python 心智入口：默认走共享 history cache-backed
+  本地撮合，显式 `.disabled_cache()` 走官方远端行情；`local_backtest` 不再是独立用户概念；持久缓存、覆盖检查和
   universe 解析归 data/task 内部能力承接
 - `tqsdk` 的 shared market cache policy 只是默认 facade 组合入口：live session/订阅由 facade
   拥有，tick rows/coverage 仍写入 `tqsdk-data::BacktestTickCache`，本地回测仍由

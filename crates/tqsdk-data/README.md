@@ -43,7 +43,8 @@
   `DataClientBuilder::history_cache_enabled(true)` 显式开启后，
   `get_*_data_series` 会隐式读写 `HistorySeriesCache`
 - 未指定缓存目录时使用 `~/.tqsdk/data_series_1`；可以通过
-  `DataClientBuilder::history_cache_dir(...)` 指定目录
+  `TQSDK_HISTORY_CACHE_DIR` 覆盖默认 root，或通过
+  `DataClientBuilder::history_cache_dir(...)` 指定单个 client 的目录
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
   `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；

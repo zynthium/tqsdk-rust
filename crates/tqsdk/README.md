@@ -5,7 +5,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
-- Unified strategy backtest (`.backtest(start_ns, end_ns)`): no cache means official server-side market stream; `cache_dir` / `market_cache` means cache-backed local simulated backtest
+- Unified strategy backtest (`.backtest(start_ns, end_ns)`): default shared history cache-backed local simulated backtest; `.disabled_cache()` means official server-side market stream; `cache_dir` / `market_cache` override the cache root
 - Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`)
 - Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
@@ -21,10 +21,12 @@ runtime contract；它只提供一个更容易开始的 facade：
 - Optional embedded monitoring dashboard/cache inventory projection with `feature = "monitoring"` and `.monitoring(MonitoringConfig::localhost(port))`
 - `tqsdk::advanced::*` 下钻到底层 crate
 
-`.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。未配置缓存时，它直接使用官方
-server-side backtest market stream，不落盘；配置 `.cache_dir(...)`、`.cache_store(...)`
-或 `.market_cache(...)` 后，它通过 `BacktestTickCache` 复用
+`.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用
+`tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
+`TQSDK_HISTORY_CACHE_DIR` 覆盖），通过 `BacktestTickCache` 复用
 `tqsdk-data::HistorySeriesCache` 的持久 tick 缓存，并把 tick 流式回放到本地 `TqSim`。
+配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 会覆盖默认 cache；
+显式 `.disabled_cache()` 才直接使用官方 server-side backtest market stream 且不落盘。
 显式 `.cache_only()` 只读本地缓存；默认 `RemoteOnMiss` 在缓存完整时直接复用本地数据且不需要
 auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tick、推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
@@ -114,10 +116,10 @@ replay source。它仍支持 `.quote_symbol(...)`、`.price_tick(...)`、
 `.instrument_spec(...)` 和 `.default_price_tick(...)` 这类本地 replay metadata。
 如果已经通过 `tqsdk-session` 查询到合约 metadata，可以把 `InstrumentSpec` 传给
 `.instrument_spec(...)`，让本地 kline replay 自动获得 `price_tick` 和合约乘数。
-无缓存 `.backtest(...)` 和 `.server_replay(date)?` 只接入官方历史行情 / 复盘行情，
+显式 `.backtest(...).disabled_cache()` 和 `.server_replay(date)?` 只接入官方历史行情 / 复盘行情，
 不会绑定交易目标，也会拒绝 `.trade_target_*()`、`.tqkq_sim()` 和
 `.trade_account(...)` / `.trade_account_env()` 等交易登录入口。需要策略下单并撮合成交的
-回测闭环应使用配置了 cache 的 `.backtest(...)` 或 `.replay_backtest(...)`。
+回测闭环应使用默认 cache-backed `.backtest(...)` 或 `.replay_backtest(...)`。
 服务端单日复盘可用 `.server_replay(date)?`：connect 时创建官方 replay session，
 把返回的 `md_url` 接入正常行情 loop，并自动发送 replay heartbeat。复盘速度和
 terminate 可通过 `Tq::set_replay_speed(...)` / `terminate_server_replay()` 显式控制。

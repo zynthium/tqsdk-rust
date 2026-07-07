@@ -190,7 +190,8 @@
    - 已有显式 opt-in 的 `HistorySeriesCache` 历史序列缓存：
      `DataClientBuilder::history_cache_enabled(true)` 让
      `get_kline_data_series` / `get_tick_data_series` 在同一 API 上隐式读写
-     `~/.tqsdk/data_series_1` 或自定义目录；cache miss 使用官方
+     `~/.tqsdk/data_series_1`、`TQSDK_HISTORY_CACHE_DIR` 覆盖目录或自定义目录；
+     cache miss 使用官方
      `DataSeries` 的 `set_chart` / `focus_datetime` / `left_kline_id`
      下载序列补齐缺口
    - 已有 cache-only history series reader、schema/version scan report、
