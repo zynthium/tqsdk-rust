@@ -772,12 +772,33 @@ impl Tq {
         &mut self,
         policy: MarketCachePolicy,
     ) -> Result<Option<RecordTicksReport>> {
-        if policy.tick_symbols.is_empty() {
+        let symbols = self.resolve_market_cache_policy_symbols(&policy).await?;
+        if symbols.is_empty() {
             return Ok(None);
         }
-        self.record_ticks(policy.cache_dir(), policy.tick_symbols())
+        self.record_ticks(policy.cache_dir(), symbols)
             .await
             .map(Some)
+    }
+
+    async fn resolve_market_cache_policy_symbols(
+        &self,
+        policy: &MarketCachePolicy,
+    ) -> Result<Vec<String>> {
+        let mut symbols = policy.tick_symbols.clone();
+        if let Some(expression) = policy.universe_expression() {
+            if !matches!(self.inner, TqInner::Live(_)) {
+                return Err(data_validation(
+                    "market cache universe recording requires live/session mode",
+                ));
+            }
+            let resolved =
+                resolve_universe_with_session(expression, self.session().clone()).await?;
+            for symbol in resolved {
+                push_unique_string(&mut symbols, symbol);
+            }
+        }
+        Ok(symbols)
     }
 
     pub async fn quote(&mut self, symbol: &str) -> Result<tqsdk_wait::QuoteRef> {
@@ -793,6 +814,24 @@ impl Tq {
             .quotes(symbols)
             .await
             .map_err(Error::from)
+    }
+
+    pub async fn quotes_universe(
+        &mut self,
+        expression: impl AsRef<str>,
+    ) -> Result<tqsdk_wait::QuoteSet> {
+        let expression = tqsdk_data::UniverseExpression::parse(expression.as_ref())?;
+        let symbols = if expression.is_static_symbol_only() {
+            tqsdk_data::resolve_static_symbols_with_expression(&expression)?
+        } else {
+            if !matches!(self.inner, TqInner::Live(_)) {
+                return Err(data_validation(
+                    "dynamic quotes_universe expression requires live/session mode",
+                ));
+            }
+            resolve_universe_with_session(&expression, self.session().clone()).await?
+        };
+        self.quotes(symbols).await
     }
 
     #[must_use]
@@ -949,6 +988,7 @@ async fn apply_auto_trade_login(tq: &mut Tq, login: AutoTradeLogin) -> Result<()
 pub struct MarketCachePolicy {
     cache_dir: PathBuf,
     tick_symbols: Vec<String>,
+    universe_expression: Option<tqsdk_data::UniverseExpression>,
 }
 
 impl MarketCachePolicy {
@@ -957,6 +997,7 @@ impl MarketCachePolicy {
         Self {
             cache_dir: cache_dir.into(),
             tick_symbols: Vec::new(),
+            universe_expression: None,
         }
     }
 
@@ -968,6 +1009,11 @@ impl MarketCachePolicy {
     #[must_use]
     pub fn tick_symbols(&self) -> &[String] {
         &self.tick_symbols
+    }
+
+    #[must_use]
+    pub fn universe_expression(&self) -> Option<&tqsdk_data::UniverseExpression> {
+        self.universe_expression.as_ref()
     }
 
     #[must_use]
@@ -988,6 +1034,13 @@ impl MarketCachePolicy {
         self
     }
 
+    /// Record tick cache rows for symbols resolved from a futures universe expression.
+    pub fn record_universe(mut self, expression: impl AsRef<str>) -> Result<Self> {
+        self.universe_expression =
+            Some(tqsdk_data::UniverseExpression::parse(expression.as_ref())?);
+        Ok(self)
+    }
+
     #[must_use]
     pub fn from_record_ticks_health(health: &RecordTicksHealth) -> Self {
         Self {
@@ -997,6 +1050,7 @@ impl MarketCachePolicy {
                 .iter()
                 .map(|symbol| symbol.symbol.clone())
                 .collect(),
+            universe_expression: None,
         }
     }
 }
@@ -1251,7 +1305,7 @@ impl BacktestBuilder {
         self.base.with_remote_backtest(self.start_ns, self.end_ns)
     }
 
-    fn apply_market_cache_policy(&mut self) -> Result<()> {
+    async fn apply_market_cache_policy(&mut self) -> Result<()> {
         let Some(policy) = self.base.market_cache.clone() else {
             return Ok(());
         };
@@ -1263,6 +1317,12 @@ impl BacktestBuilder {
             .set_monitoring_cache_dir_if_empty(policy.cache_dir());
         for symbol in policy.tick_symbols() {
             push_unique_string(&mut self.symbols, symbol.clone());
+        }
+        if let Some(expression) = policy.universe_expression() {
+            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
+            for symbol in resolved {
+                push_unique_string(&mut self.symbols, symbol);
+            }
         }
         Ok(())
     }
@@ -1394,7 +1454,7 @@ impl BacktestBuilder {
 
     pub async fn warmup(mut self) -> Result<BacktestCacheWarmupReport> {
         self.validate_range()?;
-        self.apply_market_cache_policy()?;
+        self.apply_market_cache_policy().await?;
         self.apply_default_cache_if_needed()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
@@ -1636,7 +1696,7 @@ impl BacktestBuilder {
     /// Validate cache coverage and prepare the local replay inputs.
     pub async fn prepare(mut self) -> Result<PreparedBacktest> {
         self.validate_range()?;
-        self.apply_market_cache_policy()?;
+        self.apply_market_cache_policy().await?;
         self.apply_default_cache_if_needed()?;
         if let Some(expression) = &self.universe_expression {
             let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
@@ -1825,7 +1885,7 @@ impl BacktestBuilder {
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
             return self.into_remote_backtest().connect().await;
         }
-        self.apply_market_cache_policy()?;
+        self.apply_market_cache_policy().await?;
         self.apply_default_cache_if_needed()?;
         self.prepare().await?.connect().await
     }
@@ -2765,6 +2825,23 @@ async fn resolve_backtest_universe(
                 .futures_market()
                 .build()?;
         resolver = resolver.with_activity_client(activity_client);
+    }
+    Ok(tqsdk_data::resolve_futures_universe_symbols(expression, &mut resolver).await?)
+}
+
+async fn resolve_universe_with_session(
+    expression: &tqsdk_data::UniverseExpression,
+    session: tqsdk_session::SessionClient,
+) -> Result<Vec<String>> {
+    if expression.is_static_symbol_only() {
+        return Ok(tqsdk_data::resolve_static_symbols_with_expression(
+            expression,
+        )?);
+    }
+
+    let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(session.clone());
+    if tqsdk_data::expression_requires_activity_quotes(expression) {
+        resolver = resolver.with_activity_client(session);
     }
     Ok(tqsdk_data::resolve_futures_universe_symbols(expression, &mut resolver).await?)
 }

@@ -114,7 +114,9 @@ V1 是：
     本地 replay runtime：`duration <= 60s` 的 K 线从 tick cache 本地合成，`duration > 60s`
     的 K 线读取 native `HistorySeriesCache` 并按 history series 远程补缺；K 线 quote
     synthesis 的 price tick / instrument spec 由 facade 显式 builder metadata 转发，不自动联网查询
-  - `.universe(...)` 复用 relay 对齐的期货 universe selector 语法，支持全品种回测策略
+  - `.universe(...)`、`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)`
+    复用 relay 对齐的期货 universe selector 语法，支持全品种回测、实时订阅和 live/cache policy
+    symbol 集合声明
   - `MarketCachePolicy` / `.market_cache(...)` 用同一份配置维护 live tick recording
     和 cache-backed backtest 的 cache 目录及 symbol 集合；`record_ticks_health()`
     暴露写入与 gap 状态，`recorded_market_cache_policy()` 只派生补洞 policy，

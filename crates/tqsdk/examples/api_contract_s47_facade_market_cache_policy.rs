@@ -8,7 +8,7 @@ const CACHE_DIR: &str = ".tqsdk/backtest_ticks";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
-    let cache = MarketCachePolicy::new(CACHE_DIR).record_ticks([SYMBOL]);
+    let cache = MarketCachePolicy::new(CACHE_DIR).record_universe(format!("symbol:{SYMBOL}"))?;
 
     if std::env::var_os("TQ_RUN_LIVE_RECORD_TICKS").is_some() {
         let mut tq = Tq::futures()

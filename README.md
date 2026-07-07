@@ -156,8 +156,10 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 才使用官方 server-side backtest market stream 且不落盘。默认 `RemoteOnMiss`
 会先检查本地缓存；缓存完整时不需要 auth，缓存缺失时使用官方 server-side backtest market
 stream 补齐缺口并写入持久缓存。这个补缓存路径不使用专业历史下载接口，也不需要专业历史下载权限。
-全品种策略使用和 relay 一致的 universe selector 语法；显式 `.tick(symbol, width)` 会复用
-tick cache，显式 `.kline(symbol, duration, width)` 中 `duration <= 60s` 的 K 线从本地 tick
+全品种策略使用和 relay 一致的 universe selector 语法；facade 目前在
+`.backtest(...).universe(...)`、实时 `quotes_universe(...)` 和
+`MarketCachePolicy::record_universe(...)` 复用同一套解析与解析器封装。显式
+`.tick(symbol, width)` 会复用 tick cache，显式 `.kline(symbol, duration, width)` 中 `duration <= 60s` 的 K 线从本地 tick
 流合成且不写入 native K 线缓存，`duration > 60s` 的 K 线按官方 Python 行为读取 native
 history K 线缓存，缺口由 history series 接口远程补齐。K 线 replay 需要 quote synthesis
 metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
@@ -177,10 +179,12 @@ let mut tq = Tq::futures()
 
 实盘或模拟盘策略如果要维护同一份回测可复用的 tick 缓存，推荐先定义共享
 `MarketCachePolicy`：live 连接时自动记录指定 tick，回测侧可复用同一个 policy 作为默认
-cache 目录和 symbol 集合。
+cache 目录和 symbol 集合。policy 可以用 `.record_ticks([...])` 显式列 symbol，也可以用
+`.record_universe("active:all;!CFFEX")?` 复用同一套 selector。
 
 ```rust
-let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks").record_ticks(["KQ.i@SHFE.au"]);
+let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
+    .record_universe("symbol:KQ.i@SHFE.au")?;
 
 let mut tq = Tq::futures()
     .auth_env()?
@@ -198,7 +202,7 @@ let backtest = Tq::futures()
 ```
 
 底层 `record_ticks(cache_dir, symbols)` 仍可作为显式运行时入口。当前 policy/recording
-只记录显式 symbol；它不自动记录所有行情订阅，也不启动守护进程。
+只记录 policy 解析出的 symbol；它不自动记录所有行情订阅，也不启动守护进程。
 写入端只在 tick id 连续时推进 coverage，断线或跳号会保留缺口；
 `record_ticks_health()` 可查看累计写入行数、最近 flush、每个 symbol 的 last id 和 gap 状态。
 `recorded_market_cache_policy()` 可以从当前 recording health 派生出同一份 cache policy，后续显式

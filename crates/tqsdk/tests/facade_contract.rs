@@ -143,6 +143,19 @@ async fn facade_backtest_universe_accepts_static_selector_expression() {
 }
 
 #[tokio::test]
+async fn facade_quotes_universe_accepts_static_selector_expression() {
+    let symbol = "SHFE.rb2601";
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    let quotes = tq
+        .quotes_universe(format!("symbol:{symbol}"))
+        .await
+        .unwrap();
+
+    assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec![symbol]);
+}
+
+#[tokio::test]
 async fn facade_backtest_remote_on_miss_requires_auth_only_when_cache_missing() {
     let symbol = "SHFE.rb2501";
     let cache_dir = temp_cache_dir();
@@ -351,6 +364,25 @@ async fn facade_market_cache_policy_starts_live_tick_recording() {
 }
 
 #[tokio::test]
+async fn facade_market_cache_policy_records_static_universe() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    let report = tq
+        .start_market_cache(
+            MarketCachePolicy::new(&cache_dir)
+                .record_universe(format!("symbol:{symbol}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("static universe market cache policy should start recording");
+
+    assert_eq!(report.symbols, vec![symbol.to_string()]);
+}
+
+#[tokio::test]
 async fn facade_market_cache_policy_supplies_backtest_cache_inputs() {
     let symbol = "SHFE.rb2501";
     let cache_dir = temp_cache_dir();
@@ -378,6 +410,36 @@ async fn facade_market_cache_policy_supplies_backtest_cache_inputs() {
     assert!(tq.next().await.unwrap());
     assert_eq!(quote.load().unwrap().last_price, 101.0);
     assert!(!tq.next().await.unwrap());
+}
+
+#[tokio::test]
+async fn facade_market_cache_policy_universe_supplies_backtest_cache_inputs() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .market_cache(
+            MarketCachePolicy::new(&cache_dir)
+                .record_universe(format!("symbol:{symbol}"))
+                .unwrap(),
+        )
+        .backtest(1_000, 3_000)
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.data_report().resolved_symbols, 1);
+    assert!(!prepared.data_report().remote_used);
 }
 
 #[test]
@@ -1095,7 +1157,7 @@ fn market_cache_policy_contract_example_exposes_shared_cache_flow() {
     let source = std::fs::read_to_string(path).expect("read market cache policy facade example");
 
     for required in [
-        "MarketCachePolicy::new(CACHE_DIR).record_ticks([SYMBOL])",
+        "MarketCachePolicy::new(CACHE_DIR).record_universe(format!(\"symbol:{SYMBOL}\"))?",
         ".market_cache(cache.clone())",
         ".connect()",
         "record_ticks_health()",

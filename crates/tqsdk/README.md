@@ -6,8 +6,9 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Unified strategy backtest (`.backtest(start_ns, end_ns)`): default shared history cache-backed local simulated backtest; `.disabled_cache()` means official server-side market stream; `cache_dir` / `market_cache` override the cache root
-- Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`)
+- Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`, `.record_universe(...)`)
 - Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
+- Shared futures universe selector helper for live quotes (`quotes_universe(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
 - Advanced custom replay backtest (`.replay_backtest(source)`, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
@@ -30,7 +31,8 @@ runtime contract；它只提供一个更容易开始的 facade：
 显式 `.cache_only()` 只读本地缓存；默认 `RemoteOnMiss` 在缓存完整时直接复用本地数据且不需要
 auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tick、推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
-对齐的期货 selector 语法，适合全品种策略。
+对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
+`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。
 
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
 tick cache；`.kline(symbol, duration, view_width)` 对 `duration <= 60s` 的 K 线从本地 tick
@@ -51,10 +53,12 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick
-symbols，然后通过 `.market_cache(policy)` 挂到 live builder。facade 会在 `connect()` 后启动
-tick recording；回测 builder 也能复用同一个 policy 作为默认 cache 目录和 symbol 集合。
-仍可显式调用 `.record_ticks(cache_dir, symbols).await?` 作为运行时入口。两种方式都只记录显式
-symbol，不会自动记录所有订阅，也不会后台运行；正常策略继续调用 `next()` / `wait_update()`，
+symbols，然后通过 `.market_cache(policy)` 挂到 live builder。symbol 集合可以用
+`.record_ticks([...])` 显式列出，也可以用 `.record_universe("active:all;!CFFEX")?`
+复用共享期货 selector。facade 会在 `connect()` 后启动 tick recording；回测 builder 也能
+复用同一个 policy 作为默认 cache 目录和 symbol 集合。
+仍可显式调用 `.record_ticks(cache_dir, symbols).await?` 作为运行时入口。两种方式都只记录
+policy 解析出的 symbol，不会自动记录所有订阅，也不会后台运行；正常策略继续调用 `next()` / `wait_update()`，
 facade 在每次更新后把新 tick 行追加到缓存。`record_ticks_health()` 返回累计写入行数、最近
 flush、每个 symbol 的 last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording
 health 派生补洞用 policy。coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的
@@ -87,7 +91,7 @@ use tqsdk::prelude::*;
 
 # async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
-    .record_ticks(["KQ.i@SHFE.au"]);
+    .record_universe("symbol:KQ.i@SHFE.au")?;
 
 let warmup = Tq::futures()
     .auth_env()?
