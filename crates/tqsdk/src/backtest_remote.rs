@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::Tick;
 use tqsdk_data::{BacktestTickCache, BacktestTickFill, DataError};
@@ -562,6 +562,17 @@ impl RemoteBacktestCachingStream {
                 {
                     continue;
                 }
+                let now_ns = current_unix_time_ns();
+                if should_reject_future_idle_finalize(self.range_end_ns, now_ns) {
+                    return Err(data_validation(format!(
+                        "remote backtest cache fill idled before requested range end {} was \
+                         reachable by local time {}; refusing to mark complete future coverage",
+                        self.range_end_ns,
+                        now_ns
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )));
+                }
                 // Closed-session tails can legitimately idle before the requested slice end.
                 let unconfirmed_incomplete_idle_symbols =
                     self.unconfirmed_incomplete_idle_symbols()?;
@@ -840,6 +851,10 @@ fn should_reject_incomplete_idle_finalize(has_unconfirmed_incomplete_idle_symbol
     has_unconfirmed_incomplete_idle_symbols
 }
 
+fn should_reject_future_idle_finalize(range_end_ns: i64, now_ns: Option<i64>) -> bool {
+    now_ns.is_none_or(|now_ns| range_end_ns > now_ns)
+}
+
 fn should_reject_empty_remote_fill(
     symbol_count: usize,
     accepted_rows_total: usize,
@@ -859,6 +874,14 @@ fn should_split_empty_idle_batch(error: &crate::Error, symbol_count: usize) -> b
                         if is_remote_fill_idle_error_message(message)
                 )
         )
+}
+
+fn current_unix_time_ns() -> Option<i64> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    i64::try_from(nanos).ok()
 }
 
 fn should_retry_remote_fill_attempt_error(error: &crate::Error, symbol_count: usize) -> bool {
@@ -906,9 +929,9 @@ mod tests {
         parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
         parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_ranges_for_slice_ns,
         remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
-        should_reject_empty_remote_fill, should_reject_incomplete_idle_finalize,
-        should_retry_remote_connect_error, should_retry_remote_fill_attempt_error,
-        should_split_empty_idle_batch,
+        should_reject_empty_remote_fill, should_reject_future_idle_finalize,
+        should_reject_incomplete_idle_finalize, should_retry_remote_connect_error,
+        should_retry_remote_fill_attempt_error, should_split_empty_idle_batch,
     };
     use tqsdk_core::Tick;
     use tqsdk_data::{BacktestTickCache, TickDataSeriesRequest};
@@ -1089,6 +1112,14 @@ mod tests {
     fn remote_fill_rejects_unconfirmed_incomplete_idle_finalize() {
         assert!(should_reject_incomplete_idle_finalize(true));
         assert!(!should_reject_incomplete_idle_finalize(false));
+    }
+
+    #[test]
+    fn remote_fill_rejects_future_idle_finalize() {
+        assert!(should_reject_future_idle_finalize(2_001, Some(2_000)));
+        assert!(!should_reject_future_idle_finalize(2_000, Some(2_000)));
+        assert!(!should_reject_future_idle_finalize(1_999, Some(2_000)));
+        assert!(should_reject_future_idle_finalize(2_000, None));
     }
 
     #[test]
