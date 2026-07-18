@@ -270,7 +270,10 @@ tqsdk-wait        tqsdk-data
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；
   remote-on-miss / warmup 通过官方 server-side backtest 流回填。warmup 会先跳过完整缓存，
   再把所有缺失 symbol 交给内部有界远端调度器；默认不做时间切片，`TQSDK_REMOTE_FILL_SLICE_SECS`
-  只作为长区间 fallback。成功回填后只 compact 本次 symbol 的 tick series，不触发全缓存重写
+  只作为长区间 fallback。默认不设置整批墙钟超时，持续有进展的长区间由 60 秒 idle watchdog
+  保护；`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 仅在显式设为正数时启用诊断/作业预算限时。
+  每个成功 slice 先验证 tick id 连续性并独立提交 coverage，全部 slice 成功后才 compact 本次
+  symbol 的 tick series；失败或未确认 slice 只会留下未覆盖范围，不触发全缓存重写
 - `LiveTickCacheWriter::push_ticks(...)` 也已经落在 `tqsdk-data`，作为纯数据层 writer
   支持 live/session host 将指定 symbol 的实时 tick 行写入同一份回测缓存；它不创建 session，
   不订阅行情，也不负责后台守护或跨进程协调

@@ -3,8 +3,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::Tick;
-use tqsdk_data::{BacktestTickCache, BacktestTickFill, DataError};
-use tqsdk_task::ReplayMarketEvent;
+use tqsdk_data::{BacktestTickCache, BacktestTickFillReport, DataError};
 
 use crate::{Result, data_validation};
 
@@ -12,7 +11,9 @@ const REMOTE_TICK_DATA_LENGTH: usize = 10_000;
 const REMOTE_FILL_END_TOLERANCE_NS: i64 = 1_000_000_000;
 const REMOTE_STEP_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_FILL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const REMOTE_FILL_BATCH_TIMEOUT: Duration = Duration::from_secs(600);
+// A productive historical fill may legitimately take longer than a fixed wall-clock limit.
+// Stalled streams are guarded by REMOTE_FILL_IDLE_TIMEOUT instead.
+const REMOTE_FILL_BATCH_TIMEOUT: Duration = Duration::ZERO;
 const REMOTE_FILL_SYMBOL_BATCH_SIZE: usize = 1;
 const REMOTE_FILL_SYMBOL_BATCH_SIZE_MAX: usize = 4;
 const REMOTE_FILL_SYMBOL_CONCURRENCY: usize = 2;
@@ -24,12 +25,11 @@ pub(crate) struct RemoteBacktestCachingStream {
     api: tqsdk_wait::TqApi,
     handles: BTreeMap<String, tqsdk_wait::TickHandle>,
     cache: BacktestTickCache,
-    fills: BTreeMap<String, BacktestTickFill>,
+    fills: BTreeMap<String, RemoteTickFillState>,
     write_buffer: RemoteTickWriteBuffer,
-    pending: VecDeque<ReplayMarketEvent>,
     range_start_ns: i64,
     range_end_ns: i64,
-    accepted_rows_total: usize,
+    accepted_rows_by_symbol: BTreeMap<String, usize>,
     last_progress: tokio::time::Instant,
     finalized: bool,
 }
@@ -75,6 +75,151 @@ struct RemoteFillBatchTaskReport {
 enum FinalizeMode {
     Strict,
     Idle,
+}
+
+/// Streaming validation state for one remote tick range.
+///
+/// The remote fill path only needs id continuity and range endpoints to commit
+/// coverage. Retaining every `Tick` duplicates the on-disk write buffer and
+/// makes a dense multi-day fill grow linearly in memory.
+#[derive(Debug, Clone)]
+struct RemoteTickFillState {
+    symbol: String,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    // Inclusive id intervals. A normal ordered stream retains one entry.
+    id_intervals: BTreeMap<i64, i64>,
+    unique_rows: usize,
+    first_id: Option<(i64, i64)>,
+    last_id: Option<(i64, i64)>,
+}
+
+impl RemoteTickFillState {
+    fn new(symbol: impl Into<String>, range_start_ns: i64, range_end_ns: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            range_start_ns,
+            range_end_ns,
+            id_intervals: BTreeMap::new(),
+            unique_rows: 0,
+            first_id: None,
+            last_id: None,
+        }
+    }
+
+    fn push(&mut self, row: &Tick) -> bool {
+        if row.datetime < self.range_start_ns || row.datetime >= self.range_end_ns {
+            return false;
+        }
+        if self.contains_id(row.id) {
+            self.update_boundary_datetime(row);
+            return false;
+        }
+
+        self.insert_id(row.id);
+        self.unique_rows = self.unique_rows.saturating_add(1);
+        self.update_boundary_datetime(row);
+        true
+    }
+
+    fn finish(&self, end_tolerance_ns: i64) -> BacktestTickFillReport {
+        self.finish_inner(end_tolerance_ns, false)
+    }
+
+    fn finish_after_idle(&self, end_tolerance_ns: i64) -> BacktestTickFillReport {
+        self.finish_inner(end_tolerance_ns, true)
+    }
+
+    fn finish_inner(&self, end_tolerance_ns: i64, allow_idle_tail: bool) -> BacktestTickFillReport {
+        let id_range = self
+            .first_id
+            .zip(self.last_id)
+            .map(|(first, last)| (first.0, last.0));
+        let first_datetime_ns = self.first_id.map(|(_, datetime)| datetime);
+        let last_datetime_ns = self.last_id.map(|(_, datetime)| datetime);
+        let mut complete = self.first_id.is_some() || allow_idle_tail;
+        let mut gap_summary = None;
+        if let Some((first_id, last_id)) = id_range {
+            let expected = last_id.saturating_sub(first_id).saturating_add(1);
+            if expected != self.unique_rows as i64 || self.id_intervals.len() != 1 {
+                complete = false;
+                gap_summary = Some(format!(
+                    "tick id range {first_id}..={last_id} contains {} unique rows",
+                    self.unique_rows
+                ));
+            }
+        } else if !allow_idle_tail {
+            complete = false;
+        }
+        if !allow_idle_tail
+            && last_datetime_ns
+                .is_none_or(|last_ns| last_ns < self.range_end_ns.saturating_sub(end_tolerance_ns))
+        {
+            complete = false;
+        }
+        BacktestTickFillReport {
+            symbol: self.symbol.clone(),
+            requested_range: (self.range_start_ns, self.range_end_ns),
+            unique_rows: self.unique_rows,
+            id_range,
+            first_datetime_ns,
+            last_datetime_ns,
+            complete,
+            gap_summary,
+        }
+    }
+
+    fn contains_id(&self, id: i64) -> bool {
+        self.id_intervals
+            .range(..=id)
+            .next_back()
+            .is_some_and(|(_, end)| id <= *end)
+    }
+
+    fn insert_id(&mut self, id: i64) {
+        let left = self
+            .id_intervals
+            .range(..=id)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        let right = self
+            .id_intervals
+            .range(id..)
+            .next()
+            .map(|(&start, &end)| (start, end));
+        let joins_left = left.is_some_and(|(_, end)| end.checked_add(1) == Some(id));
+        let joins_right = right.is_some_and(|(start, _)| id.checked_add(1) == Some(start));
+
+        match (joins_left, joins_right) {
+            (true, true) => {
+                let (left_start, _) = left.expect("left interval must exist");
+                let (right_start, right_end) = right.expect("right interval must exist");
+                self.id_intervals.insert(left_start, right_end);
+                self.id_intervals.remove(&right_start);
+            }
+            (true, false) => {
+                let (left_start, _) = left.expect("left interval must exist");
+                self.id_intervals.insert(left_start, id);
+            }
+            (false, true) => {
+                let (right_start, right_end) = right.expect("right interval must exist");
+                self.id_intervals.remove(&right_start);
+                self.id_intervals.insert(id, right_end);
+            }
+            (false, false) => {
+                self.id_intervals.insert(id, id);
+            }
+        }
+    }
+
+    fn update_boundary_datetime(&mut self, row: &Tick) {
+        if self.first_id.is_none_or(|(id, _)| row.id <= id) {
+            self.first_id = Some((row.id, row.datetime));
+        }
+        if self.last_id.is_none_or(|(id, _)| row.id >= id) {
+            self.last_id = Some((row.id, row.datetime));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -158,11 +303,14 @@ pub(crate) async fn fill_backtest_tick_cache(
     let mut completed_batches = 0usize;
     let mut tasks = tokio::task::JoinSet::new();
     let mut rows_by_symbol = BTreeMap::new();
+    let mut batch_errors = Vec::new();
     remote_fill_progress(format_args!(
         "event=fill_start symbols={requested_symbol_count} batches={total_batches} \
          batch_size={symbol_batch_size} concurrency={max_concurrency} \
          batch_timeout_s={}",
-        batch_timeout.as_secs()
+        batch_timeout
+            .map(|timeout| timeout.as_secs().to_string())
+            .unwrap_or_else(|| "disabled".to_string())
     ));
 
     while !pending_batches.is_empty() || !tasks.is_empty() {
@@ -195,13 +343,18 @@ pub(crate) async fn fill_backtest_tick_cache(
         let Some(result) = tasks.join_next().await else {
             continue;
         };
-        let task_report = match result.map_err(|error| {
-            data_validation(format!("remote backtest cache fill task failed: {error}"))
-        })? {
-            Ok(task_report) => task_report,
-            Err(error) => {
+        let task_report = match result {
+            Ok(Ok(task_report)) => task_report,
+            Ok(Err(error)) => {
                 remote_fill_progress(format_args!("event=batch_error error={error}"));
-                return Err(error);
+                batch_errors.push(error.to_string());
+                continue;
+            }
+            Err(error) => {
+                let error = format!("remote backtest cache fill task failed: {error}");
+                remote_fill_progress(format_args!("event=batch_error error={error}"));
+                batch_errors.push(error);
+                continue;
             }
         };
         completed_batches = completed_batches.saturating_add(1);
@@ -223,6 +376,14 @@ pub(crate) async fn fill_backtest_tick_cache(
         for (symbol, rows) in task_report.fill_report.rows_by_symbol {
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
+    }
+    if !batch_errors.is_empty() {
+        return Err(data_validation(format!(
+            "remote backtest cache fill completed {completed_batches}/{total_batches} batches; \
+             {} batch(es) failed: {}",
+            batch_errors.len(),
+            batch_errors.join(" | ")
+        )));
     }
     let accepted_rows_total = rows_by_symbol.values().copied().sum();
     if should_reject_empty_remote_fill(
@@ -278,7 +439,7 @@ fn remote_fill_batches(
 
 async fn fill_backtest_tick_cache_symbol_batch_timed(
     batch_index: usize,
-    batch_timeout: Duration,
+    batch_timeout: Option<Duration>,
     user: String,
     pass: String,
     batch: RemoteFillBatch,
@@ -288,30 +449,32 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
     let timeout_symbols = batch.symbols.clone();
     let start_ns = batch.start_ns;
     let end_ns = batch.end_ns;
-    let result = tokio::time::timeout(
-        batch_timeout,
-        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, batch.symbols, cache),
-    )
-    .await;
+    let fill =
+        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, batch.symbols, cache);
+    let fill_report = match batch_timeout {
+        Some(batch_timeout) => match tokio::time::timeout(batch_timeout, fill).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(data_validation(format!(
+                    "remote backtest cache fill batch timed out after {}s for {} symbols ({}) \
+                     in range [{start_ns}, {end_ns})",
+                    batch_timeout.as_secs(),
+                    timeout_symbols.len(),
+                    timeout_symbols.join(",")
+                )));
+            }
+        },
+        None => fill.await?,
+    };
     let elapsed = started.elapsed();
-    match result {
-        Ok(Ok(fill_report)) => Ok(RemoteFillBatchTaskReport {
-            batch_index,
-            symbols: timeout_symbols,
-            start_ns,
-            end_ns,
-            elapsed,
-            fill_report,
-        }),
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err(data_validation(format!(
-            "remote backtest cache fill batch timed out after {}s for {} symbols ({}) \
-             in range [{start_ns}, {end_ns})",
-            batch_timeout.as_secs(),
-            timeout_symbols.len(),
-            timeout_symbols.join(",")
-        ))),
-    }
+    Ok(RemoteFillBatchTaskReport {
+        batch_index,
+        symbols: timeout_symbols,
+        start_ns,
+        end_ns,
+        elapsed,
+        fill_report,
+    })
 }
 
 async fn fill_backtest_tick_cache_symbol_batch(
@@ -422,15 +585,16 @@ async fn fill_backtest_tick_cache_symbol_batch_attempt(
         )
         .await
         .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
-        while let Some(event) = stream
-            .next_remote_event()
+        let slice_report = stream
+            .fill_cache()
             .await
-            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?
-        {
-            *rows_by_symbol
-                .entry(event.symbol().to_string())
-                .or_insert(0) += 1;
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+        for (symbol, rows) in slice_report.rows_by_symbol {
+            *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
+    }
+    for symbol in symbols {
+        cache.compact_symbol_ticks(&symbol)?;
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
 }
@@ -527,7 +691,7 @@ impl RemoteBacktestCachingStream {
                 .await?;
             fills.insert(
                 symbol.clone(),
-                BacktestTickFill::new(symbol.clone(), start_ns, end_ns),
+                RemoteTickFillState::new(symbol.clone(), start_ns, end_ns),
             );
             handles.insert(symbol, handle);
         }
@@ -537,23 +701,27 @@ impl RemoteBacktestCachingStream {
             cache,
             fills,
             write_buffer: RemoteTickWriteBuffer::default(),
-            pending: VecDeque::new(),
             range_start_ns: start_ns,
             range_end_ns: end_ns,
-            accepted_rows_total: 0,
+            accepted_rows_by_symbol: BTreeMap::new(),
             last_progress: tokio::time::Instant::now(),
             finalized: false,
         })
     }
 
-    async fn next_remote_event(&mut self) -> Result<Option<ReplayMarketEvent>> {
+    async fn fill_cache(&mut self) -> Result<RemoteBacktestCacheFillReport> {
         loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(Some(event));
-            }
-            if self.fills_complete()? {
+            if self.fills_complete() {
                 self.finalize_cache(FinalizeMode::Strict)?;
-                return Ok(None);
+                return Ok(self.fill_report());
+            }
+            if self.all_tick_serials_exhausted() {
+                let now_ns = current_unix_time_ns();
+                if !should_finalize_idle_after_serial_exhaustion(true, self.range_end_ns, now_ns) {
+                    return Err(future_idle_finalize_error(self.range_end_ns, now_ns));
+                }
+                self.finalize_idle_after_terminal(now_ns)?;
+                return Ok(self.fill_report());
             }
             if self.last_progress.elapsed() >= remote_fill_idle_timeout() {
                 if self
@@ -563,48 +731,8 @@ impl RemoteBacktestCachingStream {
                     continue;
                 }
                 let now_ns = current_unix_time_ns();
-                if should_reject_future_idle_finalize(self.range_end_ns, now_ns) {
-                    return Err(data_validation(format!(
-                        "remote backtest cache fill idled before requested range end {} was \
-                         reachable by local time {}; refusing to mark complete future coverage",
-                        self.range_end_ns,
-                        now_ns
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    )));
-                }
-                // Closed-session tails can legitimately idle before the requested slice end.
-                let unconfirmed_incomplete_idle_symbols =
-                    self.unconfirmed_incomplete_idle_symbols()?;
-                if should_reject_incomplete_idle_finalize(
-                    !unconfirmed_incomplete_idle_symbols.is_empty(),
-                ) {
-                    return Err(data_validation(format!(
-                        "remote backtest cache fill idled before tick ranges were confirmed \
-                         for {} symbols ({}) in range [{}, {}); refusing to mark complete partial coverage",
-                        unconfirmed_incomplete_idle_symbols.len(),
-                        unconfirmed_incomplete_idle_symbols.join(","),
-                        self.range_start_ns,
-                        self.range_end_ns
-                    )));
-                }
-
-                let unconfirmed_empty_idle_symbols = self.unconfirmed_empty_idle_symbols()?;
-                if should_reject_empty_idle_finalize(
-                    remote_fill_allow_empty_idle(),
-                    !unconfirmed_empty_idle_symbols.is_empty(),
-                ) {
-                    return Err(data_validation(format!(
-                        "remote backtest cache fill idled before empty tick ranges were confirmed \
-                         for {} symbols ({}) in range [{}, {}); refusing to mark complete empty coverage",
-                        unconfirmed_empty_idle_symbols.len(),
-                        unconfirmed_empty_idle_symbols.join(","),
-                        self.range_start_ns,
-                        self.range_end_ns
-                    )));
-                }
-                self.finalize_cache(FinalizeMode::Idle)?;
-                return Ok(None);
+                self.finalize_idle_after_terminal(now_ns)?;
+                return Ok(self.fill_report());
             }
 
             let deadline = tokio::time::Instant::now() + REMOTE_STEP_POLL_TIMEOUT;
@@ -630,32 +758,25 @@ impl RemoteBacktestCachingStream {
             }
 
             let mut accepted_rows = Vec::new();
-            let mut accepted_events = Vec::new();
             for row in handle.changed_rows(step)? {
                 let Some(fill) = self.fills.get_mut(symbol) else {
                     continue;
                 };
-                if !fill.push(row.clone())? {
+                if !fill.push(&row) {
                     continue;
                 }
 
-                accepted_events.push(ReplayMarketEvent::tick(
-                    "server-backtest",
-                    symbol,
-                    row.datetime,
-                    Some(row.datetime),
-                    row.clone(),
-                )?);
                 accepted_rows.push(row);
             }
 
             if !accepted_rows.is_empty() {
-                self.accepted_rows_total =
-                    self.accepted_rows_total.saturating_add(accepted_rows.len());
+                *self
+                    .accepted_rows_by_symbol
+                    .entry(symbol.clone())
+                    .or_insert(0) += accepted_rows.len();
                 self.write_buffer
                     .push_rows(&self.cache, symbol, accepted_rows)?;
                 made_progress = true;
-                self.pending.extend(accepted_events);
             }
         }
 
@@ -668,7 +789,7 @@ impl RemoteBacktestCachingStream {
     fn unconfirmed_incomplete_idle_symbols(&self) -> Result<Vec<String>> {
         let mut symbols = Vec::new();
         for (symbol, fill) in &self.fills {
-            let report = fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?;
+            let report = fill.finish(REMOTE_FILL_END_TOLERANCE_NS);
             if report.complete || report.unique_rows == 0 {
                 continue;
             }
@@ -688,7 +809,7 @@ impl RemoteBacktestCachingStream {
         let mut symbols = Vec::new();
         for (symbol, fill) in &self.fills {
             if fill
-                .finish_after_idle(REMOTE_FILL_END_TOLERANCE_NS)?
+                .finish_after_idle(REMOTE_FILL_END_TOLERANCE_NS)
                 .unique_rows
                 != 0
             {
@@ -706,13 +827,61 @@ impl RemoteBacktestCachingStream {
         Ok(symbols)
     }
 
-    fn fills_complete(&self) -> Result<bool> {
+    fn fills_complete(&self) -> bool {
         for fill in self.fills.values() {
-            if !fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?.complete {
-                return Ok(false);
+            if !fill.finish(REMOTE_FILL_END_TOLERANCE_NS).complete {
+                return false;
             }
         }
-        Ok(true)
+        true
+    }
+
+    fn all_tick_serials_exhausted(&self) -> bool {
+        !self.handles.is_empty()
+            && self
+                .handles
+                .values()
+                .all(|handle| self.api.backtest_tick_serial_exhausted(handle) == Some(true))
+    }
+
+    fn finalize_idle_after_terminal(&mut self, now_ns: Option<i64>) -> Result<()> {
+        if should_reject_future_idle_finalize(self.range_end_ns, now_ns) {
+            return Err(future_idle_finalize_error(self.range_end_ns, now_ns));
+        }
+        // Closed-session tails can legitimately end before the requested slice end.
+        let unconfirmed_incomplete_idle_symbols = self.unconfirmed_incomplete_idle_symbols()?;
+        if should_reject_incomplete_idle_finalize(!unconfirmed_incomplete_idle_symbols.is_empty()) {
+            return Err(data_validation(format!(
+                "remote backtest cache fill idled before tick ranges were confirmed \
+                 for {} symbols ({}) in range [{}, {}); refusing to mark complete partial coverage",
+                unconfirmed_incomplete_idle_symbols.len(),
+                unconfirmed_incomplete_idle_symbols.join(","),
+                self.range_start_ns,
+                self.range_end_ns
+            )));
+        }
+
+        let unconfirmed_empty_idle_symbols = self.unconfirmed_empty_idle_symbols()?;
+        if should_reject_empty_idle_finalize(
+            remote_fill_allow_empty_idle(),
+            !unconfirmed_empty_idle_symbols.is_empty(),
+        ) {
+            return Err(data_validation(format!(
+                "remote backtest cache fill idled before empty tick ranges were confirmed \
+                 for {} symbols ({}) in range [{}, {}); refusing to mark complete empty coverage",
+                unconfirmed_empty_idle_symbols.len(),
+                unconfirmed_empty_idle_symbols.join(","),
+                self.range_start_ns,
+                self.range_end_ns
+            )));
+        }
+        self.finalize_cache(FinalizeMode::Idle)
+    }
+
+    fn fill_report(&self) -> RemoteBacktestCacheFillReport {
+        RemoteBacktestCacheFillReport {
+            rows_by_symbol: self.accepted_rows_by_symbol.clone(),
+        }
     }
 
     fn finalize_cache(&mut self, mode: FinalizeMode) -> Result<()> {
@@ -722,8 +891,8 @@ impl RemoteBacktestCachingStream {
         self.write_buffer.flush_all(&self.cache)?;
         for (symbol, fill) in &self.fills {
             let report = match mode {
-                FinalizeMode::Strict => fill.finish(REMOTE_FILL_END_TOLERANCE_NS)?,
-                FinalizeMode::Idle => fill.finish_after_idle(REMOTE_FILL_END_TOLERANCE_NS)?,
+                FinalizeMode::Strict => fill.finish(REMOTE_FILL_END_TOLERANCE_NS),
+                FinalizeMode::Idle => fill.finish_after_idle(REMOTE_FILL_END_TOLERANCE_NS),
             };
             if !report.complete {
                 return Err(data_validation(format!(
@@ -738,7 +907,6 @@ impl RemoteBacktestCachingStream {
                 report.unique_rows,
                 report.id_range,
             )?;
-            self.cache.compact_symbol_ticks(symbol)?;
         }
         self.finalized = true;
         Ok(())
@@ -750,9 +918,10 @@ fn remote_fill_idle_timeout() -> Duration {
     parse_remote_fill_idle_timeout(value.as_deref())
 }
 
-fn remote_fill_batch_timeout() -> Duration {
+fn remote_fill_batch_timeout() -> Option<Duration> {
     let value = std::env::var("TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS").ok();
-    parse_remote_fill_batch_timeout(value.as_deref())
+    let timeout = parse_remote_fill_batch_timeout(value.as_deref());
+    (!timeout.is_zero()).then_some(timeout)
 }
 
 fn remote_fill_allow_empty_idle() -> bool {
@@ -855,6 +1024,24 @@ fn should_reject_future_idle_finalize(range_end_ns: i64, now_ns: Option<i64>) ->
     now_ns.is_none_or(|now_ns| range_end_ns > now_ns)
 }
 
+fn should_finalize_idle_after_serial_exhaustion(
+    all_serials_exhausted: bool,
+    range_end_ns: i64,
+    now_ns: Option<i64>,
+) -> bool {
+    all_serials_exhausted && !should_reject_future_idle_finalize(range_end_ns, now_ns)
+}
+
+fn future_idle_finalize_error(range_end_ns: i64, now_ns: Option<i64>) -> crate::Error {
+    data_validation(format!(
+        "remote backtest cache fill idled before requested range end {range_end_ns} was \
+         reachable by local time {}; refusing to mark complete future coverage",
+        now_ns
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ))
+}
+
 fn should_reject_empty_remote_fill(
     symbol_count: usize,
     accepted_rows_total: usize,
@@ -924,17 +1111,18 @@ mod tests {
 
     use super::{
         REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest,
-        RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
-        parse_remote_fill_idle_timeout, parse_remote_fill_progress_enabled,
-        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
-        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_ranges_for_slice_ns,
-        remote_fill_ranges_with_slice_ns, should_reject_empty_idle_finalize,
+        RemoteTickFillState, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
+        parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
+        parse_remote_fill_progress_enabled, parse_remote_fill_slice_ns,
+        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
+        remote_fill_batches, remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
+        should_finalize_idle_after_serial_exhaustion, should_reject_empty_idle_finalize,
         should_reject_empty_remote_fill, should_reject_future_idle_finalize,
         should_reject_incomplete_idle_finalize, should_retry_remote_connect_error,
         should_retry_remote_fill_attempt_error, should_split_empty_idle_batch,
     };
     use tqsdk_core::Tick;
-    use tqsdk_data::{BacktestTickCache, TickDataSeriesRequest};
+    use tqsdk_data::{BacktestTickCache, BacktestTickFill, TickDataSeriesRequest};
 
     #[test]
     fn remote_fill_ranges_default_to_single_python_style_backtest_session() {
@@ -1062,23 +1250,106 @@ mod tests {
     }
 
     #[test]
-    fn remote_fill_batch_timeout_can_be_overridden_for_diagnostics() {
+    fn remote_fill_batch_timeout_is_disabled_unless_explicitly_configured() {
         assert_eq!(
             parse_remote_fill_batch_timeout(Some("30")),
             Duration::from_secs(30)
         );
-        assert_eq!(
-            parse_remote_fill_batch_timeout(Some("0")),
-            REMOTE_FILL_BATCH_TIMEOUT
-        );
+        assert_eq!(parse_remote_fill_batch_timeout(Some("0")), Duration::ZERO);
         assert_eq!(
             parse_remote_fill_batch_timeout(Some("invalid")),
-            REMOTE_FILL_BATCH_TIMEOUT
+            Duration::ZERO
+        );
+        assert_eq!(parse_remote_fill_batch_timeout(None), Duration::ZERO);
+        assert_eq!(REMOTE_FILL_BATCH_TIMEOUT, Duration::ZERO);
+    }
+
+    #[test]
+    fn remote_tick_fill_state_coalesces_out_of_order_contiguous_ids() {
+        let mut fill = RemoteTickFillState::new("SHFE.rb2601", 1_000, 4_000);
+
+        assert!(fill.push(&tick(1, 1_000, 100.0)));
+        assert!(fill.push(&tick(3, 3_500, 102.0)));
+        assert!(fill.push(&tick(2, 2_000, 101.0)));
+        assert!(!fill.push(&tick(2, 2_000, 101.0)));
+
+        let report = fill.finish(1_000_000_000);
+        assert!(report.complete);
+        assert_eq!(report.unique_rows, 3);
+        assert_eq!(report.id_range, Some((1, 3)));
+        assert_eq!(fill.id_intervals.len(), 1);
+    }
+
+    #[test]
+    fn remote_tick_fill_state_rejects_discontinuous_id_ranges() {
+        let mut fill = RemoteTickFillState::new("SHFE.rb2601", 1_000, 4_000);
+
+        assert!(fill.push(&tick(1, 1_000, 100.0)));
+        assert!(fill.push(&tick(3, 3_500, 102.0)));
+
+        let report = fill.finish_after_idle(1_000_000_000);
+        assert!(!report.complete);
+        assert_eq!(
+            report.gap_summary.as_deref(),
+            Some("tick id range 1..=3 contains 2 unique rows")
+        );
+    }
+
+    #[test]
+    fn remote_tick_fill_state_matches_public_accumulator_semantics() {
+        let mut state = RemoteTickFillState::new("SHFE.rb2601", 1_000, 4_000);
+        let mut baseline = BacktestTickFill::new("SHFE.rb2601", 1_000, 4_000);
+        let rows = [
+            tick(2, 2_000, 101.0),
+            tick(1, 1_000, 100.0),
+            tick(3, 3_500, 102.0),
+            tick(1, 1_100, 100.5),
+            tick(3, 3_600, 102.5),
+            tick(0, 999, 99.0),
+            tick(4, 4_000, 103.0),
+        ];
+
+        for row in rows {
+            assert_eq!(state.push(&row), baseline.push(row).unwrap());
+        }
+
+        assert_eq!(state.finish(1_000_000_000).first_datetime_ns, Some(1_100));
+        assert_eq!(state.finish(1_000_000_000).last_datetime_ns, Some(3_600));
+        assert_eq!(
+            state.finish(1_000_000_000),
+            baseline.finish(1_000_000_000).unwrap()
         );
         assert_eq!(
-            parse_remote_fill_batch_timeout(None),
-            REMOTE_FILL_BATCH_TIMEOUT
+            state.finish_after_idle(1_000_000_000),
+            baseline.finish_after_idle(1_000_000_000).unwrap()
         );
+    }
+
+    #[test]
+    fn serial_exhaustion_can_finalize_only_non_future_ranges() {
+        assert!(should_finalize_idle_after_serial_exhaustion(
+            true,
+            2_000,
+            Some(2_000)
+        ));
+        assert!(should_finalize_idle_after_serial_exhaustion(
+            true,
+            1_999,
+            Some(2_000)
+        ));
+        assert!(!should_finalize_idle_after_serial_exhaustion(
+            false,
+            1_999,
+            Some(2_000)
+        ));
+        assert!(!should_finalize_idle_after_serial_exhaustion(
+            true,
+            2_001,
+            Some(2_000)
+        ));
+        assert!(!should_finalize_idle_after_serial_exhaustion(
+            true, 2_000, None
+        ));
     }
 
     #[test]

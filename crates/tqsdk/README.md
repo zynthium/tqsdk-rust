@@ -50,6 +50,11 @@ backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由
 `TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制，默认值保持保守以避免放大官方服务压力。
+默认不设置整批墙钟超时，长区间的持续进展不会被固定时限中断；60 秒无 tick 进展仍会触发
+保护，可用 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS` 调整。只有显式设置正数
+`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 时才会启用整批限时，适合诊断或外层作业预算。
+每个成功 slice 都先校验 tick id 连续性后独立提交 coverage，全部 slice 成功后才按 symbol
+compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会继续补其缺口。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick

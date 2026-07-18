@@ -101,6 +101,7 @@ pub struct HistorySeriesCacheFileReport {
     pub status: HistorySeriesCacheFileStatus,
     pub symbol: Option<String>,
     pub duration_ns: Option<i64>,
+    /// Id extent stored in this file as `[first_id, one_past_last_id)`.
     pub id_range: Option<(i64, i64)>,
     pub row_width: Option<usize>,
     pub rows: usize,

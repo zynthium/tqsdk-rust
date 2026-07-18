@@ -106,6 +106,10 @@ pub struct BacktestTickCacheInventorySymbol {
     pub rows: usize,
     pub bytes: u64,
     pub days: usize,
+    /// Observed on-disk id extent as `[first_id, one_past_last_id)`.
+    ///
+    /// This is a file inventory metric rather than request-scoped coverage: a
+    /// trading-day partition can include rows just outside an inspected time range.
     pub id_range: Option<(i64, i64)>,
     pub problem_files: usize,
 }
@@ -115,6 +119,7 @@ pub struct BacktestTickFillReport {
     pub symbol: String,
     pub requested_range: (i64, i64),
     pub unique_rows: usize,
+    /// Remote fill id extent as `(first_id, last_id)`, with both endpoints inclusive.
     pub id_range: Option<(i64, i64)>,
     pub first_datetime_ns: Option<i64>,
     pub last_datetime_ns: Option<i64>,
