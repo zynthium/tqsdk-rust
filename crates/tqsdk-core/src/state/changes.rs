@@ -61,6 +61,8 @@ pub struct ChangeSet {
     pub field_hits: Vec<ChangeHit>,
 }
 
+const LINEAR_APPLIED_CHANGESET_LIMIT: usize = 8;
+
 impl ChangeSet {
     pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
         let field_hit_capacity = mutations.iter().map(|mutation| mutation.fields.len()).sum();
@@ -104,6 +106,10 @@ impl ChangeSet {
         changes: &[AppliedChange],
         mutations: &[NormalizedMutation],
     ) -> Self {
+        if changes.len() <= LINEAR_APPLIED_CHANGESET_LIMIT {
+            return Self::from_small_applied_changes(changes, mutations);
+        }
+
         let field_hit_capacity = changes
             .iter()
             .map(|change| change.field_indexes.len())
@@ -149,6 +155,65 @@ impl ChangeSet {
                             field.field.clone(),
                         ));
                     }
+                }
+            }
+        }
+
+        change_set
+    }
+
+    fn from_small_applied_changes(
+        changes: &[AppliedChange],
+        mutations: &[NormalizedMutation],
+    ) -> Self {
+        let field_hit_capacity = changes
+            .iter()
+            .map(|change| change.field_indexes.len())
+            .sum();
+        let mut change_set = Self {
+            path_hits: Vec::with_capacity(changes.len()),
+            object_hits: Vec::with_capacity(changes.len()),
+            field_hits: Vec::with_capacity(field_hit_capacity),
+        };
+
+        for change in changes {
+            debug_assert!(!change.root.is_empty());
+            let path_is_new = !change_set.path_hits.iter().any(|path| path == &change.path);
+            if path_is_new {
+                change_set.path_hits.push(change.path.clone());
+            }
+
+            let Some(object) = &change.object else {
+                continue;
+            };
+            let object_is_new = !change_set
+                .object_hits
+                .iter()
+                .any(|existing| existing == object);
+            if object_is_new {
+                change_set.object_hits.push(object.clone());
+            }
+
+            let Some(mutation) = mutations.get(change.mutation_index) else {
+                debug_assert!(false, "applied change must point at an input mutation");
+                continue;
+            };
+            debug_assert_eq!(mutation.path, change.path);
+            debug_assert_eq!(mutation.object, change.object);
+
+            for field_index in &change.field_indexes {
+                let Some(field) = mutation.fields.get(*field_index) else {
+                    debug_assert!(false, "applied field index must point at mutation field");
+                    continue;
+                };
+                if !change_set.field_hits.iter().any(|hit| {
+                    hit.path == change.path && hit.object == *object && hit.field == field.field
+                }) {
+                    change_set.field_hits.push(ChangeHit::field(
+                        change.path.clone(),
+                        object.clone(),
+                        field.field.clone(),
+                    ));
                 }
             }
         }
@@ -300,6 +365,84 @@ mod tests {
             vec![
                 ChangeHit::field(path.clone(), object.clone(), "last_price"),
                 ChangeHit::field(path, object, "ask_price1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn small_applied_changes_preserve_path_object_and_field_deduplication() {
+        let path = StatePath::new(["quotes", "SHFE.au2606"]);
+        let auxiliary_path = StatePath::new(["quotes", "SHFE.ag2606"]);
+        let object = ObjectKey::Quote {
+            symbol: Symbol::new("SHFE.au2606"),
+        };
+        let mutations = vec![
+            NormalizedMutation {
+                path: path.clone(),
+                object: Some(object.clone()),
+                fields: vec![
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(610.0),
+                    },
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(611.0),
+                    },
+                    FieldMutation {
+                        field: "ask_price1".to_string(),
+                        value: json!(611.2),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: path.clone(),
+                object: Some(object.clone()),
+                fields: vec![
+                    FieldMutation {
+                        field: "last_price".to_string(),
+                        value: json!(612.0),
+                    },
+                    FieldMutation {
+                        field: "bid_price1".to_string(),
+                        value: json!(611.0),
+                    },
+                ],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: auxiliary_path.clone(),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(9_000.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+        ];
+        let applied = vec![
+            AppliedChange::new(
+                "quotes",
+                path.clone(),
+                Some(object.clone()),
+                0,
+                vec![0, 1, 2],
+            ),
+            AppliedChange::new("quotes", path.clone(), Some(object.clone()), 1, vec![0, 1]),
+            AppliedChange::new("quotes", auxiliary_path.clone(), None, 2, vec![0]),
+        ];
+
+        let changes = ChangeSet::from_applied_changes(&applied, &mutations);
+
+        assert_eq!(changes.path_hits, vec![path.clone(), auxiliary_path]);
+        assert_eq!(changes.object_hits, vec![object.clone()]);
+        assert_eq!(
+            changes.field_hits,
+            vec![
+                ChangeHit::field(path.clone(), object.clone(), "last_price"),
+                ChangeHit::field(path.clone(), object.clone(), "ask_price1"),
+                ChangeHit::field(path, object, "bid_price1"),
             ]
         );
     }

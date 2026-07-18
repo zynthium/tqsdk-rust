@@ -4,12 +4,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use serde_json::{Number, Value};
-use tqsdk_core::{CommitScope, FieldMutation, Kline, Quote, Symbol, Tick};
+use tqsdk_core::{FieldMutation, Kline, NormalizedMutation, Quote, Tick};
 
 use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
 use crate::replay_runtime::{
-    ReplayKlineSpec, ReplayTickSpec, ingest_replay_market_event, seed_replay_serials,
+    BacktestTickWindowState, ReplayKlineSpec, ReplayTickSpec, backtest_market_mutations,
+    ingest_presorted_replay_market_mutations, seed_replay_serials,
 };
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
@@ -52,6 +53,7 @@ pub struct StrategyBacktest {
     price_ticks: HashMap<String, f64>,
     quote_metadata_price_ticks: HashMap<String, f64>,
     last_replay_quotes: HashMap<String, ReplayStepQuote>,
+    tick_windows: HashMap<String, BacktestTickWindowState>,
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
 }
@@ -77,6 +79,7 @@ pub struct StrategyBacktestContext<'a> {
 
 #[derive(Debug, Default)]
 struct ReplayStepBatch {
+    market_mutations: Vec<NormalizedMutation>,
     latest_quotes: Vec<(String, ReplayStepQuote)>,
     sim_report: TqSimStepReport,
 }
@@ -168,7 +171,11 @@ impl StrategyBacktest {
         event: &ReplayMarketEvent,
         batch: &mut ReplayStepBatch,
     ) -> Result<()> {
-        ingest_replay_market_event(self.strategy.task_host(), event, &self.klines, &self.ticks)?;
+        if let Some(mut mutations) =
+            backtest_market_mutations(event, &self.klines, &self.ticks, &mut self.tick_windows)
+        {
+            batch.market_mutations.append(&mut mutations);
+        }
         let event_time_ns = event.event_time_ns();
         match event.payload() {
             ReplayMarketPayload::Quote(quote) => {
@@ -210,17 +217,26 @@ impl StrategyBacktest {
     }
 
     fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<TqSimStepReport> {
-        let quote_fields = self.quote_fields_for_replay_batch(batch.latest_quotes);
-        ingest_quote_fields(self.strategy.task_host(), quote_fields)?;
+        let ReplayStepBatch {
+            market_mutations,
+            latest_quotes,
+            sim_report,
+        } = batch;
+        let quote_fields = self.quote_fields_for_replay_batch(latest_quotes);
+        ingest_presorted_replay_market_mutations(
+            self.strategy.task_host(),
+            market_mutations,
+            quote_fields,
+        )?;
         self.sim
-            .ingest_step_report(self.strategy.task_host(), &batch.sim_report)?;
-        Ok(batch.sim_report)
+            .ingest_step_report(self.strategy.task_host(), &sim_report)?;
+        Ok(sim_report)
     }
 
     fn quote_fields_for_replay_batch(
         &mut self,
         quotes: Vec<(String, ReplayStepQuote)>,
-    ) -> Vec<(Symbol, Vec<FieldMutation>)> {
+    ) -> Vec<(String, Vec<FieldMutation>)> {
         quotes
             .into_iter()
             .filter_map(|(symbol, quote)| {
@@ -229,7 +245,7 @@ impl StrategyBacktest {
                 if fields.is_empty() {
                     None
                 } else {
-                    Some((Symbol::new(symbol), fields))
+                    Some((symbol, fields))
                 }
             })
             .collect()
@@ -490,6 +506,7 @@ impl StrategyBacktestBuilder {
             price_ticks,
             quote_metadata_price_ticks: HashMap::new(),
             last_replay_quotes: HashMap::new(),
+            tick_windows: HashMap::new(),
             default_price_tick,
             summary,
         })
@@ -641,20 +658,6 @@ fn ledger_snapshot_from_sim(
         .collect();
 
     BacktestLedgerSnapshot::new(event_time_ns, sim.account(), orders, trades, positions)
-}
-
-fn ingest_quote_fields(
-    host: &TaskHost,
-    quote_fields: Vec<(Symbol, Vec<FieldMutation>)>,
-) -> Result<()> {
-    if quote_fields.is_empty() {
-        return Ok(());
-    }
-    host.api()
-        .session()
-        .handle()
-        .ingest_presorted_market_quote_fields(quote_fields, vec![], CommitScope::ReplayStep)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1134,6 +1137,152 @@ mod tests {
         assert_eq!(ticks.view_width(), 10);
         assert_eq!(ticks.len(), 1);
         assert_eq!(ticks.last().expect("last tick").last_price, 101.0);
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_bounds_declared_tick_window_and_reclaims_rows() {
+        let replay = ReplayMarketSource::new(vec![
+            tick_event("SHFE.a", 10, 1_000, 101.0),
+            tick_event("SHFE.a", 11, 2_000, 102.0),
+            tick_event("SHFE.a", 12, 3_000, 103.0),
+        ]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .tick("SHFE.a", 2)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest.next().await.unwrap().expect("first step");
+        assert_eq!(
+            first
+                .tick("SHFE.a")
+                .unwrap()
+                .iter()
+                .map(|tick| tick.id)
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
+        drop(first);
+
+        let second = backtest.next().await.unwrap().expect("second step");
+        assert_eq!(
+            second
+                .tick("SHFE.a")
+                .unwrap()
+                .iter()
+                .map(|tick| tick.id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        drop(second);
+
+        let third = backtest.next().await.unwrap().expect("third step");
+        assert_eq!(
+            third
+                .tick("SHFE.a")
+                .unwrap()
+                .iter()
+                .map(|tick| tick.id)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        let market = third
+            .task_host()
+            .api()
+            .session()
+            .reader()
+            .read_market_state();
+        assert!(
+            market
+                .get_path(&["ticks", "SHFE.a", "data", "10"])
+                .is_none(),
+            "rows outside the declared tick window must be removed"
+        );
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-2", "ready"])
+                .and_then(Value::as_bool),
+            Some(true),
+            "seeded chart readiness must survive incremental bounds updates"
+        );
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-2", "state", "duration"])
+                .and_then(Value::as_i64),
+            Some(0),
+            "seeded chart state must survive incremental bounds updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_tick_and_quote_share_one_replay_commit() {
+        let replay = ReplayMarketSource::new(vec![tick_event("SHFE.a", 7, 1_000, 101.0)]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .tick("SHFE.a", 10)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        let objects = &first
+            .task_host()
+            .api()
+            .last_commit()
+            .expect("step should expose its replay commit")
+            .changes
+            .object_hits;
+        assert!(objects.iter().any(|object| {
+            matches!(
+                object,
+                tqsdk_core::ObjectKey::Tick { symbol, tick_id }
+                    if symbol.as_str() == "SHFE.a" && *tick_id == 7
+            )
+        }));
+        assert!(objects.iter().any(|object| {
+            matches!(
+                object,
+                tqsdk_core::ObjectKey::Quote { symbol } if symbol.as_str() == "SHFE.a"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_skips_undeclared_tick_serial_state() {
+        let replay = ReplayMarketSource::new(vec![tick_event("SHFE.a", 7, 1_000, 101.0)]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        let first = backtest
+            .next()
+            .await
+            .expect("first step should succeed")
+            .expect("first step should exist");
+        assert_eq!(first.quote("SHFE.a").unwrap().last_price, 101.0);
+        let objects = &first
+            .task_host()
+            .api()
+            .last_commit()
+            .expect("step should expose its replay commit")
+            .changes
+            .object_hits;
+        assert!(objects.iter().any(|object| {
+            matches!(
+                object,
+                tqsdk_core::ObjectKey::Quote { symbol } if symbol.as_str() == "SHFE.a"
+            )
+        }));
+        assert!(!objects.iter().any(|object| {
+            matches!(
+                object,
+                tqsdk_core::ObjectKey::Tick { symbol, .. } if symbol.as_str() == "SHFE.a"
+            )
+        }));
     }
 
     #[tokio::test]

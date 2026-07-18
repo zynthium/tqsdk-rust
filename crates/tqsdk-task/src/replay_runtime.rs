@@ -1,6 +1,10 @@
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
 use serde_json::{Map, Number, Value, json};
 use tqsdk_core::{
-    CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote, RuntimeInput, Tick,
+    ChartId, CommitScope, FieldMutation, InputPayload, IoEvent, Kline, MutationSource,
+    NormalizedMutation, ObjectKey, ProtocolDomain, Quote, RuntimeInput, SeriesKey, StatePath,
+    Symbol, Tick,
 };
 
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload};
@@ -19,13 +23,60 @@ pub(crate) struct ReplayTickSpec {
     pub(crate) view_width: usize,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct BacktestTickWindowState {
+    row_ids: VecDeque<i64>,
+    retained_ids: HashSet<i64>,
+}
+
+impl BacktestTickWindowState {
+    fn push(&mut self, id: i64, capacity: usize) -> Vec<i64> {
+        let capacity = capacity.max(1);
+        if self.retained_ids.insert(id) {
+            self.row_ids.push_back(id);
+        }
+        let mut evicted = Vec::new();
+        while self.row_ids.len() > capacity {
+            if let Some(id) = self.row_ids.pop_front() {
+                self.retained_ids.remove(&id);
+                evicted.push(id);
+            }
+        }
+        evicted
+    }
+
+    fn right_id(&self) -> i64 {
+        *self
+            .row_ids
+            .back()
+            .expect("a tick window contains the current tick")
+    }
+
+    fn left_id(&self, view_width: usize) -> i64 {
+        let index = self.row_ids.len().saturating_sub(view_width.max(1));
+        self.row_ids[index]
+    }
+}
+
 pub(crate) fn ingest_replay_market_event(
     host: &TaskHost,
     event: &ReplayMarketEvent,
     klines: &[ReplayKlineSpec],
     ticks: &[ReplayTickSpec],
 ) -> Result<()> {
-    let body = match event.payload() {
+    ingest_replay_market_batch(
+        host,
+        vec![replay_market_update(event, klines, ticks)],
+        Vec::new(),
+    )
+}
+
+pub(crate) fn replay_market_update(
+    event: &ReplayMarketEvent,
+    klines: &[ReplayKlineSpec],
+    ticks: &[ReplayTickSpec],
+) -> Value {
+    match event.payload() {
         ReplayMarketPayload::Quote(quote) => {
             quote_update(event.symbol(), quote, event.underlying_symbol())
         }
@@ -39,7 +90,71 @@ pub(crate) fn ingest_replay_market_event(
         ReplayMarketPayload::Tick(tick) => {
             tick_update(event.symbol(), tick, ticks, event.underlying_symbol())
         }
-    };
+    }
+}
+
+/// Build already-normalized local-backtest mutations for one replayed market event.
+///
+/// A tick serial is only part of the facade state when the caller declared a
+/// corresponding subscription. Quote and simulator projection happen outside
+/// this helper, so quote-only backtests do not retain every historical tick.
+pub(crate) fn backtest_market_mutations(
+    event: &ReplayMarketEvent,
+    klines: &[ReplayKlineSpec],
+    ticks: &[ReplayTickSpec],
+    tick_windows: &mut HashMap<String, BacktestTickWindowState>,
+) -> Option<Vec<NormalizedMutation>> {
+    match event.payload() {
+        ReplayMarketPayload::Quote(quote) => Some(quote_mutations(
+            event.symbol(),
+            quote,
+            event.underlying_symbol(),
+        )),
+        ReplayMarketPayload::Kline { duration_ns, row } => Some(kline_mutations(
+            event.symbol(),
+            *duration_ns,
+            row,
+            klines,
+            event.underlying_symbol(),
+        )),
+        ReplayMarketPayload::Tick(tick) => backtest_tick_mutations(
+            event.symbol(),
+            tick,
+            ticks,
+            event.underlying_symbol(),
+            tick_windows,
+        ),
+    }
+}
+
+pub(crate) fn ingest_presorted_replay_market_mutations(
+    host: &TaskHost,
+    mut market_mutations: Vec<NormalizedMutation>,
+    quote_fields: Vec<(String, Vec<FieldMutation>)>,
+) -> Result<()> {
+    market_mutations.extend(quote_field_mutations(quote_fields));
+    if market_mutations.is_empty() {
+        return Ok(());
+    }
+
+    host.api()
+        .session()
+        .handle()
+        .ingest_presorted_market_mutations(market_mutations, vec![], CommitScope::ReplayStep)?;
+    Ok(())
+}
+
+pub(crate) fn ingest_replay_market_batch(
+    host: &TaskHost,
+    mut updates: Vec<Value>,
+    quote_fields: Vec<(String, Vec<FieldMutation>)>,
+) -> Result<()> {
+    if let Some(quote_update) = quote_fields_update(quote_fields) {
+        updates.push(quote_update);
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
 
     host.api().session().handle().ingest(
         RuntimeInput::Io(IoEvent {
@@ -47,13 +162,31 @@ pub(crate) fn ingest_replay_market_event(
             domains: vec![ProtocolDomain::Market],
             payload: InputPayload::Json(json!({
                 "aid": "rtn_data",
-                "data": [body]
+                "data": updates
             })),
         }),
         vec![],
         CommitScope::ReplayStep,
     )?;
     Ok(())
+}
+
+fn quote_fields_update(quote_fields: Vec<(String, Vec<FieldMutation>)>) -> Option<Value> {
+    let mut quotes = Map::new();
+    for (symbol, fields) in quote_fields {
+        let fields = fields
+            .into_iter()
+            .map(|field| (field.field, field.value))
+            .collect::<Map<_, _>>();
+        if !fields.is_empty() {
+            quotes.insert(symbol, Value::Object(fields));
+        }
+    }
+    if quotes.is_empty() {
+        None
+    } else {
+        Some(json!({"quotes": Value::Object(quotes)}))
+    }
 }
 
 pub(crate) fn seed_replay_serials(
@@ -249,6 +382,294 @@ fn tick_update(
     body
 }
 
+fn quote_mutations(
+    symbol: &str,
+    quote: &Quote,
+    underlying_symbol: Option<&str>,
+) -> Vec<NormalizedMutation> {
+    let mut fields = Vec::with_capacity(6);
+    push_string_if_present(&mut fields, "datetime", &quote.datetime);
+    push_f64_if_finite(&mut fields, "last_price", quote.last_price);
+    push_f64_if_finite(&mut fields, "ask_price1", quote.ask_price1);
+    push_i64_if_nonzero(&mut fields, "ask_volume1", quote.ask_volume1);
+    push_f64_if_finite(&mut fields, "bid_price1", quote.bid_price1);
+    push_i64_if_nonzero(&mut fields, "bid_volume1", quote.bid_volume1);
+    push_string_if_present(
+        &mut fields,
+        "underlying_symbol",
+        effective_underlying_symbol(quote, underlying_symbol),
+    );
+    market_mutation(
+        StatePath::new(["quotes", symbol]),
+        Some(ObjectKey::Quote {
+            symbol: Symbol::new(symbol),
+        }),
+        fields,
+    )
+    .into_iter()
+    .collect()
+}
+
+fn kline_mutations(
+    symbol: &str,
+    duration_ns: i64,
+    row: &Kline,
+    klines: &[ReplayKlineSpec],
+    underlying_symbol: Option<&str>,
+) -> Vec<NormalizedMutation> {
+    let mut mutations = Vec::with_capacity(klines.len().saturating_mul(2).saturating_add(2));
+    for spec in klines
+        .iter()
+        .filter(|spec| spec.symbol == symbol && spec.duration_ns == duration_ns)
+    {
+        push_chart_bounds_mutation(
+            &mut mutations,
+            &kline_chart_id(symbol, duration_ns, spec.view_width),
+            row.id,
+            row.id,
+        );
+    }
+
+    if let Some(mutation) = market_mutation(
+        StatePath::new([
+            "klines",
+            symbol,
+            duration_ns.to_string().as_str(),
+            "data",
+            row.id.to_string().as_str(),
+        ]),
+        Some(ObjectKey::Kline {
+            series: SeriesKey {
+                primary: Symbol::new(symbol),
+                secondary: Vec::new(),
+                duration_ns,
+                view_width: 0,
+                right_id: None,
+            },
+            bar_id: row.id,
+        }),
+        kline_fields(row),
+    ) {
+        mutations.push(mutation);
+    }
+    push_underlying_symbol_mutation(&mut mutations, symbol, underlying_symbol);
+    mutations
+}
+
+fn backtest_tick_mutations(
+    symbol: &str,
+    tick: &Tick,
+    ticks: &[ReplayTickSpec],
+    underlying_symbol: Option<&str>,
+    tick_windows: &mut HashMap<String, BacktestTickWindowState>,
+) -> Option<Vec<NormalizedMutation>> {
+    let specs = ticks
+        .iter()
+        .filter(|spec| spec.symbol == symbol)
+        .collect::<Vec<_>>();
+    let capacity = specs.iter().map(|spec| spec.view_width).max()?.max(1);
+    let window = tick_windows.entry(symbol.to_string()).or_default();
+    let evicted = window.push(tick.id, capacity);
+    let right_id = window.right_id();
+
+    let mut mutations = Vec::with_capacity(specs.len().saturating_mul(2).saturating_add(3));
+    for spec in specs {
+        push_chart_bounds_mutation(
+            &mut mutations,
+            &tick_chart_id(symbol, spec.view_width),
+            window.left_id(spec.view_width),
+            right_id,
+        );
+    }
+    push_underlying_symbol_mutation(&mut mutations, symbol, underlying_symbol);
+
+    if !evicted.is_empty() {
+        let fields = evicted
+            .into_iter()
+            .map(|id| FieldMutation {
+                field: id.to_string(),
+                value: Value::Null,
+            })
+            .collect();
+        if let Some(mutation) =
+            market_mutation(StatePath::new(["ticks", symbol, "data"]), None, fields)
+        {
+            mutations.push(mutation);
+        }
+    }
+    if let Some(mutation) = market_mutation(
+        StatePath::new(["ticks", symbol, "data", tick.id.to_string().as_str()]),
+        Some(ObjectKey::Tick {
+            symbol: Symbol::new(symbol),
+            tick_id: tick.id,
+        }),
+        tick_fields(tick),
+    ) {
+        mutations.push(mutation);
+    }
+    Some(mutations)
+}
+
+fn quote_field_mutations(
+    quote_fields: Vec<(String, Vec<FieldMutation>)>,
+) -> Vec<NormalizedMutation> {
+    let mut latest_by_symbol = BTreeMap::new();
+    for (symbol, fields) in quote_fields {
+        if !fields.is_empty() {
+            latest_by_symbol.insert(symbol, fields);
+        }
+    }
+
+    latest_by_symbol
+        .into_iter()
+        .filter_map(|(symbol, fields)| {
+            market_mutation(
+                StatePath::new(["quotes", symbol.as_str()]),
+                Some(ObjectKey::Quote {
+                    symbol: Symbol::new(symbol),
+                }),
+                fields,
+            )
+        })
+        .collect()
+}
+
+fn push_chart_bounds_mutation(
+    mutations: &mut Vec<NormalizedMutation>,
+    chart_id: &str,
+    left_id: i64,
+    right_id: i64,
+) {
+    if let Some(mutation) = market_mutation(
+        StatePath::new(["charts", chart_id]),
+        Some(ObjectKey::Chart {
+            chart_id: ChartId::new(chart_id),
+        }),
+        vec![
+            FieldMutation {
+                field: "left_id".to_string(),
+                value: Value::from(left_id),
+            },
+            FieldMutation {
+                field: "right_id".to_string(),
+                value: Value::from(right_id),
+            },
+        ],
+    ) {
+        mutations.push(mutation);
+    }
+}
+
+fn push_underlying_symbol_mutation(
+    mutations: &mut Vec<NormalizedMutation>,
+    symbol: &str,
+    underlying_symbol: Option<&str>,
+) {
+    let Some(underlying_symbol) = underlying_symbol.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if let Some(mutation) = market_mutation(
+        StatePath::new(["quotes", symbol]),
+        Some(ObjectKey::Quote {
+            symbol: Symbol::new(symbol),
+        }),
+        vec![FieldMutation {
+            field: "underlying_symbol".to_string(),
+            value: Value::from(underlying_symbol.to_string()),
+        }],
+    ) {
+        mutations.push(mutation);
+    }
+}
+
+fn kline_fields(row: &Kline) -> Vec<FieldMutation> {
+    let mut fields = Vec::with_capacity(9);
+    fields.push(FieldMutation {
+        field: "id".to_string(),
+        value: Value::from(row.id),
+    });
+    fields.push(FieldMutation {
+        field: "datetime".to_string(),
+        value: Value::from(row.datetime),
+    });
+    push_f64_if_finite(&mut fields, "open", row.open);
+    push_f64_if_finite(&mut fields, "high", row.high);
+    push_f64_if_finite(&mut fields, "low", row.low);
+    push_f64_if_finite(&mut fields, "close", row.close);
+    push_i64_if_nonzero(&mut fields, "volume", row.volume);
+    push_i64_if_nonzero(&mut fields, "open_oi", row.open_oi);
+    push_i64_if_nonzero(&mut fields, "close_oi", row.close_oi);
+    fields
+}
+
+fn tick_fields(row: &Tick) -> Vec<FieldMutation> {
+    let mut fields = Vec::with_capacity(14);
+    fields.push(FieldMutation {
+        field: "id".to_string(),
+        value: Value::from(row.id),
+    });
+    fields.push(FieldMutation {
+        field: "datetime".to_string(),
+        value: Value::from(row.datetime),
+    });
+    push_f64_if_finite(&mut fields, "last_price", row.last_price);
+    push_f64_if_finite(&mut fields, "average", row.average);
+    push_f64_if_finite(&mut fields, "highest", row.highest);
+    push_f64_if_finite(&mut fields, "lowest", row.lowest);
+    push_f64_if_finite(&mut fields, "ask_price1", row.ask_price1);
+    push_i64_if_nonzero(&mut fields, "ask_volume1", row.ask_volume1);
+    push_f64_if_finite(&mut fields, "bid_price1", row.bid_price1);
+    push_i64_if_nonzero(&mut fields, "bid_volume1", row.bid_volume1);
+    push_i64_if_nonzero(&mut fields, "volume", row.volume);
+    push_f64_if_finite(&mut fields, "amount", row.amount);
+    push_i64_if_nonzero(&mut fields, "open_interest", row.open_interest);
+    fields
+}
+
+fn market_mutation(
+    path: StatePath,
+    object: Option<ObjectKey>,
+    mut fields: Vec<FieldMutation>,
+) -> Option<NormalizedMutation> {
+    if fields.is_empty() {
+        return None;
+    }
+    fields.sort_unstable_by(|left, right| left.field.cmp(&right.field));
+    Some(NormalizedMutation {
+        path,
+        object,
+        fields,
+        source: MutationSource::MarketDiff,
+    })
+}
+
+fn push_string_if_present(fields: &mut Vec<FieldMutation>, key: &str, value: &str) {
+    if !value.is_empty() {
+        fields.push(FieldMutation {
+            field: key.to_string(),
+            value: Value::from(value.to_string()),
+        });
+    }
+}
+
+fn push_f64_if_finite(fields: &mut Vec<FieldMutation>, key: &str, value: f64) {
+    if let Some(value) = Number::from_f64(value) {
+        fields.push(FieldMutation {
+            field: key.to_string(),
+            value: Value::Number(value),
+        });
+    }
+}
+
+fn push_i64_if_nonzero(fields: &mut Vec<FieldMutation>, key: &str, value: i64) {
+    if value != 0 {
+        fields.push(FieldMutation {
+            field: key.to_string(),
+            value: Value::from(value),
+        });
+    }
+}
+
 fn kline_value(row: &Kline) -> Value {
     let mut value = Map::new();
     value.insert("id".to_string(), Value::from(row.id));
@@ -344,4 +765,39 @@ fn sanitize_chart_token(raw: &str) -> String {
     raw.chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BacktestTickWindowState;
+
+    #[test]
+    fn backtest_tick_window_preserves_duplicate_row_identity_without_linear_scan() {
+        let mut window = BacktestTickWindowState::default();
+
+        assert!(window.push(10, 2).is_empty());
+        assert!(window.push(11, 2).is_empty());
+        assert!(window.push(11, 2).is_empty());
+        assert_eq!(
+            window.row_ids.iter().copied().collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+
+        assert_eq!(window.push(12, 2), vec![10]);
+        assert_eq!(
+            window.row_ids.iter().copied().collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+    }
+
+    #[test]
+    fn backtest_tick_window_clamps_zero_capacity_to_one_row() {
+        let mut window = BacktestTickWindowState::default();
+
+        assert!(window.push(10, 0).is_empty());
+        assert_eq!(window.left_id(0), 10);
+        assert_eq!(window.right_id(), 10);
+        assert_eq!(window.push(11, 0), vec![10]);
+        assert_eq!(window.left_id(0), 11);
+    }
 }

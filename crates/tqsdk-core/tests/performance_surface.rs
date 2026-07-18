@@ -107,7 +107,7 @@ fn state_apply_records_changed_field_names_without_value_clone() {
 
     let commit_engine = include_str!("../src/runtime/commit_engine.rs");
     assert!(
-        commit_engine.contains("ChangeSet::from_applied_changes(&applied, &mutations)"),
+        commit_engine.contains("ChangeSet::from_applied_changes(&applied, mutations)"),
         "commit metadata should be built from applied-change records, not cloned mutations"
     );
 }

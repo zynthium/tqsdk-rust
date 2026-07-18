@@ -205,6 +205,35 @@ impl RuntimeHandle {
         self.ingest_market_quote_fields_inner(quotes, caused_by, scope, false)
     }
 
+    /// Record already-normalized market mutations without invoking a protocol adapter.
+    ///
+    /// This is an internal sibling-crate bridge for deterministic local replay. Callers
+    /// must supply `MarketDiff` mutations with fields already sorted by name.
+    #[doc(hidden)]
+    pub fn ingest_presorted_market_mutations<I>(
+        &self,
+        mutations: I,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<SharedCommitResult>>
+    where
+        I: IntoIterator<Item = NormalizedMutation>,
+    {
+        let mutations = mutations.into_iter().collect::<Vec<_>>();
+        if mutations.is_empty() {
+            return Ok(None);
+        }
+        if mutations
+            .iter()
+            .any(|mutation| mutation.source != MutationSource::MarketDiff)
+        {
+            return Err(ContractError::validation(
+                "presorted market mutations must use MarketDiff source",
+            ));
+        }
+        self.record_mutations(mutations, vec![ProtocolDomain::Market], caused_by, scope)
+    }
+
     fn ingest_market_quote_fields_inner<I>(
         &self,
         quotes: I,
@@ -847,8 +876,8 @@ mod tests {
         events::{
             FieldMutation, InputPayload, IoEvent, MutationSource, NormalizedMutation, RuntimeInput,
         },
-        ids::{AccountId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
-        state::{CommitScope, StatePath},
+        ids::{AccountId, ChartId, CommandId, OrderId, ProtocolDomain, Revision, Symbol},
+        state::{CommitScope, ObjectKey, StatePath},
     };
 
     use super::{Runtime, RuntimeHandle};
@@ -1086,6 +1115,176 @@ mod tests {
             json_handle
                 .latest_snapshot()
                 .get(["quotes", "SHFE.rb2601", "last_price"])
+        );
+    }
+
+    #[test]
+    fn presorted_market_mutations_match_json_market_diff() {
+        let json_handle = runtime_with_default_adapters();
+        let typed_handle = runtime_with_default_adapters();
+
+        let json_commit = json_handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "backtest".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "charts": {
+                                "tick-chart": {
+                                    "state": {
+                                        "duration": 0,
+                                        "ins_list": "SHFE.rb2601"
+                                    },
+                                    "left_id": 7,
+                                    "more_data": false,
+                                    "ready": true,
+                                    "right_id": 7
+                                }
+                            },
+                            "quotes": {
+                                "SHFE.rb2601": {
+                                    "underlying_symbol": "SHFE.rb2601"
+                                }
+                            },
+                            "ticks": {
+                                "SHFE.rb2601": {
+                                    "data": {
+                                        "7": {
+                                            "datetime": 1_781_182_800_000_000_000_i64,
+                                            "id": 7,
+                                            "last_price": 3012.5
+                                        }
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::ReplayStep,
+            )
+            .unwrap()
+            .expect("json market ingest should publish a commit");
+
+        let symbol = Symbol::new("SHFE.rb2601");
+        let typed_commit = typed_handle
+            .ingest_presorted_market_mutations(
+                vec![
+                    NormalizedMutation {
+                        path: StatePath::new(["charts", "tick-chart"]),
+                        object: Some(ObjectKey::Chart {
+                            chart_id: ChartId::new("tick-chart"),
+                        }),
+                        fields: vec![
+                            FieldMutation {
+                                field: "left_id".to_string(),
+                                value: json!(7),
+                            },
+                            FieldMutation {
+                                field: "more_data".to_string(),
+                                value: json!(false),
+                            },
+                            FieldMutation {
+                                field: "ready".to_string(),
+                                value: json!(true),
+                            },
+                            FieldMutation {
+                                field: "right_id".to_string(),
+                                value: json!(7),
+                            },
+                        ],
+                        source: MutationSource::MarketDiff,
+                    },
+                    NormalizedMutation {
+                        path: StatePath::new(["charts", "tick-chart", "state"]),
+                        object: None,
+                        fields: vec![
+                            FieldMutation {
+                                field: "duration".to_string(),
+                                value: json!(0),
+                            },
+                            FieldMutation {
+                                field: "ins_list".to_string(),
+                                value: json!("SHFE.rb2601"),
+                            },
+                        ],
+                        source: MutationSource::MarketDiff,
+                    },
+                    NormalizedMutation {
+                        path: StatePath::new(["quotes", "SHFE.rb2601"]),
+                        object: Some(ObjectKey::Quote {
+                            symbol: symbol.clone(),
+                        }),
+                        fields: vec![FieldMutation {
+                            field: "underlying_symbol".to_string(),
+                            value: json!("SHFE.rb2601"),
+                        }],
+                        source: MutationSource::MarketDiff,
+                    },
+                    NormalizedMutation {
+                        path: StatePath::new(["ticks", "SHFE.rb2601", "data", "7"]),
+                        object: Some(ObjectKey::Tick { symbol, tick_id: 7 }),
+                        fields: vec![
+                            FieldMutation {
+                                field: "datetime".to_string(),
+                                value: json!(1_781_182_800_000_000_000_i64),
+                            },
+                            FieldMutation {
+                                field: "id".to_string(),
+                                value: json!(7),
+                            },
+                            FieldMutation {
+                                field: "last_price".to_string(),
+                                value: json!(3012.5),
+                            },
+                        ],
+                        source: MutationSource::MarketDiff,
+                    },
+                ],
+                vec![],
+                CommitScope::ReplayStep,
+            )
+            .unwrap()
+            .expect("typed market ingest should publish a commit");
+
+        assert_eq!(typed_commit.domains, json_commit.domains);
+        assert_eq!(typed_commit.scope, json_commit.scope);
+        assert_eq!(typed_commit.changes, json_commit.changes);
+        assert_eq!(
+            typed_handle
+                .latest_snapshot()
+                .get(["ticks", "SHFE.rb2601", "data", "7", "last_price"]),
+            json_handle
+                .latest_snapshot()
+                .get(["ticks", "SHFE.rb2601", "data", "7", "last_price"])
+        );
+    }
+
+    #[test]
+    fn presorted_market_mutations_reject_non_market_source() {
+        let handle = runtime_with_default_adapters();
+
+        let error = handle
+            .ingest_presorted_market_mutations(
+                [NormalizedMutation {
+                    path: StatePath::new(["trade", "sim"]),
+                    object: None,
+                    fields: vec![FieldMutation {
+                        field: "value".to_string(),
+                        value: json!(1),
+                    }],
+                    source: MutationSource::TradeReply,
+                }],
+                vec![],
+                CommitScope::ReplayStep,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "validation error: presorted market mutations must use MarketDiff source"
         );
     }
 
