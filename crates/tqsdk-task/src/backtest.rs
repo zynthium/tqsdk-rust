@@ -9,8 +9,8 @@ use tqsdk_core::{FieldMutation, Kline, NormalizedMutation, Quote, Tick};
 use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
 use crate::replay_runtime::{
-    BacktestTickWindowState, ReplayKlineSpec, ReplayTickSpec, backtest_market_mutations,
-    ingest_presorted_replay_market_mutations, seed_replay_serials,
+    BacktestTickSubscription, ReplayKlineSpec, ReplayTickSpec, backtest_market_mutations,
+    backtest_tick_subscriptions, ingest_presorted_replay_market_mutations, seed_replay_serials,
 };
 use crate::sim::{TqSim, TqSimStepReport};
 use crate::strategy::StrategyHostBuilder;
@@ -49,11 +49,10 @@ pub struct StrategyBacktest {
     sim: TqSim,
     tracked_symbols: Vec<String>,
     klines: Vec<ReplayKlineSpec>,
-    ticks: Vec<ReplayTickSpec>,
     price_ticks: HashMap<String, f64>,
     quote_metadata_price_ticks: HashMap<String, f64>,
     last_replay_quotes: HashMap<String, ReplayStepQuote>,
-    tick_windows: HashMap<String, BacktestTickWindowState>,
+    tick_subscriptions: HashMap<String, BacktestTickSubscription>,
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
 }
@@ -172,7 +171,7 @@ impl StrategyBacktest {
         batch: &mut ReplayStepBatch,
     ) -> Result<()> {
         if let Some(mut mutations) =
-            backtest_market_mutations(event, &self.klines, &self.ticks, &mut self.tick_windows)
+            backtest_market_mutations(event, &self.klines, &mut self.tick_subscriptions)
         {
             batch.market_mutations.append(&mut mutations);
         }
@@ -473,6 +472,7 @@ impl StrategyBacktestBuilder {
         }
         sim.seed_runtime(&host)?;
         seed_replay_serials(&host, &klines, &ticks)?;
+        let tick_subscriptions = backtest_tick_subscriptions(&ticks);
         let mut builder = StrategyHostBuilder::new(host).account(sim.account_id());
         for quote in &quotes {
             builder = builder.quote(quote);
@@ -502,11 +502,10 @@ impl StrategyBacktestBuilder {
             sim,
             tracked_symbols,
             klines,
-            ticks,
             price_ticks,
             quote_metadata_price_ticks: HashMap::new(),
             last_replay_quotes: HashMap::new(),
-            tick_windows: HashMap::new(),
+            tick_subscriptions,
             default_price_tick,
             summary,
         })
@@ -1211,6 +1210,72 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(0),
             "seeded chart state must survive incremental bounds updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_backtest_keeps_distinct_bounds_for_tick_views_of_one_symbol() {
+        let replay = ReplayMarketSource::new(vec![
+            tick_event("SHFE.a", 10, 1_000, 101.0),
+            tick_event("SHFE.a", 11, 2_000, 102.0),
+            tick_event("SHFE.a", 12, 3_000, 103.0),
+        ]);
+        let mut backtest = StrategyBacktest::builder(replay)
+            .tick("SHFE.a", 1)
+            .tick("SHFE.a", 2)
+            .build()
+            .await
+            .expect("backtest should build");
+
+        drop(backtest.next().await.unwrap().expect("first step"));
+        drop(backtest.next().await.unwrap().expect("second step"));
+        let third = backtest.next().await.unwrap().expect("third step");
+        let market = third
+            .task_host()
+            .api()
+            .session()
+            .reader()
+            .read_market_state();
+
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-1", "left_id"])
+                .and_then(Value::as_i64),
+            Some(12)
+        );
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-1", "right_id"])
+                .and_then(Value::as_i64),
+            Some(12)
+        );
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-2", "left_id"])
+                .and_then(Value::as_i64),
+            Some(11)
+        );
+        assert_eq!(
+            market
+                .get_path(&["charts", "wait-tick-SHFE_a-2", "right_id"])
+                .and_then(Value::as_i64),
+            Some(12)
+        );
+        assert!(
+            market
+                .get_path(&["ticks", "SHFE.a", "data", "10"])
+                .is_none(),
+            "the largest declared window should reclaim rows outside its own capacity"
+        );
+        assert!(
+            market
+                .get_path(&["ticks", "SHFE.a", "data", "11"])
+                .is_some()
+        );
+        assert!(
+            market
+                .get_path(&["ticks", "SHFE.a", "data", "12"])
+                .is_some()
         );
     }
 

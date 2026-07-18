@@ -29,6 +29,19 @@ pub(crate) struct BacktestTickWindowState {
     retained_ids: HashSet<i64>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct BacktestTickSubscription {
+    charts: Vec<BacktestTickChart>,
+    max_view_width: usize,
+    window: BacktestTickWindowState,
+}
+
+#[derive(Debug)]
+struct BacktestTickChart {
+    view_width: usize,
+    chart_id: String,
+}
+
 impl BacktestTickWindowState {
     fn push(&mut self, id: i64, capacity: usize) -> Vec<i64> {
         let capacity = capacity.max(1);
@@ -56,6 +69,21 @@ impl BacktestTickWindowState {
         let index = self.row_ids.len().saturating_sub(view_width.max(1));
         self.row_ids[index]
     }
+}
+
+pub(crate) fn backtest_tick_subscriptions(
+    ticks: &[ReplayTickSpec],
+) -> HashMap<String, BacktestTickSubscription> {
+    let mut subscriptions = HashMap::<String, BacktestTickSubscription>::with_capacity(ticks.len());
+    for spec in ticks {
+        let subscription = subscriptions.entry(spec.symbol.clone()).or_default();
+        subscription.max_view_width = subscription.max_view_width.max(spec.view_width.max(1));
+        subscription.charts.push(BacktestTickChart {
+            view_width: spec.view_width,
+            chart_id: tick_chart_id(&spec.symbol, spec.view_width),
+        });
+    }
+    subscriptions
 }
 
 pub(crate) fn ingest_replay_market_event(
@@ -101,8 +129,7 @@ pub(crate) fn replay_market_update(
 pub(crate) fn backtest_market_mutations(
     event: &ReplayMarketEvent,
     klines: &[ReplayKlineSpec],
-    ticks: &[ReplayTickSpec],
-    tick_windows: &mut HashMap<String, BacktestTickWindowState>,
+    tick_subscriptions: &mut HashMap<String, BacktestTickSubscription>,
 ) -> Option<Vec<NormalizedMutation>> {
     match event.payload() {
         ReplayMarketPayload::Quote(quote) => Some(quote_mutations(
@@ -120,9 +147,8 @@ pub(crate) fn backtest_market_mutations(
         ReplayMarketPayload::Tick(tick) => backtest_tick_mutations(
             event.symbol(),
             tick,
-            ticks,
             event.underlying_symbol(),
-            tick_windows,
+            tick_subscriptions,
         ),
     }
 }
@@ -459,25 +485,27 @@ fn kline_mutations(
 fn backtest_tick_mutations(
     symbol: &str,
     tick: &Tick,
-    ticks: &[ReplayTickSpec],
     underlying_symbol: Option<&str>,
-    tick_windows: &mut HashMap<String, BacktestTickWindowState>,
+    tick_subscriptions: &mut HashMap<String, BacktestTickSubscription>,
 ) -> Option<Vec<NormalizedMutation>> {
-    let specs = ticks
-        .iter()
-        .filter(|spec| spec.symbol == symbol)
-        .collect::<Vec<_>>();
-    let capacity = specs.iter().map(|spec| spec.view_width).max()?.max(1);
-    let window = tick_windows.entry(symbol.to_string()).or_default();
-    let evicted = window.push(tick.id, capacity);
-    let right_id = window.right_id();
+    let subscription = tick_subscriptions.get_mut(symbol)?;
+    let evicted = subscription
+        .window
+        .push(tick.id, subscription.max_view_width);
+    let right_id = subscription.window.right_id();
 
-    let mut mutations = Vec::with_capacity(specs.len().saturating_mul(2).saturating_add(3));
-    for spec in specs {
+    let mut mutations = Vec::with_capacity(
+        subscription
+            .charts
+            .len()
+            .saturating_mul(2)
+            .saturating_add(3),
+    );
+    for chart in &subscription.charts {
         push_chart_bounds_mutation(
             &mut mutations,
-            &tick_chart_id(symbol, spec.view_width),
-            window.left_id(spec.view_width),
+            &chart.chart_id,
+            subscription.window.left_id(chart.view_width),
             right_id,
         );
     }
@@ -513,6 +541,25 @@ fn backtest_tick_mutations(
 fn quote_field_mutations(
     quote_fields: Vec<(String, Vec<FieldMutation>)>,
 ) -> Vec<NormalizedMutation> {
+    if quote_fields.is_empty() {
+        return Vec::new();
+    }
+    if quote_fields.len() == 1 {
+        let (symbol, fields) = quote_fields
+            .into_iter()
+            .next()
+            .expect("one quote field update must contain one entry");
+        return market_mutation(
+            StatePath::new(["quotes", symbol.as_str()]),
+            Some(ObjectKey::Quote {
+                symbol: Symbol::new(symbol),
+            }),
+            fields,
+        )
+        .into_iter()
+        .collect();
+    }
+
     let mut latest_by_symbol = BTreeMap::new();
     for (symbol, fields) in quote_fields {
         if !fields.is_empty() {
@@ -769,7 +816,47 @@ fn sanitize_chart_token(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::BacktestTickWindowState;
+    use serde_json::json;
+    use tqsdk_core::{FieldMutation, ObjectKey};
+
+    use super::{
+        BacktestTickWindowState, ReplayTickSpec, backtest_tick_subscriptions, quote_field_mutations,
+    };
+
+    #[test]
+    fn backtest_tick_subscriptions_precompute_chart_ids_and_capacity() {
+        let subscriptions = backtest_tick_subscriptions(&[
+            ReplayTickSpec {
+                symbol: "SHFE.au2606".to_string(),
+                view_width: 10,
+            },
+            ReplayTickSpec {
+                symbol: "SHFE.au2606".to_string(),
+                view_width: 100,
+            },
+            ReplayTickSpec {
+                symbol: "SHFE.ag2606".to_string(),
+                view_width: 5,
+            },
+        ]);
+
+        let subscription = subscriptions
+            .get("SHFE.au2606")
+            .expect("gold subscription should exist");
+        assert_eq!(subscription.max_view_width, 100);
+        assert_eq!(
+            subscription
+                .charts
+                .iter()
+                .map(|chart| (chart.view_width, chart.chart_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (10, "wait-tick-SHFE_au2606-10"),
+                (100, "wait-tick-SHFE_au2606-100"),
+            ]
+        );
+        assert_eq!(subscriptions.len(), 2);
+    }
 
     #[test]
     fn backtest_tick_window_preserves_duplicate_row_identity_without_linear_scan() {
@@ -799,5 +886,49 @@ mod tests {
         assert_eq!(window.right_id(), 10);
         assert_eq!(window.push(11, 0), vec![10]);
         assert_eq!(window.left_id(0), 11);
+    }
+
+    #[test]
+    fn quote_field_mutations_fast_path_emits_the_single_symbol_update() {
+        let mutations = quote_field_mutations(vec![(
+            "SHFE.au2606".to_string(),
+            vec![FieldMutation {
+                field: "last_price".to_string(),
+                value: json!(610.0),
+            }],
+        )]);
+
+        assert_eq!(mutations.len(), 1);
+        assert!(matches!(
+            &mutations[0].object,
+            Some(ObjectKey::Quote { symbol }) if symbol.as_str() == "SHFE.au2606"
+        ));
+        assert_eq!(mutations[0].fields[0].field, "last_price");
+        assert_eq!(mutations[0].fields[0].value, json!(610.0));
+    }
+
+    #[test]
+    fn quote_field_mutations_keep_last_update_for_duplicate_symbol() {
+        let mutations = quote_field_mutations(vec![
+            (
+                "SHFE.au2606".to_string(),
+                vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(610.0),
+                }],
+            ),
+            (
+                "SHFE.au2606".to_string(),
+                vec![FieldMutation {
+                    field: "bid_price1".to_string(),
+                    value: json!(609.8),
+                }],
+            ),
+        ]);
+
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].fields.len(), 1);
+        assert_eq!(mutations[0].fields[0].field, "bid_price1");
+        assert_eq!(mutations[0].fields[0].value, json!(609.8));
     }
 }
