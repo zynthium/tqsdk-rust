@@ -27,10 +27,17 @@ impl CommitEngine {
         }
 
         let next_revision = Revision::new(snapshot.revision().get() + 1);
-        snapshot.apply_with(next_revision, &mut mutations, |applied, mutations| {
+        let is_market_commit = domains == [ProtocolDomain::Market];
+        let apply = |applied: Vec<crate::state::AppliedChange>,
+                     mutations: &[NormalizedMutation]| {
             let changes = ChangeSet::from_applied_changes(&applied, mutations);
             publish_commit(next_revision, domains, changes, caused_by, scope, on_commit)
-        })
+        };
+        if is_market_commit {
+            snapshot.apply_market_with(next_revision, &mut mutations, apply)
+        } else {
+            snapshot.apply_with(next_revision, &mut mutations, apply)
+        }
     }
 }
 

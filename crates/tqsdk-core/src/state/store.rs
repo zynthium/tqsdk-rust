@@ -299,6 +299,106 @@ impl StateStore {
         }
     }
 
+    /// Applies a market-only batch while preserving the generic multi-root commit contract.
+    ///
+    /// Market updates commonly span quotes, charts, and serial rows. Locking their known
+    /// partitions directly avoids allocating a root set and searching the guard list for each
+    /// mutation, while retaining the `StateRoot` lock order used by the generic path.
+    pub(crate) fn apply_market_with<T, F>(
+        &self,
+        revision: Revision,
+        mutations: &mut [NormalizedMutation],
+        on_applied: F,
+    ) -> Option<T>
+    where
+        F: FnOnce(Vec<AppliedChange>, &[NormalizedMutation]) -> T,
+    {
+        let first = mutations.first()?;
+        let first_root = partition_path(first).0;
+        if mutations
+            .iter()
+            .all(|mutation| partition_path(mutation).0 == first_root)
+        {
+            return self.apply_single_root(revision, first_root, mutations, on_applied);
+        }
+
+        let mut has_quotes = false;
+        let mut has_trading_status = false;
+        let mut has_charts = false;
+        let mut has_klines = false;
+        let mut has_ticks = false;
+        let mut has_other = false;
+        for mutation in mutations.iter() {
+            match partition_path(mutation).0 {
+                StateRoot::Quotes => has_quotes = true,
+                StateRoot::TradingStatus => has_trading_status = true,
+                StateRoot::Charts => has_charts = true,
+                StateRoot::Klines => has_klines = true,
+                StateRoot::Ticks => has_ticks = true,
+                StateRoot::Other => has_other = true,
+                _ => return self.apply_with(revision, mutations, on_applied),
+            }
+        }
+
+        // Keep the same total lock order as StateRoot's Ord implementation and generic path.
+        let mut quotes = has_quotes.then(|| rwlock_write(&self.quotes));
+        let mut trading_status = has_trading_status.then(|| rwlock_write(&self.trading_status));
+        let mut charts = has_charts.then(|| rwlock_write(&self.charts));
+        let mut klines = has_klines.then(|| rwlock_write(&self.klines));
+        let mut ticks = has_ticks.then(|| rwlock_write(&self.ticks));
+        let mut other = has_other.then(|| rwlock_write(&self.other));
+
+        let mut applied = Vec::with_capacity(mutations.len());
+        for (mutation_index, mutation) in mutations.iter_mut().enumerate() {
+            let NormalizedMutation {
+                path,
+                object,
+                fields,
+                ..
+            } = mutation;
+            let (root, relative_path) = partition_path_segments(path.segments());
+            let partition: &mut Value = match root {
+                StateRoot::Quotes => &mut *quotes
+                    .as_mut()
+                    .expect("market quote root must have a write guard"),
+                StateRoot::TradingStatus => &mut *trading_status
+                    .as_mut()
+                    .expect("market trading_status root must have a write guard"),
+                StateRoot::Charts => &mut *charts
+                    .as_mut()
+                    .expect("market charts root must have a write guard"),
+                StateRoot::Klines => &mut *klines
+                    .as_mut()
+                    .expect("market klines root must have a write guard"),
+                StateRoot::Ticks => &mut *ticks
+                    .as_mut()
+                    .expect("market ticks root must have a write guard"),
+                StateRoot::Other => &mut *other
+                    .as_mut()
+                    .expect("market fallback root must have a write guard"),
+                _ => unreachable!("non-market root must use the generic state apply path"),
+            };
+            if let Some(changed) = apply_mutation_at_partition(
+                root,
+                partition,
+                relative_path,
+                mutation_index,
+                path,
+                object,
+                fields,
+            ) {
+                applied.push(changed);
+            }
+        }
+
+        if applied.is_empty() {
+            None
+        } else {
+            self.revision.store(revision.get(), Ordering::SeqCst);
+            Some(on_applied(applied, mutations))
+        }
+    }
+
     fn apply_single_root<T, F>(
         &self,
         revision: Revision,
@@ -747,6 +847,7 @@ mod tests {
     use super::*;
     use crate::{
         events::{FieldMutation, MutationSource, NormalizedMutation},
+        ids::{ChartId, Symbol},
         state::StatePath,
     };
 
@@ -866,5 +967,128 @@ mod tests {
                 .get(["system", "session", "reconnect", "detail"]),
             None
         );
+    }
+
+    #[test]
+    fn market_multi_root_fast_path_matches_generic_apply() {
+        let generic = StateStore::new(Revision::new(0));
+        let optimized = StateStore::new(Revision::new(0));
+        let mut generic_mutations = multi_root_market_mutations();
+        let mut optimized_mutations = generic_mutations.clone();
+
+        let generic_applied = generic
+            .apply_with(Revision::new(1), &mut generic_mutations, |applied, _| {
+                applied
+            })
+            .expect("generic market batch should apply");
+        let optimized_applied = optimized
+            .apply_market_with(Revision::new(1), &mut optimized_mutations, |applied, _| {
+                applied
+            })
+            .expect("optimized market batch should apply");
+
+        assert_eq!(optimized_applied, generic_applied);
+        assert_eq!(optimized.revision(), generic.revision());
+        assert_eq!(optimized.snapshot(), generic.snapshot());
+    }
+
+    #[test]
+    fn market_multi_root_fast_path_falls_back_for_non_market_partition() {
+        let generic = StateStore::new(Revision::new(0));
+        let optimized = StateStore::new(Revision::new(0));
+        let mut generic_mutations = vec![
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2606"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(610.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trade", "TQSIM", "accounts", "CNY"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "balance".to_string(),
+                    value: json!(1_000_000.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+        ];
+        let mut optimized_mutations = generic_mutations.clone();
+
+        let generic_applied = generic
+            .apply_with(Revision::new(1), &mut generic_mutations, |applied, _| {
+                applied
+            })
+            .expect("generic mixed batch should apply");
+        let optimized_applied = optimized
+            .apply_market_with(Revision::new(1), &mut optimized_mutations, |applied, _| {
+                applied
+            })
+            .expect("market fast path should fall back to generic apply");
+
+        assert_eq!(optimized_applied, generic_applied);
+        assert_eq!(optimized.snapshot(), generic.snapshot());
+    }
+
+    fn multi_root_market_mutations() -> Vec<NormalizedMutation> {
+        vec![
+            NormalizedMutation {
+                path: StatePath::new(["charts", "tick-chart"]),
+                object: Some(ObjectKey::Chart {
+                    chart_id: ChartId::new("tick-chart"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "right_id".to_string(),
+                    value: json!(7),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.au2606"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.au2606"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(610.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["ticks", "SHFE.au2606", "data", "7"]),
+                object: Some(ObjectKey::Tick {
+                    symbol: Symbol::new("SHFE.au2606"),
+                    tick_id: 7,
+                }),
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(610.0),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["trading_status", "SHFE.au2606"]),
+                object: Some(ObjectKey::TradingStatus {
+                    symbol: Symbol::new("SHFE.au2606"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "tradeable".to_string(),
+                    value: json!(true),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: StatePath::new(["symbols", "SHFE.au2606"]),
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "instrument_name".to_string(),
+                    value: json!("gold"),
+                }],
+                source: MutationSource::MarketDiff,
+            },
+        ]
     }
 }
