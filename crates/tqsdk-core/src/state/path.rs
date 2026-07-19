@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::ids::{
     AccountId, ChartId, CommandId, NotificationId, OrderId, QueryId, ReplaySessionId, SchemaId,
     Symbol, TradeId,
@@ -6,7 +8,7 @@ use crate::ids::{
 pub type PathSegment = String;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StatePath(Vec<PathSegment>);
+pub struct StatePath(Arc<[PathSegment]>);
 
 impl StatePath {
     pub fn new<I, S>(segments: I) -> Self
@@ -14,11 +16,17 @@ impl StatePath {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self(segments.into_iter().map(Into::into).collect())
+        Self(
+            segments
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+        )
     }
 
     pub(crate) fn quote(symbol: &Symbol) -> Self {
-        Self(vec!["quotes".to_string(), symbol.as_str().to_string()])
+        Self(vec!["quotes".to_string(), symbol.as_str().to_string()].into())
     }
 
     pub fn segments(&self) -> &[PathSegment] {
@@ -128,6 +136,15 @@ mod tests {
                 "ORDER-1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn state_path_clone_shares_segment_storage() {
+        let path = StatePath::new(["ticks", "SHFE.au2606", "data", "7"]);
+        let cloned = path.clone();
+
+        assert!(Arc::ptr_eq(&path.0, &cloned.0));
+        assert_eq!(cloned.segments(), path.segments());
     }
 
     #[test]
