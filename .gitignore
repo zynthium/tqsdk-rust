@@ -24,3 +24,4 @@ docs/designs
 .gemini/
 opencode.jsonc
 GEMINI.md
+.tokensave/
