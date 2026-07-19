@@ -97,6 +97,21 @@ fn applied_change_metadata_does_not_store_owned_field_names() {
 }
 
 #[test]
+fn dense_small_applied_changes_avoid_quadratic_field_deduplication() {
+    let source = include_str!("../src/state/changes.rs");
+    let block = function_block(
+        source,
+        "pub(crate) fn from_applied_changes(",
+        "\n    fn from_small_applied_changes(",
+    );
+
+    assert!(
+        block.contains("field_hit_capacity <= LINEAR_APPLIED_FIELD_HIT_LIMIT"),
+        "field-dense replay commits should use hash-based deduplication even with few mutations"
+    );
+}
+
+#[test]
 fn state_apply_records_changed_field_names_without_value_clone() {
     let source = include_str!("../src/state/store.rs");
     let apply_fields = function_block(source, "fn apply_fields(", "\n}\n\nfn preserves_null_field");

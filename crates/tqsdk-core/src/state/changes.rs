@@ -62,6 +62,7 @@ pub struct ChangeSet {
 }
 
 const LINEAR_APPLIED_CHANGESET_LIMIT: usize = 8;
+const LINEAR_APPLIED_FIELD_HIT_LIMIT: usize = 8;
 
 impl ChangeSet {
     pub fn from_mutations(mutations: &[NormalizedMutation]) -> Self {
@@ -106,14 +107,16 @@ impl ChangeSet {
         changes: &[AppliedChange],
         mutations: &[NormalizedMutation],
     ) -> Self {
-        if changes.len() <= LINEAR_APPLIED_CHANGESET_LIMIT {
-            return Self::from_small_applied_changes(changes, mutations);
-        }
-
         let field_hit_capacity = changes
             .iter()
             .map(|change| change.field_indexes.len())
             .sum();
+        if changes.len() <= LINEAR_APPLIED_CHANGESET_LIMIT
+            && field_hit_capacity <= LINEAR_APPLIED_FIELD_HIT_LIMIT
+        {
+            return Self::from_small_applied_changes(changes, mutations, field_hit_capacity);
+        }
+
         let mut path_seen: HashSet<&StatePath> = HashSet::with_capacity(changes.len());
         let mut object_seen: HashSet<&ObjectKey> = HashSet::with_capacity(changes.len());
         let mut field_seen: HashSet<(&StatePath, &ObjectKey, &str)> =
@@ -165,11 +168,8 @@ impl ChangeSet {
     fn from_small_applied_changes(
         changes: &[AppliedChange],
         mutations: &[NormalizedMutation],
+        field_hit_capacity: usize,
     ) -> Self {
-        let field_hit_capacity = changes
-            .iter()
-            .map(|change| change.field_indexes.len())
-            .sum();
         let mut change_set = Self {
             path_hits: Vec::with_capacity(changes.len()),
             object_hits: Vec::with_capacity(changes.len()),
@@ -444,6 +444,81 @@ mod tests {
                 ChangeHit::field(path.clone(), object.clone(), "ask_price1"),
                 ChangeHit::field(path, object, "bid_price1"),
             ]
+        );
+    }
+
+    #[test]
+    fn dense_applied_changes_preserve_path_object_and_field_deduplication() {
+        let path = StatePath::new(["ticks", "SHFE.au2606", "data", "7"]);
+        let object = ObjectKey::Tick {
+            symbol: Symbol::new("SHFE.au2606"),
+            tick_id: 7,
+        };
+        let field_names = [
+            "id",
+            "datetime",
+            "last_price",
+            "average",
+            "highest",
+            "lowest",
+            "ask_price1",
+            "ask_volume1",
+            "bid_price1",
+            "bid_volume1",
+        ];
+        let mutations = vec![
+            NormalizedMutation {
+                path: path.clone(),
+                object: Some(object.clone()),
+                fields: field_names[..8]
+                    .iter()
+                    .map(|field| FieldMutation {
+                        field: (*field).to_string(),
+                        value: json!(1),
+                    })
+                    .collect(),
+                source: MutationSource::MarketDiff,
+            },
+            NormalizedMutation {
+                path: path.clone(),
+                object: Some(object.clone()),
+                fields: ["id", "bid_price1", "bid_volume1"]
+                    .into_iter()
+                    .map(|field| FieldMutation {
+                        field: field.to_string(),
+                        value: json!(2),
+                    })
+                    .collect(),
+                source: MutationSource::MarketDiff,
+            },
+        ];
+        let applied = vec![
+            AppliedChange::new(
+                "ticks",
+                path.clone(),
+                Some(object.clone()),
+                0,
+                (0..8).collect(),
+            ),
+            AppliedChange::new(
+                "ticks",
+                path.clone(),
+                Some(object.clone()),
+                1,
+                (0..3).collect(),
+            ),
+        ];
+
+        let changes = ChangeSet::from_applied_changes(&applied, &mutations);
+
+        assert_eq!(changes.path_hits, vec![path.clone()]);
+        assert_eq!(changes.object_hits, vec![object.clone()]);
+        assert_eq!(
+            changes.field_hits,
+            field_names
+                .into_iter()
+                .map(|field| ChangeHit::field(path.clone(), object.clone(), field))
+                .collect::<Vec<_>>(),
         );
     }
 
