@@ -687,18 +687,15 @@ fn apply_fields(
 
     for (field_index, field) in fields.iter_mut().enumerate() {
         let preserve_null = preserves_null_field(object, &field.field);
-        let has_changed = if field.value.is_null() && !preserve_null {
-            map.contains_key(&field.field)
-        } else {
-            map.get(&field.field) != Some(&field.value)
-        };
-
-        if !has_changed {
-            continue;
-        }
-
         if field.value.is_null() && !preserve_null {
-            map.remove(&field.field);
+            if map.remove(&field.field).is_none() {
+                continue;
+            }
+        } else if let Some(existing) = map.get_mut(&field.field) {
+            if *existing == field.value {
+                continue;
+            }
+            *existing = std::mem::replace(&mut field.value, Value::Null);
         } else {
             let value = std::mem::replace(&mut field.value, Value::Null);
             map.insert(field.field.clone(), value);
@@ -817,6 +814,7 @@ fn ensure_child_object<'a>(root: &'a mut Value, segment: &PathSegment) -> (&'a m
     let Value::Object(map) = root else {
         unreachable!("state snapshot intermediate nodes must always be objects");
     };
+
     if !map.contains_key(segment) {
         map.insert(segment.clone(), Value::Object(Map::new()));
         changed = true;
@@ -959,6 +957,61 @@ mod tests {
             store
                 .snapshot()
                 .get(["system", "session", "reconnect", "detail"]),
+            None
+        );
+    }
+
+    #[test]
+    fn state_store_updates_and_evicts_rolling_tick_rows() {
+        let store = StateStore::new(Revision::new(0));
+        let tick_path = StatePath::new(["ticks", "SHFE.au2606", "data", "7"]);
+        let tick_data_path = StatePath::new(["ticks", "SHFE.au2606", "data"]);
+
+        let insert = NormalizedMutation {
+            path: tick_path.clone(),
+            object: Some(ObjectKey::Tick {
+                symbol: Symbol::new("SHFE.au2606"),
+                tick_id: 7,
+            }),
+            fields: vec![FieldMutation {
+                field: "last_price".to_string(),
+                value: json!(610.0),
+            }],
+            source: MutationSource::MarketDiff,
+        };
+        let update = NormalizedMutation {
+            path: tick_path,
+            object: Some(ObjectKey::Tick {
+                symbol: Symbol::new("SHFE.au2606"),
+                tick_id: 7,
+            }),
+            fields: vec![FieldMutation {
+                field: "last_price".to_string(),
+                value: json!(611.0),
+            }],
+            source: MutationSource::MarketDiff,
+        };
+        let evict = NormalizedMutation {
+            path: tick_data_path,
+            object: None,
+            fields: vec![FieldMutation {
+                field: "7".to_string(),
+                value: Value::Null,
+            }],
+            source: MutationSource::MarketDiff,
+        };
+
+        assert_eq!(store.apply(Revision::new(1), &[insert]).len(), 1);
+        assert_eq!(store.apply(Revision::new(2), &[update]).len(), 1);
+        assert_eq!(
+            store
+                .snapshot()
+                .get(["ticks", "SHFE.au2606", "data", "7", "last_price"]),
+            Some(&json!(611.0))
+        );
+        assert_eq!(store.apply(Revision::new(3), &[evict]).len(), 1);
+        assert_eq!(
+            store.snapshot().get(["ticks", "SHFE.au2606", "data", "7"]),
             None
         );
     }
