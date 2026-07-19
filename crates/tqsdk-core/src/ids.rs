@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Revision(u64);
 
@@ -60,7 +62,6 @@ macro_rules! string_id {
     };
 }
 
-string_id!(Symbol);
 string_id!(AccountId);
 string_id!(OrderId);
 string_id!(TradeId);
@@ -70,6 +71,25 @@ string_id!(ReplaySessionId);
 string_id!(AuthId);
 string_id!(ChartId);
 string_id!(NotificationId);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Symbol(Arc<str>);
+
+impl Symbol {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Arc::<str>::from(value.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolDomain {
@@ -91,5 +111,19 @@ impl ProtocolDomain {
             Self::Query => "query",
             Self::Schema => "schema",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Symbol;
+
+    #[test]
+    fn symbol_clone_shares_string_storage() {
+        let symbol = Symbol::new("SHFE.au2606");
+        let cloned = symbol.clone();
+
+        assert!(std::sync::Arc::ptr_eq(&symbol.0, &cloned.0));
+        assert_eq!(cloned.as_str(), "SHFE.au2606");
     }
 }

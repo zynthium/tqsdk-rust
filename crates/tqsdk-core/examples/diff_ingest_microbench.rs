@@ -17,19 +17,23 @@ const DEFAULT_SINGLE_ITERS: u64 = 20_000;
 const DEFAULT_BATCH_ITERS: u64 = 1_000;
 const DEFAULT_NOOP_ITERS: u64 = 20_000;
 const DEFAULT_READ_ITERS: u64 = 50_000;
+const DEFAULT_TICK_ITERS: u64 = 20_000;
 const DEFAULT_BATCH_SYMBOLS: usize = 100;
 const DEFAULT_LARGE_BATCH_SYMBOLS: usize = 1_000;
+const DEFAULT_TICK_WINDOW: usize = 100;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let single_iters = env_u64("TQSDK_DIFF_BENCH_SINGLE_ITERS", DEFAULT_SINGLE_ITERS);
     let batch_iters = env_u64("TQSDK_DIFF_BENCH_BATCH_ITERS", DEFAULT_BATCH_ITERS);
     let noop_iters = env_u64("TQSDK_DIFF_BENCH_NOOP_ITERS", DEFAULT_NOOP_ITERS);
     let read_iters = env_u64("TQSDK_DIFF_BENCH_READ_ITERS", DEFAULT_READ_ITERS);
+    let tick_iters = env_u64("TQSDK_DIFF_BENCH_TICK_ITERS", DEFAULT_TICK_ITERS);
     let batch_symbols = env_usize("TQSDK_DIFF_BENCH_BATCH_SYMBOLS", DEFAULT_BATCH_SYMBOLS);
     let large_batch_symbols = env_usize(
         "TQSDK_DIFF_BENCH_LARGE_BATCH_SYMBOLS",
         DEFAULT_LARGE_BATCH_SYMBOLS,
     );
+    let tick_window = env_usize("TQSDK_DIFF_BENCH_TICK_WINDOW", DEFAULT_TICK_WINDOW);
 
     println!("tqsdk-core DIFF ingest microbench");
     println!("profile: run with --release for useful numbers");
@@ -54,6 +58,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         "ingest_noop_single_quote",
         noop_iters,
         &single_symbols,
+    )?);
+    print_result(run_rolling_tick_ingest_case(
+        "ingest_rolling_tick_window",
+        tick_iters,
+        &single_symbols[0],
+        tick_window,
     )?);
 
     let batch_symbols = bench_symbols(batch_symbols);
@@ -154,6 +164,16 @@ fn run_sparse_ingest_case(
     let items_per_iter = changed_per_iter.min(symbols.len());
     let inputs = sparse_quote_inputs(iterations, symbols, changed_per_iter);
     run_ingest_inputs_with_handle(name, handle, inputs, items_per_iter)
+}
+
+fn run_rolling_tick_ingest_case(
+    name: &'static str,
+    iterations: u64,
+    symbol: &str,
+    window: usize,
+) -> tqsdk_core::Result<BenchResult> {
+    let inputs = rolling_tick_inputs(iterations, symbol, window);
+    run_ingest_inputs_case(name, inputs, 1)
 }
 
 fn run_text_ingest_case(
@@ -387,6 +407,12 @@ fn sparse_quote_inputs(
         .collect()
 }
 
+fn rolling_tick_inputs(iterations: u64, symbol: &str, window: usize) -> Vec<RuntimeInput> {
+    (1..=iterations)
+        .map(|tick_id| market_input(rolling_tick_rtn_data(symbol, tick_id as i64, window)))
+        .collect()
+}
+
 fn quote_rtn_data(symbols: &[String], sequence: u64) -> Value {
     let mut quotes = Map::with_capacity(symbols.len());
     for (index, symbol) in symbols.iter().enumerate() {
@@ -438,6 +464,29 @@ fn sparse_quote_rtn_data(
     Value::Object(envelope)
 }
 
+fn rolling_tick_rtn_data(symbol: &str, tick_id: i64, window: usize) -> Value {
+    let mut data = Map::with_capacity(2);
+    if tick_id > window as i64 {
+        data.insert((tick_id - window as i64).to_string(), Value::Null);
+    }
+    data.insert(tick_id.to_string(), tick_fields(tick_id));
+
+    let mut serial = Map::with_capacity(2);
+    serial.insert("last_id".to_string(), Value::from(tick_id));
+    serial.insert("data".to_string(), Value::Object(data));
+
+    let mut ticks = Map::with_capacity(1);
+    ticks.insert(symbol.to_string(), Value::Object(serial));
+
+    let mut root = Map::with_capacity(1);
+    root.insert("ticks".to_string(), Value::Object(ticks));
+
+    let mut envelope = Map::with_capacity(2);
+    envelope.insert("aid".to_string(), Value::String("rtn_data".to_string()));
+    envelope.insert("data".to_string(), Value::Array(vec![Value::Object(root)]));
+    Value::Object(envelope)
+}
+
 fn quote_fields(sequence: u64, index: usize) -> Value {
     let price = 600.0 + index as f64 * 0.01 + sequence as f64 * 0.001;
     let mut fields = Map::new();
@@ -457,6 +506,30 @@ fn quote_fields(sequence: u64, index: usize) -> Value {
     fields.insert(
         "open_interest".to_string(),
         Value::from(10_000_i64 + index as i64),
+    );
+    Value::Object(fields)
+}
+
+fn tick_fields(tick_id: i64) -> Value {
+    let price = 600.0 + tick_id as f64 * 0.001;
+    let mut fields = Map::new();
+    fields.insert("id".to_string(), Value::from(tick_id));
+    fields.insert(
+        "datetime".to_string(),
+        Value::from(1_780_000_000_000_000_000_i64 + tick_id),
+    );
+    fields.insert("last_price".to_string(), number(price));
+    fields.insert("average".to_string(), number(price - 0.01));
+    fields.insert("highest".to_string(), number(price + 0.2));
+    fields.insert("lowest".to_string(), number(price - 0.2));
+    fields.insert("ask_price1".to_string(), number(price + 0.01));
+    fields.insert("ask_volume1".to_string(), Value::from(12_i64));
+    fields.insert("bid_price1".to_string(), number(price - 0.01));
+    fields.insert("bid_volume1".to_string(), Value::from(10_i64));
+    fields.insert("volume".to_string(), Value::from(tick_id));
+    fields.insert(
+        "open_interest".to_string(),
+        Value::from(10_000_i64 + tick_id),
     );
     Value::Object(fields)
 }
