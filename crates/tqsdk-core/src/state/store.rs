@@ -283,7 +283,6 @@ impl StateStore {
                 &mut *partition,
                 relative_path,
                 mutation_index,
-                path,
                 object,
                 fields,
             ) {
@@ -383,7 +382,6 @@ impl StateStore {
                 partition,
                 relative_path,
                 mutation_index,
-                path,
                 object,
                 fields,
             ) {
@@ -424,7 +422,6 @@ impl StateStore {
                 &mut partition,
                 relative_path,
                 mutation_index,
-                path,
                 object,
                 fields,
             ) {
@@ -462,7 +459,6 @@ fn apply_mutation_at_partition(
     root: &mut Value,
     path: &[PathSegment],
     mutation_index: usize,
-    mutation_path: &super::StatePath,
     object: &Option<ObjectKey>,
     fields: &mut [crate::events::FieldMutation],
 ) -> Option<AppliedChange> {
@@ -487,8 +483,6 @@ fn apply_mutation_at_partition(
     } else {
         Some(AppliedChange::new(
             partition_root.as_str(),
-            mutation_path.clone(),
-            object.clone(),
             mutation_index,
             field_indexes,
         ))

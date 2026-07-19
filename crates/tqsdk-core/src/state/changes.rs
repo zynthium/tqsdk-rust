@@ -30,8 +30,6 @@ impl ChangeHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AppliedChange {
     pub(crate) root: &'static str,
-    pub(crate) path: StatePath,
-    pub(crate) object: Option<ObjectKey>,
     pub(crate) mutation_index: usize,
     pub(crate) field_indexes: Vec<usize>,
 }
@@ -39,15 +37,11 @@ pub(crate) struct AppliedChange {
 impl AppliedChange {
     pub(crate) fn new(
         root: &'static str,
-        path: StatePath,
-        object: Option<ObjectKey>,
         mutation_index: usize,
         field_indexes: Vec<usize>,
     ) -> Self {
         Self {
             root,
-            path,
-            object,
             mutation_index,
             field_indexes,
         }
@@ -130,34 +124,33 @@ impl ChangeSet {
 
         for change in changes {
             debug_assert!(!change.root.is_empty());
-            if path_seen.insert(&change.path) {
-                change_set.path_hits.push(change.path.clone());
+            let Some(mutation) = mutations.get(change.mutation_index) else {
+                debug_assert!(false, "applied change must point at an input mutation");
+                continue;
+            };
+            let path = &mutation.path;
+            if path_seen.insert(path) {
+                change_set.path_hits.push(path.clone());
             }
 
-            if let Some(object) = &change.object {
-                if object_seen.insert(object) {
-                    change_set.object_hits.push(object.clone());
-                }
+            let Some(object) = &mutation.object else {
+                continue;
+            };
+            if object_seen.insert(object) {
+                change_set.object_hits.push(object.clone());
+            }
 
-                let Some(mutation) = mutations.get(change.mutation_index) else {
-                    debug_assert!(false, "applied change must point at an input mutation");
+            for field_index in &change.field_indexes {
+                let Some(field) = mutation.fields.get(*field_index) else {
+                    debug_assert!(false, "applied field index must point at mutation field");
                     continue;
                 };
-                debug_assert_eq!(mutation.path, change.path);
-                debug_assert_eq!(mutation.object, change.object);
-
-                for field_index in &change.field_indexes {
-                    let Some(field) = mutation.fields.get(*field_index) else {
-                        debug_assert!(false, "applied field index must point at mutation field");
-                        continue;
-                    };
-                    if field_seen.insert((&change.path, object, field.field.as_str())) {
-                        change_set.field_hits.push(ChangeHit::field(
-                            change.path.clone(),
-                            object.clone(),
-                            field.field.clone(),
-                        ));
-                    }
+                if field_seen.insert((path, object, field.field.as_str())) {
+                    change_set.field_hits.push(ChangeHit::field(
+                        path.clone(),
+                        object.clone(),
+                        field.field.clone(),
+                    ));
                 }
             }
         }
@@ -178,12 +171,17 @@ impl ChangeSet {
 
         for change in changes {
             debug_assert!(!change.root.is_empty());
-            let path_is_new = !change_set.path_hits.iter().any(|path| path == &change.path);
+            let Some(mutation) = mutations.get(change.mutation_index) else {
+                debug_assert!(false, "applied change must point at an input mutation");
+                continue;
+            };
+            let path = &mutation.path;
+            let path_is_new = !change_set.path_hits.iter().any(|existing| existing == path);
             if path_is_new {
-                change_set.path_hits.push(change.path.clone());
+                change_set.path_hits.push(path.clone());
             }
 
-            let Some(object) = &change.object else {
+            let Some(object) = &mutation.object else {
                 continue;
             };
             let object_is_new = !change_set
@@ -194,23 +192,16 @@ impl ChangeSet {
                 change_set.object_hits.push(object.clone());
             }
 
-            let Some(mutation) = mutations.get(change.mutation_index) else {
-                debug_assert!(false, "applied change must point at an input mutation");
-                continue;
-            };
-            debug_assert_eq!(mutation.path, change.path);
-            debug_assert_eq!(mutation.object, change.object);
-
             for field_index in &change.field_indexes {
                 let Some(field) = mutation.fields.get(*field_index) else {
                     debug_assert!(false, "applied field index must point at mutation field");
                     continue;
                 };
                 if !change_set.field_hits.iter().any(|hit| {
-                    hit.path == change.path && hit.object == *object && hit.field == field.field
+                    hit.path == *path && hit.object == *object && hit.field == field.field
                 }) {
                     change_set.field_hits.push(ChangeHit::field(
-                        change.path.clone(),
+                        path.clone(),
                         object.clone(),
                         field.field.clone(),
                     ));
@@ -422,15 +413,9 @@ mod tests {
             },
         ];
         let applied = vec![
-            AppliedChange::new(
-                "quotes",
-                path.clone(),
-                Some(object.clone()),
-                0,
-                vec![0, 1, 2],
-            ),
-            AppliedChange::new("quotes", path.clone(), Some(object.clone()), 1, vec![0, 1]),
-            AppliedChange::new("quotes", auxiliary_path.clone(), None, 2, vec![0]),
+            AppliedChange::new("quotes", 0, vec![0, 1, 2]),
+            AppliedChange::new("quotes", 1, vec![0, 1]),
+            AppliedChange::new("quotes", 2, vec![0]),
         ];
 
         let changes = ChangeSet::from_applied_changes(&applied, &mutations);
@@ -493,20 +478,8 @@ mod tests {
             },
         ];
         let applied = vec![
-            AppliedChange::new(
-                "ticks",
-                path.clone(),
-                Some(object.clone()),
-                0,
-                (0..8).collect(),
-            ),
-            AppliedChange::new(
-                "ticks",
-                path.clone(),
-                Some(object.clone()),
-                1,
-                (0..3).collect(),
-            ),
+            AppliedChange::new("ticks", 0, (0..8).collect()),
+            AppliedChange::new("ticks", 1, (0..3).collect()),
         ];
 
         let changes = ChangeSet::from_applied_changes(&applied, &mutations);
