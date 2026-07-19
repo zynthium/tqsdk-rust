@@ -11,8 +11,9 @@ use crate::{
 use super::{
     ProtocolAdapter,
     common::{
-        build_chart_message, decode_io_payload, extend_symbols, is_market_io_event, join_symbols,
-        remove_symbols, request_with_peek, validate_chart_request,
+        build_chart_message, decode_io_payload, decode_io_payload_owned, extend_symbols,
+        is_market_io_event, join_symbols, remove_symbols, request_with_peek,
+        validate_chart_request,
     },
 };
 
@@ -83,6 +84,15 @@ impl ProtocolAdapter for MarketAdapter {
         match input {
             RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Market) => {
                 decode_io_payload(event, MutationSource::MarketDiff, vec![])
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    fn decode_owned(&mut self, input: RuntimeInput) -> Result<Vec<NormalizedMutation>> {
+        match input {
+            RuntimeInput::Io(event) if event.domains.contains(&ProtocolDomain::Market) => {
+                decode_io_payload_owned(event, MutationSource::MarketDiff, vec![])
             }
             _ => Ok(vec![]),
         }

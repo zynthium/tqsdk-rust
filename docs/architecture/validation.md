@@ -77,6 +77,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 ### adapter 边界
 - adapter 可以编解码和保留短期协议态
+- 恰好一个 adapter 接受输入时，registry 可以把 `RuntimeInput` 所有权交给该 adapter 的消费式解码路径；这不得改变 mutation、commit 或 revision 语义
+- 多个 adapter 接受同一输入时，registry 必须保留借用式 fan-out；未覆写消费式解码的自定义 adapter 必须继续通过默认借用式实现兼容
 - adapter 不得直接推进 revision
 - adapter 不得直接发通知给上层
 - adapter 不得直接改 cursor
@@ -91,14 +93,15 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | query response commit | GraphQL / HTTP 查询返回结果 | 结果写入 `query/*`，形成可见 commit | query 结果进入 snapshot |
 | session error commit | auth 失效或 transport 异常 | session 错误进入 `system/*` 并形成 commit | system 错误统一可见 |
 | cursor isolation | 两个 cursor 从不同 revision 开始消费 | 各自独立推进 | cursor 独立性 |
-| multi-adapter observation | 一个输入被多个 adapter 观察 | 只通过 mutation/commit 对外可见 | adapter 无提交权 |
+| single-adapter input ownership | 一个输入只被一个 adapter 接受 | 可消费输入且产出与借用式解码相同的 mutation | 输入所有权不改变 commit 语义 |
+| multi-adapter observation | 一个输入被多个 adapter 观察 | 保持借用式 fan-out，只通过 mutation/commit 对外可见 | adapter 无提交权 |
 
 ## 当前实现验证入口
 当前仓库已经有直接对应 V1 contract 的验证入口，可作为“功能全景”验收基线：
 
 | 能力面 | 主要验证文件 | 说明 |
 | :--- | :--- | :--- |
-| DIFF 协议对象 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_batch_commit.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs` | 覆盖 market diff、trade diff、query/schema/replay 输入归一化与提交 |
+| DIFF 协议对象 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_batch_commit.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs`、`crates/tqsdk-core/src/adapter.rs` 单元测试 | 覆盖 market diff、trade diff、query/schema/replay 输入归一化与提交，以及单 adapter 消费式解码和多 adapter 借用式广播 |
 | trade 命令与状态 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_command_ledger.rs` | 覆盖 `req_login`、`insert_order`、`pre_insert_order` 及命令状态写回 |
 | replay/feed 推进 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs` | 覆盖 replay pending route 执行与 replay state 提交 |
 | auth/session/system 控制 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_auth_context.rs`、`crates/tqsdk-core/tests/runtime_contract_session_state.rs`、`crates/tqsdk-core/tests/runtime_contract_session_runtime.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |

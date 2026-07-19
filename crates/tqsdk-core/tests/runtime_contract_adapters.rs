@@ -1,15 +1,20 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use serde_json::{Value, json};
 use tqsdk_core::adapter::{
     MarketAdapter, QueryAdapter, ReplayAdapter, SchemaAdapter, SystemAdapter, TradeAdapter,
 };
 use tqsdk_core::{
-    AccountId, AdapterRegistry, ChartId, FieldMutation, HttpMethod, InputPayload, InternalEvent,
-    MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation, NotificationId,
-    ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter, ProtocolDomain,
-    QueryCommand, QueryId, ReplayCommand, ReplayEvent, ReplaySessionId, RuntimeCommand,
-    RuntimeInput, SchemaCommand, StatePath, Symbol, SystemCommand, TradeCommand, TradeDirection,
-    TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradePreInsertOrderCommand,
-    TradePriceType, TradeTimeCondition, TradeVolumeCondition,
+    AccountId, AdapterRegistry, ChartId, CommitScope, FieldMutation, HttpMethod, InputPayload,
+    InternalEvent, MarketChartCommand, MarketCommand, MutationSource, NormalizedMutation,
+    NotificationId, ObjectKey, OrderId, OutboundFrame, OutboundRequest, ProtocolAdapter,
+    ProtocolDomain, QueryCommand, QueryId, ReplayCommand, ReplayEvent, ReplaySessionId,
+    RuntimeCommand, RuntimeHandle, RuntimeInput, SchemaCommand, StatePath, Symbol, SystemCommand,
+    TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset,
+    TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition, TradeVolumeCondition,
 };
 
 #[derive(Clone)]
@@ -44,6 +49,214 @@ impl ProtocolAdapter for StubAdapter {
     fn decode(&mut self, _input: &RuntimeInput) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
         Ok(self.decoded.clone())
     }
+}
+
+#[derive(Clone)]
+struct DecodePathAdapter {
+    domain: ProtocolDomain,
+    accepted_input_label: &'static str,
+    borrowed_calls: Arc<AtomicUsize>,
+    owned_calls: Arc<AtomicUsize>,
+}
+
+impl ProtocolAdapter for DecodePathAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        self.domain
+    }
+
+    fn accepts_command(&self, _cmd: &RuntimeCommand) -> bool {
+        false
+    }
+
+    fn encode(&mut self, _cmd: &RuntimeCommand) -> tqsdk_core::Result<Vec<OutboundRequest>> {
+        Ok(Vec::new())
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(
+            input,
+            RuntimeInput::Internal(InternalEvent { label, .. }) if *label == self.accepted_input_label
+        )
+    }
+
+    fn decode(&mut self, _input: &RuntimeInput) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
+        self.borrowed_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+
+    fn decode_owned(
+        &mut self,
+        _input: RuntimeInput,
+    ) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
+        self.owned_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone)]
+struct BorrowOnlyAdapter {
+    domain: ProtocolDomain,
+    accepted_input_label: &'static str,
+    borrowed_calls: Arc<AtomicUsize>,
+}
+
+impl ProtocolAdapter for BorrowOnlyAdapter {
+    fn domain(&self) -> ProtocolDomain {
+        self.domain
+    }
+
+    fn accepts_command(&self, _cmd: &RuntimeCommand) -> bool {
+        false
+    }
+
+    fn encode(&mut self, _cmd: &RuntimeCommand) -> tqsdk_core::Result<Vec<OutboundRequest>> {
+        Ok(Vec::new())
+    }
+
+    fn accepts_input(&self, input: &RuntimeInput) -> bool {
+        matches!(
+            input,
+            RuntimeInput::Internal(InternalEvent { label, .. }) if *label == self.accepted_input_label
+        )
+    }
+
+    fn decode(&mut self, _input: &RuntimeInput) -> tqsdk_core::Result<Vec<NormalizedMutation>> {
+        self.borrowed_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn runtime_ingest_keeps_single_adapter_default_decode_compatible() {
+    let borrowed_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(BorrowOnlyAdapter {
+        domain: ProtocolDomain::System,
+        accepted_input_label: "single",
+        borrowed_calls: Arc::clone(&borrowed_calls),
+    });
+    let handle = RuntimeHandle::with_adapters(registry);
+
+    assert!(
+        handle
+            .ingest(
+                RuntimeInput::Internal(InternalEvent {
+                    label: "single",
+                    payload: None,
+                }),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(borrowed_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn runtime_ingest_routes_unique_adapter_to_consuming_decode() {
+    let borrowed_calls = Arc::new(AtomicUsize::new(0));
+    let owned_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(DecodePathAdapter {
+        domain: ProtocolDomain::System,
+        accepted_input_label: "single",
+        borrowed_calls: Arc::clone(&borrowed_calls),
+        owned_calls: Arc::clone(&owned_calls),
+    });
+    let handle = RuntimeHandle::with_adapters(registry);
+
+    assert!(
+        handle
+            .ingest(
+                RuntimeInput::Internal(InternalEvent {
+                    label: "single",
+                    payload: None,
+                }),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(borrowed_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(owned_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn runtime_ingest_batch_routes_unique_inputs_to_consuming_decode() {
+    let borrowed_calls = Arc::new(AtomicUsize::new(0));
+    let owned_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(DecodePathAdapter {
+        domain: ProtocolDomain::System,
+        accepted_input_label: "single",
+        borrowed_calls: Arc::clone(&borrowed_calls),
+        owned_calls: Arc::clone(&owned_calls),
+    });
+    let handle = RuntimeHandle::with_adapters(registry);
+
+    assert!(
+        handle
+            .ingest_batch(
+                vec![
+                    RuntimeInput::Internal(InternalEvent {
+                        label: "single",
+                        payload: None,
+                    }),
+                    RuntimeInput::Internal(InternalEvent {
+                        label: "single",
+                        payload: None,
+                    }),
+                ],
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(borrowed_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(owned_calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn runtime_ingest_preserves_borrowed_multi_adapter_fanout() {
+    let first_borrowed = Arc::new(AtomicUsize::new(0));
+    let first_owned = Arc::new(AtomicUsize::new(0));
+    let second_borrowed = Arc::new(AtomicUsize::new(0));
+    let second_owned = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry.register_adapter(DecodePathAdapter {
+        domain: ProtocolDomain::System,
+        accepted_input_label: "shared",
+        borrowed_calls: Arc::clone(&first_borrowed),
+        owned_calls: Arc::clone(&first_owned),
+    });
+    registry.register_adapter(DecodePathAdapter {
+        domain: ProtocolDomain::Replay,
+        accepted_input_label: "shared",
+        borrowed_calls: Arc::clone(&second_borrowed),
+        owned_calls: Arc::clone(&second_owned),
+    });
+    let handle = RuntimeHandle::with_adapters(registry);
+
+    assert!(
+        handle
+            .ingest(
+                RuntimeInput::Internal(InternalEvent {
+                    label: "shared",
+                    payload: None,
+                }),
+                Vec::new(),
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(first_borrowed.load(Ordering::Relaxed), 1);
+    assert_eq!(second_borrowed.load(Ordering::Relaxed), 1);
+    assert_eq!(first_owned.load(Ordering::Relaxed), 0);
+    assert_eq!(second_owned.load(Ordering::Relaxed), 0);
 }
 
 #[test]

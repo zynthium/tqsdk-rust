@@ -27,7 +27,7 @@
 3. adapter 将命令编码成 `OutboundRequest`
 4. runtime 发送请求或推进 replay/feed
 5. runtime 接收 `RuntimeInput`
-6. 将输入广播给 interested adapters
+6. registry 确定 interested adapters：恰好一个时可将输入所有权交给它；多个时保持借用式广播
 7. adapter 解码为 `NormalizedMutation`
 8. `StateStore` 应用 mutation
 9. `ProjectionEngine` 归并 path/object/field 命中
@@ -39,6 +39,7 @@
 - 命令分发、输入解码、状态提交属于同一条 session runtime 链路
 - raw input 到达不等于一定形成 commit
 - adapter 可以保留短期协议态，但没有 commit 权
+- 输入所有权仅是解码期的分配优化：单 adapter 可消费 `RuntimeInput`，多 adapter 的观察和广播语义不变
 - 所有热路径读取都应通过 `RuntimeReader::read()` 获得 zero-copy 视图，而不是依赖快照 clone
 
 ## commit 触发规则

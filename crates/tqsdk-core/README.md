@@ -90,7 +90,7 @@ research 代码反复解析 `YYYY-MM-DD` 字符串。
 | `MarketStateReadGuard` / `TradeStateReadGuard` / `MarketTradeStateReadGuard` | hot path 分区读面；组合 guard 用于同 revision 读取 market + trade |
 | `CommitReadGuard` | exact revision 的 commit + state 读面 |
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
-| `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码 |
+| `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码；单一 interested adapter 可消费输入，多个 adapter 保持借用式 fan-out |
 | `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
 | `tqsdk_core::transport::{Transport, SessionRouteConnector, DefaultRouteConnector}` | 底层 transport seam 与默认 route connector |
 | `tqsdk_core::transport::WebSocketTransport` | yawc-backed websocket transport；需要 `websocket-transport` feature |
@@ -114,13 +114,19 @@ RuntimeCommand
   -> OutboundDispatch
   -> transport / HTTP / replay / internal route
   -> RuntimeInput
-  -> ProtocolAdapter decode
+  -> AdapterRegistry decode dispatch
+  -> ProtocolAdapter decode / decode_owned
   -> NormalizedMutation
   -> CommitResult + SharedCommitResult + Revision
   -> RuntimeReader / UpdateCursor
 ```
 
 这个内核最重要的约束很简单：所有上层可见状态都必须进入同一棵状态树，所有上层可见变化都必须由同一套 commit / revision / causality 语义解释。
+
+`ProtocolAdapter::decode_owned(...)` 是 `decode(...)` 的可选消费式优化路径。registry 只有在
+恰好一个 adapter 接受输入时才会调用它，以便 market DIFF 不必复制 JSON value；多个 adapter
+接受同一输入时仍使用原有借用式 fan-out。自定义 adapter 不需要覆写该方法，默认实现会调用
+既有的 `decode(...)`，因此不会改变现有 adapter 的源兼容性或 runtime 提交语义。
 
 ## 快速开始
 

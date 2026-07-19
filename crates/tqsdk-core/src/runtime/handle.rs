@@ -148,15 +148,10 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
+        let domains = input_domains(&input);
         let mut inner = mutex_lock(&self.inner);
-        let mutations = inner.adapters.decode_input(&input)?;
-        self.apply_and_publish_locked(
-            &mut inner,
-            mutations,
-            input_domains(&input),
-            caused_by,
-            scope,
-        )
+        let mutations = inner.adapters.decode_input_owned(input)?;
+        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
     }
 
     pub fn ingest_batch(
@@ -165,18 +160,13 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
+        let domains = batch_input_domains(&inputs);
         let mut inner = mutex_lock(&self.inner);
         let mut mutations = Vec::new();
-        for input in &inputs {
-            mutations.extend(inner.adapters.decode_input(input)?);
+        for input in inputs {
+            mutations.extend(inner.adapters.decode_input_owned(input)?);
         }
-        self.apply_and_publish_locked(
-            &mut inner,
-            mutations,
-            batch_input_domains(&inputs),
-            caused_by,
-            scope,
-        )
+        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
     }
 
     #[doc(hidden)]

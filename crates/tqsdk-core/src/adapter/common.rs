@@ -317,6 +317,17 @@ pub(super) fn decode_io_payload(
     }
 }
 
+pub(super) fn decode_io_payload_owned(
+    event: IoEvent,
+    source: MutationSource,
+    prefix: Vec<String>,
+) -> Result<Vec<NormalizedMutation>> {
+    match event.payload {
+        InputPayload::Json(value) => decode_json_envelope_owned(value, source, prefix),
+        InputPayload::Text(_) | InputPayload::Binary(_) => Ok(vec![]),
+    }
+}
+
 fn json_request(value: Value) -> OutboundRequest {
     OutboundRequest::Transport(OutboundFrame::Text(value.to_string()))
 }
@@ -428,6 +439,37 @@ fn decode_json_envelope(
     decode_json_value(value, source, prefix)
 }
 
+fn decode_json_envelope_owned(
+    value: Value,
+    source: MutationSource,
+    prefix: Vec<String>,
+) -> Result<Vec<NormalizedMutation>> {
+    if DiffInboundAid::from_value(&value) == DiffInboundAid::RtnData {
+        let Value::Object(mut envelope) = value else {
+            return Err(ContractError::Adapter(
+                "rtn_data.data must be an array".to_string(),
+            ));
+        };
+        let Some(Value::Array(data)) = envelope.remove("data") else {
+            return Err(ContractError::Adapter(
+                "rtn_data.data must be an array".to_string(),
+            ));
+        };
+        let mut mutations = Vec::new();
+        for item in data {
+            match decode_market_quote_rtn_data_item_owned(item, source, &prefix) {
+                Ok(decoded) => mutations.extend(decoded),
+                Err(item) => {
+                    mutations.extend(decode_json_value_owned(item, source, prefix.clone())?);
+                }
+            }
+        }
+        return Ok(mutations);
+    }
+
+    decode_json_value_owned(value, source, prefix)
+}
+
 fn decode_notify_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
     let mut mutations = Vec::new();
     if DiffInboundAid::from_value(value) == DiffInboundAid::RtnData {
@@ -461,6 +503,43 @@ fn decode_market_quote_rtn_data_item(
     source: MutationSource,
     prefix: &[String],
 ) -> Option<Vec<NormalizedMutation>> {
+    let quotes = market_quote_rtn_data_item_quotes(value, source, prefix)?;
+    decode_quote_object_fast_path(quotes)
+}
+
+fn decode_market_quote_rtn_data_item_owned(
+    value: Value,
+    source: MutationSource,
+    prefix: &[String],
+) -> std::result::Result<Vec<NormalizedMutation>, Value> {
+    let Some(quotes) = market_quote_rtn_data_item_quotes(&value, source, prefix) else {
+        return Err(value);
+    };
+    if quotes.values().any(|value| {
+        value
+            .as_object()
+            .is_none_or(|fields| fields.values().any(Value::is_object))
+    }) {
+        return Err(value);
+    }
+
+    let Value::Object(mut item) = value else {
+        unreachable!("market quote fast path shape was prevalidated");
+    };
+    let Value::Object(quotes) = item
+        .remove("quotes")
+        .expect("market quote fast path must contain quotes")
+    else {
+        unreachable!("market quote fast path quotes must be an object");
+    };
+    Ok(decode_quote_object_fast_path_owned(quotes))
+}
+
+fn market_quote_rtn_data_item_quotes<'a>(
+    value: &'a Value,
+    source: MutationSource,
+    prefix: &[String],
+) -> Option<&'a Map<String, Value>> {
     if source != MutationSource::MarketDiff || !prefix.is_empty() {
         return None;
     }
@@ -471,7 +550,7 @@ fn decode_market_quote_rtn_data_item(
     }
 
     let quotes = item.get("quotes")?.as_object()?;
-    decode_quote_object_fast_path(quotes)
+    Some(quotes)
 }
 
 fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<NormalizedMutation>> {
@@ -510,6 +589,31 @@ fn decode_quote_object_fast_path(quotes: &Map<String, Value>) -> Option<Vec<Norm
     }
 
     Some(mutations)
+}
+
+fn decode_quote_object_fast_path_owned(quotes: Map<String, Value>) -> Vec<NormalizedMutation> {
+    let mut mutations = Vec::with_capacity(quotes.len());
+
+    for (symbol, value) in quotes {
+        let Value::Object(fields) = value else {
+            unreachable!("market quote fast path shape was prevalidated");
+        };
+        let mut fields = fields
+            .into_iter()
+            .map(|(field, value)| FieldMutation { field, value })
+            .collect::<Vec<_>>();
+        fields.sort_unstable_by(|left, right| left.field.cmp(&right.field));
+
+        let symbol = Symbol::new(symbol);
+        mutations.push(NormalizedMutation {
+            path: StatePath::quote(&symbol),
+            object: Some(ObjectKey::Quote { symbol }),
+            fields,
+            source: MutationSource::MarketDiff,
+        });
+    }
+
+    mutations
 }
 
 fn decode_query_envelope(value: &Value) -> Result<Vec<NormalizedMutation>> {
@@ -627,6 +731,31 @@ fn decode_json_value(
     Ok(mutations)
 }
 
+fn decode_json_value_owned(
+    value: Value,
+    source: MutationSource,
+    prefix: Vec<String>,
+) -> Result<Vec<NormalizedMutation>> {
+    let mut mutations = Vec::new();
+    match value {
+        Value::Object(map) => {
+            let mut path = prefix;
+            flatten_object_owned(&mut path, map, source, &mut mutations);
+        }
+        value if !prefix.is_empty() => mutations.push(NormalizedMutation {
+            path: StatePath::new(prefix),
+            object: None,
+            fields: vec![FieldMutation {
+                field: "value".to_string(),
+                value,
+            }],
+            source,
+        }),
+        _ => {}
+    }
+    Ok(mutations)
+}
+
 fn flatten_object(
     path: &mut Vec<String>,
     map: &Map<String, Value>,
@@ -694,6 +823,68 @@ fn flatten_object(
                 source,
             });
             path.pop();
+        }
+    }
+}
+
+fn flatten_object_owned(
+    path: &mut Vec<String>,
+    map: Map<String, Value>,
+    source: MutationSource,
+    out: &mut Vec<NormalizedMutation>,
+) {
+    let was_empty = map.is_empty();
+    let mut fields = Vec::new();
+    let mut children = Vec::new();
+
+    for (field, value) in map {
+        if matches!(value, Value::Object(_)) || emits_scalar_leaf(path.as_slice(), &field) {
+            children.push((field, value));
+        } else {
+            fields.push(FieldMutation { field, value });
+        }
+    }
+    fields.sort_by(|left, right| left.field.cmp(&right.field));
+    inject_market_data_row_id(path.as_slice(), &mut fields);
+
+    if !path.is_empty() && !fields.is_empty() {
+        out.push(NormalizedMutation {
+            path: StatePath::new(path.iter().cloned()),
+            object: infer_object_key_from_segments(path.as_slice()),
+            fields,
+            source,
+        });
+    } else if !path.is_empty() && was_empty {
+        out.push(NormalizedMutation {
+            path: StatePath::new(path.iter().cloned()),
+            object: infer_object_key_from_segments(path.as_slice()),
+            fields: Vec::new(),
+            source,
+        });
+    }
+
+    for (field, value) in children {
+        match value {
+            Value::Object(child) => {
+                path.push(field);
+                flatten_object_owned(path, child, source, out);
+                path.pop();
+            }
+            value => {
+                debug_assert!(emits_scalar_leaf(path.as_slice(), &field));
+                let object = infer_object_key_from_segments(path.as_slice());
+                path.push(field);
+                out.push(NormalizedMutation {
+                    path: StatePath::new(path.iter().cloned()),
+                    object,
+                    fields: vec![FieldMutation {
+                        field: "value".to_string(),
+                        value,
+                    }],
+                    source,
+                });
+                path.pop();
+            }
         }
     }
 }
