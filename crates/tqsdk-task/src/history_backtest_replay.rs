@@ -27,6 +27,35 @@ pub struct HistoryBacktestReplayRequest {
     pub synthetic_klines: Vec<HistoryBacktestKlineRequest>,
 }
 
+/// One cache-backed tick range replayed under a possibly different symbol.
+///
+/// This lets a continuous contract reuse the physical contract's history while
+/// keeping its stable strategy-facing symbol during replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryBacktestTickSource {
+    pub replay_symbol: String,
+    pub cache_symbol: String,
+    pub start_ns: i64,
+    pub end_ns: i64,
+}
+
+/// One synthetic kline stream sourced from a projected tick range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryBacktestSyntheticKlineSource {
+    pub tick_source: HistoryBacktestTickSource,
+    pub duration_ns: i64,
+}
+
+/// Replay request with explicit logical-to-physical tick projections.
+pub struct HistoryBacktestProjectedReplayRequest {
+    pub cache: HistorySeriesCache,
+    pub start_ns: i64,
+    pub end_ns: i64,
+    pub tick_sources: Vec<HistoryBacktestTickSource>,
+    pub native_klines: Vec<HistoryBacktestKlineRequest>,
+    pub synthetic_kline_sources: Vec<HistoryBacktestSyntheticKlineSource>,
+}
+
 pub struct HistoryBacktestReplayStream {
     cursors: Vec<HistoryCursor>,
     heap: BinaryHeap<HeapItem>,
@@ -34,6 +63,7 @@ pub struct HistoryBacktestReplayStream {
 
 struct HistoryCursor {
     symbol: String,
+    underlying_symbol: Option<String>,
     symbol_rank: usize,
     producer: CursorProducer,
     next: Option<QueuedEvent>,
@@ -84,6 +114,7 @@ impl HistoryBacktestReplayStream {
                 .map_err(data_error_to_task)?;
             cursors.push(HistoryCursor {
                 symbol,
+                underlying_symbol: None,
                 symbol_rank: 0,
                 producer: CursorProducer::Tick { reader },
                 next: None,
@@ -103,6 +134,7 @@ impl HistoryBacktestReplayStream {
             let synth = KlineSynthesizer::new(spec.symbol.clone(), spec.duration_ns)?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
+                underlying_symbol: None,
                 symbol_rank: 0,
                 producer: CursorProducer::SyntheticKline { reader, synth },
                 next: None,
@@ -130,6 +162,111 @@ impl HistoryBacktestReplayStream {
             )?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
+                underlying_symbol: None,
+                symbol_rank: 0,
+                producer: CursorProducer::NativeKline { events },
+                next: None,
+            });
+        }
+
+        let symbol_ranks = cursors
+            .iter()
+            .map(|cursor| cursor.symbol.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .enumerate()
+            .map(|(rank, symbol)| (symbol, rank))
+            .collect::<BTreeMap<_, _>>();
+        let mut heap = BinaryHeap::new();
+        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
+            cursor.symbol_rank = symbol_ranks
+                .get(cursor.symbol.as_str())
+                .copied()
+                .unwrap_or(cursor_index);
+            push_next_event(cursor, cursor_index, &mut heap)?;
+        }
+
+        Ok(Self { cursors, heap })
+    }
+
+    pub fn new_projected(request: HistoryBacktestProjectedReplayRequest) -> Result<Self> {
+        validate_request_range(request.start_ns, request.end_ns)?;
+        let mut cursors = Vec::new();
+
+        for source in request.tick_sources {
+            validate_projected_tick_source(&source, request.start_ns, request.end_ns)?;
+            let reader = request
+                .cache
+                .open_tick_data_series_reader(TickDataSeriesRequest::new(
+                    &source.cache_symbol,
+                    source.start_ns,
+                    source.end_ns,
+                ))
+                .map_err(data_error_to_task)?;
+            let underlying_symbol =
+                (source.replay_symbol != source.cache_symbol).then_some(source.cache_symbol);
+            cursors.push(HistoryCursor {
+                symbol: source.replay_symbol,
+                underlying_symbol,
+                symbol_rank: 0,
+                producer: CursorProducer::Tick { reader },
+                next: None,
+            });
+        }
+
+        for source in request.synthetic_kline_sources {
+            validate_projected_tick_source(&source.tick_source, request.start_ns, request.end_ns)?;
+            if source.duration_ns <= 0 {
+                return Err(TaskError::InvalidState(
+                    "projected synthetic kline duration_ns must be positive",
+                ));
+            }
+            let reader = request
+                .cache
+                .open_tick_data_series_reader(TickDataSeriesRequest::new(
+                    &source.tick_source.cache_symbol,
+                    source.tick_source.start_ns,
+                    source.tick_source.end_ns,
+                ))
+                .map_err(data_error_to_task)?;
+            let synth = KlineSynthesizer::new(
+                source.tick_source.replay_symbol.clone(),
+                source.duration_ns,
+            )?;
+            let underlying_symbol = (source.tick_source.replay_symbol
+                != source.tick_source.cache_symbol)
+                .then_some(source.tick_source.cache_symbol);
+            cursors.push(HistoryCursor {
+                symbol: source.tick_source.replay_symbol,
+                underlying_symbol,
+                symbol_rank: 0,
+                producer: CursorProducer::SyntheticKline { reader, synth },
+                next: None,
+            });
+        }
+
+        for spec in request.native_klines {
+            validate_kline_request(&spec)?;
+            let duration = Duration::from_nanos(spec.duration_ns as u64);
+            let series = request
+                .cache
+                .read_kline_data_series(KlineDataSeriesRequest::new(
+                    &spec.symbol,
+                    duration,
+                    request.start_ns,
+                    request.end_ns,
+                ))
+                .map_err(data_error_to_task)?;
+            let events = native_kline_events(
+                &spec.symbol,
+                spec.duration_ns,
+                request.start_ns,
+                request.end_ns,
+                series.into_rows(),
+            )?;
+            cursors.push(HistoryCursor {
+                symbol: spec.symbol,
+                underlying_symbol: None,
                 symbol_rank: 0,
                 producer: CursorProducer::NativeKline { events },
                 next: None,
@@ -168,8 +305,13 @@ impl HistoryBacktestReplayStream {
         debug_assert_eq!(queued.event.event_time_ns(), item.event_time_ns);
         debug_assert_eq!(queued.source_rank, item.source_rank);
         debug_assert_eq!(queued.row_id, item.row_id);
+        let underlying_symbol = cursor.underlying_symbol.clone();
         push_next_event(cursor, item.cursor_index, &mut self.heap)?;
-        Ok(Some(queued.event))
+        let event = match underlying_symbol {
+            Some(underlying_symbol) => queued.event.with_underlying_symbol(underlying_symbol)?,
+            None => queued.event,
+        };
+        Ok(Some(event))
     }
 }
 
@@ -230,6 +372,26 @@ fn push_next_event(
             symbol_rank: cursor.symbol_rank,
             row_id: queued.row_id,
         });
+    }
+    Ok(())
+}
+
+fn validate_projected_tick_source(
+    source: &HistoryBacktestTickSource,
+    request_start_ns: i64,
+    request_end_ns: i64,
+) -> Result<()> {
+    validate_symbol(&source.replay_symbol)?;
+    validate_symbol(&source.cache_symbol)?;
+    if source.start_ns >= source.end_ns {
+        return Err(TaskError::InvalidState(
+            "projected tick source start_ns must be less than end_ns",
+        ));
+    }
+    if source.start_ns < request_start_ns || source.end_ns > request_end_ns {
+        return Err(TaskError::InvalidState(
+            "projected tick source must be inside replay request range",
+        ));
     }
     Ok(())
 }

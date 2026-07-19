@@ -101,6 +101,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `StrategyReplaySourceBuilder` 可接收 `KlineDataSeries` / `TickDataSeries` 生成 history replay
   - `StrategyReplaySourceBuilder::kline_series_as(...)` / `tick_series_as(...)` 可把 underlying history 以主连等 caller-provided replay symbol 回放，并把原 series symbol 写入 quote `underlying_symbol`
   - `kline_rows_with_underlying(...)` / `tick_rows_with_underlying(...)` 为手工 rows 提供同样的 quote `underlying_symbol` metadata；不需要 metadata 时仍可用 `kline_rows(...)` / `tick_rows(...)`
+  - `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 让 cache-backed
+    facade 按每个物理 tick range 回放到逻辑 symbol；`KQ.m@...` 主连因此读取具体合约
+    cache file，同时为 replay quote 写入 `underlying_symbol`
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence

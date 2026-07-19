@@ -34,6 +34,14 @@ auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tic
 对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。
 
+`KQ.m@EX.product` 主连回测会通过
+`tqsdk_data::DataClient::query_his_cont_underlying_segments(...)` 查询历史映射，并按 CST
+交易日把逻辑主连投影到具体合约 tick range。缓存文件、coverage、remote-on-miss、refresh 和
+warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约共用一份 tick cache；回放仍使用
+主连 symbol，quote 的 `underlying_symbol` 标注当时实际合约。映射查询不需天勤账号，但主连
+`.cache_only()` 仍需访问这份公开 metadata。主连 `duration > 60s` 的 native K 线目前不支持；
+改用 `duration <= 60s` 让 K 线从共享 tick 合成。
+
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
 tick cache；`.kline(symbol, duration, view_width)` 对 `duration <= 60s` 的 K 线从本地 tick
 流合成，不写入 native K 线缓存；`duration > 60s` 的 K 线对齐官方 Python 行为，读取
@@ -45,7 +53,7 @@ backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
 backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
 缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会先跳过完整缓存，再把
-每个 symbol 的 `missing_ranges` 交给内部有界远端调度器，用官方 server-side backtest 流只补缺口。默认不做
+每个物理 cache symbol 的 `missing_ranges` 交给内部有界远端调度器，用官方 server-side backtest 流只补缺口。默认不做
 时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。补齐成功后只
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由

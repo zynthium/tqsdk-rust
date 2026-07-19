@@ -106,8 +106,11 @@ V1 是：
   - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
     共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
     `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
-    tick cache，缺失时按每个 symbol 的 `missing_ranges` 通过官方 server-side
-    backtest market stream 填充缓存并驱动本地 `TqSim`；cache hit 不需要 auth，
+    tick cache，缺失时按每个物理 cache symbol 的 `missing_ranges` 通过官方 server-side
+    backtest market stream 填充缓存并驱动本地 `TqSim`；`KQ.m@...` 主连先由
+    `tqsdk-data` 的历史 segment query 解析为 dated concrete-contract tick ranges，
+    因而与具体合约共用物理 cache、coverage 和远端补缺请求；主连 mapping 本身不需 auth，
+    但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
     cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
     server-side backtest market stream 且不落盘
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
@@ -122,7 +125,10 @@ V1 是：
     暴露写入与 gap 状态，`recorded_market_cache_policy()` 只派生补洞 policy，
     不携带或复用 live session 明文 auth
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
-  - local backtest continuous minute helper 可自动查询主连 underlying segment、按交易日窗口裁剪历史分钟线并以主连 symbol 回放
+  - cache-backed facade backtest / warmup 可自动查询 `KQ.m@...` 主连 underlying segment、按
+    CST 交易日窗口裁剪并以具体合约缓存；同一物理 range 会合并，避免主连与具体合约重复回填
+  - 主连 `duration <= 60s` K 线从上述共享 tick 合成；`duration > 60s` native K 线拒绝，
+    不创建逻辑主连独立 K 线 cache
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现

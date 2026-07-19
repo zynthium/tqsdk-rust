@@ -125,8 +125,11 @@
     `.backtest(...)` 默认使用 `tqsdk-data` 共享 history cache root；配置 `cache_dir` /
     `market_cache` 可覆盖 root，显式 `.disabled_cache()` 使用官方服务端回测行情且不落盘；
     持久 tick cache、native K 线 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    `KQ.m@...` 主连在 facade 解析为 concrete-contract tick sources，task 的
+    `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 从这些物理 series
+    读取、却以逻辑主连 symbol 发事件并写入 `underlying_symbol`；
     `duration <= 60s` 的 backtest K 线从 tick cache 本地合成，`duration > 60s` 的 backtest
-    K 线读取 native history series cache，并通过 `HistoryBacktestReplayStream` 与 tick /
+    K 线读取 native history series cache（主连 native K 线当前显式拒绝），并通过 `HistoryBacktestReplayStream` 与 tick /
     synthetic K 线事件按时间合并回放；K 线 quote synthesis 所需 price tick / instrument spec
     仍由显式 builder metadata 提供；
     caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`

@@ -1,8 +1,9 @@
 use tqsdk_core::{Kline, Tick};
 use tqsdk_data::{BacktestTickCache, HistorySeriesCache};
 use tqsdk_task::{
-    BacktestMarketStream, HistoryBacktestKlineRequest, HistoryBacktestReplayRequest,
-    HistoryBacktestReplayStream, HistoryTickReplayStream, ReplayMarketPayload,
+    BacktestMarketStream, HistoryBacktestKlineRequest, HistoryBacktestProjectedReplayRequest,
+    HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
+    HistoryBacktestTickSource, HistoryTickReplayStream, ReplayMarketPayload,
 };
 
 #[tokio::test]
@@ -50,6 +51,99 @@ async fn history_backtest_replay_tick_only_matches_tick_stream_order() {
         tick_stream.next_event().await.unwrap().unwrap().symbol(),
         "SHFE.rb2601"
     );
+}
+
+#[tokio::test]
+async fn history_backtest_replay_projects_shared_physical_ticks_under_main_contract() {
+    let dir = temp_dir("projected-main-contract");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let main = "KQ.m@SHFE.au";
+    let physical = "SHFE.au2608";
+    cache
+        .store_ticks(physical, 1_000, 2_000, [tick(1, 1_000, 500.0, 1)])
+        .unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns: 1_000,
+            end_ns: 2_000,
+            tick_sources: vec![
+                HistoryBacktestTickSource {
+                    replay_symbol: main.to_string(),
+                    cache_symbol: physical.to_string(),
+                    start_ns: 1_000,
+                    end_ns: 2_000,
+                },
+                HistoryBacktestTickSource {
+                    replay_symbol: physical.to_string(),
+                    cache_symbol: physical.to_string(),
+                    start_ns: 1_000,
+                    end_ns: 2_000,
+                },
+            ],
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+        })
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next_event().await.unwrap() {
+        events.push(event);
+    }
+
+    assert_eq!(events.len(), 2);
+    let main_event = events
+        .iter()
+        .find(|event| event.symbol() == main)
+        .expect("main-contract replay event");
+    assert_eq!(main_event.underlying_symbol(), Some(physical));
+    let physical_event = events
+        .iter()
+        .find(|event| event.symbol() == physical)
+        .expect("physical-contract replay event");
+    assert_eq!(physical_event.underlying_symbol(), None);
+}
+
+#[tokio::test]
+async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_ticks() {
+    let dir = temp_dir("projected-main-contract-synthetic");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let main = "KQ.m@SHFE.au";
+    let physical = "SHFE.au2608";
+    cache
+        .store_ticks(physical, 1_000, 2_000, [tick(1, 1_000, 500.0, 1)])
+        .unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns: 1_000,
+            end_ns: 2_000,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: vec![HistoryBacktestSyntheticKlineSource {
+                tick_source: HistoryBacktestTickSource {
+                    replay_symbol: main.to_string(),
+                    cache_symbol: physical.to_string(),
+                    start_ns: 1_000,
+                    end_ns: 2_000,
+                },
+                duration_ns: 60_000_000_000,
+            }],
+        })
+        .unwrap();
+
+    let event = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(event.symbol(), main);
+    assert_eq!(event.underlying_symbol(), Some(physical));
+    assert!(matches!(
+        event.payload(),
+        ReplayMarketPayload::Kline {
+            duration_ns: 60_000_000_000,
+            row
+        } if row.close == 500.0
+    ));
 }
 
 #[tokio::test]

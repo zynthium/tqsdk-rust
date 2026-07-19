@@ -165,6 +165,14 @@ history K 线缓存，缺口由 history series 接口远程补齐。K 线 replay
 metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 `.default_price_tick(...)` 显式提供。
 
+回测声明 `KQ.m@EX.product` 主连时，facade 会通过
+`DataClient::query_his_cont_underlying_segments(...)` 取得历史 date → concrete-contract
+映射，按 CST 交易日切成物理合约 tick range。缓存、coverage、remote-on-miss 和 `.warmup()`
+都以具体合约为 key：主连与同一时段的具体合约共用同一份 `.tqbn` tick 文件，replay 事件仍保留
+主连 symbol 并附带 `underlying_symbol`。映射查询不需要天勤账号，但主连 `.cache_only()`
+仍需要取得这份公开 mapping metadata；主连只支持 `duration <= 60s` 的 tick 合成 K 线，
+`> 60s` native K 线会明确报错，避免额外创建逻辑主连缓存。
+
 ```rust
 let mut tq = Tq::futures()
     .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges
@@ -243,7 +251,7 @@ println!("monitor: {:?}", tq.monitor_addr());
 缺口，或 `.purge_cache_symbols()` 删除已声明 symbol 的 tick 缓存文件。
 需要先预热全品种缓存而不运行策略时，用同一个 builder 调 `.warmup().await?`；它会按
 `.batch_size(n)` 记录兼容 batch hint、解析 universe、跳过完整缓存、用官方 server-side
-backtest 流按每个 symbol 的 `missing_ranges` 只补缺口，并返回每个 symbol 的 skipped /
+backtest 流按每个物理 cache symbol 的 `missing_ranges` 只补缺口，并返回每个 symbol 的 skipped /
 missing / filled 报告。远端补齐成功后只
 compact 本次 symbol 的 tick 文件，用于合并回填时产生的碎片 blocks。
 

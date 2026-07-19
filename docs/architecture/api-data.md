@@ -182,7 +182,9 @@
    - 扩展 `query_his_cont_quotes`
    - `query_his_cont_underlyings` 提供单主连 date -> underlying 映射薄 helper
    - `query_his_cont_underlying_segments` / `historical_cont_underlying_segments` 提供相邻交易日同一 underlying 的 segment 压缩基础能力
-   - `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用
+   - `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用；
+     cache-backed facade 的 `KQ.m@...` 回测据此把逻辑主连分段投影到具体合约 tick cache，
+     data 层只提供 mapping/rows，不拥有 replay
    - `query_option_greeks`
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`
@@ -265,6 +267,10 @@ tqsdk-wait        tqsdk-data
 - facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`，
   `duration > 60s` 的 K 线输入经 `HistorySeriesCache` native K 线 series；
   `duration <= 60s` 的 K 线合成和 mixed replay 推进属于 `tqsdk-task`，不在数据层持久化
+- facade 对 `KQ.m@...` 使用 `DataClient::query_his_cont_underlying_segments(...)` 的 dated
+  mapping，把每段读写、coverage 和 remote fill 定位到 concrete underlying symbol；这样主连和
+  同一段具体合约共享同一 TQBN tick series。映射查询无需交易账号，但并非持久 tick cache 的一部分；
+  `duration > 60s` 主连 native K 线不创建逻辑 cache，当前由 facade 明确拒绝
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；
