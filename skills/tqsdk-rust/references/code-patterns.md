@@ -247,9 +247,48 @@ async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 `MarketCachePolicy` 可以用 `.record_ticks([...])` 显式列 symbol，也可以用
 `.record_universe("active:all;!CFFEX")?` 复用共享 selector。`Tq::record_ticks(cache_dir, symbols).await?`
 仍保留为运行中临时开启 recording 的显式入口。两种方式都只记录 policy 解析出的 symbol，
-不会自动记录所有订阅，也不会启动后台守护进程。coverage
-只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续需要显式
+不会自动记录所有订阅，也不会启动后台守护进程。`coverage` 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续需要显式
 `.warmup()` / `.remote_on_miss()` 补齐。
+
+### 预热与只读消费者
+
+单策略可以让默认 `.backtest(...)` 按需用 `RemoteOnMiss` 补洞。多个策略共享一个 cache root 时，
+将远端补齐集中在一个定时预热作业，消费者只读同一份完整缓存；这能避免多个进程重复下载相同缺口。
+已知或静态解析 symbol 的 cache hit 不需要 auth；预热发生远端补数时才需要 auth，且不需要 `tq_dl` / 专业历史下载权限。
+
+```rust
+use tqsdk::prelude::*;
+
+const SYMBOL: &str = "KQ.i@SHFE.au";
+const CACHE_DIR: &str = "/var/lib/tqsdk/history";
+
+async fn warm_then_prepare(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
+    let _warmup = Tq::futures()
+        .auth_env()?
+        .backtest(start_ns, end_ns)
+        .cache_dir(CACHE_DIR)?
+        .universe(format!("symbol:{SYMBOL}"))?
+        .remote_on_miss()
+        .warmup()
+        .await?;
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(CACHE_DIR)?
+        .cache_only()
+        .tick(SYMBOL, 1_024)
+        .universe(format!("symbol:{SYMBOL}"))?
+        .prepare()
+        .await?;
+    let mut tq = prepared.connect().await?;
+    while tq.next().await? {}
+    Ok(())
+}
+```
+
+每个 cache root 只安排一个远端 warmup owner。TQBN 文件锁只保证写入互斥，不能去重跨进程
+`RemoteOnMiss` 请求；不要直接改写 `.tqbn`，也不要把 relay 当作历史缓存的唯一 owner。
+`duration > 60s` 的 native K 线使用 `HistorySeriesCache`，不在本段 tick cache 流程内。
 
 已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
 `LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id

@@ -24,9 +24,9 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 写代码前先选择能覆盖场景的最高层入口。普通策略、目标持仓和轻量历史访问优先从默认 `tqsdk` crate 开始；明确需要内部能力时再下钻。
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
 - 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。多消费者 event/fan-out 是调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建的集成层。
-- 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：不配置 cache 时使用官方服务端回测行情；配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 时使用持久 tick cache 本地撮合，缺口由 `RemoteOnMiss` / `.warmup()` 显式补齐。
-- 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码迁移为 `.backtest(start_ns, end_ns).connect().await?` 的无缓存模式，或按需要补 `.cache_dir(...)` / `.market_cache(...)` / `.replay_backtest(...)`。
-- history cache 默认关闭；只有显式 `DataClientBuilder::history_cache_enabled(true)`、显式 `HistorySeriesCache::open(...)` cache-only reader、回测 `.cache_dir(...)` / `.market_cache(...)`，或 live/session mode 下显式 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)` 才写持久缓存。
+- 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：默认使用共享持久 tick cache（`$HOME/.tqsdk/data_series_1`，可用 `TQSDK_HISTORY_CACHE_DIR` 覆盖）和 `RemoteOnMiss`。已知或静态解析 symbol 的 cache hit 不需要 auth；只有缺 tick range 时才需 auth，并通过官方 server-side backtest stream 补洞后在本地 `TqSim` 回放。`.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 覆盖默认 cache；只有 `.disabled_cache()` 才是纯官方服务端回测且不落盘。
+- 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码统一迁移为 `.backtest(start_ns, end_ns)`，需要本地严格只读时加 `.cache_only()`，只有有意禁用缓存时才加 `.disabled_cache()`；自定义数据源使用 `.replay_backtest(...)`。
+- `DataClient` 的 history-series cache 默认 opt-in；这不改变 facade `.backtest(...)` 默认共享 tick cache 的语义。持久化 live tick 必须显式使用 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)`；`HistorySeriesCache` 仍只服务 offline data-series。
 - `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
 - 共享期货 universe selector 在默认 facade 的 `.backtest(...).universe(...)`、实时 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 上复用同一套解析语义；动态 selector 需要 live/session 或显式 auth，静态 `symbol:...` selector 可本地解析。
 - `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；跳号/断线保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
@@ -43,12 +43,23 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 下单示例默认使用模拟/TqKq 风格；只有用户明确要求实盘接入并接受副作用时，才给 real-account 集成。
 - 精确 API 形状重要时，先检查目标 crate README 和 `crates/*/examples/api_contract_sXX_*.rs`，再定稿代码。
 
+## 历史 Tick 缓存补齐
+
+- 按需补齐：单个策略可直接使用默认 `.backtest(...)`；完整缓存直接本地回放，缺口由默认 `RemoteOnMiss` 补齐。这个路径不使用 `tq_dl` / 专业历史下载权限，但实际远端补数需要 `.auth_env()?`。
+- 预热作业：对固定 cache root 和明确的 symbol/universe，使用 `.remote_on_miss().warmup().await?`。它只填每个 symbol 的 `missing_ranges`，连续 tick id 的成功 slice 才提交 coverage；失败或未确认尾部保留缺口，下一次 warmup 可继续补齐。
+- 多策略/生产：每个 cache root 只安排一个定时远端 warmup owner；策略实例复用同一 root 并用 `.cache_only()`。文件锁可串行化 TQBN 写入，但不是跨进程远端补数调度器，多个 `RemoteOnMiss` 实例仍可能重复下载。
+- 实时增量：用 `MarketCachePolicy::record_ticks(...)` / `.record_universe(...)` 加 `.market_cache(...)`。只记录 policy 声明的 symbol，且必须持续 `next()` / `wait_update()`；断线和跳号留下的 coverage gap 交给后续 warmup 补齐。
+- 不要手工改写 `.tqbn`，也不要把 relay 当作 canonical historical-cache owner。缓存检查、清理和补齐走 `.inspect_cache()`、`.purge_cache_symbols()`、`.warmup()` 或 `.remote_on_miss()`。
+- tick cache 与 native K 线 cache 分开：`duration <= 60s` K 线从 tick 合成；`duration > 60s` 使用 `HistorySeriesCache` 的另一条补齐路径。
+
+完整示例见 [references/code-patterns.md](references/code-patterns.md) 的 `Shared Live/Backtest Tick Cache`。
+
 ## 常见错误
 
 - 不要用 `tqsdk-wait` 回答 direct-query 问题；使用 `tqsdk-session` 或 `api.session()`。
 - live facade 或调用方 event consumer 里不要为了 metadata 再建第二个 client；复用 shared session。
 - 不要把历史下载当作 live ref；使用 `tqsdk-data`。如果用户要维护指定合约的 live/backtest 共享 tick 缓存，优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启可用 `Tq::record_ticks(...)`；如果要持久化 live K 线、任意 row batch、commit events、跨进程 WAL 或审计流，使用调用方自己的 sidecar，不要把旧 Python mmap history cache 接进 live 热路径。
-- 不要把官方服务端回测写成 `server_backtest(...)` 或 `TqBuilder::server_backtest(...)`；唯一默认 facade public 入口是 `.backtest(start_ns, end_ns)`，是否配置 cache 决定 remote market stream 还是本地 cache-backed 回测。
+- 不要把官方服务端回测写成 `server_backtest(...)` 或 `TqBuilder::server_backtest(...)`；唯一默认 facade public 入口是 `.backtest(start_ns, end_ns)`，它默认 cache-backed + `RemoteOnMiss`。只有显式 `.disabled_cache()` 才改为纯 remote market stream。
 - 不要把监控面板做成新的 relay、session owner 或 cache 管理器；`tqsdk-monitor` 只读 snapshot 和 data 层 inventory 报告，管理/补齐/删除 cache 仍走显式 data/facade API。
 - 普通用户示例不要直接从 sibling crate taxonomy 起步；先尝试 `tqsdk::prelude::*` / `Tq::futures()`，除非用户明确要 wait、session、task、data、core 或自建 event/fan-out consumer 的完整 surface。
 - 普通用户示例不要从 `tqsdk-core` 起步，除非用户明确要 runtime internals。

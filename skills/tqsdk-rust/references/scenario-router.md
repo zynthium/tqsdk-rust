@@ -112,7 +112,7 @@
 
 按用户想要的回测形态分三条入口：
 
-1. 普通用户想让同一段 `Tq::next()` / `quote()` 策略主体跑 live、官方服务端回测、cache-backed 本地回测或自定义 replay 回测时，优先使用默认 `tqsdk` facade：统一用 `.backtest(start_ns, end_ns)`；不配置缓存时走官方服务端行情，配置 `.cache_dir(...)` 或 `.market_cache(...)` 时走持久 tick cache 本地撮合；自定义 replay 用 `.replay_backtest(replay)`，kline replay 需要 `price_tick(symbol, tick)`。不要使用 `server_backtest(...)`，它已经不是 public API。契约锚点是 S37-S39、S43-S47。
+1. 普通用户想让同一段 `Tq::next()` / `quote()` 策略主体跑 live、官方服务端补洞的 cache-backed 本地回测或自定义 replay 回测时，优先使用默认 `tqsdk` facade：统一用 `.backtest(start_ns, end_ns)`；它默认共享持久 tick cache + `RemoteOnMiss`，已知或静态解析 symbol 的完整 cache 不需 auth，缺口才用官方 server-side stream 补齐并落盘。`.cache_dir(...)` 或 `.market_cache(...)` 覆盖 cache；`.cache_only()` 用于预热后的严格本地消费者；只有 `.disabled_cache()` 才直接使用官方服务端行情且不落盘。多客户端用一个定时 `.warmup()` writer，避免重复远端填充；自定义 replay 用 `.replay_backtest(replay)`，kline replay 需要 `price_tick(symbol, tick)`。不要使用 `server_backtest(...)`，它已经不是 public API。契约锚点是 S37-S39、S43-S47。
 2. 如果用户明确要像 Python `TqApi(backtest=TqBacktest(...))` 那样直接操作 wait facade，使用 `tqsdk-wait` 的 `TqApiBuilder::{futures_backtest,stock_backtest}` 或 `TqBacktest`。策略主体只依赖 `quote` / `kline` handles 和 `step()`；backtest 结束时 `step()` 返回 `None`。契约锚点是 S36。
 3. 如果用户要不连接真实服务、用本地历史行情或显式 replay event 和 Python-compatible `TqSim` 撮合账户跑确定性回测内部能力，使用 `tqsdk-task::{ReplayMarketSource,StrategyBacktest,TqSim}`；历史 rows 可由 `tqsdk-data` 拉取并通过 `StrategyReplaySourceBuilder` 转成 replay source。契约锚点是 S32。
 4. 如果只是准备历史输入、导出或缓存，才单独路由到 `tqsdk-data`；不要把“策略回测”回答成单纯历史下载。
