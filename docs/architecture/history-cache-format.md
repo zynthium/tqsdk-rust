@@ -9,6 +9,7 @@
 相关文档：
 
 - [data facade / research tooling](api-data.md)
+- [backtest tick cache operations](backtest-tick-cache-operations.md)
 - [crate 边界审计](crate-boundaries.md)
 - [验收标准与测试矩阵](validation.md)
 

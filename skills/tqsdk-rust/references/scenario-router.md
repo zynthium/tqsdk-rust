@@ -21,7 +21,7 @@
 | "下单", "撤单", "目标持仓", "调仓", "策略下单", "风控", "scheduler", "多账户", "fake broker" | Strategy execution layer | `tqsdk` for ordinary target-position path; `tqsdk-task` when ownership/risk/task internals are needed; `tqsdk-wait` for thin direct order wrappers | `Tq::target_pos_tqkq`, `TargetPos`; advanced: `TaskHost`, `TargetPosTask`, `RiskEngine`, typed order builders, `OrderTicket`, strategy/test harness APIs |
 | "回测", "策略回测", "TqBacktest", "TqSim", "本地模拟账户", "同一策略跑实盘和回测" | Strategy backtest | `tqsdk` first for ordinary same-body facade; `tqsdk-wait` for explicit Python-style wait builder; `tqsdk-task` + `tqsdk-data` for local deterministic internals | facade: `.backtest(...)`, `.backtest(...).cache_dir(...)`, `.replay_backtest(...)`, `quote_symbol`, `price_tick`, `Tq::next`, `backtest_summary`; wait: `TqApiBuilder::futures_backtest`, `TqBacktest`, `step`; local internals: `StrategyBacktest`, `TqSim`, `ReplayMarketSource`, `finish_sim_step` |
 | "实时 tick 写缓存", "record_ticks", "record_universe", "维护指定合约持久化 tick 缓存", "维护 selector 集合缓存", "实盘增量填充回测缓存" | Shared live/backtest tick cache | `tqsdk` first; `tqsdk-data` only for pure row writer | facade: `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?`, `TqBuilder::market_cache(policy)`, `Tq::record_ticks(cache_dir, symbols)`, `record_ticks_health`, `recorded_market_cache_policy`, `Tq::next`; data writer: `LiveTickCacheWriter::push_ticks` |
-| "监控面板", "dashboard", "latency", "cache inventory", "历史缓存统计", "订单监控" | Same-process monitoring snapshot | `tqsdk` with `monitoring` feature; `tqsdk-monitor` for advanced embedding | facade: `.monitoring(MonitoringConfig::localhost(port))`, `Tq::monitor_addr`, `Tq::monitor_snapshot`; inventory: `.market_cache(...)` / backtest `.cache_dir(...)` default source or `MonitoringConfig::with_cache_inventory(path)` |
+| "监控面板", "dashboard", "latency", "cache inventory", "历史缓存统计", "订单监控" | Caller-owned observability / cache inspection | `tqsdk` facade cache APIs or `tqsdk-data`; relay dashboard only with relay | `.inspect_cache()`、`.warmup()`、`record_ticks_health()`、`BacktestTickCache::inventory()`；通用 dashboard、告警和进程管理由调用方 sidecar 提供 |
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series" | Historical/offline research | `tqsdk-data` for rows/cache/export; `tqsdk-task` for replay source | data: `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, `BacktestTickCache`; task replay: `ReplayMarketSource`, `StrategyReplaySourceBuilder` |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
@@ -78,7 +78,6 @@
 5. 过滤、bounded channel、lag/closed/error report、重放和持久化 sidecar 都由调用方实现。
 6. metadata 使用同一个 session 的 query support，不要另开 query client。
 7. 指定 symbol 或 selector 集合的 live tick 要写入回测共享缓存时，普通策略优先使用 `MarketCachePolicy` + `.market_cache(...)`，运行中临时开启用 `Tq::record_ticks(cache_dir, symbols)`；泛化 live events/K 线/commit persistence 使用调用方自有 sidecar。
-8. 只需要同进程运行观测时，启用 `monitoring` feature 和 `.monitoring(MonitoringConfig::localhost(port))`；cache inventory 由后台 worker 读取 data 层只读报告，不要在 event bus 或 hot path 里扫描目录。
 
 ### 4. 实现 target-position 策略
 

@@ -23,7 +23,6 @@ services = [
     "tqsdk-task/services",
     "tqsdk-wait/services",
 ]
-monitoring = ["dep:tqsdk-monitor"]
 tqbn-zstd = ["tqsdk-data/tqbn-zstd", "tqsdk-task/tqbn-zstd"]
 
 [dependencies]
@@ -31,7 +30,6 @@ chrono.workspace = true
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 tqsdk-data = { path = "../tqsdk-data", version = "0.1.0", default-features = false }
-tqsdk-monitor = { path = "../tqsdk-monitor", version = "0.1.0", optional = true }
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
 tqsdk-task = { path = "../tqsdk-task", version = "0.1.0", default-features = false }
 tqsdk-wait = { path = "../tqsdk-wait", version = "0.1.0", default-features = false }
@@ -71,10 +69,6 @@ required-features = ["live"]
 [[example]]
 name = "api_contract_s45_facade_backtest_cache_warmup"
 required-features = ["live"]
-
-[[example]]
-name = "api_contract_s48_facade_monitoring_dashboard"
-required-features = ["monitoring"]
 
 [lints]
 workspace = true

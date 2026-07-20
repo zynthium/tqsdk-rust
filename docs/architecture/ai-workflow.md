@@ -37,8 +37,7 @@ tqsdk
 ```
 
 实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
-`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`；启用 `monitoring` feature 时额外接入
-`tqsdk-monitor`。内部能力归属仍由这些 crate 自己维护。
+`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`。内部能力归属仍由这些 crate 自己维护。
 
 设计意图：
 
@@ -47,8 +46,6 @@ tqsdk
 - `tqsdk` 是面向普通用户的默认 facade / prelude；它降低入口复杂度，但不拥有
   第二套 runtime、状态树、direct query、task 或 data 实现。
 - 让高性能和多消费者异步系统用户停留在 `tqsdk-core + tqsdk-session` 自建消费层，让 Python 心智用户使用 `tqsdk-wait`，让执行和研究能力分别进入 `tqsdk-task` 与 `tqsdk-data`。
-- `tqsdk-monitor` 是可选观察者层：只能接收低成本 sink 事件或后台读取 data 层只读报告，
-  不拥有 session、状态树、回测推进或持久缓存格式。
 - 避免回退成单体 `TqApi` crate，也避免把 direct query、task、downloader、research helpers 塞回底层。
 
 ## Crate 职责边界
@@ -219,28 +216,6 @@ tqsdk
 禁止回退：
 
 - 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait 或调用方自建消费层。
-
-### `tqsdk-monitor`
-
-职责：
-
-- 可选同进程 observability module
-- 低开销 `MonitorSink`、`MonitorRegistry`、`MonitorSnapshot`
-- 只读 localhost dashboard 和 `/monitor/api/snapshot`
-- latency、tick/cache write、order event projection 和 bounded incidents
-- 后台低频读取 `tqsdk-data::BacktestTickCache::inventory()`，把 history inventory 投影到 snapshot
-
-设计原因：
-
-- 监控应和策略主循环同进程可选启用，但不应进入默认 hot path。
-- HTTP handler 只能读取预聚合 snapshot；cache inventory 扫描必须留在后台 worker。
-- monitor 可以依赖 data 层的只读报告，但不能拥有或复制 TQBN 格式逻辑。
-
-禁止回退：
-
-- 不要让 monitor 拥有 market/trade session、runtime state tree、回测推进或 cache coverage 写入。
-- 不要在 hot path 或 HTTP handler 中执行 cache 目录全量扫描。
-- 不要把补数据、compact、删除或跨进程缓存服务塞进 `tqsdk-monitor`。
 
 ### `tqsdk-relay`
 

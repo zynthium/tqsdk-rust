@@ -27,7 +27,6 @@
 - `tqsdk-wait` 是 Python 风格单推进点的 continuous-consumption facade
 - `tqsdk-task` 是高层执行工具与任务编排层
 - `tqsdk-data` 是 research/offline data、history、cache、export 能力层
-- `tqsdk-monitor` 是可选观测层，只提供同进程低开销 sink、snapshot、cache inventory projection 和只读 dashboard
 
 内部层依然是按“语义层”切分，而不是按 market / trade / replay / query 协议域切分。对于天勤这种多协议域共享同一 session、同一状态树、同一 commit 语义的系统，这是更稳的切法。`tqsdk` 只把这些能力组织成默认用户入口。
 
@@ -260,37 +259,6 @@
 这一层当前边界是健康的，而且是最接近你目标用户体验的部分。
 
 后续最大的风险不是“功能不够”，而是重新把 Python 单体 `TqApi` 的其他便利接口全部塞回来。
-
-## `tqsdk-monitor`
-
-### 正确职责
-
-`tqsdk-monitor` 应继续承担：
-
-- 可选同进程 observability module
-- `MonitorSink` 这类低开销 batch/event sink
-- `MonitorRegistry` / `MonitorSnapshot` read model
-- 只读 localhost HTTP dashboard
-- bounded incidents / latency counters / cache write counters / order event projection 的承载面
-- 低频后台读取 `tqsdk-data::BacktestTickCache::inventory()` 并投影到 snapshot 的 history inventory
-
-### 不应吸收的能力
-
-`tqsdk-monitor` 不应继续吸收：
-
-- market/trade session ownership
-- runtime state tree 或 commit/cursor 实现
-- backtest/replay 推进逻辑
-- TQBN 文件格式、cache coverage 写入或 compact 实现
-- 默认启用的 GUI / HTTP 依赖
-- 在 HTTP handler 或 hot path 中执行 cache 目录全量扫描
-- 直接修改、补齐或删除持久缓存文件
-
-### 判断
-
-这一层是观察者，不是新的执行层。它可以被 `tqsdk` 的 `monitoring` feature 和未来
-`tqsdk-relay` dashboard 复用，但不能成为 SDK 默认直连路径的一部分。monitor 可以依赖 data
-层的只读 inventory 报告，但不能拥有或复制 TQBN 格式逻辑。
 
 ## `tqsdk-task`
 
@@ -571,7 +539,6 @@ Python 的问题是：
 - `tqsdk-wait` 继续做 Python 风格单推进点 continuous-consumption facade
 - `tqsdk-task` 继续做执行工具层
 - `tqsdk-data` 继续做 research/offline data、history、cache、export 能力层
-- `tqsdk-monitor` 继续做可选观测层；默认关闭，只能投影 snapshot / cache inventory，不能拥有数据/任务/session 状态
 
 接下来真正要补的不是重新划分这些已落地 crate，而是继续稳固默认 `tqsdk` 入口和内部 `task/data` 能力边界。
 

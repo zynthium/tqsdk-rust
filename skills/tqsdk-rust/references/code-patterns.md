@@ -290,6 +290,13 @@ async fn warm_then_prepare(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 `RemoteOnMiss` 请求；不要直接改写 `.tqbn`，也不要把 relay 当作历史缓存的唯一 owner。
 `duration > 60s` 的 native K 线使用 `HistorySeriesCache`，不在本段 tick cache 流程内。
 
+### 交易日窗口与完成判定
+
+- 用 `DataClient::query_trading_days(...)` 或等价的官方交易日历确定“最近 N 个交易日”；不要按周一到周五倒推。休市日可能有合法的空 TQBN 覆盖分区。
+- 只补到最后一个已完成的交易日，避免把盘中尾部当作完整覆盖。SHFE 贵金属的常用窗口是首个交易日前一日 `18:00:00` CST 到最后交易日 `15:00:01` CST；跨市场时以目标合约的 `trading_time` 为准。
+- `KQ.i@...` 指数和 `KQ.m@...` 主连是不同的请求语义：前者按该 index symbol 缓存，后者会解析为具体合约范围并共享具体合约的 tick 文件。不要用一个 symbol 的覆盖报告推断另一个 symbol 完整。
+- `RemoteOnMiss` 成功后，对相同 root、symbol/universe 和时间窗口运行 `.cache_only()`，并至少消费一次回放。验收应同时满足 cache-only 无缺口、所有目标 symbol complete、以及预期存在行情时 replay 非空；文件数、体积和 remote rows 仅作诊断指标。
+
 已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
 `LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id
 推进 coverage，不负责 session、订阅或后台运行。
@@ -299,58 +306,6 @@ bridge 仍属于调用方 sidecar；`HistorySeriesCache` 保持 offline
 `get_*_data_series` 缓存和 cache-only reader。
 
 如果用户使用的 SDK revision 中 struct 形状不同，先检查对应 crate example，再定稿代码。
-
-## Embedded Monitoring Snapshot
-
-同进程监控使用默认 `tqsdk` facade 的 `monitoring` feature。HTTP task 默认不启用；
-启用后 hot path 只写聚合计数，dashboard 和 `monitor_snapshot()` 读取预聚合 snapshot。
-如果 builder 同时配置了 `.market_cache(...)`，monitor 会自动把同一 cache 目录作为
-history inventory 来源；也可显式 `with_cache_inventory(path)`。
-
-```toml
-[dependencies]
-tqsdk = { path = "../tqsdk-rust/crates/tqsdk", features = ["monitoring"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
-```
-
-```rust
-use tqsdk::prelude::*;
-
-# async fn run() -> tqsdk::Result<()> {
-let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
-    .record_universe("symbol:KQ.i@SHFE.au")?;
-
-let mut tq = Tq::futures()
-    .auth_env()?
-    .market_cache(cache)
-    .monitoring(MonitoringConfig::localhost(18688))
-    .connect()
-    .await?;
-
-println!("monitor={:?}", tq.monitor_addr());
-if let Some(snapshot) = tq.monitor_snapshot() {
-    println!(
-        "mode={:?} rows={}",
-        snapshot.process.mode, snapshot.history.inventory_rows
-    );
-}
-
-while tq.next().await? {
-    // normal strategy body
-}
-# Ok(())
-# }
-```
-
-没有 `MarketCachePolicy` / backtest cache builder 时，显式指定 inventory 来源：
-
-```rust
-# use tqsdk::prelude::*;
-let monitoring = MonitoringConfig::localhost(18688)
-    .with_cache_inventory(".tqsdk/backtest_ticks");
-```
-
-cache inventory worker 默认低频后台刷新；不要把 cache scan 放到策略循环或 HTTP handler。
 
 ## Trading Task Pattern
 
