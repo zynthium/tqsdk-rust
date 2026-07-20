@@ -10,6 +10,10 @@
 `CacheOnly` 回测不需要 auth。历史原始格式和路径合同见
 [History Cache Format](history-cache-format.md)。
 
+固定 cache root 的 operator 作业可使用可选 [`tqsdk-cache` CLI](backtest-tick-cache-cli.md)。
+它复用本文相同的 remote-on-miss / CacheOnly 语义，并额外提供 root lock、JSON report 和
+deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
+
 只在用户明确授权连接远端并写入目标 cache root 后执行远端预热。预热只读行情，不登录交易账户，
 也不会提交订单。
 

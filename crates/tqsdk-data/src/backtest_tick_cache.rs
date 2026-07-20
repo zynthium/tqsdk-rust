@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
+use chrono::NaiveDate;
+use fs2::FileExt;
 use tqsdk_core::Tick;
 
 use crate::history_series_cache::{
@@ -114,6 +118,92 @@ pub struct BacktestTickCacheInventorySymbol {
     pub problem_files: usize,
 }
 
+/// Lightweight filesystem inventory that does not decode TQBN record blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheFastInventory {
+    pub backend_format: &'static str,
+    pub cache_dir: PathBuf,
+    pub symbols: Vec<BacktestTickCacheFastInventorySymbol>,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub total_days: usize,
+    pub problem_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheFastInventorySymbol {
+    pub symbol: String,
+    pub files: usize,
+    pub bytes: u64,
+    pub days: usize,
+    pub problem_files: usize,
+}
+
+/// Deep diagnostic result for one tick partition file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheDiagnostic {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub trading_day: Option<String>,
+    pub symbol: String,
+    pub status: HistorySeriesCacheFileStatus,
+    pub id_range: Option<(i64, i64)>,
+    pub rows: usize,
+    pub size_bytes: u64,
+    pub schema_version: Option<u32>,
+    pub error: Option<String>,
+}
+
+impl BacktestTickCacheDiagnostic {
+    #[must_use]
+    pub fn is_problem(&self) -> bool {
+        is_problem_file_status(self.status)
+    }
+}
+
+/// Deep diagnostic projection for all tick partitions in a cache root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheDiagnosticReport {
+    pub backend_format: &'static str,
+    pub cache_dir: PathBuf,
+    pub files: Vec<BacktestTickCacheDiagnostic>,
+    pub problem_files: usize,
+}
+
+/// Canonical TQBN trading-day range used by tick cache partitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacktestTickTradingDayRange {
+    pub trading_day: NaiveDate,
+    pub start_ns: i64,
+    pub end_ns: i64,
+}
+
+/// Advisory lock held while an operation needs a stable cache-root view.
+#[derive(Debug)]
+pub struct BacktestTickCacheOperationLock {
+    cache_dir: PathBuf,
+    path: PathBuf,
+    file: File,
+}
+
+impl BacktestTickCacheOperationLock {
+    #[must_use]
+    pub fn cache_dir(&self) -> &Path {
+        self.cache_dir.as_path()
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+}
+
+impl Drop for BacktestTickCacheOperationLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestTickFillReport {
     pub symbol: String,
@@ -143,6 +233,12 @@ impl BacktestTickCache {
 
     pub fn open(root_dir: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::new(HistorySeriesCache::open(root_dir)?))
+    }
+
+    /// Open a cache root for inspection without creating files or directories.
+    #[must_use]
+    pub fn open_read_only(root_dir: impl AsRef<Path>) -> Self {
+        Self::new(HistorySeriesCache::open_read_only(root_dir))
     }
 
     #[must_use]
@@ -267,6 +363,125 @@ impl BacktestTickCache {
             total_days: days.len(),
             problem_files,
         })
+    }
+
+    /// Return a filesystem-only inventory of daily TQBN tick partitions.
+    ///
+    /// Unlike [`Self::inventory`], this only reads each file's metadata and
+    /// magic prefix. It is appropriate for a frequently refreshed status view,
+    /// but it does not establish row counts, coverage, or full file health.
+    pub fn fast_inventory(&self) -> Result<BacktestTickCacheFastInventory> {
+        let mut days = BTreeSet::new();
+        let mut symbols = BTreeMap::<String, FastInventorySymbolAccumulator>::new();
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
+        let mut problem_files = 0usize;
+
+        for entry in fast_tick_partition_files(self.history.root_dir())? {
+            total_files = total_files.saturating_add(1);
+            total_bytes = total_bytes.saturating_add(entry.size_bytes);
+            if entry.is_problem {
+                problem_files = problem_files.saturating_add(1);
+            }
+            days.insert(entry.trading_day.clone());
+            symbols
+                .entry(entry.symbol.clone())
+                .or_insert_with(|| FastInventorySymbolAccumulator::new(entry.symbol.clone()))
+                .push(entry.size_bytes, &entry.trading_day, entry.is_problem);
+        }
+
+        Ok(BacktestTickCacheFastInventory {
+            backend_format: self.history.format_id(),
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbols: symbols
+                .into_values()
+                .map(FastInventorySymbolAccumulator::finish)
+                .collect(),
+            total_files,
+            total_bytes,
+            total_days: days.len(),
+            problem_files,
+        })
+    }
+
+    /// Decode all tick partitions and report their health without mutating the cache.
+    pub fn diagnose(&self) -> Result<BacktestTickCacheDiagnosticReport> {
+        let scan = self.history.scan()?;
+        let mut files = scan
+            .files
+            .into_iter()
+            .filter(|file| file.duration_ns == Some(0))
+            .filter_map(|file| {
+                let symbol = file.symbol?;
+                Some(BacktestTickCacheDiagnostic {
+                    trading_day: tick_inventory_day(file.file_name.as_str()),
+                    path: file.path,
+                    file_name: file.file_name,
+                    symbol,
+                    status: file.status,
+                    id_range: file.id_range,
+                    rows: file.rows,
+                    size_bytes: file.size_bytes,
+                    schema_version: file.schema_version,
+                    error: file.error,
+                })
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        let problem_files = files.iter().filter(|file| file.is_problem()).count();
+        Ok(BacktestTickCacheDiagnosticReport {
+            backend_format: self.history.format_id(),
+            cache_dir: self.history.root_dir().to_path_buf(),
+            files,
+            problem_files,
+        })
+    }
+
+    /// Try to acquire the cache-root lock required by remote fill operations.
+    ///
+    /// The lock is advisory and intentionally separate from individual TQBN
+    /// file locks: it prevents concurrent owners from requesting and writing
+    /// the same missing historical ranges.
+    pub fn try_acquire_remote_fill_lock(&self) -> Result<BacktestTickCacheOperationLock> {
+        self.try_acquire_operation_lock("remote fill", true)
+    }
+
+    /// Try to acquire a shared stable-view lock for verification and diagnostics.
+    pub fn try_acquire_consistency_read_lock(&self) -> Result<BacktestTickCacheOperationLock> {
+        self.try_acquire_operation_lock("consistency read", false)
+    }
+
+    fn try_acquire_operation_lock(
+        &self,
+        operation: &'static str,
+        exclusive: bool,
+    ) -> Result<BacktestTickCacheOperationLock> {
+        let cache_dir = self.history.root_dir().to_path_buf();
+        fs::create_dir_all(&cache_dir)?;
+        let path = cache_dir.join(".tqsdk-cache-operation.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        let result = if exclusive {
+            FileExt::try_lock_exclusive(&file)
+        } else {
+            FileExt::try_lock_shared(&file)
+        };
+        match result {
+            Ok(()) => Ok(BacktestTickCacheOperationLock {
+                cache_dir,
+                path,
+                file,
+            }),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir,
+                operation,
+            }),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn purge_symbol_ticks(
@@ -405,6 +620,24 @@ impl BacktestTickCache {
     }
 }
 
+/// Return the canonical TQBN trading day for a timestamp in nanoseconds.
+///
+/// Daily tick partitions roll at 18:00:00 CST and weekend boundaries are
+/// normalized to the following Monday.
+pub fn backtest_tick_trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
+    crate::history_series_cache::tqbn_trading_day_for_timestamp_ns(timestamp_ns)
+}
+
+/// Return the complete canonical TQBN range for a requested trading day.
+pub fn backtest_tick_trading_day_range(day: NaiveDate) -> Result<BacktestTickTradingDayRange> {
+    let (trading_day, start_ns, end_ns) = crate::history_series_cache::tqbn_trading_day_range(day)?;
+    Ok(BacktestTickTradingDayRange {
+        trading_day,
+        start_ns,
+        end_ns,
+    })
+}
+
 impl BacktestTickFill {
     #[must_use]
     pub fn new(symbol: impl Into<String>, range_start_ns: i64, range_end_ns: i64) -> Self {
@@ -538,6 +771,117 @@ impl InventorySymbolAccumulator {
     }
 }
 
+#[derive(Debug, Default)]
+struct FastInventorySymbolAccumulator {
+    symbol: String,
+    files: usize,
+    bytes: u64,
+    days: BTreeSet<String>,
+    problem_files: usize,
+}
+
+impl FastInventorySymbolAccumulator {
+    fn new(symbol: String) -> Self {
+        Self {
+            symbol,
+            ..Self::default()
+        }
+    }
+
+    fn push(&mut self, bytes: u64, trading_day: &str, is_problem: bool) {
+        self.files = self.files.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.days.insert(trading_day.to_string());
+        if is_problem {
+            self.problem_files = self.problem_files.saturating_add(1);
+        }
+    }
+
+    fn finish(self) -> BacktestTickCacheFastInventorySymbol {
+        BacktestTickCacheFastInventorySymbol {
+            symbol: self.symbol,
+            files: self.files,
+            bytes: self.bytes,
+            days: self.days.len(),
+            problem_files: self.problem_files,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FastTickPartitionFile {
+    symbol: String,
+    trading_day: String,
+    size_bytes: u64,
+    is_problem: bool,
+}
+
+fn fast_tick_partition_files(root_dir: &Path) -> Result<Vec<FastTickPartitionFile>> {
+    let series_root = root_dir.join("series");
+    if !series_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    for day_entry in fs::read_dir(&series_root)? {
+        let day_entry = day_entry?;
+        if !day_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let trading_day = day_entry.file_name().to_string_lossy().into_owned();
+        if NaiveDate::parse_from_str(&trading_day, "%Y%m%d").is_err() {
+            continue;
+        }
+        let tick_dir = day_entry.path().join("tick");
+        if !tick_dir.is_dir() {
+            continue;
+        }
+        for file_entry in fs::read_dir(tick_dir)? {
+            let file_entry = file_entry?;
+            if !file_entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = file_entry.path();
+            let Some(symbol) = fast_tick_symbol_from_path(&path) else {
+                continue;
+            };
+            let size_bytes = file_entry.metadata()?.len();
+            let is_problem = fast_tqbn_magic_is_problem(&path, size_bytes)?;
+            files.push(FastTickPartitionFile {
+                symbol,
+                trading_day: trading_day.clone(),
+                size_bytes,
+                is_problem,
+            });
+        }
+    }
+    files.sort_by(|left, right| {
+        left.trading_day
+            .cmp(&right.trading_day)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    Ok(files)
+}
+
+fn fast_tick_symbol_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy();
+    let encoded = file_name.strip_suffix(".tqbn")?;
+    (!encoded.is_empty()).then(|| encoded.replace("%2F", "/"))
+}
+
+fn fast_tqbn_magic_is_problem(path: &Path, size_bytes: u64) -> Result<bool> {
+    if size_bytes == 0 {
+        return Ok(false);
+    }
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(magic != *b"TQBN"),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn is_problem_file_status(status: HistorySeriesCacheFileStatus) -> bool {
     !matches!(
         status,
@@ -548,7 +892,9 @@ fn is_problem_file_status(status: HistorySeriesCacheFileStatus) -> bool {
 fn tick_inventory_day(file_name: &str) -> Option<String> {
     let (day, rest) = file_name.split_once('/')?;
     if rest.starts_with("tick/") {
-        Some(day.to_string())
+        NaiveDate::parse_from_str(day, "%Y%m%d")
+            .ok()
+            .map(|day| day.format("%Y-%m-%d").to_string())
     } else {
         None
     }

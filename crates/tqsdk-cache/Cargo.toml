@@ -1,0 +1,22 @@
+[package]
+name = "tqsdk-cache"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Tick history cache management CLI for tqsdk-rust"
+license.workspace = true
+repository = "https://github.com/zynthium/tqsdk-rust"
+publish = false
+
+[dependencies]
+chrono.workspace = true
+indicatif = "0.17"
+clap = { version = "4.5", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tqsdk = { path = "../tqsdk", version = "0.1.0" }
+tqsdk-data = { path = "../tqsdk-data", version = "0.1.0" }
+
+[lints]
+workspace = true

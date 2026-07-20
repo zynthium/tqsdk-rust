@@ -32,6 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：inventory、coverage inspect、closed-day fill、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -40,6 +41,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
+- 对固定 root 做历史 tick cache 预检、补齐或验收：使用可选 `tqsdk-cache` CLI；普通策略不需要启动它。
 - 做确定性 replay / 本地回测行情输入：用 `tqsdk_task::replay::ReplayMarketSource`。
 - 需要策略下单并撮合成交的回测：优先用 `tqsdk` 的
   `.backtest(start_ns, end_ns)` 单一入口；默认复用共享 history cache，显式
@@ -334,6 +336,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade remote-on-miss 缓存回测 | `cargo run -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss` | 使用官方 server-side backtest tick stream 填补缺失缓存；需要账号，但不需要专业历史下载权限 |
 | 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 共享缓存 policy | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s47_facade_market_cache_policy` | `MarketCachePolicy` 同时驱动 live tick recording 和 cache-backed local backtest 输入 |
+| 回测 tick cache 运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；管理 daily TQBN tick cache，不启动 relay 或守护进程 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |
@@ -401,6 +404,8 @@ cargo check --examples
 
 `tqsdk-relay` 是可选基础设施，不在默认 SDK validation set 中；修改 relay 时显式运行
 `cargo test -p tqsdk-relay --tests` 等 relay gate。
+`tqsdk-cache` 同样是可选运维二进制；修改它时显式运行
+`cargo test -p tqsdk-cache` 和 `cargo clippy -p tqsdk-cache --all-targets -- -D warnings`。
 
 常用验证命令：
 
@@ -445,6 +450,7 @@ cargo check --all-features --examples
 - [文档索引](docs/README.md)
 - [架构总览](docs/architecture/README.md)
 - [回测 Tick 持久缓存预热与验收](docs/architecture/backtest-tick-cache-operations.md)
+- [回测 Tick Cache CLI](docs/architecture/backtest-tick-cache-cli.md)
 - [runtime core overview](docs/architecture/runtime-core/overview.md)
 - [crate 边界审计](docs/architecture/crate-boundaries.md)
 - [验证矩阵](docs/architecture/validation.md)

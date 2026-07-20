@@ -297,6 +297,33 @@ async fn warm_then_prepare(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 - `KQ.i@...` 指数和 `KQ.m@...` 主连是不同的请求语义：前者按该 index symbol 缓存，后者会解析为具体合约范围并共享具体合约的 tick 文件。不要用一个 symbol 的覆盖报告推断另一个 symbol 完整。
 - `RemoteOnMiss` 成功后，对相同 root、symbol/universe 和时间窗口运行 `.cache_only()`，并至少消费一次回放。验收应同时满足 cache-only 无缺口、所有目标 symbol complete、以及预期存在行情时 replay 非空；文件数、体积和 remote rows 仅作诊断指标。
 
+### Cache Operator CLI
+
+固定共享 root 的 cache 运维不必把策略进程改成 downloader。可选 `tqsdk-cache` binary 复用同一套
+remote-on-miss / CacheOnly 合同：它的 stdout 是 versioned JSON，进度只写 stderr，因此适合 cron
+或 CI；它不是 relay 或守护进程。
+
+```bash
+# 预检不会请求远端 tick、写 cache 或获取 fill lock。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history fill \
+  --universe 'main:all;index:all;!CFFEX' \
+  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run --pretty
+
+# 正常 fill 只补缺失 coverage。仅在实际 miss 时需要此账号对。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history fill \
+  --symbol KQ.i@SHFE.au \
+  --start-day 2026-06-01 --end-day 2026-06-30 --pretty
+```
+
+V1 仅接受已结束交易日；TQBN 日界线是 CST `18:00`，open day 不能标记 complete。normal fill
+生成的 report 固定 canonical root/range/physical symbols，后续用
+`tqsdk-cache verify --report <path> --replay --min-rows 1` 做本地验收。Ctrl-C/SIGTERM 会 flush
+partial rows 但不提交 coverage，下一轮 fill 自动补洞。完整 CLI 合同见
+`docs/architecture/backtest-tick-cache-cli.md`。
+
 已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
 `LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id
 推进 coverage，不负责 session、订阅或后台运行。

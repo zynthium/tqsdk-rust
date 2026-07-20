@@ -210,6 +210,11 @@ V1 是：
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
+- `tqsdk-cache`
+  - 可选 operator CLI；对 canonical daily TQBN tick cache 提供 fast inventory、closed-day
+    remote-on-miss fill、report-bound CacheOnly verify 与 deep doctor
+  - 复用 `tqsdk` facade / `tqsdk-data` store，不拥有第二种缓存格式、session、状态树、live
+    recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth

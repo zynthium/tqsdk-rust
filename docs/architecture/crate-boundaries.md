@@ -328,6 +328,8 @@ sink、WAL、journal 或 cache writer。
   tick id 推进 coverage，不拥有 session、订阅、wait loop 或后台进程
 - cache inspect / purge / compact 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
   `(symbol, tick)` 文件粒度清除或合并回测 tick 缓存
+- fast filesystem inventory、deep TQBN diagnostic、read-only cache opening，以及 root-scoped
+  advisory lock；它们服务 CLI/operator，但不拥有 CLI/session/runtime
 - relay-compatible futures universe selector parser 与 resolver 抽象
 
 `HistorySeriesCache::open(...)` 和 `BacktestTickCache::open(...)` 仍是 public facade
@@ -345,6 +347,29 @@ sink、WAL、journal 或 cache writer。
 - shared market cache policy、live session 或订阅 ownership
 - remote-on-miss 的 session 推进 loop
 - relay 进程、dashboard 或多客户端 market service
+
+## `tqsdk-cache`
+
+### 正确职责
+
+- 可选 workspace binary，不进入 Cargo default-members
+- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、closed-day
+  `fill`、CacheOnly `verify` 和 deep `doctor`
+- 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` read-only/diagnostic/root-lock
+  APIs 组合为 JSON stdout + stderr progress 的 operator contract
+- normal fill report 记录 canonical root、logical/physical symbols、coverage 和调度配置，供
+  `verify --report` 复用；取消 flush partial rows 但不提交 coverage
+
+### 不应承担的职责
+
+- 新的持久格式、store adapter、remote protocol client 或 proxy policy
+- session/state-tree/backtest runtime ownership，live tick recording、daemon、relay 或 dashboard
+- V1 destructive `purge` / `refresh` / `compact` command；这类操作继续要求显式 SDK API 和人工确认
+
+### 判断
+
+这是一个运维入口，不是新的 SDK runtime 层。它只封装已存在的稳定 cache/facade 合同，因而不会
+改变默认策略的依赖、性能或正常回测入口。
 
 ## `tqsdk-relay`
 

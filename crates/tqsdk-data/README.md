@@ -20,6 +20,9 @@
 - `BacktestTickCache::open(...).store_ticks(...)`
 - `BacktestTickCache::open(...).load_series(...)`
 - `BacktestTickCache::open(...).compact_symbol_ticks(...)`
+- `BacktestTickCache::open_read_only(...).fast_inventory()`
+- `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_lock()` /
+  `try_acquire_consistency_read_lock()`
 - `LiveTickCacheWriter::new(...).push_ticks(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
@@ -80,6 +83,13 @@
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、
   refresh、远端补缓存后的碎块合并和磁盘清理复用
+- `BacktestTickCache::open_read_only(...)` 不创建 root，也拒绝任何写入；`fast_inventory()` 只读取
+  daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
+  `try_acquire_remote_fill_lock()` 与 `try_acquire_consistency_read_lock()` 用于协调远端 fill owner
+  和稳定检查视图；它们是 advisory lock，不替代单 TQBN 文件写锁
+- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力，提供 JSON inventory、closed-day fill、
+  report-bound verify 和 doctor；它不属于本 crate 的 runtime、store adapter 或 live writer 边界，
+  详见 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
   rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口；它不拥有
   session、订阅、后台线程或跨进程协调
@@ -139,8 +149,14 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `HistoryPermissionStatus`
 - `BacktestCachePolicy`
 - `BacktestTickCache`
+- `BacktestTickCacheFastInventory`
+- `BacktestTickCacheFastInventorySymbol`
 - `BacktestTickCacheInventory`
 - `BacktestTickCacheInventorySymbol`
+- `BacktestTickCacheDiagnostic`
+- `BacktestTickCacheDiagnosticReport`
+- `BacktestTickCacheOperationLock`
+- `BacktestTickTradingDayRange`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
 - `BacktestTickFill`
@@ -157,6 +173,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `HistorySeriesCoverageReport`
 - `HistorySeriesPurgeReport`
 - `HISTORY_SERIES_CACHE_FORMAT_ID`
+- `backtest_tick_trading_day_for_timestamp_ns`
+- `backtest_tick_trading_day_range`
 - `UniverseExpression`
 - `FuturesContract`
 - `FuturesUniverseResolver`

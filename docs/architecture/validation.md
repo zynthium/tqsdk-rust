@@ -161,6 +161,9 @@ rtk cargo test -p tqsdk-data --lib tqbn
 rtk cargo test -p tqsdk-data --features tqbn-zstd --lib tqbn
 rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
+rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
+rtk cargo test -p tqsdk-cache
+rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-task --test history_tick_replay
@@ -182,6 +185,10 @@ rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd -
 daily partition file identity、scan、损坏报告、size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
+`backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
+inspection、fast inventory、deep diagnostic、root lock、closed-day dry-run、完整 cache 无 auth fill，
+以及 fill report 对 canonical root 的 verify binding。CLI 的真实远端 fill 仍只在用户明确授权、
+提供凭证后手动运行，不进入普通 unit test。
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过
 `LiveTickCacheWriter` 的连续 id 语义提交回测可读 coverage；同一个 `MarketCachePolicy`

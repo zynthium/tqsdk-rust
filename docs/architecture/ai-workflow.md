@@ -38,6 +38,8 @@ tqsdk
 
 实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
 `tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`。内部能力归属仍由这些 crate 自己维护。
+`tqsdk-cache` 是此图之外的可选 operator binary：它调用已存在的 facade/data cache APIs，
+不参与策略 runtime 或默认依赖路径。
 
 设计意图：
 
@@ -216,6 +218,28 @@ tqsdk
 禁止回退：
 
 - 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait 或调用方自建消费层。
+
+### `tqsdk-cache`
+
+职责：
+
+- 可选 canonical daily TQBN tick cache operator CLI
+- JSON-only stdout contract，stderr progress，closed-day fill、report-bound CacheOnly verify、
+  fast inventory 与 deep doctor
+- 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows
+  而不提交 coverage
+
+非职责：
+
+- 新 cache format/store adapter、session owner、live subscription/recording loop 或 backtest runtime
+- relay、daemon、monitor/dashboard、通用 downloader 或 destructive maintenance automation
+
+设计原因：
+
+- 固定 cache root 的 batch 运维需要稳定 shell/JSON contract，但不能把运维进程、网络调度或
+  storage 语义塞回默认 SDK hot path。
+- 该 binary 不在 Cargo default-members；普通策略用 `.backtest(...)`、`.warmup()` 和
+  `MarketCachePolicy`，不会因它增加依赖或运行成本。
 
 ### `tqsdk-relay`
 

@@ -55,6 +55,7 @@ const MAX_TQBN_BLOCK_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub(super) struct TqbnHistoryStore {
     root_dir: Arc<PathBuf>,
+    read_only: bool,
 }
 
 #[derive(Debug, Default)]
@@ -105,7 +106,24 @@ impl TqbnHistoryStore {
         fs::create_dir_all(root_dir.join(ROOT_DIR_NAME))?;
         Ok(Self {
             root_dir: Arc::new(root_dir),
+            read_only: false,
         })
+    }
+
+    pub(super) fn new_read_only(root_dir: PathBuf) -> Self {
+        Self {
+            root_dir: Arc::new(root_dir),
+            read_only: true,
+        }
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(DataError::InvalidState(
+                "history cache was opened read-only",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn series_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
@@ -324,7 +342,7 @@ fn partition_ranges(start_ns: i64, end_ns: i64) -> Result<Vec<TqbnPartitionRange
     Ok(ranges)
 }
 
-fn trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
+pub(crate) fn trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
     let seconds = timestamp_ns.div_euclid(NANOS_PER_SECOND);
     let nanos = timestamp_ns.rem_euclid(NANOS_PER_SECOND) as u32;
     let utc = DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or_else(|| {
@@ -342,6 +360,19 @@ fn trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
 
 fn trading_day_end_ns(day: NaiveDate) -> Result<i64> {
     trading_day_boundary_ns(day, 18)
+}
+
+pub(crate) fn trading_day_range(day: NaiveDate) -> Result<(NaiveDate, i64, i64)> {
+    let day = normalize_weekend_trading_day(day)?;
+    let mut previous_day = add_days(day, -1)?;
+    while matches!(previous_day.weekday(), Weekday::Sat | Weekday::Sun) {
+        previous_day = add_days(previous_day, -1)?;
+    }
+    Ok((
+        day,
+        trading_day_boundary_ns(previous_day, 18)?,
+        trading_day_end_ns(day)?,
+    ))
 }
 
 fn trading_day_boundary_ns(day: NaiveDate, hours_from_midnight: i64) -> Result<i64> {
@@ -435,6 +466,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         max_bytes: Option<u64>,
         retention_days: Option<u64>,
     ) -> Result<HistorySeriesCacheMaintenanceReport> {
+        self.ensure_writable()?;
         let mut report = HistorySeriesCacheMaintenanceReport::default();
         evict_expired_tqbn_files(self.root_dir.as_path(), retention_days, &mut report)?;
         compact_tqbn_files(self.root_dir.as_path())?;
@@ -443,6 +475,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
     }
 
     fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+        self.ensure_writable()?;
         for path in self.partition_paths_for_series(symbol, kind)? {
             compact_tqbn_file(&path, symbol, kind)?;
         }
@@ -488,6 +521,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
+        self.ensure_writable()?;
         validate_segment_rows(&segment)?;
         let (rows, id_range, datetime_range) = segment_rows_summary(&segment)?;
         let mut touched_path = None;
@@ -583,6 +617,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
         commit: HistorySeriesCoverageCommit,
     ) -> Result<HistorySeriesCoverageReport> {
+        self.ensure_writable()?;
         validate_coverage_range(commit.range_start_ns, commit.range_end_ns)?;
         let symbol = commit.symbol.clone();
         let kind = commit.kind;
@@ -611,6 +646,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         symbol: &str,
         kind: HistorySeriesKind,
     ) -> Result<HistorySeriesPurgeReport> {
+        self.ensure_writable()?;
         let path = self.series_path(symbol, kind.duration_ns());
         let mut report = HistorySeriesPurgeReport {
             path: path.clone(),

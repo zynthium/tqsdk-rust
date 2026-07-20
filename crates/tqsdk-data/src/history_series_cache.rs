@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::NaiveDate;
 use tqsdk_core::{Kline, Tick};
 
 use crate::client::{
@@ -262,6 +263,16 @@ impl HistorySeriesCache {
         let root_dir = root_dir.as_ref().to_path_buf();
         let store = tqbn::TqbnHistoryStore::new(root_dir)?;
         Ok(Self::from_store(Arc::new(store)))
+    }
+
+    /// Open an existing cache root without creating directories or allowing mutation.
+    ///
+    /// Missing files are reported as ordinary cache misses. This is intended
+    /// for inspection and dry-run paths that must not touch the filesystem.
+    #[must_use]
+    pub fn open_read_only(root_dir: impl AsRef<Path>) -> Self {
+        let root_dir = root_dir.as_ref().to_path_buf();
+        Self::from_store(Arc::new(tqbn::TqbnHistoryStore::new_read_only(root_dir)))
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -579,6 +590,14 @@ pub fn default_history_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .map(|home| home.join(DEFAULT_CACHE_DIR))
         .unwrap_or_else(|| std::env::temp_dir().join("tqsdk_data_series_1"))
+}
+
+pub(crate) fn tqbn_trading_day_for_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
+    tqbn::trading_day_for_timestamp_ns(timestamp_ns)
+}
+
+pub(crate) fn tqbn_trading_day_range(day: NaiveDate) -> Result<(NaiveDate, i64, i64)> {
+    tqbn::trading_day_range(day)
 }
 
 fn merge_datetime_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {

@@ -77,9 +77,13 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
 }
 
 pub use backtest_tick_cache::{
-    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheInventory,
-    BacktestTickCacheInventorySymbol, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
-    BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
+    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
+    BacktestTickCacheDiagnosticReport, BacktestTickCacheFastInventory,
+    BacktestTickCacheFastInventorySymbol, BacktestTickCacheInventory,
+    BacktestTickCacheInventorySymbol, BacktestTickCacheOperationLock, BacktestTickCachePurgeReport,
+    BacktestTickCacheStatus, BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill,
+    BacktestTickFillReport, BacktestTickTradingDayRange,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 pub use client::{
     DataClient, DataClientBuilder, HistoricalContQuotesRow, HistoricalContUnderlyingRow,

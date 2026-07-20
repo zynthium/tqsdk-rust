@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::NaiveDate;
 use tqsdk_core::Tick;
-use tqsdk_data::{BacktestTickCache, BacktestTickFillReport, DataError};
+use tqsdk_data::{
+    BacktestTickCache, BacktestTickFillReport, DataError,
+    backtest_tick_trading_day_for_timestamp_ns,
+};
 
 use crate::{Result, data_validation};
 
@@ -21,6 +27,242 @@ const REMOTE_FILL_SYMBOL_CONCURRENCY_MAX: usize = 4;
 const REMOTE_CONNECT_RETRY_ATTEMPTS: usize = 5;
 const REMOTE_TICK_WRITE_BUFFER_ROWS: usize = 8_192;
 
+/// Typed configuration for remote historical tick cache fills.
+///
+/// [`Self::from_environment`] preserves the SDK's existing environment-based
+/// defaults. An explicit builder configuration takes precedence over those
+/// values and is scoped to that one backtest operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacktestRemoteFillConfig {
+    pub symbol_batch_size: usize,
+    pub symbol_concurrency: usize,
+    pub idle_timeout: Duration,
+    pub batch_timeout: Option<Duration>,
+    pub slice: Option<Duration>,
+    pub allow_empty_idle: bool,
+}
+
+impl Default for BacktestRemoteFillConfig {
+    fn default() -> Self {
+        Self {
+            symbol_batch_size: REMOTE_FILL_SYMBOL_BATCH_SIZE,
+            symbol_concurrency: REMOTE_FILL_SYMBOL_CONCURRENCY,
+            idle_timeout: REMOTE_FILL_IDLE_TIMEOUT,
+            batch_timeout: None,
+            slice: None,
+            allow_empty_idle: false,
+        }
+    }
+}
+
+impl BacktestRemoteFillConfig {
+    /// Resolve the legacy `TQSDK_REMOTE_FILL_*` environment variables.
+    #[must_use]
+    pub fn from_environment() -> Self {
+        let batch_timeout = parse_remote_fill_batch_timeout(
+            std::env::var("TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        );
+        let slice_ns = parse_remote_fill_slice_ns(
+            std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS")
+                .ok()
+                .as_deref(),
+        );
+        Self {
+            symbol_batch_size: parse_remote_fill_symbol_batch_size(
+                std::env::var("TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE")
+                    .ok()
+                    .as_deref(),
+            ),
+            symbol_concurrency: parse_remote_fill_symbol_concurrency(
+                std::env::var("TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY")
+                    .ok()
+                    .as_deref(),
+            ),
+            idle_timeout: parse_remote_fill_idle_timeout(
+                std::env::var("TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS")
+                    .ok()
+                    .as_deref(),
+            ),
+            batch_timeout: (!batch_timeout.is_zero()).then_some(batch_timeout),
+            slice: slice_ns
+                .and_then(|value| u64::try_from(value).ok())
+                .map(Duration::from_nanos),
+            allow_empty_idle: parse_remote_fill_allow_empty_idle(
+                std::env::var("TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE")
+                    .ok()
+                    .as_deref(),
+            ),
+        }
+        .normalized()
+    }
+
+    #[must_use]
+    pub fn with_symbol_batch_size(mut self, value: usize) -> Self {
+        self.symbol_batch_size = value;
+        self.normalized()
+    }
+
+    #[must_use]
+    pub fn with_symbol_concurrency(mut self, value: usize) -> Self {
+        self.symbol_concurrency = value;
+        self.normalized()
+    }
+
+    #[must_use]
+    pub fn with_idle_timeout(mut self, value: Duration) -> Self {
+        self.idle_timeout = value;
+        self.normalized()
+    }
+
+    #[must_use]
+    pub fn with_batch_timeout(mut self, value: Option<Duration>) -> Self {
+        self.batch_timeout = value;
+        self.normalized()
+    }
+
+    #[must_use]
+    pub fn with_slice(mut self, value: Option<Duration>) -> Self {
+        self.slice = value;
+        self.normalized()
+    }
+
+    #[must_use]
+    pub fn with_allow_empty_idle(mut self, value: bool) -> Self {
+        self.allow_empty_idle = value;
+        self
+    }
+
+    fn normalized(mut self) -> Self {
+        self.symbol_batch_size = normalize_symbol_batch_size(self.symbol_batch_size);
+        self.symbol_concurrency = normalize_symbol_concurrency(self.symbol_concurrency);
+        if self.idle_timeout.is_zero() {
+            self.idle_timeout = REMOTE_FILL_IDLE_TIMEOUT;
+        }
+        self.batch_timeout = self.batch_timeout.filter(|timeout| !timeout.is_zero());
+        self.slice = self.slice.filter(|slice| !slice.is_zero());
+        self
+    }
+
+    fn slice_ns(self) -> Option<i64> {
+        self.slice
+            .and_then(|slice| i64::try_from(slice.as_nanos()).ok())
+            .filter(|slice| *slice > 0)
+    }
+}
+
+/// Low-frequency lifecycle updates emitted by a configured remote cache fill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BacktestRemoteFillProgress {
+    FillStarted {
+        requested_symbols: usize,
+        total_batches: usize,
+        symbol_batch_size: usize,
+        symbol_concurrency: usize,
+        batch_timeout: Option<Duration>,
+    },
+    BatchStarted {
+        batch_number: usize,
+        total_batches: usize,
+        pending_batches: usize,
+        active_batches: usize,
+        requested_range: (i64, i64),
+        symbols: Vec<String>,
+    },
+    TickObserved {
+        symbol: String,
+        trading_day: NaiveDate,
+        accepted_rows: usize,
+    },
+    BatchFinished {
+        batch_number: usize,
+        total_batches: usize,
+        completed_batches: usize,
+        requested_range: (i64, i64),
+        symbols: Vec<String>,
+        elapsed: Duration,
+        rows: usize,
+    },
+    BatchFailed {
+        batch_number: usize,
+        total_batches: usize,
+        requested_range: (i64, i64),
+        symbols: Vec<String>,
+        error: String,
+    },
+}
+
+/// Synchronous observer for [`BacktestRemoteFillProgress`] events.
+///
+/// Handlers run only when explicitly configured and should return quickly.
+pub type BacktestRemoteFillProgressHandler =
+    Arc<dyn Fn(&BacktestRemoteFillProgress) + Send + Sync + 'static>;
+
+/// Cooperative cancellation handle for a remote cache fill.
+///
+/// Cancellation flushes accepted partial tick rows but intentionally does not
+/// commit coverage for the interrupted range.
+#[derive(Clone, Default)]
+pub struct BacktestRemoteFillCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl BacktestRemoteFillCancellation {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteBacktestFillRuntime {
+    config: BacktestRemoteFillConfig,
+    progress: Option<BacktestRemoteFillProgressHandler>,
+    cancellation: Option<BacktestRemoteFillCancellation>,
+}
+
+impl RemoteBacktestFillRuntime {
+    pub(crate) fn new(
+        config: Option<BacktestRemoteFillConfig>,
+        progress: Option<BacktestRemoteFillProgressHandler>,
+        cancellation: Option<BacktestRemoteFillCancellation>,
+    ) -> Self {
+        Self {
+            config: config
+                .unwrap_or_else(BacktestRemoteFillConfig::from_environment)
+                .normalized(),
+            progress,
+            cancellation,
+        }
+    }
+
+    fn emit(&self, event: BacktestRemoteFillProgress) {
+        if let Some(progress) = &self.progress {
+            progress(&event);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+    }
+
+    fn has_progress_handler(&self) -> bool {
+        self.progress.is_some()
+    }
+}
+
 pub(crate) struct RemoteBacktestCachingStream {
     api: tqsdk_wait::TqApi,
     handles: BTreeMap<String, tqsdk_wait::TickHandle>,
@@ -30,7 +272,9 @@ pub(crate) struct RemoteBacktestCachingStream {
     range_start_ns: i64,
     range_end_ns: i64,
     accepted_rows_by_symbol: BTreeMap<String, usize>,
+    reported_trading_days: BTreeMap<String, NaiveDate>,
     last_progress: tokio::time::Instant,
+    runtime: RemoteBacktestFillRuntime,
     finalized: bool,
 }
 
@@ -69,6 +313,17 @@ struct RemoteFillBatchTaskReport {
     end_ns: i64,
     elapsed: Duration,
     fill_report: RemoteBacktestCacheFillReport,
+}
+
+struct RemoteFillBatchTask {
+    batch_index: usize,
+    total_batches: usize,
+    batch_timeout: Option<Duration>,
+    user: String,
+    pass: String,
+    batch: RemoteFillBatch,
+    cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -288,16 +543,18 @@ pub(crate) async fn fill_backtest_tick_cache(
     pass: String,
     requests: Vec<RemoteBacktestCacheFillRequest>,
     cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let requested_symbol_count = requests
         .iter()
         .map(|request| request.symbol.as_str())
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    let symbol_batch_size = remote_fill_symbol_batch_size();
+    let config = runtime.config;
+    let symbol_batch_size = config.symbol_batch_size;
     let mut pending_batches = remote_fill_batches(requests, symbol_batch_size)?;
-    let max_concurrency = remote_fill_symbol_concurrency();
-    let batch_timeout = remote_fill_batch_timeout();
+    let max_concurrency = config.symbol_concurrency;
+    let batch_timeout = config.batch_timeout;
     let total_batches = pending_batches.len();
     let mut next_batch_index = 0usize;
     let mut completed_batches = 0usize;
@@ -312,9 +569,16 @@ pub(crate) async fn fill_backtest_tick_cache(
             .map(|timeout| timeout.as_secs().to_string())
             .unwrap_or_else(|| "disabled".to_string())
     ));
+    runtime.emit(BacktestRemoteFillProgress::FillStarted {
+        requested_symbols: requested_symbol_count,
+        total_batches,
+        symbol_batch_size,
+        symbol_concurrency: max_concurrency,
+        batch_timeout,
+    });
 
     while !pending_batches.is_empty() || !tasks.is_empty() {
-        while tasks.len() < max_concurrency {
+        while !runtime.is_cancelled() && tasks.len() < max_concurrency {
             let Some(batch) = pending_batches.pop_front() else {
                 break;
             };
@@ -330,17 +594,32 @@ pub(crate) async fn fill_backtest_tick_cache(
                 batch.end_ns,
                 batch.symbols.join(",")
             ));
+            runtime.emit(BacktestRemoteFillProgress::BatchStarted {
+                batch_number: batch_index + 1,
+                total_batches,
+                pending_batches: pending_batches.len(),
+                active_batches: tasks.len() + 1,
+                requested_range: (batch.start_ns, batch.end_ns),
+                symbols: batch.symbols.clone(),
+            });
             tasks.spawn(fill_backtest_tick_cache_symbol_batch_timed(
-                batch_index,
-                batch_timeout,
-                user.clone(),
-                pass.clone(),
-                batch,
-                cache.clone(),
+                RemoteFillBatchTask {
+                    batch_index,
+                    total_batches,
+                    batch_timeout,
+                    user: user.clone(),
+                    pass: pass.clone(),
+                    batch,
+                    cache: cache.clone(),
+                    runtime: runtime.clone(),
+                },
             ));
         }
 
         let Some(result) = tasks.join_next().await else {
+            if runtime.is_cancelled() {
+                return Err(remote_fill_cancelled_error());
+            }
             continue;
         };
         let task_report = match result {
@@ -373,9 +652,21 @@ pub(crate) async fn fill_backtest_tick_cache(
             task_report.end_ns,
             task_report.symbols.join(",")
         ));
+        runtime.emit(BacktestRemoteFillProgress::BatchFinished {
+            batch_number: task_report.batch_index + 1,
+            total_batches,
+            completed_batches,
+            requested_range: (task_report.start_ns, task_report.end_ns),
+            symbols: task_report.symbols.clone(),
+            elapsed: task_report.elapsed,
+            rows: batch_rows,
+        });
         for (symbol, rows) in task_report.fill_report.rows_by_symbol {
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
+    }
+    if runtime.is_cancelled() {
+        return Err(remote_fill_cancelled_error());
     }
     if !batch_errors.is_empty() {
         return Err(data_validation(format!(
@@ -389,7 +680,7 @@ pub(crate) async fn fill_backtest_tick_cache(
     if should_reject_empty_remote_fill(
         requested_symbol_count,
         accepted_rows_total,
-        remote_fill_allow_empty_idle(),
+        config.allow_empty_idle,
     ) {
         return Err(data_validation(format!(
             "remote backtest cache fill completed without accepted ticks for {requested_symbol_count} symbols; refusing to mark complete empty coverage"
@@ -438,33 +729,57 @@ fn remote_fill_batches(
 }
 
 async fn fill_backtest_tick_cache_symbol_batch_timed(
-    batch_index: usize,
-    batch_timeout: Option<Duration>,
-    user: String,
-    pass: String,
-    batch: RemoteFillBatch,
-    cache: BacktestTickCache,
+    task: RemoteFillBatchTask,
 ) -> Result<RemoteFillBatchTaskReport> {
+    let RemoteFillBatchTask {
+        batch_index,
+        total_batches,
+        batch_timeout,
+        user,
+        pass,
+        batch,
+        cache,
+        runtime,
+    } = task;
     let started = tokio::time::Instant::now();
     let timeout_symbols = batch.symbols.clone();
     let start_ns = batch.start_ns;
     let end_ns = batch.end_ns;
-    let fill =
-        fill_backtest_tick_cache_symbol_batch(user, pass, start_ns, end_ns, batch.symbols, cache);
-    let fill_report = match batch_timeout {
+    let symbols = batch.symbols;
+    let fill = fill_backtest_tick_cache_symbol_batch(
+        user,
+        pass,
+        start_ns,
+        end_ns,
+        symbols.clone(),
+        cache,
+        runtime.clone(),
+    );
+    let result = match batch_timeout {
         Some(batch_timeout) => match tokio::time::timeout(batch_timeout, fill).await {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(data_validation(format!(
-                    "remote backtest cache fill batch timed out after {}s for {} symbols ({}) \
+            Ok(result) => result,
+            Err(_) => Err(data_validation(format!(
+                "remote backtest cache fill batch timed out after {}s for {} symbols ({}) \
                      in range [{start_ns}, {end_ns})",
-                    batch_timeout.as_secs(),
-                    timeout_symbols.len(),
-                    timeout_symbols.join(",")
-                )));
-            }
+                batch_timeout.as_secs(),
+                timeout_symbols.len(),
+                timeout_symbols.join(",")
+            ))),
         },
-        None => fill.await?,
+        None => fill.await,
+    };
+    let fill_report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            runtime.emit(BacktestRemoteFillProgress::BatchFailed {
+                batch_number: batch_index + 1,
+                total_batches,
+                requested_range: (start_ns, end_ns),
+                symbols: timeout_symbols,
+                error: error.to_string(),
+            });
+            return Err(error);
+        }
     };
     let elapsed = started.elapsed();
     Ok(RemoteFillBatchTaskReport {
@@ -484,6 +799,7 @@ async fn fill_backtest_tick_cache_symbol_batch(
     end_ns: i64,
     symbols: Vec<String>,
     cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let result = fill_backtest_tick_cache_symbol_batch_once(
         user.clone(),
@@ -492,6 +808,7 @@ async fn fill_backtest_tick_cache_symbol_batch(
         end_ns,
         symbols.clone(),
         cache.clone(),
+        runtime.clone(),
     )
     .await;
     if !matches!(
@@ -516,6 +833,7 @@ async fn fill_backtest_tick_cache_symbol_batch(
             end_ns,
             vec![symbol],
             cache.clone(),
+            runtime.clone(),
         )
         .await?;
         for (symbol, rows) in fill_report.rows_by_symbol {
@@ -533,6 +851,7 @@ async fn fill_backtest_tick_cache_symbol_batch_once(
     end_ns: i64,
     symbols: Vec<String>,
     cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let mut attempt = 1usize;
     loop {
@@ -543,6 +862,7 @@ async fn fill_backtest_tick_cache_symbol_batch_once(
             end_ns,
             symbols.clone(),
             cache.clone(),
+            runtime.clone(),
         )
         .await;
         match result {
@@ -572,9 +892,10 @@ async fn fill_backtest_tick_cache_symbol_batch_attempt(
     end_ns: i64,
     symbols: Vec<String>,
     cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let mut rows_by_symbol = BTreeMap::new();
-    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns) {
+    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns, runtime.config) {
         let mut stream = connect_remote_backtest_caching_stream(
             user.clone(),
             pass.clone(),
@@ -582,6 +903,7 @@ async fn fill_backtest_tick_cache_symbol_batch_attempt(
             slice_end_ns,
             symbols.clone(),
             cache.clone(),
+            runtime.clone(),
         )
         .await
         .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
@@ -606,6 +928,7 @@ async fn connect_remote_backtest_caching_stream(
     end_ns: i64,
     symbols: Vec<String>,
     cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCachingStream> {
     let mut attempt = 1usize;
     loop {
@@ -616,6 +939,7 @@ async fn connect_remote_backtest_caching_stream(
             end_ns,
             symbols.clone(),
             cache.clone(),
+            runtime.clone(),
         )
         .await;
         match result {
@@ -636,8 +960,12 @@ fn remote_connect_retry_delay(attempt: usize) -> Duration {
     Duration::from_secs((attempt as u64).saturating_mul(2))
 }
 
-fn remote_fill_ranges(start_ns: i64, end_ns: i64) -> Vec<(i64, i64)> {
-    remote_fill_ranges_for_slice_ns(start_ns, end_ns, remote_fill_slice_ns())
+fn remote_fill_ranges(
+    start_ns: i64,
+    end_ns: i64,
+    config: BacktestRemoteFillConfig,
+) -> Vec<(i64, i64)> {
+    remote_fill_ranges_for_slice_ns(start_ns, end_ns, config.slice_ns())
 }
 
 fn remote_fill_ranges_for_slice_ns(
@@ -668,6 +996,10 @@ fn remote_slice_error(slice_start_ns: i64, slice_end_ns: i64, error: crate::Erro
     ))
 }
 
+fn remote_fill_cancelled_error() -> crate::Error {
+    data_validation("remote backtest cache fill cancelled")
+}
+
 impl RemoteBacktestCachingStream {
     pub(crate) async fn connect(
         user: String,
@@ -676,6 +1008,7 @@ impl RemoteBacktestCachingStream {
         end_ns: i64,
         symbols: Vec<String>,
         cache: BacktestTickCache,
+        runtime: RemoteBacktestFillRuntime,
     ) -> Result<Self> {
         let mut api = tqsdk_wait::TqApiBuilder::new(user, pass)
             .futures_backtest(start_ns, end_ns)?
@@ -704,13 +1037,19 @@ impl RemoteBacktestCachingStream {
             range_start_ns: start_ns,
             range_end_ns: end_ns,
             accepted_rows_by_symbol: BTreeMap::new(),
+            reported_trading_days: BTreeMap::new(),
             last_progress: tokio::time::Instant::now(),
+            runtime,
             finalized: false,
         })
     }
 
     async fn fill_cache(&mut self) -> Result<RemoteBacktestCacheFillReport> {
         loop {
+            if self.runtime.is_cancelled() {
+                self.write_buffer.flush_all(&self.cache)?;
+                return Err(remote_fill_cancelled_error());
+            }
             if self.fills_complete() {
                 self.finalize_cache(FinalizeMode::Strict)?;
                 return Ok(self.fill_report());
@@ -723,7 +1062,7 @@ impl RemoteBacktestCachingStream {
                 self.finalize_idle_after_terminal(now_ns)?;
                 return Ok(self.fill_report());
             }
-            if self.last_progress.elapsed() >= remote_fill_idle_timeout() {
+            if self.last_progress.elapsed() >= self.runtime.config.idle_timeout {
                 if self
                     .poll_remote_step_until(tokio::time::Instant::now())
                     .await?
@@ -770,12 +1109,33 @@ impl RemoteBacktestCachingStream {
             }
 
             if !accepted_rows.is_empty() {
-                *self
-                    .accepted_rows_by_symbol
-                    .entry(symbol.clone())
-                    .or_insert(0) += accepted_rows.len();
+                let latest_datetime_ns = self
+                    .runtime
+                    .has_progress_handler()
+                    .then(|| accepted_rows.iter().map(|row| row.datetime).max())
+                    .flatten();
+                let accepted_rows_total = {
+                    let total = self
+                        .accepted_rows_by_symbol
+                        .entry(symbol.clone())
+                        .or_insert(0);
+                    *total = total.saturating_add(accepted_rows.len());
+                    *total
+                };
                 self.write_buffer
                     .push_rows(&self.cache, symbol, accepted_rows)?;
+                if let Some(datetime_ns) = latest_datetime_ns {
+                    let trading_day = backtest_tick_trading_day_for_timestamp_ns(datetime_ns)?;
+                    if self.reported_trading_days.get(symbol) != Some(&trading_day) {
+                        self.reported_trading_days
+                            .insert(symbol.clone(), trading_day);
+                        self.runtime.emit(BacktestRemoteFillProgress::TickObserved {
+                            symbol: symbol.clone(),
+                            trading_day,
+                            accepted_rows: accepted_rows_total,
+                        });
+                    }
+                }
                 made_progress = true;
             }
         }
@@ -863,7 +1223,7 @@ impl RemoteBacktestCachingStream {
 
         let unconfirmed_empty_idle_symbols = self.unconfirmed_empty_idle_symbols()?;
         if should_reject_empty_idle_finalize(
-            remote_fill_allow_empty_idle(),
+            self.runtime.config.allow_empty_idle,
             !unconfirmed_empty_idle_symbols.is_empty(),
         ) {
             return Err(data_validation(format!(
@@ -913,37 +1273,6 @@ impl RemoteBacktestCachingStream {
     }
 }
 
-fn remote_fill_idle_timeout() -> Duration {
-    let value = std::env::var("TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS").ok();
-    parse_remote_fill_idle_timeout(value.as_deref())
-}
-
-fn remote_fill_batch_timeout() -> Option<Duration> {
-    let value = std::env::var("TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS").ok();
-    let timeout = parse_remote_fill_batch_timeout(value.as_deref());
-    (!timeout.is_zero()).then_some(timeout)
-}
-
-fn remote_fill_allow_empty_idle() -> bool {
-    let value = std::env::var("TQSDK_REMOTE_FILL_ALLOW_EMPTY_IDLE").ok();
-    parse_remote_fill_allow_empty_idle(value.as_deref())
-}
-
-fn remote_fill_symbol_batch_size() -> usize {
-    let value = std::env::var("TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE").ok();
-    parse_remote_fill_symbol_batch_size(value.as_deref())
-}
-
-fn remote_fill_symbol_concurrency() -> usize {
-    let value = std::env::var("TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY").ok();
-    parse_remote_fill_symbol_concurrency(value.as_deref())
-}
-
-fn remote_fill_slice_ns() -> Option<i64> {
-    let value = std::env::var("TQSDK_REMOTE_FILL_SLICE_SECS").ok();
-    parse_remote_fill_slice_ns(value.as_deref())
-}
-
 fn remote_fill_progress_enabled() -> bool {
     let value = std::env::var("TQSDK_REMOTE_FILL_PROGRESS").ok();
     parse_remote_fill_progress_enabled(value.as_deref())
@@ -986,19 +1315,31 @@ fn parse_remote_fill_progress_enabled(value: Option<&str>) -> bool {
 }
 
 fn parse_remote_fill_symbol_batch_size(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|batch_size| *batch_size > 0)
-        .unwrap_or(REMOTE_FILL_SYMBOL_BATCH_SIZE)
-        .min(REMOTE_FILL_SYMBOL_BATCH_SIZE_MAX)
+    normalize_symbol_batch_size(
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(REMOTE_FILL_SYMBOL_BATCH_SIZE),
+    )
 }
 
 fn parse_remote_fill_symbol_concurrency(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|concurrency| *concurrency > 0)
-        .unwrap_or(REMOTE_FILL_SYMBOL_CONCURRENCY)
-        .min(REMOTE_FILL_SYMBOL_CONCURRENCY_MAX)
+    normalize_symbol_concurrency(
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(REMOTE_FILL_SYMBOL_CONCURRENCY),
+    )
+}
+
+fn normalize_symbol_batch_size(value: usize) -> usize {
+    value.clamp(1, REMOTE_FILL_SYMBOL_BATCH_SIZE_MAX)
+}
+
+fn normalize_symbol_concurrency(value: usize) -> usize {
+    if value == 0 {
+        REMOTE_FILL_SYMBOL_CONCURRENCY
+    } else {
+        value.min(REMOTE_FILL_SYMBOL_CONCURRENCY_MAX)
+    }
 }
 
 fn parse_remote_fill_slice_ns(value: Option<&str>) -> Option<i64> {
@@ -1110,7 +1451,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest,
+        BacktestRemoteFillCancellation, BacktestRemoteFillConfig, REMOTE_FILL_BATCH_TIMEOUT,
+        REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest, RemoteBacktestFillRuntime,
         RemoteTickFillState, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
         parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
         parse_remote_fill_progress_enabled, parse_remote_fill_slice_ns,
@@ -1123,6 +1465,36 @@ mod tests {
     };
     use tqsdk_core::Tick;
     use tqsdk_data::{BacktestTickCache, BacktestTickFill, TickDataSeriesRequest};
+
+    #[test]
+    fn typed_remote_fill_config_normalizes_direct_cli_overrides() {
+        let config = BacktestRemoteFillConfig::default()
+            .with_symbol_batch_size(128)
+            .with_symbol_concurrency(0)
+            .with_idle_timeout(Duration::ZERO)
+            .with_batch_timeout(Some(Duration::ZERO))
+            .with_slice(Some(Duration::from_secs(2)));
+
+        assert_eq!(config.symbol_batch_size, 4);
+        assert_eq!(config.symbol_concurrency, 2);
+        assert_eq!(config.idle_timeout, REMOTE_FILL_IDLE_TIMEOUT);
+        assert_eq!(config.batch_timeout, None);
+        assert_eq!(config.slice_ns(), Some(2_000_000_000));
+    }
+
+    #[test]
+    fn remote_fill_cancellation_is_shared_with_the_runtime() {
+        let cancellation = BacktestRemoteFillCancellation::new();
+        let runtime = RemoteBacktestFillRuntime::new(
+            Some(BacktestRemoteFillConfig::default()),
+            None,
+            Some(cancellation.clone()),
+        );
+
+        assert!(!runtime.is_cancelled());
+        cancellation.cancel();
+        assert!(runtime.is_cancelled());
+    }
 
     #[test]
     fn remote_fill_ranges_default_to_single_python_style_backtest_session() {

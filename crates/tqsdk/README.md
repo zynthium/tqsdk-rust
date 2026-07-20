@@ -64,6 +64,12 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会继续补其缺口。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 
+固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
+`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day `fill`、
+report-bound `verify` 和 TQBN `doctor`。CLI 不改变 facade 默认行为，也不替代 live
+`MarketCachePolicy` recording；完整命令合同见
+[回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
+
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick
 symbols，然后通过 `.market_cache(policy)` 挂到 live builder。symbol 集合可以用
 `.record_ticks([...])` 显式列出，也可以用 `.record_universe("active:all;!CFFEX")?`

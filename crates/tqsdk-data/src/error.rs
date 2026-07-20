@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::history_series_cache::HistorySeriesCacheMiss;
@@ -14,6 +15,10 @@ pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
     PermissionDenied(String),
     CacheMiss(Box<HistorySeriesCacheMiss>),
+    CacheBusy {
+        cache_dir: PathBuf,
+        operation: &'static str,
+    },
     Validation(String),
     InvalidState(&'static str),
     InvalidResponse(String),
@@ -63,6 +68,14 @@ impl Display for DataError {
                 miss.end_datetime_ns,
                 miss.missing_ranges
             ),
+            Self::CacheBusy {
+                cache_dir,
+                operation,
+            } => write!(
+                f,
+                "history cache at {} is busy with {operation}",
+                cache_dir.display()
+            ),
             Self::Validation(message) => write!(f, "invalid data query input: {message}"),
             Self::InvalidState(message) => write!(f, "invalid data client state: {message}"),
             Self::InvalidResponse(message) => {
@@ -89,6 +102,7 @@ impl std::error::Error for DataError {
             Self::Json(error) => Some(error),
             Self::PermissionDenied(_)
             | Self::CacheMiss(_)
+            | Self::CacheBusy { .. }
             | Self::Validation(_)
             | Self::InvalidState(_)
             | Self::InvalidResponse(_)

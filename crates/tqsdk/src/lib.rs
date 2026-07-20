@@ -18,7 +18,8 @@ use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Timelike, Utc, Weekday}
 pub mod prelude {
     pub use crate::{
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
-        BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestTickCache,
+        BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestRemoteFillCancellation,
+        BacktestRemoteFillConfig, BacktestRemoteFillProgress, BacktestTickCache,
         BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
         MarketCachePolicy, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
         RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, Result,
@@ -98,6 +99,10 @@ mod backtest_remote;
 mod live_tick_recorder;
 mod local_backtest;
 
+pub use backtest_remote::{
+    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillProgress,
+    BacktestRemoteFillProgressHandler,
+};
 pub use live_tick_recorder::{
     RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport, RecordTicksSymbolFlushReport,
     RecordTicksSymbolHealth,
@@ -956,6 +961,10 @@ pub struct BacktestBuilder {
     tick_specs: Vec<BacktestTickSpec>,
     universe_expression: Option<tqsdk_data::UniverseExpression>,
     warmup_batch_size: usize,
+    remote_fill_config: Option<BacktestRemoteFillConfig>,
+    remote_fill_progress: Option<BacktestRemoteFillProgressHandler>,
+    remote_fill_cancellation: Option<BacktestRemoteFillCancellation>,
+    remote_fill_lock_wait: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -990,6 +999,7 @@ pub struct PreparedBacktest {
     builder: BacktestBuilder,
     data_report: BacktestDataReport,
     mode: PreparedBacktestMode,
+    remote_fill_lock: Option<tqsdk_data::BacktestTickCacheOperationLock>,
 }
 
 enum PreparedBacktestMode {
@@ -1049,6 +1059,11 @@ pub struct BacktestCacheWarmupReport {
     pub requested_range: (i64, i64),
     pub cache_policy: BacktestCachePolicy,
     pub cache_dir: std::path::PathBuf,
+    /// Logical symbols after explicit and universe-expression resolution.
+    ///
+    /// `symbols` below reports the physical tick-cache symbols; they can differ
+    /// for a historical `KQ.m@...` main-contract request.
+    pub logical_symbols: Vec<String>,
     /// Compatibility field for callers that still record a warmup batch hint.
     ///
     /// Remote cache fill is scheduled by the internal bounded remote scheduler;
@@ -1450,6 +1465,50 @@ impl BacktestBuilder {
         Ok(())
     }
 
+    fn remote_fill_runtime(&self) -> backtest_remote::RemoteBacktestFillRuntime {
+        backtest_remote::RemoteBacktestFillRuntime::new(
+            self.remote_fill_config,
+            self.remote_fill_progress.clone(),
+            self.remote_fill_cancellation.clone(),
+        )
+    }
+
+    async fn acquire_remote_fill_lock(
+        &self,
+        cache: &tqsdk_data::BacktestTickCache,
+    ) -> Result<tqsdk_data::BacktestTickCacheOperationLock> {
+        if self
+            .remote_fill_cancellation
+            .as_ref()
+            .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+        {
+            return Err(data_validation("remote backtest cache fill cancelled"));
+        }
+        let Some(wait) = self.remote_fill_lock_wait else {
+            return cache.try_acquire_remote_fill_lock().map_err(Error::from);
+        };
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if self
+                .remote_fill_cancellation
+                .as_ref()
+                .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+            {
+                return Err(data_validation("remote backtest cache fill cancelled"));
+            }
+            match cache.try_acquire_remote_fill_lock() {
+                Ok(lock) => return Ok(lock),
+                Err(tqsdk_data::DataError::CacheBusy { .. })
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
+                }
+                Err(error) => return Err(Error::from(error)),
+            }
+        }
+    }
+
     fn resolved_cache(&self) -> Result<tqsdk_data::BacktestTickCache> {
         if let Some(cache) = &self.cache {
             return Ok(cache.clone());
@@ -1505,6 +1564,50 @@ impl BacktestBuilder {
     #[must_use]
     pub fn batch_size(mut self, batch_size: usize) -> Self {
         self.warmup_batch_size = batch_size.max(1);
+        self
+    }
+
+    /// Override remote tick-fill scheduling for this backtest operation.
+    ///
+    /// Use [`BacktestRemoteFillConfig::from_environment`] to retain the
+    /// existing environment configuration and selectively override it.
+    #[must_use]
+    pub fn remote_fill_config(mut self, config: BacktestRemoteFillConfig) -> Self {
+        self.remote_fill_config = Some(config);
+        self
+    }
+
+    /// Observe low-frequency remote cache-fill lifecycle events.
+    ///
+    /// The handler is not installed by default and should return quickly.
+    #[must_use]
+    pub fn on_remote_fill_progress(
+        mut self,
+        handler: impl Fn(&BacktestRemoteFillProgress) + Send + Sync + 'static,
+    ) -> Self {
+        self.remote_fill_progress = Some(Arc::new(handler));
+        self
+    }
+
+    /// Install cooperative cancellation for a remote cache fill.
+    ///
+    /// Cancellation persists accepted partial rows but does not claim coverage
+    /// for the interrupted range.
+    #[must_use]
+    pub fn remote_fill_cancellation(
+        mut self,
+        cancellation: BacktestRemoteFillCancellation,
+    ) -> Self {
+        self.remote_fill_cancellation = Some(cancellation);
+        self
+    }
+
+    /// Wait up to `wait` for another remote cache fill owner to release the root lock.
+    ///
+    /// Without this opt-in the cache lock is fail-fast.
+    #[must_use]
+    pub fn remote_fill_lock_wait(mut self, wait: Duration) -> Self {
+        self.remote_fill_lock_wait = Some(wait);
         self
     }
 
@@ -1571,6 +1674,9 @@ impl BacktestBuilder {
             resolve_backtest_tick_sources(&planned.tick_symbols, self.start_ns, self.end_ns)
                 .await?;
         let physical_ranges = physical_tick_ranges(&tick_sources);
+        let mut logical_symbols = planned.tick_symbols.clone();
+        logical_symbols.sort();
+        logical_symbols.dedup();
 
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
             return Err(data_validation(format!(
@@ -1583,6 +1689,14 @@ impl BacktestBuilder {
         if refresh && self.base.auth.is_none() {
             return Err(data_validation("remote backtest cache fill requires auth"));
         }
+        let _remote_fill_lock = if matches!(
+            self.cache_policy,
+            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+        ) {
+            Some(self.acquire_remote_fill_lock(&cache).await?)
+        } else {
+            None
+        };
         if refresh {
             for (symbol, _, _) in &physical_ranges {
                 cache.purge_symbol_ticks(symbol)?;
@@ -1620,12 +1734,14 @@ impl BacktestBuilder {
                 });
             }
             return Ok(build_warmup_report(
-                self.start_ns,
-                self.end_ns,
-                self.cache_policy,
-                cache_dir,
-                self.warmup_batch_size,
-                false,
+                WarmupReportContext {
+                    requested_range: (self.start_ns, self.end_ns),
+                    cache_policy: self.cache_policy,
+                    cache_dir,
+                    logical_symbols: logical_symbols.clone(),
+                    batch_size: self.warmup_batch_size,
+                    remote_used: false,
+                },
                 symbols,
             ));
         }
@@ -1643,6 +1759,7 @@ impl BacktestBuilder {
                 auth.pass,
                 fill_requests,
                 cache.clone(),
+                self.remote_fill_runtime(),
             )
             .await?;
             for (symbol, rows) in fill_report.rows_by_symbol {
@@ -1680,12 +1797,14 @@ impl BacktestBuilder {
         }
 
         Ok(build_warmup_report(
-            self.start_ns,
-            self.end_ns,
-            self.cache_policy,
-            cache_dir,
-            self.warmup_batch_size,
-            remote_used,
+            WarmupReportContext {
+                requested_range: (self.start_ns, self.end_ns),
+                cache_policy: self.cache_policy,
+                cache_dir,
+                logical_symbols,
+                batch_size: self.warmup_batch_size,
+                remote_used,
+            },
             symbols,
         ))
     }
@@ -1831,6 +1950,14 @@ impl BacktestBuilder {
             native_klines: planned.native_klines.clone(),
             synthetic_klines,
         };
+        let remote_fill_lock = if matches!(
+            self.cache_policy,
+            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+        ) {
+            Some(self.acquire_remote_fill_lock(cache).await?)
+        } else {
+            None
+        };
         if matches!(self.cache_policy, BacktestCachePolicy::Refresh) {
             if self.base.auth.is_none() {
                 return Err(data_validation("remote backtest cache fill requires auth"));
@@ -1975,10 +2102,16 @@ impl BacktestBuilder {
             remote_tick_used,
             remote_kline_used,
         };
+        let remote_fill_lock = if matches!(&mode, PreparedBacktestMode::RemoteCaching { .. }) {
+            remote_fill_lock
+        } else {
+            None
+        };
         Ok(PreparedBacktest {
             builder: self,
             data_report,
             mode,
+            remote_fill_lock,
         })
     }
 
@@ -2020,13 +2153,17 @@ fn fill_requests_from_ranges(
         .collect()
 }
 
-fn build_warmup_report(
-    start_ns: i64,
-    end_ns: i64,
+struct WarmupReportContext {
+    requested_range: (i64, i64),
     cache_policy: BacktestCachePolicy,
     cache_dir: std::path::PathBuf,
+    logical_symbols: Vec<String>,
     batch_size: usize,
     remote_used: bool,
+}
+
+fn build_warmup_report(
+    context: WarmupReportContext,
     symbols: Vec<BacktestCacheWarmupSymbolReport>,
 ) -> BacktestCacheWarmupReport {
     let symbols_skipped = symbols
@@ -2049,16 +2186,17 @@ fn build_warmup_report(
         .count();
     let rows_written = symbols.iter().map(|symbol| symbol.rows_written).sum();
     BacktestCacheWarmupReport {
-        requested_range: (start_ns, end_ns),
-        cache_policy,
-        cache_dir,
-        batch_size,
+        requested_range: context.requested_range,
+        cache_policy: context.cache_policy,
+        cache_dir: context.cache_dir,
+        logical_symbols: context.logical_symbols,
+        batch_size: context.batch_size,
         symbols_total: symbols.len(),
         symbols_skipped,
         symbols_missing,
         symbols_filled,
         rows_written,
-        remote_used,
+        remote_used: context.remote_used,
         symbols,
     }
 }
@@ -2076,6 +2214,7 @@ impl PreparedBacktest {
             builder,
             data_report: _,
             mode,
+            remote_fill_lock: _remote_fill_lock,
         } = self;
         let BacktestBuilder {
             base,
@@ -2088,7 +2227,16 @@ impl PreparedBacktest {
             tick_specs,
             universe_expression: _,
             warmup_batch_size: _,
+            remote_fill_config,
+            remote_fill_progress,
+            remote_fill_cancellation,
+            remote_fill_lock_wait: _,
         } = builder;
+        let remote_fill_runtime = backtest_remote::RemoteBacktestFillRuntime::new(
+            remote_fill_config,
+            remote_fill_progress,
+            remote_fill_cancellation,
+        );
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
         let mut base = base;
         for spec in &kline_specs {
@@ -2120,6 +2268,7 @@ impl PreparedBacktest {
                         auth.pass.clone(),
                         tick_fill_requests,
                         cache.clone(),
+                        remote_fill_runtime.clone(),
                     )
                     .await?;
                 }
@@ -2286,6 +2435,10 @@ impl TqBuilder {
             tick_specs: Vec::new(),
             universe_expression: None,
             warmup_batch_size: DEFAULT_BACKTEST_WARMUP_BATCH_SIZE,
+            remote_fill_config: None,
+            remote_fill_progress: None,
+            remote_fill_cancellation: None,
+            remote_fill_lock_wait: None,
         }
     }
 
