@@ -26,7 +26,8 @@
 - [回测 Tick 持久缓存预热与验收](architecture/backtest-tick-cache-operations.md)：按已完成交易日
   增量填充共享 TQBN cache，并用 CacheOnly 和实际回放验证 coverage。
 - [回测 Tick Cache CLI](architecture/backtest-tick-cache-cli.md)：可选 `tqsdk-cache` binary 的
-  inventory、closed-day fill、report-bound verify 与 TQBN doctor 合同。
+  inventory、calendar-aware closed-day fill、stderr-only physical progress、report-bound verify 与
+  TQBN doctor 合同。
 
 ## AI 助手读取顺序
 

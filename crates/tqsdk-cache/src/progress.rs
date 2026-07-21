@@ -1,0 +1,741 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, IsTerminal};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use chrono::NaiveDate;
+use clap::ValueEnum;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use tqsdk::{
+    BacktestRemoteFillPhase, BacktestRemoteFillProgress, BacktestRemoteFillTelemetry,
+    RemoteFillPlan,
+};
+use tqsdk_cache::{FillReport, FillReportSymbolDayStats};
+use tqsdk_data::{backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range};
+
+const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ProgressMode {
+    Auto,
+    Plain,
+    Off,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProgressCalendar {
+    pub source: String,
+    pub days: Vec<NaiveDate>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FillProgress {
+    shared: Option<Arc<Mutex<ProgressState>>>,
+}
+
+pub(crate) struct FillProgressSession {
+    progress: FillProgress,
+    renderer: Option<thread::JoinHandle<()>>,
+}
+
+impl FillProgressSession {
+    pub(crate) fn new(mode: ProgressMode, max_bars: usize) -> Self {
+        let mode = resolve_mode(mode);
+        if matches!(mode, ResolvedProgressMode::Off) {
+            return Self {
+                progress: FillProgress { shared: None },
+                renderer: None,
+            };
+        }
+
+        let shared = Arc::new(Mutex::new(ProgressState::new(mode, max_bars)));
+        let renderer_state = Arc::clone(&shared);
+        let renderer = thread::spawn(move || render_loop(renderer_state));
+        Self {
+            progress: FillProgress {
+                shared: Some(shared),
+            },
+            renderer: Some(renderer),
+        }
+    }
+
+    pub(crate) fn observer(&self) -> FillProgress {
+        self.progress.clone()
+    }
+
+    pub(crate) fn finish(mut self, summary: impl Into<String>) {
+        if let Some(shared) = &self.progress.shared {
+            if let Ok(mut state) = shared.lock() {
+                state.finished = Some(summary.into());
+                state.revision = state.revision.saturating_add(1);
+            }
+        }
+        if let Some(renderer) = self.renderer.take() {
+            let _ = renderer.join();
+        }
+    }
+}
+
+impl Drop for FillProgressSession {
+    fn drop(&mut self) {
+        let Some(renderer) = self.renderer.take() else {
+            return;
+        };
+        if let Some(shared) = &self.progress.shared {
+            if let Ok(mut state) = shared.lock() {
+                if state.finished.is_none() {
+                    state.finished = Some("fill ended before a final progress summary".to_string());
+                    state.revision = state.revision.saturating_add(1);
+                }
+            }
+        }
+        let _ = renderer.join();
+    }
+}
+
+impl FillProgress {
+    pub(crate) fn planning(&self, message: impl Into<String>) {
+        self.with_state(|state| state.planning = message.into());
+    }
+
+    pub(crate) fn calendar_ready(&self, calendar: ProgressCalendar) {
+        self.with_state(|state| {
+            state.calendar = Some(calendar);
+            state.recalculate_days();
+        });
+    }
+
+    pub(crate) fn calendar_unavailable(&self, message: impl Into<String>) {
+        self.with_state(|state| state.calendar_error = Some(message.into()));
+    }
+
+    pub(crate) fn observe_progress(&self, event: &BacktestRemoteFillProgress) {
+        self.with_state(|state| state.apply_progress(event));
+    }
+
+    pub(crate) fn observe_telemetry(&self, event: &BacktestRemoteFillTelemetry) {
+        self.with_state(|state| state.apply_telemetry(event));
+    }
+
+    pub(crate) fn final_report(&self, report: &FillReport) {
+        self.with_state(|state| state.apply_final_report(report));
+    }
+
+    fn with_state(&self, update: impl FnOnce(&mut ProgressState)) {
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        let Ok(mut state) = shared.lock() else {
+            return;
+        };
+        update(&mut state);
+        state.revision = state.revision.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedProgressMode {
+    Tty,
+    Plain,
+    Off,
+}
+
+fn resolve_mode(mode: ProgressMode) -> ResolvedProgressMode {
+    match mode {
+        ProgressMode::Off => ResolvedProgressMode::Off,
+        ProgressMode::Plain => ResolvedProgressMode::Plain,
+        ProgressMode::Auto
+            if io::stderr().is_terminal()
+                && std::env::var("TERM").ok().as_deref() != Some("dumb") =>
+        {
+            ResolvedProgressMode::Tty
+        }
+        ProgressMode::Auto => ResolvedProgressMode::Plain,
+    }
+}
+
+#[derive(Clone)]
+struct ProgressState {
+    mode: ResolvedProgressMode,
+    max_bars: usize,
+    planning: String,
+    calendar: Option<ProgressCalendar>,
+    calendar_error: Option<String>,
+    plan: Option<RemoteFillPlan>,
+    symbols: BTreeMap<String, SymbolProgress>,
+    completed_batches: BTreeSet<usize>,
+    total_batches: usize,
+    failed: bool,
+    revision: u64,
+    finished: Option<String>,
+    started_at: Instant,
+}
+
+#[derive(Clone, Default)]
+struct SymbolProgress {
+    requested_ranges: Vec<(i64, i64)>,
+    missing_ranges: Vec<(i64, i64)>,
+    planned_days: BTreeSet<NaiveDate>,
+    missing_days: BTreeSet<NaiveDate>,
+    covered_days: BTreeSet<NaiveDate>,
+    received_days: BTreeSet<NaiveDate>,
+    rows_by_stream: BTreeMap<(usize, usize, i64, i64), usize>,
+    active: bool,
+    phase: Option<BacktestRemoteFillPhase>,
+    latest_trading_day: Option<NaiveDate>,
+    retries: usize,
+    split_fallback: bool,
+}
+
+impl ProgressState {
+    fn new(mode: ResolvedProgressMode, max_bars: usize) -> Self {
+        Self {
+            mode,
+            max_bars,
+            planning: "planning cache fill".to_string(),
+            calendar: None,
+            calendar_error: None,
+            plan: None,
+            symbols: BTreeMap::new(),
+            completed_batches: BTreeSet::new(),
+            total_batches: 0,
+            failed: false,
+            revision: 0,
+            finished: None,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn apply_progress(&mut self, event: &BacktestRemoteFillProgress) {
+        match event {
+            BacktestRemoteFillProgress::FillStarted { total_batches, .. } => {
+                self.total_batches = *total_batches;
+            }
+            BacktestRemoteFillProgress::BatchFinished { batch_number, .. } => {
+                self.completed_batches.insert(*batch_number);
+            }
+            BacktestRemoteFillProgress::BatchFailed { .. } => self.failed = true,
+            BacktestRemoteFillProgress::BatchStarted { .. }
+            | BacktestRemoteFillProgress::TickObserved { .. } => {}
+        }
+    }
+
+    fn apply_telemetry(&mut self, event: &BacktestRemoteFillTelemetry) {
+        if let Some(plan) = event.plan() {
+            self.plan = Some(plan.clone());
+            self.total_batches = plan.logical_batches();
+            self.symbols.clear();
+            for plan_symbol in plan.physical_symbols() {
+                self.symbols.insert(
+                    plan_symbol.physical_symbol().to_string(),
+                    SymbolProgress {
+                        requested_ranges: plan_symbol.requested_ranges().to_vec(),
+                        missing_ranges: plan_symbol.missing_ranges().to_vec(),
+                        ..SymbolProgress::default()
+                    },
+                );
+            }
+            self.recalculate_days();
+            return;
+        }
+
+        let Some(symbol) = event.physical_symbol() else {
+            return;
+        };
+        let Some(range) = event.requested_range() else {
+            return;
+        };
+        let entry = self.symbols.entry(symbol.to_string()).or_default();
+        entry.phase = Some(event.phase());
+        entry.active = !matches!(
+            event.phase(),
+            BacktestRemoteFillPhase::Finished
+                | BacktestRemoteFillPhase::Failed
+                | BacktestRemoteFillPhase::Cancelled
+        );
+        if matches!(event.phase(), BacktestRemoteFillPhase::Retrying) {
+            entry.retries = entry.retries.saturating_add(1);
+        }
+        if matches!(event.phase(), BacktestRemoteFillPhase::SplitFallback) {
+            entry.split_fallback = true;
+        }
+        if matches!(event.phase(), BacktestRemoteFillPhase::Failed) {
+            self.failed = true;
+        }
+        if let Some(batch_id) = event.logical_batch_id() {
+            entry.rows_by_stream.insert(
+                (batch_id, event.attempt(), range.0, range.1),
+                event.accepted_rows(),
+            );
+        }
+        if let Some(cursor_ns) = event.latest_cursor_ns() {
+            if let Ok(cursor_day) = backtest_tick_trading_day_for_timestamp_ns(cursor_ns) {
+                entry.latest_trading_day = Some(cursor_day);
+            }
+            entry.received_days.extend(completed_days_through_cursor(
+                &entry.missing_days,
+                cursor_ns,
+            ));
+        }
+        if matches!(event.phase(), BacktestRemoteFillPhase::Finished) {
+            let completed_days = days_for_ranges(&[range], self.calendar.as_ref());
+            entry
+                .covered_days
+                .extend(entry.missing_days.intersection(&completed_days).copied());
+            entry
+                .received_days
+                .extend(entry.missing_days.intersection(&completed_days).copied());
+        }
+    }
+
+    fn apply_final_report(&mut self, report: &FillReport) {
+        for symbol in &report.physical_symbols {
+            let Some(stats) = &symbol.day_stats else {
+                continue;
+            };
+            self.apply_day_stats(stats);
+        }
+    }
+
+    fn apply_day_stats(&mut self, stats: &FillReportSymbolDayStats) {
+        let Some(symbol) = self.symbols.get_mut(&stats.symbol) else {
+            return;
+        };
+        if symbol.planned_days.len() == stats.planned_days
+            && stats.covered_days == stats.planned_days
+        {
+            symbol.covered_days = symbol.planned_days.clone();
+        }
+        if symbol.missing_days.len() == stats.missing_days
+            && stats.received_days == stats.missing_days
+        {
+            symbol.received_days = symbol.missing_days.clone();
+        }
+    }
+
+    fn recalculate_days(&mut self) {
+        for symbol in self.symbols.values_mut() {
+            symbol.planned_days = days_for_ranges(&symbol.requested_ranges, self.calendar.as_ref());
+            symbol.missing_days = days_for_ranges(&symbol.missing_ranges, self.calendar.as_ref());
+            symbol.covered_days = symbol
+                .planned_days
+                .difference(&symbol.missing_days)
+                .copied()
+                .collect();
+            symbol
+                .received_days
+                .retain(|day| symbol.missing_days.contains(day));
+        }
+    }
+
+    fn coverage_counts(&self) -> (usize, usize, usize, usize, usize) {
+        let mut covered = 0;
+        let mut planned = 0;
+        let mut received = 0;
+        let mut missing = 0;
+        let mut rows = 0;
+        for symbol in self.symbols.values() {
+            covered += symbol.covered_days.len();
+            planned += symbol.planned_days.len();
+            received += symbol.received_days.len();
+            missing += symbol.missing_days.len();
+            rows += symbol.rows_by_stream.values().copied().sum::<usize>();
+        }
+        (covered, planned, received, missing, rows)
+    }
+}
+
+fn days_for_ranges(
+    ranges: &[(i64, i64)],
+    calendar: Option<&ProgressCalendar>,
+) -> BTreeSet<NaiveDate> {
+    let calendar_days =
+        calendar.map(|calendar| calendar.days.iter().copied().collect::<BTreeSet<_>>());
+    let mut days = BTreeSet::new();
+    for (start_ns, end_ns) in ranges {
+        if start_ns >= end_ns {
+            continue;
+        }
+        let Ok(mut day) = backtest_tick_trading_day_for_timestamp_ns(*start_ns) else {
+            continue;
+        };
+        let Ok(last_day) = backtest_tick_trading_day_for_timestamp_ns(end_ns.saturating_sub(1))
+        else {
+            continue;
+        };
+        while day <= last_day {
+            if calendar_days
+                .as_ref()
+                .is_none_or(|days| days.contains(&day))
+            {
+                days.insert(day);
+            }
+            let Some(next) = day.succ_opt() else {
+                break;
+            };
+            day = next;
+        }
+    }
+    days
+}
+
+fn completed_days_through_cursor(
+    days: &BTreeSet<NaiveDate>,
+    cursor_ns: i64,
+) -> BTreeSet<NaiveDate> {
+    days.iter()
+        .copied()
+        .filter(|day| {
+            backtest_tick_trading_day_range(*day)
+                .map(|range| range.end_ns <= cursor_ns)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn render_loop(shared: Arc<Mutex<ProgressState>>) {
+    let mode = shared
+        .lock()
+        .map(|state| state.mode)
+        .unwrap_or(ResolvedProgressMode::Off);
+    match mode {
+        ResolvedProgressMode::Tty => render_tty(shared),
+        ResolvedProgressMode::Plain => render_plain(shared),
+        ResolvedProgressMode::Off => {}
+    }
+}
+
+fn render_plain(shared: Arc<Mutex<ProgressState>>) {
+    let mut rendered_revision = u64::MAX;
+    loop {
+        thread::sleep(RENDER_INTERVAL);
+        let snapshot = match shared.lock() {
+            Ok(state) => state.clone(),
+            Err(_) => return,
+        };
+        if snapshot.revision != rendered_revision {
+            rendered_revision = snapshot.revision;
+            let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
+            let rows_per_second = rows_per_second(rows, snapshot.started_at);
+            if snapshot.plan.is_none() {
+                eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
+            } else {
+                eprintln!(
+                    "tqsdk-cache: phase=fill status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} rows_per_sec={} calendar={}{}",
+                    if snapshot.failed { "failed" } else { "running" },
+                    snapshot.completed_batches.len(),
+                    snapshot.total_batches,
+                    covered,
+                    planned,
+                    received,
+                    missing,
+                    rows,
+                    rows_per_second,
+                    snapshot
+                        .calendar
+                        .as_ref()
+                        .map(|calendar| calendar.source.as_str())
+                        .unwrap_or("partition_fallback"),
+                    snapshot
+                        .calendar_error
+                        .as_ref()
+                        .map(|error| format!(" calendar_error={error:?}"))
+                        .unwrap_or_default(),
+                );
+                for (symbol, state) in snapshot.symbols.iter().filter(|(_, state)| state.active) {
+                    let trading_day = state
+                        .latest_trading_day
+                        .map(|day| day.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    eprintln!(
+                        "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{} received_days={}/{} rows={} attempt_retries={} split_fallback={}",
+                        symbol,
+                        state.phase.map(phase_name).unwrap_or("pending"),
+                        trading_day,
+                        state.covered_days.len(),
+                        state.planned_days.len(),
+                        state.received_days.len(),
+                        state.missing_days.len(),
+                        state.rows_by_stream.values().copied().sum::<usize>(),
+                        state.retries,
+                        state.split_fallback,
+                    );
+                }
+            }
+        }
+        if let Some(summary) = snapshot.finished {
+            eprintln!("tqsdk-cache: phase=complete summary={summary:?}");
+            return;
+        }
+    }
+}
+
+fn render_tty(shared: Arc<Mutex<ProgressState>>) {
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(8));
+    let planning = multi.add(ProgressBar::new_spinner());
+    planning.set_style(spinner_style());
+    planning.enable_steady_tick(Duration::from_millis(120));
+    let mut global = None;
+    let mut symbol_bars = BTreeMap::<String, ProgressBar>::new();
+    let mut rendered_revision = u64::MAX;
+
+    loop {
+        thread::sleep(RENDER_INTERVAL);
+        let snapshot = match shared.lock() {
+            Ok(state) => state.clone(),
+            Err(_) => return,
+        };
+        if snapshot.revision != rendered_revision {
+            rendered_revision = snapshot.revision;
+            if snapshot.plan.is_none() {
+                planning.set_message(snapshot.planning.clone());
+            } else {
+                let active = snapshot
+                    .symbols
+                    .iter()
+                    .filter(|(_, state)| state.active)
+                    .map(|(symbol, _)| symbol.clone())
+                    .collect::<Vec<_>>();
+                let visible = active
+                    .iter()
+                    .take(snapshot.max_bars)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let additional_active = active.len().saturating_sub(visible.len());
+                if global.is_none() {
+                    planning.finish_and_clear();
+                    multi.remove(&planning);
+                    let bar = multi.add(ProgressBar::new(snapshot.total_batches as u64));
+                    bar.set_style(global_style());
+                    global = Some(bar);
+                }
+                if let Some(global) = &global {
+                    let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
+                    global.set_length(snapshot.total_batches as u64);
+                    global.set_position(snapshot.completed_batches.len() as u64);
+                    global.set_message(format!(
+                        "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | {}/s{}",
+                        if snapshot.failed { "failed" } else { "running" },
+                        rows_per_second(rows, snapshot.started_at),
+                        if additional_active == 0 {
+                            String::new()
+                        } else {
+                            format!(" | +{additional_active} active")
+                        }
+                    ));
+                }
+                for (symbol, bar) in &symbol_bars {
+                    if !visible.contains(symbol) {
+                        bar.finish_and_clear();
+                    }
+                }
+                symbol_bars.retain(|symbol, _| visible.contains(symbol));
+                for symbol in &visible {
+                    let bar = symbol_bars.entry(symbol.clone()).or_insert_with(|| {
+                        let bar = multi.add(ProgressBar::new(0));
+                        bar.set_style(symbol_style());
+                        bar
+                    });
+                    let state = &snapshot.symbols[symbol];
+                    bar.set_prefix(symbol.clone());
+                    bar.set_length(state.missing_days.len() as u64);
+                    bar.set_position(state.received_days.len() as u64);
+                    let retry = if state.retries > 0 {
+                        format!(" | retry {}", state.retries)
+                    } else {
+                        String::new()
+                    };
+                    let split = if state.split_fallback { " | split" } else { "" };
+                    let trading_day = state
+                        .latest_trading_day
+                        .map(|day| day.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    bar.set_message(format!(
+                        "{} | {} | 覆盖 {}/{} | 本轮接收 {}/{} | {} rows{}{}",
+                        state.phase.map(phase_name).unwrap_or("pending"),
+                        trading_day,
+                        state.covered_days.len(),
+                        state.planned_days.len(),
+                        state.received_days.len(),
+                        state.missing_days.len(),
+                        state.rows_by_stream.values().copied().sum::<usize>(),
+                        retry,
+                        split,
+                    ));
+                }
+            }
+        }
+        if let Some(summary) = snapshot.finished {
+            for bar in symbol_bars.values() {
+                bar.finish_and_clear();
+            }
+            if let Some(global) = &global {
+                global.finish_with_message(summary.clone());
+            } else {
+                let _ = multi.println(summary.clone());
+            }
+            return;
+        }
+    }
+}
+
+fn rows_per_second(rows: usize, started_at: Instant) -> usize {
+    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+    (rows as f64 / elapsed) as usize
+}
+
+fn phase_name(phase: BacktestRemoteFillPhase) -> &'static str {
+    match phase {
+        BacktestRemoteFillPhase::PlanReady => "plan_ready",
+        BacktestRemoteFillPhase::Started => "started",
+        BacktestRemoteFillPhase::Streaming => "streaming",
+        BacktestRemoteFillPhase::Retrying => "retrying",
+        BacktestRemoteFillPhase::SplitFallback => "split_fallback",
+        BacktestRemoteFillPhase::Finished => "finished",
+        BacktestRemoteFillPhase::Failed => "failed",
+        BacktestRemoteFillPhase::Cancelled => "cancelled",
+        _ => "unknown",
+    }
+}
+
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.cyan} {msg}")
+        .expect("valid fill spinner progress template")
+        .tick_strings(&["-", "\\", "|", "/"])
+}
+
+fn global_style() -> ProgressStyle {
+    ProgressStyle::with_template("{elapsed_precise} {bar:28.cyan/blue} {pos:>4}/{len:4} {msg}")
+        .expect("valid fill global progress template")
+        .progress_chars("##-")
+}
+
+fn symbol_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {prefix:>18} {bar:18.green/blue} {pos:>3}/{len:3} {msg}")
+        .expect("valid fill symbol progress template")
+        .progress_chars("##-")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{
+        ProgressCalendar, ProgressState, SymbolProgress, completed_days_through_cursor,
+        days_for_ranges,
+    };
+    use chrono::NaiveDate;
+    use tqsdk_cache::FillReportSymbolDayStats;
+    use tqsdk_data::backtest_tick_trading_day_range;
+
+    #[test]
+    fn partition_days_preserve_night_session_day_boundaries() {
+        let trading_day = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let range = backtest_tick_trading_day_range(trading_day).unwrap();
+        let days = days_for_ranges(&[(range.start_ns, range.end_ns)], None);
+
+        assert_eq!(days, BTreeSet::from([trading_day]));
+    }
+
+    #[test]
+    fn calendar_filters_partition_days_for_progress_totals() {
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap();
+        let first_range = backtest_tick_trading_day_range(first_day).unwrap();
+        let second_range = backtest_tick_trading_day_range(second_day).unwrap();
+        let calendar = ProgressCalendar {
+            source: "test".to_string(),
+            days: vec![second_day],
+        };
+
+        let days = days_for_ranges(
+            &[
+                (first_range.start_ns, first_range.end_ns),
+                (second_range.start_ns, second_range.end_ns),
+            ],
+            Some(&calendar),
+        );
+
+        assert_eq!(days, BTreeSet::from([second_day]));
+    }
+
+    #[test]
+    fn physical_symbol_denominator_uses_its_own_requested_range() {
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap();
+        let first_range = backtest_tick_trading_day_range(first_day).unwrap();
+        let second_range = backtest_tick_trading_day_range(second_day).unwrap();
+        let mut state = ProgressState::new(super::ResolvedProgressMode::Plain, 8);
+        state.calendar = Some(ProgressCalendar {
+            source: "test".to_string(),
+            days: vec![first_day, second_day],
+        });
+        state.symbols.insert(
+            "SHFE.au2608".to_string(),
+            SymbolProgress {
+                requested_ranges: vec![(first_range.start_ns, first_range.end_ns)],
+                missing_ranges: vec![(first_range.start_ns, first_range.end_ns)],
+                ..SymbolProgress::default()
+            },
+        );
+        state.symbols.insert(
+            "SHFE.au2610".to_string(),
+            SymbolProgress {
+                requested_ranges: vec![(second_range.start_ns, second_range.end_ns)],
+                missing_ranges: vec![(second_range.start_ns, second_range.end_ns)],
+                ..SymbolProgress::default()
+            },
+        );
+
+        state.recalculate_days();
+
+        assert_eq!(state.symbols["SHFE.au2608"].planned_days.len(), 1);
+        assert_eq!(state.symbols["SHFE.au2610"].planned_days.len(), 1);
+    }
+
+    #[test]
+    fn streaming_cursor_counts_only_completed_tqbn_partitions() {
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap();
+        let first_range = backtest_tick_trading_day_range(first_day).unwrap();
+        let second_range = backtest_tick_trading_day_range(second_day).unwrap();
+        let days = BTreeSet::from([first_day, second_day]);
+
+        assert!(completed_days_through_cursor(&days, first_range.start_ns + 1).is_empty());
+        assert_eq!(
+            completed_days_through_cursor(&days, second_range.start_ns),
+            BTreeSet::from([first_day])
+        );
+        assert_eq!(
+            completed_days_through_cursor(&days, second_range.end_ns),
+            BTreeSet::from([first_day, second_day])
+        );
+    }
+
+    #[test]
+    fn partial_report_counts_do_not_forge_day_assignment() {
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap();
+        let mut state = ProgressState::new(super::ResolvedProgressMode::Plain, 8);
+        state.symbols.insert(
+            "SHFE.au2608".to_string(),
+            SymbolProgress {
+                planned_days: BTreeSet::from([first_day, second_day]),
+                missing_days: BTreeSet::from([first_day, second_day]),
+                ..SymbolProgress::default()
+            },
+        );
+
+        state.apply_day_stats(&FillReportSymbolDayStats {
+            symbol: "SHFE.au2608".to_string(),
+            planned_days: 2,
+            covered_days: 1,
+            missing_days: 2,
+            received_days: 1,
+        });
+
+        assert!(state.symbols["SHFE.au2608"].covered_days.is_empty());
+        assert!(state.symbols["SHFE.au2608"].received_days.is_empty());
+    }
+}

@@ -19,11 +19,12 @@ pub mod prelude {
     pub use crate::{
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
         BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestRemoteFillCancellation,
-        BacktestRemoteFillConfig, BacktestRemoteFillProgress, BacktestTickCache,
-        BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
-        MarketCachePolicy, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
-        RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, Result,
-        TargetPos, Tq, TqBuilder,
+        BacktestRemoteFillConfig, BacktestRemoteFillPhase, BacktestRemoteFillProgress,
+        BacktestRemoteFillTelemetry, BacktestTickCache, BacktestTickCachePurgeReport,
+        BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID, MarketCachePolicy,
+        PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport,
+        RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, RemoteFillPlan,
+        RemoteFillPlanSymbol, Result, TargetPos, Tq, TqBuilder,
     };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
 }
@@ -100,8 +101,9 @@ mod live_tick_recorder;
 mod local_backtest;
 
 pub use backtest_remote::{
-    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillProgress,
-    BacktestRemoteFillProgressHandler,
+    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillPhase,
+    BacktestRemoteFillProgress, BacktestRemoteFillProgressHandler, BacktestRemoteFillTelemetry,
+    BacktestRemoteFillTelemetryHandler, RemoteFillPlan, RemoteFillPlanSymbol,
 };
 pub use live_tick_recorder::{
     RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport, RecordTicksSymbolFlushReport,
@@ -963,6 +965,7 @@ pub struct BacktestBuilder {
     warmup_batch_size: usize,
     remote_fill_config: Option<BacktestRemoteFillConfig>,
     remote_fill_progress: Option<BacktestRemoteFillProgressHandler>,
+    remote_fill_telemetry: Option<BacktestRemoteFillTelemetryHandler>,
     remote_fill_cancellation: Option<BacktestRemoteFillCancellation>,
     remote_fill_lock_wait: Option<Duration>,
 }
@@ -1469,6 +1472,7 @@ impl BacktestBuilder {
         backtest_remote::RemoteBacktestFillRuntime::new(
             self.remote_fill_config,
             self.remote_fill_progress.clone(),
+            self.remote_fill_telemetry.clone(),
             self.remote_fill_cancellation.clone(),
         )
     }
@@ -1586,6 +1590,22 @@ impl BacktestBuilder {
         handler: impl Fn(&BacktestRemoteFillProgress) + Send + Sync + 'static,
     ) -> Self {
         self.remote_fill_progress = Some(Arc::new(handler));
+        self
+    }
+
+    /// Observe resolved plans and low-frequency remote cache-fill telemetry.
+    ///
+    /// The handler receives a `PlanReady` snapshot after cache coverage has
+    /// been inspected (and, for remote fill modes, after the root fill lock is
+    /// held). It then receives per-physical-symbol lifecycle snapshots. The
+    /// handler is not installed by default and must return quickly; in
+    /// particular it must not perform terminal I/O or block remote filling.
+    #[must_use]
+    pub fn on_remote_fill_telemetry(
+        mut self,
+        handler: impl Fn(&BacktestRemoteFillTelemetry) + Send + Sync + 'static,
+    ) -> Self {
+        self.remote_fill_telemetry = Some(Arc::new(handler));
         self
     }
 
@@ -1713,6 +1733,16 @@ impl BacktestBuilder {
             before_by_range.insert((symbol.clone(), *start_ns, *end_ns), before);
         }
 
+        let remote_fill_runtime = self.remote_fill_runtime();
+        remote_fill_runtime.emit_plan(build_remote_fill_plan(
+            (self.start_ns, self.end_ns),
+            logical_symbols.clone(),
+            &physical_ranges,
+            &before_by_range,
+            &fill_requests,
+            remote_fill_runtime.config(),
+        )?);
+
         if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
             let mut symbols = Vec::new();
             for (symbol, start_ns, end_ns) in &physical_ranges {
@@ -1759,7 +1789,7 @@ impl BacktestBuilder {
                 auth.pass,
                 fill_requests,
                 cache.clone(),
-                self.remote_fill_runtime(),
+                remote_fill_runtime,
             )
             .await?;
             for (symbol, rows) in fill_report.rows_by_symbol {
@@ -2135,6 +2165,41 @@ fn fill_requests_from_status(
     fill_requests_from_ranges(status.symbol.as_str(), &status.missing_ranges)
 }
 
+fn build_remote_fill_plan(
+    requested_range: (i64, i64),
+    logical_symbols: Vec<String>,
+    physical_ranges: &[(String, i64, i64)],
+    before_by_range: &BTreeMap<(String, i64, i64), BacktestTickCacheStatus>,
+    fill_requests: &[backtest_remote::RemoteBacktestCacheFillRequest],
+    config: BacktestRemoteFillConfig,
+) -> Result<backtest_remote::RemoteFillPlan> {
+    let logical_batches = backtest_remote::remote_fill_logical_batch_count(
+        fill_requests.to_vec(),
+        config.symbol_batch_size,
+    )?;
+    let mut by_symbol = BTreeMap::<String, (Vec<(i64, i64)>, Vec<(i64, i64)>)>::new();
+    for (symbol, start_ns, end_ns) in physical_ranges {
+        let status = before_by_range
+            .get(&(symbol.clone(), *start_ns, *end_ns))
+            .ok_or_else(|| data_validation("remote fill plan coverage status missing"))?;
+        let entry = by_symbol.entry(symbol.clone()).or_default();
+        entry.0.push((*start_ns, *end_ns));
+        entry.1.extend(status.missing_ranges.iter().copied());
+    }
+    let physical_symbols = by_symbol
+        .into_iter()
+        .map(|(symbol, (requested_ranges, missing_ranges))| {
+            backtest_remote::RemoteFillPlanSymbol::new(symbol, requested_ranges, missing_ranges)
+        })
+        .collect();
+    Ok(backtest_remote::RemoteFillPlan::new(
+        requested_range,
+        logical_symbols,
+        physical_symbols,
+        logical_batches,
+    ))
+}
+
 fn fill_requests_from_coverage(
     coverage: &tqsdk_data::BacktestTickCoverage,
 ) -> Vec<backtest_remote::RemoteBacktestCacheFillRequest> {
@@ -2229,12 +2294,14 @@ impl PreparedBacktest {
             warmup_batch_size: _,
             remote_fill_config,
             remote_fill_progress,
+            remote_fill_telemetry,
             remote_fill_cancellation,
             remote_fill_lock_wait: _,
         } = builder;
         let remote_fill_runtime = backtest_remote::RemoteBacktestFillRuntime::new(
             remote_fill_config,
             remote_fill_progress,
+            remote_fill_telemetry,
             remote_fill_cancellation,
         );
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
@@ -2437,6 +2504,7 @@ impl TqBuilder {
             warmup_batch_size: DEFAULT_BACKTEST_WARMUP_BATCH_SIZE,
             remote_fill_config: None,
             remote_fill_progress: None,
+            remote_fill_telemetry: None,
             remote_fill_cancellation: None,
             remote_fill_lock_wait: None,
         }

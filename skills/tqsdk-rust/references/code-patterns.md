@@ -289,6 +289,10 @@ async fn warm_then_prepare(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 每个 cache root 只安排一个远端 warmup owner。TQBN 文件锁只保证写入互斥，不能去重跨进程
 `RemoteOnMiss` 请求；不要直接改写 `.tqbn`，也不要把 relay 当作历史缓存的唯一 owner。
 `duration > 60s` 的 native K 线使用 `HistorySeriesCache`，不在本段 tick cache 流程内。
+调用方需要计划或进度 reducer 时，在 warmup builder 上安装 `.on_remote_fill_telemetry(...)`：
+`PlanReady` 给出逻辑请求、物理 cache symbol、请求区间和缺口，随后 lifecycle event 给出
+physical symbol、batch、cursor、retry/split 和终态。handler 位于远端填充路径，应该只更新内存状态，
+不能同步写终端或发网络请求。
 
 ### 交易日窗口与完成判定
 
@@ -315,11 +319,17 @@ TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --symbol KQ.i@SHFE.au \
-  --start-day 2026-06-01 --end-day 2026-06-30 --pretty
+  --last-trading-days 60 --calendar auto \
+  --progress auto --progress-max-bars 8 --pretty
 ```
 
 V1 仅接受已结束交易日；TQBN 日界线是 CST `18:00`，open day 不能标记 complete。normal fill
-生成的 report 固定 canonical root/range/physical symbols，后续用
+的 `--calendar auto` 优先复用 `<cache-root>/meta/trading-calendar-v1.json`；它只用于最近 N 日
+selector 和进度分母，不能替代 coverage。没有可用快照的显式范围会先完成 coverage plan，只有
+确认存在远端缺口才查询通用日历；`--calendar required` 禁止 fallback，`off` 拒绝
+`--last-trading-days`。TTY 显示当前 physical symbol、trading day、完整接收日和 rows，非 TTY
+输出 stderr `key=value`，`--progress off` 保持安静。生成的 schema-v2 report 固定
+canonical root/range/physical symbols，后续用
 `tqsdk-cache verify --report <path> --replay --min-rows 1` 做本地验收。Ctrl-C/SIGTERM 会 flush
 partial rows 但不提交 coverage，下一轮 fill 自动补洞。完整 CLI 合同见
 `docs/architecture/backtest-tick-cache-cli.md`。

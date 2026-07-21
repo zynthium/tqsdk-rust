@@ -31,11 +31,18 @@ cargo run -p tqsdk-cache -- \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 --pretty
 
-# 不联网补数、不加 lock、不写文件的预检。缺 coverage 时退出码为 1。
+# 不请求远端 tick、不加 lock、不写文件的预检。缺 coverage 时退出码为 1。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run --pretty
+
+# 按通用交易日历选择最近 60 个已结束交易日。默认在 TTY 显示全局 batch 和当前物理合约日进度。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history fill \
+  --universe 'main:all;index:all;!CFFEX' \
+  --last-trading-days 60 --calendar auto \
+  --progress auto --progress-max-bars 8 --pretty
 ```
 
 正常 `fill` 使用与 `Tq::futures().backtest(...).remote_on_miss().warmup()` 相同的
@@ -69,6 +76,29 @@ cargo run -p tqsdk-cache -- \
 被误当完整。传入 `KQ.m@...` 或动态 universe 时，report 会分别记录 logical symbols 和已解析的
 physical cache symbols；`inspect` 只接受后者。
 
+## 日历、进度与报告
+
+`fill` 的 `--calendar auto|required|off` 只用于选择日期和显示进度，永远不替代 TQBN coverage：
+
+- `auto` 优先读取 `<cache-root>/meta/trading-calendar-v1.json`（损坏快照按不可用处理）。对显式日期范围且没有可用快照时，
+  先按 TQBN 分区规划；只有 `PlanReady` 已确认存在远端缺口时才拉取通用交易日历。使用
+  `--last-trading-days N` 时必须有日历，必要时会先查询以确定窗口，但只在 fill lock 已取得后原子写入快照。
+- `required` 要求完整日历；没有本地快照时会查询，查询失败即让 fill 失败。
+- `off` 固定按 TQBN 分区日显示，且拒绝 `--last-trading-days`。
+
+可用 `--end-day YYYY-MM-DD` 作为 `--last-trading-days` 的历史锚点。通用日历只描述工作日和假期，
+不判断某个合约是否有行情；空 coverage 和夜盘归属仍由 CST `18:00` TQBN 边界决定。
+
+进度始终写 stderr：`--progress auto` 在 TTY 使用全局 logical-batch bar 和最多
+`--progress-max-bars` 个当前 physical symbol bar；非 TTY 自动输出稳定的 `key=value` 行；
+`--progress plain` 强制后者，`--progress off` 关闭进度。每个 symbol 显示当前处理 trading day、
+总规划日、已完整接收日和 row 数；“已接收日”只会在完整 TQBN 日分区跨越后递增，避免把盘中日误报为完成。
+stdout 始终保持最终 JSON。
+
+正常 fill 写 schema version `2` report，增加原始 selector、已解析日历来源/快照元数据和每个
+physical cache report range 的日计数。`verify --report` 仍可读取 schema version `1` 报告；v1 中没有的
+v2 字段按空值处理。
+
 ## 协调与退出码
 
 - `fill` 取得每个 cache root 的排他 advisory lock。默认 fail-fast，竞争时退出 `75`；可用
@@ -77,7 +107,7 @@ physical cache symbols；`inspect` 只接受后者。
   但只是可能看到中间状态的快速盘点。
 - Ctrl-C 或 SIGTERM 会 flush 已接收的 tick rows，但不会提交该范围 coverage，退出 `130`；下一次
   fill 会继续补洞。
-- JSON report 目前为 schema version `1`。正常 fill 默认写入
+- JSON report 当前为 schema version `2`，并兼容读取 schema version `1`。正常 fill 默认写入
   `<cache-root>/reports/`；`verify --report` 始终使用报告记录的 canonical root，并拒绝与
   `--cache-dir` 不一致的调用。
 

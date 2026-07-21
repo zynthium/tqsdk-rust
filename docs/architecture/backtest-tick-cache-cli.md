@@ -35,14 +35,16 @@ tqsdk-cache fill
 
 ## 命令合同
 
-所有成功和可机器读取的结果都写 stdout JSON，当前顶层 `schema_version` 为 `1`。进度、错误和
+所有成功和可机器读取的结果都写 stdout JSON，当前顶层 `schema_version` 为 `2`。进度、错误和
 交互 spinner 只写 stderr。`--pretty` 只改变 stdout 的 JSON 缩进，不改变字段或 stderr。
+`verify --report` 兼容读取 schema version `1`，缺少的 selector、日历和 per-symbol day stats
+视为未知而不是覆盖事实。
 
 | 命令 | 作用 | 写入 / 网络 | 一致性 |
 | --- | --- | --- | --- |
 | `inventory` | 快速枚举 tick day partitions、文件数、字节数和 magic 问题 | 不创建不存在的 root，不解码 records，不联网 | 可在 fill 中运行，结果可能是中间状态 |
 | `inspect` | 对显式 physical symbol 检查 coverage/missing ranges | read-only，不联网 | 不取稳定视图锁 |
-| `fill --dry-run` | 解析目标并用 CacheOnly 检查 coverage | 不取 lock，不远端补数，不创建目录或 report | 缺 coverage 退出 `1` |
+| `fill --dry-run` | 解析目标并用 CacheOnly 检查 coverage | 不取 lock，不请求远端 tick 或创建 report；universe/calendar selector 可查询 metadata | 缺 coverage 退出 `1` |
 | `fill` | 对 closed trading days 只补 missing ranges | 可能写 TQBN/report，只有 miss 才联网 | 每 root 排他 fill lock |
 | `verify` | CacheOnly coverage，选配实际 replay | 不远端补数；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
 | `doctor` | 深度解码所有 TQBN tick partitions | 不修改 records；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
@@ -64,6 +66,29 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 不同交易所的实际收盘时间以合约 `trading_time` 为准。TQBN day window 是 partition / coverage
 边界，不是“所有品种都交易到 18:00”的市场断言。
 
+## 日历选择与进度
+
+`fill` 提供两种日期选择方式：显式 `--start-day/--end-day`，或
+`--last-trading-days N [--end-day YYYY-MM-DD]`。后者按通用交易日历选择最近 N 个已结束交易日，
+不能把 N 个工作日当作 N 个交易日。
+
+日历模式由 `--calendar auto|required|off` 控制：
+
+- `auto` 先读 `<cache-root>/meta/trading-calendar-v1.json`（损坏快照按不可用处理）。显式日期范围没有可用快照时，先按
+  TQBN 日分区规划；只有 `PlanReady` 已确认远端缺口后才请求通用日历。`--last-trading-days` 必须
+  在计划前获得日历以确定窗口；新快照只会在 root fill lock 已取得后原子写入。
+- `required` 不允许 partition fallback。缺少或不覆盖窗口的快照会触发查询；查询失败时 fill 失败。
+- `off` 不读取或查询日历，使用 TQBN partition days，并拒绝 `--last-trading-days`。
+
+通用日历只用于 selector、分母和进度显示，绝不提交或推断 cache coverage。CST `18:00` 的 TQBN
+分区、连续 tick id 和最终 `CacheOnly` 检查仍是完整性的唯一依据；休市日可以是合法空 coverage。
+
+进度仅写 stderr：`--progress auto` 在 TTY 使用一个 logical-batch 全局 bar 和最多
+`--progress-max-bars` 个 active physical-symbol bar；非 TTY 自动降级为稳定 `key=value` 文本；
+`plain` 强制文本，`off` 关闭进度。每条 physical-symbol 状态包含当前处理的 trading day、
+coverage day count、完整接收 day count、rows、retry 和 split 状态。流式 cursor 只有跨过完整 TQBN
+日分区后才增加接收计数，最后一个日分区由成功 terminal event 确认。
+
 ## 填充、报告与验证
 
 基础命令示例使用历史 closed dates；生产作业应先从官方交易日历选择日期，而不是倒推工作日：
@@ -73,7 +98,7 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history inventory --pretty
 
-# 无副作用预检；当 coverage 不完整时返回 1。
+# 不请求远端 tick 的预检；当 coverage 不完整时返回 1。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
@@ -86,12 +111,20 @@ cargo run -p tqsdk-cache -- \
   --universe 'main:all;index:all;!CFFEX' \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2 --symbol-batch-size 1 --pretty
+
+# 生产定时作业：按日历补齐最近 60 个已结束交易日，并保留 stdout JSON 给调度器。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history fill \
+  --universe 'main:all;index:all;!CFFEX' \
+  --last-trading-days 60 --calendar auto \
+  --progress auto --progress-max-bars 8 --pretty
 ```
 
 正常 fill 会把 credential-free JSON report 写到
 `<cache-root>/reports/tqsdk-cache-fill-<utc>-<pid>.json`，也可以用 `--report PATH` 覆盖。
-报告包含 canonical absolute `cache_dir`、请求 trading-day window、logical/physical symbols、
-coverage before/after、`rows_written`、是否实际远端填充和生效的调度配置。不要把 report
+报告包含 canonical absolute `cache_dir`、原始 selector、请求和解析后的 trading-day window、
+日历模式/快照 metadata、logical/physical symbols、coverage before/after、每 physical cache report
+range 的日统计、`rows_written`、是否实际远端填充和生效的调度配置。不要把 report
 看成写入成功的唯一依据：`complete=true`、CacheOnly coverage 和实际 replay 共同构成验收。
 
 ```bash
@@ -126,8 +159,9 @@ Ctrl-C 或 SIGTERM 将触发协作式取消：已经接收的 row batch 会 flus
 range 不会 commit coverage，命令返回 `130`。下次 `fill` 依据缺口继续完成；不要手工补 coverage
 或编辑 `.tqbn`。
 
-进度会在 stderr 显示当前 batch、symbol、trading day 和已接收 rows。`--daily-slices` 是诊断
-fallback，会按一天切远端请求；默认保持 SDK 的单会话长 range 调度。CLI flags
+进度会在 stderr 显示当前 batch、physical symbol、trading day、完整接收日和 rows；它不改变
+远端调度或 cache 写入热路径。`--daily-slices` 是诊断 fallback，会按一天切远端请求；默认保持
+SDK 的单会话长 range 调度。CLI flags
 `--symbol-batch-size`、`--symbol-concurrency`、`--idle-timeout-secs`、
 `--batch-timeout-secs` 覆盖当前进程的 `TQSDK_REMOTE_FILL_*` defaults，不会修改全局环境。
 

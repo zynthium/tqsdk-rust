@@ -26,6 +26,7 @@ const REMOTE_FILL_SYMBOL_CONCURRENCY: usize = 2;
 const REMOTE_FILL_SYMBOL_CONCURRENCY_MAX: usize = 4;
 const REMOTE_CONNECT_RETRY_ATTEMPTS: usize = 5;
 const REMOTE_TICK_WRITE_BUFFER_ROWS: usize = 8_192;
+const REMOTE_FILL_TELEMETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Typed configuration for remote historical tick cache fills.
 ///
@@ -199,6 +200,239 @@ pub enum BacktestRemoteFillProgress {
 pub type BacktestRemoteFillProgressHandler =
     Arc<dyn Fn(&BacktestRemoteFillProgress) + Send + Sync + 'static>;
 
+/// Immutable physical-cache planning details for one remote fill operation.
+///
+/// A logical symbol can resolve to multiple physical symbols, for example when
+/// a main-contract request crosses an underlying roll. The ranges here retain
+/// that physical ownership so observers do not need to repeat planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFillPlanSymbol {
+    physical_symbol: String,
+    requested_ranges: Vec<(i64, i64)>,
+    missing_ranges: Vec<(i64, i64)>,
+}
+
+impl RemoteFillPlanSymbol {
+    pub(crate) fn new(
+        physical_symbol: String,
+        requested_ranges: Vec<(i64, i64)>,
+        missing_ranges: Vec<(i64, i64)>,
+    ) -> Self {
+        Self {
+            physical_symbol,
+            requested_ranges,
+            missing_ranges,
+        }
+    }
+
+    #[must_use]
+    pub fn physical_symbol(&self) -> &str {
+        &self.physical_symbol
+    }
+
+    #[must_use]
+    pub fn requested_ranges(&self) -> &[(i64, i64)] {
+        &self.requested_ranges
+    }
+
+    #[must_use]
+    pub fn missing_ranges(&self) -> &[(i64, i64)] {
+        &self.missing_ranges
+    }
+
+    #[must_use]
+    pub fn requires_remote_fill(&self) -> bool {
+        !self.missing_ranges.is_empty()
+    }
+}
+
+/// Fully resolved cache-fill plan emitted before a remote request is started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFillPlan {
+    requested_range: (i64, i64),
+    logical_symbols: Vec<String>,
+    physical_symbols: Vec<RemoteFillPlanSymbol>,
+    logical_batches: usize,
+}
+
+impl RemoteFillPlan {
+    pub(crate) fn new(
+        requested_range: (i64, i64),
+        logical_symbols: Vec<String>,
+        physical_symbols: Vec<RemoteFillPlanSymbol>,
+        logical_batches: usize,
+    ) -> Self {
+        Self {
+            requested_range,
+            logical_symbols,
+            physical_symbols,
+            logical_batches,
+        }
+    }
+
+    #[must_use]
+    pub fn requested_range(&self) -> (i64, i64) {
+        self.requested_range
+    }
+
+    #[must_use]
+    pub fn logical_symbols(&self) -> &[String] {
+        &self.logical_symbols
+    }
+
+    #[must_use]
+    pub fn physical_symbols(&self) -> &[RemoteFillPlanSymbol] {
+        &self.physical_symbols
+    }
+
+    #[must_use]
+    pub fn logical_batches(&self) -> usize {
+        self.logical_batches
+    }
+
+    #[must_use]
+    pub fn requires_remote_fill(&self) -> bool {
+        self.physical_symbols
+            .iter()
+            .any(RemoteFillPlanSymbol::requires_remote_fill)
+    }
+}
+
+/// Lifecycle phase for a remote cache-fill telemetry snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BacktestRemoteFillPhase {
+    PlanReady,
+    Started,
+    Streaming,
+    Retrying,
+    SplitFallback,
+    Finished,
+    Failed,
+    Cancelled,
+}
+
+/// Immutable, low-overhead remote cache-fill telemetry snapshot.
+///
+/// The callback configured through
+/// [`crate::BacktestBuilder::on_remote_fill_telemetry`] runs on the remote
+/// fill path. It must not perform terminal I/O or otherwise block that path.
+/// Streaming updates are rate-limited per active physical symbol; lifecycle
+/// transitions are emitted immediately.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BacktestRemoteFillTelemetry {
+    phase: BacktestRemoteFillPhase,
+    plan: Option<RemoteFillPlan>,
+    logical_batch_id: Option<usize>,
+    attempt: usize,
+    physical_symbol: Option<String>,
+    requested_range: Option<(i64, i64)>,
+    accepted_rows: usize,
+    latest_cursor_ns: Option<i64>,
+    elapsed: Duration,
+    error: Option<String>,
+}
+
+impl BacktestRemoteFillTelemetry {
+    pub(crate) fn plan_ready(plan: RemoteFillPlan) -> Self {
+        Self {
+            phase: BacktestRemoteFillPhase::PlanReady,
+            plan: Some(plan),
+            logical_batch_id: None,
+            attempt: 0,
+            physical_symbol: None,
+            requested_range: None,
+            accepted_rows: 0,
+            latest_cursor_ns: None,
+            elapsed: Duration::ZERO,
+            error: None,
+        }
+    }
+
+    fn lifecycle(update: RemoteFillTelemetryUpdate) -> Self {
+        Self {
+            phase: update.phase,
+            plan: None,
+            logical_batch_id: Some(update.logical_batch_id),
+            attempt: update.attempt,
+            physical_symbol: Some(update.physical_symbol),
+            requested_range: Some(update.requested_range),
+            accepted_rows: update.accepted_rows,
+            latest_cursor_ns: update.latest_cursor_ns,
+            elapsed: update.elapsed,
+            error: update.error,
+        }
+    }
+
+    #[must_use]
+    pub fn phase(&self) -> BacktestRemoteFillPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub fn plan(&self) -> Option<&RemoteFillPlan> {
+        self.plan.as_ref()
+    }
+
+    #[must_use]
+    pub fn logical_batch_id(&self) -> Option<usize> {
+        self.logical_batch_id
+    }
+
+    #[must_use]
+    pub fn attempt(&self) -> usize {
+        self.attempt
+    }
+
+    #[must_use]
+    pub fn physical_symbol(&self) -> Option<&str> {
+        self.physical_symbol.as_deref()
+    }
+
+    #[must_use]
+    pub fn requested_range(&self) -> Option<(i64, i64)> {
+        self.requested_range
+    }
+
+    /// Rows accepted by the current physical stream attempt.
+    #[must_use]
+    pub fn accepted_rows(&self) -> usize {
+        self.accepted_rows
+    }
+
+    #[must_use]
+    pub fn latest_cursor_ns(&self) -> Option<i64> {
+        self.latest_cursor_ns
+    }
+
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Synchronous observer for [`BacktestRemoteFillTelemetry`] snapshots.
+pub type BacktestRemoteFillTelemetryHandler =
+    Arc<dyn Fn(&BacktestRemoteFillTelemetry) + Send + Sync + 'static>;
+
+struct RemoteFillTelemetryUpdate {
+    phase: BacktestRemoteFillPhase,
+    logical_batch_id: usize,
+    attempt: usize,
+    physical_symbol: String,
+    requested_range: (i64, i64),
+    accepted_rows: usize,
+    latest_cursor_ns: Option<i64>,
+    elapsed: Duration,
+    error: Option<String>,
+}
+
 /// Cooperative cancellation handle for a remote cache fill.
 ///
 /// Cancellation flushes accepted partial tick rows but intentionally does not
@@ -228,6 +462,7 @@ impl BacktestRemoteFillCancellation {
 pub(crate) struct RemoteBacktestFillRuntime {
     config: BacktestRemoteFillConfig,
     progress: Option<BacktestRemoteFillProgressHandler>,
+    telemetry: Option<BacktestRemoteFillTelemetryHandler>,
     cancellation: Option<BacktestRemoteFillCancellation>,
 }
 
@@ -235,6 +470,7 @@ impl RemoteBacktestFillRuntime {
     pub(crate) fn new(
         config: Option<BacktestRemoteFillConfig>,
         progress: Option<BacktestRemoteFillProgressHandler>,
+        telemetry: Option<BacktestRemoteFillTelemetryHandler>,
         cancellation: Option<BacktestRemoteFillCancellation>,
     ) -> Self {
         Self {
@@ -242,6 +478,7 @@ impl RemoteBacktestFillRuntime {
                 .unwrap_or_else(BacktestRemoteFillConfig::from_environment)
                 .normalized(),
             progress,
+            telemetry,
             cancellation,
         }
     }
@@ -249,6 +486,20 @@ impl RemoteBacktestFillRuntime {
     fn emit(&self, event: BacktestRemoteFillProgress) {
         if let Some(progress) = &self.progress {
             progress(&event);
+        }
+    }
+
+    pub(crate) fn emit_plan(&self, plan: RemoteFillPlan) {
+        self.emit_telemetry(BacktestRemoteFillTelemetry::plan_ready(plan));
+    }
+
+    pub(crate) fn config(&self) -> BacktestRemoteFillConfig {
+        self.config
+    }
+
+    fn emit_telemetry(&self, event: BacktestRemoteFillTelemetry) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry(&event);
         }
     }
 
@@ -260,6 +511,10 @@ impl RemoteBacktestFillRuntime {
 
     fn has_progress_handler(&self) -> bool {
         self.progress.is_some()
+    }
+
+    fn has_telemetry_handler(&self) -> bool {
+        self.telemetry.is_some()
     }
 }
 
@@ -273,7 +528,10 @@ pub(crate) struct RemoteBacktestCachingStream {
     range_end_ns: i64,
     accepted_rows_by_symbol: BTreeMap<String, usize>,
     reported_trading_days: BTreeMap<String, NaiveDate>,
+    latest_cursor_by_symbol: BTreeMap<String, i64>,
+    last_telemetry_by_symbol: BTreeMap<String, tokio::time::Instant>,
     last_progress: tokio::time::Instant,
+    telemetry_context: RemoteFillTelemetryContext,
     runtime: RemoteBacktestFillRuntime,
     finalized: bool,
 }
@@ -324,6 +582,80 @@ struct RemoteFillBatchTask {
     batch: RemoteFillBatch,
     cache: BacktestTickCache,
     runtime: RemoteBacktestFillRuntime,
+}
+
+#[derive(Clone)]
+struct RemoteFillTelemetryContext {
+    logical_batch_id: usize,
+    attempt: usize,
+    phase: BacktestRemoteFillPhase,
+    started_at: tokio::time::Instant,
+}
+
+impl RemoteFillTelemetryContext {
+    fn new(logical_batch_id: usize) -> Self {
+        Self {
+            logical_batch_id,
+            attempt: 1,
+            phase: BacktestRemoteFillPhase::Started,
+            started_at: tokio::time::Instant::now(),
+        }
+    }
+
+    fn with_attempt(&self, attempt: usize) -> Self {
+        Self {
+            attempt,
+            ..self.clone()
+        }
+    }
+
+    fn with_phase(&self, phase: BacktestRemoteFillPhase) -> Self {
+        Self {
+            phase,
+            ..self.clone()
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RemoteFillRequest {
+    user: String,
+    pass: String,
+    start_ns: i64,
+    end_ns: i64,
+    symbols: Vec<String>,
+    cache: BacktestTickCache,
+    runtime: RemoteBacktestFillRuntime,
+    telemetry_context: RemoteFillTelemetryContext,
+}
+
+fn emit_telemetry_for_symbols(
+    runtime: &RemoteBacktestFillRuntime,
+    context: &RemoteFillTelemetryContext,
+    symbols: &[String],
+    requested_range: (i64, i64),
+    accepted_rows: usize,
+    latest_cursor_ns: Option<i64>,
+    error: Option<String>,
+) {
+    if !runtime.has_telemetry_handler() {
+        return;
+    }
+    for symbol in symbols {
+        runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
+            RemoteFillTelemetryUpdate {
+                phase: context.phase,
+                logical_batch_id: context.logical_batch_id,
+                attempt: context.attempt,
+                physical_symbol: symbol.clone(),
+                requested_range,
+                accepted_rows,
+                latest_cursor_ns,
+                elapsed: context.started_at.elapsed(),
+                error: error.clone(),
+            },
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -728,6 +1060,13 @@ fn remote_fill_batches(
     Ok(batches)
 }
 
+pub(crate) fn remote_fill_logical_batch_count(
+    requests: Vec<RemoteBacktestCacheFillRequest>,
+    symbol_batch_size: usize,
+) -> Result<usize> {
+    Ok(remote_fill_batches(requests, symbol_batch_size)?.len())
+}
+
 async fn fill_backtest_tick_cache_symbol_batch_timed(
     task: RemoteFillBatchTask,
 ) -> Result<RemoteFillBatchTaskReport> {
@@ -746,15 +1085,26 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
     let start_ns = batch.start_ns;
     let end_ns = batch.end_ns;
     let symbols = batch.symbols;
-    let fill = fill_backtest_tick_cache_symbol_batch(
+    let telemetry_context = RemoteFillTelemetryContext::new(batch_index + 1);
+    emit_telemetry_for_symbols(
+        &runtime,
+        &telemetry_context,
+        &symbols,
+        (start_ns, end_ns),
+        0,
+        None,
+        None,
+    );
+    let fill = fill_backtest_tick_cache_symbol_batch(RemoteFillRequest {
         user,
         pass,
         start_ns,
         end_ns,
-        symbols.clone(),
+        symbols: symbols.clone(),
         cache,
-        runtime.clone(),
-    );
+        runtime: runtime.clone(),
+        telemetry_context: telemetry_context.clone(),
+    });
     let result = match batch_timeout {
         Some(batch_timeout) => match tokio::time::timeout(batch_timeout, fill).await {
             Ok(result) => result,
@@ -775,9 +1125,22 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
                 batch_number: batch_index + 1,
                 total_batches,
                 requested_range: (start_ns, end_ns),
-                symbols: timeout_symbols,
+                symbols: timeout_symbols.clone(),
                 error: error.to_string(),
             });
+            emit_telemetry_for_symbols(
+                &runtime,
+                &telemetry_context.with_phase(if runtime.is_cancelled() {
+                    BacktestRemoteFillPhase::Cancelled
+                } else {
+                    BacktestRemoteFillPhase::Failed
+                }),
+                &timeout_symbols,
+                (start_ns, end_ns),
+                0,
+                None,
+                Some(error.to_string()),
+            );
             return Err(error);
         }
     };
@@ -793,49 +1156,41 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
 }
 
 async fn fill_backtest_tick_cache_symbol_batch(
-    user: String,
-    pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
-    cache: BacktestTickCache,
-    runtime: RemoteBacktestFillRuntime,
+    request: RemoteFillRequest,
 ) -> Result<RemoteBacktestCacheFillReport> {
-    let result = fill_backtest_tick_cache_symbol_batch_once(
-        user.clone(),
-        pass.clone(),
-        start_ns,
-        end_ns,
-        symbols.clone(),
-        cache.clone(),
-        runtime.clone(),
-    )
-    .await;
+    let result = fill_backtest_tick_cache_symbol_batch_once(request.clone()).await;
     if !matches!(
         result.as_ref(),
-        Err(error) if should_split_empty_idle_batch(error, symbols.len())
+        Err(error) if should_split_empty_idle_batch(error, request.symbols.len())
     ) {
         return result;
     }
     if let Err(error) = &result {
         remote_fill_progress(format_args!(
             "event=batch_split symbols={} error={error}",
-            symbols.join(",")
+            request.symbols.join(",")
         ));
+        emit_telemetry_for_symbols(
+            &request.runtime,
+            &request
+                .telemetry_context
+                .with_phase(BacktestRemoteFillPhase::SplitFallback),
+            &request.symbols,
+            (request.start_ns, request.end_ns),
+            0,
+            None,
+            Some(error.to_string()),
+        );
     }
 
     let mut rows_by_symbol = BTreeMap::new();
-    for symbol in symbols {
-        let fill_report = fill_backtest_tick_cache_symbol_batch_once(
-            user.clone(),
-            pass.clone(),
-            start_ns,
-            end_ns,
-            vec![symbol],
-            cache.clone(),
-            runtime.clone(),
-        )
-        .await?;
+    for symbol in request.symbols.clone() {
+        let mut split_request = request.clone();
+        split_request.symbols = vec![symbol];
+        split_request.telemetry_context = split_request
+            .telemetry_context
+            .with_phase(BacktestRemoteFillPhase::SplitFallback);
+        let fill_report = fill_backtest_tick_cache_symbol_batch_once(split_request).await?;
         for (symbol, rows) in fill_report.rows_by_symbol {
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
@@ -845,38 +1200,37 @@ async fn fill_backtest_tick_cache_symbol_batch(
 }
 
 async fn fill_backtest_tick_cache_symbol_batch_once(
-    user: String,
-    pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
-    cache: BacktestTickCache,
-    runtime: RemoteBacktestFillRuntime,
+    request: RemoteFillRequest,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let mut attempt = 1usize;
     loop {
-        let result = fill_backtest_tick_cache_symbol_batch_attempt(
-            user.clone(),
-            pass.clone(),
-            start_ns,
-            end_ns,
-            symbols.clone(),
-            cache.clone(),
-            runtime.clone(),
-        )
-        .await;
+        let mut attempt_request = request.clone();
+        attempt_request.telemetry_context = attempt_request.telemetry_context.with_attempt(attempt);
+        let result = fill_backtest_tick_cache_symbol_batch_attempt(attempt_request).await;
         match result {
             Ok(report) => return Ok(report),
             Err(error)
                 if attempt < REMOTE_CONNECT_RETRY_ATTEMPTS
-                    && should_retry_remote_fill_attempt_error(&error, symbols.len()) =>
+                    && should_retry_remote_fill_attempt_error(&error, request.symbols.len()) =>
             {
                 remote_fill_progress(format_args!(
                     "event=batch_attempt_retry attempt={} next_attempt={} symbols={} error={error}",
                     attempt,
                     attempt + 1,
-                    symbols.join(",")
+                    request.symbols.join(",")
                 ));
+                emit_telemetry_for_symbols(
+                    &request.runtime,
+                    &request
+                        .telemetry_context
+                        .with_attempt(attempt.saturating_add(1))
+                        .with_phase(BacktestRemoteFillPhase::Retrying),
+                    &request.symbols,
+                    (request.start_ns, request.end_ns),
+                    0,
+                    None,
+                    Some(error.to_string()),
+                );
                 tokio::time::sleep(remote_connect_retry_delay(attempt)).await;
                 attempt = attempt.saturating_add(1);
             }
@@ -886,27 +1240,21 @@ async fn fill_backtest_tick_cache_symbol_batch_once(
 }
 
 async fn fill_backtest_tick_cache_symbol_batch_attempt(
-    user: String,
-    pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
-    cache: BacktestTickCache,
-    runtime: RemoteBacktestFillRuntime,
+    request: RemoteFillRequest,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let mut rows_by_symbol = BTreeMap::new();
-    for (slice_start_ns, slice_end_ns) in remote_fill_ranges(start_ns, end_ns, runtime.config) {
-        let mut stream = connect_remote_backtest_caching_stream(
-            user.clone(),
-            pass.clone(),
-            slice_start_ns,
-            slice_end_ns,
-            symbols.clone(),
-            cache.clone(),
-            runtime.clone(),
-        )
-        .await
-        .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
+    for (slice_start_ns, slice_end_ns) in
+        remote_fill_ranges(request.start_ns, request.end_ns, request.runtime.config)
+    {
+        let mut slice_request = request.clone();
+        slice_request.start_ns = slice_start_ns;
+        slice_request.end_ns = slice_end_ns;
+        slice_request.telemetry_context = slice_request
+            .telemetry_context
+            .with_phase(BacktestRemoteFillPhase::Streaming);
+        let mut stream = connect_remote_backtest_caching_stream(slice_request)
+            .await
+            .map_err(|error| remote_slice_error(slice_start_ns, slice_end_ns, error))?;
         let slice_report = stream
             .fill_cache()
             .await
@@ -915,39 +1263,43 @@ async fn fill_backtest_tick_cache_symbol_batch_attempt(
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
     }
-    for symbol in symbols {
-        cache.compact_symbol_ticks(&symbol)?;
+    for symbol in &request.symbols {
+        request.cache.compact_symbol_ticks(symbol)?;
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
 }
 
 async fn connect_remote_backtest_caching_stream(
-    user: String,
-    pass: String,
-    start_ns: i64,
-    end_ns: i64,
-    symbols: Vec<String>,
-    cache: BacktestTickCache,
-    runtime: RemoteBacktestFillRuntime,
+    request: RemoteFillRequest,
 ) -> Result<RemoteBacktestCachingStream> {
     let mut attempt = 1usize;
     loop {
-        let result = RemoteBacktestCachingStream::connect(
-            user.clone(),
-            pass.clone(),
-            start_ns,
-            end_ns,
-            symbols.clone(),
-            cache.clone(),
-            runtime.clone(),
-        )
-        .await;
+        let mut connect_request = request.clone();
+        connect_request.telemetry_context = connect_request.telemetry_context.with_attempt(
+            request
+                .telemetry_context
+                .attempt
+                .saturating_add(attempt.saturating_sub(1)),
+        );
+        let result = RemoteBacktestCachingStream::connect(connect_request).await;
         match result {
             Ok(stream) => return Ok(stream),
             Err(error)
                 if attempt < REMOTE_CONNECT_RETRY_ATTEMPTS
                     && should_retry_remote_connect_error(&error) =>
             {
+                emit_telemetry_for_symbols(
+                    &request.runtime,
+                    &request
+                        .telemetry_context
+                        .with_attempt(request.telemetry_context.attempt.saturating_add(attempt))
+                        .with_phase(BacktestRemoteFillPhase::Retrying),
+                    &request.symbols,
+                    (request.start_ns, request.end_ns),
+                    0,
+                    None,
+                    Some(error.to_string()),
+                );
                 tokio::time::sleep(remote_connect_retry_delay(attempt)).await;
                 attempt = attempt.saturating_add(1);
             }
@@ -1001,15 +1353,17 @@ fn remote_fill_cancelled_error() -> crate::Error {
 }
 
 impl RemoteBacktestCachingStream {
-    pub(crate) async fn connect(
-        user: String,
-        pass: String,
-        start_ns: i64,
-        end_ns: i64,
-        symbols: Vec<String>,
-        cache: BacktestTickCache,
-        runtime: RemoteBacktestFillRuntime,
-    ) -> Result<Self> {
+    async fn connect(request: RemoteFillRequest) -> Result<Self> {
+        let RemoteFillRequest {
+            user,
+            pass,
+            start_ns,
+            end_ns,
+            symbols,
+            cache,
+            runtime,
+            telemetry_context,
+        } = request;
         let mut api = tqsdk_wait::TqApiBuilder::new(user, pass)
             .futures_backtest(start_ns, end_ns)?
             .backtest_cache_fill_mode()
@@ -1028,6 +1382,16 @@ impl RemoteBacktestCachingStream {
             );
             handles.insert(symbol, handle);
         }
+        let active_symbols = handles.keys().cloned().collect::<Vec<_>>();
+        emit_telemetry_for_symbols(
+            &runtime,
+            &telemetry_context,
+            &active_symbols,
+            (start_ns, end_ns),
+            0,
+            None,
+            None,
+        );
         Ok(Self {
             api,
             handles,
@@ -1038,7 +1402,10 @@ impl RemoteBacktestCachingStream {
             range_end_ns: end_ns,
             accepted_rows_by_symbol: BTreeMap::new(),
             reported_trading_days: BTreeMap::new(),
+            latest_cursor_by_symbol: BTreeMap::new(),
+            last_telemetry_by_symbol: BTreeMap::new(),
             last_progress: tokio::time::Instant::now(),
+            telemetry_context,
             runtime,
             finalized: false,
         })
@@ -1048,10 +1415,12 @@ impl RemoteBacktestCachingStream {
         loop {
             if self.runtime.is_cancelled() {
                 self.write_buffer.flush_all(&self.cache)?;
+                self.emit_terminal_telemetry(BacktestRemoteFillPhase::Cancelled, None);
                 return Err(remote_fill_cancelled_error());
             }
             if self.fills_complete() {
                 self.finalize_cache(FinalizeMode::Strict)?;
+                self.emit_terminal_telemetry(BacktestRemoteFillPhase::Finished, None);
                 return Ok(self.fill_report());
             }
             if self.all_tick_serials_exhausted() {
@@ -1060,6 +1429,7 @@ impl RemoteBacktestCachingStream {
                     return Err(future_idle_finalize_error(self.range_end_ns, now_ns));
                 }
                 self.finalize_idle_after_terminal(now_ns)?;
+                self.emit_terminal_telemetry(BacktestRemoteFillPhase::Finished, None);
                 return Ok(self.fill_report());
             }
             if self.last_progress.elapsed() >= self.runtime.config.idle_timeout {
@@ -1071,6 +1441,7 @@ impl RemoteBacktestCachingStream {
                 }
                 let now_ns = current_unix_time_ns();
                 self.finalize_idle_after_terminal(now_ns)?;
+                self.emit_terminal_telemetry(BacktestRemoteFillPhase::Finished, None);
                 return Ok(self.fill_report());
             }
 
@@ -1091,6 +1462,8 @@ impl RemoteBacktestCachingStream {
 
     fn process_remote_step(&mut self, step: &tqsdk_wait::WaitStep) -> Result<()> {
         let mut made_progress = false;
+        let observe_progress = self.runtime.has_progress_handler();
+        let observe_telemetry = self.runtime.has_telemetry_handler();
         for (symbol, handle) in &self.handles {
             if !step.is_changing(handle) {
                 continue;
@@ -1109,9 +1482,7 @@ impl RemoteBacktestCachingStream {
             }
 
             if !accepted_rows.is_empty() {
-                let latest_datetime_ns = self
-                    .runtime
-                    .has_progress_handler()
+                let latest_datetime_ns = (observe_progress || observe_telemetry)
                     .then(|| accepted_rows.iter().map(|row| row.datetime).max())
                     .flatten();
                 let accepted_rows_total = {
@@ -1125,15 +1496,41 @@ impl RemoteBacktestCachingStream {
                 self.write_buffer
                     .push_rows(&self.cache, symbol, accepted_rows)?;
                 if let Some(datetime_ns) = latest_datetime_ns {
+                    self.latest_cursor_by_symbol
+                        .entry(symbol.clone())
+                        .and_modify(|cursor| *cursor = (*cursor).max(datetime_ns))
+                        .or_insert(datetime_ns);
                     let trading_day = backtest_tick_trading_day_for_timestamp_ns(datetime_ns)?;
-                    if self.reported_trading_days.get(symbol) != Some(&trading_day) {
+                    let day_changed = self.reported_trading_days.get(symbol) != Some(&trading_day);
+                    if day_changed {
                         self.reported_trading_days
                             .insert(symbol.clone(), trading_day);
+                    }
+                    if observe_progress && day_changed {
                         self.runtime.emit(BacktestRemoteFillProgress::TickObserved {
                             symbol: symbol.clone(),
                             trading_day,
                             accepted_rows: accepted_rows_total,
                         });
+                    }
+                    let now = tokio::time::Instant::now();
+                    let should_emit_telemetry = observe_telemetry
+                        && (day_changed
+                            || self
+                                .last_telemetry_by_symbol
+                                .get(symbol)
+                                .is_none_or(|last| {
+                                    now.duration_since(*last) >= REMOTE_FILL_TELEMETRY_INTERVAL
+                                }));
+                    if should_emit_telemetry {
+                        self.last_telemetry_by_symbol.insert(symbol.clone(), now);
+                        self.emit_symbol_telemetry(
+                            symbol,
+                            BacktestRemoteFillPhase::Streaming,
+                            accepted_rows_total,
+                            Some(datetime_ns),
+                            None,
+                        );
                     }
                 }
                 made_progress = true;
@@ -1144,6 +1541,52 @@ impl RemoteBacktestCachingStream {
             self.last_progress = tokio::time::Instant::now();
         }
         Ok(())
+    }
+
+    fn emit_symbol_telemetry(
+        &self,
+        symbol: &str,
+        phase: BacktestRemoteFillPhase,
+        accepted_rows: usize,
+        latest_cursor_ns: Option<i64>,
+        error: Option<String>,
+    ) {
+        if !self.runtime.has_telemetry_handler() {
+            return;
+        }
+        let context = self.telemetry_context.with_phase(phase);
+        self.runtime
+            .emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
+                RemoteFillTelemetryUpdate {
+                    phase: context.phase,
+                    logical_batch_id: context.logical_batch_id,
+                    attempt: context.attempt,
+                    physical_symbol: symbol.to_string(),
+                    requested_range: (self.range_start_ns, self.range_end_ns),
+                    accepted_rows,
+                    latest_cursor_ns,
+                    elapsed: context.started_at.elapsed(),
+                    error,
+                },
+            ));
+    }
+
+    fn emit_terminal_telemetry(&self, phase: BacktestRemoteFillPhase, error: Option<String>) {
+        if !self.runtime.has_telemetry_handler() {
+            return;
+        }
+        for symbol in self.fills.keys() {
+            self.emit_symbol_telemetry(
+                symbol,
+                phase,
+                self.accepted_rows_by_symbol
+                    .get(symbol)
+                    .copied()
+                    .unwrap_or_default(),
+                self.latest_cursor_by_symbol.get(symbol).copied(),
+                error.clone(),
+            );
+        }
     }
 
     fn unconfirmed_incomplete_idle_symbols(&self) -> Result<Vec<String>> {
@@ -1451,17 +1894,19 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BacktestRemoteFillCancellation, BacktestRemoteFillConfig, REMOTE_FILL_BATCH_TIMEOUT,
-        REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest, RemoteBacktestFillRuntime,
-        RemoteTickFillState, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
-        parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
-        parse_remote_fill_progress_enabled, parse_remote_fill_slice_ns,
-        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
-        remote_fill_batches, remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
-        should_finalize_idle_after_serial_exhaustion, should_reject_empty_idle_finalize,
-        should_reject_empty_remote_fill, should_reject_future_idle_finalize,
-        should_reject_incomplete_idle_finalize, should_retry_remote_connect_error,
-        should_retry_remote_fill_attempt_error, should_split_empty_idle_batch,
+        BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillPhase,
+        BacktestRemoteFillTelemetry, REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT,
+        RemoteBacktestCacheFillRequest, RemoteBacktestFillRuntime, RemoteFillPlan,
+        RemoteFillPlanSymbol, RemoteFillTelemetryUpdate, RemoteTickFillState,
+        RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
+        parse_remote_fill_idle_timeout, parse_remote_fill_progress_enabled,
+        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
+        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_ranges_for_slice_ns,
+        remote_fill_ranges_with_slice_ns, should_finalize_idle_after_serial_exhaustion,
+        should_reject_empty_idle_finalize, should_reject_empty_remote_fill,
+        should_reject_future_idle_finalize, should_reject_incomplete_idle_finalize,
+        should_retry_remote_connect_error, should_retry_remote_fill_attempt_error,
+        should_split_empty_idle_batch,
     };
     use tqsdk_core::Tick;
     use tqsdk_data::{BacktestTickCache, BacktestTickFill, TickDataSeriesRequest};
@@ -1488,12 +1933,54 @@ mod tests {
         let runtime = RemoteBacktestFillRuntime::new(
             Some(BacktestRemoteFillConfig::default()),
             None,
+            None,
             Some(cancellation.clone()),
         );
 
         assert!(!runtime.is_cancelled());
         cancellation.cancel();
         assert!(runtime.is_cancelled());
+    }
+
+    #[test]
+    fn telemetry_snapshots_expose_plan_and_retry_identity() {
+        let plan = RemoteFillPlan::new(
+            (1_000, 4_000),
+            vec!["KQ.m@SHFE.au".to_string()],
+            vec![RemoteFillPlanSymbol::new(
+                "SHFE.au2608".to_string(),
+                vec![(1_000, 4_000)],
+                vec![(2_000, 4_000)],
+            )],
+            2,
+        );
+        let ready = BacktestRemoteFillTelemetry::plan_ready(plan.clone());
+
+        assert_eq!(ready.phase(), BacktestRemoteFillPhase::PlanReady);
+        assert_eq!(ready.plan(), Some(&plan));
+        assert!(ready.logical_batch_id().is_none());
+        assert!(ready.plan().unwrap().requires_remote_fill());
+        assert_eq!(ready.plan().unwrap().logical_batches(), 2);
+
+        let retry = BacktestRemoteFillTelemetry::lifecycle(RemoteFillTelemetryUpdate {
+            phase: BacktestRemoteFillPhase::Retrying,
+            logical_batch_id: 2,
+            attempt: 3,
+            physical_symbol: "SHFE.au2608".to_string(),
+            requested_range: (2_000, 4_000),
+            accepted_rows: 128,
+            latest_cursor_ns: Some(3_000),
+            elapsed: Duration::from_secs(5),
+            error: Some("temporary failure".to_string()),
+        });
+        assert_eq!(retry.phase(), BacktestRemoteFillPhase::Retrying);
+        assert_eq!(retry.logical_batch_id(), Some(2));
+        assert_eq!(retry.attempt(), 3);
+        assert_eq!(retry.physical_symbol(), Some("SHFE.au2608"));
+        assert_eq!(retry.requested_range(), Some((2_000, 4_000)));
+        assert_eq!(retry.accepted_rows(), 128);
+        assert_eq!(retry.latest_cursor_ns(), Some(3_000));
+        assert_eq!(retry.error(), Some("temporary failure"));
     }
 
     #[test]

@@ -1,20 +1,27 @@
 use std::collections::BTreeSet;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::NaiveDate;
-use clap::{Args, Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use chrono::{Days, NaiveDate};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
-use tqsdk::{
-    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillProgress, Tq,
-};
+use tokio::sync::mpsc;
+use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
 use tqsdk_cache::{
-    FillReport, REPORT_SCHEMA_VERSION, TradingDayWindow, default_fill_report_path, open_cache,
-    open_read_only_cache, read_fill_report, write_fill_report,
+    FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
+    REPORT_SCHEMA_VERSION, TradingCalendarSnapshot, TradingDayWindow, default_fill_report_path,
+    open_cache, open_read_only_cache, read_fill_report, read_trading_calendar_snapshot,
+    write_fill_report, write_trading_calendar_snapshot,
 };
-use tqsdk_data::{DataError, HistorySeriesCacheFileStatus};
+use tqsdk_data::{
+    DataClient, DataError, HistorySeriesCacheFileStatus, TradingCalendarRow,
+    backtest_tick_trading_day_for_timestamp_ns,
+};
+
+mod progress;
+
+use progress::{FillProgress, FillProgressSession, ProgressCalendar, ProgressMode};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -65,6 +72,39 @@ struct OptionalDaysArgs {
     end_day: Option<NaiveDate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CalendarMode {
+    Auto,
+    Required,
+    Off,
+}
+
+impl CalendarMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Required => "required",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct FillDaysArgs {
+    /// First closed trading day, inclusive, in YYYY-MM-DD form.
+    #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "last_trading_days")]
+    start_day: Option<NaiveDate>,
+    /// Last closed trading day, inclusive, or the anchor for --last-trading-days.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    end_day: Option<NaiveDate>,
+    /// Resolve the most recent N closed trading days from the generic calendar.
+    #[arg(long, value_name = "COUNT", conflicts_with = "start_day")]
+    last_trading_days: Option<usize>,
+    /// Calendar planning policy. Cache coverage remains the completeness authority.
+    #[arg(long, value_enum, default_value_t = CalendarMode::Auto)]
+    calendar: CalendarMode,
+}
+
 #[derive(Debug, Args)]
 struct SymbolsArgs {
     /// Physical cache symbol. Repeat for more symbols.
@@ -88,7 +128,7 @@ struct FillArgs {
     #[arg(long, value_name = "EXPRESSION")]
     universe: Option<String>,
     #[command(flatten)]
-    days: DaysArgs,
+    days: FillDaysArgs,
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote ticks.
     #[arg(long)]
     dry_run: bool,
@@ -116,6 +156,12 @@ struct FillArgs {
     /// Report destination. Normal fills otherwise create a report under <cache-dir>/reports/.
     #[arg(long, value_name = "PATH")]
     report: Option<PathBuf>,
+    /// Progress rendering mode for this fill only.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+    /// Maximum active physical-symbol bars in TTY mode; zero keeps only the global bar.
+    #[arg(long, value_name = "COUNT", default_value_t = 8)]
+    progress_max_bars: usize,
 }
 
 #[derive(Debug, Args)]
@@ -201,90 +247,261 @@ struct CommandOutcome {
 }
 
 #[derive(Clone)]
-struct FillProgress {
-    bar: ProgressBar,
-    interactive: bool,
+struct CalendarResolution {
+    mode: CalendarMode,
+    snapshot: Option<TradingCalendarSnapshot>,
+    source: String,
+    persist_after_plan: bool,
 }
 
-impl FillProgress {
-    fn new() -> Self {
-        let interactive = io::stderr().is_terminal();
-        let bar = if interactive {
-            let bar = ProgressBar::new_spinner();
-            bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(4));
-            bar.enable_steady_tick(Duration::from_millis(120));
-            bar
-        } else {
-            ProgressBar::hidden()
-        };
-        Self { bar, interactive }
-    }
+struct ResolvedFillWindow {
+    window: TradingDayWindow,
+    calendar: CalendarResolution,
+}
 
-    fn observe(&self, event: &BacktestRemoteFillProgress) {
-        let message = match event {
-            BacktestRemoteFillProgress::FillStarted {
-                requested_symbols,
-                total_batches,
-                symbol_batch_size,
-                symbol_concurrency,
-                ..
-            } => format!(
-                "fill started: symbols={requested_symbols} batches={total_batches} batch_size={symbol_batch_size} concurrency={symbol_concurrency}"
-            ),
-            BacktestRemoteFillProgress::BatchStarted {
-                batch_number,
-                total_batches,
-                requested_range,
-                symbols,
-                ..
-            } => format!(
-                "batch {batch_number}/{total_batches}: symbols={} range=[{}, {})",
-                symbols.join(","),
-                requested_range.0,
-                requested_range.1
-            ),
-            BacktestRemoteFillProgress::TickObserved {
-                symbol,
-                trading_day,
-                accepted_rows,
-            } => format!(
-                "downloading {symbol}: trading_day={trading_day} accepted_rows={accepted_rows}"
-            ),
-            BacktestRemoteFillProgress::BatchFinished {
-                batch_number,
-                total_batches,
-                completed_batches,
-                rows,
-                ..
-            } => format!(
-                "batch {batch_number}/{total_batches} complete: completed={completed_batches} rows={rows}"
-            ),
-            BacktestRemoteFillProgress::BatchFailed {
-                batch_number,
-                total_batches,
-                symbols,
-                error,
-                ..
-            } => format!(
-                "batch {batch_number}/{total_batches} failed: symbols={} error={error}",
-                symbols.join(",")
-            ),
-        };
-        if self.interactive {
-            self.bar.set_message(message);
-            self.bar.tick();
-        } else {
-            eprintln!("tqsdk-cache: {message}");
+impl CalendarResolution {
+    fn report_calendar(&self) -> FillReportCalendar {
+        FillReportCalendar {
+            mode: self.mode.as_str().to_string(),
+            source: self.source.clone(),
+            snapshot: self
+                .snapshot
+                .as_ref()
+                .map(TradingCalendarSnapshot::metadata),
         }
     }
 
-    fn finish(&self, message: &str) {
-        if self.interactive {
-            self.bar.finish_with_message(message.to_string());
-        } else {
-            eprintln!("tqsdk-cache: {message}");
+    fn progress_calendar(&self, window: &TradingDayWindow) -> Result<ProgressCalendar, CliError> {
+        let start_day = parse_window_day(&window.start_day)?;
+        let end_day = parse_window_day(&window.end_day)?;
+        let days = match &self.snapshot {
+            Some(snapshot) => snapshot.trading_days_between(start_day, end_day)?,
+            None => partition_days_between(start_day, end_day)?,
+        };
+        Ok(ProgressCalendar {
+            source: self.source.clone(),
+            days,
+        })
+    }
+}
+
+async fn resolve_fill_window(
+    cache_dir: &Path,
+    args: &FillDaysArgs,
+    dry_run: bool,
+) -> Result<ResolvedFillWindow, CliError> {
+    if args.last_trading_days.is_some() && matches!(args.calendar, CalendarMode::Off) {
+        return Err(CliError::Usage(
+            "--last-trading-days requires --calendar auto or required".to_string(),
+        ));
+    }
+    if args.start_day.is_some() && args.last_trading_days.is_some() {
+        return Err(CliError::Usage(
+            "--start-day cannot be combined with --last-trading-days".to_string(),
+        ));
+    }
+
+    let local_snapshot = if matches!(args.calendar, CalendarMode::Off) {
+        None
+    } else {
+        match read_trading_calendar_snapshot(cache_dir) {
+            Ok(snapshot) => snapshot,
+            Err(_) if matches!(args.calendar, CalendarMode::Auto) => None,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    if let Some(last_trading_days) = args.last_trading_days {
+        if last_trading_days == 0 {
+            return Err(CliError::Usage(
+                "--last-trading-days must be greater than zero".to_string(),
+            ));
+        }
+        let open_day = current_open_trading_day()?;
+        let anchor = args.end_day.unwrap_or(open_day);
+        let mut snapshot = local_snapshot;
+        let mut source = "local".to_string();
+        let mut persist_after_plan = false;
+        if snapshot.as_ref().is_none_or(|snapshot| {
+            eligible_calendar_days(snapshot, anchor, open_day)
+                .map(|days| days.len() < last_trading_days)
+                .unwrap_or(true)
+        }) {
+            let lookback_days = last_trading_days
+                .checked_mul(4)
+                .and_then(|days| days.checked_add(31))
+                .ok_or_else(|| CliError::Usage("--last-trading-days is too large".to_string()))?;
+            let start = anchor
+                .checked_sub_days(Days::new(lookback_days as u64))
+                .ok_or_else(|| {
+                    CliError::Usage("failed to compute calendar lookback".to_string())
+                })?;
+            snapshot = Some(fetch_calendar_snapshot(start, anchor).await?);
+            source = "remote".to_string();
+            persist_after_plan = !dry_run;
+        }
+        let snapshot = snapshot.ok_or_else(|| {
+            CliError::Usage("--last-trading-days requires a trading calendar".to_string())
+        })?;
+        let eligible = eligible_calendar_days(&snapshot, anchor, open_day)?;
+        if eligible.len() < last_trading_days {
+            return Err(CliError::Usage(format!(
+                "trading calendar contains only {} closed trading days before {}",
+                eligible.len(),
+                anchor.format("%Y-%m-%d")
+            )));
+        }
+        let selected = &eligible[eligible.len() - last_trading_days..];
+        let window = TradingDayWindow::closed_from_days(selected[0], *selected.last().unwrap())?;
+        return Ok(ResolvedFillWindow {
+            window,
+            calendar: CalendarResolution {
+                mode: args.calendar,
+                snapshot: Some(snapshot),
+                source,
+                persist_after_plan,
+            },
+        });
+    }
+
+    let start_day = args.start_day.ok_or_else(|| {
+        CliError::Usage("fill requires --start-day or --last-trading-days".to_string())
+    })?;
+    let end_day = args
+        .end_day
+        .ok_or_else(|| CliError::Usage("fill requires --end-day with --start-day".to_string()))?;
+    let window = TradingDayWindow::closed_from_days(start_day, end_day)?;
+    let normalized_start = parse_window_day(&window.start_day)?;
+    let normalized_end = parse_window_day(&window.end_day)?;
+    let mut snapshot = local_snapshot;
+    let mut source = if snapshot.is_some() {
+        "local".to_string()
+    } else if matches!(args.calendar, CalendarMode::Off) {
+        "off".to_string()
+    } else {
+        "partition_fallback".to_string()
+    };
+    let mut persist_after_plan = false;
+    let needs_calendar = snapshot.as_ref().is_some_and(|snapshot| {
+        !snapshot
+            .covers(normalized_start, normalized_end)
+            .unwrap_or(false)
+    });
+    if matches!(args.calendar, CalendarMode::Required) && (snapshot.is_none() || needs_calendar) {
+        snapshot = Some(fetch_calendar_snapshot(normalized_start, normalized_end).await?);
+        source = "remote".to_string();
+        persist_after_plan = !dry_run;
+    } else if needs_calendar {
+        snapshot = None;
+        source = "partition_fallback".to_string();
+    }
+    Ok(ResolvedFillWindow {
+        window,
+        calendar: CalendarResolution {
+            mode: args.calendar,
+            snapshot,
+            source,
+            persist_after_plan,
+        },
+    })
+}
+
+async fn finish_calendar_after_plan(
+    mut plan_rx: mpsc::Receiver<RemoteFillPlan>,
+    cache_dir: PathBuf,
+    window: TradingDayWindow,
+    mut calendar: CalendarResolution,
+    dry_run: bool,
+    reporter: FillProgress,
+) -> Result<CalendarResolution, CliError> {
+    let Some(plan) = plan_rx.recv().await else {
+        return Ok(calendar);
+    };
+    let start_day = parse_window_day(&window.start_day)?;
+    let end_day = parse_window_day(&window.end_day)?;
+    if calendar.snapshot.is_none()
+        && matches!(calendar.mode, CalendarMode::Auto | CalendarMode::Required)
+        && plan.requires_remote_fill()
+    {
+        match fetch_calendar_snapshot(start_day, end_day).await {
+            Ok(snapshot) => {
+                calendar.snapshot = Some(snapshot);
+                calendar.source = "remote".to_string();
+                calendar.persist_after_plan = !dry_run;
+            }
+            Err(error) if matches!(calendar.mode, CalendarMode::Auto) => {
+                calendar.source = "partition_fallback".to_string();
+                reporter.calendar_unavailable(error.to_string());
+            }
+            Err(error) => return Err(error),
         }
     }
+    if calendar.persist_after_plan && !dry_run {
+        if let Some(snapshot) = &calendar.snapshot {
+            write_trading_calendar_snapshot(&cache_dir, snapshot)?;
+            calendar.persist_after_plan = false;
+        }
+    }
+    reporter.calendar_ready(calendar.progress_calendar(&window)?);
+    Ok(calendar)
+}
+
+async fn fetch_calendar_snapshot(
+    start_day: NaiveDate,
+    end_day: NaiveDate,
+) -> Result<TradingCalendarSnapshot, CliError> {
+    let rows: Vec<TradingCalendarRow> = DataClient::new()
+        .query_trading_calendar(start_day, end_day)
+        .await?;
+    Ok(TradingCalendarSnapshot::from_rows(rows)?)
+}
+
+fn eligible_calendar_days(
+    snapshot: &TradingCalendarSnapshot,
+    anchor: NaiveDate,
+    open_day: NaiveDate,
+) -> Result<Vec<NaiveDate>, CliError> {
+    let mut days = Vec::new();
+    for day in &snapshot.days {
+        let date = parse_window_day(&day.date)?;
+        if day.trading && date <= anchor && date < open_day {
+            days.push(date);
+        }
+    }
+    Ok(days)
+}
+
+fn parse_window_day(value: &str) -> Result<NaiveDate, CliError> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|error| CliError::Usage(format!("invalid trading day {value:?}: {error}")))
+}
+
+fn partition_days_between(
+    start_day: NaiveDate,
+    end_day: NaiveDate,
+) -> Result<Vec<NaiveDate>, CliError> {
+    if start_day > end_day {
+        return Err(CliError::Usage(
+            "start trading day must not be after end trading day".to_string(),
+        ));
+    }
+    let mut days = Vec::new();
+    let mut day = start_day;
+    while day <= end_day {
+        days.push(day);
+        day = day
+            .succ_opt()
+            .ok_or_else(|| CliError::Usage("trading day date overflow".to_string()))?;
+    }
+    Ok(days)
+}
+
+fn current_open_trading_day() -> Result<NaiveDate, CliError> {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .ok_or_else(|| CliError::Usage("system clock is outside TQBN range".to_string()))?;
+    Ok(backtest_tick_trading_day_for_timestamp_ns(now_ns)?)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -378,7 +595,17 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
                 .to_string(),
         ));
     }
-    let window = TradingDayWindow::closed_from_days(args.days.start_day, args.days.end_day)?;
+    let (cache, canonical_cache_dir) = if args.dry_run {
+        open_read_only_cache(cache_dir)?
+    } else {
+        open_cache(cache_dir)?
+    };
+    let resolved = resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run).await?;
+    let window = resolved.window;
+    let selector = FillSelectorReport {
+        symbols: symbols.clone(),
+        universe: universe.clone(),
+    };
     if args.dry_run {
         if args.report.is_some() {
             return Err(CliError::Usage(
@@ -386,7 +613,6 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
                     .to_string(),
             ));
         }
-        let (cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
         let builder = apply_fill_targets(
             builder_with_environment_auth(false)?
                 .backtest(window.start_ns, window.end_ns)
@@ -397,7 +623,15 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
             universe.as_deref(),
         )?;
         let warmup = builder.warmup().await?;
-        let report = FillReport::from_warmup(&warmup, &canonical_cache_dir, window, config, true);
+        let report = fill_report_with_metadata(
+            &warmup,
+            &canonical_cache_dir,
+            window,
+            config,
+            true,
+            selector,
+            &resolved.calendar,
+        )?;
         let complete = report.complete;
         return Ok(CommandOutcome {
             value: json!({
@@ -412,21 +646,41 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         });
     }
 
-    let (cache, canonical_cache_dir) = open_cache(cache_dir)?;
-    let reporter = FillProgress::new();
+    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars);
+    let reporter = progress_session.observer();
+    reporter.planning("resolving universe and inspecting strict cache coverage");
+    if resolved.calendar.snapshot.is_some() {
+        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
+    }
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {
         wait_for_shutdown_signal(signal_cancellation).await;
     });
-    let callback = reporter.clone();
+    let (plan_tx, plan_rx) = mpsc::channel(1);
+    let calendar_task = tokio::spawn(finish_calendar_after_plan(
+        plan_rx,
+        canonical_cache_dir.clone(),
+        window.clone(),
+        resolved.calendar.clone(),
+        false,
+        reporter.clone(),
+    ));
+    let progress_callback = reporter.clone();
+    let telemetry_callback = reporter.clone();
     let mut builder = builder_with_environment_auth(false)?
         .backtest(window.start_ns, window.end_ns)
         .cache_dir(&canonical_cache_dir)?
         .remote_on_miss()
         .remote_fill_config(config)
         .remote_fill_cancellation(cancellation.clone())
-        .on_remote_fill_progress(move |event| callback.observe(event));
+        .on_remote_fill_progress(move |event| progress_callback.observe_progress(event))
+        .on_remote_fill_telemetry(move |event| {
+            telemetry_callback.observe_telemetry(event);
+            if let Some(plan) = event.plan() {
+                let _ = plan_tx.try_send(plan.clone());
+            }
+        });
     if let Some(wait_secs) = args.lock_wait_secs {
         builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
     }
@@ -434,9 +688,23 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
     let warmup = builder.warmup().await;
     signal_task.abort();
     let _ = signal_task.await;
+    let calendar = match calendar_task.await {
+        Ok(Ok(calendar)) => calendar,
+        Ok(Err(error)) => {
+            progress_session.finish("fill failed; calendar preparation did not complete");
+            return Err(error);
+        }
+        Err(error) => {
+            progress_session.finish("fill failed; calendar planning task did not complete");
+            return Err(CliError::Usage(format!(
+                "calendar planning task failed: {error}"
+            )));
+        }
+    };
 
     if cancellation.is_cancelled() {
-        reporter.finish("interrupted; partial accepted rows were flushed without coverage commit");
+        let summary = "interrupted; partial accepted rows were flushed without coverage commit";
+        progress_session.finish(summary);
         let inventory = cache.fast_inventory()?;
         return Ok(CommandOutcome {
             value: json!({
@@ -450,9 +718,24 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         });
     }
 
-    let warmup = warmup?;
-    reporter.finish("fill complete; verifying final local coverage");
-    let report = FillReport::from_warmup(&warmup, &canonical_cache_dir, window, config, false);
+    let warmup = match warmup {
+        Ok(warmup) => warmup,
+        Err(error) => {
+            progress_session.finish("fill failed; strict local coverage was not committed");
+            return Err(error.into());
+        }
+    };
+    let report = fill_report_with_metadata(
+        &warmup,
+        &canonical_cache_dir,
+        window,
+        config,
+        false,
+        selector,
+        &calendar,
+    )?;
+    reporter.final_report(&report);
+    progress_session.finish("fill complete; strict local coverage verified");
     let report_path = args
         .report
         .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
@@ -469,6 +752,66 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         }),
         exit_code: if complete { 0 } else { 1 },
     })
+}
+
+fn fill_report_with_metadata(
+    warmup: &tqsdk::BacktestCacheWarmupReport,
+    cache_dir: &Path,
+    window: TradingDayWindow,
+    config: BacktestRemoteFillConfig,
+    dry_run: bool,
+    selector: FillSelectorReport,
+    calendar: &CalendarResolution,
+) -> Result<FillReport, CliError> {
+    let progress_calendar = calendar.progress_calendar(&window)?;
+    let day_stats = warmup
+        .symbols
+        .iter()
+        .map(|symbol| fill_symbol_day_stats(symbol, &progress_calendar.days))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(
+        FillReport::from_warmup(warmup, cache_dir, window, config, dry_run).with_v2_metadata(
+            selector,
+            Some(calendar.report_calendar()),
+            day_stats,
+        ),
+    )
+}
+
+fn fill_symbol_day_stats(
+    symbol: &tqsdk::BacktestCacheWarmupSymbolReport,
+    calendar_days: &[NaiveDate],
+) -> Result<FillReportSymbolDayStats, CliError> {
+    let mut planned_days = 0;
+    let mut before_covered_days = 0;
+    let mut after_covered_days = 0;
+    for day in calendar_days {
+        let range = tqsdk_data::backtest_tick_trading_day_range(*day)?;
+        if range.start_ns < symbol.after.range_start_ns || range.end_ns > symbol.after.range_end_ns
+        {
+            continue;
+        }
+        planned_days += 1;
+        if ranges_cover(&symbol.before.cached_ranges, range.start_ns, range.end_ns) {
+            before_covered_days += 1;
+        }
+        if ranges_cover(&symbol.after.cached_ranges, range.start_ns, range.end_ns) {
+            after_covered_days += 1;
+        }
+    }
+    Ok(FillReportSymbolDayStats {
+        symbol: symbol.symbol.clone(),
+        planned_days,
+        covered_days: after_covered_days,
+        missing_days: planned_days.saturating_sub(after_covered_days),
+        received_days: after_covered_days.saturating_sub(before_covered_days),
+    })
+}
+
+fn ranges_cover(ranges: &[(i64, i64)], start_ns: i64, end_ns: i64) -> bool {
+    ranges
+        .iter()
+        .any(|(cached_start, cached_end)| *cached_start <= start_ns && end_ns <= *cached_end)
 }
 
 async fn verify(cache_dir: Option<&Path>, args: VerifyArgs) -> Result<CommandOutcome, CliError> {
@@ -777,4 +1120,132 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
     }
     stdout.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CalendarMode, FillDaysArgs, resolve_fill_window};
+    use chrono::NaiveDate;
+    use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
+    use tqsdk_data::TradingCalendarRow;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_auto_range_uses_partition_fallback_without_a_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-auto-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let args = FillDaysArgs {
+            start_day: Some(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()),
+            end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 3).unwrap()),
+            last_trading_days: None,
+            calendar: CalendarMode::Auto,
+        };
+
+        let resolved = resolve_fill_window(&root, &args, true).await.unwrap();
+
+        assert_eq!(resolved.window.start_day, "2020-01-02");
+        assert_eq!(resolved.window.end_day, "2020-01-03");
+        assert!(resolved.calendar.snapshot.is_none());
+        assert_eq!(resolved.calendar.source, "partition_fallback");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_auto_range_ignores_an_invalid_local_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("meta")).unwrap();
+        std::fs::write(root.join("meta/trading-calendar-v1.json"), "invalid").unwrap();
+        let args = FillDaysArgs {
+            start_day: Some(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()),
+            end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 3).unwrap()),
+            last_trading_days: None,
+            calendar: CalendarMode::Auto,
+        };
+
+        let resolved = resolve_fill_window(&root, &args, true).await.unwrap();
+
+        assert!(resolved.calendar.snapshot.is_none());
+        assert_eq!(resolved.calendar.source, "partition_fallback");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_trading_days_is_rejected_when_calendar_is_off() {
+        let args = FillDaysArgs {
+            start_day: None,
+            end_day: None,
+            last_trading_days: Some(5),
+            calendar: CalendarMode::Off,
+        };
+        let error =
+            match resolve_fill_window(std::path::Path::new("/tmp/unused"), &args, true).await {
+                Ok(_) => panic!("calendar-off last-trading-days request should fail"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("--last-trading-days"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_trading_days_uses_the_local_calendar_snapshot_without_network() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-last-days-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let snapshot = TradingCalendarSnapshot::from_rows(vec![
+            TradingCalendarRow {
+                date: "2020-01-06".to_string(),
+                trading: true,
+            },
+            TradingCalendarRow {
+                date: "2020-01-07".to_string(),
+                trading: true,
+            },
+            TradingCalendarRow {
+                date: "2020-01-08".to_string(),
+                trading: true,
+            },
+            TradingCalendarRow {
+                date: "2020-01-09".to_string(),
+                trading: true,
+            },
+            TradingCalendarRow {
+                date: "2020-01-10".to_string(),
+                trading: true,
+            },
+        ])
+        .unwrap();
+        write_trading_calendar_snapshot(&root, &snapshot).unwrap();
+        let args = FillDaysArgs {
+            start_day: None,
+            end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 10).unwrap()),
+            last_trading_days: Some(2),
+            calendar: CalendarMode::Auto,
+        };
+
+        let resolved = resolve_fill_window(&root, &args, false).await.unwrap();
+
+        assert_eq!(resolved.window.start_day, "2020-01-09");
+        assert_eq!(resolved.window.end_day, "2020-01-10");
+        assert_eq!(resolved.calendar.source, "local");
+        assert!(!resolved.calendar.persist_after_plan);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

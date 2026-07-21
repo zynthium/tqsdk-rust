@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use serde_json::{Map, Value, json};
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
@@ -23,6 +25,7 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<RecordTicksHealth> = None;
     let _: Option<RecordTicksFlushReport> = None;
     let _: Option<RecordTicksReport> = None;
+    let _: Option<BacktestRemoteFillTelemetry> = None;
 }
 
 #[tokio::test]
@@ -543,6 +546,47 @@ async fn facade_backtest_warmup_skips_complete_cache_without_auth() {
         BacktestCacheWarmupAction::SkippedComplete
     );
     assert!(report.symbols[0].after.is_complete());
+}
+
+#[tokio::test]
+async fn facade_backtest_warmup_emits_a_cache_inspected_remote_fill_plan() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+    let observed_plan = Arc::new(Mutex::new(None));
+    let callback_plan = Arc::clone(&observed_plan);
+
+    let report = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .remote_on_miss()
+        .on_remote_fill_telemetry(move |event| {
+            if let Some(plan) = event.plan() {
+                *callback_plan.lock().unwrap() = Some(plan.clone());
+            }
+        })
+        .warmup()
+        .await
+        .unwrap();
+
+    let plan = observed_plan.lock().unwrap().clone().unwrap();
+    assert!(!report.remote_used);
+    assert_eq!(plan.requested_range(), (1_000, 3_000));
+    assert_eq!(plan.logical_symbols(), &[symbol.to_string()]);
+    assert_eq!(plan.logical_batches(), 0);
+    assert_eq!(plan.physical_symbols().len(), 1);
+    assert_eq!(plan.physical_symbols()[0].physical_symbol(), symbol);
+    assert!(plan.physical_symbols()[0].missing_ranges().is_empty());
 }
 
 #[tokio::test]

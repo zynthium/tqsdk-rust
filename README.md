@@ -32,7 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：inventory、coverage inspect、closed-day fill、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：inventory、coverage inspect、calendar-aware closed-day fill、stderr-only physical progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：

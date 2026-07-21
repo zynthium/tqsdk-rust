@@ -63,10 +63,17 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 每个成功 slice 都先校验 tick id 连续性后独立提交 coverage，全部 slice 成功后才按 symbol
 compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会继续补其缺口。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
+调用方若需要把 warmup 接入自己的轻量进度或调度器，可配置
+`.on_remote_fill_telemetry(...)`：它在 coverage inspection（远端模式已取得 root fill lock）后
+先给出 `RemoteFillPlan`，随后按 physical cache symbol 给出低频生命周期快照。流式更新每个
+symbol 至多 500ms 一次，handler 在填充路径同步调用，必须保持快速且不得做终端 I/O 或阻塞网络。
+已有 `.on_remote_fill_progress(...)` 保持兼容；telemetry 额外提供 plan、cursor、retry 和 split
+identity，适合 CLI/UI reducer，而不是策略热路径。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
 `.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day `fill`、
-report-bound `verify` 和 TQBN `doctor`。CLI 不改变 facade 默认行为，也不替代 live
+report-bound `verify` 和 TQBN `doctor`。`fill` 可按本地通用交易日历选择最近 N 个已结束交易日，
+并将 JSON 保持在 stdout、进度保持在 stderr。CLI 不改变 facade 默认行为，也不替代 live
 `MarketCachePolicy` recording；完整命令合同见
 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
 

@@ -36,6 +36,9 @@ deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
   长期生产作业应显式传递 `cache_dir(...)`，避免环境差异。
 - 使用官方交易日历（`DataClient::query_trading_days(...)`）选择“最近 N 个交易日”，不要把
   N 个工作日当作交易日。休市日的空覆盖分区是正常结果。
+- 固定 root 的 operator 作业可以让 `tqsdk-cache fill --last-trading-days N --calendar auto`
+  管理这一步：它优先复用 `<cache-root>/meta/trading-calendar-v1.json`，在没有可用快照且确认
+  存在远端缺口后才拉取通用日历。日历只决定 selector 和进度分母，不能替代 coverage。
 - 只填到最后一个已结束交易日。盘中或尚未经过尾部确认的交易日不能视为完整缓存。
 - `KQ.i@...` 直接按 index symbol 缓存；`KQ.m@...` 会按日期解析到具体合约并共享具体合约的
   tick 文件。不要用一个 symbol 的 coverage 推断另一个 symbol 完整。
@@ -44,6 +47,22 @@ deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
 
 同一 cache root 同时只运行一个远端 warmup owner。TQBN 文件锁保证写入互斥，但不会去重多个
 进程发出的远端补数请求。
+
+对于长期运行的运维任务，推荐直接使用 CLI 的 closed-day selector，而不是由外层脚本倒推工作日：
+
+```bash
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+  --universe 'main:all;index:all;!CFFEX' \
+  --last-trading-days 60 --calendar auto \
+  --progress auto --progress-max-bars 8 --pretty
+```
+
+TTY 会显示 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`，非 TTY 输出
+稳定的 stderr `key=value` 行，最终 JSON 仍只写 stdout。一个日只有在其 TQBN partition 已完整
+跨越或成功 terminal event 确认后才计入“完整接收”，因此夜盘和盘中尾部不会被提前计为完成。
+`--calendar required` 禁止无日历 fallback，`--calendar off` 保留纯 partition 规划并拒绝
+`--last-trading-days`。
 
 ## 2. 预检已有 coverage
 
@@ -108,6 +127,12 @@ async fn warmup(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS`。`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 默认关闭，
 只有需要强制墙钟预算或诊断时才设置，并应留出足够余量。
 
+需要把相同计划/生命周期信息接入调用方 UI 或调度器时，可在 builder 上安装
+`.on_remote_fill_telemetry(...)`。它先在 coverage inspection 后发出 `PlanReady`，再按 physical
+symbol 发出开始、流式、重试、split、完成、失败或取消状态；流式事件每个 symbol 至多 500ms 一次，
+生命周期事件立即发出。handler 与远端填充共享执行路径，必须只做快速内存操作，不能写终端、阻塞
+或等待网络。
+
 ## 4. 用 CacheOnly 和实际回放验收
 
 预热成功后，必须在不提供 auth 的条件下验证相同窗口。第一步验证 coverage，第二步实际消费
@@ -150,6 +175,11 @@ async fn verify(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 ```
 
 当窗口本来没有任何行情时，最后一项应改为检查预期的空 coverage，而不是强制 replay 非空。
+
+CLI fill report 的当前 schema 为 `2`，记录原始 selector、解析日历及每 physical cache report range
+的日计数；
+`verify --report` 仍可读取旧 schema `1`。无论报告版本如何，最终验收都必须以同 root、同窗口的
+CacheOnly coverage 为准。
 
 ## 5. 仓库内端到端 runner
 

@@ -67,8 +67,24 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
 
     assert!(output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], 2);
     assert_eq!(json["report"]["complete"], true);
     assert_eq!(json["report"]["remote_used"], false);
+    assert_eq!(
+        json["report"]["selector"]["symbols"],
+        serde_json::json!(["SHFE.rb2601"])
+    );
+    assert!(json["report"]["resolved_range"].is_object());
+    assert_eq!(json["report"]["calendar"]["mode"], "auto");
+    assert_eq!(json["report"]["calendar"]["source"], "partition_fallback");
+    assert_eq!(
+        json["report"]["physical_symbols"][0]["day_stats"]["planned_days"],
+        2
+    );
+    assert_eq!(
+        json["report"]["physical_symbols"][0]["day_stats"]["received_days"],
+        0
+    );
     assert!(report_path.exists());
 
     let verified = run_without_auth(["verify", "--report", report_path.to_str().unwrap()]);
@@ -89,6 +105,127 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
 
     let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_dir_all(&another_cache_dir);
+}
+
+#[test]
+fn fill_rejects_last_trading_days_when_calendar_is_off() {
+    let output = run([
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--last-trading-days",
+        "5",
+        "--calendar",
+        "off",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--last-trading-days"));
+}
+
+#[test]
+fn fill_requires_an_explicit_end_day_without_last_trading_days() {
+    let output = run([
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--end-day"));
+}
+
+#[test]
+fn fill_progress_off_keeps_stderr_quiet_and_stdout_machine_readable() {
+    let cache_dir = temp_dir("progress-off");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let start = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    cache
+        .mark_complete("SHFE.rb2601", start.start_ns, start.end_ns, 0, None)
+        .unwrap();
+
+    let output = run_without_auth([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--progress",
+        "off",
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["command"], "fill");
+    assert_eq!(json["report"]["complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn fill_progress_plain_keeps_stdout_json_and_emits_structured_stderr() {
+    let cache_dir = temp_dir("progress-plain");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let start = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    cache
+        .mark_complete("SHFE.rb2601", start.start_ns, start.end_ns, 0, None)
+        .unwrap();
+
+    let output = run_without_auth([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--progress",
+        "plain",
+    ]);
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("tqsdk-cache: phase=complete"));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["command"], "fill");
+    assert_eq!(json["report"]["complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn fill_progress_plain_reports_a_specific_failure_summary() {
+    let cache_dir = temp_dir("progress-failure");
+    let output = run_without_auth([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--calendar",
+        "off",
+        "--progress",
+        "plain",
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("fill failed; strict local coverage was not committed"));
+    assert!(!stderr.contains("fill ended before a final progress summary"));
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]
