@@ -861,6 +861,20 @@ fn flatten_object_owned(
             fields: Vec::new(),
             source,
         });
+    } else if path.is_empty() {
+        for field in fields {
+            if emits_root_delete(field.field.as_str(), &field.value, source) {
+                out.push(NormalizedMutation {
+                    path: StatePath::new([field.field]),
+                    object: None,
+                    fields: vec![FieldMutation {
+                        field: "value".to_string(),
+                        value: Value::Null,
+                    }],
+                    source,
+                });
+            }
+        }
     }
 
     for (field, value) in children {
@@ -1105,5 +1119,41 @@ impl NamedPayloadEvent for InternalEvent {
 
     fn payload(&self) -> Option<&Value> {
         self.payload.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_decoder_preserves_root_delete_mutations() {
+        let cases = [
+            (MutationSource::MarketDiff, "quotes"),
+            (MutationSource::MarketDiff, "trading_status"),
+            (MutationSource::MarketDiff, "charts"),
+            (MutationSource::MarketDiff, "klines"),
+            (MutationSource::MarketDiff, "ticks"),
+            (MutationSource::TradeReply, "trade"),
+            (MutationSource::QueryResult, "query"),
+            (MutationSource::SchemaBootstrap, "schema"),
+            (MutationSource::ReplayStep, "replay"),
+            (MutationSource::SessionControl, "system"),
+            (MutationSource::SessionControl, "runtime"),
+        ];
+
+        for (source, root) in cases {
+            let mut item = Map::new();
+            item.insert(root.to_string(), Value::Null);
+            let payload = json!({
+                "aid": "rtn_data",
+                "data": [Value::Object(item)],
+            });
+
+            let borrowed = decode_json_envelope(&payload, source, Vec::new()).unwrap();
+            let owned = decode_json_envelope_owned(payload, source, Vec::new()).unwrap();
+
+            assert_eq!(owned, borrowed, "owned decoder lost {root} root delete");
+        }
     }
 }
