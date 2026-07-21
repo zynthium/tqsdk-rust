@@ -15,6 +15,10 @@ session owner、后台守护进程、relay、监控面板或 custom store plugin
 完整操作合同见
 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
 
+`--universe` 使用 shared futures resolver；最终 resolved universe 会排除当前不受本地
+history cache / relay 支持的 `KQD` 外盘合约，因此 `cont:all` 不会生成不存在历史映射的
+`KQ.m@KQD.*`。
+
 ## 常用命令
 
 所有正常结果写 versioned JSON 到 stdout；进度和诊断写 stderr，因此可以安全地将 stdout

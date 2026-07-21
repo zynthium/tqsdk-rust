@@ -212,6 +212,22 @@ async fn expression_does_not_generate_index_contracts_for_kqd() {
 }
 
 #[tokio::test]
+async fn expression_excludes_unsupported_kqd_external_contracts() {
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("KQD.CBOT.KE", "KQD", "CBOT.KE", false).unwrap(),
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+    ])
+    .with_main_symbols(["KQD.CBOT.KE", "DCE.m2609"]);
+    let expression = UniverseExpression::parse("active:all;main:all;index:all;cont:all").unwrap();
+
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m", "KQ.m@DCE.m"]);
+}
+
+#[tokio::test]
 async fn expression_excludes_kqd_with_bare_exchange_token() {
     let mut resolver = StaticFuturesUniverseResolver::new([
         FuturesContract::new("KQD.S2609", "KQD", "S", false).unwrap(),

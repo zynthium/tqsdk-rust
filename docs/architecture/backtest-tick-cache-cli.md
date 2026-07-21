@@ -51,7 +51,9 @@ tqsdk-cache fill
 
 `inspect` 接受的是 physical cache symbol。`fill` 可以同时接受重复的 `--symbol` 和
 `--universe`；它会依赖 facade 的 resolver 去重。`KQ.m@...` 主连的 logical 请求可能解析到多条
-物理合约 cache symbols，fill report 会同时保留 `logical_symbols` 和 `physical_symbols`。
+物理合约 cache symbols，fill report 会同时保留 `logical_symbols` 和 `physical_symbols`。共享
+universe resolver 会在最终集合中剔除不受本地历史缓存支持的 `KQD` 外盘合约，因此 `cont:all`
+不会生成不存在历史映射的 `KQ.m@KQD.*`。
 
 ## 交易日与 closed-day 保护
 

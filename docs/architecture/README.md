@@ -230,8 +230,9 @@ V1 是：
   - 二进制启动参数统一使用组合式 universe 表达式，把真实活跃合约、真实主力、加权指数连续合约、
     主连连续合约、top-N、静态文件和排除规则放进同一个订阅前置计划，例如
     `main:all;index:all;!CFFEX` 或 `file:./futures-symbols.txt`
-  - `index` 选择器只生成天勤支持的 `KQ.i@EX.product` 加权 / 指数连续代码；`KQD`
-    外盘行情没有加权 / 指数连续合约，不能为其合成不存在的 `KQ.i@...`
+  - shared universe resolver 在最终集合中剔除当前不受本地 history cache / relay 支持的 `KQD`
+    外盘合约；因此 `index` / `cont` 不会分别合成不存在的 `KQ.i@KQD.*` /
+    `KQ.m@KQD.*` 连续代码
   - metadata 查询按批执行，避免产品发现自身制造过大的单次 query 负载
   - 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
     长度阈值；启动时上游先发送累计 quote 订阅用于首样本，

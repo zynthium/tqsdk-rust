@@ -29,6 +29,8 @@ use crate::universe_expression::{
 const FUTURES_ACTIVITY_QUOTE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "metadata")]
 const FUTURES_ACTIVITY_QUOTE_POLL: Duration = Duration::from_millis(250);
+const SUPPORTED_FUTURES_UNIVERSE_EXCHANGES: &[&str] =
+    &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProductScope {
@@ -504,6 +506,7 @@ pub(crate) fn static_contracts_with_expression(
     for exclusion in exclusions {
         included.retain(|_, contract| !exclusion.matches(contract));
     }
+    retain_supported_futures_universe_contracts(&mut included);
     Ok(included.into_values().collect())
 }
 
@@ -528,7 +531,18 @@ where
     for exclusion in exclusions {
         included.retain(|_, contract| !exclusion.matches(contract));
     }
+    retain_supported_futures_universe_contracts(&mut included);
     Ok(included.into_values().collect())
+}
+
+fn retain_supported_futures_universe_contracts(contracts: &mut BTreeMap<String, FuturesContract>) {
+    contracts.retain(|_, contract| supports_futures_universe_exchange(&contract.exchange_id));
+}
+
+fn supports_futures_universe_exchange(exchange_id: &str) -> bool {
+    SUPPORTED_FUTURES_UNIVERSE_EXCHANGES
+        .iter()
+        .any(|supported| exchange_id.eq_ignore_ascii_case(supported))
 }
 
 async fn contracts_for_product_scope<R>(

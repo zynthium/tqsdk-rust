@@ -31,7 +31,9 @@ runtime contract；它只提供一个更容易开始的 facade：
 auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tick、推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
 对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
-`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。
+`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。最终 resolved
+universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外盘合约，因此 `cont:all`
+不会请求不存在的 `KQ.m@KQD.*` 历史主连映射。
 
 `KQ.m@EX.product` 主连回测会通过
 `tqsdk_data::DataClient::query_his_cont_underlying_segments(...)` 查询历史映射，并按 CST
