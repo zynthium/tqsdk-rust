@@ -1,12 +1,16 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use tqsdk_core::Tick;
 use tqsdk_data::{BacktestTickCache, LiveTickCacheWriteReport, LiveTickCacheWriter};
-use tqsdk_wait::TickHandle;
+use tqsdk_wait::{TickHandle, WaitStep};
 
 use crate::{Error, Result};
 
 const RECORD_TICK_DATA_LENGTH: usize = 10_000;
+const RECORD_TICK_WRITE_BUFFER_ROWS: usize = 128;
+const RECORD_TICK_WRITE_MAX_LATENCY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordTicksReport {
@@ -59,7 +63,12 @@ pub(crate) struct LiveTickRecorder {
 struct RecordedTickSymbol {
     symbol: String,
     handle: TickHandle,
-    last_seen_id: Option<i64>,
+    last_observed_id: Option<i64>,
+    last_persisted_id: Option<i64>,
+    pending_rows: Vec<Tick>,
+    last_persisted_at: Option<Instant>,
+    pending_gap_detected: bool,
+    needs_rescan: bool,
 }
 
 impl LiveTickRecorder {
@@ -84,7 +93,12 @@ impl LiveTickRecorder {
             recorded.push(RecordedTickSymbol {
                 symbol: symbol.clone(),
                 handle,
-                last_seen_id: None,
+                last_observed_id: None,
+                last_persisted_id: None,
+                pending_rows: Vec::new(),
+                last_persisted_at: None,
+                pending_gap_detected: false,
+                needs_rescan: false,
             });
         }
 
@@ -104,20 +118,36 @@ impl LiveTickRecorder {
         ))
     }
 
-    pub(crate) fn flush(&mut self) -> Result<RecordTicksFlushReport> {
+    pub(crate) fn flush(&mut self, step: Option<&WaitStep>) -> Result<RecordTicksFlushReport> {
+        for recorded in &mut self.symbols {
+            let rows = recorded.rows_for_step(step)?;
+            recorded.observe_rows(rows);
+        }
+
+        self.flush_pending(false)
+    }
+
+    fn flush_pending(&mut self, force: bool) -> Result<RecordTicksFlushReport> {
+        let now = Instant::now();
         let mut symbol_reports = Vec::new();
         for recorded in &mut self.symbols {
-            let rows = match recorded.last_seen_id {
-                Some(last_seen_id) => recorded.handle.rows_since(last_seen_id)?,
-                None => recorded.handle.rows()?,
-            };
-
-            if rows.is_empty() {
+            if !recorded.should_persist(now, force) {
                 continue;
             }
-
-            let write_report = self.writer.push_ticks(recorded.symbol.as_str(), rows)?;
-            recorded.last_seen_id = write_report.last_seen_id;
+            let last_persisted_id = recorded.last_persisted_id;
+            let rows = std::mem::take(&mut recorded.pending_rows);
+            let write_report = match self.writer.push_ticks(recorded.symbol.as_str(), rows) {
+                Ok(report) => report,
+                Err(error) => {
+                    recorded.last_observed_id = last_persisted_id;
+                    recorded.needs_rescan = true;
+                    return Err(error.into());
+                }
+            };
+            recorded.last_persisted_id = write_report.last_seen_id;
+            recorded.last_persisted_at = Some(now);
+            recorded.pending_gap_detected = false;
+            recorded.needs_rescan = false;
             symbol_reports.push(RecordTicksSymbolFlushReport::from(write_report));
         }
 
@@ -128,6 +158,61 @@ impl LiveTickRecorder {
 
     pub(crate) fn health(&self) -> &RecordTicksHealth {
         &self.health
+    }
+}
+
+impl Drop for LiveTickRecorder {
+    fn drop(&mut self) {
+        let _ = self.flush_pending(true);
+    }
+}
+
+impl RecordedTickSymbol {
+    fn rows_for_step(&self, step: Option<&WaitStep>) -> Result<Vec<Tick>> {
+        let Some(last_seen_id) = self.last_observed_id else {
+            return self.handle.rows().map_err(Into::into);
+        };
+
+        if self.needs_rescan {
+            return self.handle.rows_since(last_seen_id).map_err(Into::into);
+        }
+
+        let Some(step) = step else {
+            return self.handle.rows_since(last_seen_id).map_err(Into::into);
+        };
+
+        let mut rows = self.handle.changed_rows(step)?;
+        rows.retain(|row| row.id > last_seen_id);
+        Ok(rows)
+    }
+
+    fn observe_rows(&mut self, rows: Vec<Tick>) {
+        for row in &rows {
+            if self
+                .last_observed_id
+                .is_some_and(|last_seen| row.id > last_seen.saturating_add(1))
+            {
+                self.pending_gap_detected = true;
+            }
+            self.last_observed_id = Some(
+                self.last_observed_id
+                    .map_or(row.id, |last_seen| last_seen.max(row.id)),
+            );
+        }
+        self.pending_rows.extend(rows);
+    }
+
+    fn should_persist(&self, now: Instant, force: bool) -> bool {
+        !self.pending_rows.is_empty()
+            && (force
+                || self.needs_rescan
+                || self.pending_gap_detected
+                || self.last_persisted_at.is_none()
+                || self.pending_rows.len() >= RECORD_TICK_WRITE_BUFFER_ROWS
+                || self.last_persisted_at.is_some_and(|last_persisted_at| {
+                    now.saturating_duration_since(last_persisted_at)
+                        >= RECORD_TICK_WRITE_MAX_LATENCY
+                }))
     }
 }
 

@@ -534,8 +534,7 @@ impl BacktestTickCache {
                 "tick row is outside declared backtest tick cache range",
             ));
         }
-        rows.sort_by_key(|row| (row.id, row.datetime, row.epoch));
-        rows.dedup_by(|left, right| left.id == right.id && left.datetime == right.datetime);
+        normalize_tick_rows(&mut rows);
         let rows_len = rows.len();
         let id_range = tick_id_range(rows.iter().map(|row| row.id))?;
         let report = self.append_partial_ticks(symbol, rows)?;
@@ -554,6 +553,19 @@ impl BacktestTickCache {
         symbol: impl AsRef<str>,
         rows: impl IntoIterator<Item = Tick>,
     ) -> Result<BacktestTickCacheWriteReport> {
+        self.append_partial_ticks_with_coverage(
+            symbol,
+            rows,
+            std::iter::empty::<(i64, i64, usize, Option<(i64, i64)>)>(),
+        )
+    }
+
+    pub(crate) fn append_partial_ticks_with_coverage(
+        &self,
+        symbol: impl AsRef<str>,
+        rows: impl IntoIterator<Item = Tick>,
+        coverage: impl IntoIterator<Item = (i64, i64, usize, Option<(i64, i64)>)>,
+    ) -> Result<BacktestTickCacheWriteReport> {
         let symbol = symbol.as_ref();
         if symbol.is_empty() {
             return Err(DataError::InvalidState(
@@ -561,14 +573,29 @@ impl BacktestTickCache {
             ));
         }
         let mut rows = rows.into_iter().collect::<Vec<_>>();
-        rows.sort_by_key(|row| (row.id, row.datetime, row.epoch));
-        rows.dedup_by(|left, right| left.id == right.id && left.datetime == right.datetime);
-        self.history.write_segment(HistorySeriesWriteSegment {
-            symbol,
-            kind: HistorySeriesKind::Tick,
-            declared_range_ns: None,
-            rows: HistorySeriesWriteRows::Ticks(rows.as_slice()),
-        })?;
+        normalize_tick_rows(&mut rows);
+        let coverage = coverage
+            .into_iter()
+            .map(
+                |(range_start_ns, range_end_ns, rows, id_range)| HistorySeriesCoverageCommit {
+                    symbol: symbol.to_string(),
+                    kind: HistorySeriesKind::Tick,
+                    range_start_ns,
+                    range_end_ns,
+                    rows,
+                    id_range,
+                },
+            )
+            .collect::<Vec<_>>();
+        self.history.write_segment_with_coverage(
+            HistorySeriesWriteSegment {
+                symbol,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(rows.as_slice()),
+            },
+            coverage.as_slice(),
+        )?;
         Ok(BacktestTickCacheWriteReport {
             cache_dir: self.history.root_dir().to_path_buf(),
             symbol: symbol.to_string(),
@@ -591,22 +618,38 @@ impl BacktestTickCache {
         id_range: Option<(i64, i64)>,
     ) -> Result<BacktestTickCoverage> {
         let symbol = symbol.as_ref();
+        self.mark_complete_without_inspection(
+            symbol,
+            range_start_ns,
+            range_end_ns,
+            rows,
+            id_range,
+        )?;
+        self.coverage(symbol, range_start_ns, range_end_ns)
+    }
+
+    /// Commit coverage after rows are durable without rescanning the series.
+    ///
+    /// Live recording keeps its own contiguous-id state, so it only needs the
+    /// append operation here. Callers that need an authoritative coverage view
+    /// must use [`Self::mark_complete`] or [`Self::coverage`] afterwards.
+    pub(crate) fn mark_complete_without_inspection(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        let symbol = symbol.as_ref();
         validate_range(symbol, range_start_ns, range_end_ns)?;
-        let report = self.history.commit_coverage(HistorySeriesCoverageCommit {
+        self.history.append_coverage(HistorySeriesCoverageCommit {
             symbol: symbol.to_string(),
             kind: HistorySeriesKind::Tick,
             range_start_ns,
             range_end_ns,
             rows,
             id_range,
-        })?;
-        Ok(BacktestTickCoverage {
-            cache_dir: self.history.root_dir().to_path_buf(),
-            symbol: report.symbol,
-            range_start_ns: report.range_start_ns,
-            range_end_ns: report.range_end_ns,
-            cached_ranges: report.cached_ranges,
-            missing_ranges: report.missing_ranges,
         })
     }
 
@@ -930,4 +973,74 @@ fn tick_id_range(ids: impl IntoIterator<Item = i64>) -> Result<Option<(i64, i64)
             "backtest tick cache id range overflow",
         ))?;
     Ok(Some((start, end)))
+}
+
+fn normalize_tick_rows(rows: &mut Vec<Tick>) {
+    if rows.windows(2).all(|pair| {
+        let previous = &pair[0];
+        let current = &pair[1];
+        previous.id < current.id
+            || (previous.id == current.id && previous.datetime < current.datetime)
+    }) {
+        return;
+    }
+    rows.sort_by_key(|row| (row.id, row.datetime, row.epoch));
+    rows.dedup_by(|left, right| left.id == right.id && left.datetime == right.datetime);
+}
+
+#[cfg(test)]
+mod tests {
+    use tqsdk_core::Tick;
+
+    use super::normalize_tick_rows;
+
+    #[test]
+    fn tick_normalization_keeps_monotonic_unique_rows_in_place() {
+        let mut rows = vec![
+            Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            },
+            Tick {
+                id: 2,
+                datetime: 2_000,
+                ..Tick::default()
+            },
+        ];
+
+        normalize_tick_rows(&mut rows);
+
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn tick_normalization_restores_legacy_sort_and_dedup_behavior() {
+        let mut rows = vec![
+            Tick {
+                id: 2,
+                datetime: 2_000,
+                epoch: Some(2),
+                ..Tick::default()
+            },
+            Tick {
+                id: 1,
+                datetime: 1_000,
+                epoch: Some(1),
+                ..Tick::default()
+            },
+            Tick {
+                id: 2,
+                datetime: 2_000,
+                epoch: Some(3),
+                ..Tick::default()
+            },
+        ];
+
+        normalize_tick_rows(&mut rows);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
+    }
 }

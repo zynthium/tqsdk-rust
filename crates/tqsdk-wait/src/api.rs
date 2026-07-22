@@ -271,6 +271,19 @@ impl TqApi {
         self.driver.last_commit.as_deref()
     }
 
+    /// Return the latest committed update as a [`WaitStep`].
+    ///
+    /// This is primarily an internal facade bridge for consumers that need the
+    /// authoritative change set without advancing the session a second time.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_step(&self) -> Option<WaitStep> {
+        self.driver
+            .last_commit
+            .clone()
+            .map(|commit| WaitStep::new(commit, current_dt_from_reader(&self.driver.reader)))
+    }
+
     #[must_use]
     pub fn session(&self) -> &SessionClient {
         &self.driver.session

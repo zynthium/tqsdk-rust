@@ -142,10 +142,18 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         &self,
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport>;
-    fn commit_coverage(
+    fn write_segment_with_coverage(
         &self,
-        commit: HistorySeriesCoverageCommit,
-    ) -> Result<HistorySeriesCoverageReport>;
+        segment: HistorySeriesWriteSegment<'_>,
+        coverage: &[HistorySeriesCoverageCommit],
+    ) -> Result<HistorySeriesSegmentReport> {
+        let report = self.write_segment(segment)?;
+        for commit in coverage {
+            self.append_coverage(commit.clone())?;
+        }
+        Ok(report)
+    }
+    fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()>;
     fn purge_series(
         &self,
         symbol: &str,

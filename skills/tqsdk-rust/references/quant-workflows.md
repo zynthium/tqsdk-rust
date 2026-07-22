@@ -4,7 +4,7 @@
 
 ## Live Monitoring
 
-普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote` / `quotes_universe`、`target_pos_tqkq` 和 `next()` 写策略主体。需要维护指定合约或 selector 集合的回测共享 tick cache 时，优先用 `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `.market_cache(policy)`，让 live recording 和 cache-backed backtest 复用同一份配置；运行中临时开启可显式调用 `record_ticks(cache_dir, symbols)`。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
+普通单策略循环优先使用 `tqsdk`：通过 `Tq::futures()` 构造默认 facade，用 `quote` / `quotes_universe`、`target_pos_tqkq` 和 `next()` 写策略主体。需要维护指定合约或 selector 集合的回测共享 tick cache 时，优先用 `MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `.market_cache(policy)`，让 live recording 和 cache-backed backtest 复用同一份配置；运行中临时开启可显式调用 `record_ticks(cache_dir, symbols)`。首次初始化或失败重扫之外，recording 在每个更新只收集变更集命中的 rows；连续 rows 每 symbol 按 `128` 行或约 `250 ms` 批量落盘，首批、跳号和正常 `Tq` 销毁会 flush；异常退出的未提交尾部会保持 coverage 缺口。明确需要 Python-style `WaitStep::is_changing()`、serial/status wait handles 或 notebook-like wait facade 时使用 `tqsdk-wait`。Ref 是 live handle；snapshot 要在 commit 后加载。
 
 契约锚点：S33、S46-S47、S1、S3、S8-S10、S25-S26。
 

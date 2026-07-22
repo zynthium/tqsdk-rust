@@ -29,7 +29,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - `DataClient` 的 history-series cache 默认 opt-in；这不改变 facade `.backtest(...)` 默认共享 tick cache 的语义。持久化 live tick 必须显式使用 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)`；`HistorySeriesCache` 仍只服务 offline data-series。
 - `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
 - 共享期货 universe selector 在默认 facade 的 `.backtest(...).universe(...)`、实时 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 上复用同一套解析语义；动态 selector 需要 live/session 或显式 auth，静态 `symbol:...` selector 可本地解析。
-- `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；跳号/断线保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
+- `Tq::record_ticks(...)` 仍是默认 facade 的显式运行时 tick-only live cache recorder：只记录声明的 symbol，复用 `BacktestTickCache`，由 `next()` / `wait_update()` 驱动；连续 rows 每 symbol 最多 `128` 行或约 `250 ms` 批量提交，首批、跳号和正常 `Tq` 销毁时强制 flush。coverage 只在 rows 已提交且 tick id 连续时推进；跳号、断线或异常退出前未提交的尾部保留 coverage 缺口，后续用 `.warmup()` / `.remote_on_miss()` 补齐。
 - `record_ticks_health()` 暴露累计写入、最近 flush、per-symbol last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording health 派生补洞用 policy，但补洞仍要用户显式重新提供 auth，不隐式复用 live session 明文凭证。
 - `tqsdk-data` 的 `LiveTickCacheWriter` 是纯数据层 writer，接收已解码 tick rows 并写共享回测缓存；它不拥有 session、订阅、后台线程或跨进程协调。
 - `HistorySeriesCache` 只服务 offline `get_*_data_series` / cache-only `read_*_data_series` / scan / maintenance；不要使用它作为 live serial 缓存或外部最新行情 API。
@@ -62,9 +62,10 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
   physical symbol、batch、cursor、retry/split 状态。该 callback 位于 cache inspection 和远端填充路径，
   只能做快速内存 reducer，不得同步打印、阻塞或做网络 I/O。
 - 开始远端预热前先检查目标 root 的已有 coverage，并只运行一个远端 writer。`RemoteOnMiss` 会跳过完整覆盖并只写缺口；除非用户明确要求刷新或清理，否则不要删除 `.tqbn`、使用 `RefreshAll`，或把 benchmark 的临时 cache 当成共享 cache。
+- 新建或 compact 后的日分区会有内部 coverage index chain，加速 `inspect_cache()` / `CacheOnly` 的完整性检查；旧文件、盘中尾部追加或任一 index/coverage 校验异常会保守回退完整扫描。调用方不需要也不得手工创建、修改 index。
 - 预热后必须用同一 symbol/universe 和时间窗口运行 `CacheOnly`，再实际回放 tick 流。以 `missing = 0`、symbol coverage complete 和可读取的 replay tick 为成功标准；日文件数量和远端写入行数只用于辅助诊断。
 - 多策略/生产：每个 cache root 只安排一个定时远端 warmup owner；策略实例复用同一 root 并用 `.cache_only()`。文件锁可串行化 TQBN 写入，但不是跨进程远端补数调度器，多个 `RemoteOnMiss` 实例仍可能重复下载。
-- 实时增量：用 `MarketCachePolicy::record_ticks(...)` / `.record_universe(...)` 加 `.market_cache(...)`。只记录 policy 声明的 symbol，且必须持续 `next()` / `wait_update()`；断线和跳号留下的 coverage gap 交给后续 warmup 补齐。
+- 实时增量：用 `MarketCachePolicy::record_ticks(...)` / `.record_universe(...)` 加 `.market_cache(...)`。只记录 policy 声明的 symbol，且必须持续 `next()` / `wait_update()`；首次初始化或失败重扫之外，每个 update 只解码变更集命中的 tick serial，连续 rows 每 symbol 按 `128` 行或约 `250 ms` 批量写入，首批、跳号和正常对象销毁会 flush。断线、跳号和异常退出前未提交尾部留下的 coverage gap 交给后续 warmup 补齐。
 - 不要手工改写 `.tqbn`，也不要把 relay 当作 canonical historical-cache owner。缓存检查、清理和补齐走 `.inspect_cache()`、`.purge_cache_symbols()`、`.warmup()` 或 `.remote_on_miss()`。
 - tick cache 与 native K 线 cache 分开：`duration <= 60s` K 线从 tick 合成；`duration > 60s` 使用 `HistorySeriesCache` 的另一条补齐路径。
 

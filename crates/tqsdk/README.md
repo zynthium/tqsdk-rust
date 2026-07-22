@@ -86,11 +86,13 @@ symbols，然后通过 `.market_cache(policy)` 挂到 live builder。symbol 集�
 复用共享期货 selector。facade 会在 `connect()` 后启动 tick recording；回测 builder 也能
 复用同一个 policy 作为默认 cache 目录和 symbol 集合。
 仍可显式调用 `.record_ticks(cache_dir, symbols).await?` 作为运行时入口。两种方式都只记录
-policy 解析出的 symbol，不会自动记录所有订阅，也不会后台运行；正常策略继续调用 `next()` / `wait_update()`，
-facade 在每次更新后把新 tick 行追加到缓存。`record_ticks_health()` 返回累计写入行数、最近
-flush、每个 symbol 的 last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording
-health 派生补洞用 policy。coverage 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的
-尾部会留下缺口，后续仍可显式配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 补齐。
+policy 解析出的 symbol，不会自动记录所有订阅，也不会后台运行；正常策略继续调用 `next()` / `wait_update()`。
+facade 在每次更新收集 rows，并按每 symbol 最多 `128` 行或约 `250 ms` 批量持久化，避免 fsync
+阻塞策略热路径；首次初始化或失败重扫之外，每次 update 只解码变更集命中的 tick serial，首批、跳号和
+正常 `Tq` 销毁时会立即 flush。`record_ticks_health()` 返回累计写入行数、
+最近 flush、每个 symbol 的 last id 和 gap 状态；`recorded_market_cache_policy()` 可从当前 recording
+health 派生补洞用 policy。coverage 只在 tick id 连续且 rows 已提交后推进；断线、跳号或异常退出前
+未确认的尾部会留下缺口，后续仍可显式配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 补齐。
 
 ```rust
 use tqsdk::prelude::*;

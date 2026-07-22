@@ -68,10 +68,9 @@ impl LiveTickCacheWriter {
         }
 
         let mut rows = rows.into_iter().collect::<Vec<_>>();
-        rows.sort_by_key(|row| (row.id, row.datetime, row.epoch));
-        rows.dedup_by(|left, right| left.id == right.id);
+        normalize_live_tick_rows(&mut rows);
 
-        let state = self.states.entry(symbol.to_string()).or_default();
+        let mut state = self.states.get(symbol).cloned().unwrap_or_default();
         let mut accepted_rows = Vec::new();
         let mut pending_commit = None;
         let mut commits = Vec::new();
@@ -133,19 +132,21 @@ impl LiveTickCacheWriter {
 
         let appended_rows = accepted_rows.len();
         if !accepted_rows.is_empty() {
-            self.cache.append_partial_ticks(symbol, accepted_rows)?;
-            for commit in &commits {
-                self.cache.mark_complete(
-                    symbol,
-                    commit.range_start_ns,
-                    commit.range_end_ns,
-                    commit.rows,
-                    Some(commit.id_range),
-                )?;
-            }
+            self.cache.append_partial_ticks_with_coverage(
+                symbol,
+                accepted_rows,
+                commits.iter().map(|commit| {
+                    (
+                        commit.range_start_ns,
+                        commit.range_end_ns,
+                        commit.rows,
+                        Some(commit.id_range),
+                    )
+                }),
+            )?;
         }
 
-        Ok(LiveTickCacheWriteReport {
+        let report = LiveTickCacheWriteReport {
             cache_dir: self.cache.cache_dir().to_path_buf(),
             symbol: symbol.to_string(),
             appended_rows,
@@ -155,8 +156,18 @@ impl LiveTickCacheWriter {
                 .collect(),
             last_seen_id: state.last_seen_id,
             gap_detected,
-        })
+        };
+        self.states.insert(symbol.to_string(), state);
+        Ok(report)
     }
+}
+
+fn normalize_live_tick_rows(rows: &mut Vec<Tick>) {
+    if rows.windows(2).all(|pair| pair[0].id < pair[1].id) {
+        return;
+    }
+    rows.sort_by_key(|row| (row.id, row.datetime, row.epoch));
+    rows.dedup_by(|left, right| left.id == right.id);
 }
 
 impl LiveTickSymbolState {
@@ -164,5 +175,63 @@ impl LiveTickSymbolState {
         self.segment_start_id = Some(id);
         self.segment_start_ns = Some(datetime_ns);
         self.segment_rows = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tqsdk_core::Tick;
+
+    use super::normalize_live_tick_rows;
+
+    #[test]
+    fn live_tick_normalization_keeps_strictly_ordered_rows_in_place() {
+        let mut rows = vec![
+            Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            },
+            Tick {
+                id: 2,
+                datetime: 2_000,
+                ..Tick::default()
+            },
+        ];
+
+        normalize_live_tick_rows(&mut rows);
+
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn live_tick_normalization_restores_legacy_id_dedup_behavior() {
+        let mut rows = vec![
+            Tick {
+                id: 2,
+                datetime: 2_000,
+                epoch: Some(2),
+                ..Tick::default()
+            },
+            Tick {
+                id: 1,
+                datetime: 1_000,
+                epoch: Some(1),
+                ..Tick::default()
+            },
+            Tick {
+                id: 2,
+                datetime: 3_000,
+                epoch: Some(3),
+                ..Tick::default()
+            },
+        ];
+
+        normalize_live_tick_rows(&mut rows);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
+        assert_eq!(rows[1].datetime, 2_000);
     }
 }

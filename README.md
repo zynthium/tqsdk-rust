@@ -212,7 +212,11 @@ let backtest = Tq::futures()
 
 底层 `record_ticks(cache_dir, symbols)` 仍可作为显式运行时入口。当前 policy/recording
 只记录 policy 解析出的 symbol；它不自动记录所有行情订阅，也不启动守护进程。
-写入端只在 tick id 连续时推进 coverage，断线或跳号会保留缺口；
+facade 会在每次 `next()` / `wait_update()` 收集新 tick，但为避免同步 fsync 阻塞策略循环，
+连续 rows 按每 symbol 最多 `128` 行或约 `250 ms` 批量落盘；首批和检测到跳号时立即提交，
+正常销毁 `Tq` 时也会强制 flush。首次初始化或失败重扫之外，每个 update 只解码变更集命中的 tick
+serial；写入端只在 tick id 连续时推进 coverage，断线、跳号或异常
+退出前尚未提交的尾部会保留缺口；
 `record_ticks_health()` 可查看累计写入行数、最近 flush、每个 symbol 的 last id 和 gap 状态。
 `recorded_market_cache_policy()` 可以从当前 recording health 派生出同一份 cache policy，后续显式
 配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 使用官方 server-side backtest 流补齐；

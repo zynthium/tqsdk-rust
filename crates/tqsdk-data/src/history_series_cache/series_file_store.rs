@@ -178,24 +178,14 @@ impl HistorySeriesStore for SeriesFileHistoryStore {
         with_exclusive_series_lock(&path, || append_segment_to_file(&path, &segment))
     }
 
-    fn commit_coverage(
-        &self,
-        commit: HistorySeriesCoverageCommit,
-    ) -> Result<HistorySeriesCoverageReport> {
+    fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()> {
         validate_coverage_range(commit.range_start_ns, commit.range_end_ns)?;
-        let symbol = commit.symbol.clone();
-        let kind = commit.kind;
-        let path = self.series_path(symbol.as_str(), kind.duration_ns());
+        let path = self.series_path(commit.symbol.as_str(), commit.kind.duration_ns());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         with_exclusive_series_lock(&path, || append_coverage_to_file(&path, &commit))?;
-        self.coverage(HistorySeriesCoverageRequest {
-            symbol,
-            kind,
-            range_start_ns: commit.range_start_ns,
-            range_end_ns: commit.range_end_ns,
-        })
+        Ok(())
     }
 
     fn purge_series(

@@ -9,16 +9,28 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::Tick;
-use tqsdk_data::{HistorySeriesCache, TickDataSeriesRequest};
+use tqsdk_data::{
+    BacktestTickCache, HistorySeriesCache, LiveTickCacheWriter, TickDataSeriesRequest,
+};
 
 const SYMBOL: &str = "SHFE.rb2601";
 const DEFAULT_ROWS: usize = 100_000;
+const DEFAULT_LIVE_WRITER_ROWS: usize = 1_000;
+const DEFAULT_LIVE_WRITER_BATCH_ROWS: usize = 128;
 const DEFAULT_SCAN_SYMBOLS: usize = 100;
 const DEFAULT_SCAN_ROWS_PER_SYMBOL: usize = 10;
 const DEFAULT_COMPACT_ROWS: usize = 50_000;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let rows = env_usize("TQSDK_HISTORY_CACHE_BENCH_ROWS", DEFAULT_ROWS);
+    let live_writer_rows = env_usize(
+        "TQSDK_HISTORY_CACHE_BENCH_LIVE_WRITER_ROWS",
+        DEFAULT_LIVE_WRITER_ROWS,
+    );
+    let live_writer_batch_rows = env_usize(
+        "TQSDK_HISTORY_CACHE_BENCH_LIVE_WRITER_BATCH_ROWS",
+        DEFAULT_LIVE_WRITER_BATCH_ROWS,
+    );
     let scan_symbols = env_usize(
         "TQSDK_HISTORY_CACHE_BENCH_SCAN_SYMBOLS",
         DEFAULT_SCAN_SYMBOLS,
@@ -49,10 +61,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let write_read = run_write_read_zstd(root.join("write-read"), rows)?;
     print_result(&write_read.write);
+    print_result(&write_read.coverage);
     print_result(&write_read.read);
     for result in &write_read.compression {
         print_compression(result);
     }
+
+    let live_writer = run_live_tick_writer(
+        root.join("live-writer-single"),
+        live_writer_rows,
+        1,
+        "live_record_ticks",
+    )?;
+    print_result(&live_writer);
+    let live_writer_buffered = run_live_tick_writer(
+        root.join("live-writer-buffered"),
+        live_writer_rows,
+        live_writer_batch_rows,
+        "live_record_ticks_buffered",
+    )?;
+    print_result(&live_writer_buffered);
 
     let scan = run_scan(root.join("scan"), scan_symbols, scan_rows_per_symbol)?;
     print_result(&scan);
@@ -89,9 +117,15 @@ fn run_write_read_zstd(root: PathBuf, rows: usize) -> Result<WriteReadReport, Bo
     let start = Instant::now();
     cache.write_tick_range(SYMBOL, start_ns, end_ns, &ticks)?;
     let write_elapsed = start.elapsed();
-    let series_path = cache.tick_series_path(SYMBOL);
-    let bytes = fs::metadata(&series_path)?.len();
+    let series_path = single_tqbn_file(&root)?;
+    let bytes = tqbn_size_bytes(&root)?;
     let write = BenchResult::new("write_ticks", rows, write_elapsed, bytes);
+
+    let start = Instant::now();
+    let coverage = cache.tick_coverage(SYMBOL, start_ns, end_ns)?;
+    let coverage_elapsed = start.elapsed();
+    black_box(&coverage);
+    let coverage = BenchResult::new("inspect_tick_coverage", 1, coverage_elapsed, bytes);
 
     let start = Instant::now();
     let series =
@@ -109,9 +143,39 @@ fn run_write_read_zstd(root: PathBuf, rows: usize) -> Result<WriteReadReport, Bo
 
     Ok(WriteReadReport {
         write,
+        coverage,
         read,
         compression,
     })
+}
+
+fn run_live_tick_writer(
+    root: PathBuf,
+    rows: usize,
+    batch_rows: usize,
+    name: &'static str,
+) -> Result<BenchResult, Box<dyn Error>> {
+    let cache = BacktestTickCache::open(&root)?;
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+    let ticks = ticks(rows, 1_713_660_000_000_000_000);
+    let start_ns = ticks.first().map_or(0, |row| row.datetime);
+    let end_ns = ticks.last().map_or(start_ns.saturating_add(1), |row| {
+        row.datetime.saturating_add(1)
+    });
+
+    let start = Instant::now();
+    for batch in ticks.chunks(batch_rows.max(1)) {
+        writer.push_ticks(SYMBOL, batch.iter().cloned())?;
+    }
+    let elapsed = start.elapsed();
+    black_box(cache.coverage(SYMBOL, start_ns, end_ns)?);
+
+    Ok(BenchResult::new(
+        name,
+        rows,
+        elapsed,
+        tqbn_size_bytes(&root)?,
+    ))
 }
 
 fn run_scan(
@@ -155,15 +219,14 @@ fn run_compaction(root: PathBuf, rows: usize) -> Result<CompactionReport, Box<dy
 
     cache.write_tick_range(SYMBOL, start_ns, end_ns, &first)?;
     cache.write_tick_range(SYMBOL, start_ns, end_ns, &second)?;
-    let series_path = cache.tick_series_path(SYMBOL);
-    let bytes_before = fs::metadata(&series_path)?.len();
+    let bytes_before = tqbn_size_bytes(&root)?;
 
     let start = Instant::now();
     let maintenance = cache.enforce_limits(None, None)?;
     let elapsed = start.elapsed();
     black_box(maintenance);
 
-    let bytes_after = fs::metadata(&series_path)?.len();
+    let bytes_after = tqbn_size_bytes(&root)?;
     Ok(CompactionReport {
         compact: BenchResult::new("compact_duplicate_ticks", rows, elapsed, bytes_after),
         rows,
@@ -272,6 +335,47 @@ fn dir_size_bytes(path: &Path) -> Result<u64, Box<dyn Error>> {
     Ok(total)
 }
 
+fn single_tqbn_file(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let mut files = tqbn_files(root)?;
+    files.sort();
+    files
+        .into_iter()
+        .next()
+        .ok_or_else(|| "benchmark cache contains no TQBN file".into())
+}
+
+fn tqbn_size_bytes(root: &Path) -> Result<u64, Box<dyn Error>> {
+    tqbn_files(root)?
+        .into_iter()
+        .try_fold(0_u64, |total, path| {
+            Ok(total.saturating_add(fs::metadata(path)?.len()))
+        })
+}
+
+fn tqbn_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let mut files = Vec::new();
+    collect_tqbn_files(root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_tqbn_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            collect_tqbn_files(&entry_path, files)?;
+        } else if metadata.is_file()
+            && entry_path
+                .extension()
+                .is_some_and(|extension| extension == "tqbn")
+        {
+            files.push(entry_path);
+        }
+    }
+    Ok(())
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)
         .ok()
@@ -288,6 +392,7 @@ fn env_bool(name: &str) -> bool {
 
 struct WriteReadReport {
     write: BenchResult,
+    coverage: BenchResult,
     read: BenchResult,
     compression: Vec<CompressionResult>,
 }

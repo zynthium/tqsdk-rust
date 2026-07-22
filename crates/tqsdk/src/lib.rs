@@ -125,6 +125,7 @@ const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(all(feature = "services", feature = "live"))]
 const SERVER_REPLAY_TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_BACKTEST_WARMUP_BATCH_SIZE: usize = 20;
+const MAX_BACKTEST_CACHE_INSPECTION_CONCURRENCY: usize = 4;
 const BACKTEST_SYNTH_KLINE_MAX_NS: i64 = 60_000_000_000;
 
 /// Error type for the user-facing facade.
@@ -337,8 +338,9 @@ impl Tq {
     }
 
     fn flush_tick_recorder(&mut self) -> Result<()> {
+        let step = self.api_any().last_step();
         if let Some(recorder) = self.tick_recorder.as_mut() {
-            recorder.flush()?;
+            recorder.flush(step.as_ref())?;
         }
         Ok(())
     }
@@ -1423,6 +1425,48 @@ fn physical_tick_ranges(
     merged
 }
 
+async fn inspect_backtest_tick_cache_ranges(
+    cache: tqsdk_data::BacktestTickCache,
+    physical_ranges: &[(String, i64, i64)],
+) -> Result<Vec<(String, i64, i64, tqsdk_data::BacktestTickCacheStatus)>> {
+    let max_concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(MAX_BACKTEST_CACHE_INSPECTION_CONCURRENCY)
+        .min(physical_ranges.len());
+    if max_concurrency == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut pending = physical_ranges.iter().cloned();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut inspected = Vec::with_capacity(physical_ranges.len());
+    loop {
+        while tasks.len() < max_concurrency {
+            let Some((symbol, start_ns, end_ns)) = pending.next() else {
+                break;
+            };
+            let cache = cache.clone();
+            tasks.spawn_blocking(move || {
+                let status = cache.inspect(symbol.as_str(), start_ns, end_ns)?;
+                Ok::<_, tqsdk_data::DataError>((symbol, start_ns, end_ns, status))
+            });
+        }
+
+        let Some(result) = tasks.join_next().await else {
+            break;
+        };
+        let result = result.map_err(|error| {
+            data_validation(format!(
+                "backtest cache coverage inspection task failed: {error}"
+            ))
+        })?;
+        let (symbol, start_ns, end_ns, status) = result.map_err(Error::from)?;
+        inspected.push((symbol, start_ns, end_ns, status));
+    }
+    Ok(inspected)
+}
+
 impl BacktestBuilder {
     fn validate_range(&self) -> Result<()> {
         if self.end_ns <= self.start_ns {
@@ -1733,8 +1777,9 @@ impl BacktestBuilder {
         let mut incomplete_ranges = 0usize;
         let mut before_by_range = BTreeMap::new();
         let mut fill_requests = Vec::new();
-        for (symbol, start_ns, end_ns) in &physical_ranges {
-            let before = cache.inspect(symbol, *start_ns, *end_ns)?;
+        for (symbol, start_ns, end_ns, before) in
+            inspect_backtest_tick_cache_ranges(cache.clone(), &physical_ranges).await?
+        {
             let is_complete = before.is_complete();
             checked_ranges = checked_ranges.saturating_add(1);
             if is_complete {
@@ -1743,8 +1788,8 @@ impl BacktestBuilder {
                 incomplete_ranges = incomplete_ranges.saturating_add(1);
             }
             remote_fill_runtime.emit_inspection(
-                symbol,
-                (*start_ns, *end_ns),
+                symbol.as_str(),
+                (start_ns, end_ns),
                 backtest_remote::BacktestRemoteFillInspectionProgress::new(
                     total_ranges,
                     checked_ranges,
@@ -1755,7 +1800,7 @@ impl BacktestBuilder {
             if refresh || !is_complete {
                 fill_requests.extend(fill_requests_from_status(&before));
             }
-            before_by_range.insert((symbol.clone(), *start_ns, *end_ns), before);
+            before_by_range.insert((symbol, start_ns, end_ns), before);
         }
 
         remote_fill_runtime.emit_plan(build_remote_fill_plan(

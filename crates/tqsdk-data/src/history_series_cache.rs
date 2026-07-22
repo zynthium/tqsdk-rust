@@ -348,11 +348,16 @@ impl HistorySeriesCache {
         self.store.write_segment(segment)
     }
 
-    pub(crate) fn commit_coverage(
+    pub(crate) fn write_segment_with_coverage(
         &self,
-        commit: HistorySeriesCoverageCommit,
-    ) -> Result<HistorySeriesCoverageReport> {
-        self.store.commit_coverage(commit)
+        segment: HistorySeriesWriteSegment<'_>,
+        coverage: &[HistorySeriesCoverageCommit],
+    ) -> Result<HistorySeriesSegmentReport> {
+        self.store.write_segment_with_coverage(segment, coverage)
+    }
+
+    pub(crate) fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()> {
+        self.store.append_coverage(commit)
     }
 
     pub fn purge_kline_series(

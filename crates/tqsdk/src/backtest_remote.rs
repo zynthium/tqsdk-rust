@@ -775,6 +775,10 @@ struct RemoteTickFillState {
     range_end_ns: i64,
     // Inclusive id intervals. A normal ordered stream retains one entry.
     id_intervals: BTreeMap<i64, i64>,
+    // Avoid materializing an interval map for the normal monotonic stream.
+    // If a gap, duplicate, or out-of-order id arrives, prior rows are promoted
+    // into `id_intervals` and the existing general-purpose logic takes over.
+    ordered_last_id: Option<i64>,
     unique_rows: usize,
     first_id: Option<(i64, i64)>,
     last_id: Option<(i64, i64)>,
@@ -787,6 +791,7 @@ impl RemoteTickFillState {
             range_start_ns,
             range_end_ns,
             id_intervals: BTreeMap::new(),
+            ordered_last_id: None,
             unique_rows: 0,
             first_id: None,
             last_id: None,
@@ -796,6 +801,23 @@ impl RemoteTickFillState {
     fn push(&mut self, row: &Tick) -> bool {
         if row.datetime < self.range_start_ns || row.datetime >= self.range_end_ns {
             return false;
+        }
+        if self.id_intervals.is_empty() {
+            match self.ordered_last_id {
+                None => {
+                    self.ordered_last_id = Some(row.id);
+                    self.unique_rows = self.unique_rows.saturating_add(1);
+                    self.update_boundary_datetime(row);
+                    return true;
+                }
+                Some(last_id) if last_id.checked_add(1) == Some(row.id) => {
+                    self.ordered_last_id = Some(row.id);
+                    self.unique_rows = self.unique_rows.saturating_add(1);
+                    self.update_boundary_datetime(row);
+                    return true;
+                }
+                Some(_) => self.materialize_ordered_interval(),
+            }
         }
         if self.contains_id(row.id) {
             self.update_boundary_datetime(row);
@@ -827,7 +849,9 @@ impl RemoteTickFillState {
         let mut gap_summary = None;
         if let Some((first_id, last_id)) = id_range {
             let expected = last_id.saturating_sub(first_id).saturating_add(1);
-            if expected != self.unique_rows as i64 || self.id_intervals.len() != 1 {
+            if expected != self.unique_rows as i64
+                || (!self.id_intervals.is_empty() && self.id_intervals.len() != 1)
+            {
                 complete = false;
                 gap_summary = Some(format!(
                     "tick id range {first_id}..={last_id} contains {} unique rows",
@@ -853,6 +877,16 @@ impl RemoteTickFillState {
             complete,
             gap_summary,
         }
+    }
+
+    fn materialize_ordered_interval(&mut self) {
+        let Some((first_id, _)) = self.first_id else {
+            return;
+        };
+        let Some(last_id) = self.ordered_last_id else {
+            return;
+        };
+        self.id_intervals.insert(first_id, last_id);
     }
 
     fn contains_id(&self, id: i64) -> bool {
@@ -2250,6 +2284,21 @@ mod tests {
         assert_eq!(report.unique_rows, 3);
         assert_eq!(report.id_range, Some((1, 3)));
         assert_eq!(fill.id_intervals.len(), 1);
+    }
+
+    #[test]
+    fn remote_tick_fill_state_keeps_ordered_stream_on_fast_path() {
+        let mut fill = RemoteTickFillState::new("SHFE.rb2601", 0, 4_097_000);
+
+        for id in 1..=4_096 {
+            assert!(fill.push(&tick(id, id * 1_000, 100.0)));
+        }
+
+        let report = fill.finish(1_000);
+        assert!(report.complete);
+        assert_eq!(report.unique_rows, 4_096);
+        assert_eq!(report.id_range, Some((1, 4_096)));
+        assert!(fill.id_intervals.is_empty());
     }
 
     #[test]

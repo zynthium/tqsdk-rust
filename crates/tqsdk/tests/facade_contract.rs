@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde_json::{Map, Value, json};
 use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
@@ -9,6 +12,8 @@ use tqsdk_core::{
 };
 use tqsdk_data::TickDataSeriesRequest;
 use tqsdk_session::testing::ManualSession;
+
+static NEXT_TEMP_CACHE_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn prelude_exposes_default_strategy_surface() {
@@ -249,6 +254,153 @@ async fn facade_record_ticks_writes_live_ticks_to_backtest_cache() {
             1_713_660_000_000_000_000,
             1_713_660_000_500_000_001,
         ))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+}
+
+#[tokio::test]
+async fn facade_record_ticks_only_processes_changed_tick_subscription() {
+    let first_symbol = "SHFE.rb2601";
+    let second_symbol = "DCE.m2601";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_713_660_000_000_000_000_i64;
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    tq.record_ticks(&cache_dir, [first_symbol, second_symbol])
+        .await
+        .unwrap();
+    seed_record_tick_chart_rows(&tq, first_symbol, [tick(200, start_ns, 618.0)]);
+    assert!(tq.next().await.unwrap());
+    seed_record_tick_chart_rows(&tq, second_symbol, [tick(300, start_ns, 2698.0)]);
+    assert!(tq.next().await.unwrap());
+
+    seed_record_tick_chart_rows(
+        &tq,
+        first_symbol,
+        [tick(202, start_ns + 500_000_000, 619.0)],
+    );
+    assert!(tq.next().await.unwrap());
+
+    let health = tq
+        .record_ticks_health()
+        .expect("record ticks health should be available");
+    assert_eq!(health.total_appended_rows, 3);
+    assert_eq!(health.symbols[0].total_appended_rows, 2);
+    assert_eq!(health.symbols[1].total_appended_rows, 1);
+    assert!(health.symbols[0].gap_detected);
+    assert!(!health.symbols[1].gap_detected);
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let first_initial = cache
+        .load_series(TickDataSeriesRequest::new(
+            first_symbol,
+            start_ns,
+            start_ns + 1,
+        ))
+        .unwrap();
+    let first_gap_tail = cache
+        .load_series(TickDataSeriesRequest::new(
+            first_symbol,
+            start_ns + 500_000_000,
+            start_ns + 500_000_001,
+        ))
+        .unwrap();
+    let second = cache
+        .load_series(TickDataSeriesRequest::new(
+            second_symbol,
+            start_ns,
+            start_ns + 1,
+        ))
+        .unwrap();
+    assert_eq!(
+        first_initial.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200]
+    );
+    assert_eq!(
+        first_gap_tail.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![202]
+    );
+    assert_eq!(
+        second.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![300]
+    );
+}
+
+#[tokio::test]
+async fn facade_record_ticks_rescans_after_a_write_failure() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_713_660_000_000_000_000_i64;
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    tq.record_ticks(&cache_dir, [symbol]).await.unwrap();
+    seed_record_tick_chart_rows(&tq, symbol, [tick(200, start_ns, 618.0)]);
+    assert!(tq.next().await.unwrap());
+
+    let invalid_rows = (201_i64..329)
+        .map(|id| {
+            let datetime = if id == 201 {
+                start_ns - 1
+            } else {
+                start_ns + id
+            };
+            tick(id, datetime, 619.0)
+        })
+        .collect::<Vec<_>>();
+    seed_record_tick_chart_rows(&tq, symbol, invalid_rows);
+    let error = tq.next().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("live tick cache writer tick datetime moved backwards")
+    );
+
+    seed_record_tick_chart_rows(&tq, symbol, [tick(201, start_ns + 1, 619.0)]);
+    assert!(tq.next().await.unwrap());
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let series = cache
+        .load_series(TickDataSeriesRequest::new(symbol, start_ns, start_ns + 2))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+}
+
+#[tokio::test]
+async fn facade_record_ticks_buffers_a_contiguous_tail_until_drop() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_713_660_000_000_000_000_i64;
+    let end_ns = start_ns + 500_000_001;
+
+    {
+        let mut tq = Tq::from_api(manual_tq_api());
+        tq.record_ticks(&cache_dir, [symbol]).await.unwrap();
+
+        seed_record_tick_chart_rows(&tq, symbol, [tick(200, start_ns, 618.0)]);
+        assert!(tq.next().await.unwrap());
+        seed_record_tick_chart_rows(&tq, symbol, [tick(201, end_ns - 1, 619.0)]);
+        assert!(tq.next().await.unwrap());
+
+        let health = tq
+            .record_ticks_health()
+            .expect("record ticks health should be available");
+        assert_eq!(health.total_appended_rows, 1);
+
+        let cache = BacktestTickCache::open(&cache_dir).unwrap();
+        let coverage = cache.coverage(symbol, start_ns, end_ns).unwrap();
+        assert_eq!(coverage.cached_ranges, vec![(start_ns, start_ns + 1)]);
+        assert_eq!(coverage.missing_ranges, vec![(start_ns + 1, end_ns)]);
+    }
+
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let series = cache
+        .load_series(TickDataSeriesRequest::new(symbol, start_ns, end_ns))
         .unwrap();
     assert_eq!(
         series.iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -600,6 +752,58 @@ async fn facade_backtest_warmup_emits_a_cache_inspected_remote_fill_plan() {
     assert_eq!(plan.physical_symbols().len(), 1);
     assert_eq!(plan.physical_symbols()[0].physical_symbol(), symbol);
     assert!(plan.physical_symbols()[0].missing_ranges().is_empty());
+}
+
+#[tokio::test]
+async fn facade_backtest_warmup_reports_every_parallel_cache_inspection() {
+    let symbols = ["DCE.m2601", "SHFE.rb2601"];
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    for symbol in symbols {
+        cache
+            .store_ticks(
+                symbol,
+                1_000,
+                3_000,
+                [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+            )
+            .unwrap();
+    }
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let callback_events = Arc::clone(&observed_events);
+
+    let report = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbols[0])
+        .symbol(symbols[1])
+        .remote_on_miss()
+        .on_remote_fill_telemetry(move |event| {
+            callback_events.lock().unwrap().push(event.clone());
+        })
+        .warmup()
+        .await
+        .unwrap();
+
+    assert_eq!(report.symbols_total, symbols.len());
+    assert_eq!(report.symbols_skipped, symbols.len());
+    let events = observed_events.lock().unwrap().clone();
+    let mut inspection_counts = events
+        .iter()
+        .filter_map(|event| event.inspection_progress())
+        .map(|inspection| inspection.checked_ranges())
+        .collect::<Vec<_>>();
+    inspection_counts.sort_unstable();
+    assert_eq!(inspection_counts, vec![1, 2]);
+    assert!(events.iter().all(|event| {
+        event
+            .inspection_progress()
+            .is_none_or(|inspection| inspection.total_ranges() == symbols.len())
+    }));
+    let plan = events.last().and_then(|event| event.plan()).unwrap();
+    assert_eq!(plan.physical_symbols().len(), symbols.len());
+    assert!(!plan.requires_remote_fill());
 }
 
 #[tokio::test]
@@ -1235,9 +1439,10 @@ fn temp_cache_dir() -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let sequence = NEXT_TEMP_CACHE_DIR_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "tqsdk-facade-contract-cache-{}-{unique}",
-        std::process::id()
+        "tqsdk-facade-contract-cache-{}-{unique}-{sequence}",
+        std::process::id(),
     ))
 }
 

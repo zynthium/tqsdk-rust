@@ -54,7 +54,9 @@
   `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
+  record lengths；新建/compact 日分区还会维护 crate-internal coverage index chain，使完整且未追加尾部
+  rows 的 coverage inspection 无需解压行情 block，索引不完整、旧文件或任何校验失败都会回退完整扫描；
+  旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
   默认 Cargo features 启用 `tqbn-zstd`，会对 TQBN records block 使用 zstd level 1 做
   per-block 压缩，且只在压缩后更小时写入压缩 block；`--no-default-features` 可关闭该支持，
   `tqsdk` / `tqsdk-task` facade 提供同名 feature 转发。

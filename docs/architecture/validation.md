@@ -183,7 +183,8 @@ rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd -
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
-daily partition file identity、scan、损坏报告、size-limit maintenance，以及通过
+coverage index chain 的多段读取、旧文件/尾部 rows 回退与引用 coverage block 损坏保护、daily partition
+file identity、scan、损坏报告、size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
 `backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
@@ -198,6 +199,10 @@ explicit V3 stdout、legacy V2 output、JSONL stderr progress，以及 fill repo
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过
 `LiveTickCacheWriter` 的连续 id 语义提交回测可读 coverage；同一个 `MarketCachePolicy`
 也必须能为 cache-backed local backtest 提供默认 cache 目录和 symbol 集合。
+连续 live tail 的持久化是有界批写：首次、跳号、每 symbol `128` 行、约 `250 ms` 到期或正常
+`Tq` 销毁时提交；contract test 必须验证异常退出前未提交 rows 不会获得 coverage，正常销毁会 flush。
+首次初始化或 writer 失败后的重扫之外，recorder 必须只读取当前 commit 变更集命中的 tick serial；
+contract test 必须覆盖多 symbol 更新不会遗漏变化行，以及失败后从最后持久化 id 恢复。
 `quotes_universe(...)`、`.backtest(...).universe(...)` 和
 `MarketCachePolicy::record_universe(...)` 复用同一套 universe selector 语义。live recording health 必须暴露累计写入、最近 flush、
 per-symbol last id 和 gap 状态，且跳号 tick 应被保留为 `gap_detected`。从 active recording

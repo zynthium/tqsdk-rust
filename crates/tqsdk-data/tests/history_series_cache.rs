@@ -195,6 +195,36 @@ fn live_tick_cache_writer_leaves_coverage_gap_when_tick_id_jumps() {
 }
 
 #[test]
+fn live_tick_cache_writer_retries_rows_after_a_failed_append() {
+    let dir = temp_dir("live-tick-cache-writer-retry");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+
+    writer
+        .push_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+        .unwrap();
+    assert!(
+        writer
+            .push_ticks("SHFE.rb2601", [tick(2, 500, 102.0)])
+            .is_err()
+    );
+
+    let report = writer
+        .push_ticks("SHFE.rb2601", [tick(2, 2_000, 102.0)])
+        .unwrap();
+    assert_eq!(report.appended_rows, 1);
+    assert_eq!(report.last_seen_id, Some(2));
+
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 2_001))
+        .unwrap();
+    assert_eq!(
+        series.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[test]
 fn backtest_tick_cache_rejects_ticks_outside_declared_range() {
     let dir = temp_dir("backtest-tick-cache-out-of-range");
     let backtest_cache = BacktestTickCache::open(&dir).unwrap();

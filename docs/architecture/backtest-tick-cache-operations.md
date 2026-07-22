@@ -220,9 +220,11 @@ E2E_OK remote_rows=2691170 remote_missing=0 cache_only_missing=0 replay_ticks=39
 ## 6. 运行后维护
 
 - 用 `MarketCachePolicy::record_ticks(...)` 或 `.record_universe(...)` 接入 live 策略，持续把
-  显式声明的 tick 追加到同一 root。策略必须持续调用 `next()` / `wait_update()`。
+  显式声明的 tick 追加到同一 root。策略必须持续调用 `next()` / `wait_update()`；facade 会按
+  每 symbol 最多 `128` 行或约 `250 ms` 批量提交连续 rows；首次初始化或失败重扫之外，只解码当前
+  commit 变更集命中的 tick serial。首批、跳号和正常对象销毁时强制 flush。
 - 观察 `record_ticks_health()`；断线、跳号或未确认尾部会保留 coverage gap，后续由同一 warmup
-  owner 再次补齐。
+  owner 再次补齐。异常退出前仍在内存 batch 的 rows 不会被标为 complete。
 - 多个策略消费者使用相同 root 加 `.cache_only()`，避免重复远端下载。不要把 relay 的内存缓存当作
   canonical historical cache。
 - `duration <= 60s` 的 K 线从 tick 合成；`duration > 60s` 使用独立的 native K 线

@@ -86,6 +86,19 @@ metadata layout 和 codec helper 不进入 public API。
 zstd block 校验压缩后的 bytes；reader 校验 checksum 后再按 flags 解码 records。未启用
 `tqbn-zstd` 的 reader 遇到 zstd block 必须返回明确的格式错误，不能静默返回坏数据。
 
+### Coverage Index Chain
+
+新建日分区和 append-log compaction 会写入 crate-internal `Index` block 链：文件首个 block 是固定
+`TQCI` root，之后每个 coverage record block 后紧跟一个 index block。每个 entry 指向其紧邻的、未压缩的
+固定宽度 coverage block，并记录前一个 index offset 与同一 `[start, end)` range。它不改变 format id 或
+schema version，普通 record reader 可以忽略 `Index` block。
+
+coverage inspection 只有在文件尾是完整 `TQCI` 链、链最终回到首 block root，且每个引用 block 的
+type、offset、checksum、coverage record 和 range 都匹配时才走小型索引读取。旧日文件、覆盖写入中断、尾部
+后来追加 rows，或任一 index/coverage 校验失败时必须回退到完整 block stream 校验，绝不能把该分区判断为
+complete。coverage 永远在 rows 已 `sync_data()` 后写入；异常崩溃可以留下 coverage gap，但不能让 coverage
+比其 rows 更早持久化。
+
 ## Price Encoding
 
 价格字段使用固定小数点 `i64` 编码：
