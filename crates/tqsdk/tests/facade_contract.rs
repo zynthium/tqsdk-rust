@@ -25,6 +25,7 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<RecordTicksHealth> = None;
     let _: Option<RecordTicksFlushReport> = None;
     let _: Option<RecordTicksReport> = None;
+    let _: Option<BacktestRemoteFillInspectionProgress> = None;
     let _: Option<BacktestRemoteFillTelemetry> = None;
 }
 
@@ -561,8 +562,8 @@ async fn facade_backtest_warmup_emits_a_cache_inspected_remote_fill_plan() {
             [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
         )
         .unwrap();
-    let observed_plan = Arc::new(Mutex::new(None));
-    let callback_plan = Arc::clone(&observed_plan);
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let callback_events = Arc::clone(&observed_events);
 
     let report = Tq::futures()
         .backtest(1_000, 3_000)
@@ -571,16 +572,28 @@ async fn facade_backtest_warmup_emits_a_cache_inspected_remote_fill_plan() {
         .symbol(symbol)
         .remote_on_miss()
         .on_remote_fill_telemetry(move |event| {
-            if let Some(plan) = event.plan() {
-                *callback_plan.lock().unwrap() = Some(plan.clone());
-            }
+            callback_events.lock().unwrap().push(event.clone());
         })
         .warmup()
         .await
         .unwrap();
 
-    let plan = observed_plan.lock().unwrap().clone().unwrap();
+    let events = observed_events.lock().unwrap().clone();
     assert!(!report.remote_used);
+    assert_eq!(events.len(), 2);
+    let inspection = &events[0];
+    assert_eq!(inspection.phase(), BacktestRemoteFillPhase::Inspecting);
+    assert_eq!(inspection.physical_symbol(), Some(symbol));
+    assert_eq!(inspection.requested_range(), Some((1_000, 3_000)));
+    let inspection_progress = inspection.inspection_progress().unwrap();
+    assert_eq!(inspection_progress.total_ranges(), 1);
+    assert_eq!(inspection_progress.checked_ranges(), 1);
+    assert_eq!(inspection_progress.complete_ranges(), 1);
+    assert_eq!(inspection_progress.incomplete_ranges(), 0);
+
+    let plan = events[1].plan().unwrap();
+    assert_eq!(events[1].phase(), BacktestRemoteFillPhase::PlanReady);
+    assert!(events[1].inspection_progress().is_none());
     assert_eq!(plan.requested_range(), (1_000, 3_000));
     assert_eq!(plan.logical_symbols(), &[symbol.to_string()]);
     assert_eq!(plan.logical_batches(), 0);

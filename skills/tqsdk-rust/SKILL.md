@@ -57,9 +57,10 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
   physical symbol、trading day 和完整分区日计数。
 - “最近 N 个交易日”必须先用官方交易日历确定窗口，不要把 N 个工作日当作交易日。只填到最后一个已结束的交易日；对 SHFE 贵金属等夜盘品种，通常从首个交易日前一日 `18:00:00` CST 起，到最后交易日 `15:00:01` CST 止。其他市场以合约 `trading_time` 为准。按日分区的休市日空覆盖是正常结果，不能仅凭“某日没有 tick”判定失败。
 - 调用方要观察远端 warmup 计划时使用 `.on_remote_fill_telemetry(...)`，而不是复制 scheduler。
-  `PlanReady` 在 coverage inspection 后提供 logical/physical/missing-range 计划；后续 lifecycle
-  event 带 physical symbol、batch、cursor、retry/split 状态。该 callback 位于远端填充路径，只能做
-  快速内存 reducer，不得同步打印、阻塞或做网络 I/O。
+  每个 physical range 完成 coverage inspection 后都会给出累计 `Inspecting`（已检查/总范围、命中、
+  缺口及当前范围）；`PlanReady` 随后提供 logical/physical/missing-range 计划；后续 lifecycle event 带
+  physical symbol、batch、cursor、retry/split 状态。该 callback 位于 cache inspection 和远端填充路径，
+  只能做快速内存 reducer，不得同步打印、阻塞或做网络 I/O。
 - 开始远端预热前先检查目标 root 的已有 coverage，并只运行一个远端 writer。`RemoteOnMiss` 会跳过完整覆盖并只写缺口；除非用户明确要求刷新或清理，否则不要删除 `.tqbn`、使用 `RefreshAll`，或把 benchmark 的临时 cache 当成共享 cache。
 - 预热后必须用同一 symbol/universe 和时间窗口运行 `CacheOnly`，再实际回放 tick 流。以 `missing = 0`、symbol coverage complete 和可读取的 replay tick 为成功标准；日文件数量和远端写入行数只用于辅助诊断。
 - 多策略/生产：每个 cache root 只安排一个定时远端 warmup owner；策略实例复用同一 root 并用 `.cache_only()`。文件锁可串行化 TQBN 写入，但不是跨进程远端补数调度器，多个 `RemoteOnMiss` 实例仍可能重复下载。

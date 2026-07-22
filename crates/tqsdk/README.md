@@ -66,11 +66,12 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会继续补其缺口。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
 调用方若需要把 warmup 接入自己的轻量进度或调度器，可配置
-`.on_remote_fill_telemetry(...)`：它在 coverage inspection（远端模式已取得 root fill lock）后
-先给出 `RemoteFillPlan`，随后按 physical cache symbol 给出低频生命周期快照。流式更新每个
-symbol 至多 500ms 一次，handler 在填充路径同步调用，必须保持快速且不得做终端 I/O 或阻塞网络。
-已有 `.on_remote_fill_progress(...)` 保持兼容；telemetry 额外提供 plan、cursor、retry 和 split
-identity，适合 CLI/UI reducer，而不是策略热路径。
+`.on_remote_fill_telemetry(...)`：每检查一个 physical cache range 就先给出累计的 `Inspecting`
+快照（已检查/总范围、命中、缺口和当前 physical symbol）；coverage inspection 完成后（远端模式已
+取得 root fill lock）给出 `RemoteFillPlan`，随后按 physical cache symbol 给出低频生命周期快照。
+流式更新每个 symbol 至多 500ms 一次，handler 在检查和填充路径同步调用，必须保持快速且不得做
+终端 I/O 或阻塞网络。已有 `.on_remote_fill_progress(...)` 保持兼容；telemetry 额外提供检查、plan、
+cursor、retry 和 split identity，适合 CLI/UI reducer，而不是策略热路径。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
 `.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day `fill`、

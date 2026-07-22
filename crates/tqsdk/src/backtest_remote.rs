@@ -302,6 +302,8 @@ impl RemoteFillPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BacktestRemoteFillPhase {
+    /// Local persistent-cache coverage is being inspected.
+    Inspecting,
     PlanReady,
     Started,
     Streaming,
@@ -312,18 +314,70 @@ pub enum BacktestRemoteFillPhase {
     Cancelled,
 }
 
+/// Cumulative cache-coverage inspection progress before remote fill planning.
+///
+/// One snapshot is emitted after each physical cache range has been checked.
+/// The counts describe the cache state at inspection time, before any remote
+/// fill starts. A physical range can be one dated segment of a logical
+/// continuous-contract request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacktestRemoteFillInspectionProgress {
+    total_ranges: usize,
+    checked_ranges: usize,
+    complete_ranges: usize,
+    incomplete_ranges: usize,
+}
+
+impl BacktestRemoteFillInspectionProgress {
+    pub(crate) fn new(
+        total_ranges: usize,
+        checked_ranges: usize,
+        complete_ranges: usize,
+        incomplete_ranges: usize,
+    ) -> Self {
+        Self {
+            total_ranges,
+            checked_ranges,
+            complete_ranges,
+            incomplete_ranges,
+        }
+    }
+
+    #[must_use]
+    pub fn total_ranges(&self) -> usize {
+        self.total_ranges
+    }
+
+    #[must_use]
+    pub fn checked_ranges(&self) -> usize {
+        self.checked_ranges
+    }
+
+    #[must_use]
+    pub fn complete_ranges(&self) -> usize {
+        self.complete_ranges
+    }
+
+    #[must_use]
+    pub fn incomplete_ranges(&self) -> usize {
+        self.incomplete_ranges
+    }
+}
+
 /// Immutable, low-overhead remote cache-fill telemetry snapshot.
 ///
 /// The callback configured through
 /// [`crate::BacktestBuilder::on_remote_fill_telemetry`] runs on the remote
-/// fill path. It must not perform terminal I/O or otherwise block that path.
-/// Streaming updates are rate-limited per active physical symbol; lifecycle
-/// transitions are emitted immediately.
+/// fill and cache-inspection paths. It must not perform terminal I/O or
+/// otherwise block those paths. Streaming updates are rate-limited per active
+/// physical symbol; inspection and lifecycle transitions are emitted
+/// immediately.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BacktestRemoteFillTelemetry {
     phase: BacktestRemoteFillPhase,
     plan: Option<RemoteFillPlan>,
+    inspection: Option<BacktestRemoteFillInspectionProgress>,
     logical_batch_id: Option<usize>,
     attempt: usize,
     physical_symbol: Option<String>,
@@ -339,6 +393,7 @@ impl BacktestRemoteFillTelemetry {
         Self {
             phase: BacktestRemoteFillPhase::PlanReady,
             plan: Some(plan),
+            inspection: None,
             logical_batch_id: None,
             attempt: 0,
             physical_symbol: None,
@@ -350,10 +405,31 @@ impl BacktestRemoteFillTelemetry {
         }
     }
 
+    fn inspection(
+        physical_symbol: &str,
+        requested_range: (i64, i64),
+        inspection: BacktestRemoteFillInspectionProgress,
+    ) -> Self {
+        Self {
+            phase: BacktestRemoteFillPhase::Inspecting,
+            plan: None,
+            inspection: Some(inspection),
+            logical_batch_id: None,
+            attempt: 0,
+            physical_symbol: Some(physical_symbol.to_string()),
+            requested_range: Some(requested_range),
+            accepted_rows: 0,
+            latest_cursor_ns: None,
+            elapsed: Duration::ZERO,
+            error: None,
+        }
+    }
+
     fn lifecycle(update: RemoteFillTelemetryUpdate) -> Self {
         Self {
             phase: update.phase,
             plan: None,
+            inspection: None,
             logical_batch_id: Some(update.logical_batch_id),
             attempt: update.attempt,
             physical_symbol: Some(update.physical_symbol),
@@ -373,6 +449,13 @@ impl BacktestRemoteFillTelemetry {
     #[must_use]
     pub fn plan(&self) -> Option<&RemoteFillPlan> {
         self.plan.as_ref()
+    }
+
+    /// Cumulative local-cache inspection state for an [`BacktestRemoteFillPhase::Inspecting`]
+    /// snapshot.
+    #[must_use]
+    pub fn inspection_progress(&self) -> Option<&BacktestRemoteFillInspectionProgress> {
+        self.inspection.as_ref()
     }
 
     #[must_use]
@@ -491,6 +574,22 @@ impl RemoteBacktestFillRuntime {
 
     pub(crate) fn emit_plan(&self, plan: RemoteFillPlan) {
         self.emit_telemetry(BacktestRemoteFillTelemetry::plan_ready(plan));
+    }
+
+    pub(crate) fn emit_inspection(
+        &self,
+        physical_symbol: &str,
+        requested_range: (i64, i64),
+        inspection: BacktestRemoteFillInspectionProgress,
+    ) {
+        if !self.has_telemetry_handler() {
+            return;
+        }
+        self.emit_telemetry(BacktestRemoteFillTelemetry::inspection(
+            physical_symbol,
+            requested_range,
+            inspection,
+        ));
     }
 
     pub(crate) fn config(&self) -> BacktestRemoteFillConfig {
@@ -1894,19 +1993,19 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillPhase,
-        BacktestRemoteFillTelemetry, REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT,
-        RemoteBacktestCacheFillRequest, RemoteBacktestFillRuntime, RemoteFillPlan,
-        RemoteFillPlanSymbol, RemoteFillTelemetryUpdate, RemoteTickFillState,
-        RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
-        parse_remote_fill_idle_timeout, parse_remote_fill_progress_enabled,
-        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
-        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_ranges_for_slice_ns,
-        remote_fill_ranges_with_slice_ns, should_finalize_idle_after_serial_exhaustion,
-        should_reject_empty_idle_finalize, should_reject_empty_remote_fill,
-        should_reject_future_idle_finalize, should_reject_incomplete_idle_finalize,
-        should_retry_remote_connect_error, should_retry_remote_fill_attempt_error,
-        should_split_empty_idle_batch,
+        BacktestRemoteFillCancellation, BacktestRemoteFillConfig,
+        BacktestRemoteFillInspectionProgress, BacktestRemoteFillPhase, BacktestRemoteFillTelemetry,
+        REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest,
+        RemoteBacktestFillRuntime, RemoteFillPlan, RemoteFillPlanSymbol, RemoteFillTelemetryUpdate,
+        RemoteTickFillState, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
+        parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
+        parse_remote_fill_progress_enabled, parse_remote_fill_slice_ns,
+        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
+        remote_fill_batches, remote_fill_ranges_for_slice_ns, remote_fill_ranges_with_slice_ns,
+        should_finalize_idle_after_serial_exhaustion, should_reject_empty_idle_finalize,
+        should_reject_empty_remote_fill, should_reject_future_idle_finalize,
+        should_reject_incomplete_idle_finalize, should_retry_remote_connect_error,
+        should_retry_remote_fill_attempt_error, should_split_empty_idle_batch,
     };
     use tqsdk_core::Tick;
     use tqsdk_data::{BacktestTickCache, BacktestTickFill, TickDataSeriesRequest};
@@ -1961,6 +2060,19 @@ mod tests {
         assert!(ready.logical_batch_id().is_none());
         assert!(ready.plan().unwrap().requires_remote_fill());
         assert_eq!(ready.plan().unwrap().logical_batches(), 2);
+        assert!(ready.inspection_progress().is_none());
+
+        let inspection_progress = BacktestRemoteFillInspectionProgress::new(4, 2, 1, 1);
+        let inspection = BacktestRemoteFillTelemetry::inspection(
+            "SHFE.au2608",
+            (1_000, 4_000),
+            inspection_progress,
+        );
+        assert_eq!(inspection.phase(), BacktestRemoteFillPhase::Inspecting);
+        assert_eq!(inspection.plan(), None);
+        assert_eq!(inspection.inspection_progress(), Some(&inspection_progress));
+        assert_eq!(inspection.physical_symbol(), Some("SHFE.au2608"));
+        assert_eq!(inspection.requested_range(), Some((1_000, 4_000)));
 
         let retry = BacktestRemoteFillTelemetry::lifecycle(RemoteFillTelemetryUpdate {
             phase: BacktestRemoteFillPhase::Retrying,
@@ -1981,6 +2093,7 @@ mod tests {
         assert_eq!(retry.accepted_rows(), 128);
         assert_eq!(retry.latest_cursor_ns(), Some(3_000));
         assert_eq!(retry.error(), Some("temporary failure"));
+        assert!(retry.inspection_progress().is_none());
     }
 
     #[test]

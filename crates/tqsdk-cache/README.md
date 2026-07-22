@@ -97,11 +97,12 @@ physical cache symbols；`inspect` 只接受后者。
 可用 `--end-day YYYY-MM-DD` 作为 `--last-trading-days` 的历史锚点。通用日历只描述工作日和假期，
 不判断某个合约是否有行情；空 coverage 和夜盘归属仍由 CST `18:00` TQBN 边界决定。
 
-进度始终写 stderr，默认 `--progress tty` 使用全局 logical-batch bar 和最多
-`--progress-max-bars` 个当前 physical symbol bar。`--progress auto` 仅在检测到交互终端时绘制动态条，
-否则输出稳定的 `key=value` 行；`--progress plain` 强制文本，`--progress off` 关闭进度。
-`--progress jsonl` 为每次 progress state
-revision 输出一条 schema `v1` 的 `tqsdk-cache.progress` JSONL 记录，适合调度器和日志采集器。
+进度始终写 stderr，默认 `--progress tty` 先显示 cache inspection bar（已检查/总 physical range、
+命中、缺口和当前 symbol），随后显示全局 logical-batch bar 和最多 `--progress-max-bars` 个当前
+physical symbol bar。`--progress auto` 仅在检测到交互终端时绘制动态条，否则输出稳定的 `key=value`
+行；`--progress plain` 强制文本，`--progress off` 关闭进度。`--progress jsonl` 为每次 progress state
+revision 输出一条 schema `v1` 的 `tqsdk-cache.progress` JSONL 记录；检查阶段的 `event=inspection`
+额外包含累计范围计数和当前 physical range，适合调度器和日志采集器。
 每个 symbol 显示当前处理 trading day、
 总规划日、已完整接收日和 row 数；“已接收日”只会在完整 TQBN 日分区跨越后递增，避免把盘中日误报为完成。
 命令最终默认输出摘要；无论在终端还是自动化环境中，需要原始 JSON 都显式传入

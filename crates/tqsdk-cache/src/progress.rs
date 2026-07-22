@@ -200,6 +200,7 @@ struct ProgressState {
     calendar: Option<ProgressCalendar>,
     calendar_error: Option<String>,
     plan: Option<RemoteFillPlan>,
+    inspection: Option<InspectionProgress>,
     symbols: BTreeMap<String, SymbolProgress>,
     completed_batches: BTreeSet<usize>,
     total_batches: usize,
@@ -213,6 +214,16 @@ struct ProgressState {
 struct ProgressCompletion {
     status: ProgressTerminalStatus,
     summary: String,
+}
+
+#[derive(Clone)]
+struct InspectionProgress {
+    total_ranges: usize,
+    checked_ranges: usize,
+    complete_ranges: usize,
+    incomplete_ranges: usize,
+    physical_symbol: String,
+    requested_range: (i64, i64),
 }
 
 #[derive(Clone, Default)]
@@ -240,6 +251,7 @@ impl ProgressState {
             calendar: None,
             calendar_error: None,
             plan: None,
+            inspection: None,
             symbols: BTreeMap::new(),
             completed_batches: BTreeSet::new(),
             total_batches: 0,
@@ -265,7 +277,26 @@ impl ProgressState {
     }
 
     fn apply_telemetry(&mut self, event: &BacktestRemoteFillTelemetry) {
+        if let Some(inspection) = event.inspection_progress() {
+            let Some(physical_symbol) = event.physical_symbol() else {
+                return;
+            };
+            let Some(requested_range) = event.requested_range() else {
+                return;
+            };
+            self.inspection = Some(InspectionProgress {
+                total_ranges: inspection.total_ranges(),
+                checked_ranges: inspection.checked_ranges(),
+                complete_ranges: inspection.complete_ranges(),
+                incomplete_ranges: inspection.incomplete_ranges(),
+                physical_symbol: physical_symbol.to_string(),
+                requested_range,
+            });
+            return;
+        }
+
         if let Some(plan) = event.plan() {
+            self.inspection = None;
             self.plan = Some(plan.clone());
             self.total_batches = plan.logical_batches();
             self.symbols.clear();
@@ -396,6 +427,7 @@ impl ProgressState {
                 completion.status.as_str(),
                 Some(completion.summary.as_str()),
             ),
+            None if self.inspection.is_some() => ("inspection", "running", None),
             None if self.plan.is_some() => (
                 "snapshot",
                 if self.failed { "failed" } else { "running" },
@@ -435,6 +467,17 @@ impl ProgressState {
                 "trading_days": self.calendar.as_ref().map_or(0, |calendar| calendar.days.len()),
                 "error": &self.calendar_error,
             },
+            "inspection": self.inspection.as_ref().map(|inspection| json!({
+                "total_ranges": inspection.total_ranges,
+                "checked_ranges": inspection.checked_ranges,
+                "complete_ranges": inspection.complete_ranges,
+                "incomplete_ranges": inspection.incomplete_ranges,
+                "physical_symbol": inspection.physical_symbol,
+                "requested_range": {
+                    "start_ns": inspection.requested_range.0,
+                    "end_ns": inspection.requested_range.1,
+                },
+            })),
             "symbols": self
                 .symbols
                 .iter()
@@ -544,7 +587,18 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
             rendered_revision = snapshot.revision;
             let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
             let rows_per_second = rows_per_second(rows, snapshot.started_at);
-            if snapshot.plan.is_none() {
+            if let Some(inspection) = &snapshot.inspection {
+                eprintln!(
+                    "tqsdk-cache: phase=inspection checked_ranges={}/{} complete_ranges={} incomplete_ranges={} symbol={} range=[{}, {})",
+                    inspection.checked_ranges,
+                    inspection.total_ranges,
+                    inspection.complete_ranges,
+                    inspection.incomplete_ranges,
+                    inspection.physical_symbol,
+                    inspection.requested_range.0,
+                    inspection.requested_range.1,
+                );
+            } else if snapshot.plan.is_none() {
                 eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
             } else {
                 eprintln!(
@@ -605,6 +659,8 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
     let planning = multi.add(ProgressBar::new_spinner());
     planning.set_style(spinner_style());
     planning.enable_steady_tick(Duration::from_millis(120));
+    let mut planning_visible = true;
+    let mut inspection = None;
     let mut global = None;
     let mut symbol_bars = BTreeMap::<String, ProgressBar>::new();
     let mut rendered_revision = u64::MAX;
@@ -617,9 +673,38 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
         };
         if snapshot.revision != rendered_revision {
             rendered_revision = snapshot.revision;
-            if snapshot.plan.is_none() {
+            if let Some(inspection_state) = &snapshot.inspection {
+                if inspection.is_none() {
+                    if planning_visible {
+                        planning.finish_and_clear();
+                        multi.remove(&planning);
+                        planning_visible = false;
+                    }
+                    let bar = multi.add(ProgressBar::new(inspection_state.total_ranges as u64));
+                    bar.set_style(global_style());
+                    inspection = Some(bar);
+                }
+                if let Some(inspection) = &inspection {
+                    inspection.set_length(inspection_state.total_ranges as u64);
+                    inspection.set_position(inspection_state.checked_ranges as u64);
+                    inspection.set_message(format!(
+                        "检查缓存 | 命中 {} | 缺口 {} | {}",
+                        inspection_state.complete_ranges,
+                        inspection_state.incomplete_ranges,
+                        inspection_state.physical_symbol,
+                    ));
+                }
+            } else if snapshot.plan.is_none() {
                 planning.set_message(snapshot.planning.clone());
             } else {
+                if let Some(inspection) = inspection.take() {
+                    inspection.finish_and_clear();
+                    multi.remove(&inspection);
+                } else if planning_visible {
+                    planning.finish_and_clear();
+                    multi.remove(&planning);
+                    planning_visible = false;
+                }
                 let active = snapshot
                     .symbols
                     .iter()
@@ -633,8 +718,6 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     .collect::<BTreeSet<_>>();
                 let additional_active = active.len().saturating_sub(visible.len());
                 if global.is_none() {
-                    planning.finish_and_clear();
-                    multi.remove(&planning);
                     let bar = multi.add(ProgressBar::new(snapshot.total_batches as u64));
                     bar.set_style(global_style());
                     global = Some(bar);
@@ -699,9 +782,17 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
             for bar in symbol_bars.values() {
                 bar.finish_and_clear();
             }
+            if let Some(inspection) = inspection.take() {
+                inspection.finish_and_clear();
+                multi.remove(&inspection);
+            }
             if let Some(global) = &global {
                 global.finish_with_message(completion.summary.clone());
             } else {
+                if planning_visible {
+                    planning.finish_and_clear();
+                    multi.remove(&planning);
+                }
                 let _ = multi.println(completion.summary);
             }
             return;
@@ -716,6 +807,7 @@ fn rows_per_second(rows: usize, started_at: Instant) -> usize {
 
 fn phase_name(phase: BacktestRemoteFillPhase) -> &'static str {
     match phase {
+        BacktestRemoteFillPhase::Inspecting => "inspecting",
         BacktestRemoteFillPhase::PlanReady => "plan_ready",
         BacktestRemoteFillPhase::Started => "started",
         BacktestRemoteFillPhase::Streaming => "streaming",

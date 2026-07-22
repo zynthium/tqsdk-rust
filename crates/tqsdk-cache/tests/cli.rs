@@ -457,7 +457,7 @@ fn fill_progress_jsonl_emits_versioned_stderr_records() {
             assert_eq!(record["kind"], "tqsdk-cache.progress");
             assert!(matches!(
                 record["event"].as_str(),
-                Some("planning" | "snapshot" | "complete")
+                Some("planning" | "inspection" | "snapshot" | "complete")
             ));
             let sequence = record["sequence"].as_u64().unwrap();
             assert!(sequence > previous_sequence);
@@ -466,6 +466,15 @@ fn fill_progress_jsonl_emits_versioned_stderr_records() {
         })
         .collect::<Vec<_>>();
     assert!(!records.is_empty());
+    let inspection = records
+        .iter()
+        .find(|record| record["event"] == "inspection")
+        .expect("cache inspection should emit a JSONL progress record");
+    assert_eq!(inspection["inspection"]["total_ranges"], 1);
+    assert_eq!(inspection["inspection"]["checked_ranges"], 1);
+    assert_eq!(inspection["inspection"]["complete_ranges"], 1);
+    assert_eq!(inspection["inspection"]["incomplete_ranges"], 0);
+    assert_eq!(inspection["inspection"]["physical_symbol"], "SHFE.rb2601");
     assert_eq!(records.last().unwrap()["event"], "complete");
     assert_eq!(records.last().unwrap()["status"], "complete");
 

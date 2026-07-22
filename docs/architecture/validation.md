@@ -191,7 +191,8 @@ inspection、fast inventory、deep diagnostic、root lock、closed-day dry-run�
 日历快照 round-trip、`--last-trading-days` 的本地快照选择、progress reducer 的完整分区计数、默认 text /
 explicit V3 stdout、legacy V2 output、JSONL stderr progress，以及 fill report v1/v2 对 canonical root
 的 verify binding。`facade_contract` 还覆盖
-`on_remote_fill_telemetry(...)` 在已检查完整 cache 时发出 physical plan。CLI 的真实远端 fill
+`on_remote_fill_telemetry(...)` 在每个 physical cache range 检查后发出累计 inspection telemetry，并在
+已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过

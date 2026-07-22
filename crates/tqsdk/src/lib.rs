@@ -19,11 +19,11 @@ pub mod prelude {
     pub use crate::{
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
         BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestRemoteFillCancellation,
-        BacktestRemoteFillConfig, BacktestRemoteFillPhase, BacktestRemoteFillProgress,
-        BacktestRemoteFillTelemetry, BacktestTickCache, BacktestTickCachePurgeReport,
-        BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID, MarketCachePolicy,
-        PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport,
-        RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, RemoteFillPlan,
+        BacktestRemoteFillConfig, BacktestRemoteFillInspectionProgress, BacktestRemoteFillPhase,
+        BacktestRemoteFillProgress, BacktestRemoteFillTelemetry, BacktestTickCache,
+        BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
+        MarketCachePolicy, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
+        RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, RemoteFillPlan,
         RemoteFillPlanSymbol, Result, TargetPos, Tq, TqBuilder,
     };
     pub use tqsdk_wait::{AccountRef, PositionRef, QuoteRef, QuoteSet, WaitStep};
@@ -101,9 +101,10 @@ mod live_tick_recorder;
 mod local_backtest;
 
 pub use backtest_remote::{
-    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillPhase,
-    BacktestRemoteFillProgress, BacktestRemoteFillProgressHandler, BacktestRemoteFillTelemetry,
-    BacktestRemoteFillTelemetryHandler, RemoteFillPlan, RemoteFillPlanSymbol,
+    BacktestRemoteFillCancellation, BacktestRemoteFillConfig, BacktestRemoteFillInspectionProgress,
+    BacktestRemoteFillPhase, BacktestRemoteFillProgress, BacktestRemoteFillProgressHandler,
+    BacktestRemoteFillTelemetry, BacktestRemoteFillTelemetryHandler, RemoteFillPlan,
+    RemoteFillPlanSymbol,
 };
 pub use live_tick_recorder::{
     RecordTicksFlushReport, RecordTicksHealth, RecordTicksReport, RecordTicksSymbolFlushReport,
@@ -1595,11 +1596,13 @@ impl BacktestBuilder {
 
     /// Observe resolved plans and low-frequency remote cache-fill telemetry.
     ///
-    /// The handler receives a `PlanReady` snapshot after cache coverage has
-    /// been inspected (and, for remote fill modes, after the root fill lock is
-    /// held). It then receives per-physical-symbol lifecycle snapshots. The
-    /// handler is not installed by default and must return quickly; in
-    /// particular it must not perform terminal I/O or block remote filling.
+    /// The handler receives an `Inspecting` snapshot after each physical cache
+    /// range is checked, with cumulative hit and gap counts. After coverage is
+    /// fully inspected (and, for remote fill modes, after the root fill lock is
+    /// held), it receives `PlanReady`, then per-physical-symbol lifecycle
+    /// snapshots. The handler is not installed by default and must return
+    /// quickly; in particular it must not perform terminal I/O or block cache
+    /// inspection or remote filling.
     #[must_use]
     pub fn on_remote_fill_telemetry(
         mut self,
@@ -1723,17 +1726,38 @@ impl BacktestBuilder {
             }
         }
 
+        let remote_fill_runtime = self.remote_fill_runtime();
+        let total_ranges = physical_ranges.len();
+        let mut checked_ranges = 0usize;
+        let mut complete_ranges = 0usize;
+        let mut incomplete_ranges = 0usize;
         let mut before_by_range = BTreeMap::new();
         let mut fill_requests = Vec::new();
         for (symbol, start_ns, end_ns) in &physical_ranges {
             let before = cache.inspect(symbol, *start_ns, *end_ns)?;
-            if refresh || !before.is_complete() {
+            let is_complete = before.is_complete();
+            checked_ranges = checked_ranges.saturating_add(1);
+            if is_complete {
+                complete_ranges = complete_ranges.saturating_add(1);
+            } else {
+                incomplete_ranges = incomplete_ranges.saturating_add(1);
+            }
+            remote_fill_runtime.emit_inspection(
+                symbol,
+                (*start_ns, *end_ns),
+                backtest_remote::BacktestRemoteFillInspectionProgress::new(
+                    total_ranges,
+                    checked_ranges,
+                    complete_ranges,
+                    incomplete_ranges,
+                ),
+            );
+            if refresh || !is_complete {
                 fill_requests.extend(fill_requests_from_status(&before));
             }
             before_by_range.insert((symbol.clone(), *start_ns, *end_ns), before);
         }
 
-        let remote_fill_runtime = self.remote_fill_runtime();
         remote_fill_runtime.emit_plan(build_remote_fill_plan(
             (self.start_ns, self.end_ns),
             logical_symbols.clone(),

@@ -96,13 +96,15 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 通用日历只用于 selector、分母和进度显示，绝不提交或推断 cache coverage。CST `18:00` 的 TQBN
 分区、连续 tick id 和最终 `CacheOnly` 检查仍是完整性的唯一依据；休市日可以是合法空 coverage。
 
-进度仅写 stderr，默认 `--progress tty` 使用一个 logical-batch 全局 bar 和最多
+进度仅写 stderr，默认 `--progress tty` 先使用一个 cache-inspection bar 显示已检查/总 physical
+range、命中、缺口和当前 symbol；`PlanReady` 到达后切换为一个 logical-batch 全局 bar 和最多
 `--progress-max-bars` 个 active physical-symbol bar。`auto` 仅在检测到交互终端时绘制动态条，否则自动降级为
 稳定 `key=value` 文本；`plain` 强制文本，`off` 关闭进度。`jsonl` 为每个 state revision 写一条 schema-v1
 `tqsdk-cache.progress` JSON record，包含 sequence、状态、batch/coverage/calendar 汇总和 active
-physical symbols，供日志采集或调度器消费。每条 physical-symbol 状态包含当前处理的 trading day、
-coverage day count、完整接收 day count、rows、retry 和 split 状态。流式 cursor 只有跨过完整 TQBN
-日分区后才增加接收计数，最后一个日分区由成功 terminal event 确认。
+physical symbols；检查阶段使用 `event=inspection`，并附带累计范围计数及当前 physical range，供日志采集或
+调度器消费。每条 physical-symbol 状态包含当前处理的 trading day、coverage day count、完整接收 day count、
+rows、retry 和 split 状态。流式 cursor 只有跨过完整 TQBN 日分区后才增加接收计数，最后一个日分区由成功
+terminal event 确认。
 
 ## 填充、报告与验证
 

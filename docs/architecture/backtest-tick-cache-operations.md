@@ -58,8 +58,9 @@ tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --progress-max-bars 8
 ```
 
-默认动态显示 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式
-使用 `--progress auto` 降级为稳定的 stderr `key=value` 行，并使用 `--output-format json` 请求机器结果。
+默认先动态显示 cache inspection 的 `已检查范围/总范围`、命中、缺口和当前 physical symbol，再显示
+logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式使用
+`--progress auto` 降级为稳定的 stderr `key=value` 行，并使用 `--output-format json` 请求机器结果。
 一个日只有在其 TQBN partition 已完整跨越或成功 terminal event 确认后才计入“完整接收”，因此夜盘和盘中尾部不会被提前计为完成。
 `--calendar required` 禁止无日历 fallback，`--calendar off` 保留纯 partition 规划并拒绝
 `--last-trading-days`。
@@ -128,10 +129,11 @@ async fn warmup(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 只有需要强制墙钟预算或诊断时才设置，并应留出足够余量。
 
 需要把相同计划/生命周期信息接入调用方 UI 或调度器时，可在 builder 上安装
-`.on_remote_fill_telemetry(...)`。它先在 coverage inspection 后发出 `PlanReady`，再按 physical
-symbol 发出开始、流式、重试、split、完成、失败或取消状态；流式事件每个 symbol 至多 500ms 一次，
-生命周期事件立即发出。handler 与远端填充共享执行路径，必须只做快速内存操作，不能写终端、阻塞
-或等待网络。
+`.on_remote_fill_telemetry(...)`。它在每个 physical range coverage inspection 后先发出累计
+`Inspecting`（已检查/总范围、命中、缺口和当前范围），完成后发出 `PlanReady`，再按 physical symbol
+发出开始、流式、重试、split、完成、失败或取消状态；流式事件每个 symbol 至多 500ms 一次，检查和
+生命周期事件立即发出。handler 与检查和远端填充共享执行路径，必须只做快速内存操作，不能写终端、
+阻塞或等待网络。
 
 ## 4. 用 CacheOnly 和实际回放验收
 
