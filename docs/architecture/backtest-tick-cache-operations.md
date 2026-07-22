@@ -55,12 +55,12 @@ TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
   --last-trading-days 60 --calendar auto \
-  --progress auto --progress-max-bars 8 --pretty
+  --progress-max-bars 8
 ```
 
-TTY 会显示 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`，非 TTY 输出
-稳定的 stderr `key=value` 行，最终 JSON 仍只写 stdout。一个日只有在其 TQBN partition 已完整
-跨越或成功 terminal event 确认后才计入“完整接收”，因此夜盘和盘中尾部不会被提前计为完成。
+默认动态显示 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式
+使用 `--progress auto` 降级为稳定的 stderr `key=value` 行，并使用 `--output-format json` 请求机器结果。
+一个日只有在其 TQBN partition 已完整跨越或成功 terminal event 确认后才计入“完整接收”，因此夜盘和盘中尾部不会被提前计为完成。
 `--calendar required` 禁止无日历 fallback，`--calendar off` 保留纯 partition 规划并拒绝
 `--last-trading-days`。
 

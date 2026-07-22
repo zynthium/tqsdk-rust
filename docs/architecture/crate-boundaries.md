@@ -356,7 +356,7 @@ sink、WAL、journal 或 cache writer。
 - 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、closed-day
   `fill`、CacheOnly `verify` 和 deep `doctor`
 - 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` read-only/diagnostic/root-lock
-  APIs 组合为 JSON stdout + stderr progress 的 operator contract
+  APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+ selectable stderr progress 的 operator contract
 - normal fill report 记录 canonical root、logical/physical symbols、coverage 和调度配置，供
   `verify --report` 复用；取消 flush partial rows 但不提交 coverage
 

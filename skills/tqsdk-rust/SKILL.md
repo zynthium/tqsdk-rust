@@ -48,7 +48,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - operator CLI：固定 root 的 inventory、closed-day fill、report-bound verify 或 TQBN doctor 使用可选
   `tqsdk-cache` binary（`cargo run -p tqsdk-cache -- --help`）。它只编排已有 facade/data cache
   合同，不是 relay、守护进程或 custom store；normal fill 的 cache hit 不需 auth，缺口才使用
-  `TQ_AUTH_USER` / `TQ_AUTH_PASS`。stdout 是 schema-versioned JSON，stderr 才是进度；
+  `TQ_AUTH_USER` / `TQ_AUTH_PASS`。默认输出摘要；需要脚本 JSON 时显式使用
+  `--output-format json`，stderr 才是进度；
   `fill --dry-run` 不加锁、不写文件、不远端补数，V1 拒绝 current open day。operator 需要最近
   N 日时优先用 `fill --last-trading-days N --calendar auto`；它先复用 root 的
   `meta/trading-calendar-v1.json`，日历只用于 selector/进度，不是 coverage truth。`--calendar off`

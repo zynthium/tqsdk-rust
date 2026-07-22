@@ -35,10 +35,21 @@ tqsdk-cache fill
 
 ## 命令合同
 
-所有成功和可机器读取的结果都写 stdout JSON，当前顶层 `schema_version` 为 `2`。进度、错误和
-交互 spinner 只写 stderr。`--pretty` 只改变 stdout 的 JSON 缩进，不改变字段或 stderr。
-`verify --report` 兼容读取 schema version `1`，缺少的 selector、日历和 per-symbol day stats
-视为未知而不是覆盖事实。
+默认将每个命令结果渲染为人工摘要，不区分 TTY、pipe、重定向或 CI。`--output-format json`
+显式请求机器输出，`--output-format text` 等同于默认摘要输出；后者不能与 `--pretty` 或
+`--output-schema` 组合。V3 固定 envelope 包含 `kind` `tqsdk-cache.result`、`command`、
+`status`、`exit_code`、`generated_at`、`duration_ms`、`tool`、`warnings`、`result` 和 `error`；`result`
+保留原 schema-v2 command body。预期 coverage 不完整以 `status=incomplete`、退出 `1` 表示，运行/usage
+错误以 `status=error` 和稳定的 error `code`、`message`、`retryable` 表示。`--output-schema v2`
+保留旧的顶层 result shape 及 stderr fatal-error 行为，作为有限期迁移兼容层；它需要
+`--output-format json`。进度和交互 spinner 只写 stderr。`--pretty` 只改变 JSON 缩进，也需要
+`--output-format json`。`verify --report`
+兼容读取 persisted report schema version `1`，缺少的 selector、日历和 per-symbol day stats 视为未知
+而不是覆盖事实。
+
+当前稳定错误码为 `usage`、`cache_busy`、`data_error`、`sdk_error`、`io_error` 和 `json_error`。
+`cache_busy` 始终 `retryable=true`；可重试的 I/O 中断、超时和 would-block 也会标记为 true。调用方应
+以 `exit_code` 和 `error.code` 决策，`message` 只用于日志和人工诊断。
 
 | 命令 | 作用 | 写入 / 网络 | 一致性 |
 | --- | --- | --- | --- |
@@ -85,9 +96,11 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 通用日历只用于 selector、分母和进度显示，绝不提交或推断 cache coverage。CST `18:00` 的 TQBN
 分区、连续 tick id 和最终 `CacheOnly` 检查仍是完整性的唯一依据；休市日可以是合法空 coverage。
 
-进度仅写 stderr：`--progress auto` 在 TTY 使用一个 logical-batch 全局 bar 和最多
-`--progress-max-bars` 个 active physical-symbol bar；非 TTY 自动降级为稳定 `key=value` 文本；
-`plain` 强制文本，`off` 关闭进度。每条 physical-symbol 状态包含当前处理的 trading day、
+进度仅写 stderr，默认 `--progress tty` 使用一个 logical-batch 全局 bar 和最多
+`--progress-max-bars` 个 active physical-symbol bar。`auto` 仅在检测到交互终端时绘制动态条，否则自动降级为
+稳定 `key=value` 文本；`plain` 强制文本，`off` 关闭进度。`jsonl` 为每个 state revision 写一条 schema-v1
+`tqsdk-cache.progress` JSON record，包含 sequence、状态、batch/coverage/calendar 汇总和 active
+physical symbols，供日志采集或调度器消费。每条 physical-symbol 状态包含当前处理的 trading day、
 coverage day count、完整接收 day count、rows、retry 和 split 状态。流式 cursor 只有跨过完整 TQBN
 日分区后才增加接收计数，最后一个日分区由成功 terminal event 确认。
 
@@ -98,13 +111,13 @@ coverage day count、完整接收 day count、rows、retry 和 split 状态。�
 ```bash
 # 检查目标 cache root，不会修改它。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history inventory --pretty
+  --cache-dir /var/lib/tqsdk/history inventory
 
 # 不请求远端 tick 的预检；当 coverage 不完整时返回 1。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
-  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run --pretty
+  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # 缺口需要账号；完整 static cache 命中时这两个变量不需要。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
@@ -112,17 +125,18 @@ cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
   --start-day 2026-06-01 --end-day 2026-06-30 \
-  --symbol-concurrency 2 --symbol-batch-size 1 --pretty
+  --symbol-concurrency 2 --symbol-batch-size 1
 
 # 生产定时作业：按日历补齐最近 60 个已结束交易日，并保留 stdout JSON 给调度器。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
   --last-trading-days 60 --calendar auto \
-  --progress auto --progress-max-bars 8 --pretty
+  --progress auto --progress-max-bars 8 \
+  --output-format json --pretty
 ```
 
-正常 fill 会把 credential-free JSON report 写到
+正常 fill 会把 credential-free persisted schema-v2 JSON report 写到
 `<cache-root>/reports/tqsdk-cache-fill-<utc>-<pid>.json`，也可以用 `--report PATH` 覆盖。
 报告包含 canonical absolute `cache_dir`、原始 selector、请求和解析后的 trading-day window、
 日历模式/快照 metadata、logical/physical symbols、coverage before/after、每 physical cache report
@@ -133,13 +147,13 @@ range 的日统计、`rows_written`、是否实际远端填充和生效的调度
 # report 是验证时的权威 root/range/symbol 输入；不需要 auth。
 cargo run -p tqsdk-cache -- verify \
   --report /var/lib/tqsdk/history/reports/june.json \
-  --replay --min-rows 1 --pretty
+  --replay --min-rows 1
 
 # 显式查 coverage；没有 report 时需要给 complete closed-day window。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history verify \
   --symbol KQ.i@SHFE.au \
-  --start-day 2026-06-01 --end-day 2026-06-30 --pretty
+  --start-day 2026-06-01 --end-day 2026-06-30
 ```
 
 `verify --report` 忽略调用环境中可能不同的默认 cache root，并使用 report 的 canonical root。
@@ -171,10 +185,10 @@ SDK 的单会话长 range 调度。CLI flags
 
 ```bash
 # Fast inventory: 不解码 record blocks。
-cargo run -p tqsdk-cache -- --cache-dir /var/lib/tqsdk/history inventory --pretty
+cargo run -p tqsdk-cache -- --cache-dir /var/lib/tqsdk/history inventory
 
 # Deep diagnostic: rows、schema、file status、incomplete/corrupt block error。
-cargo run -p tqsdk-cache -- --cache-dir /var/lib/tqsdk/history doctor --pretty
+cargo run -p tqsdk-cache -- --cache-dir /var/lib/tqsdk/history doctor
 ```
 
 `doctor` 的非零退出码表示至少一个 tick file 状态异常。它不是修复器。V1 故意没有

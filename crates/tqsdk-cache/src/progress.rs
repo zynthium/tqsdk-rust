@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, SecondsFormat, Utc};
 use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use serde_json::{Value, json};
 use tqsdk::{
     BacktestRemoteFillPhase, BacktestRemoteFillProgress, BacktestRemoteFillTelemetry,
     RemoteFillPlan,
@@ -19,7 +20,9 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressMode {
     Auto,
+    Tty,
     Plain,
+    Jsonl,
     Off,
 }
 
@@ -50,13 +53,18 @@ impl FillProgressSession {
         }
 
         let shared = Arc::new(Mutex::new(ProgressState::new(mode, max_bars)));
-        let renderer_state = Arc::clone(&shared);
-        let renderer = thread::spawn(move || render_loop(renderer_state));
+        let renderer = match mode {
+            ResolvedProgressMode::Tty | ResolvedProgressMode::Plain => {
+                let renderer_state = Arc::clone(&shared);
+                Some(thread::spawn(move || render_loop(renderer_state)))
+            }
+            ResolvedProgressMode::Jsonl | ResolvedProgressMode::Off => None,
+        };
         Self {
             progress: FillProgress {
                 shared: Some(shared),
             },
-            renderer: Some(renderer),
+            renderer,
         }
     }
 
@@ -64,13 +72,8 @@ impl FillProgressSession {
         self.progress.clone()
     }
 
-    pub(crate) fn finish(mut self, summary: impl Into<String>) {
-        if let Some(shared) = &self.progress.shared {
-            if let Ok(mut state) = shared.lock() {
-                state.finished = Some(summary.into());
-                state.revision = state.revision.saturating_add(1);
-            }
-        }
+    pub(crate) fn finish(mut self, status: ProgressTerminalStatus, summary: impl Into<String>) {
+        self.progress.finish(status, summary);
         if let Some(renderer) = self.renderer.take() {
             let _ = renderer.join();
         }
@@ -79,18 +82,15 @@ impl FillProgressSession {
 
 impl Drop for FillProgressSession {
     fn drop(&mut self) {
-        let Some(renderer) = self.renderer.take() else {
-            return;
-        };
-        if let Some(shared) = &self.progress.shared {
-            if let Ok(mut state) = shared.lock() {
-                if state.finished.is_none() {
-                    state.finished = Some("fill ended before a final progress summary".to_string());
-                    state.revision = state.revision.saturating_add(1);
-                }
-            }
+        if !self.progress.is_finished() {
+            self.progress.finish(
+                ProgressTerminalStatus::Failed,
+                "fill ended before a final progress summary",
+            );
         }
-        let _ = renderer.join();
+        if let Some(renderer) = self.renderer.take() {
+            let _ = renderer.join();
+        }
     }
 }
 
@@ -122,6 +122,20 @@ impl FillProgress {
         self.with_state(|state| state.apply_final_report(report));
     }
 
+    fn finish(&self, status: ProgressTerminalStatus, summary: impl Into<String>) {
+        let summary = summary.into();
+        self.with_state(|state| {
+            state.finished = Some(ProgressCompletion { status, summary });
+        });
+    }
+
+    fn is_finished(&self) -> bool {
+        self.shared
+            .as_ref()
+            .and_then(|shared| shared.lock().ok().map(|state| state.finished.is_some()))
+            .unwrap_or(true)
+    }
+
     fn with_state(&self, update: impl FnOnce(&mut ProgressState)) {
         let Some(shared) = &self.shared else {
             return;
@@ -131,6 +145,9 @@ impl FillProgress {
         };
         update(&mut state);
         state.revision = state.revision.saturating_add(1);
+        if matches!(state.mode, ResolvedProgressMode::Jsonl) {
+            write_jsonl_progress(&state.jsonl_record());
+        }
     }
 }
 
@@ -138,13 +155,33 @@ impl FillProgress {
 enum ResolvedProgressMode {
     Tty,
     Plain,
+    Jsonl,
     Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgressTerminalStatus {
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+impl ProgressTerminalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
 }
 
 fn resolve_mode(mode: ProgressMode) -> ResolvedProgressMode {
     match mode {
         ProgressMode::Off => ResolvedProgressMode::Off,
+        ProgressMode::Tty => ResolvedProgressMode::Tty,
         ProgressMode::Plain => ResolvedProgressMode::Plain,
+        ProgressMode::Jsonl => ResolvedProgressMode::Jsonl,
         ProgressMode::Auto
             if io::stderr().is_terminal()
                 && std::env::var("TERM").ok().as_deref() != Some("dumb") =>
@@ -168,8 +205,14 @@ struct ProgressState {
     total_batches: usize,
     failed: bool,
     revision: u64,
-    finished: Option<String>,
+    finished: Option<ProgressCompletion>,
     started_at: Instant,
+}
+
+#[derive(Clone)]
+struct ProgressCompletion {
+    status: ProgressTerminalStatus,
+    summary: String,
 }
 
 #[derive(Clone, Default)]
@@ -344,6 +387,89 @@ impl ProgressState {
         }
         (covered, planned, received, missing, rows)
     }
+
+    fn jsonl_record(&self) -> Value {
+        let (covered, planned, received, missing, rows) = self.coverage_counts();
+        let (event, status, summary) = match &self.finished {
+            Some(completion) => (
+                "complete",
+                completion.status.as_str(),
+                Some(completion.summary.as_str()),
+            ),
+            None if self.plan.is_some() => (
+                "snapshot",
+                if self.failed { "failed" } else { "running" },
+                None,
+            ),
+            None => (
+                "planning",
+                if self.failed { "failed" } else { "running" },
+                None,
+            ),
+        };
+        json!({
+            "schema_version": 1,
+            "kind": "tqsdk-cache.progress",
+            "event": event,
+            "sequence": self.revision,
+            "emitted_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            "elapsed_ms": elapsed_millis(self.started_at),
+            "status": status,
+            "batch": {
+                "completed": self.completed_batches.len(),
+                "total": self.total_batches,
+            },
+            "coverage": {
+                "covered_days": covered,
+                "planned_days": planned,
+                "received_days": received,
+                "missing_days": missing,
+                "rows": rows,
+            },
+            "calendar": {
+                "source": self
+                    .calendar
+                    .as_ref()
+                    .map(|calendar| calendar.source.as_str())
+                    .unwrap_or("partition_fallback"),
+                "trading_days": self.calendar.as_ref().map_or(0, |calendar| calendar.days.len()),
+                "error": &self.calendar_error,
+            },
+            "symbols": self
+                .symbols
+                .iter()
+                .filter(|(_, state)| state.active)
+                .map(|(symbol, state)| json!({
+                    "symbol": symbol,
+                    "phase": state.phase.map(phase_name).unwrap_or("pending"),
+                    "trading_day": state.latest_trading_day.map(|day| day.to_string()),
+                    "coverage_days": {
+                        "covered": state.covered_days.len(),
+                        "planned": state.planned_days.len(),
+                        "received": state.received_days.len(),
+                        "missing": state.missing_days.len(),
+                    },
+                    "rows": state.rows_by_stream.values().copied().sum::<usize>(),
+                    "attempt_retries": state.retries,
+                    "split_fallback": state.split_fallback,
+                }))
+                .collect::<Vec<_>>(),
+            "summary": summary,
+        })
+    }
+}
+
+fn write_jsonl_progress(record: &Value) {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    if serde_json::to_writer(&mut stderr, record).is_ok() {
+        let _ = stderr.write_all(b"\n");
+        let _ = stderr.flush();
+    }
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn days_for_ranges(
@@ -402,7 +528,7 @@ fn render_loop(shared: Arc<Mutex<ProgressState>>) {
     match mode {
         ResolvedProgressMode::Tty => render_tty(shared),
         ResolvedProgressMode::Plain => render_plain(shared),
-        ResolvedProgressMode::Off => {}
+        ResolvedProgressMode::Jsonl | ResolvedProgressMode::Off => {}
     }
 }
 
@@ -464,8 +590,11 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                 }
             }
         }
-        if let Some(summary) = snapshot.finished {
-            eprintln!("tqsdk-cache: phase=complete summary={summary:?}");
+        if let Some(completion) = snapshot.finished {
+            eprintln!(
+                "tqsdk-cache: phase=complete summary={:?}",
+                completion.summary
+            );
             return;
         }
     }
@@ -566,14 +695,14 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                 }
             }
         }
-        if let Some(summary) = snapshot.finished {
+        if let Some(completion) = snapshot.finished {
             for bar in symbol_bars.values() {
                 bar.finish_and_clear();
             }
             if let Some(global) = &global {
-                global.finish_with_message(summary.clone());
+                global.finish_with_message(completion.summary.clone());
             } else {
-                let _ = multi.println(summary.clone());
+                let _ = multi.println(completion.summary);
             }
             return;
         }
@@ -622,8 +751,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ProgressCalendar, ProgressState, SymbolProgress, completed_days_through_cursor,
-        days_for_ranges,
+        ProgressCalendar, ProgressMode, ProgressState, ResolvedProgressMode, SymbolProgress,
+        completed_days_through_cursor, days_for_ranges, resolve_mode,
     };
     use chrono::NaiveDate;
     use tqsdk_cache::FillReportSymbolDayStats;
@@ -737,5 +866,10 @@ mod tests {
 
         assert!(state.symbols["SHFE.au2608"].covered_days.is_empty());
         assert!(state.symbols["SHFE.au2608"].received_days.is_empty());
+    }
+
+    #[test]
+    fn explicit_tty_mode_bypasses_terminal_auto_detection() {
+        assert_eq!(resolve_mode(ProgressMode::Tty), ResolvedProgressMode::Tty);
     }
 }

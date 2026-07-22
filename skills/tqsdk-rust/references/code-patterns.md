@@ -304,15 +304,15 @@ physical symbol、batch、cursor、retry/split 和终态。handler 位于远端�
 ### Cache Operator CLI
 
 固定共享 root 的 cache 运维不必把策略进程改成 downloader。可选 `tqsdk-cache` binary 复用同一套
-remote-on-miss / CacheOnly 合同：它的 stdout 是 versioned JSON，进度只写 stderr，因此适合 cron
-或 CI；它不是 relay 或守护进程。
+remote-on-miss / CacheOnly 合同：默认输出摘要；cron 或 CI 需要 versioned JSON 时显式传入
+`--output-format json`。进度只写 stderr；它不是 relay 或守护进程。
 
 ```bash
 # 预检不会请求远端 tick、写 cache 或获取 fill lock。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
-  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run --pretty
+  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # 正常 fill 只补缺失 coverage。仅在实际 miss 时需要此账号对。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
@@ -320,15 +320,15 @@ cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --symbol KQ.i@SHFE.au \
   --last-trading-days 60 --calendar auto \
-  --progress auto --progress-max-bars 8 --pretty
+  --progress-max-bars 8
 ```
 
 V1 仅接受已结束交易日；TQBN 日界线是 CST `18:00`，open day 不能标记 complete。normal fill
 的 `--calendar auto` 优先复用 `<cache-root>/meta/trading-calendar-v1.json`；它只用于最近 N 日
 selector 和进度分母，不能替代 coverage。没有可用快照的显式范围会先完成 coverage plan，只有
 确认存在远端缺口才查询通用日历；`--calendar required` 禁止 fallback，`off` 拒绝
-`--last-trading-days`。TTY 显示当前 physical symbol、trading day、完整接收日和 rows，非 TTY
-输出 stderr `key=value`，`--progress off` 保持安静。生成的 schema-v2 report 固定
+`--last-trading-days`。默认动态显示当前 physical symbol、trading day、完整接收日和 rows；需要在
+非交互环境保持稳定日志时显式传入 `--progress auto` 或 `--progress plain`，`--progress off` 保持安静。生成的 schema-v2 report 固定
 canonical root/range/physical symbols，后续用
 `tqsdk-cache verify --report <path> --replay --min-rows 1` 做本地验收。Ctrl-C/SIGTERM 会 flush
 partial rows 但不提交 coverage，下一轮 fill 自动补洞。完整 CLI 合同见

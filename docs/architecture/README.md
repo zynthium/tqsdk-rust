@@ -212,8 +212,9 @@ V1 是：
   - history page/series/download/export foundation
 - `tqsdk-cache`
   - 可选 operator CLI；对 canonical daily TQBN tick cache 提供 fast inventory、closed-day
-    remote-on-miss fill、calendar-aware `--last-trading-days` selector、stderr-only physical-symbol
-    progress、schema-v2 report（兼容读取 v1）、report-bound CacheOnly verify 与 deep doctor
+    remote-on-miss fill、calendar-aware `--last-trading-days` selector、selectable physical-symbol
+    stderr progress（plain/TTY/JSONL）、默认 text / 按需 V3 stdout result、schema-v2 persisted report（兼容读取 v1）、
+    report-bound CacheOnly verify 与 deep doctor
   - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
     partition 与 CacheOnly verification 仍是完整性权威
   - 复用 `tqsdk` facade / `tqsdk-data` store，不拥有第二种缓存格式、session、状态树、live

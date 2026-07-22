@@ -21,32 +21,36 @@ history cache / relay 支持的 `KQD` 外盘合约，因此 `cont:all` 不会生
 
 ## 常用命令
 
-所有正常结果写 versioned JSON 到 stdout；进度和诊断写 stderr，因此可以安全地将 stdout
-交给自动化程序。
+默认输出是紧凑的人工摘要，不区分 TTY、pipe、重定向或 CI。需要机器结果时显式传入
+`--output-format json`；`--output-format text` 等同于默认值。JSON V3 将原有命令结果保留在
+`result`，并固定提供 `kind`、`command`、`status`、`exit_code`、`generated_at`、`duration_ms`、
+`tool`、`warnings` 和 `error`。`--pretty` 与 `--output-schema v2|v3` 需要和
+`--output-format json` 组合。`--output-schema v2` 保留旧的顶层 JSON 字段和 fatal-error stderr
+行为，供尚未迁移的脚本使用。
 
 ```bash
 # 快速文件系统盘点；不存在的 root 不会被创建。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history inventory --pretty
+  --cache-dir /var/lib/tqsdk/history inventory
 
 # 检查一个或多个物理缓存 symbol 的 coverage。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history inspect \
   --symbol KQ.i@SHFE.au \
-  --start-day 2026-06-01 --end-day 2026-06-30 --pretty
+  --start-day 2026-06-01 --end-day 2026-06-30
 
 # 不请求远端 tick、不加 lock、不写文件的预检。缺 coverage 时退出码为 1。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
-  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run --pretty
+  --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
-# 按通用交易日历选择最近 60 个已结束交易日。默认在 TTY 显示全局 batch 和当前物理合约日进度。
+# 按通用交易日历选择最近 60 个已结束交易日。默认动态显示全局 batch 和当前物理合约日进度。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --universe 'main:all;index:all;!CFFEX' \
   --last-trading-days 60 --calendar auto \
-  --progress auto --progress-max-bars 8 --pretty
+  --progress-max-bars 8
 ```
 
 正常 `fill` 使用与 `Tq::futures().backtest(...).remote_on_miss().warmup()` 相同的
@@ -63,16 +67,16 @@ cargo run -p tqsdk-cache -- \
   --universe 'main:all;index:all;!CFFEX' \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol KQ.i@SHFE.au \
-  --symbol-concurrency 2 --report /var/lib/tqsdk/history/reports/june.json --pretty
+  --symbol-concurrency 2 --report /var/lib/tqsdk/history/reports/june.json
 
 # 以 report 固定的 canonical root、range 和物理 symbol 做严格本地验收。
 cargo run -p tqsdk-cache -- verify \
   --report /var/lib/tqsdk/history/reports/june.json \
-  --replay --min-rows 1 --pretty
+  --replay --min-rows 1
 
 # 解码全部 tick partitions，检查 TQBN 结构与损坏状态。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history doctor --pretty
+  --cache-dir /var/lib/tqsdk/history doctor
 ```
 
 `fill` 只接受已结束交易日。TQBN trading day 在 CST `18:00:00` 开始，周末会归一到下一交易日；
@@ -93,13 +97,17 @@ physical cache symbols；`inspect` 只接受后者。
 可用 `--end-day YYYY-MM-DD` 作为 `--last-trading-days` 的历史锚点。通用日历只描述工作日和假期，
 不判断某个合约是否有行情；空 coverage 和夜盘归属仍由 CST `18:00` TQBN 边界决定。
 
-进度始终写 stderr：`--progress auto` 在 TTY 使用全局 logical-batch bar 和最多
-`--progress-max-bars` 个当前 physical symbol bar；非 TTY 自动输出稳定的 `key=value` 行；
-`--progress plain` 强制后者，`--progress off` 关闭进度。每个 symbol 显示当前处理 trading day、
+进度始终写 stderr，默认 `--progress tty` 使用全局 logical-batch bar 和最多
+`--progress-max-bars` 个当前 physical symbol bar。`--progress auto` 仅在检测到交互终端时绘制动态条，
+否则输出稳定的 `key=value` 行；`--progress plain` 强制文本，`--progress off` 关闭进度。
+`--progress jsonl` 为每次 progress state
+revision 输出一条 schema `v1` 的 `tqsdk-cache.progress` JSONL 记录，适合调度器和日志采集器。
+每个 symbol 显示当前处理 trading day、
 总规划日、已完整接收日和 row 数；“已接收日”只会在完整 TQBN 日分区跨越后递增，避免把盘中日误报为完成。
-stdout 始终保持最终 JSON。
+命令最终默认输出摘要；无论在终端还是自动化环境中，需要原始 JSON 都显式传入
+`--output-format json`。
 
-正常 fill 写 schema version `2` report，增加原始 selector、已解析日历来源/快照元数据和每个
+正常 fill 仍写 schema version `2` persisted report，增加原始 selector、已解析日历来源/快照元数据和每个
 physical cache report range 的日计数。`verify --report` 仍可读取 schema version `1` 报告；v1 中没有的
 v2 字段按空值处理。
 
@@ -111,7 +119,9 @@ v2 字段按空值处理。
   但只是可能看到中间状态的快速盘点。
 - Ctrl-C 或 SIGTERM 会 flush 已接收的 tick rows，但不会提交该范围 coverage，退出 `130`；下一次
   fill 会继续补洞。
-- JSON report 当前为 schema version `2`，并兼容读取 schema version `1`。正常 fill 默认写入
+- persisted fill report 当前为 schema version `2`，并兼容读取 schema version `1`。CLI 显式 JSON
+  输出默认使用 output schema `v3`，可使用 `--output-format json --output-schema v2` 迁移旧脚本。
+  正常 fill 默认写入
   `<cache-root>/reports/`；`verify --report` 始终使用报告记录的 canonical root，并拒绝与
   `--cache-dir` 不一致的调用。
 

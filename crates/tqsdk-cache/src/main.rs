@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{Days, NaiveDate};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use chrono::{Days, NaiveDate, SecondsFormat, Utc};
+use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
@@ -20,8 +20,12 @@ use tqsdk_data::{
 };
 
 mod progress;
+mod terminal;
 
-use progress::{FillProgress, FillProgressSession, ProgressCalendar, ProgressMode};
+use progress::{
+    FillProgress, FillProgressSession, ProgressCalendar, ProgressMode, ProgressTerminalStatus,
+};
+use terminal::{write_error as write_terminal_error, write_result as write_terminal_result};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,11 +37,29 @@ struct Cli {
     /// Canonical cache root. Defaults to TQSDK_HISTORY_CACHE_DIR or ~/.tqsdk/data_series_1.
     #[arg(long, global = true, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
-    /// Pretty-print the versioned JSON result written to stdout.
+    /// Pretty-print the JSON result. Requires --output-format json.
     #[arg(long, global = true)]
     pretty: bool,
+    /// Output rendering. Text is the default for terminal-oriented use.
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
+    /// JSON result contract. Requires --output-format json; V2 preserves the legacy shape.
+    #[arg(long, global = true, value_enum)]
+    output_schema: Option<OutputSchema>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputSchema {
+    V2,
+    V3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Text,
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,6 +74,18 @@ enum Command {
     Verify(VerifyArgs),
     /// Deep read-only TQBN health diagnostics; requires a stable cache view.
     Doctor,
+}
+
+impl Command {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Inventory => "inventory",
+            Self::Inspect(_) => "inspect",
+            Self::Fill(_) => "fill",
+            Self::Verify(_) => "verify",
+            Self::Doctor => "doctor",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -156,8 +190,8 @@ struct FillArgs {
     /// Report destination. Normal fills otherwise create a report under <cache-dir>/reports/.
     #[arg(long, value_name = "PATH")]
     report: Option<PathBuf>,
-    /// Progress rendering mode for this fill only.
-    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    /// Progress rendering mode for this fill; defaults to dynamic tty bars.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Tty)]
     progress: ProgressMode,
     /// Maximum active physical-symbol bars in TTY mode; zero keeps only the global bar.
     #[arg(long, value_name = "COUNT", default_value_t = 8)]
@@ -203,6 +237,42 @@ impl CliError {
             _ => 1,
         }
     }
+
+    fn code(&self) -> &'static str {
+        if self.is_cache_busy() {
+            "cache_busy"
+        } else {
+            match self {
+                Self::Usage(_) => "usage",
+                Self::Data(_) => "data_error",
+                Self::Sdk(_) => "sdk_error",
+                Self::Io(_) => "io_error",
+                Self::Json(_) => "json_error",
+            }
+        }
+    }
+
+    fn retryable(&self) -> bool {
+        self.is_cache_busy()
+            || matches!(
+                self,
+                Self::Io(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    )
+            )
+    }
+
+    fn is_cache_busy(&self) -> bool {
+        match self {
+            Self::Data(DataError::CacheBusy { .. }) => true,
+            Self::Sdk(tqsdk::Error::Data(data)) => {
+                matches!(&**data, DataError::CacheBusy { .. })
+            }
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for CliError {
@@ -244,6 +314,24 @@ impl From<serde_json::Error> for CliError {
 struct CommandOutcome {
     value: Value,
     exit_code: i32,
+}
+
+impl CommandOutcome {
+    fn command(&self) -> &str {
+        self.value
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    }
+
+    fn status(&self) -> &'static str {
+        match self.exit_code {
+            0 => "success",
+            1 => "incomplete",
+            130 => "interrupted",
+            _ => "error",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -506,23 +594,230 @@ fn current_open_trading_day() -> Result<NaiveDate, CliError> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let cli = Cli::parse();
+    let started_at = Instant::now();
+    let requested_output = output_preferences_from_process_args();
+    let parse_output_format = requested_output.output_format.unwrap_or(OutputFormat::Text);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            let _ = error.print();
+            std::process::exit(error.exit_code());
+        }
+        Err(error) => {
+            let exit_code = error.exit_code();
+            match parse_output_format {
+                OutputFormat::Text => {
+                    let _ = error.print();
+                }
+                OutputFormat::Json if requested_output.output_schema == Some(OutputSchema::V2) => {
+                    let _ = error.print();
+                }
+                OutputFormat::Json => {
+                    let cli_error = CliError::Usage(error.to_string());
+                    if let Err(write_error) = write_output(
+                        &error_envelope(None, &cli_error, exit_code, started_at),
+                        false,
+                    ) {
+                        eprintln!("tqsdk-cache: {write_error}");
+                    }
+                }
+            }
+            std::process::exit(exit_code);
+        }
+    };
     let pretty = cli.pretty;
+    let output_schema_is_explicit = cli.output_schema.is_some();
+    let output_schema = cli.output_schema.unwrap_or(OutputSchema::V3);
+    let command = cli.command.name();
+    if matches!(cli.output_format, OutputFormat::Text) && (pretty || output_schema_is_explicit) {
+        let error = CliError::Usage(
+            "--pretty and --output-schema require --output-format json".to_string(),
+        );
+        if let Err(write_error) = write_terminal_error_output(command, &error) {
+            eprintln!("tqsdk-cache: {write_error}");
+        }
+        std::process::exit(error.exit_code());
+    }
+    let output_format = cli.output_format;
     match run(cli).await {
         Ok(outcome) => {
-            if let Err(error) = write_output(&outcome.value, pretty) {
+            let exit_code = outcome.exit_code;
+            let write_result = match output_format {
+                OutputFormat::Text => write_terminal_output(&outcome, started_at),
+                OutputFormat::Json => match output_schema {
+                    OutputSchema::V2 => write_output(&outcome.value, pretty),
+                    OutputSchema::V3 => {
+                        let output = result_envelope(&outcome, started_at);
+                        write_output(&output, pretty)
+                    }
+                },
+            };
+            if let Err(error) = write_result {
                 eprintln!("tqsdk-cache: {error}");
                 std::process::exit(error.exit_code());
             }
-            if outcome.exit_code != 0 {
-                std::process::exit(outcome.exit_code);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
         }
         Err(error) => {
-            eprintln!("tqsdk-cache: {error}");
+            let write_error = match output_format {
+                OutputFormat::Text => write_terminal_error_output(command, &error),
+                OutputFormat::Json if matches!(output_schema, OutputSchema::V2) => {
+                    eprintln!("tqsdk-cache: {error}");
+                    Ok(())
+                }
+                OutputFormat::Json => write_output(
+                    &error_envelope(Some(command), &error, error.exit_code(), started_at),
+                    pretty,
+                ),
+            };
+            if let Err(write_error) = write_error {
+                eprintln!("tqsdk-cache: {write_error}");
+            }
             std::process::exit(error.exit_code());
         }
     }
+}
+
+#[derive(Default)]
+struct OutputPreferences {
+    output_format: Option<OutputFormat>,
+    output_schema: Option<OutputSchema>,
+}
+
+fn output_preferences_from_process_args() -> OutputPreferences {
+    let mut preferences = OutputPreferences::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--pretty" {
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--output-format=") {
+            preferences.output_format = parse_output_format(value);
+            continue;
+        }
+        if argument == "--output-format" {
+            preferences.output_format = args.next().as_deref().and_then(parse_output_format);
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--output-schema=") {
+            preferences.output_schema = parse_output_schema(value);
+            continue;
+        }
+        if argument == "--output-schema" {
+            preferences.output_schema = args.next().as_deref().and_then(parse_output_schema);
+        }
+    }
+    preferences
+}
+
+fn parse_output_format(value: &str) -> Option<OutputFormat> {
+    match value {
+        "json" => Some(OutputFormat::Json),
+        "text" => Some(OutputFormat::Text),
+        _ => None,
+    }
+}
+
+fn parse_output_schema(value: &str) -> Option<OutputSchema> {
+    match value {
+        "v2" => Some(OutputSchema::V2),
+        "v3" => Some(OutputSchema::V3),
+        _ => None,
+    }
+}
+
+fn write_terminal_output(outcome: &CommandOutcome, started_at: Instant) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    write_terminal_result(
+        &mut stdout,
+        &outcome.value,
+        outcome.status(),
+        outcome.exit_code,
+        elapsed_millis(started_at),
+    )?;
+    Ok(())
+}
+
+fn write_terminal_error_output(command: &str, error: &CliError) -> Result<(), CliError> {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    write_terminal_error(
+        &mut stderr,
+        command,
+        &error.to_string(),
+        error.exit_code(),
+        error.retryable(),
+    )?;
+    Ok(())
+}
+
+const RESULT_SCHEMA_VERSION: u8 = 3;
+const RESULT_KIND: &str = "tqsdk-cache.result";
+
+fn result_envelope(outcome: &CommandOutcome, started_at: Instant) -> Value {
+    json!({
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "kind": RESULT_KIND,
+        "command": outcome.command(),
+        "status": outcome.status(),
+        "exit_code": outcome.exit_code,
+        "generated_at": result_generated_at(),
+        "duration_ms": elapsed_millis(started_at),
+        "tool": {
+            "name": "tqsdk-cache",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "warnings": [],
+        "result": &outcome.value,
+        "error": Value::Null,
+    })
+}
+
+fn error_envelope(
+    command: Option<&str>,
+    error: &CliError,
+    exit_code: i32,
+    started_at: Instant,
+) -> Value {
+    json!({
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "kind": RESULT_KIND,
+        "command": command.unwrap_or("unknown"),
+        "status": "error",
+        "exit_code": exit_code,
+        "generated_at": result_generated_at(),
+        "duration_ms": elapsed_millis(started_at),
+        "tool": {
+            "name": "tqsdk-cache",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "warnings": [],
+        "result": {},
+        "error": {
+            "code": error.code(),
+            "message": error.to_string(),
+            "retryable": error.retryable(),
+        },
+    })
+}
+
+fn result_generated_at() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
@@ -691,11 +986,17 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
     let calendar = match calendar_task.await {
         Ok(Ok(calendar)) => calendar,
         Ok(Err(error)) => {
-            progress_session.finish("fill failed; calendar preparation did not complete");
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "fill failed; calendar preparation did not complete",
+            );
             return Err(error);
         }
         Err(error) => {
-            progress_session.finish("fill failed; calendar planning task did not complete");
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "fill failed; calendar planning task did not complete",
+            );
             return Err(CliError::Usage(format!(
                 "calendar planning task failed: {error}"
             )));
@@ -704,7 +1005,7 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
 
     if cancellation.is_cancelled() {
         let summary = "interrupted; partial accepted rows were flushed without coverage commit";
-        progress_session.finish(summary);
+        progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
         let inventory = cache.fast_inventory()?;
         return Ok(CommandOutcome {
             value: json!({
@@ -721,7 +1022,10 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
     let warmup = match warmup {
         Ok(warmup) => warmup,
         Err(error) => {
-            progress_session.finish("fill failed; strict local coverage was not committed");
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "fill failed; strict local coverage was not committed",
+            );
             return Err(error.into());
         }
     };
@@ -735,7 +1039,10 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         &calendar,
     )?;
     reporter.final_report(&report);
-    progress_session.finish("fill complete; strict local coverage verified");
+    progress_session.finish(
+        ProgressTerminalStatus::Complete,
+        "fill complete; strict local coverage verified",
+    );
     let report_path = args
         .report
         .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
@@ -1124,8 +1431,9 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CalendarMode, FillDaysArgs, resolve_fill_window};
+    use super::{CalendarMode, Cli, Command, FillDaysArgs, ProgressMode, resolve_fill_window};
     use chrono::NaiveDate;
+    use clap::Parser;
     use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
     use tqsdk_data::TradingCalendarRow;
 
@@ -1247,5 +1555,25 @@ mod tests {
         assert!(!resolved.calendar.persist_after_plan);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fill_progress_defaults_to_tty() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--start-day",
+            "2026-07-20",
+            "--end-day",
+            "2026-07-21",
+        ])
+        .unwrap();
+
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        assert_eq!(args.progress, ProgressMode::Tty);
     }
 }

@@ -224,7 +224,7 @@ tqsdk
 职责：
 
 - 可选 canonical daily TQBN tick cache operator CLI
-- JSON-only stdout contract，stderr progress，closed-day fill、report-bound CacheOnly verify、
+- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、report-bound CacheOnly verify、
   fast inventory 与 deep doctor
 - 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows
   而不提交 coverage
@@ -236,7 +236,7 @@ tqsdk
 
 设计原因：
 
-- 固定 cache root 的 batch 运维需要稳定 shell/JSON contract，但不能把运维进程、网络调度或
+- 固定 cache root 的 batch 运维以终端摘要为默认合同，脚本可显式请求 JSON；但不能把运维进程、网络调度或
   storage 语义塞回默认 SDK hot path。
 - 该 binary 不在 Cargo default-members；普通策略用 `.backtest(...)`、`.warmup()` 和
   `MarketCachePolicy`，不会因它增加依赖或运行成本。
