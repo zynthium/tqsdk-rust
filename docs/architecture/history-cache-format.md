@@ -23,10 +23,12 @@ record stream；store layout 按交易日拆分，避免扩展回填区间时重
 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
 也不提供兼容读取或迁移 store。
 
-默认构建启用 Cargo feature `tqbn-zstd`，writer 会对 records block 使用 zstd level 1 做
-per-block 压缩，且只有压缩后 payload 更小时才写入压缩 block；metadata prefix、file
-identity、schema version 和 public facade 均不改变。`--no-default-features` 可关闭该支持，
-此时 writer 写未压缩 blocks。
+默认构建启用 Cargo feature `tqbn-zstd`。hot append writer 对 records block 使用 zstd level 1；
+append-log compaction 重写 records block 时使用 zstd level 3。两种路径都只有压缩后 payload
+更小时才写入压缩 block；metadata prefix、file identity、schema version 和 public facade 均不改变。
+`--no-default-features` 可关闭该支持，此时 writer 写未压缩 blocks。
+market-data records block 的未压缩 payload 目标上限为 8 MiB。该粒度避免日分区只形成一个超大
+zstd frame，同时把 frame/header 开销和压缩率损失控制在小范围；它不是新的 public tuning knob。
 
 ## Public Interface
 
@@ -40,6 +42,8 @@ TQBN 的 record struct、metadata struct 和 codec helper 都是 `tqsdk-data` �
 crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN record；对外只暴露 typed
 history series、coverage、scan report、purge report、backtest tick cache 和 live tick
 row writer 语义。
+`LiveTickCacheWriter::push_ticks(...)` 会合并连续单 tick 调用，`flush()` 显式提交不足一批的尾部；
+这只改变纯 writer 的批写时机，不把 session、timer task 或后台线程下沉到 data crate。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
 symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
 
@@ -86,12 +90,25 @@ metadata layout 和 codec helper 不进入 public API。
 zstd block 校验压缩后的 bytes；reader 校验 checksum 后再按 flags 解码 records。未启用
 `tqbn-zstd` 的 reader 遇到 zstd block 必须返回明确的格式错误，不能静默返回坏数据。
 
+### Records Range Index
+
+新写入和 append-log compaction 会在每个 market-data records block 后紧跟一个 crate-internal
+`TQRI` `Index` block。entry 记录前一个 records block 的 offset 和其行时间范围 `[start, end)`；
+records block 先写、index 后写，异常中断最多留下无索引 block。旧 reader 会忽略 `Index` block，
+新 reader 遇到旧文件、缺失索引、offset/range 不合法或不认识的 index 时，对该 records block
+回退完整解码，因此 format id 和 schema version 保持不变。
+
+范围 reader 顺序读取小型 block header/index，只读取、校验并解压与请求范围相交的 market-data
+payload。metadata、coverage 和 index 自身仍校验；未知 flags 仍必须拒绝。`scan()`、`diagnose()`、
+compaction 等完整性路径继续解码整个文件，因此范围读取跳过无关 payload 不会替代深度诊断。
+
 ### Coverage Index Chain
 
 新建日分区和 append-log compaction 会写入 crate-internal `Index` block 链：文件首个 block 是固定
 `TQCI` root，之后每个 coverage record block 后紧跟一个 index block。每个 entry 指向其紧邻的、未压缩的
 固定宽度 coverage block，并记录前一个 index offset 与同一 `[start, end)` range。它不改变 format id 或
-schema version，普通 record reader 可以忽略 `Index` block。
+schema version，普通 record reader 可以忽略 `Index` block。coverage chain 与 `TQRI` records index
+可以交错存在；coverage tail 查找会忽略合法 `TQRI` entry。
 
 coverage inspection 只有在文件尾是完整 `TQCI` 链、链最终回到首 block root，且每个引用 block 的
 type、offset、checksum、coverage record 和 range 都匹配时才走小型索引读取。旧日文件、覆盖写入中断、尾部
@@ -126,6 +143,7 @@ TQBN reader 的兼容规则是：
 4. 未知 record type 一律按 `length_words * 4` 跳过，不影响同一文件内后续已知 record 的读取。
 
 5. 已知 block flags 按 feature-gated path 处理；未知 block flags 必须拒绝。
+6. `TQRI` 是可选加速结构；缺失或无效时必须回退解码对应 records block，不能静默漏行。
 
 这些规则允许后续 record 尾部追加字段，但不允许 silent truncation。任何需要读取旧 layout 的逻辑都应
 集中在 compat module 中，不能散落在 normal decode path。

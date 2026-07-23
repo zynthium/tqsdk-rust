@@ -20,6 +20,24 @@ const BLOCK_HEADER_LEN: usize = TQBN_BLOCK_MAGIC.len() + 1 + 3 + 8 + 8;
 pub(super) const TQBN_BLOCK_FLAG_ZSTD: u8 = 0x01;
 #[cfg(feature = "tqbn-zstd")]
 const TQBN_ZSTD_LEVEL: i32 = 1;
+#[cfg(feature = "tqbn-zstd")]
+const TQBN_COMPACTION_ZSTD_LEVEL: i32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TqbnRecordsBlockCompression {
+    Hot,
+    Compaction,
+}
+
+impl TqbnRecordsBlockCompression {
+    #[cfg(feature = "tqbn-zstd")]
+    const fn zstd_level(self) -> i32 {
+        match self {
+            Self::Hot => TQBN_ZSTD_LEVEL,
+            Self::Compaction => TQBN_COMPACTION_ZSTD_LEVEL,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TqbnFilePrefix {
@@ -149,12 +167,24 @@ pub(super) fn encode_block(block_type: TqbnBlockType, records: &[u8]) -> Vec<u8>
 }
 
 pub(super) fn encode_records_block(records: &[u8]) -> Result<Vec<u8>> {
+    encode_records_block_with_compression(records, TqbnRecordsBlockCompression::Hot)
+}
+
+pub(super) fn encode_compacted_records_block(records: &[u8]) -> Result<Vec<u8>> {
+    encode_records_block_with_compression(records, TqbnRecordsBlockCompression::Compaction)
+}
+
+fn encode_records_block_with_compression(
+    records: &[u8],
+    compression: TqbnRecordsBlockCompression,
+) -> Result<Vec<u8>> {
     #[cfg(feature = "tqbn-zstd")]
     {
         if !records.is_empty() {
-            let compressed = zstd::bulk::compress(records, TQBN_ZSTD_LEVEL).map_err(|error| {
-                DataError::InvalidResponse(format!("TQBN zstd compression failed: {error}"))
-            })?;
+            let compressed =
+                zstd::bulk::compress(records, compression.zstd_level()).map_err(|error| {
+                    DataError::InvalidResponse(format!("TQBN zstd compression failed: {error}"))
+                })?;
             if compressed.len() < records.len() {
                 return Ok(encode_block_with_flags(
                     TqbnBlockType::Records,
@@ -164,6 +194,8 @@ pub(super) fn encode_records_block(records: &[u8]) -> Result<Vec<u8>> {
             }
         }
     }
+    #[cfg(not(feature = "tqbn-zstd"))]
+    let _ = compression;
     Ok(encode_block(TqbnBlockType::Records, records))
 }
 
@@ -248,18 +280,9 @@ pub(super) fn decode_block_payload(
     payload: Vec<u8>,
     max_decoded_payload_bytes: usize,
 ) -> Result<Vec<u8>> {
-    if flags & !TQBN_BLOCK_FLAG_ZSTD != 0 {
-        return Err(DataError::InvalidResponse(format!(
-            "TQBN block flags {flags:#04x} contain unsupported bits"
-        )));
-    }
+    validate_block_flags(block_type, flags)?;
     if flags & TQBN_BLOCK_FLAG_ZSTD == 0 {
         return Ok(payload);
-    }
-    if block_type != TqbnBlockType::Records as u8 {
-        return Err(DataError::InvalidResponse(
-            "TQBN zstd compression is only supported for records blocks".to_string(),
-        ));
     }
 
     #[cfg(feature = "tqbn-zstd")]
@@ -273,6 +296,23 @@ pub(super) fn decode_block_payload(
             "TQBN zstd-compressed block requires the tqbn-zstd feature".to_string(),
         ))
     }
+}
+
+pub(super) fn validate_block_flags(block_type: u8, flags: u8) -> Result<()> {
+    if flags & !TQBN_BLOCK_FLAG_ZSTD != 0 {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN block flags {flags:#04x} contain unsupported bits"
+        )));
+    }
+    if flags & TQBN_BLOCK_FLAG_ZSTD == 0 {
+        return Ok(());
+    }
+    if block_type != TqbnBlockType::Records as u8 {
+        return Err(DataError::InvalidResponse(
+            "TQBN zstd compression is only supported for records blocks".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "tqbn-zstd")]
@@ -737,6 +777,22 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].block_type, TqbnBlockType::Records);
         assert_eq!(decoded[0].records, records.as_slice());
+    }
+
+    #[cfg(feature = "tqbn-zstd")]
+    #[test]
+    fn compacted_records_encoder_uses_level_three() {
+        assert_eq!(TqbnRecordsBlockCompression::Compaction.zstd_level(), 3);
+        assert!(
+            TqbnRecordsBlockCompression::Compaction.zstd_level()
+                > TqbnRecordsBlockCompression::Hot.zstd_level()
+        );
+
+        let records = vec![7_u8; 16 * 1024];
+        let encoded = encode_compacted_records_block(&records).unwrap();
+
+        assert_eq!(encoded[5] & TQBN_BLOCK_FLAG_ZSTD, TQBN_BLOCK_FLAG_ZSTD);
+        assert_eq!(decode_blocks(&encoded).unwrap()[0].records, records);
     }
 
     #[test]

@@ -335,8 +335,9 @@ partial rows 但不提交 coverage，下一轮 fill 自动补洞。完整 CLI �
 `docs/architecture/backtest-tick-cache-cli.md`。
 
 已有 tick rows 的上层 host 或 relay-like 进程可以下钻到 `tqsdk-data` 的纯 writer：
-`LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。它只追加 rows 并按连续 tick id
-推进 coverage，不负责 session、订阅或后台运行。
+`LiveTickCacheWriter::new(cache).push_ticks(symbol, rows)`。连续单 tick push 会有界聚合；需要在
+检查 coverage 或结束 host 前调用 `flush()` 提交不足一批的尾部。它只追加 rows 并按连续 tick id
+推进 coverage，不负责 session、订阅、timer task 或后台运行。
 
 泛化 live event/K 线/commit 持久化、审计 WAL、跨进程 queue 或旧 Python mmap history
 bridge 仍属于调用方 sidecar；`HistorySeriesCache` 保持 offline

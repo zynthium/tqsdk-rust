@@ -18,7 +18,7 @@
 //! - `DataClient::from_session(...).get_tick_data_series(...)`
 //! - `KlineDataSeries::integrity_report()` / `TickDataSeries::integrity_report()`
 //! - `HistorySeriesCache::open_tick_data_series_reader(...)`
-//! - `LiveTickCacheWriter::new(...).push_ticks(...)`
+//! - `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
 //! - `DataClient::from_session(...).kline_data_download(...)`
 //! - `DataClient::from_session(...).tick_data_download(...)`
 //! - `KlineDataDownload::collect_remaining()`

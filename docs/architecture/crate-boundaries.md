@@ -319,13 +319,15 @@ sink、WAL、journal 或 cache writer。
 - `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format；
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；embedded coverage commit 和 tick-only `BacktestTickCache`
+  record lengths；8 MiB 目标 records block 与 crate-internal 时间索引支持按范围选择性解压，
+  旧/不匹配索引逐 block 回退；embedded coverage commit 和 tick-only `BacktestTickCache`
 - TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 会执行 append-log compaction，
   合并重复 rows 并保留 last-write-wins 语义；
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
-  tick id 推进 coverage，不拥有 session、订阅、wait loop 或后台进程
+  tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有
+  session、订阅、wait loop、timer task 或后台进程
 - cache inspect / purge / compact 运维 API：输出 backend、文件路径、coverage/missing ranges，并按
   `(symbol, tick)` 文件粒度清除或合并回测 tick 缓存
 - fast filesystem inventory、deep TQBN diagnostic、read-only cache opening，以及 root-scoped
@@ -496,8 +498,11 @@ sink、WAL、journal 或 cache writer。
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
-- 默认 `tqbn-zstd` feature 只压缩 TQBN internal records block；`tqsdk-data` 是实现点，
+- 默认 `tqbn-zstd` feature 对 hot append 的 TQBN internal records block 使用 zstd level 1，
+  对 append-log compaction 重写的 records block 使用 zstd level 3；`tqsdk-data` 是实现点，
   `tqsdk-task` / `tqsdk` 仅做同名 feature 转发，`--no-default-features` 可关闭
+- market-data records block 采用 8 MiB 目标 payload 和 crate-internal 时间索引，在压缩率与
+  小范围读取解压量之间取平衡；不新增用户可选 store/index API
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store；旧 Python-compatible
   binary/mmap cache 已废弃
 - 回测 tick 持久缓存、coverage 检查和 shared universe selector

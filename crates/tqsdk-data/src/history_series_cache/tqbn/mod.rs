@@ -29,8 +29,8 @@ use tqsdk_core::{Kline, Tick};
 use codec::{
     DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_block_payload,
     decode_file_prefix, decode_kline_record, decode_one_record, decode_tick1_record,
-    decode_tick5_record, encode_block, encode_file_prefix, encode_kline_record,
-    encode_records_block, encode_tick_record,
+    decode_tick5_record, encode_block, encode_compacted_records_block, encode_file_prefix,
+    encode_kline_record, encode_records_block, encode_tick_record, validate_block_flags,
 };
 use format::{
     FIXED_AMOUNT_SCALE, FIXED_PRICE_SCALE, TqbnCoverageRecordV1, TqbnKlineRecordV1, TqbnRType,
@@ -51,11 +51,15 @@ const TQBN_PREFIX_HEADER_LEN: usize = 4 + 1 + 4 + 4 + 8;
 const MAX_TQBN_PREFIX_METADATA_LEN: usize = 64 * 1024;
 const TQBN_BLOCK_HEADER_LEN: usize = 4 + 1 + 3 + 8 + 8;
 const MAX_TQBN_BLOCK_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const TQBN_TARGET_RECORDS_BLOCK_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 const TQBN_COVERAGE_INDEX_MAGIC: [u8; 4] = *b"TQCI";
 const TQBN_COVERAGE_INDEX_VERSION: u8 = 1;
 const TQBN_COVERAGE_INDEX_ROOT_FLAG: u8 = 0x01;
 const TQBN_COVERAGE_INDEX_NO_OFFSET: u64 = u64::MAX;
 const TQBN_COVERAGE_INDEX_PAYLOAD_LEN: usize = 40;
+const TQBN_RECORDS_INDEX_MAGIC: [u8; 4] = *b"TQRI";
+const TQBN_RECORDS_INDEX_VERSION: u8 = 1;
+const TQBN_RECORDS_INDEX_PAYLOAD_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
 pub(super) struct TqbnHistoryStore {
@@ -105,12 +109,27 @@ struct TqbnReader {
 type TqbnRowIdRange = Option<(i64, i64)>;
 type TqbnRowDatetimeRange = Option<(i64, i64)>;
 type TqbnAppendReport = (usize, TqbnRowIdRange, TqbnRowDatetimeRange);
+type TqbnRecordsBlockEncoder = fn(&[u8]) -> Result<Vec<u8>>;
+
+#[derive(Debug, Default)]
+struct PendingTqbnRecordsBlock {
+    records: Vec<u8>,
+    range_start_ns: Option<i64>,
+    range_end_ns: Option<i64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TqbnCoverageIndexV1 {
     flags: u8,
     previous_index_offset: u64,
     coverage_block_offset: u64,
+    range_start_ns: i64,
+    range_end_ns: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TqbnRecordsIndexV1 {
+    records_block_offset: u64,
     range_start_ns: i64,
     range_end_ns: i64,
 }
@@ -812,16 +831,13 @@ impl HistorySeriesReader for TqbnReader {
             }
             let path = &self.paths[self.path_index];
             self.path_index += 1;
-            let parsed = parse_tqbn_series_file(path, self.symbol.as_str(), self.kind)?;
-            if let Some(error) = parsed.error {
-                return Err(DataError::InvalidResponse(error));
-            }
-            self.rows = rows_for_request(
-                parsed.state.rows,
+            self.rows = parse_tqbn_rows_for_range(
+                path,
+                self.symbol.as_str(),
                 self.kind,
                 self.range_start_ns,
                 self.range_end_ns,
-            )
+            )?
             .into_iter();
         }
     }
@@ -958,16 +974,37 @@ fn append_rows_block(
     file: &mut File,
     segment: &HistorySeriesWriteSegment<'_>,
 ) -> Result<TqbnAppendReport> {
-    let mut records = Vec::new();
+    append_rows_block_with_encoder(file, segment, encode_records_block)
+}
+
+fn append_compacted_rows_block(
+    file: &mut File,
+    segment: &HistorySeriesWriteSegment<'_>,
+) -> Result<TqbnAppendReport> {
+    append_rows_block_with_encoder(file, segment, encode_compacted_records_block)
+}
+
+fn append_rows_block_with_encoder(
+    file: &mut File,
+    segment: &HistorySeriesWriteSegment<'_>,
+    encode_records: TqbnRecordsBlockEncoder,
+) -> Result<TqbnAppendReport> {
+    let mut block = PendingTqbnRecordsBlock::default();
     let mut record = Vec::new();
     match (segment.kind, &segment.rows) {
         (HistorySeriesKind::Kline { duration_ns }, HistorySeriesWriteRows::Klines(rows)) => {
             for row in *rows {
                 record.clear();
                 write_kline_record_bytes(&mut record, &encode_kline_record(row)?)?;
-                append_record_to_blocks(file, &mut records, &record)?;
+                append_indexed_record_to_blocks(
+                    file,
+                    &mut block,
+                    &record,
+                    row.datetime,
+                    encode_records,
+                )?;
             }
-            flush_records_block(file, &mut records)?;
+            flush_indexed_records_block(file, &mut block, encode_records)?;
             Ok((
                 rows.len(),
                 id_range(rows.iter().map(|row| row.id))?,
@@ -986,9 +1023,15 @@ fn append_rows_block(
                         write_tick5_record_bytes(&mut record, &encoded)?;
                     }
                 }
-                append_record_to_blocks(file, &mut records, &record)?;
+                append_indexed_record_to_blocks(
+                    file,
+                    &mut block,
+                    &record,
+                    row.datetime,
+                    encode_records,
+                )?;
             }
-            flush_records_block(file, &mut records)?;
+            flush_indexed_records_block(file, &mut block, encode_records)?;
             Ok((
                 rows.len(),
                 id_range(rows.iter().map(|row| row.id))?,
@@ -1004,19 +1047,101 @@ fn append_rows_block(
     }
 }
 
-fn append_record_to_blocks(
-    writer: &mut impl Write,
-    records: &mut Vec<u8>,
+fn append_indexed_record_to_blocks(
+    file: &mut File,
+    block: &mut PendingTqbnRecordsBlock,
     record: &[u8],
+    datetime_ns: i64,
+    encode_records: TqbnRecordsBlockEncoder,
 ) -> Result<()> {
-    append_record_to_blocks_with_limit(writer, records, record, MAX_TQBN_BLOCK_PAYLOAD_BYTES)
+    if record.len() > MAX_TQBN_BLOCK_PAYLOAD_BYTES {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN record length {} exceeds max block payload {MAX_TQBN_BLOCK_PAYLOAD_BYTES}",
+            record.len()
+        )));
+    }
+    let next_len = block
+        .records
+        .len()
+        .checked_add(record.len())
+        .ok_or_else(|| {
+            DataError::InvalidResponse("TQBN block records length overflow".to_string())
+        })?;
+    if !block.records.is_empty() && next_len > TQBN_TARGET_RECORDS_BLOCK_PAYLOAD_BYTES {
+        flush_indexed_records_block(file, block, encode_records)?;
+    }
+
+    let range_end_ns = datetime_ns.checked_add(1).ok_or_else(|| {
+        DataError::InvalidResponse("TQBN records index datetime overflow".to_string())
+    })?;
+    block.range_start_ns = Some(
+        block
+            .range_start_ns
+            .map_or(datetime_ns, |current| current.min(datetime_ns)),
+    );
+    block.range_end_ns = Some(
+        block
+            .range_end_ns
+            .map_or(range_end_ns, |current| current.max(range_end_ns)),
+    );
+    block.records.extend_from_slice(record);
+    Ok(())
 }
 
+fn flush_indexed_records_block(
+    file: &mut File,
+    block: &mut PendingTqbnRecordsBlock,
+    encode_records: TqbnRecordsBlockEncoder,
+) -> Result<()> {
+    if block.records.is_empty() {
+        return Ok(());
+    }
+    let range_start_ns = block.range_start_ns.ok_or(DataError::InvalidState(
+        "TQBN records block start is missing",
+    ))?;
+    let range_end_ns = block
+        .range_end_ns
+        .ok_or(DataError::InvalidState("TQBN records block end is missing"))?;
+    let encoded = encode_records(&block.records)?;
+    let records_block_offset = file.seek(SeekFrom::End(0))?;
+    file.write_all(&encoded)?;
+    append_tqbn_records_index(
+        file,
+        TqbnRecordsIndexV1 {
+            records_block_offset,
+            range_start_ns,
+            range_end_ns,
+        },
+    )?;
+    block.records.clear();
+    block.range_start_ns = None;
+    block.range_end_ns = None;
+    Ok(())
+}
+
+#[cfg(test)]
 fn append_record_to_blocks_with_limit(
     writer: &mut impl Write,
     records: &mut Vec<u8>,
     record: &[u8],
     max_payload_bytes: usize,
+) -> Result<()> {
+    append_record_to_blocks_with_limit_and_encoder(
+        writer,
+        records,
+        record,
+        max_payload_bytes,
+        encode_records_block,
+    )
+}
+
+#[cfg(test)]
+fn append_record_to_blocks_with_limit_and_encoder(
+    writer: &mut impl Write,
+    records: &mut Vec<u8>,
+    record: &[u8],
+    max_payload_bytes: usize,
+    encode_records: TqbnRecordsBlockEncoder,
 ) -> Result<()> {
     if record.len() > max_payload_bytes {
         return Err(DataError::InvalidResponse(format!(
@@ -1028,18 +1153,43 @@ fn append_record_to_blocks_with_limit(
         DataError::InvalidResponse("TQBN block records length overflow".to_string())
     })?;
     if next_len > max_payload_bytes {
-        flush_records_block(writer, records)?;
+        flush_records_block_with_encoder(writer, records, encode_records)?;
     }
     records.extend_from_slice(record);
     Ok(())
 }
 
+#[cfg(test)]
 fn flush_records_block(writer: &mut impl Write, records: &mut Vec<u8>) -> Result<()> {
+    flush_records_block_with_encoder(writer, records, encode_records_block)
+}
+
+#[cfg(test)]
+fn flush_records_block_with_encoder(
+    writer: &mut impl Write,
+    records: &mut Vec<u8>,
+    encode_records: TqbnRecordsBlockEncoder,
+) -> Result<()> {
     if !records.is_empty() {
-        writer.write_all(&encode_records_block(records)?)?;
+        writer.write_all(&encode_records(records)?)?;
         records.clear();
     }
     Ok(())
+}
+
+fn append_tqbn_records_index(file: &mut File, index: TqbnRecordsIndexV1) -> Result<u64> {
+    let index_offset = file.seek(SeekFrom::End(0))?;
+    let mut payload = Vec::with_capacity(TQBN_RECORDS_INDEX_PAYLOAD_LEN);
+    payload.extend_from_slice(&TQBN_RECORDS_INDEX_MAGIC);
+    payload.push(TQBN_RECORDS_INDEX_VERSION);
+    payload.push(0);
+    payload.extend_from_slice(&[0, 0]);
+    payload.extend_from_slice(&index.records_block_offset.to_le_bytes());
+    payload.extend_from_slice(&index.range_start_ns.to_le_bytes());
+    payload.extend_from_slice(&index.range_end_ns.to_le_bytes());
+    debug_assert_eq!(payload.len(), TQBN_RECORDS_INDEX_PAYLOAD_LEN);
+    file.write_all(&encode_block(TqbnBlockType::Index, &payload))?;
+    Ok(index_offset)
 }
 
 fn append_coverage_block(
@@ -1153,6 +1303,30 @@ fn parse_tqbn_series_file(
         }
     }
     Ok(parsed)
+}
+
+fn parse_tqbn_rows_for_range(
+    path: &Path,
+    symbol: &str,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+) -> Result<Vec<HistorySeriesRow>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut state = TqbnSeriesState::default();
+    decode_blocks_streaming_for_range(&mut file, kind, range_start_ns, range_end_ns, &mut state)?;
+    Ok(rows_for_request(
+        state.rows,
+        kind,
+        range_start_ns,
+        range_end_ns,
+    ))
 }
 
 fn parse_tqbn_coverage_file(
@@ -1278,7 +1452,7 @@ fn find_latest_tqbn_coverage_index(
             };
             if decode_tqbn_coverage_index(&payload).is_some() {
                 latest = Some(offset);
-            } else {
+            } else if decode_tqbn_records_index(&payload).is_none() {
                 file.seek(SeekFrom::End(0))?;
                 return Ok(None);
             }
@@ -1358,6 +1532,22 @@ fn decode_tqbn_coverage_index(payload: &[u8]) -> Option<TqbnCoverageIndexV1> {
         range_start_ns: i64::from_le_bytes(payload[24..32].try_into().ok()?),
         range_end_ns: i64::from_le_bytes(payload[32..40].try_into().ok()?),
     })
+}
+
+fn decode_tqbn_records_index(payload: &[u8]) -> Option<TqbnRecordsIndexV1> {
+    if payload.len() != TQBN_RECORDS_INDEX_PAYLOAD_LEN
+        || payload[0..4] != TQBN_RECORDS_INDEX_MAGIC
+        || payload[4] != TQBN_RECORDS_INDEX_VERSION
+        || payload[5..8] != [0, 0, 0]
+    {
+        return None;
+    }
+    let index = TqbnRecordsIndexV1 {
+        records_block_offset: u64::from_le_bytes(payload[8..16].try_into().ok()?),
+        range_start_ns: i64::from_le_bytes(payload[16..24].try_into().ok()?),
+        range_end_ns: i64::from_le_bytes(payload[24..32].try_into().ok()?),
+    };
+    (index.range_start_ns < index.range_end_ns).then_some(index)
 }
 
 fn read_and_validate_tqbn_prefix(
@@ -1487,6 +1677,88 @@ fn decode_blocks_streaming(
     state: &mut TqbnSeriesState,
 ) -> Result<()> {
     decode_blocks_streaming_with(file, |records| decode_records_block(records, kind, state))
+}
+
+fn decode_blocks_streaming_for_range(
+    file: &mut File,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    state: &mut TqbnSeriesState,
+) -> Result<()> {
+    let file_len = file.metadata()?.len();
+    let mut offset = file.stream_position()?;
+    while offset < file_len {
+        let descriptor = read_tqbn_block_descriptor_at(file, offset, file_len)?;
+        validate_block_flags(descriptor.block_type, descriptor.flags)?;
+        match descriptor.block_type {
+            value if value == TqbnBlockType::Records as u8 => {
+                if let Some((index_descriptor, index)) =
+                    read_following_tqbn_records_index(file, offset, descriptor, file_len)?
+                {
+                    if index.range_start_ns < range_end_ns && range_start_ns < index.range_end_ns {
+                        let records = read_decoded_tqbn_block_payload(file, descriptor)?;
+                        decode_records_block(&records, kind, state)?;
+                    }
+                    offset = index_descriptor.end_offset;
+                } else {
+                    let records = read_decoded_tqbn_block_payload(file, descriptor)?;
+                    decode_records_block(&records, kind, state)?;
+                    offset = descriptor.end_offset;
+                }
+            }
+            value
+                if value == TqbnBlockType::Metadata as u8
+                    || value == TqbnBlockType::Index as u8 =>
+            {
+                let _ = read_decoded_tqbn_block_payload(file, descriptor)?;
+                offset = descriptor.end_offset;
+            }
+            value => {
+                return Err(DataError::InvalidResponse(format!(
+                    "TQBN block type {value} is unknown"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_following_tqbn_records_index(
+    file: &mut File,
+    records_block_offset: u64,
+    records_descriptor: TqbnBlockDescriptor,
+    file_len: u64,
+) -> Result<Option<(TqbnBlockDescriptor, TqbnRecordsIndexV1)>> {
+    if records_descriptor.end_offset >= file_len {
+        return Ok(None);
+    }
+    let index_descriptor =
+        read_tqbn_block_descriptor_at(file, records_descriptor.end_offset, file_len)?;
+    if index_descriptor.block_type != TqbnBlockType::Index as u8 {
+        return Ok(None);
+    }
+    let payload = read_decoded_tqbn_block_payload(file, index_descriptor)?;
+    let Some(index) = decode_tqbn_records_index(&payload) else {
+        return Ok(None);
+    };
+    if index.records_block_offset != records_block_offset {
+        return Ok(None);
+    }
+    Ok(Some((index_descriptor, index)))
+}
+
+fn read_decoded_tqbn_block_payload(
+    file: &mut File,
+    descriptor: TqbnBlockDescriptor,
+) -> Result<Vec<u8>> {
+    let payload = read_tqbn_block_payload(file, descriptor)?;
+    decode_block_payload(
+        descriptor.block_type,
+        descriptor.flags,
+        payload,
+        MAX_TQBN_BLOCK_PAYLOAD_BYTES,
+    )
 }
 
 fn decode_blocks_streaming_with(
@@ -2151,7 +2423,7 @@ fn write_compacted_rows_block(
                     HistorySeriesRow::Tick(_) => None,
                 })
                 .collect::<Vec<_>>();
-            append_rows_block(
+            append_compacted_rows_block(
                 file,
                 &HistorySeriesWriteSegment {
                     symbol,
@@ -2169,7 +2441,7 @@ fn write_compacted_rows_block(
                     HistorySeriesRow::Kline(_) => None,
                 })
                 .collect::<Vec<_>>();
-            append_rows_block(
+            append_compacted_rows_block(
                 file,
                 &HistorySeriesWriteSegment {
                     symbol,
@@ -2706,7 +2978,7 @@ impl<'a> RecordReader<'a> {
 #[cfg(test)]
 mod tests {
     use std::fs::{File, OpenOptions};
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2724,9 +2996,9 @@ mod tests {
     use super::{
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
         coverage_record, encode_metadata, history_rows_are_strictly_increasing,
-        parse_tqbn_coverage_file, read_and_validate_tqbn_prefix, read_tqbn_coverage_index_at,
-        rows_for_request, tick_level_depth, try_parse_tqbn_coverage_index_chain,
-        write_coverage_record_bytes,
+        parse_tqbn_coverage_file, read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at,
+        read_tqbn_coverage_index_at, rows_for_request, tick_level_depth,
+        try_parse_tqbn_coverage_index_chain, write_coverage_record_bytes,
     };
 
     const SYMBOL: &str = "SHFE.rb2601";
@@ -2766,6 +3038,100 @@ mod tests {
             .unwrap();
         assert_eq!(series.rows()[0].last_price, 618.5);
         assert_eq!(series.rows()[0].ask_price5, 623.5);
+    }
+
+    #[test]
+    fn tqbn_range_reader_skips_out_of_range_indexed_records_blocks() {
+        let cache = tqbn_cache("range_reader_skips_unrelated_block");
+        cache
+            .write_tick_range(SYMBOL, 1_000, 2_000, &[tick5(1, 1_000, 618.5, 623.5)])
+            .unwrap();
+        cache
+            .write_tick_range(SYMBOL, 3_000, 4_000, &[tick5(2, 3_000, 619.5, 624.5)])
+            .unwrap();
+
+        let path = cache
+            .root_dir()
+            .join("series")
+            .join("19700101")
+            .join("tick")
+            .join("SHFE.rb2601.tqbn");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let (_, first_block_offset) =
+            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        let mut offset = first_block_offset as u64;
+        let payload_offset = loop {
+            let descriptor = read_tqbn_block_descriptor_at(&mut file, offset, file_len).unwrap();
+            if descriptor.block_type == TqbnBlockType::Records as u8 {
+                break descriptor.payload_offset;
+            }
+            offset = descriptor.end_offset;
+        };
+        file.seek(SeekFrom::Start(payload_offset)).unwrap();
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::Start(payload_offset)).unwrap();
+        file.write_all(&[byte[0] ^ 0xff]).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        let series = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 3_000, 4_000))
+            .unwrap();
+
+        assert_eq!(series.rows().len(), 1);
+        assert_eq!(series.rows()[0].id, 2);
+    }
+
+    #[test]
+    fn tqbn_range_reader_rejects_unknown_flags_in_skipped_block() {
+        let cache = tqbn_cache("range_reader_validates_skipped_block_flags");
+        cache
+            .write_tick_range(SYMBOL, 1_000, 2_000, &[tick5(1, 1_000, 618.5, 623.5)])
+            .unwrap();
+        cache
+            .write_tick_range(SYMBOL, 3_000, 4_000, &[tick5(2, 3_000, 619.5, 624.5)])
+            .unwrap();
+
+        let path = cache
+            .root_dir()
+            .join("series")
+            .join("19700101")
+            .join("tick")
+            .join("SHFE.rb2601.tqbn");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let (_, first_block_offset) =
+            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        let mut offset = first_block_offset as u64;
+        let block_offset = loop {
+            let descriptor = read_tqbn_block_descriptor_at(&mut file, offset, file_len).unwrap();
+            if descriptor.block_type == TqbnBlockType::Records as u8 {
+                break offset;
+            }
+            offset = descriptor.end_offset;
+        };
+        file.seek(SeekFrom::Start(block_offset + 5)).unwrap();
+        file.write_all(&[0x80]).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        let error = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 3_000, 4_000))
+            .unwrap_err();
+
+        assert!(
+            matches!(error, DataError::InvalidResponse(message) if message.contains("unsupported bits"))
+        );
     }
 
     #[test]

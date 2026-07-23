@@ -136,7 +136,21 @@ impl LiveTickRecorder {
             }
             let last_persisted_id = recorded.last_persisted_id;
             let rows = std::mem::take(&mut recorded.pending_rows);
-            let write_report = match self.writer.push_ticks(recorded.symbol.as_str(), rows) {
+            let write_result = self
+                .writer
+                .push_ticks(recorded.symbol.as_str(), rows)
+                .and_then(|report| {
+                    if report.appended_rows > 0 {
+                        return Ok(report);
+                    }
+                    Ok(self
+                        .writer
+                        .flush()?
+                        .into_iter()
+                        .find(|flushed| flushed.symbol == recorded.symbol)
+                        .unwrap_or(report))
+                });
+            let write_report = match write_result {
                 Ok(report) => report,
                 Err(error) => {
                     recorded.last_observed_id = last_persisted_id;

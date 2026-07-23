@@ -23,7 +23,7 @@
 - `BacktestTickCache::open_read_only(...).fast_inventory()`
 - `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_lock()` /
   `try_acquire_consistency_read_lock()`
-- `LiveTickCacheWriter::new(...).push_ticks(...)`
+- `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
@@ -54,12 +54,15 @@
   `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；新建/compact 日分区还会维护 crate-internal coverage index chain，使完整且未追加尾部
-  rows 的 coverage inspection 无需解压行情 block，索引不完整、旧文件或任何校验失败都会回退完整扫描；
+  record lengths；market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟
+  crate-internal `TQRI` 时间索引，使范围读取只解压相交 block；新建/compact 日分区还会维护
+  coverage index chain，使完整且未追加尾部 rows 的 coverage inspection 无需解压行情 block。
+  records index 缺失或不匹配时逐 block 回退解码，coverage index 不完整、旧文件或任何校验失败时回退完整扫描；
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
-  默认 Cargo features 启用 `tqbn-zstd`，会对 TQBN records block 使用 zstd level 1 做
-  per-block 压缩，且只在压缩后更小时写入压缩 block；`--no-default-features` 可关闭该支持，
-  `tqsdk` / `tqsdk-task` facade 提供同名 feature 转发。
+  默认 Cargo features 启用 `tqbn-zstd`：hot append 的 TQBN records block 使用 zstd level 1，
+  append-log compaction 重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入
+  压缩 block。`--no-default-features` 可关闭该支持，`tqsdk` / `tqsdk-task` facade 提供同名
+  feature 转发。
   旧 Python `DataSeries` binary/mmap cache
   不再作为 public surface 暴露，已有旧文件不会自动迁移
 - `BacktestTickCache::open(...)` 复用同一个 store adapter；默认 tick 日分区文件路径是
@@ -93,8 +96,10 @@
   report-bound verify 和 doctor；它不属于本 crate 的 runtime、store adapter 或 live writer 边界，
   详见 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
-  rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口；它不拥有
-  session、订阅、后台线程或跨进程协调
+  rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口。连续单 tick push
+  默认聚合到 128 行；批量输入、跳号、约 250 ms 后的下一次 push、显式 `flush()` 或最后一个
+  clone 销毁会提交短尾。report 的 `appended_rows` 只统计实际落盘行数；它不拥有 session、订阅、
+  后台线程或跨进程协调
 - `HistorySeriesCache::scan()` 输出 schema version、series 文件状态、未完成写入
   和格式损坏报告；当前 TQBN store 不额外写 manifest 文件，并保持 crate-internal
   store adapter 语义
@@ -248,6 +253,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `BacktestTickCache::compact_symbol_ticks(...)`
 - `LiveTickCacheWriter::new(...)`
 - `LiveTickCacheWriter::push_ticks(...)`
+- `LiveTickCacheWriter::flush(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 
@@ -330,5 +336,11 @@ S30 contract
 和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
 同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。默认 features 启用
 `tqbn-zstd`，只改变 TQBN internal block payload，不新增用户可选 store API。
+
+`history_series_cache_microbench` 默认生成 synthetic ticks。要对本地完整 cache range 复测，设置
+`TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR`、`TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL`、
+`TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS` 和 `TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS`；benchmark
+会以该 range 的 cache-only ticks 作为 write/read 样本，并同时报告完整读取与 `read_ticks_1pct`
+小范围读取；不联网、不修改输入 cache。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

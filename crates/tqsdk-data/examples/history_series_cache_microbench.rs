@@ -20,6 +20,11 @@ const DEFAULT_LIVE_WRITER_BATCH_ROWS: usize = 128;
 const DEFAULT_SCAN_SYMBOLS: usize = 100;
 const DEFAULT_SCAN_ROWS_PER_SYMBOL: usize = 10;
 const DEFAULT_COMPACT_ROWS: usize = 50_000;
+const INPUT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR";
+const INPUT_SYMBOL_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL";
+const INPUT_START_NS_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS";
+const INPUT_END_NS_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS";
+type CacheTickSource = (PathBuf, String, i64, i64);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let rows = env_usize("TQSDK_HISTORY_CACHE_BENCH_ROWS", DEFAULT_ROWS);
@@ -44,6 +49,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         DEFAULT_COMPACT_ROWS,
     );
     let keep = env_bool("TQSDK_HISTORY_CACHE_BENCH_KEEP");
+    let cache_source = cache_tick_source_from_env()?;
+    let input_ticks = match cache_source.as_ref() {
+        Some((root, symbol, start_ns, end_ns)) => {
+            load_cache_ticks(root, symbol, *start_ns, *end_ns)?
+        }
+        None => ticks(rows, 1_713_660_000_000_000_000),
+    };
 
     let root = temp_root()?;
     println!("tqsdk-data history series cache microbench");
@@ -52,6 +64,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "format: {}",
         HistorySeriesCache::open(root.join("format"))?.format_id()
     );
+    match cache_source.as_ref() {
+        Some((cache_dir, symbol, start_ns, end_ns)) => println!(
+            "write/read input: cache {} {} [{start_ns}, {end_ns})",
+            cache_dir.display(),
+            symbol
+        ),
+        None => println!("write/read input: synthetic {} rows", input_ticks.len()),
+    }
     println!("root: {}", root.display());
     println!();
 
@@ -59,10 +79,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         "{:<30} {:>12} {:>12} {:>14} {:>14}",
         "case", "items", "ms", "ns/item", "bytes"
     );
-    let write_read = run_write_read_zstd(root.join("write-read"), rows)?;
+    let write_read = run_write_read_zstd(root.join("write-read"), input_ticks.as_slice())?;
     print_result(&write_read.write);
     print_result(&write_read.coverage);
     print_result(&write_read.read);
+    print_result(&write_read.read_slice);
     for result in &write_read.compression {
         print_compression(result);
     }
@@ -106,20 +127,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_write_read_zstd(root: PathBuf, rows: usize) -> Result<WriteReadReport, Box<dyn Error>> {
+fn run_write_read_zstd(root: PathBuf, ticks: &[Tick]) -> Result<WriteReadReport, Box<dyn Error>> {
+    if ticks.is_empty() {
+        return Err("write/read benchmark input contains no ticks".into());
+    }
     let cache = HistorySeriesCache::open(&root)?;
-    let ticks = ticks(rows, 1_713_660_000_000_000_000);
     let start_ns = ticks.first().map_or(0, |row| row.datetime);
     let end_ns = ticks.last().map_or(start_ns.saturating_add(1), |row| {
         row.datetime.saturating_add(1)
     });
 
     let start = Instant::now();
-    cache.write_tick_range(SYMBOL, start_ns, end_ns, &ticks)?;
+    cache.write_tick_range(SYMBOL, start_ns, end_ns, ticks)?;
     let write_elapsed = start.elapsed();
     let series_path = single_tqbn_file(&root)?;
     let bytes = tqbn_size_bytes(&root)?;
-    let write = BenchResult::new("write_ticks", rows, write_elapsed, bytes);
+    let write = BenchResult::new("write_ticks", ticks.len(), write_elapsed, bytes);
 
     let start = Instant::now();
     let coverage = cache.tick_coverage(SYMBOL, start_ns, end_ns)?;
@@ -134,6 +157,26 @@ fn run_write_read_zstd(root: PathBuf, rows: usize) -> Result<WriteReadReport, Bo
     black_box(series.rows());
     let read = BenchResult::new("read_ticks", series.len(), read_elapsed, bytes);
 
+    let slice_rows = (ticks.len() / 100).max(1);
+    let slice_start = (ticks.len() - slice_rows) / 2;
+    let slice = &ticks[slice_start..slice_start + slice_rows];
+    let slice_start_ns = slice.first().unwrap().datetime;
+    let slice_end_ns = slice.last().unwrap().datetime.saturating_add(1);
+    let start = Instant::now();
+    let slice_series = cache.read_tick_data_series(TickDataSeriesRequest::new(
+        SYMBOL,
+        slice_start_ns,
+        slice_end_ns,
+    ))?;
+    let read_slice_elapsed = start.elapsed();
+    black_box(slice_series.rows());
+    let read_slice = BenchResult::new(
+        "read_ticks_1pct",
+        slice_series.len(),
+        read_slice_elapsed,
+        bytes,
+    );
+
     let mut compression = Vec::new();
     for level in [1_u8, 3_u8] {
         if let Some(result) = run_zstd(&series_path, level)? {
@@ -145,6 +188,7 @@ fn run_write_read_zstd(root: PathBuf, rows: usize) -> Result<WriteReadReport, Bo
         write,
         coverage,
         read,
+        read_slice,
         compression,
     })
 }
@@ -167,6 +211,7 @@ fn run_live_tick_writer(
     for batch in ticks.chunks(batch_rows.max(1)) {
         writer.push_ticks(SYMBOL, batch.iter().cloned())?;
     }
+    writer.flush()?;
     let elapsed = start.elapsed();
     black_box(cache.coverage(SYMBOL, start_ns, end_ns)?);
 
@@ -390,10 +435,82 @@ fn env_bool(name: &str) -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
+fn cache_tick_source_from_env() -> Result<Option<CacheTickSource>, Box<dyn Error>> {
+    parse_cache_tick_source(
+        env::var(INPUT_CACHE_DIR_ENV).ok().as_deref(),
+        env::var(INPUT_SYMBOL_ENV).ok().as_deref(),
+        env::var(INPUT_START_NS_ENV).ok().as_deref(),
+        env::var(INPUT_END_NS_ENV).ok().as_deref(),
+    )
+    .map_err(Into::into)
+}
+
+fn parse_cache_tick_source(
+    cache_dir: Option<&str>,
+    symbol: Option<&str>,
+    start_ns: Option<&str>,
+    end_ns: Option<&str>,
+) -> Result<Option<CacheTickSource>, String> {
+    let has_non_root_value = symbol.is_some() || start_ns.is_some() || end_ns.is_some();
+    let Some(cache_dir) = cache_dir else {
+        return if has_non_root_value {
+            Err(format!(
+                "{INPUT_CACHE_DIR_ENV} is required when configuring a cache benchmark input"
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let Some(symbol) = symbol.filter(|value| !value.is_empty()) else {
+        return Err(format!(
+            "{INPUT_SYMBOL_ENV} is required with {INPUT_CACHE_DIR_ENV}"
+        ));
+    };
+    let (Some(start_ns), Some(end_ns)) = (start_ns, end_ns) else {
+        return Err(format!(
+            "{INPUT_START_NS_ENV} and {INPUT_END_NS_ENV} are required with {INPUT_CACHE_DIR_ENV}"
+        ));
+    };
+    let start_ns = start_ns
+        .parse::<i64>()
+        .map_err(|error| format!("{INPUT_START_NS_ENV} must be an i64 timestamp: {error}"))?;
+    let end_ns = end_ns
+        .parse::<i64>()
+        .map_err(|error| format!("{INPUT_END_NS_ENV} must be an i64 timestamp: {error}"))?;
+    if start_ns >= end_ns {
+        return Err(format!(
+            "{INPUT_START_NS_ENV} must be less than {INPUT_END_NS_ENV}"
+        ));
+    }
+    Ok(Some((
+        PathBuf::from(cache_dir),
+        symbol.to_string(),
+        start_ns,
+        end_ns,
+    )))
+}
+
+fn load_cache_ticks(
+    cache_dir: &Path,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<Tick>, Box<dyn Error>> {
+    let cache = HistorySeriesCache::open_read_only(cache_dir);
+    let ticks = cache
+        .read_tick_data_series(TickDataSeriesRequest::new(symbol, start_ns, end_ns))?
+        .into_rows();
+    if ticks.is_empty() {
+        return Err("cache benchmark input contains no ticks".into());
+    }
+    Ok(ticks)
+}
+
 struct WriteReadReport {
     write: BenchResult,
     coverage: BenchResult,
     read: BenchResult,
+    read_slice: BenchResult,
     compression: Vec<CompressionResult>,
 }
 
@@ -498,5 +615,44 @@ fn format_bytes_delta(before: u64, after: u64) -> String {
         format!("-{}", before - after)
     } else {
         format!("+{}", after - before)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::parse_cache_tick_source;
+
+    #[test]
+    fn cache_tick_source_requires_all_config_values() {
+        let error = parse_cache_tick_source(Some("/tmp/cache"), Some("SHFE.rb2601"), None, None)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS and TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS are required with TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR"
+        );
+    }
+
+    #[test]
+    fn cache_tick_source_parses_complete_config() {
+        let source = parse_cache_tick_source(
+            Some("/tmp/cache"),
+            Some("SHFE.rb2601"),
+            Some("100"),
+            Some("200"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            source,
+            Some((
+                PathBuf::from("/tmp/cache"),
+                "SHFE.rb2601".to_string(),
+                100,
+                200
+            ))
+        );
     }
 }

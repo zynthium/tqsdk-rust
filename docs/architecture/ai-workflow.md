@@ -205,9 +205,11 @@ tqsdk
 - history page/series/download
 - CSV export
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
+- TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
-  live 订阅、`wait_update()` 驱动和后台进程不属于 `tqsdk-data`
+  它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
+  不属于 `tqsdk-data`
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 

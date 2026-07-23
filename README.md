@@ -221,6 +221,9 @@ serial；写入端只在 tick id 连续时推进 coverage，断线、跳号或�
 `recorded_market_cache_policy()` 可以从当前 recording health 派生出同一份 cache policy，后续显式
 配合 `.auth_env()?`、`.warmup()` / `.remote_on_miss()` 使用官方 server-side backtest 流补齐；
 运行中的 `Tq` 不会隐式保存或复用明文 auth。
+直接下钻 `LiveTickCacheWriter` 时，连续的单 tick `push_ticks(...)` 同样会聚合到 128 行；
+批量输入、跳号、约 250 ms 后的下一次 push、显式 `flush()` 或最后一个 writer 销毁会提交短尾。
+`LiveTickCacheWriteReport::appended_rows` 只统计本次实际落盘行数。
 
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
 `.refresh()`，它会按最小缓存颗粒度删除对应 symbol 的 tick 文件后再由官方回测流补齐；
@@ -256,8 +259,11 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `query_his_cont_underlying_segments(...)`。
 历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v2 (`.tqbn`)；
 tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 features 启用
-`tqbn-zstd`，TQBN records block 会使用 zstd level 1 做内部压缩，且只在压缩后更小时
-写入压缩 block；`--no-default-features` 可关闭该支持，不新增用户可选 store API。
+`tqbn-zstd`，hot append 的 TQBN records block 使用 zstd level 1，append-log compaction
+重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入压缩 block。
+market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟 crate-internal `TQRI`
+时间索引；范围读取只解压与请求相交的 block，旧文件或缺失/不匹配索引逐 block 回退完整解码。
+`--no-default-features` 可关闭该支持，不新增用户可选 store API。
 
 如果已经配置好天勤账号，可以运行一次 `wait_update()` 行情示例：
 

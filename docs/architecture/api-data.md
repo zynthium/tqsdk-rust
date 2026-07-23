@@ -211,8 +211,9 @@
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
    - `LiveTickCacheWriter` 是 `BacktestTickCache` 上的一层纯 writer；它接收调用方已经消费到的
-     live tick rows，追加 rows，并只在 tick id 连续时推进 coverage。session ownership、
-     `wait_update()` 消费、订阅和后台运行不属于这个 writer
+     live tick rows，追加 rows，并只在 tick id 连续时推进 coverage。连续单 tick push 默认合并到
+     128 行；批量、跳号、到期后的下一次 push、显式 `flush()` 或最后一个 clone 销毁会提交短尾。
+     session ownership、`wait_update()` 消费、订阅、timer task 和后台运行不属于这个 writer
    - 后续再考虑路径管理型文件导出
    - deterministic replay / local backtest event source 由 `tqsdk-task` 拥有；
      `tqsdk-data` 只提供 history rows，不提供 JSONL market cache public surface
@@ -280,7 +281,7 @@ tqsdk-wait        tqsdk-data
   保护；`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 仅在显式设为正数时启用诊断/作业预算限时。
   每个成功 slice 先验证 tick id 连续性并独立提交 coverage，全部 slice 成功后才 compact 本次
   symbol 的 tick series；失败或未确认 slice 只会留下未覆盖范围，不触发全缓存重写
-- `LiveTickCacheWriter::push_ticks(...)` 也已经落在 `tqsdk-data`，作为纯数据层 writer
+- `LiveTickCacheWriter::push_ticks(...)` / `flush()` 也已经落在 `tqsdk-data`，作为纯数据层 writer
   支持 live/session host 将指定 symbol 的实时 tick 行写入同一份回测缓存；它不创建 session，
   不订阅行情，也不负责后台守护或跨进程协调
 - `kline_data_download` / `tick_data_download` 也已经落在 `tqsdk-data`
@@ -319,8 +320,11 @@ tqsdk-wait        tqsdk-data
   `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn`。旧 `.tqseries`、旧单文件
   `.tqbn` layout 和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是
   non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
-- 默认 feature `tqbn-zstd` 只做 TQBN internal records block 的 zstd level 1 压缩；
-  `--no-default-features` 可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API
+- 默认 feature `tqbn-zstd` 对 hot append 的 TQBN internal records block 使用 zstd level 1，
+  对 append-log compaction 重写的 records block 使用 zstd level 3；`--no-default-features`
+  可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API
+- market-data records block 使用 8 MiB 未压缩目标 payload 和 crate-internal `TQRI` 时间索引；
+  range reader 只解压相交 block，旧文件或缺失/不匹配索引逐 block 回退，不扩大 public store API
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，
   而不是把 live session、进程管理、HTTP endpoint、GUI 或底层文件编排表面
   下沉进 `tqsdk-data`

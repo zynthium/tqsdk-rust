@@ -172,6 +172,97 @@ fn live_tick_cache_writer_commits_continuous_tick_ranges_for_backtests() {
 }
 
 #[test]
+fn live_tick_cache_writer_batches_single_tick_pushes() {
+    let dir = temp_dir("live-tick-cache-writer-batches-single-ticks");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+
+    for index in 0..127_i64 {
+        let report = writer
+            .push_ticks(
+                "SHFE.rb2601",
+                [tick(index + 1, 1_000 + index, 100.0 + index as f64)],
+            )
+            .unwrap();
+        assert_eq!(report.appended_rows, 0);
+        assert!(report.committed_ranges.is_empty());
+    }
+
+    let coverage = cache.coverage("SHFE.rb2601", 1_000, 1_128).unwrap();
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 1_128)]);
+
+    let report = writer
+        .push_ticks("SHFE.rb2601", [tick(128, 1_127, 227.0)])
+        .unwrap();
+    assert_eq!(report.appended_rows, 128);
+    assert_eq!(report.committed_ranges, vec![(1_000, 1_128)]);
+
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 1_128))
+        .unwrap();
+    assert_eq!(series.len(), 128);
+}
+
+#[test]
+fn live_tick_cache_writer_drop_flushes_short_tail() {
+    let dir = temp_dir("live-tick-cache-writer-drop-flushes-tail");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    {
+        let mut writer = LiveTickCacheWriter::new(cache.clone());
+        let report = writer
+            .push_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+            .unwrap();
+        assert_eq!(report.appended_rows, 0);
+    }
+
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 1_001))
+        .unwrap();
+    assert_eq!(series.len(), 1);
+}
+
+#[test]
+fn live_tick_cache_writer_only_last_clone_flushes_short_tail() {
+    let dir = temp_dir("live-tick-cache-writer-last-clone-flushes-tail");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+    writer
+        .push_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+        .unwrap();
+    let writer_clone = writer.clone();
+
+    drop(writer);
+    let coverage = cache.coverage("SHFE.rb2601", 1_000, 1_001).unwrap();
+    assert_eq!(coverage.missing_ranges, vec![(1_000, 1_001)]);
+
+    drop(writer_clone);
+    let persisted = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 1_001))
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+}
+
+#[test]
+fn live_tick_cache_writer_flush_persists_short_tail() {
+    let dir = temp_dir("live-tick-cache-writer-explicit-flush");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let mut writer = LiveTickCacheWriter::new(cache.clone());
+    writer
+        .push_ticks("SHFE.rb2601", [tick(1, 1_000, 101.0)])
+        .unwrap();
+
+    let reports = writer.flush().unwrap();
+
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].appended_rows, 1);
+    assert_eq!(reports[0].committed_ranges, vec![(1_000, 1_001)]);
+    let series = cache
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 1_001))
+        .unwrap();
+    assert_eq!(series.len(), 1);
+}
+
+#[test]
 fn live_tick_cache_writer_leaves_coverage_gap_when_tick_id_jumps() {
     let dir = temp_dir("live-tick-cache-writer-gap");
     let cache = BacktestTickCache::open(&dir).unwrap();
@@ -184,8 +275,11 @@ fn live_tick_cache_writer_leaves_coverage_gap_when_tick_id_jumps() {
         .push_ticks("SHFE.rb2601", [tick(3, 3_000, 103.0)])
         .unwrap();
 
-    assert_eq!(report.appended_rows, 1);
-    assert_eq!(report.committed_ranges, vec![(3_000, 3_001)]);
+    assert_eq!(report.appended_rows, 2);
+    assert_eq!(
+        report.committed_ranges,
+        vec![(1_000, 1_001), (3_000, 3_001)]
+    );
     assert!(report.gap_detected);
 
     let coverage = cache.coverage("SHFE.rb2601", 1_000, 3_001).unwrap();
@@ -212,8 +306,11 @@ fn live_tick_cache_writer_retries_rows_after_a_failed_append() {
     let report = writer
         .push_ticks("SHFE.rb2601", [tick(2, 2_000, 102.0)])
         .unwrap();
-    assert_eq!(report.appended_rows, 1);
+    assert_eq!(report.appended_rows, 0);
     assert_eq!(report.last_seen_id, Some(2));
+    let reports = writer.flush().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].appended_rows, 2);
 
     let series = cache
         .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 2_001))

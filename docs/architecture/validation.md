@@ -160,6 +160,7 @@ rtk cargo test -p tqsdk-data --test history_series_tqbn_corruption
 rtk cargo test -p tqsdk-data --lib tqbn
 rtk cargo test -p tqsdk-data --features tqbn-zstd --lib tqbn
 rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cache_microbench
+TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL=<symbol> TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS=<start-ns> TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS=<end-ns> rtk cargo run -p tqsdk-data --release --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
 rtk cargo test -p tqsdk-cache
@@ -184,7 +185,8 @@ rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd -
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
 coverage index chain 的多段读取、旧文件/尾部 rows 回退与引用 coverage block 损坏保护、daily partition
-file identity、scan、损坏报告、size-limit maintenance，以及通过
+file identity、records range index 的无关 block 跳过与未知 flags 拒绝、scan、损坏报告、
+size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
 `backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
@@ -199,6 +201,8 @@ explicit V3 stdout、legacy V2 output、JSONL stderr progress，以及 fill repo
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过
 `LiveTickCacheWriter` 的连续 id 语义提交回测可读 coverage；同一个 `MarketCachePolicy`
 也必须能为 cache-backed local backtest 提供默认 cache 目录和 symbol 集合。
+data writer contract test 还必须覆盖连续单 tick push 的 128 行合并、显式 `flush()`、Drop 短尾提交、
+跳号立即提交和失败后重试；`appended_rows` 只统计实际落盘行数。
 连续 live tail 的持久化是有界批写：首次、跳号、每 symbol `128` 行、约 `250 ms` 到期或正常
 `Tq` 销毁时提交；contract test 必须验证异常退出前未提交 rows 不会获得 coverage，正常销毁会 flush。
 首次初始化或 writer 失败后的重扫之外，recorder 必须只读取当前 commit 变更集命中的 tick serial；
@@ -220,7 +224,7 @@ TQBN format/store checks currently live in internal lib tests and are covered by
 
 These TQBN tests should cover file identity, record header, little-endian scalar, price
 fixed-point encoding, compatibility skip rules, `HistorySeriesCache` / `BacktestTickCache`
-store semantics, corrupted input reporting, and append-log rewrite/compaction via
+store semantics, records range-index selection/fallback, corrupted input reporting, and append-log rewrite/compaction via
 `enforce_limits(...)` and symbol-scoped backtest tick compaction. 旧 `.tqseries`
 和旧单文件 `.tqbn` layout 不是当前默认格式；旧 Python-compatible binary/mmap backend 已废弃。
 

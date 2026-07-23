@@ -207,6 +207,9 @@ V1 是：
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
   - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded coverage commit、
     tick-only `BacktestTickCache` 和纯数据层 `LiveTickCacheWriter`
+  - 8 MiB 目标 records block、crate-internal `TQRI` 时间索引和按范围选择性解压；旧/不匹配索引
+    逐 block 回退
+  - `LiveTickCacheWriter` 合并连续单 tick push，并用显式 `flush()` / Drop 提交不足一批的尾部
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
