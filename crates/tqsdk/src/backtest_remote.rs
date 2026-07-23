@@ -1992,19 +1992,24 @@ fn should_retry_remote_fill_attempt_error(error: &crate::Error, symbol_count: us
     should_retry_remote_connect_error(error)
         || (symbol_count == 1
             && matches!(
-            error,
-            crate::Error::Data(data)
-                if matches!(
-                    &**data,
-                    DataError::Validation(message) if is_remote_fill_idle_error_message(message)
+                error,
+                crate::Error::Data(data)
+                    if matches!(
+                        &**data,
+                        DataError::Validation(message)
+                            if is_retryable_remote_fill_idle_error_message(message)
                 )
             ))
 }
 
-fn is_remote_fill_idle_error_message(message: &str) -> bool {
+fn is_retryable_remote_fill_idle_error_message(message: &str) -> bool {
     message.contains("remote backtest cache fill idled without accepted ticks")
         || message
             .contains("remote backtest cache fill idled before empty tick ranges were confirmed")
+}
+
+fn is_remote_fill_idle_error_message(message: &str) -> bool {
+    is_retryable_remote_fill_idle_error_message(message)
         || message.contains("remote backtest cache fill idled before tick ranges were confirmed")
 }
 
@@ -2458,7 +2463,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_fill_retries_single_symbol_transient_attempt_idle_errors() {
+    fn remote_fill_retries_empty_but_not_incomplete_single_symbol_idle_errors() {
         let wrapped_unconfirmed_empty_idle = crate::data_validation(
             "remote backtest cache fill failed for slice [1, 2): invalid data query input: \
              remote backtest cache fill idled before empty tick ranges were confirmed \
@@ -2475,7 +2480,7 @@ mod tests {
             &wrapped_unconfirmed_empty_idle,
             1
         ));
-        assert!(should_retry_remote_fill_attempt_error(
+        assert!(!should_retry_remote_fill_attempt_error(
             &wrapped_unconfirmed_incomplete_idle,
             1
         ));

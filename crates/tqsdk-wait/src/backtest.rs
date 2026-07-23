@@ -168,6 +168,9 @@ impl BacktestPump {
             first_emitted_id: None,
             last_emitted_id: None,
             last_loaded_right_id: None,
+            prefetching_page: false,
+            prefetched_page: None,
+            terminal_after_current_page: false,
             exhausted: false,
         };
         self.internal_tick_charts
@@ -257,6 +260,7 @@ impl BacktestPump {
                         return Ok(None);
                     }
                 }
+                TickPumpDecision::AdvancePage => {}
             }
         }
 
@@ -290,7 +294,12 @@ impl BacktestPump {
                 let Some(serial) = self.tick_serials.get_mut(&chart_id) else {
                     continue;
                 };
-                serial.next_decision(reader, backtest)?
+                loop {
+                    let decision = serial.next_cache_fill_decision(reader, backtest)?;
+                    if !matches!(decision, TickPumpDecision::AdvancePage) {
+                        break decision;
+                    }
+                }
             };
 
             match decision {
@@ -321,6 +330,9 @@ impl BacktestPump {
                         .await?;
                 }
                 TickPumpDecision::None => {}
+                TickPumpDecision::AdvancePage => {
+                    unreachable!("advance decisions are consumed above")
+                }
             }
         }
 
@@ -349,7 +361,7 @@ impl BacktestPump {
                 trace_backtest_tick(format_args!(
                     "load_page internal={internal_chart_id} user={user_chart_id}"
                 ));
-                serial.load_page(reader, &internal_chart_id)?;
+                serial.load_page(reader, &internal_chart_id, self.mode)?;
             }
         }
 
@@ -463,6 +475,7 @@ impl BacktestPump {
             .await?;
         if let Some(serial) = self.tick_serials.get_mut(user_chart_id) {
             serial.awaiting_page = true;
+            serial.prefetching_page = self.mode == BacktestPumpMode::CacheFill;
         }
         self.internal_tick_charts
             .insert(internal_chart_id, user_chart_id.to_string());
@@ -474,6 +487,13 @@ impl BacktestPump {
 enum TickPageRequest {
     Focus { datetime_ns: i64, position: usize },
     LeftId(i64),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BacktestTickPage {
+    left_id: i64,
+    right_id: i64,
+    terminal: bool,
 }
 
 #[derive(Debug)]
@@ -488,6 +508,9 @@ struct BacktestTickSerial {
     first_emitted_id: Option<i64>,
     last_emitted_id: Option<i64>,
     last_loaded_right_id: Option<i64>,
+    prefetching_page: bool,
+    prefetched_page: Option<BacktestTickPage>,
+    terminal_after_current_page: bool,
     exhausted: bool,
 }
 
@@ -560,7 +583,12 @@ impl BacktestTickSerial {
         self.next_emit_id = row_id.checked_add(1);
     }
 
-    fn load_page(&mut self, reader: &RuntimeReader, internal_chart_id: &str) -> Result<()> {
+    fn load_page(
+        &mut self,
+        reader: &RuntimeReader,
+        internal_chart_id: &str,
+        mode: BacktestPumpMode,
+    ) -> Result<()> {
         let market = reader.read_market_state();
         let Some(chart) = market.decode_path::<Chart>(&["charts", internal_chart_id])? else {
             return Ok(());
@@ -579,29 +607,72 @@ impl BacktestTickSerial {
         }
         let serial_last_id = tick_last_id(&market, &self.symbol);
         let mdhis_more_data = market_mdhis_more_data(&market);
-        let rows_ready = tick_rows_ready(&market, &self.symbol, &chart, serial_last_id);
+        let cache_fill_page = mode == BacktestPumpMode::CacheFill;
+        let page_last_id = cache_fill_page
+            .then(|| {
+                tick_page_last_existing_id(&market, &self.symbol, chart.left_id, chart.right_id)
+            })
+            .flatten();
+        let terminal_page = cache_fill_page && page_last_id != Some(chart.right_id);
+        let page_right_id = if cache_fill_page {
+            page_last_id
+        } else {
+            Some(chart.right_id)
+        };
+        let rows_ready =
+            cache_fill_page || tick_rows_ready(&market, &self.symbol, &chart, serial_last_id);
         if chart.more_data || mdhis_more_data || !rows_ready {
             trace_backtest_tick(format_args!(
-                "wait page chart_more_data={} mdhis_more_data={} rows_ready={} serial_last_id={serial_last_id:?}",
-                chart.more_data, mdhis_more_data, rows_ready
+                "wait page chart_more_data={} mdhis_more_data={} rows_ready={} serial_last_id={serial_last_id:?} page_last_id={page_last_id:?} prefetching={}",
+                chart.more_data, mdhis_more_data, rows_ready, self.prefetching_page
             ));
             return Ok(());
         }
 
         self.awaiting_page = false;
+        if self.prefetching_page {
+            self.prefetching_page = false;
+            let Some(page_right_id) = page_right_id else {
+                self.terminal_after_current_page = true;
+                return Ok(());
+            };
+            if self
+                .last_loaded_right_id
+                .is_some_and(|last_right_id| page_right_id <= last_right_id)
+            {
+                self.terminal_after_current_page = true;
+                return Ok(());
+            }
+            self.last_loaded_right_id = Some(page_right_id);
+            self.prefetched_page = Some(BacktestTickPage {
+                left_id: chart.left_id,
+                right_id: page_right_id,
+                terminal: terminal_page || chart.left_id > page_right_id,
+            });
+            return Ok(());
+        }
+
+        let Some(page_right_id) = page_right_id else {
+            self.current_page_left_id = None;
+            self.current_page_right_id = None;
+            self.next_emit_id = None;
+            self.exhausted = true;
+            return Ok(());
+        };
         self.current_page_left_id = Some(chart.left_id);
-        self.current_page_right_id = Some(chart.right_id);
+        self.current_page_right_id = Some(page_right_id);
+        self.terminal_after_current_page = terminal_page;
         if self
             .last_loaded_right_id
-            .is_some_and(|last_right_id| chart.right_id <= last_right_id)
+            .is_some_and(|last_right_id| page_right_id <= last_right_id)
         {
             self.exhausted = true;
             self.next_emit_id = None;
             return Ok(());
         }
-        self.last_loaded_right_id = Some(chart.right_id);
+        self.last_loaded_right_id = Some(page_right_id);
 
-        if chart.left_id <= chart.right_id {
+        if chart.left_id <= page_right_id {
             let next_after_last = self
                 .last_emitted_id
                 .and_then(|id| id.checked_add(1))
@@ -613,6 +684,27 @@ impl BacktestTickSerial {
         }
 
         Ok(())
+    }
+
+    fn next_cache_fill_decision(
+        &mut self,
+        reader: &RuntimeReader,
+        backtest: &TqBacktest,
+    ) -> Result<TickPumpDecision> {
+        if !self.exhausted
+            && !self.awaiting_page
+            && self.prefetched_page.is_none()
+            && !self.terminal_after_current_page
+            && let Some(right_id) = self.current_page_right_id
+        {
+            return Ok(TickPumpDecision::RequestNextPage {
+                symbol: self.symbol.clone(),
+                user_chart_id: self.user_chart_id.clone(),
+                left_id: right_id,
+            });
+        }
+
+        self.next_decision(reader, backtest)
     }
 
     fn next_decision(
@@ -693,6 +785,27 @@ impl BacktestTickSerial {
     }
 
     fn next_page_or_finish(&mut self) -> Result<TickPumpDecision> {
+        if let Some(page) = self.prefetched_page.take() {
+            self.current_page_left_id = Some(page.left_id);
+            self.current_page_right_id = Some(page.right_id);
+            self.terminal_after_current_page = page.terminal;
+            let next_after_last = self
+                .last_emitted_id
+                .and_then(|id| id.checked_add(1))
+                .unwrap_or(page.left_id);
+            self.next_emit_id = Some(next_after_last.max(page.left_id));
+            return Ok(TickPumpDecision::AdvancePage);
+        }
+
+        if self.terminal_after_current_page {
+            self.current_page_left_id = None;
+            self.current_page_right_id = None;
+            self.next_emit_id = None;
+            self.terminal_after_current_page = false;
+            self.exhausted = true;
+            return Ok(TickPumpDecision::None);
+        }
+
         if let Some(right_id) = self.current_page_right_id {
             let left_id = right_id;
             trace_backtest_tick(format_args!(
@@ -734,6 +847,29 @@ fn tick_last_id(market: &tqsdk_core::MarketStateReadGuard<'_>, symbol: &str) -> 
         .and_then(Value::as_i64)
 }
 
+fn tick_page_last_existing_id(
+    market: &tqsdk_core::MarketStateReadGuard<'_>,
+    symbol: &str,
+    left_id: i64,
+    right_id: i64,
+) -> Option<i64> {
+    if left_id > right_id {
+        return None;
+    }
+    if tick_row_exists(market, symbol, right_id) {
+        return Some(right_id);
+    }
+
+    market
+        .get_path(&["ticks", symbol, "data"])
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|data| data.keys())
+        .filter_map(|row_id| row_id.parse::<i64>().ok())
+        .filter(|row_id| left_id <= *row_id && *row_id <= right_id)
+        .max()
+}
+
 fn tick_rows_ready(
     market: &tqsdk_core::MarketStateReadGuard<'_>,
     symbol: &str,
@@ -751,6 +887,17 @@ fn tick_rows_ready(
     let right_id = chart.right_id.to_string();
     market
         .get_path(&["ticks", symbol, "data", right_id.as_str()])
+        .is_some()
+}
+
+fn tick_row_exists(
+    market: &tqsdk_core::MarketStateReadGuard<'_>,
+    symbol: &str,
+    row_id: i64,
+) -> bool {
+    let row_id = row_id.to_string();
+    market
+        .get_path(&["ticks", symbol, "data", row_id.as_str()])
         .is_some()
 }
 
@@ -812,6 +959,7 @@ enum TickPumpDecision {
         user_chart_id: String,
         left_id: i64,
     },
+    AdvancePage,
     None,
 }
 
@@ -1064,7 +1212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backtest_tick_pump_cache_fill_mode_emits_ready_serial_while_requesting_next_page() {
+    async fn backtest_tick_pump_cache_fill_mode_prefetches_each_ready_serial() {
         let handle = runtime_with_default_adapters();
         seed_tick(&handle, "AAA.needs_next_page", 1, 1_000);
         seed_tick(&handle, "BBB.future_ready", 10, 5_000);
@@ -1082,21 +1230,203 @@ mod tests {
             ready_serial("BBB.future_ready", "b-chart", 10, 10),
         );
 
-        assert_eq!(
-            emit_current_dt(&mut pump, &session, &reader, &backtest).await,
-            Some(1_000)
+        assert!(
+            pump.emit_pending_tick(&session, &reader, &backtest)
+                .await
+                .expect("cache fill prefetch should succeed")
+                .is_none()
+        );
+        assert_eq!(emitted_marker(&reader, "a-chart"), None);
+        assert_eq!(emitted_marker(&reader, "b-chart"), None);
+        assert!(
+            pump.tick_serials
+                .values()
+                .all(|serial| serial.awaiting_page && serial.prefetching_page)
+        );
+    }
+
+    #[tokio::test]
+    async fn backtest_tick_pump_cache_fill_prefetches_before_current_page_emit() {
+        let handle = runtime_with_default_adapters();
+        seed_tick(&handle, "SHFE.ag2608", 1, 1_000);
+        seed_tick(&handle, "SHFE.ag2608", 2, 2_000);
+        let reader = handle.reader();
+        let session = ManualSession::from_runtime(handle);
+        let backtest = TqBacktest::futures(0, 10_000).expect("valid backtest range");
+        let mut pump = BacktestPump::new_cache_fill();
+        pump.tick_serials.insert(
+            "cache-fill-chart".to_string(),
+            ready_serial("SHFE.ag2608", "cache-fill-chart", 1, 2),
         );
 
-        assert_eq!(
-            emit_current_dt(&mut pump, &session, &reader, &backtest).await,
-            Some(5_000)
+        let synthetic = pump
+            .emit_pending_tick(session.client(), &reader, &backtest)
+            .await
+            .expect("cache fill prefetch should succeed");
+
+        assert!(synthetic.is_none());
+        assert_eq!(emitted_marker(&reader, "cache-fill-chart"), None);
+        assert!(
+            pump.tick_serials
+                .get("cache-fill-chart")
+                .expect("cache fill serial should exist")
+                .awaiting_page
         );
-        assert_eq!(emitted_marker(&reader, "b-chart"), Some(10));
-        let a_serial = pump
-            .tick_serials
-            .get("a-chart")
-            .expect("a-chart serial should still exist");
-        assert!(a_serial.awaiting_page);
+        let body = set_chart_body(&session);
+        assert_eq!(body.get("left_kline_id"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn backtest_tick_cache_fill_terminal_prefetch_emits_tail_then_exhausts() {
+        let handle = runtime_with_default_adapters();
+        seed_tick(&handle, "SHFE.ag2608", 1, 1_000);
+        seed_tick(&handle, "SHFE.ag2608", 2, 2_000);
+        seed_tick(&handle, "SHFE.ag2608", 3, 3_000);
+        seed_chart(&handle, "prefetch-chart", 2, 5);
+        let reader = handle.reader();
+        let backtest = TqBacktest::futures(0, 10_000).expect("valid backtest range");
+        let mut serial = ready_serial("SHFE.ag2608", "cache-fill-chart", 1, 2);
+        serial.awaiting_page = true;
+        serial.prefetching_page = true;
+
+        serial
+            .load_page(&reader, "prefetch-chart", BacktestPumpMode::CacheFill)
+            .expect("terminal prefetch should load");
+        assert_eq!(
+            serial
+                .prefetched_page
+                .map(|page| (page.left_id, page.right_id, page.terminal)),
+            Some((2, 3, true))
+        );
+
+        for expected_id in [1, 2] {
+            match serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("current page tick should emit")
+            {
+                TickPumpDecision::Emit { row_id, .. } => assert_eq!(row_id, expected_id),
+                other => panic!("expected current page emit, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("terminal page should advance"),
+            TickPumpDecision::AdvancePage
+        ));
+        match serial
+            .next_cache_fill_decision(&reader, &backtest)
+            .expect("terminal tail should emit")
+        {
+            TickPumpDecision::Emit { row_id, .. } => assert_eq!(row_id, 3),
+            other => panic!("expected terminal tail emit, got {other:?}"),
+        }
+        assert!(matches!(
+            serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("terminal page should exhaust"),
+            TickPumpDecision::None
+        ));
+        assert!(serial.exhausted);
+    }
+
+    #[test]
+    fn backtest_tick_cache_fill_empty_terminal_prefetch_exhausts_after_current_page() {
+        let handle = runtime_with_default_adapters();
+        seed_tick(&handle, "SHFE.ag2608", 1, 1_000);
+        seed_tick(&handle, "SHFE.ag2608", 2, 2_000);
+        seed_chart(&handle, "prefetch-chart", 2, 5);
+        let reader = handle.reader();
+        let backtest = TqBacktest::futures(0, 10_000).expect("valid backtest range");
+        let mut serial = ready_serial("SHFE.ag2608", "cache-fill-chart", 1, 2);
+        serial.awaiting_page = true;
+        serial.prefetching_page = true;
+
+        serial
+            .load_page(&reader, "prefetch-chart", BacktestPumpMode::CacheFill)
+            .expect("empty terminal prefetch should load");
+        assert!(serial.prefetched_page.is_none());
+        assert!(serial.terminal_after_current_page);
+
+        for expected_id in [1, 2] {
+            match serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("current page tick should emit")
+            {
+                TickPumpDecision::Emit { row_id, .. } => assert_eq!(row_id, expected_id),
+                other => panic!("expected current page emit, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("empty terminal prefetch should exhaust"),
+            TickPumpDecision::None
+        ));
+        assert!(serial.exhausted);
+    }
+
+    #[test]
+    fn backtest_tick_cache_fill_accepts_terminal_short_initial_page() {
+        let handle = runtime_with_default_adapters();
+        seed_tick(&handle, "SHFE.ag2608", 1, 1_000);
+        seed_tick(&handle, "SHFE.ag2608", 2, 2_000);
+        seed_chart(&handle, "initial-chart", 1, 5);
+        let reader = handle.reader();
+        let mut serial = ready_serial("SHFE.ag2608", "cache-fill-chart", 1, 2);
+        serial.awaiting_page = true;
+        serial.current_page_left_id = None;
+        serial.current_page_right_id = None;
+        serial.next_emit_id = None;
+        serial.last_loaded_right_id = None;
+
+        serial
+            .load_page(&reader, "initial-chart", BacktestPumpMode::CacheFill)
+            .expect("short initial page should load");
+
+        assert!(!serial.awaiting_page);
+        assert_eq!(serial.current_page_left_id, Some(1));
+        assert_eq!(serial.current_page_right_id, Some(2));
+        assert_eq!(serial.next_emit_id, Some(1));
+        assert!(serial.terminal_after_current_page);
+
+        let backtest = TqBacktest::futures(10_000, 20_000).expect("valid backtest range");
+        assert!(matches!(
+            serial
+                .next_cache_fill_decision(&reader, &backtest)
+                .expect("out-of-range terminal page should exhaust"),
+            TickPumpDecision::None
+        ));
+        assert!(serial.exhausted);
+    }
+
+    #[test]
+    fn backtest_tick_cache_fill_prefetch_uses_page_rows_when_last_id_rewinds() {
+        let handle = runtime_with_default_adapters();
+        for id in 1..=5 {
+            seed_tick(&handle, "SHFE.ag2608", id, id * 1_000);
+        }
+        seed_tick(&handle, "SHFE.ag2608", 2, 2_000);
+        seed_chart(&handle, "prefetch-chart", 2, 5);
+        let reader = handle.reader();
+        let mut serial = ready_serial("SHFE.ag2608", "cache-fill-chart", 1, 2);
+        serial.awaiting_page = true;
+        serial.prefetching_page = true;
+
+        serial
+            .load_page(&reader, "prefetch-chart", BacktestPumpMode::CacheFill)
+            .expect("full prefetch should load despite rewound last_id");
+
+        assert_eq!(
+            tick_last_id(&reader.read_market_state(), "SHFE.ag2608"),
+            Some(2)
+        );
+        assert_eq!(
+            serial
+                .prefetched_page
+                .map(|page| (page.left_id, page.right_id, page.terminal)),
+            Some((2, 5, false))
+        );
     }
 
     #[tokio::test]
@@ -1238,6 +1568,35 @@ mod tests {
         RuntimeHandle::with_adapters(adapters)
     }
 
+    fn seed_chart(handle: &RuntimeHandle, chart_id: &str, left_id: i64, right_id: i64) {
+        handle
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "charts": {
+                                chart_id: {
+                                    "left_id": left_id,
+                                    "right_id": right_id,
+                                    "more_data": false,
+                                    "ready": true,
+                                    "state": {}
+                                }
+                            },
+                            "mdhis_more_data": false
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .expect("seed chart ingest should succeed")
+            .expect("seed chart ingest should produce a commit");
+    }
+
     async fn emit_current_dt(
         pump: &mut BacktestPump,
         session: &SessionClient,
@@ -1275,6 +1634,9 @@ mod tests {
             first_emitted_id: None,
             last_emitted_id: None,
             last_loaded_right_id: Some(right_id),
+            prefetching_page: false,
+            prefetched_page: None,
+            terminal_after_current_page: false,
             exhausted: false,
         }
     }
