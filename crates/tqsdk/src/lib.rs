@@ -72,9 +72,9 @@ pub mod advanced {
         }
 
         pub use tqsdk_task::{
-            LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode, ReplayMarketEvent,
-            ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource, StrategyBacktest,
-            StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
+            HistoryBacktestTickSource, LOCAL_BACKTEST_ACCOUNT_ID, OffsetPriority, PriceMode,
+            ReplayMarketEvent, ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource,
+            StrategyBacktest, StrategyBacktestBalancePoint, StrategyBacktestClosedProfitPoint,
             StrategyBacktestDailyBalanceReturn, StrategyBacktestDailyEquityReturn,
             StrategyBacktestDailyReturnWindow, StrategyBacktestEquityPoint,
             StrategyBacktestPerformanceMetrics, StrategyBacktestPerformanceReport,
@@ -2442,6 +2442,19 @@ impl PreparedBacktest {
     #[must_use]
     pub fn data_report(&self) -> &BacktestDataReport {
         &self.data_report
+    }
+
+    /// Return projected logical-to-physical tick sources for caller-owned replay.
+    ///
+    /// Each source's half-open `[start_ns, end_ns)` range is authoritative.
+    /// In particular, a physical contract backing `KQ.m@...` must not be read
+    /// outside that range.
+    #[must_use]
+    pub fn tick_sources(&self) -> &[tqsdk_task::HistoryBacktestTickSource] {
+        match &self.mode {
+            PreparedBacktestMode::CacheHit { inputs }
+            | PreparedBacktestMode::RemoteCaching { inputs, .. } => &inputs.tick_sources,
+        }
     }
 
     /// Connect the prepared local backtest without remote access.

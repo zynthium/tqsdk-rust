@@ -32,6 +32,16 @@ async fn main() -> tqsdk::Result<()> {
     assert_eq!(report.native_kline_series, 0);
     assert_eq!(report.synthetic_kline_series, 1);
     assert!(!report.remote_used);
+    assert_eq!(prepared.tick_sources().len(), 1);
+    assert_eq!(prepared.tick_sources()[0].replay_symbol, SYMBOL);
+    assert_eq!(prepared.tick_sources()[0].cache_symbol, SYMBOL);
+    assert_eq!(
+        (
+            prepared.tick_sources()[0].start_ns,
+            prepared.tick_sources()[0].end_ns
+        ),
+        (1_000, 3_000)
+    );
 
     let mut tq = prepared.connect().await?;
 

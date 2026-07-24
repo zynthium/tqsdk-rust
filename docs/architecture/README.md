@@ -112,7 +112,9 @@ V1 是：
     因而与具体合约共用物理 cache、coverage 和远端补缺请求；主连 mapping 本身不需 auth，
     但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
     cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
-    server-side backtest market stream 且不落盘
+  server-side backtest market stream 且不落盘
+- `PreparedBacktest::tick_sources()` 只读暴露上述 logical-to-physical 投影及各自有效区间，
+  供调用方自有多资产回放器并行读取；跨品种 barrier、截面调度和策略状态不下沉到 facade
   - `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 只为固定 as-of 的当前交易日 warmup
     提交 non-final checkpoint；普通 coverage/cache-hit 仍视为缺口，TQBN 18:00 分区结束后必须
     走普通 final warmup 全日重对账

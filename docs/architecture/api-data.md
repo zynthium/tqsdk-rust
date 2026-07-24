@@ -182,10 +182,13 @@
    - 扩展 `query_his_cont_quotes`
    - `query_his_cont_underlyings` 提供单主连 date -> underlying 映射薄 helper
    - `query_his_cont_underlying_segments` / `historical_cont_underlying_segments` 提供相邻交易日同一 underlying 的 segment 压缩基础能力
-   - `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用；
-     cache-backed facade 的 `KQ.m@...` 回测据此把逻辑主连分段投影到具体合约 tick cache，
-     data 层只提供 mapping/rows，不拥有 replay
-   - `query_option_greeks`
+- `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用；
+  cache-backed facade 的 `KQ.m@...` 回测据此把逻辑主连分段投影到具体合约 tick cache，
+  data 层只提供 mapping/rows，不拥有 replay
+- `PreparedBacktest::tick_sources()` 向调用方自有回放器暴露 facade 已验证的投影计划：
+  `replay_symbol`、`cache_symbol` 和权威半开有效区间；调用方可以并行读取区间，但不得自行重建
+  主连映射或把物理合约扩展到整个请求窗口，跨品种 barrier/截面调度仍归调用方
+- `query_option_greeks`
 3. local materialization
    - 已有最薄的 owned Vec materialization：`collect_remaining`
    - 已有最薄的 `AsyncWrite` CSV export

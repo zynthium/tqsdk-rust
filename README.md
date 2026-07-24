@@ -174,6 +174,9 @@ metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec
 仍需要取得这份公开 mapping metadata；主连只支持 `duration <= 60s` 的 tick 合成 K 线，
 `> 60s` native K 线会明确报错，避免额外创建逻辑主连缓存。
 
+自有多资产调度器可在 `.prepare().await?` 后读取 `PreparedBacktest::tick_sources()`，
+复用同一 logical-to-physical 投影；必须按每项的半开有效区间读取物理 cache。
+
 ```rust
 let mut tq = Tq::futures()
     .auth_env()? // only needed when RemoteOnMiss has to fill missing cache ranges

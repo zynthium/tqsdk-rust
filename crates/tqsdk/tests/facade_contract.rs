@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use serde_json::{Map, Value, json};
-use tqsdk::advanced::task::{ReplayMarketEvent, ReplayMarketSource};
+use tqsdk::advanced::task::{HistoryBacktestTickSource, ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote,
@@ -149,6 +149,15 @@ async fn facade_backtest_universe_accepts_static_selector_expression() {
 
     assert_eq!(prepared.data_report().resolved_symbols, 1);
     assert!(!prepared.data_report().remote_used);
+    assert_eq!(
+        prepared.tick_sources(),
+        &[HistoryBacktestTickSource {
+            replay_symbol: symbol.to_string(),
+            cache_symbol: symbol.to_string(),
+            start_ns: 1_000,
+            end_ns: 3_000,
+        }]
+    );
 }
 
 #[tokio::test]

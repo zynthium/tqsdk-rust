@@ -44,6 +44,11 @@ warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约
 `.cache_only()` 仍需访问这份公开 metadata。主连 `duration > 60s` 的 native K 线目前不支持；
 改用 `duration <= 60s` 让 K 线从共享 tick 合成。
 
+调用方自带多资产回放调度器时，可先调用 `.prepare().await?`，再通过
+`PreparedBacktest::tick_sources()` 取得同一份 logical-to-physical 投影。每项都包含稳定的
+`replay_symbol`、缓存使用的 `cache_symbol` 和权威半开区间 `[start_ns, end_ns)`；具体合约不得
+脱离该区间扩展到整个回测窗口。默认 `.connect()` 继续消费同一投影。
+
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
 tick cache；`.kline(symbol, duration, view_width)` 对 `duration <= 60s` 的 K 线从本地 tick
 流合成，不写入 native K 线缓存；`duration > 60s` 的 K 线对齐官方 Python 行为，读取
