@@ -124,6 +124,104 @@ fn read_only_cache_does_not_create_a_missing_root_or_allow_writes() {
     assert!(!dir.exists());
 }
 
+#[test]
+fn provisional_tick_checkpoint_never_counts_as_final_coverage() {
+    let dir = temp_dir("provisional-checkpoint");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .append_partial_ticks("SHFE.rb2601", [tick(1, 1_000), tick(2, 2_000)])
+        .unwrap();
+
+    let checkpoint = cache
+        .mark_provisional("SHFE.rb2601", 1_000, 3_000, 3_000, 2, Some((1, 2)))
+        .unwrap();
+
+    assert_eq!(checkpoint.range_start_ns, 1_000);
+    assert_eq!(checkpoint.complete_through_ns, 3_000);
+    assert_eq!(checkpoint.as_of_ns, 3_000);
+    assert_eq!(checkpoint.rows, 2);
+    assert_eq!(checkpoint.id_range, Some((1, 2)));
+    let final_coverage = cache.coverage("SHFE.rb2601", 1_000, 4_000).unwrap();
+    assert_eq!(final_coverage.cached_ranges, Vec::<(i64, i64)>::new());
+    assert_eq!(final_coverage.missing_ranges, vec![(1_000, 4_000)]);
+    let checkpoint = cache
+        .mark_provisional("SHFE.rb2601", 1_000, 3_500, 3_500, 2, Some((1, 2)))
+        .unwrap();
+    assert_eq!(checkpoint.complete_through_ns, 3_500);
+
+    cache.compact_symbol_ticks("SHFE.rb2601").unwrap();
+    let reopened = BacktestTickCache::open(&dir).unwrap();
+    assert_eq!(
+        reopened
+            .provisional_coverage("SHFE.rb2601", 1_000, 4_000)
+            .unwrap(),
+        Some(checkpoint)
+    );
+
+    reopened
+        .mark_complete("SHFE.rb2601", 1_000, 4_000, 2, Some((1, 2)))
+        .unwrap();
+    assert!(
+        reopened
+            .provisional_coverage("SHFE.rb2601", 1_000, 4_000)
+            .unwrap()
+            .is_none()
+    );
+    reopened.compact_symbol_ticks("SHFE.rb2601").unwrap();
+    assert!(
+        reopened
+            .provisional_coverage("SHFE.rb2601", 1_000, 4_000)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn provisional_tick_checkpoint_rejects_cross_partition_ranges() {
+    let dir = temp_dir("provisional-cross-partition");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let day = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+    let range = backtest_tick_trading_day_range(day).unwrap();
+    let complete_through_ns = range.end_ns.saturating_add(1);
+
+    let error = cache
+        .mark_provisional(
+            "SHFE.rb2601",
+            range.start_ns,
+            complete_through_ns,
+            complete_through_ns,
+            0,
+            None,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DataError::InvalidState(
+            "provisional tick coverage must stay within one TQBN trading-day partition"
+        )
+    ));
+
+    let error = cache
+        .mark_provisional(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            range.end_ns.saturating_add(1),
+            0,
+            None,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DataError::InvalidState(
+            "provisional tick coverage must stay within one TQBN trading-day partition"
+        )
+    ));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn cst_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
     FixedOffset::east_opt(8 * 60 * 60)
         .unwrap()

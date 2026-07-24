@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tqsdk::{
     BacktestCacheWarmupAction, BacktestCacheWarmupReport, BacktestRemoteFillConfig,
     BacktestTickCacheStatus,
@@ -55,6 +55,30 @@ impl TradingDayWindow {
         if end_day >= current_open_day {
             return Err(DataError::Validation(format!(
                 "requested end trading day {} is not closed; current open trading day is {}",
+                window.end_day,
+                current_open_day.format("%Y-%m-%d")
+            )));
+        }
+        Ok(window)
+    }
+
+    /// Build a window that may end at the currently open trading day.
+    ///
+    /// Future trading days remain invalid. Callers must still use provisional
+    /// coverage for the open-day portion.
+    pub fn through_open_day_from_days(
+        start_day: NaiveDate,
+        end_day: NaiveDate,
+    ) -> Result<Self, DataError> {
+        let window = Self::from_days(start_day, end_day)?;
+        let current_open_day = current_open_trading_day()?;
+        let normalized_end =
+            NaiveDate::parse_from_str(&window.end_day, "%Y-%m-%d").map_err(|error| {
+                DataError::Validation(format!("invalid normalized TQBN trading day: {error}"))
+            })?;
+        if normalized_end > current_open_day {
+            return Err(DataError::Validation(format!(
+                "requested end trading day {} is in the future; current open trading day is {}",
                 window.end_day,
                 current_open_day.format("%Y-%m-%d")
             )));
@@ -336,7 +360,7 @@ impl From<BacktestRemoteFillConfig> for FillConfigReport {
 }
 
 /// Stable, credential-free report written after a fill operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FillReport {
     pub schema_version: u32,
     pub generated_at: String,
@@ -357,6 +381,72 @@ pub struct FillReport {
     pub rows_written: usize,
     pub complete: bool,
     pub dry_run: bool,
+    /// `final` for ordinary closed-day fills, `provisional` for an open-day snapshot.
+    #[serde(default = "default_coverage_state")]
+    pub coverage_state: String,
+    /// Shared high-water mark across all physical symbols for a provisional fill.
+    #[serde(default)]
+    pub complete_through_ns: Option<i64>,
+    /// Whether the requested trading-day window has final immutable coverage.
+    pub day_complete: bool,
+}
+
+#[derive(Deserialize)]
+struct FillReportWire {
+    schema_version: u32,
+    generated_at: String,
+    cache_dir: String,
+    requested_days: TradingDayWindow,
+    requested_range: (i64, i64),
+    #[serde(default)]
+    selector: FillSelectorReport,
+    #[serde(default)]
+    resolved_range: Option<TradingDayWindow>,
+    #[serde(default)]
+    calendar: Option<FillReportCalendar>,
+    logical_symbols: Vec<String>,
+    physical_symbols: Vec<FillReportSymbol>,
+    fill_config: FillConfigReport,
+    remote_used: bool,
+    rows_written: usize,
+    complete: bool,
+    dry_run: bool,
+    #[serde(default = "default_coverage_state")]
+    coverage_state: String,
+    #[serde(default)]
+    complete_through_ns: Option<i64>,
+    #[serde(default)]
+    day_complete: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for FillReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = FillReportWire::deserialize(deserializer)?;
+        let day_complete = wire.day_complete.unwrap_or(wire.complete);
+        Ok(Self {
+            schema_version: wire.schema_version,
+            generated_at: wire.generated_at,
+            cache_dir: wire.cache_dir,
+            requested_days: wire.requested_days,
+            requested_range: wire.requested_range,
+            selector: wire.selector,
+            resolved_range: wire.resolved_range,
+            calendar: wire.calendar,
+            logical_symbols: wire.logical_symbols,
+            physical_symbols: wire.physical_symbols,
+            fill_config: wire.fill_config,
+            remote_used: wire.remote_used,
+            rows_written: wire.rows_written,
+            complete: wire.complete,
+            dry_run: wire.dry_run,
+            coverage_state: wire.coverage_state,
+            complete_through_ns: wire.complete_through_ns,
+            day_complete,
+        })
+    }
 }
 
 impl FillReport {
@@ -397,7 +487,18 @@ impl FillReport {
             rows_written: warmup.rows_written,
             complete,
             dry_run,
+            coverage_state: default_coverage_state(),
+            complete_through_ns: None,
+            day_complete: complete,
         }
+    }
+
+    #[must_use]
+    pub fn with_provisional_state(mut self, complete_through_ns: Option<i64>) -> Self {
+        self.coverage_state = "provisional".to_string();
+        self.complete_through_ns = complete_through_ns;
+        self.day_complete = false;
+        self
     }
 
     #[must_use]
@@ -439,6 +540,10 @@ impl FillReport {
         }
         Ok(symbols)
     }
+}
+
+fn default_coverage_state() -> String {
+    "final".to_string()
 }
 
 pub fn open_cache(cache_dir: Option<&Path>) -> Result<(BacktestTickCache, PathBuf), DataError> {
@@ -698,6 +803,9 @@ mod tests {
         assert!(report.resolved_range.is_none());
         assert!(report.calendar.is_none());
         assert!(report.physical_symbols[0].day_stats.is_none());
+        assert_eq!(report.coverage_state, "final");
+        assert!(report.complete_through_ns.is_none());
+        assert!(report.day_complete);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -756,6 +864,9 @@ mod tests {
             rows_written: 0,
             complete: true,
             dry_run: false,
+            coverage_state: "final".to_string(),
+            complete_through_ns: None,
+            day_complete: true,
         }
         .with_v2_metadata(
             FillSelectorReport::default(),

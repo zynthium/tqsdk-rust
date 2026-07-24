@@ -15,7 +15,7 @@ use tqsdk_cache::{
     write_fill_report, write_trading_calendar_snapshot,
 };
 use tqsdk_data::{
-    DataClient, DataError, HistorySeriesCacheFileStatus, TradingCalendarRow,
+    BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, TradingCalendarRow,
     backtest_tick_trading_day_for_timestamp_ns,
 };
 
@@ -166,8 +166,8 @@ struct FillArgs {
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote ticks.
     #[arg(long)]
     dry_run: bool,
-    /// Reserved for a future provisional-current-day implementation; exits with usage status.
-    #[arg(long)]
+    /// Include the currently open trading day using non-final provisional coverage.
+    #[arg(long, conflicts_with = "last_trading_days")]
     include_open_day: bool,
     /// Wait this many seconds for an existing fill owner instead of failing immediately.
     #[arg(long, value_name = "SECONDS")]
@@ -345,7 +345,16 @@ struct CalendarResolution {
 struct ResolvedFillWindow {
     window: TradingDayWindow,
     calendar: CalendarResolution,
+    provisional: Option<ProvisionalOpenDayWindow>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ProvisionalOpenDayWindow {
+    day_start_ns: i64,
+    as_of_ns: i64,
+}
+
+const OPEN_DAY_HORIZON_LAG_NS: i64 = 5 * 1_000_000_000;
 
 impl CalendarResolution {
     fn report_calendar(&self) -> FillReportCalendar {
@@ -377,6 +386,7 @@ async fn resolve_fill_window(
     cache_dir: &Path,
     args: &FillDaysArgs,
     dry_run: bool,
+    include_open_day: bool,
 ) -> Result<ResolvedFillWindow, CliError> {
     if args.last_trading_days.is_some() && matches!(args.calendar, CalendarMode::Off) {
         return Err(CliError::Usage(
@@ -440,15 +450,16 @@ async fn resolve_fill_window(
         }
         let selected = &eligible[eligible.len() - last_trading_days..];
         let window = TradingDayWindow::closed_from_days(selected[0], *selected.last().unwrap())?;
-        return Ok(ResolvedFillWindow {
+        return resolved_fill_window(
             window,
-            calendar: CalendarResolution {
+            CalendarResolution {
                 mode: args.calendar,
                 snapshot: Some(snapshot),
                 source,
                 persist_after_plan,
             },
-        });
+            include_open_day,
+        );
     }
 
     let start_day = args.start_day.ok_or_else(|| {
@@ -457,7 +468,11 @@ async fn resolve_fill_window(
     let end_day = args
         .end_day
         .ok_or_else(|| CliError::Usage("fill requires --end-day with --start-day".to_string()))?;
-    let window = TradingDayWindow::closed_from_days(start_day, end_day)?;
+    let window = if include_open_day {
+        TradingDayWindow::through_open_day_from_days(start_day, end_day)?
+    } else {
+        TradingDayWindow::closed_from_days(start_day, end_day)?
+    };
     let normalized_start = parse_window_day(&window.start_day)?;
     let normalized_end = parse_window_day(&window.end_day)?;
     let mut snapshot = local_snapshot;
@@ -482,14 +497,52 @@ async fn resolve_fill_window(
         snapshot = None;
         source = "partition_fallback".to_string();
     }
-    Ok(ResolvedFillWindow {
+    resolved_fill_window(
         window,
-        calendar: CalendarResolution {
+        CalendarResolution {
             mode: args.calendar,
             snapshot,
             source,
             persist_after_plan,
         },
+        include_open_day,
+    )
+}
+
+fn resolved_fill_window(
+    window: TradingDayWindow,
+    calendar: CalendarResolution,
+    include_open_day: bool,
+) -> Result<ResolvedFillWindow, CliError> {
+    let provisional = if include_open_day {
+        let now_ns = current_time_ns()?;
+        let open_day = backtest_tick_trading_day_for_timestamp_ns(now_ns)?;
+        let end_day = parse_window_day(&window.end_day)?;
+        if end_day == open_day {
+            let range = tqsdk_data::backtest_tick_trading_day_range(open_day)?;
+            let as_of_ns = now_ns
+                .saturating_sub(OPEN_DAY_HORIZON_LAG_NS)
+                .min(range.end_ns);
+            if as_of_ns <= range.start_ns {
+                return Err(CliError::Usage(
+                    "current trading day has not advanced far enough for a provisional snapshot"
+                        .to_string(),
+                ));
+            }
+            Some(ProvisionalOpenDayWindow {
+                day_start_ns: range.start_ns,
+                as_of_ns,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(ResolvedFillWindow {
+        window,
+        calendar,
+        provisional,
     })
 }
 
@@ -584,12 +637,17 @@ fn partition_days_between(
 }
 
 fn current_open_trading_day() -> Result<NaiveDate, CliError> {
-    let now_ns = SystemTime::now()
+    Ok(backtest_tick_trading_day_for_timestamp_ns(
+        current_time_ns()?,
+    )?)
+}
+
+fn current_time_ns() -> Result<i64, CliError> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .ok_or_else(|| CliError::Usage("system clock is outside TQBN range".to_string()))?;
-    Ok(backtest_tick_trading_day_for_timestamp_ns(now_ns)?)
+        .ok_or_else(|| CliError::Usage("system clock is outside TQBN range".to_string()))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -884,19 +942,22 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
             "fill requires at least one --symbol or --universe expression".to_string(),
         ));
     }
-    if args.include_open_day {
-        return Err(CliError::Usage(
-            "--include-open-day is reserved for a future provisional coverage mode and is not implemented"
-                .to_string(),
-        ));
-    }
     let (cache, canonical_cache_dir) = if args.dry_run {
         open_read_only_cache(cache_dir)?
     } else {
         open_cache(cache_dir)?
     };
-    let resolved = resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run).await?;
-    let window = resolved.window;
+    let resolved = resolve_fill_window(
+        &canonical_cache_dir,
+        &args.days,
+        args.dry_run,
+        args.include_open_day,
+    )
+    .await?;
+    let window = resolved.window.clone();
+    let operation_end_ns = resolved
+        .provisional
+        .map_or(window.end_ns, |provisional| provisional.as_of_ns);
     let selector = FillSelectorReport {
         symbols: symbols.clone(),
         universe: universe.clone(),
@@ -908,15 +969,16 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
                     .to_string(),
             ));
         }
-        let builder = apply_fill_targets(
-            builder_with_environment_auth(false)?
-                .backtest(window.start_ns, window.end_ns)
-                .cache_store(cache)
-                .cache_only()
-                .remote_fill_config(config),
-            &symbols,
-            universe.as_deref(),
-        )?;
+        let mut builder = builder_with_environment_auth(false)?
+            .backtest(window.start_ns, operation_end_ns)
+            .cache_store(cache)
+            .cache_only()
+            .remote_fill_config(config);
+        if let Some(provisional) = resolved.provisional {
+            builder = builder
+                .provisional_open_day_fill(provisional.day_start_ns, provisional.as_of_ns)?;
+        }
+        let builder = apply_fill_targets(builder, &symbols, universe.as_deref())?;
         let warmup = builder.warmup().await?;
         let report = fill_report_with_metadata(
             &warmup,
@@ -926,8 +988,9 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
             true,
             selector,
             &resolved.calendar,
+            resolved.provisional,
         )?;
-        let complete = report.complete;
+        let complete = fill_operation_complete(&report, resolved.provisional);
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -964,7 +1027,7 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
     let progress_callback = reporter.clone();
     let telemetry_callback = reporter.clone();
     let mut builder = builder_with_environment_auth(false)?
-        .backtest(window.start_ns, window.end_ns)
+        .backtest(window.start_ns, operation_end_ns)
         .cache_dir(&canonical_cache_dir)?
         .remote_on_miss()
         .remote_fill_config(config)
@@ -976,6 +1039,10 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
                 let _ = plan_tx.try_send(plan.clone());
             }
         });
+    if let Some(provisional) = resolved.provisional {
+        builder =
+            builder.provisional_open_day_fill(provisional.day_start_ns, provisional.as_of_ns)?;
+    }
     if let Some(wait_secs) = args.lock_wait_secs {
         builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
     }
@@ -1004,7 +1071,8 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
     };
 
     if cancellation.is_cancelled() {
-        let summary = "interrupted; partial accepted rows were flushed without coverage commit";
+        let summary =
+            "interrupted; partial accepted rows were flushed without advancing the checkpoint";
         progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
         let inventory = cache.fast_inventory()?;
         return Ok(CommandOutcome {
@@ -1037,17 +1105,20 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         false,
         selector,
         &calendar,
+        resolved.provisional,
     )?;
     reporter.final_report(&report);
-    progress_session.finish(
-        ProgressTerminalStatus::Complete,
-        "fill complete; strict local coverage verified",
-    );
+    let completion_summary = if resolved.provisional.is_some() {
+        "fill complete; provisional open-day checkpoint verified"
+    } else {
+        "fill complete; strict local coverage verified"
+    };
+    progress_session.finish(ProgressTerminalStatus::Complete, completion_summary);
     let report_path = args
         .report
         .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
     write_fill_report(&report_path, &report)?;
-    let complete = report.complete;
+    let complete = fill_operation_complete(&report, resolved.provisional);
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -1069,6 +1140,7 @@ fn fill_report_with_metadata(
     dry_run: bool,
     selector: FillSelectorReport,
     calendar: &CalendarResolution,
+    provisional: Option<ProvisionalOpenDayWindow>,
 ) -> Result<FillReport, CliError> {
     let progress_calendar = calendar.progress_calendar(&window)?;
     let day_stats = warmup
@@ -1076,13 +1148,69 @@ fn fill_report_with_metadata(
         .iter()
         .map(|symbol| fill_symbol_day_stats(symbol, &progress_calendar.days))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(
-        FillReport::from_warmup(warmup, cache_dir, window, config, dry_run).with_v2_metadata(
-            selector,
-            Some(calendar.report_calendar()),
-            day_stats,
-        ),
-    )
+    let report = FillReport::from_warmup(warmup, cache_dir, window, config, dry_run)
+        .with_v2_metadata(selector, Some(calendar.report_calendar()), day_stats);
+    if let Some(provisional) = provisional {
+        let complete_through_ns = provisional_complete_through(warmup, cache_dir, provisional)?;
+        Ok(report.with_provisional_state(complete_through_ns))
+    } else {
+        Ok(report)
+    }
+}
+
+fn provisional_complete_through(
+    warmup: &tqsdk::BacktestCacheWarmupReport,
+    cache_dir: &Path,
+    provisional: ProvisionalOpenDayWindow,
+) -> Result<Option<i64>, CliError> {
+    let cache = BacktestTickCache::open_read_only(cache_dir);
+    let mut shared_complete_through = None;
+    for symbol in &warmup.symbols {
+        let closed_start_ns = symbol.after.range_start_ns;
+        let closed_end_ns = symbol.after.range_end_ns.min(provisional.day_start_ns);
+        if closed_start_ns < closed_end_ns
+            && !ranges_cover(&symbol.after.cached_ranges, closed_start_ns, closed_end_ns)
+        {
+            return Ok(None);
+        }
+
+        let open_start_ns = symbol.after.range_start_ns.max(provisional.day_start_ns);
+        let open_end_ns = symbol.after.range_end_ns.min(provisional.as_of_ns);
+        if open_start_ns >= open_end_ns {
+            continue;
+        }
+        let symbol_complete_through =
+            if ranges_cover(&symbol.after.cached_ranges, open_start_ns, open_end_ns) {
+                open_end_ns
+            } else {
+                let Some(checkpoint) = cache.provisional_coverage(
+                    symbol.symbol.as_str(),
+                    open_start_ns,
+                    open_end_ns,
+                )?
+                else {
+                    return Ok(None);
+                };
+                checkpoint.complete_through_ns.min(open_end_ns)
+            };
+        shared_complete_through = Some(
+            shared_complete_through.map_or(symbol_complete_through, |current: i64| {
+                current.min(symbol_complete_through)
+            }),
+        );
+    }
+    Ok(shared_complete_through)
+}
+
+fn fill_operation_complete(
+    report: &FillReport,
+    provisional: Option<ProvisionalOpenDayWindow>,
+) -> bool {
+    provisional.map_or(report.complete, |provisional| {
+        report
+            .complete_through_ns
+            .is_some_and(|through| through >= provisional.as_of_ns)
+    })
 }
 
 fn fill_symbol_day_stats(
@@ -1454,7 +1582,9 @@ mod tests {
             calendar: CalendarMode::Auto,
         };
 
-        let resolved = resolve_fill_window(&root, &args, true).await.unwrap();
+        let resolved = resolve_fill_window(&root, &args, true, false)
+            .await
+            .unwrap();
 
         assert_eq!(resolved.window.start_day, "2020-01-02");
         assert_eq!(resolved.window.end_day, "2020-01-03");
@@ -1481,7 +1611,9 @@ mod tests {
             calendar: CalendarMode::Auto,
         };
 
-        let resolved = resolve_fill_window(&root, &args, true).await.unwrap();
+        let resolved = resolve_fill_window(&root, &args, true, false)
+            .await
+            .unwrap();
 
         assert!(resolved.calendar.snapshot.is_none());
         assert_eq!(resolved.calendar.source, "partition_fallback");
@@ -1497,11 +1629,17 @@ mod tests {
             last_trading_days: Some(5),
             calendar: CalendarMode::Off,
         };
-        let error =
-            match resolve_fill_window(std::path::Path::new("/tmp/unused"), &args, true).await {
-                Ok(_) => panic!("calendar-off last-trading-days request should fail"),
-                Err(error) => error,
-            };
+        let error = match resolve_fill_window(
+            std::path::Path::new("/tmp/unused"),
+            &args,
+            true,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("calendar-off last-trading-days request should fail"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("--last-trading-days"));
     }
@@ -1547,7 +1685,9 @@ mod tests {
             calendar: CalendarMode::Auto,
         };
 
-        let resolved = resolve_fill_window(&root, &args, false).await.unwrap();
+        let resolved = resolve_fill_window(&root, &args, false, false)
+            .await
+            .unwrap();
 
         assert_eq!(resolved.window.start_day, "2020-01-09");
         assert_eq!(resolved.window.end_day, "2020-01-10");
@@ -1575,5 +1715,21 @@ mod tests {
             panic!("expected fill command");
         };
         assert_eq!(args.progress, ProgressMode::Tty);
+    }
+
+    #[test]
+    fn open_day_fill_requires_an_explicit_day_range() {
+        let error = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--last-trading-days",
+            "1",
+            "--include-open-day",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

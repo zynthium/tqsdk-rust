@@ -8,8 +8,8 @@ use crate::history_series_cache::tqbn::fixed::{
 };
 use crate::history_series_cache::tqbn::format::{
     NONE_EPOCH, TQBN_BLOCK_MAGIC, TQBN_MAGIC, TQBN_SCHEMA_VERSION, TQBN_VERSION,
-    TqbnCoverageRecordV1, TqbnKlineRecordV1, TqbnRType, TqbnRecordHeader, TqbnTick1RecordV1,
-    TqbnTick5RecordV1,
+    TqbnCoverageRecordV1, TqbnKlineRecordV1, TqbnProvisionalCoverageRecordV1, TqbnRType,
+    TqbnRecordHeader, TqbnTick1RecordV1, TqbnTick5RecordV1,
 };
 use tqsdk_core::{Kline, Tick};
 
@@ -356,6 +356,10 @@ pub(super) enum DecodedTqbnRecord<'a> {
         bytes: &'a [u8],
         record_size: usize,
     },
+    ProvisionalCoverage {
+        bytes: &'a [u8],
+        record_size: usize,
+    },
     Unknown {
         #[cfg_attr(
             not(test),
@@ -403,6 +407,14 @@ pub(super) fn decode_one_record(bytes: &[u8]) -> Result<DecodedTqbnRecord<'_>> {
         value if value == TqbnRType::Coverage as u8 => {
             decode_known_record::<TqbnCoverageRecordV1>(bytes, record_size, "coverage")
                 .map(|bytes| DecodedTqbnRecord::Coverage { bytes, record_size })
+        }
+        value if value == TqbnRType::ProvisionalCoverage as u8 => {
+            decode_known_record::<TqbnProvisionalCoverageRecordV1>(
+                bytes,
+                record_size,
+                "provisional coverage",
+            )
+            .map(|bytes| DecodedTqbnRecord::ProvisionalCoverage { bytes, record_size })
         }
         rtype => Ok(DecodedTqbnRecord::Unknown { rtype, record_size }),
     }

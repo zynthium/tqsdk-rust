@@ -206,6 +206,8 @@ tqsdk
 - CSV export
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
+- TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
+  coverage/cache-hit，final 覆盖后由 compaction 淘汰
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
@@ -226,10 +228,10 @@ tqsdk
 职责：
 
 - 可选 canonical daily TQBN tick cache operator CLI
-- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、report-bound CacheOnly verify、
-  fast inventory 与 deep doctor
-- 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows
-  而不提交 coverage
+- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式
+  current-day provisional fill、report-bound CacheOnly verify、fast inventory 与 deep doctor
+- 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows，
+  但不提交 final coverage 或推进 provisional checkpoint
 
 非职责：
 

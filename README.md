@@ -32,7 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、calendar-aware closed-day fill、selectable stderr progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、calendar-aware closed-day fill、显式当前日 provisional fill、selectable stderr progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -238,8 +238,17 @@ serial；写入端只在 tick id 连续时推进 coverage，断线、跳号或�
 需要先预热全品种缓存而不运行策略时，用同一个 builder 调 `.warmup().await?`；它会按
 `.batch_size(n)` 记录兼容 batch hint、解析 universe、跳过完整缓存、用官方 server-side
 backtest 流按每个物理 cache symbol 的 `missing_ranges` 只补缺口，并返回每个 symbol 的 skipped /
-missing / filled 报告。远端补齐成功后只
+missing / filled 报告。普通 final 补齐成功后只
 compact 本次 symbol 的 tick 文件，用于合并回填时产生的碎片 blocks。
+当前交易日若要盘中增量快照，可固定
+`.backtest(day_start_ns, as_of_ns)` 后调用
+`.provisional_open_day_fill(day_start_ns, as_of_ns)?`；它只写 non-final checkpoint，
+不满足普通 coverage/cache-hit，且 checkpoint 的范围和 as-of 必须位于同一 TQBN 日分区。
+远端明确成功结束的空增量可以推进 checkpoint；取消、超时或未确认结束不能推进。
+重复运行从 checkpoint 前 5 分钟重叠续填，并延后 compaction，避免每次盘中续填重写全历史；
+TQBN 18:00 分区结束后必须再次运行普通 warmup，完成全日 final 重对账、compaction 并淘汰 checkpoint。
+运维 CLI 对应入口是显式
+`fill --include-open-day`，单次 horizon 固定为启动时刻减 5 秒。
 
 多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略只接收
 `&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
@@ -261,6 +270,8 @@ date -> underlying 映射和 contiguous segment 压缩可用
 tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 features 启用
 `tqbn-zstd`，hot append 的 TQBN records block 使用 zstd level 1，append-log compaction
 重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入压缩 block。
+当前日 checkpoint 使用独立的 non-final provisional record，不进入普通 coverage；同日 final
+coverage 成功后会覆盖并在 compaction 中淘汰它。
 market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟 crate-internal `TQRI`
 时间索引；范围读取只解压与请求相交的 block，旧文件或缺失/不匹配索引逐 block 回退完整解码。
 `--no-default-features` 可关闭该支持，不新增用户可选 store API。
@@ -344,6 +355,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 本地 replay 回测 | `cargo run -p tqsdk --example api_contract_s38_facade_local_backtest` | `Tq::futures().replay_backtest(...)` 使用本地 replay + `TqSim`，不连接真实服务 |
 | 默认 facade 持久缓存回测 | `cargo run -p tqsdk --example api_contract_s43_facade_backtest_history_cache` | `.backtest(...).universe(...)` 默认通过共享 history cache root 复用持久 tick 缓存；`.cache_dir(...)` 可覆盖 |
 | 默认 facade remote-on-miss 缓存回测 | `cargo run -p tqsdk --example api_contract_s44_facade_backtest_remote_on_miss` | 使用官方 server-side backtest tick stream 填补缺失缓存；需要账号，但不需要专业历史下载权限 |
+| 默认 facade 缓存预热 | `cargo run -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup` | `.warmup()` 只预热缓存；示例也编译检查当前日 `.provisional_open_day_fill(...)` 配置 |
 | 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 共享缓存 policy | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s47_facade_market_cache_policy` | `MarketCachePolicy` 同时驱动 live tick recording 和 cache-backed local backtest 输入 |
 | 回测 tick cache 运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；管理 daily TQBN tick cache，不启动 relay 或守护进程 |

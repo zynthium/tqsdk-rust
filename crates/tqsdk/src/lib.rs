@@ -127,6 +127,7 @@ const SERVER_REPLAY_TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_BACKTEST_WARMUP_BATCH_SIZE: usize = 20;
 const MAX_BACKTEST_CACHE_INSPECTION_CONCURRENCY: usize = 4;
 const BACKTEST_SYNTH_KLINE_MAX_NS: i64 = 60_000_000_000;
+const DEFAULT_PROVISIONAL_OPEN_DAY_OVERLAP_NS: i64 = 5 * 60 * 1_000_000_000;
 
 /// Error type for the user-facing facade.
 #[derive(Debug)]
@@ -971,6 +972,14 @@ pub struct BacktestBuilder {
     remote_fill_telemetry: Option<BacktestRemoteFillTelemetryHandler>,
     remote_fill_cancellation: Option<BacktestRemoteFillCancellation>,
     remote_fill_lock_wait: Option<Duration>,
+    provisional_open_day_fill: Option<ProvisionalOpenDayFill>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProvisionalOpenDayFill {
+    day_start_ns: i64,
+    as_of_ns: i64,
+    overlap_ns: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1678,6 +1687,34 @@ impl BacktestBuilder {
         self
     }
 
+    /// Configure this warmup as a resumable snapshot of one still-open trading day.
+    ///
+    /// The range ending at `as_of_ns` is persisted as provisional coverage and
+    /// therefore never satisfies ordinary cache-hit checks. Closed ranges
+    /// before `day_start_ns` keep their normal final-coverage semantics.
+    #[must_use = "the configured builder must be used"]
+    pub fn provisional_open_day_fill(mut self, day_start_ns: i64, as_of_ns: i64) -> Result<Self> {
+        if day_start_ns < self.start_ns || day_start_ns >= as_of_ns || as_of_ns != self.end_ns {
+            return Err(data_validation(
+                "provisional open-day fill requires start_ns <= day_start_ns < as_of_ns == end_ns",
+            ));
+        }
+        let start_day = tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(day_start_ns)?;
+        let end_day =
+            tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(as_of_ns.saturating_sub(1))?;
+        if start_day != end_day {
+            return Err(data_validation(
+                "provisional open-day fill must stay within one TQBN trading-day partition",
+            ));
+        }
+        self.provisional_open_day_fill = Some(ProvisionalOpenDayFill {
+            day_start_ns,
+            as_of_ns,
+            overlap_ns: DEFAULT_PROVISIONAL_OPEN_DAY_OVERLAP_NS,
+        });
+        Ok(self)
+    }
+
     /// Inspect persistent tick cache coverage for explicitly configured symbols.
     pub fn inspect_cache(&self) -> Result<Vec<BacktestTickCacheStatus>> {
         if self.symbols.is_empty() {
@@ -1798,7 +1835,15 @@ impl BacktestBuilder {
                 ),
             );
             if refresh || !is_complete {
-                fill_requests.extend(fill_requests_from_status(&before));
+                if let Some(provisional) = self.provisional_open_day_fill {
+                    fill_requests.extend(provisional_fill_requests_from_status(
+                        &cache,
+                        &before,
+                        provisional,
+                    )?);
+                } else {
+                    fill_requests.extend(fill_requests_from_status(&before));
+                }
             }
             before_by_range.insert((symbol, start_ns, end_ns), before);
         }
@@ -2234,6 +2279,63 @@ fn fill_requests_from_status(
     fill_requests_from_ranges(status.symbol.as_str(), &status.missing_ranges)
 }
 
+fn provisional_fill_requests_from_status(
+    cache: &tqsdk_data::BacktestTickCache,
+    status: &BacktestTickCacheStatus,
+    provisional: ProvisionalOpenDayFill,
+) -> Result<Vec<backtest_remote::RemoteBacktestCacheFillRequest>> {
+    let mut requests = Vec::new();
+    for &(start_ns, end_ns) in &status.missing_ranges {
+        let closed_end_ns = end_ns.min(provisional.day_start_ns);
+        if start_ns < closed_end_ns {
+            requests.push(backtest_remote::RemoteBacktestCacheFillRequest::new(
+                status.symbol.clone(),
+                start_ns,
+                closed_end_ns,
+            ));
+        }
+    }
+
+    let provisional_start_ns = status.range_start_ns.max(provisional.day_start_ns);
+    let provisional_end_ns = status.range_end_ns.min(provisional.as_of_ns);
+    if provisional_start_ns >= provisional_end_ns
+        || !status.missing_ranges.iter().any(|&(start_ns, end_ns)| {
+            start_ns < provisional_end_ns && provisional_start_ns < end_ns
+        })
+    {
+        return Ok(requests);
+    }
+
+    let resume_ns = cache
+        .provisional_coverage(
+            status.symbol.as_str(),
+            provisional_start_ns,
+            provisional_end_ns,
+        )?
+        .map_or(provisional_start_ns, |checkpoint| {
+            if checkpoint.complete_through_ns >= provisional_end_ns {
+                provisional_end_ns
+            } else {
+                checkpoint
+                    .complete_through_ns
+                    .saturating_sub(provisional.overlap_ns)
+                    .max(provisional_start_ns)
+            }
+        });
+    if resume_ns < provisional_end_ns {
+        requests.push(
+            backtest_remote::RemoteBacktestCacheFillRequest::provisional(
+                status.symbol.clone(),
+                resume_ns,
+                provisional_end_ns,
+                provisional_start_ns,
+                provisional.as_of_ns,
+            ),
+        );
+    }
+    Ok(requests)
+}
+
 fn build_remote_fill_plan(
     requested_range: (i64, i64),
     logical_symbols: Vec<String>,
@@ -2366,6 +2468,7 @@ impl PreparedBacktest {
             remote_fill_telemetry,
             remote_fill_cancellation,
             remote_fill_lock_wait: _,
+            provisional_open_day_fill: _,
         } = builder;
         let remote_fill_runtime = backtest_remote::RemoteBacktestFillRuntime::new(
             remote_fill_config,
@@ -2576,6 +2679,7 @@ impl TqBuilder {
             remote_fill_telemetry: None,
             remote_fill_cancellation: None,
             remote_fill_lock_wait: None,
+            provisional_open_day_fill: None,
         }
     }
 
@@ -3244,7 +3348,12 @@ fn parse_env_value(name: &'static str, value: String) -> Result<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{BacktestTickCacheStatus, Error, fill_requests_from_status, parse_env_value};
+    use tqsdk_data::BacktestTickCache;
+
+    use super::{
+        BacktestTickCacheStatus, Error, ProvisionalOpenDayFill, fill_requests_from_status,
+        parse_env_value, provisional_fill_requests_from_status,
+    };
 
     #[test]
     fn parse_env_value_trims_non_empty_credentials() {
@@ -3285,6 +3394,89 @@ mod tests {
         assert_eq!((requests[0].start_ns, requests[0].end_ns), (2_000, 4_000));
         assert_eq!(requests[1].symbol, "SHFE.rb2601");
         assert_eq!((requests[1].start_ns, requests[1].end_ns), (5_000, 7_000));
+    }
+
+    #[test]
+    fn provisional_fill_resumes_with_overlap_without_promoting_the_open_day() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-provisional-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = BacktestTickCache::open(&cache_dir).unwrap();
+        cache
+            .mark_provisional("SHFE.rb2601", 1_000, 6_000, 6_000, 0, None)
+            .unwrap();
+        let status = BacktestTickCacheStatus {
+            backend_format: "tqbn",
+            cache_dir: cache_dir.clone(),
+            series_path: cache.tick_series_path("SHFE.rb2601"),
+            series_path_exists: true,
+            symbol: "SHFE.rb2601".to_string(),
+            range_start_ns: 1_000,
+            range_end_ns: 10_000,
+            cached_ranges: Vec::new(),
+            missing_ranges: vec![(1_000, 10_000)],
+        };
+
+        let requests = provisional_fill_requests_from_status(
+            &cache,
+            &status,
+            ProvisionalOpenDayFill {
+                day_start_ns: 1_000,
+                as_of_ns: 10_000,
+                overlap_ns: 500,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!((requests[0].start_ns, requests[0].end_ns), (5_500, 10_000));
+        assert!(requests[0].commit_mode.is_provisional());
+        assert_eq!(requests[0].commit_mode.provisional_start_ns(), Some(1_000));
+        let final_coverage = cache.coverage("SHFE.rb2601", 1_000, 10_000).unwrap();
+        assert!(!final_coverage.is_complete());
+
+        cache
+            .mark_provisional("SHFE.rb2601", 1_000, 10_000, 10_000, 0, None)
+            .unwrap();
+        let requests = provisional_fill_requests_from_status(
+            &cache,
+            &status,
+            ProvisionalOpenDayFill {
+                day_start_ns: 1_000,
+                as_of_ns: 10_000,
+                overlap_ns: 500,
+            },
+        )
+        .unwrap();
+        assert!(requests.is_empty());
+
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn provisional_open_day_builder_rejects_cross_partition_windows() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let range = tqsdk_data::backtest_tick_trading_day_range(day).unwrap();
+        let as_of_ns = range.end_ns.saturating_add(1);
+
+        let error = match super::Tq::futures()
+            .backtest(range.start_ns, as_of_ns)
+            .provisional_open_day_fill(range.start_ns, as_of_ns)
+        {
+            Ok(_) => panic!("cross-partition provisional fill should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("must stay within one TQBN trading-day partition")
+        );
     }
 }
 

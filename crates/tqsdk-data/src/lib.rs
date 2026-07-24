@@ -82,7 +82,7 @@ pub use backtest_tick_cache::{
     BacktestTickCacheFastInventorySymbol, BacktestTickCacheInventory,
     BacktestTickCacheInventorySymbol, BacktestTickCacheOperationLock, BacktestTickCachePurgeReport,
     BacktestTickCacheStatus, BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill,
-    BacktestTickFillReport, BacktestTickTradingDayRange,
+    BacktestTickFillReport, BacktestTickProvisionalCoverage, BacktestTickTradingDayRange,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 pub use client::{

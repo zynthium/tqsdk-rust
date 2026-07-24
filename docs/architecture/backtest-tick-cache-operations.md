@@ -30,6 +30,12 @@ deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
 `.tqbn` 文件存在、日分区数量正确或 `rows_written > 0` 都只是辅助信号。已完整缓存的重复运行
 可以合法地得到 `rows_written == 0` 和 `remote_used == false`。
 
+显式 `--include-open-day` 的盘中快照不满足上述“全日完整”标准。它成功时要求所有 physical
+symbols 至少推进到同一个 `complete_through_ns`，report 使用
+`coverage_state=provisional`、`day_complete=false`；普通 CacheOnly 仍应报告当前日缺口。
+只有 TQBN 18:00 分区边界过去后再次运行，才会按普通 final coverage 全日重对账，并恢复以上
+三项完成标准。
+
 ## 1. 选择 cache root、symbol 与完成窗口
 
 - 默认共享 root 为 `$HOME/.tqsdk/data_series_1`，可由 `TQSDK_HISTORY_CACHE_DIR` 覆盖；
@@ -39,7 +45,9 @@ deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
 - 固定 root 的 operator 作业可以让 `tqsdk-cache fill --last-trading-days N --calendar auto`
   管理这一步：它优先复用 `<cache-root>/meta/trading-calendar-v1.json`，在没有可用快照且确认
   存在远端缺口后才拉取通用日历。日历只决定 selector 和进度分母，不能替代 coverage。
-- 只填到最后一个已结束交易日。盘中或尚未经过尾部确认的交易日不能视为完整缓存。
+- 默认只填到最后一个已结束交易日。需要盘中快照时必须显式指定
+  `--start-day/--end-day <当前交易日> --include-open-day`；该日只写 provisional checkpoint，
+  不能视为完整缓存。`--include-open-day` 不与 `--last-trading-days` 组合。
 - `KQ.i@...` 直接按 index symbol 缓存；`KQ.m@...` 会按日期解析到具体合约并共享具体合约的
   tick 文件。不要用一个 symbol 的 coverage 推断另一个 symbol 完整。
 - 对 SHFE 贵金属等夜盘品种，常用窗口从首个交易日前一天 `18:00:00` CST 开始，到最后交易日
@@ -57,6 +65,22 @@ tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --last-trading-days 60 --calendar auto \
   --progress-max-bars 8
 ```
+
+盘中需要提前获得当前 TQBN 交易日快照时，固定本次启动时刻减 5 秒为 horizon：
+
+```bash
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+  --symbol CZCE.AP610 \
+  --start-day 2026-07-24 --end-day 2026-07-24 \
+  --include-open-day
+```
+
+重复运行会从已持久化高水位前 5 分钟重新请求，利用 tick id 去重后向新 horizon 延伸。
+checkpoint 的范围、高水位和 as-of 必须在同一 TQBN 日分区。远端明确 terminal 成功的空增量
+可以推进 checkpoint；进程取消、超时或未确认结束时只保留已落盘 rows，不推进 checkpoint。
+盘中续填不做全历史 compaction。TQBN 分区在 18:00 CST 后转为 closed day；同一命令再次运行时
+不再使用 provisional checkpoint，而是请求尚缺的 final coverage，并在成功后 compact、淘汰 checkpoint。
 
 默认先动态显示 cache inspection 的 `已检查范围/总范围`、命中、缺口和当前 physical symbol，再显示
 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式使用
@@ -120,6 +144,11 @@ async fn warmup(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 }
 ```
 
+需要由 SDK 调用方自行编排当前日时，可在 `.backtest(day_start_ns, as_of_ns)` 后调用
+`.provisional_open_day_fill(day_start_ns, as_of_ns)?`。该配置只改变 warmup 的远端补缺与
+checkpoint 提交方式，不改变普通 replay/CacheOnly coverage；调用方仍应固定单次运行的
+`as_of_ns`，不能在同一次 warmup 中随墙钟漂移。
+
 `batch_size(...)` 只保留兼容报告 hint，不再串行切远端任务。多 symbol 的网络并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，合并会话大小由
 `TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制；未做基准测试时保持默认值。
@@ -179,8 +208,10 @@ async fn verify(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 当窗口本来没有任何行情时，最后一项应改为检查预期的空 coverage，而不是强制 replay 非空。
 
 CLI fill report 的当前 schema 为 `2`，记录原始 selector、解析日历及每 physical cache report range
-的日计数；
-`verify --report` 仍可读取旧 schema `1`。无论报告版本如何，最终验收都必须以同 root、同窗口的
+的日计数；盘中报告额外使用 `coverage_state`、`complete_through_ns` 和 `day_complete`
+区分“本轮快照成功”与“全日 final coverage 完成”。`verify --report` 仍可读取旧 schema `1`，
+缺少这些字段时按 `coverage_state=final`、`complete_through_ns=null`、
+`day_complete=complete` 解释。无论报告版本如何，最终验收都必须以同 root、同窗口的
 CacheOnly coverage 为准。
 
 ## 5. 仓库内端到端 runner

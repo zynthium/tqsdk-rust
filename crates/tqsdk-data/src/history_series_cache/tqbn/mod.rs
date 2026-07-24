@@ -15,9 +15,9 @@ use crate::history_series_cache::{
     HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesCoverageCommit,
     HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
-    HistorySeriesPurgeReport, HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow,
-    HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
-    HistorySeriesWriteSegment,
+    HistorySeriesProvisionalCoverage, HistorySeriesPurgeReport, HistorySeriesReadRequest,
+    HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore,
+    HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone,
@@ -33,8 +33,9 @@ use codec::{
     encode_kline_record, encode_records_block, encode_tick_record, validate_block_flags,
 };
 use format::{
-    FIXED_AMOUNT_SCALE, FIXED_PRICE_SCALE, TqbnCoverageRecordV1, TqbnKlineRecordV1, TqbnRType,
-    TqbnRecordHeader, TqbnTick1RecordV1, TqbnTick5RecordV1,
+    FIXED_AMOUNT_SCALE, FIXED_PRICE_SCALE, TqbnCoverageRecordV1, TqbnKlineRecordV1,
+    TqbnProvisionalCoverageRecordV1, TqbnRType, TqbnRecordHeader, TqbnTick1RecordV1,
+    TqbnTick5RecordV1,
 };
 use metadata::{TqbnMetadata, TqbnSchema, decode_metadata, encode_metadata};
 
@@ -55,6 +56,9 @@ const TQBN_TARGET_RECORDS_BLOCK_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 const TQBN_COVERAGE_INDEX_MAGIC: [u8; 4] = *b"TQCI";
 const TQBN_COVERAGE_INDEX_VERSION: u8 = 1;
 const TQBN_COVERAGE_INDEX_ROOT_FLAG: u8 = 0x01;
+const TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG: u8 = 0x02;
+const TQBN_COVERAGE_INDEX_KNOWN_FLAGS: u8 =
+    TQBN_COVERAGE_INDEX_ROOT_FLAG | TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG;
 const TQBN_COVERAGE_INDEX_NO_OFFSET: u64 = u64::MAX;
 const TQBN_COVERAGE_INDEX_PAYLOAD_LEN: usize = 40;
 const TQBN_RECORDS_INDEX_MAGIC: [u8; 4] = *b"TQRI";
@@ -71,6 +75,7 @@ pub(super) struct TqbnHistoryStore {
 struct TqbnSeriesState {
     rows: Vec<HistorySeriesRow>,
     coverage: Vec<(i64, i64)>,
+    provisional: Vec<TqbnProvisionalCoverage>,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +99,15 @@ struct TqbnPartitionRange {
     day: String,
     start_ns: i64,
     end_ns: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TqbnProvisionalCoverage {
+    range_start_ns: i64,
+    complete_through_ns: i64,
+    as_of_ns: i64,
+    rows: usize,
+    id_range: Option<(i64, i64)>,
 }
 
 struct TqbnReader {
@@ -125,6 +139,12 @@ struct TqbnCoverageIndexV1 {
     coverage_block_offset: u64,
     range_start_ns: i64,
     range_end_ns: i64,
+}
+
+#[derive(Debug, Default)]
+struct TqbnIndexedCoverage {
+    coverage: Vec<(i64, i64)>,
+    provisional: Vec<TqbnProvisionalCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -593,6 +613,41 @@ impl HistorySeriesStore for TqbnHistoryStore {
         })
     }
 
+    fn provisional_coverage(
+        &self,
+        request: HistorySeriesCoverageRequest,
+    ) -> Result<Option<HistorySeriesProvisionalCoverage>> {
+        let mut provisional = Vec::new();
+        let mut final_coverage = Vec::new();
+        for path in self.partition_paths_for_range(
+            request.symbol.as_str(),
+            request.kind,
+            request.range_start_ns,
+            request.range_end_ns,
+        )? {
+            let parsed = parse_tqbn_checkpoint_file(&path, request.symbol.as_str(), request.kind)?;
+            provisional.extend(parsed.provisional);
+            final_coverage.extend(parsed.coverage);
+        }
+        let checkpoint = select_provisional_checkpoint(
+            provisional,
+            &super::merge_datetime_ranges(final_coverage),
+            request.range_start_ns,
+            request.range_end_ns,
+        );
+        Ok(
+            checkpoint.map(|checkpoint| HistorySeriesProvisionalCoverage {
+                symbol: request.symbol,
+                kind: request.kind,
+                range_start_ns: checkpoint.range_start_ns,
+                complete_through_ns: checkpoint.complete_through_ns,
+                as_of_ns: checkpoint.as_of_ns,
+                rows: checkpoint.rows,
+                id_range: checkpoint.id_range,
+            }),
+        )
+    }
+
     fn write_segment(
         &self,
         segment: HistorySeriesWriteSegment<'_>,
@@ -773,6 +828,32 @@ impl HistorySeriesStore for TqbnHistoryStore {
         Ok(())
     }
 
+    fn append_provisional(&self, commit: HistorySeriesProvisionalCoverage) -> Result<()> {
+        self.ensure_writable()?;
+        validate_provisional_coverage(&commit)?;
+        for partition in partition_ranges(commit.range_start_ns, commit.complete_through_ns)? {
+            let path = self.partition_series_path(
+                partition.day.as_str(),
+                commit.symbol.as_str(),
+                commit.kind,
+            );
+            let partition_commit = HistorySeriesProvisionalCoverage {
+                symbol: commit.symbol.clone(),
+                kind: commit.kind,
+                range_start_ns: partition.start_ns,
+                complete_through_ns: partition.end_ns,
+                as_of_ns: commit.as_of_ns,
+                rows: commit.rows,
+                id_range: commit.id_range,
+            };
+            ensure_parent_dir(&path)?;
+            with_exclusive_tqbn_lock(&path, || {
+                append_provisional_to_file(&path, &partition_commit)
+            })?;
+        }
+        Ok(())
+    }
+
     fn purge_series(
         &self,
         symbol: &str,
@@ -935,6 +1016,24 @@ fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) ->
         commit.rows,
         commit.id_range,
     )?;
+    file.flush()?;
+    file.sync_data()?;
+    Ok(())
+}
+
+fn append_provisional_to_file(
+    path: &Path,
+    commit: &HistorySeriesProvisionalCoverage,
+) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let first_block_offset =
+        ensure_tqbn_file_initialized(&mut file, commit.symbol.as_str(), commit.kind)?;
+    let coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    let _ = append_provisional_block(&mut file, coverage_index_offset, commit)?;
     file.flush()?;
     file.sync_data()?;
     Ok(())
@@ -1222,6 +1321,34 @@ fn append_coverage_block(
     append_tqbn_coverage_index(file, index).map(Some)
 }
 
+fn append_provisional_block(
+    file: &mut File,
+    previous_index_offset: Option<u64>,
+    commit: &HistorySeriesProvisionalCoverage,
+) -> Result<Option<u64>> {
+    validate_provisional_coverage(commit)?;
+    let record = provisional_coverage_record(commit)?;
+    let mut records = Vec::new();
+    write_provisional_coverage_record_bytes(&mut records, &record)?;
+    let coverage_block_offset = file.seek(SeekFrom::End(0))?;
+    file.write_all(&encode_block(TqbnBlockType::Records, &records))?;
+
+    let Some(previous_index_offset) = previous_index_offset else {
+        return Ok(None);
+    };
+    append_tqbn_coverage_index(
+        file,
+        TqbnCoverageIndexV1 {
+            flags: TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG,
+            previous_index_offset,
+            coverage_block_offset,
+            range_start_ns: commit.range_start_ns,
+            range_end_ns: commit.complete_through_ns,
+        },
+    )
+    .map(Some)
+}
+
 fn append_tqbn_coverage_index_root(file: &mut File) -> Result<u64> {
     append_tqbn_coverage_index(
         file,
@@ -1272,6 +1399,39 @@ fn coverage_record(
         hd: TqbnRecordHeader::new::<TqbnCoverageRecordV1>(TqbnRType::Coverage, 1, ts_event),
         range_start_ns: start_ns,
         range_end_ns: end_ns,
+        rows,
+        id_start,
+        id_end,
+        has_id_range,
+        reserved: [0; 7],
+    })
+}
+
+fn provisional_coverage_record(
+    commit: &HistorySeriesProvisionalCoverage,
+) -> Result<TqbnProvisionalCoverageRecordV1> {
+    let ts_event = u64::try_from(commit.range_start_ns).map_err(|_| {
+        DataError::InvalidResponse(format!(
+            "TQBN provisional range start must be non-negative, got {}",
+            commit.range_start_ns
+        ))
+    })?;
+    let rows = u64::try_from(commit.rows).map_err(|_| {
+        DataError::InvalidResponse("TQBN provisional row count overflow".to_string())
+    })?;
+    let (id_start, id_end, has_id_range) = match commit.id_range {
+        Some((start, end)) => (start, end, 1),
+        None => (0, 0, 0),
+    };
+    Ok(TqbnProvisionalCoverageRecordV1 {
+        hd: TqbnRecordHeader::new::<TqbnProvisionalCoverageRecordV1>(
+            TqbnRType::ProvisionalCoverage,
+            1,
+            ts_event,
+        ),
+        range_start_ns: commit.range_start_ns,
+        complete_through_ns: commit.complete_through_ns,
+        as_of_ns: commit.as_of_ns,
         rows,
         id_start,
         id_end,
@@ -1334,27 +1494,48 @@ fn parse_tqbn_coverage_file(
     symbol: &str,
     kind: HistorySeriesKind,
 ) -> Result<Vec<(i64, i64)>> {
+    Ok(parse_tqbn_checkpoint_file(path, symbol, kind)?.coverage)
+}
+
+fn parse_tqbn_checkpoint_file(
+    path: &Path,
+    symbol: &str,
+    kind: HistorySeriesKind,
+) -> Result<TqbnIndexedCoverage> {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(TqbnIndexedCoverage::default());
+        }
         Err(error) => return Err(error.into()),
     };
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
-    if let Some(coverage) = try_parse_tqbn_coverage_index_chain(&mut file, offset as u64)? {
-        return Ok(coverage);
+    if let Some(indexed) = try_parse_tqbn_checkpoint_index_chain(&mut file, offset as u64)? {
+        return Ok(indexed);
     }
     file.seek(SeekFrom::Start(offset as u64))?;
-    let mut coverage = Vec::new();
+    let mut indexed = TqbnIndexedCoverage::default();
     decode_blocks_streaming_with(&mut file, |records| {
-        decode_coverage_records_block(records, &mut coverage)
+        decode_checkpoint_records_block(records, &mut indexed)
     })?;
-    Ok(coverage)
+    Ok(indexed)
 }
 
+#[cfg(test)]
 fn try_parse_tqbn_coverage_index_chain(
     file: &mut File,
     first_block_offset: u64,
 ) -> Result<Option<Vec<(i64, i64)>>> {
+    Ok(
+        try_parse_tqbn_checkpoint_index_chain(file, first_block_offset)?
+            .map(|indexed| indexed.coverage),
+    )
+}
+
+fn try_parse_tqbn_checkpoint_index_chain(
+    file: &mut File,
+    first_block_offset: u64,
+) -> Result<Option<TqbnIndexedCoverage>> {
     let file_len = file.metadata()?.len();
     let index_block_len = (TQBN_BLOCK_HEADER_LEN + TQBN_COVERAGE_INDEX_PAYLOAD_LEN) as u64;
     let Some(tail_offset) = file_len.checked_sub(index_block_len) else {
@@ -1368,7 +1549,7 @@ fn try_parse_tqbn_coverage_index_chain(
     };
 
     let mut index_offset = tail_offset;
-    let mut coverage = Vec::new();
+    let mut indexed = TqbnIndexedCoverage::default();
     let max_links = file_len / index_block_len + 1;
     for _ in 0..max_links {
         if index.flags == TQBN_COVERAGE_INDEX_ROOT_FLAG {
@@ -1380,10 +1561,11 @@ fn try_parse_tqbn_coverage_index_chain(
             {
                 return Ok(None);
             }
-            coverage.reverse();
-            return Ok(Some(coverage));
+            indexed.coverage.reverse();
+            indexed.provisional.reverse();
+            return Ok(Some(indexed));
         }
-        if index.flags != 0
+        if !matches!(index.flags, 0 | TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG)
             || index.previous_index_offset == TQBN_COVERAGE_INDEX_NO_OFFSET
             || index.coverage_block_offset == TQBN_COVERAGE_INDEX_NO_OFFSET
             || index.previous_index_offset < first_block_offset
@@ -1395,19 +1577,37 @@ fn try_parse_tqbn_coverage_index_chain(
             return Ok(None);
         }
 
-        let Some(range) = read_tqbn_indexed_coverage_range(
-            file,
-            index.coverage_block_offset,
-            index_offset,
-            file_len,
-        )?
-        else {
-            return Ok(None);
-        };
-        if range != (index.range_start_ns, index.range_end_ns) {
-            return Ok(None);
+        if index.flags == TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG {
+            let Some(checkpoint) = read_tqbn_indexed_provisional_coverage(
+                file,
+                index.coverage_block_offset,
+                index_offset,
+                file_len,
+            )?
+            else {
+                return Ok(None);
+            };
+            if (checkpoint.range_start_ns, checkpoint.complete_through_ns)
+                != (index.range_start_ns, index.range_end_ns)
+            {
+                return Ok(None);
+            }
+            indexed.provisional.push(checkpoint);
+        } else {
+            let Some(range) = read_tqbn_indexed_coverage_range(
+                file,
+                index.coverage_block_offset,
+                index_offset,
+                file_len,
+            )?
+            else {
+                return Ok(None);
+            };
+            if range != (index.range_start_ns, index.range_end_ns) {
+                return Ok(None);
+            }
+            indexed.coverage.push(range);
         }
-        coverage.push(range);
 
         index_offset = index.previous_index_offset;
         let Some(previous) = read_tqbn_coverage_index_at(file, index_offset, file_len)? else {
@@ -1516,11 +1716,42 @@ fn read_tqbn_indexed_coverage_range(
     Ok(Some(*range))
 }
 
+fn read_tqbn_indexed_provisional_coverage(
+    file: &mut File,
+    coverage_block_offset: u64,
+    index_offset: u64,
+    file_len: u64,
+) -> Result<Option<TqbnProvisionalCoverage>> {
+    let descriptor = match read_tqbn_block_descriptor_at(file, coverage_block_offset, file_len) {
+        Ok(descriptor) => descriptor,
+        Err(_) => return Ok(None),
+    };
+    if descriptor.block_type != TqbnBlockType::Records as u8
+        || descriptor.flags != 0
+        || descriptor.end_offset != index_offset
+        || descriptor.payload_len != std::mem::size_of::<TqbnProvisionalCoverageRecordV1>()
+    {
+        return Ok(None);
+    }
+    let payload = match read_tqbn_block_payload(file, descriptor) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(None),
+    };
+    let mut indexed = TqbnIndexedCoverage::default();
+    if decode_checkpoint_records_block(&payload, &mut indexed).is_err() {
+        return Ok(None);
+    }
+    let [checkpoint] = indexed.provisional.as_slice() else {
+        return Ok(None);
+    };
+    Ok(Some(*checkpoint))
+}
+
 fn decode_tqbn_coverage_index(payload: &[u8]) -> Option<TqbnCoverageIndexV1> {
     if payload.len() != TQBN_COVERAGE_INDEX_PAYLOAD_LEN
         || payload[0..4] != TQBN_COVERAGE_INDEX_MAGIC
         || payload[4] != TQBN_COVERAGE_INDEX_VERSION
-        || payload[5] & !TQBN_COVERAGE_INDEX_ROOT_FLAG != 0
+        || payload[5] & !TQBN_COVERAGE_INDEX_KNOWN_FLAGS != 0
         || payload[6..8] != [0, 0]
     {
         return None;
@@ -2022,6 +2253,15 @@ fn decode_records_block(
                 }
                 record_size
             }
+            DecodedTqbnRecord::ProvisionalCoverage {
+                bytes: record,
+                record_size,
+            } => {
+                state
+                    .provisional
+                    .push(decode_provisional_coverage_record(record)?);
+                record_size
+            }
             DecodedTqbnRecord::Unknown { record_size, .. } => record_size,
         };
         bytes = &bytes[record_size..];
@@ -2029,7 +2269,17 @@ fn decode_records_block(
     Ok(())
 }
 
-fn decode_coverage_records_block(mut bytes: &[u8], coverage: &mut Vec<(i64, i64)>) -> Result<()> {
+fn decode_coverage_records_block(bytes: &[u8], coverage: &mut Vec<(i64, i64)>) -> Result<()> {
+    let mut indexed = TqbnIndexedCoverage::default();
+    decode_checkpoint_records_block(bytes, &mut indexed)?;
+    coverage.extend(indexed.coverage);
+    Ok(())
+}
+
+fn decode_checkpoint_records_block(
+    mut bytes: &[u8],
+    indexed: &mut TqbnIndexedCoverage,
+) -> Result<()> {
     while !bytes.is_empty() {
         let decoded = decode_one_record(bytes)?;
         let record_size = match decoded {
@@ -2039,8 +2289,19 @@ fn decode_coverage_records_block(mut bytes: &[u8], coverage: &mut Vec<(i64, i64)
             } => {
                 let record = read_coverage_record_bytes(record)?;
                 if record.range_start_ns < record.range_end_ns {
-                    coverage.push((record.range_start_ns, record.range_end_ns));
+                    indexed
+                        .coverage
+                        .push((record.range_start_ns, record.range_end_ns));
                 }
+                record_size
+            }
+            DecodedTqbnRecord::ProvisionalCoverage {
+                bytes: record,
+                record_size,
+            } => {
+                indexed
+                    .provisional
+                    .push(decode_provisional_coverage_record(record)?);
                 record_size
             }
             DecodedTqbnRecord::Kline { record_size, .. }
@@ -2051,6 +2312,49 @@ fn decode_coverage_records_block(mut bytes: &[u8], coverage: &mut Vec<(i64, i64)
         bytes = &bytes[record_size..];
     }
     Ok(())
+}
+
+fn decode_provisional_coverage_record(bytes: &[u8]) -> Result<TqbnProvisionalCoverage> {
+    let record = read_provisional_coverage_record_bytes(bytes)?;
+    if record.range_start_ns >= record.complete_through_ns {
+        return Err(DataError::InvalidResponse(
+            "TQBN provisional range start must be less than complete-through".to_string(),
+        ));
+    }
+    if record.complete_through_ns > record.as_of_ns {
+        return Err(DataError::InvalidResponse(
+            "TQBN provisional complete-through exceeds as-of time".to_string(),
+        ));
+    }
+    let start_day = trading_day_for_timestamp_ns(record.range_start_ns)?;
+    let complete_day = trading_day_for_timestamp_ns(record.complete_through_ns.saturating_sub(1))?;
+    let as_of_day = trading_day_for_timestamp_ns(record.as_of_ns.saturating_sub(1))?;
+    if start_day != complete_day || start_day != as_of_day {
+        return Err(DataError::InvalidResponse(
+            "TQBN provisional coverage crosses a trading-day partition".to_string(),
+        ));
+    }
+    if record.has_id_range > 1 || record.reserved != [0; 7] {
+        return Err(DataError::InvalidResponse(
+            "TQBN provisional flags are invalid".to_string(),
+        ));
+    }
+    let rows = usize::try_from(record.rows).map_err(|_| {
+        DataError::InvalidResponse("TQBN provisional row count exceeds usize::MAX".to_string())
+    })?;
+    let id_range = (record.has_id_range == 1).then_some((record.id_start, record.id_end));
+    if id_range.is_some_and(|(start, end)| start > end) {
+        return Err(DataError::InvalidResponse(
+            "TQBN provisional id range is invalid".to_string(),
+        ));
+    }
+    Ok(TqbnProvisionalCoverage {
+        range_start_ns: record.range_start_ns,
+        complete_through_ns: record.complete_through_ns,
+        as_of_ns: record.as_of_ns,
+        rows,
+        id_range,
+    })
 }
 
 fn rows_for_request(
@@ -2369,6 +2673,7 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
     })?;
     let rows = compact_rows(parsed.state.rows, kind);
     let coverage = super::merge_datetime_ranges(parsed.state.coverage);
+    let provisional = compact_provisional_coverage(parsed.state.provisional, &coverage);
     let temp_path = compact_temp_path(path)?;
     let result = (|| -> Result<()> {
         let mut file = File::create(&temp_path)?;
@@ -2384,6 +2689,24 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
                 end_ns,
                 rows.len(),
                 id_range,
+            )?
+            .ok_or_else(|| {
+                DataError::InvalidState("TQBN compaction lost its coverage index root")
+            })?;
+        }
+        for checkpoint in provisional {
+            coverage_index_offset = append_provisional_block(
+                &mut file,
+                Some(coverage_index_offset),
+                &HistorySeriesProvisionalCoverage {
+                    symbol: symbol.to_string(),
+                    kind,
+                    range_start_ns: checkpoint.range_start_ns,
+                    complete_through_ns: checkpoint.complete_through_ns,
+                    as_of_ns: checkpoint.as_of_ns,
+                    rows: checkpoint.rows,
+                    id_range: checkpoint.id_range,
+                },
             )?
             .ok_or_else(|| {
                 DataError::InvalidState("TQBN compaction lost its coverage index root")
@@ -2406,6 +2729,33 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
         return Err(error);
     }
     Ok(())
+}
+
+fn compact_provisional_coverage(
+    provisional: Vec<TqbnProvisionalCoverage>,
+    final_coverage: &[(i64, i64)],
+) -> Vec<TqbnProvisionalCoverage> {
+    let mut by_start = BTreeMap::<i64, TqbnProvisionalCoverage>::new();
+    for checkpoint in provisional {
+        if super::rangeset_difference(
+            &[(checkpoint.range_start_ns, checkpoint.complete_through_ns)],
+            final_coverage,
+        )
+        .is_empty()
+        {
+            continue;
+        }
+        let replace = by_start
+            .get(&checkpoint.range_start_ns)
+            .is_none_or(|current| {
+                (checkpoint.complete_through_ns, checkpoint.as_of_ns)
+                    > (current.complete_through_ns, current.as_of_ns)
+            });
+        if replace {
+            by_start.insert(checkpoint.range_start_ns, checkpoint);
+        }
+    }
+    by_start.into_values().collect()
 }
 
 fn write_compacted_rows_block(
@@ -2622,6 +2972,57 @@ fn validate_coverage_range(start_ns: i64, end_ns: i64) -> Result<()> {
     Ok(())
 }
 
+fn validate_provisional_coverage(commit: &HistorySeriesProvisionalCoverage) -> Result<()> {
+    if commit.kind != HistorySeriesKind::Tick {
+        return Err(DataError::InvalidState(
+            "provisional history coverage is only supported for ticks",
+        ));
+    }
+    validate_coverage_range(commit.range_start_ns, commit.complete_through_ns)?;
+    if commit.complete_through_ns > commit.as_of_ns {
+        return Err(DataError::InvalidState(
+            "history provisional coverage cannot extend beyond its as-of time",
+        ));
+    }
+    let start_day = trading_day_for_timestamp_ns(commit.range_start_ns)?;
+    let complete_day = trading_day_for_timestamp_ns(commit.complete_through_ns.saturating_sub(1))?;
+    let as_of_day = trading_day_for_timestamp_ns(commit.as_of_ns.saturating_sub(1))?;
+    if start_day != complete_day || start_day != as_of_day {
+        return Err(DataError::InvalidState(
+            "history provisional coverage must stay within one TQBN trading-day partition",
+        ));
+    }
+    if commit.id_range.is_some_and(|(start, end)| start > end) {
+        return Err(DataError::InvalidState(
+            "history provisional coverage id range is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn select_provisional_checkpoint(
+    provisional: Vec<TqbnProvisionalCoverage>,
+    final_coverage: &[(i64, i64)],
+    range_start_ns: i64,
+    range_end_ns: i64,
+) -> Option<TqbnProvisionalCoverage> {
+    provisional
+        .into_iter()
+        .filter(|checkpoint| {
+            checkpoint.range_start_ns <= range_start_ns
+                && checkpoint.complete_through_ns > range_start_ns
+                && checkpoint.range_start_ns < range_end_ns
+        })
+        .filter(|checkpoint| {
+            !super::rangeset_difference(
+                &[(checkpoint.range_start_ns, checkpoint.complete_through_ns)],
+                final_coverage,
+            )
+            .is_empty()
+        })
+        .max_by_key(|checkpoint| (checkpoint.complete_through_ns, checkpoint.as_of_ns))
+}
+
 fn rows_id_range(rows: &[HistorySeriesRow]) -> Result<Option<(i64, i64)>> {
     id_range(rows.iter().map(|row| match row {
         HistorySeriesRow::Kline(row) => row.id,
@@ -2797,6 +3198,27 @@ fn write_coverage_record_bytes(out: &mut Vec<u8>, record: &TqbnCoverageRecordV1)
     validate_record_len::<TqbnCoverageRecordV1>(record.hd)
 }
 
+fn write_provisional_coverage_record_bytes(
+    out: &mut Vec<u8>,
+    record: &TqbnProvisionalCoverageRecordV1,
+) -> Result<()> {
+    write_header(out, &record.hd);
+    write_i64_fields(
+        out,
+        &[
+            record.range_start_ns,
+            record.complete_through_ns,
+            record.as_of_ns,
+            i64::from_le_bytes(record.rows.to_le_bytes()),
+            record.id_start,
+            record.id_end,
+        ],
+    );
+    out.push(record.has_id_range);
+    out.extend_from_slice(&record.reserved);
+    validate_record_len::<TqbnProvisionalCoverageRecordV1>(record.hd)
+}
+
 fn write_i64_fields(out: &mut Vec<u8>, fields: &[i64]) {
     for field in fields {
         out.extend_from_slice(&field.to_le_bytes());
@@ -2908,6 +3330,30 @@ fn read_coverage_record_bytes(bytes: &[u8]) -> Result<TqbnCoverageRecordV1> {
     })
 }
 
+fn read_provisional_coverage_record_bytes(bytes: &[u8]) -> Result<TqbnProvisionalCoverageRecordV1> {
+    let mut reader = RecordReader::new(bytes);
+    let hd = reader.read_header()?;
+    let range_start_ns = reader.read_i64()?;
+    let complete_through_ns = reader.read_i64()?;
+    let as_of_ns = reader.read_i64()?;
+    let rows = u64::from_le_bytes(reader.read_i64()?.to_le_bytes());
+    let id_start = reader.read_i64()?;
+    let id_end = reader.read_i64()?;
+    let has_id_range = reader.read_u8()?;
+    let reserved = reader.read_u8_array::<7>()?;
+    Ok(TqbnProvisionalCoverageRecordV1 {
+        hd,
+        range_start_ns,
+        complete_through_ns,
+        as_of_ns,
+        rows,
+        id_start,
+        id_end,
+        has_id_range,
+        reserved,
+    })
+}
+
 struct RecordReader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -2982,14 +3428,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use chrono::NaiveDate;
     use tqsdk_core::{Kline, Tick};
 
     use crate::client::{KlineDataSeriesRequest, TickDataSeriesRequest};
     use crate::error::DataError;
     use crate::history_series_cache::{
         HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit,
-        HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesRow, HistorySeriesStore,
-        HistorySeriesWriteRows, HistorySeriesWriteSegment,
+        HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesProvisionalCoverage,
+        HistorySeriesRow, HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
     };
 
     use super::codec::{TqbnBlockType, decode_blocks, encode_block, encode_file_prefix};
@@ -2997,7 +3444,7 @@ mod tests {
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
         coverage_record, encode_metadata, history_rows_are_strictly_increasing,
         parse_tqbn_coverage_file, read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at,
-        read_tqbn_coverage_index_at, rows_for_request, tick_level_depth,
+        read_tqbn_coverage_index_at, rows_for_request, tick_level_depth, trading_day_range,
         try_parse_tqbn_coverage_index_chain, write_coverage_record_bytes,
     };
 
@@ -3195,6 +3642,32 @@ mod tests {
 
         assert!(coverage.is_complete());
         assert_eq!(coverage.cached_ranges, vec![(1_000, 3_000)]);
+    }
+
+    #[test]
+    fn tqbn_provisional_coverage_rejects_cross_partition_at_store_boundary() {
+        let store = tqbn_store("provisional_cross_partition");
+        let (_, range_start_ns, range_end_ns) =
+            trading_day_range(NaiveDate::from_ymd_opt(2026, 7, 24).unwrap()).unwrap();
+
+        let error = store
+            .append_provisional(HistorySeriesProvisionalCoverage {
+                symbol: SYMBOL.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns,
+                complete_through_ns: range_end_ns,
+                as_of_ns: range_end_ns.saturating_add(1),
+                rows: 0,
+                id_range: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DataError::InvalidState(
+                "history provisional coverage must stay within one TQBN trading-day partition"
+            )
+        ));
     }
 
     #[test]

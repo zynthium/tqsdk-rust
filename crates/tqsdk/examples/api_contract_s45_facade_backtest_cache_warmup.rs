@@ -15,6 +15,18 @@ async fn main() -> tqsdk::Result<()> {
     let start_ns = 1_781_182_800_000_000_000;
     let end_ns = 1_781_182_860_000_000_000;
     let symbol = "KQ.i@SHFE.au";
+
+    // A caller-managed open-day job fixes one as-of horizon per warmup. Building
+    // this value has no network or cache side effect; calling `warmup()` would
+    // persist only a resumable, non-final checkpoint.
+    let open_day_start_ns = 1_781_172_000_000_000_000;
+    let _open_day_snapshot = Tq::futures()
+        .backtest(open_day_start_ns, end_ns)
+        .cache_dir(".tqsdk/backtest_ticks")?
+        .universe(format!("symbol:{symbol}"))?
+        .remote_on_miss()
+        .provisional_open_day_fill(open_day_start_ns, end_ns)?;
+
     let remote_fill = BacktestRemoteFillConfig::from_environment()
         .with_symbol_batch_size(1)
         .with_symbol_concurrency(1)

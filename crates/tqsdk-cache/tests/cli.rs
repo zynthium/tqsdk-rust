@@ -2,7 +2,9 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use serde_json::Value;
-use tqsdk_data::{BacktestTickCache, backtest_tick_trading_day_range};
+use tqsdk_data::{
+    BacktestTickCache, backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+};
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
     assert_eq!(json["schema_version"], 3);
@@ -271,28 +273,193 @@ fn fill_progress_plain_reports_a_specific_failure_summary() {
 }
 
 #[test]
-fn fill_rejects_provisional_open_day_mode() {
+fn fill_rejects_current_open_day_without_opt_in() {
+    let open_day = current_open_day().format("%Y-%m-%d").to_string();
     let output = run_json([
         "fill",
         "--symbol",
         "SHFE.rb2601",
         "--start-day",
-        "2020-01-02",
+        open_day.as_str(),
         "--end-day",
-        "2020-01-03",
-        "--include-open-day",
+        open_day.as_str(),
+        "--dry-run",
     ]);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let _ = v3_result(&json, "fill", "error", 2);
-    assert_eq!(json["error"]["code"], "usage");
+    let _ = v3_result(&json, "fill", "error", 1);
+    assert_eq!(json["error"]["code"], "data_error");
     assert!(
         json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("--include-open-day")
+            .contains("not closed")
     );
+}
+
+#[test]
+fn fill_dry_run_accepts_current_open_day_with_opt_in() {
+    let cache_dir = temp_dir("open-day-dry-run");
+    let open_day = current_open_day().format("%Y-%m-%d").to_string();
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        open_day.as_str(),
+        "--end-day",
+        open_day.as_str(),
+        "--include-open-day",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["report"]["coverage_state"], "provisional");
+    assert_eq!(result["report"]["day_complete"], false);
+    assert!(result["report"]["complete_through_ns"].is_null());
+}
+
+#[test]
+fn fill_dry_run_reports_existing_partial_open_day_high_water_mark() {
+    let cache_dir = temp_dir("open-day-partial-checkpoint");
+    let open_day = current_open_day();
+    let open_range = backtest_tick_trading_day_range(open_day).unwrap();
+    let now_ns = current_time_ns();
+    let horizon_ns = now_ns.saturating_sub(5_000_000_000).min(open_range.end_ns);
+    assert!(horizon_ns > open_range.start_ns + 1);
+    let checkpoint_ns = open_range.start_ns + (horizon_ns - open_range.start_ns) / 2;
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .mark_provisional(
+            "SHFE.rb2601",
+            open_range.start_ns,
+            checkpoint_ns,
+            checkpoint_ns,
+            0,
+            None,
+        )
+        .unwrap();
+    let open_day = open_day.format("%Y-%m-%d").to_string();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        open_day.as_str(),
+        "--end-day",
+        open_day.as_str(),
+        "--include-open-day",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(
+        result["report"]["complete_through_ns"].as_i64(),
+        Some(checkpoint_ns)
+    );
+    assert_eq!(result["report"]["day_complete"], false);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn fill_reuses_current_open_day_checkpoint_without_auth() {
+    let cache_dir = temp_dir("open-day-checkpoint");
+    let open_day = current_open_day();
+    let open_range = backtest_tick_trading_day_range(open_day).unwrap();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .mark_provisional(
+            "SHFE.rb2601",
+            open_range.start_ns,
+            open_range.end_ns,
+            open_range.end_ns,
+            0,
+            None,
+        )
+        .unwrap();
+    let open_day = open_day.format("%Y-%m-%d").to_string();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        open_day.as_str(),
+        "--end-day",
+        open_day.as_str(),
+        "--include-open-day",
+        "--progress",
+        "off",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "success", 0);
+    assert_eq!(result["report"]["complete"], false);
+    assert_eq!(result["report"]["coverage_state"], "provisional");
+    assert_eq!(result["report"]["day_complete"], false);
+    assert!(result["report"]["complete_through_ns"].is_i64());
+    assert_eq!(result["report"]["remote_used"], false);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn fill_treats_a_previous_day_checkpoint_as_needing_final_reconciliation() {
+    let cache_dir = temp_dir("closed-day-provisional-checkpoint");
+    let open_range = backtest_tick_trading_day_range(current_open_day()).unwrap();
+    let previous_day =
+        backtest_tick_trading_day_for_timestamp_ns(open_range.start_ns.saturating_sub(1)).unwrap();
+    let previous_range = backtest_tick_trading_day_range(previous_day).unwrap();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .mark_provisional(
+            "SHFE.rb2601",
+            previous_range.start_ns,
+            previous_range.end_ns,
+            previous_range.end_ns,
+            0,
+            None,
+        )
+        .unwrap();
+    let previous_day = previous_day.format("%Y-%m-%d").to_string();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        previous_day.as_str(),
+        "--end-day",
+        previous_day.as_str(),
+        "--include-open-day",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["report"]["coverage_state"], "final");
+    assert!(result["report"]["complete_through_ns"].is_null());
+    assert_eq!(result["report"]["day_complete"], false);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]
@@ -508,6 +675,18 @@ fn run_without_auth_json<const N: usize>(args: [&str; N]) -> std::process::Outpu
 
 fn day(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+fn current_open_day() -> NaiveDate {
+    backtest_tick_trading_day_for_timestamp_ns(current_time_ns()).unwrap()
+}
+
+fn current_time_ns() -> i64 {
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    i64::try_from(now_ns).unwrap()
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {

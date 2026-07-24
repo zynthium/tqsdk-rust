@@ -23,8 +23,9 @@ pub use store::{
 };
 pub(crate) use store::{
     HistorySeriesCoverageCommit, HistorySeriesCoverageRequest, HistorySeriesKind,
-    HistorySeriesReadRequest, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
-    HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    HistorySeriesProvisionalCoverage, HistorySeriesReadRequest, HistorySeriesReader,
+    HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment,
 };
 
 const DEFAULT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_DIR";
@@ -358,6 +359,20 @@ impl HistorySeriesCache {
 
     pub(crate) fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()> {
         self.store.append_coverage(commit)
+    }
+
+    pub(crate) fn provisional_coverage(
+        &self,
+        request: HistorySeriesCoverageRequest,
+    ) -> Result<Option<HistorySeriesProvisionalCoverage>> {
+        self.store.provisional_coverage(request)
+    }
+
+    pub(crate) fn append_provisional(
+        &self,
+        commit: HistorySeriesProvisionalCoverage,
+    ) -> Result<()> {
+        self.store.append_provisional(commit)
     }
 
     pub fn purge_kline_series(

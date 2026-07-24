@@ -113,6 +113,9 @@ V1 是：
     但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
     cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
     server-side backtest market stream 且不落盘
+  - `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 只为固定 as-of 的当前交易日 warmup
+    提交 non-final checkpoint；普通 coverage/cache-hit 仍视为缺口，TQBN 18:00 分区结束后必须
+    走普通 final warmup 全日重对账
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
     本地 replay runtime：`duration <= 60s` 的 K 线从 tick cache 本地合成，`duration > 60s`
     的 K 线读取 native `HistorySeriesCache` 并按 history series 远程补缺；K 线 quote
@@ -205,8 +208,9 @@ V1 是：
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
-  - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded coverage commit、
-    tick-only `BacktestTickCache` 和纯数据层 `LiveTickCacheWriter`
+  - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded final coverage commit、
+    open-day provisional checkpoint、tick-only `BacktestTickCache` 和纯数据层
+    `LiveTickCacheWriter`
   - 8 MiB 目标 records block、crate-internal `TQRI` 时间索引和按范围选择性解压；旧/不匹配索引
     逐 block 回退
   - `LiveTickCacheWriter` 合并连续单 tick push，并用显式 `flush()` / Drop 提交不足一批的尾部
@@ -214,9 +218,10 @@ V1 是：
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
 - `tqsdk-cache`
-  - 可选 operator CLI；对 canonical daily TQBN tick cache 提供 fast inventory、closed-day
-    remote-on-miss fill、calendar-aware `--last-trading-days` selector、selectable physical-symbol
-    stderr progress（plain/TTY/JSONL）、默认 text / 按需 V3 stdout result、schema-v2 persisted report（兼容读取 v1）、
+  - 可选 operator CLI；对 canonical daily TQBN tick cache 提供 fast inventory、默认 closed-day
+    remote-on-miss fill、显式 `--include-open-day` provisional fill、calendar-aware
+    `--last-trading-days` selector、selectable physical-symbol stderr progress（plain/TTY/JSONL）、
+    默认 text / 按需 V3 stdout result、schema-v2 persisted report（兼容读取 v1）、
     report-bound CacheOnly verify 与 deep doctor
   - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
     partition 与 CacheOnly verification 仍是完整性权威

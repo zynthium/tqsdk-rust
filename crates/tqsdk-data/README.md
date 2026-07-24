@@ -19,6 +19,7 @@
 - `DataClientBuilder::new().history_cache_enabled(true).build()?.get_kline_data_series(...)`
 - `BacktestTickCache::open(...).store_ticks(...)`
 - `BacktestTickCache::open(...).load_series(...)`
+- `BacktestTickCache::mark_provisional(...)` / `provisional_coverage(...)`
 - `BacktestTickCache::open(...).compact_symbol_ticks(...)`
 - `BacktestTickCache::open_read_only(...).fast_inventory()`
 - `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_lock()` /
@@ -53,8 +54,9 @@
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
   `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
-  price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟
+  price storage、self-describing metadata、explicit final coverage records、non-final
+  provisional checkpoint records 和 forward-compatible record lengths；market-data records
+  block 以 8 MiB 未压缩 payload 为目标上限，并紧跟
   crate-internal `TQRI` 时间索引，使范围读取只解压相交 block；新建/compact 日分区还会维护
   coverage index chain，使完整且未追加尾部 rows 的 coverage inspection 无需解压行情 block。
   records index 缺失或不匹配时逐 block 回退解码，coverage index 不完整、旧文件或任何校验失败时回退完整扫描；
@@ -80,7 +82,10 @@
 - `BacktestTickCache` 是 tick-only semantic facade，复用同一个
   `HistorySeriesCache` 存储接口，用于回测覆盖检查、tick 写入和 tick
   replay 读取；TQBN store 会把覆盖元数据和 tick rows 写进同一个交易日分区文件，支持
-  partial row append 和最终 coverage commit；它不持久化 K 线，也不引入第二套 tick cache 文件格式
+  partial row append、盘中 provisional checkpoint 和最终 coverage commit。provisional checkpoint
+  只用于恢复当前交易日的增量填充，不进入普通 coverage/cache-hit；其范围、高水位和 as-of
+  必须属于同一 TQBN 日分区。盘中追加 checkpoint 不触发全历史 compaction，final coverage
+  覆盖后才在 compaction 中淘汰。它不持久化 K 线，也不引入第二套 tick cache 文件格式
 - cache-backed facade backtest 的 `duration > 60s` K 线复用同一 cache root 下的
   `HistorySeriesCache` native K 线 series；`duration <= 60s` K 线由 `tqsdk-task`
   从 tick rows 临时合成，不写入 durable K 线文件
@@ -92,8 +97,9 @@
   daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
   `try_acquire_remote_fill_lock()` 与 `try_acquire_consistency_read_lock()` 用于协调远端 fill owner
   和稳定检查视图；它们是 advisory lock，不替代单 TQBN 文件写锁
-- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力，提供 JSON inventory、closed-day fill、
-  report-bound verify 和 doctor；它不属于本 crate 的 runtime、store adapter 或 live writer 边界，
+- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力，提供 JSON inventory、默认 closed-day
+  fill、显式当前日 provisional fill、report-bound verify 和 doctor；它不属于本 crate 的 runtime、
+  store adapter 或 live writer 边界，
   详见 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
   rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口。连续单 tick push

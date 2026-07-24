@@ -42,6 +42,9 @@ TQBN 的 record struct、metadata struct 和 codec helper 都是 `tqsdk-data` �
 crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN record；对外只暴露 typed
 history series、coverage、scan report、purge report、backtest tick cache 和 live tick
 row writer 语义。
+`BacktestTickCache::mark_provisional(...)` /
+`provisional_coverage(...)` 通过 `BacktestTickProvisionalCoverage` 暴露当前交易日的
+非最终高水位；它不进入普通 coverage，也不能让 CacheOnly 命中。
 `LiveTickCacheWriter::push_ticks(...)` 会合并连续单 tick 调用，`flush()` 显式提交不足一批的尾部；
 这只改变纯 writer 的批写时机，不把 session、timer task 或后台线程下沉到 data crate。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
@@ -115,6 +118,29 @@ type、offset、checksum、coverage record 和 range 都匹配时才走小型索
 后来追加 rows，或任一 index/coverage 校验失败时必须回退到完整 block stream 校验，绝不能把该分区判断为
 complete。coverage 永远在 rows 已 `sync_data()` 后写入；异常崩溃可以留下 coverage gap，但不能让 coverage
 比其 rows 更早持久化。
+
+### Provisional Coverage Checkpoints
+
+当前交易日盘中回填使用独立的 `ProvisionalCoverage` record（rtype `19`），记录
+`range_start_ns`、`complete_through_ns`、`as_of_ns`、row 数和可选 tick id 范围。
+对应 `TQCI` entry 使用 `0x02` provisional flag，并与 final coverage 共用同一条索引链。
+
+provisional checkpoint 的合同是：
+
+- 只表示“截至 `as_of_ns`，`[range_start_ns, complete_through_ns)` 已完成一次远端快照”；
+  它永远不合并进普通 final coverage，也不能令 `BacktestTickCoverage::is_complete()` 为真。
+- `range_start_ns`、`complete_through_ns - 1` 和 `as_of_ns - 1` 必须映射到同一个
+  TQBN trading-day partition；跨分区 checkpoint 必须在写入前拒绝。
+- 重跑盘中 fill 可以从 checkpoint 前固定 overlap 处继续，以覆盖边界迟到数据；新 checkpoint
+  只有在本轮 rows 已持久化且远端 range 成功结束后才追加。远端明确成功结束的空增量也可以
+  推进 checkpoint；取消、超时或未确认结束不能推进。
+- provisional fill 只追加 rows/checkpoint，不在每次盘中续填后重写全历史；final reconcile
+  才执行 compaction，以合并碎片、提高压缩率并清理失效 checkpoint。
+- 一旦 final coverage 完整覆盖 checkpoint，读取端立即忽略它；后续 compaction 会物理淘汰
+  已被 final coverage 取代的 checkpoint，并只保留每个起点最新的有效 checkpoint。
+- 旧 reader 不认识 rtype `19` 时按 `length_words` 跳过 record；不认识 `0x02` 索引 flag 时
+  回退扫描 record stream。因此 schema version 保持 `2`，旧 reader 最多失去续填加速，
+  不能把 provisional 错判为 final。
 
 ## Price Encoding
 

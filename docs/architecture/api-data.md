@@ -275,6 +275,9 @@ tqsdk-wait        tqsdk-data
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；
+  `mark_provisional(...)` / `provisional_coverage(...)` 只暴露当前交易日的 durable
+  non-final checkpoint。该 checkpoint 不进入 `BacktestTickCoverage`，也不能满足普通 cache hit；
+  final coverage 覆盖后读取端立即忽略，compaction 负责物理淘汰；
   remote-on-miss / warmup 通过官方 server-side backtest 流回填。warmup 会先跳过完整缓存，
   再把所有缺失 symbol 交给内部有界远端调度器；默认不做时间切片，`TQSDK_REMOTE_FILL_SLICE_SECS`
   只作为长区间 fallback。默认不设置整批墙钟超时，持续有进展的长区间由 60 秒 idle watchdog

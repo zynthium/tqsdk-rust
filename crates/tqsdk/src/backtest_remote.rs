@@ -632,6 +632,7 @@ pub(crate) struct RemoteBacktestCachingStream {
     last_progress: tokio::time::Instant,
     telemetry_context: RemoteFillTelemetryContext,
     runtime: RemoteBacktestFillRuntime,
+    commit_mode: RemoteCacheCommitMode,
     finalized: bool,
 }
 
@@ -644,6 +645,7 @@ pub(crate) struct RemoteBacktestCacheFillRequest {
     pub(crate) symbol: String,
     pub(crate) start_ns: i64,
     pub(crate) end_ns: i64,
+    pub(crate) commit_mode: RemoteCacheCommitMode,
 }
 
 impl RemoteBacktestCacheFillRequest {
@@ -652,6 +654,57 @@ impl RemoteBacktestCacheFillRequest {
             symbol: symbol.into(),
             start_ns,
             end_ns,
+            commit_mode: RemoteCacheCommitMode::Final,
+        }
+    }
+
+    pub(crate) fn provisional(
+        symbol: impl Into<String>,
+        start_ns: i64,
+        end_ns: i64,
+        provisional_start_ns: i64,
+        as_of_ns: i64,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            start_ns,
+            end_ns,
+            commit_mode: RemoteCacheCommitMode::Provisional {
+                provisional_start_ns,
+                as_of_ns,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RemoteCacheCommitMode {
+    Final,
+    Provisional {
+        provisional_start_ns: i64,
+        as_of_ns: i64,
+    },
+}
+
+impl RemoteCacheCommitMode {
+    fn compacts_after_fill(self) -> bool {
+        matches!(self, Self::Final)
+    }
+}
+
+#[cfg(test)]
+impl RemoteCacheCommitMode {
+    pub(crate) fn is_provisional(self) -> bool {
+        matches!(self, Self::Provisional { .. })
+    }
+
+    pub(crate) fn provisional_start_ns(self) -> Option<i64> {
+        match self {
+            Self::Final => None,
+            Self::Provisional {
+                provisional_start_ns,
+                ..
+            } => Some(provisional_start_ns),
         }
     }
 }
@@ -661,6 +714,7 @@ struct RemoteFillBatch {
     start_ns: i64,
     end_ns: i64,
     symbols: Vec<String>,
+    commit_mode: RemoteCacheCommitMode,
 }
 
 struct RemoteFillBatchTaskReport {
@@ -726,6 +780,7 @@ struct RemoteFillRequest {
     cache: BacktestTickCache,
     runtime: RemoteBacktestFillRuntime,
     telemetry_context: RemoteFillTelemetryContext,
+    commit_mode: RemoteCacheCommitMode,
 }
 
 fn emit_telemetry_for_symbols(
@@ -1010,6 +1065,13 @@ pub(crate) async fn fill_backtest_tick_cache(
     cache: BacktestTickCache,
     runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
+    let all_requests_provisional = !requests.is_empty()
+        && requests.iter().all(|request| {
+            matches!(
+                request.commit_mode,
+                RemoteCacheCommitMode::Provisional { .. }
+            )
+        });
     let requested_symbol_count = requests
         .iter()
         .map(|request| request.symbol.as_str())
@@ -1146,6 +1208,7 @@ pub(crate) async fn fill_backtest_tick_cache(
         requested_symbol_count,
         accepted_rows_total,
         config.allow_empty_idle,
+        all_requests_provisional,
     ) {
         return Err(data_validation(format!(
             "remote backtest cache fill completed without accepted ticks for {requested_symbol_count} symbols; refusing to mark complete empty coverage"
@@ -1159,7 +1222,7 @@ fn remote_fill_batches(
     symbol_batch_size: usize,
 ) -> Result<VecDeque<RemoteFillBatch>> {
     let symbol_batch_size = symbol_batch_size.max(1);
-    let mut by_range: BTreeMap<(i64, i64), Vec<String>> = BTreeMap::new();
+    let mut by_range: BTreeMap<(i64, i64, RemoteCacheCommitMode), Vec<String>> = BTreeMap::new();
     for request in requests {
         if request.symbol.is_empty() {
             return Err(data_validation(
@@ -1173,13 +1236,13 @@ fn remote_fill_batches(
             )));
         }
         by_range
-            .entry((request.start_ns, request.end_ns))
+            .entry((request.start_ns, request.end_ns, request.commit_mode))
             .or_default()
             .push(request.symbol);
     }
 
     let mut batches = VecDeque::new();
-    for ((start_ns, end_ns), mut symbols) in by_range {
+    for ((start_ns, end_ns, commit_mode), mut symbols) in by_range {
         symbols.sort();
         symbols.dedup();
         for chunk in symbols.chunks(symbol_batch_size) {
@@ -1187,6 +1250,7 @@ fn remote_fill_batches(
                 start_ns,
                 end_ns,
                 symbols: chunk.to_vec(),
+                commit_mode,
             });
         }
     }
@@ -1217,6 +1281,7 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
     let timeout_symbols = batch.symbols.clone();
     let start_ns = batch.start_ns;
     let end_ns = batch.end_ns;
+    let commit_mode = batch.commit_mode;
     let symbols = batch.symbols;
     let telemetry_context = RemoteFillTelemetryContext::new(batch_index + 1);
     emit_telemetry_for_symbols(
@@ -1237,6 +1302,7 @@ async fn fill_backtest_tick_cache_symbol_batch_timed(
         cache,
         runtime: runtime.clone(),
         telemetry_context: telemetry_context.clone(),
+        commit_mode,
     });
     let result = match batch_timeout {
         Some(batch_timeout) => match tokio::time::timeout(batch_timeout, fill).await {
@@ -1396,8 +1462,10 @@ async fn fill_backtest_tick_cache_symbol_batch_attempt(
             *rows_by_symbol.entry(symbol).or_insert(0) += rows;
         }
     }
-    for symbol in &request.symbols {
-        request.cache.compact_symbol_ticks(symbol)?;
+    if request.commit_mode.compacts_after_fill() {
+        for symbol in &request.symbols {
+            request.cache.compact_symbol_ticks(symbol)?;
+        }
     }
     Ok(RemoteBacktestCacheFillReport { rows_by_symbol })
 }
@@ -1496,6 +1564,7 @@ impl RemoteBacktestCachingStream {
             cache,
             runtime,
             telemetry_context,
+            commit_mode,
         } = request;
         let mut api = tqsdk_wait::TqApiBuilder::new(user, pass)
             .futures_backtest(start_ns, end_ns)?
@@ -1540,6 +1609,7 @@ impl RemoteBacktestCachingStream {
             last_progress: tokio::time::Instant::now(),
             telemetry_context,
             runtime,
+            commit_mode,
             finalized: false,
         })
     }
@@ -1836,7 +1906,22 @@ impl RemoteBacktestCachingStream {
                     report.gap_summary
                 )));
             }
-            self.cache.mark_complete(
+            commit_remote_fill_report(&self.cache, self.commit_mode, symbol, &report)?;
+        }
+        self.finalized = true;
+        Ok(())
+    }
+}
+
+fn commit_remote_fill_report(
+    cache: &BacktestTickCache,
+    commit_mode: RemoteCacheCommitMode,
+    symbol: &str,
+    report: &BacktestTickFillReport,
+) -> Result<()> {
+    match commit_mode {
+        RemoteCacheCommitMode::Final => {
+            cache.mark_complete(
                 symbol,
                 report.requested_range.0,
                 report.requested_range.1,
@@ -1844,9 +1929,21 @@ impl RemoteBacktestCachingStream {
                 report.id_range,
             )?;
         }
-        self.finalized = true;
-        Ok(())
+        RemoteCacheCommitMode::Provisional {
+            provisional_start_ns,
+            as_of_ns,
+        } => {
+            cache.mark_provisional(
+                symbol,
+                provisional_start_ns,
+                report.requested_range.1,
+                as_of_ns,
+                report.unique_rows,
+                report.id_range,
+            )?;
+        }
     }
+    Ok(())
 }
 
 fn remote_fill_progress_enabled() -> bool {
@@ -1963,8 +2060,9 @@ fn should_reject_empty_remote_fill(
     symbol_count: usize,
     accepted_rows_total: usize,
     allow_empty_idle: bool,
+    all_requests_provisional: bool,
 ) -> bool {
-    symbol_count > 1 && accepted_rows_total == 0 && !allow_empty_idle
+    symbol_count > 1 && accepted_rows_total == 0 && !allow_empty_idle && !all_requests_provisional
 }
 
 fn should_split_empty_idle_batch(error: &crate::Error, symbol_count: usize) -> bool {
@@ -2035,8 +2133,9 @@ mod tests {
         BacktestRemoteFillCancellation, BacktestRemoteFillConfig,
         BacktestRemoteFillInspectionProgress, BacktestRemoteFillPhase, BacktestRemoteFillTelemetry,
         REMOTE_FILL_BATCH_TIMEOUT, REMOTE_FILL_IDLE_TIMEOUT, RemoteBacktestCacheFillRequest,
-        RemoteBacktestFillRuntime, RemoteFillPlan, RemoteFillPlanSymbol, RemoteFillTelemetryUpdate,
-        RemoteTickFillState, RemoteTickWriteBuffer, parse_remote_fill_allow_empty_idle,
+        RemoteBacktestFillRuntime, RemoteCacheCommitMode, RemoteFillPlan, RemoteFillPlanSymbol,
+        RemoteFillTelemetryUpdate, RemoteTickFillState, RemoteTickWriteBuffer,
+        commit_remote_fill_report, parse_remote_fill_allow_empty_idle,
         parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
         parse_remote_fill_progress_enabled, parse_remote_fill_slice_ns,
         parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
@@ -2238,6 +2337,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn provisional_remote_commit_persists_checkpoint_not_final_coverage() {
+        let symbol = "SHFE.rb2601";
+        let cache_dir = temp_cache_dir("remote-provisional-commit");
+        let cache = BacktestTickCache::open(&cache_dir).unwrap();
+        cache
+            .append_partial_ticks(symbol, [tick(1, 5_500, 100.0), tick(2, 9_000, 101.0)])
+            .unwrap();
+        let report = tqsdk_data::BacktestTickFillReport {
+            symbol: symbol.to_string(),
+            requested_range: (5_500, 10_000),
+            unique_rows: 2,
+            id_range: Some((1, 2)),
+            first_datetime_ns: Some(5_500),
+            last_datetime_ns: Some(9_000),
+            complete: true,
+            gap_summary: None,
+        };
+
+        commit_remote_fill_report(
+            &cache,
+            RemoteCacheCommitMode::Provisional {
+                provisional_start_ns: 1_000,
+                as_of_ns: 10_000,
+            },
+            symbol,
+            &report,
+        )
+        .unwrap();
+
+        assert!(!cache.coverage(symbol, 1_000, 10_000).unwrap().is_complete());
+        let checkpoint = cache
+            .provisional_coverage(symbol, 1_000, 10_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.range_start_ns, 1_000);
+        assert_eq!(checkpoint.complete_through_ns, 10_000);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn provisional_remote_fill_defers_compaction_until_final_reconciliation() {
+        assert!(RemoteCacheCommitMode::Final.compacts_after_fill());
+        assert!(
+            !RemoteCacheCommitMode::Provisional {
+                provisional_start_ns: 1_000,
+                as_of_ns: 2_000,
+            }
+            .compacts_after_fill()
+        );
     }
 
     #[test]
@@ -2516,11 +2667,12 @@ mod tests {
 
     #[test]
     fn remote_fill_rejects_multi_symbol_empty_overall_fill_by_default() {
-        assert!(should_reject_empty_remote_fill(2, 0, false));
-        assert!(should_reject_empty_remote_fill(128, 0, false));
-        assert!(!should_reject_empty_remote_fill(1, 0, false));
-        assert!(!should_reject_empty_remote_fill(2, 1, false));
-        assert!(!should_reject_empty_remote_fill(2, 0, true));
+        assert!(should_reject_empty_remote_fill(2, 0, false, false));
+        assert!(should_reject_empty_remote_fill(128, 0, false, false));
+        assert!(!should_reject_empty_remote_fill(1, 0, false, false));
+        assert!(!should_reject_empty_remote_fill(2, 1, false, false));
+        assert!(!should_reject_empty_remote_fill(2, 0, true, false));
+        assert!(!should_reject_empty_remote_fill(2, 0, false, true));
     }
 
     #[test]

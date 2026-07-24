@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tqsdk_core::{Kline, Tick};
 
-use crate::Result;
+use crate::{DataError, Result};
 
 use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
 
@@ -57,6 +57,17 @@ pub(crate) struct HistorySeriesCoverageCommit {
     pub kind: HistorySeriesKind,
     pub range_start_ns: i64,
     pub range_end_ns: i64,
+    pub rows: usize,
+    pub id_range: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistorySeriesProvisionalCoverage {
+    pub symbol: String,
+    pub kind: HistorySeriesKind,
+    pub range_start_ns: i64,
+    pub complete_through_ns: i64,
+    pub as_of_ns: i64,
     pub rows: usize,
     pub id_range: Option<(i64, i64)>,
 }
@@ -138,6 +149,12 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         &self,
         request: HistorySeriesCoverageRequest,
     ) -> Result<HistorySeriesCoverageReport>;
+    fn provisional_coverage(
+        &self,
+        _request: HistorySeriesCoverageRequest,
+    ) -> Result<Option<HistorySeriesProvisionalCoverage>> {
+        Ok(None)
+    }
     fn write_segment(
         &self,
         segment: HistorySeriesWriteSegment<'_>,
@@ -154,6 +171,11 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         Ok(report)
     }
     fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()>;
+    fn append_provisional(&self, _commit: HistorySeriesProvisionalCoverage) -> Result<()> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support provisional coverage",
+        ))
+    }
     fn purge_series(
         &self,
         symbol: &str,

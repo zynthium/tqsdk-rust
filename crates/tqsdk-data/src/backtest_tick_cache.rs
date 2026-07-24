@@ -9,7 +9,7 @@ use tqsdk_core::Tick;
 
 use crate::history_series_cache::{
     HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit, HistorySeriesKind,
-    HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    HistorySeriesProvisionalCoverage, HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 use crate::{DataError, HistorySeriesCache, Result, TickDataSeries, TickDataSeriesRequest};
 
@@ -50,6 +50,22 @@ impl BacktestTickCoverage {
     pub fn is_complete(&self) -> bool {
         self.missing_ranges.is_empty()
     }
+}
+
+/// Durable, non-final high-water mark for an open trading-day snapshot.
+///
+/// A provisional checkpoint can resume a later fill, but it is intentionally
+/// excluded from [`BacktestTickCoverage`] and cache-hit decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickProvisionalCoverage {
+    pub cache_dir: PathBuf,
+    pub symbol: String,
+    pub range_start_ns: i64,
+    pub complete_through_ns: i64,
+    pub as_of_ns: i64,
+    pub rows: usize,
+    /// Inclusive remote/live tick id extent when one was observed.
+    pub id_range: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -626,6 +642,98 @@ impl BacktestTickCache {
             id_range,
         )?;
         self.coverage(symbol, range_start_ns, range_end_ns)
+    }
+
+    /// Persist an open-day checkpoint without promoting it to final coverage.
+    pub fn mark_provisional(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        complete_through_ns: i64,
+        as_of_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<BacktestTickProvisionalCoverage> {
+        let symbol = symbol.as_ref();
+        self.mark_provisional_without_inspection(
+            symbol,
+            range_start_ns,
+            complete_through_ns,
+            as_of_ns,
+            rows,
+            id_range,
+        )?;
+        self.provisional_coverage(symbol, range_start_ns, complete_through_ns)?
+            .ok_or(DataError::InvalidState(
+                "provisional tick coverage was not persisted",
+            ))
+    }
+
+    pub(crate) fn mark_provisional_without_inspection(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        complete_through_ns: i64,
+        as_of_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, complete_through_ns)?;
+        if complete_through_ns > as_of_ns {
+            return Err(DataError::InvalidState(
+                "provisional tick coverage cannot extend beyond its as-of time",
+            ));
+        }
+        let start_day = backtest_tick_trading_day_for_timestamp_ns(range_start_ns)?;
+        let complete_day =
+            backtest_tick_trading_day_for_timestamp_ns(complete_through_ns.saturating_sub(1))?;
+        let as_of_day = backtest_tick_trading_day_for_timestamp_ns(as_of_ns.saturating_sub(1))?;
+        if start_day != complete_day || start_day != as_of_day {
+            return Err(DataError::InvalidState(
+                "provisional tick coverage must stay within one TQBN trading-day partition",
+            ));
+        }
+        self.history
+            .append_provisional(HistorySeriesProvisionalCoverage {
+                symbol: symbol.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns,
+                complete_through_ns,
+                as_of_ns,
+                rows,
+                id_range,
+            })?;
+        Ok(())
+    }
+
+    /// Return the longest non-final checkpoint that starts at or before the
+    /// requested range and is not already superseded by final coverage.
+    pub fn provisional_coverage(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<Option<BacktestTickProvisionalCoverage>> {
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        Ok(self
+            .history
+            .provisional_coverage(crate::history_series_cache::HistorySeriesCoverageRequest {
+                symbol: symbol.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns,
+                range_end_ns,
+            })?
+            .map(|checkpoint| BacktestTickProvisionalCoverage {
+                cache_dir: self.history.root_dir().to_path_buf(),
+                symbol: checkpoint.symbol,
+                range_start_ns: checkpoint.range_start_ns,
+                complete_through_ns: checkpoint.complete_through_ns,
+                as_of_ns: checkpoint.as_of_ns,
+                rows: checkpoint.rows,
+                id_range: checkpoint.id_range,
+            }))
     }
 
     /// Commit coverage after rows are durable without rescanning the series.

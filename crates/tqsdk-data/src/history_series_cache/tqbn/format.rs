@@ -22,6 +22,7 @@ pub(in crate::history_series_cache) enum TqbnRType {
     Coverage = 16,
     Index = 17,
     MetadataUpdate = 18,
+    ProvisionalCoverage = 19,
 }
 
 #[repr(C)]
@@ -136,6 +137,25 @@ pub(super) struct TqbnCoverageRecordV1 {
     pub hd: TqbnRecordHeader,
     pub range_start_ns: i64,
     pub range_end_ns: i64,
+    pub rows: u64,
+    pub id_start: i64,
+    pub id_end: i64,
+    pub has_id_range: u8,
+    pub reserved: [u8; 7],
+}
+
+/// Durable high-water mark for an open trading-day snapshot.
+///
+/// This is deliberately a distinct record type from [`TqbnCoverageRecordV1`]:
+/// readers that do not understand it skip the record by `length_words`, while
+/// readers that do understand it must never promote it to final coverage.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TqbnProvisionalCoverageRecordV1 {
+    pub hd: TqbnRecordHeader,
+    pub range_start_ns: i64,
+    pub complete_through_ns: i64,
+    pub as_of_ns: i64,
     pub rows: u64,
     pub id_start: i64,
     pub id_end: i64,

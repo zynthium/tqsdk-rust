@@ -55,6 +55,8 @@
   remote-on-miss 官方回测流补缓存、`.warmup()` 缓存预热 runner，以及 `.universe(...)`、
   `quotes_universe(...)`、`MarketCachePolicy::record_universe(...)` 这些共享 universe
   选择器接线；cache hit 不要求 auth，cache fill 不使用专业历史下载接口
+- `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 当前日 warmup 配置：只提交 non-final
+  checkpoint，不改变普通 coverage/cache-hit，并要求分区结束后由 final warmup 重对账
 - `MarketCachePolicy` / `.market_cache(...)` 这类共享 live/backtest tick cache policy 入口，
   以及 `record_ticks(cache_dir, symbols)` 这类显式 live/session 到持久 tick cache 的组合入口；
   订阅和 `wait_update()` 驱动留在 facade，实际 rows/coverage 写入复用 `tqsdk-data`；
@@ -318,8 +320,9 @@ sink、WAL、journal 或 cache writer。
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
 - `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format；
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
-  price storage、self-describing metadata、explicit coverage records 和 forward-compatible
-  record lengths；8 MiB 目标 records block 与 crate-internal 时间索引支持按范围选择性解压，
+  price storage、self-describing metadata、explicit final coverage records、non-final
+  provisional checkpoint records 和 forward-compatible record lengths；8 MiB 目标 records
+  block 与 crate-internal 时间索引支持按范围选择性解压，
   旧/不匹配索引逐 block 回退；embedded coverage commit 和 tick-only `BacktestTickCache`
 - TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 会执行 append-log compaction，
   合并重复 rows 并保留 last-write-wins 语义；
@@ -355,12 +358,13 @@ sink、WAL、journal 或 cache writer。
 ### 正确职责
 
 - 可选 workspace binary，不进入 Cargo default-members
-- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、closed-day
-  `fill`、CacheOnly `verify` 和 deep `doctor`
+- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、默认
+  closed-day `fill`、显式 current-day provisional `fill`、CacheOnly `verify` 和 deep `doctor`
 - 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` read-only/diagnostic/root-lock
   APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+ selectable stderr progress 的 operator contract
-- normal fill report 记录 canonical root、logical/physical symbols、coverage 和调度配置，供
-  `verify --report` 复用；取消 flush partial rows 但不提交 coverage
+- normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同
+  checkpoint 和调度配置，供 `verify --report` 复用；取消 flush partial rows，但不提交 final
+  coverage 或推进 provisional checkpoint
 
 ### 不应承担的职责
 

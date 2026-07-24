@@ -189,11 +189,16 @@ file identity、records range index 的无关 block 跳过与未知 flags 拒绝
 size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
+`backtest_tick_cache_ops` 还覆盖 provisional checkpoint 不进入 final coverage、最新 checkpoint
+round-trip、compaction 保留，以及 final coverage 覆盖后立即隐藏并物理淘汰。
 `backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
 inspection、fast inventory、deep diagnostic、root lock、closed-day dry-run、完整 cache 无 auth fill、
-日历快照 round-trip、`--last-trading-days` 的本地快照选择、progress reducer 的完整分区计数、默认 text /
+当前日显式 opt-in、已有 checkpoint 无 auth 复用、partial shared high-water、closed-day final
+reconciliation、旧 report 的 `day_complete=complete` 兼容、日历快照 round-trip、
+`--last-trading-days` 的本地快照选择、progress reducer 的完整分区计数、默认 text /
 explicit V3 stdout、legacy V2 output、JSONL stderr progress，以及 fill report v1/v2 对 canonical root
-的 verify binding。`facade_contract` 还覆盖
+的 verify binding。`tqsdk` 单元测试还覆盖 provisional planner 的 5 分钟 overlap 和远端提交不污染
+final coverage；`facade_contract` 还覆盖
 `on_remote_fill_telemetry(...)` 在每个 physical cache range 检查后发出累计 inspection telemetry，并在
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。

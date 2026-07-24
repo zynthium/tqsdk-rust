@@ -136,9 +136,7 @@ impl LiveTickCacheWriter {
                     state.segment_start_id.ok_or(DataError::InvalidState(
                         "live tick cache writer segment id start is missing",
                     ))?,
-                    row.id.checked_add(1).ok_or(DataError::InvalidState(
-                        "live tick cache writer id range overflow",
-                    ))?,
+                    row.id,
                 ),
             };
             state.update_pending_commit(commit);

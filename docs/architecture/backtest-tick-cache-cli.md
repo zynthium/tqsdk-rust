@@ -56,7 +56,7 @@ tqsdk-cache fill
 | `inventory` | 快速枚举 tick day partitions、文件数、字节数和 magic 问题 | 不创建不存在的 root，不解码 records，不联网 | 可在 fill 中运行，结果可能是中间状态 |
 | `inspect` | 对显式 physical symbol 检查 coverage/missing ranges | read-only，不联网 | 不取稳定视图锁 |
 | `fill --dry-run` | 解析目标并用 CacheOnly 检查 coverage | 不取 lock，不请求远端 tick 或创建 report；universe/calendar selector 可查询 metadata | 缺 coverage 退出 `1` |
-| `fill` | 对 closed trading days 只补 missing ranges | 可能写 TQBN/report，只有 miss 才联网 | 每 root 排他 fill lock |
+| `fill` | 默认补 closed-day missing ranges；显式 `--include-open-day` 可做当前日 provisional 快照 | 可能写 TQBN/report，只有 miss 才联网 | 每 root 排他 fill lock |
 | `verify` | CacheOnly coverage，选配实际 replay | 不远端补数；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
 | `doctor` | 深度解码所有 TQBN tick partitions | 不修改 records；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
 
@@ -66,15 +66,24 @@ tqsdk-cache fill
 universe resolver 会在最终集合中剔除不受本地历史缓存支持的 `KQD` 外盘合约，因此 `cont:all`
 不会生成不存在历史映射的 `KQ.m@KQD.*`。
 
-## 交易日与 closed-day 保护
+## 交易日、closed-day 与 provisional 保护
 
 TQBN day partition 的日界线固定为 CST `18:00:00`：
 
 - 一个交易日的 storage window 是前一自然日 18:00 到该交易日 18:00。
 - 周五晚和周末会归一到下一交易日；休市日的空 coverage partition 合法。
-- `fill` 和不带 report 的 `verify` 只接受最后一个已结束交易日前的窗口。
-- 当前 open trading day 或未来 trading day 会拒绝。V1 的 `--include-open-day` 明确退出 `2`，
-  不允许把盘中尾部错误标为 complete。
+- 默认 `fill` 和不带 report 的 `verify` 只接受最后一个已结束交易日前的窗口；未来 trading day
+  始终拒绝。
+- `fill --include-open-day` 只接受显式 `--start-day/--end-day`，允许窗口终点等于当前
+  TQBN trading day；它与 `--last-trading-days` 冲突。
+- 单次启动把 horizon 固定为启动时刻减 5 秒。当前日只写 non-final provisional checkpoint，
+  report 保持 `day_complete=false`，普通 coverage/CacheOnly 仍视为缺口。
+- checkpoint 的范围、高水位和 as-of 必须全部位于同一个 TQBN day partition。远端明确
+  terminal 成功的空增量可以推进 checkpoint；取消、超时或未确认结束不能推进。
+- 重跑从 checkpoint 前 5 分钟开始请求并按 tick id 去重，盘中不做全历史 compaction。
+  当前 TQBN 日越过 18:00 边界后，
+  同一命令自动退回普通 final fill，全日重对账成功后 provisional checkpoint 被覆盖并在
+  compaction 中淘汰。
 
 不同交易所的实际收盘时间以合约 `trading_time` 为准。TQBN day window 是 partition / coverage
 边界，不是“所有品种都交易到 18:00”的市场断言。
@@ -83,7 +92,8 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 
 `fill` 提供两种日期选择方式：显式 `--start-day/--end-day`，或
 `--last-trading-days N [--end-day YYYY-MM-DD]`。后者按通用交易日历选择最近 N 个已结束交易日，
-不能把 N 个工作日当作 N 个交易日。
+不能把 N 个工作日当作 N 个交易日。当前日 provisional 模式只使用前一种显式选择，避免
+“最近 N 日”究竟是否包含未结束日的歧义。
 
 日历模式由 `--calendar auto|required|off` 控制：
 
@@ -129,6 +139,14 @@ cargo run -p tqsdk-cache -- \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2 --symbol-batch-size 1
 
+# 当前 TQBN 交易日盘中快照；本轮成功不等于全日 final coverage。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history fill \
+  --symbol CZCE.AP610 \
+  --start-day 2026-07-24 --end-day 2026-07-24 \
+  --include-open-day
+
 # 生产定时作业：按日历补齐最近 60 个已结束交易日，并保留 stdout JSON 给调度器。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
@@ -142,8 +160,19 @@ cargo run -p tqsdk-cache -- \
 `<cache-root>/reports/tqsdk-cache-fill-<utc>-<pid>.json`，也可以用 `--report PATH` 覆盖。
 报告包含 canonical absolute `cache_dir`、原始 selector、请求和解析后的 trading-day window、
 日历模式/快照 metadata、logical/physical symbols、coverage before/after、每 physical cache report
-range 的日统计、`rows_written`、是否实际远端填充和生效的调度配置。不要把 report
-看成写入成功的唯一依据：`complete=true`、CacheOnly coverage 和实际 replay 共同构成验收。
+range 的日统计、`rows_written`、是否实际远端填充和生效的调度配置。盘中 report 使用：
+
+- `coverage_state=provisional`
+- `complete_through_ns`：所有 physical symbols 已共同达到的最小 checkpoint；未形成共同前缀时为 null
+- `day_complete=false`
+
+盘中命令只要共同 checkpoint 达到本次固定 horizon 即可退出 `0`，即使 report 的普通
+`complete` 仍为 false。closed-day report 使用 `coverage_state=final`，且
+`day_complete` 与普通 coverage 完成状态一致。旧 schema-1 report 缺少这些字段时按
+`final` / null / `complete` 解释。
+
+不要把 report 看成写入成功的唯一依据：对 closed day，`complete=true`、CacheOnly coverage
+和实际 replay 共同构成验收。
 
 ```bash
 # report 是验证时的权威 root/range/symbol 输入；不需要 auth。
@@ -174,8 +203,8 @@ cargo run -p tqsdk-cache -- \
 - 单个 TQBN 文件仍有文件级写锁；它不是远端去重机制，根锁才负责 fill owner 协调。
 
 Ctrl-C 或 SIGTERM 将触发协作式取消：已经接收的 row batch 会 flush 到对应 daily file，但该
-range 不会 commit coverage，命令返回 `130`。下次 `fill` 依据缺口继续完成；不要手工补 coverage
-或编辑 `.tqbn`。
+range 不会 commit final coverage，也不会推进 provisional checkpoint，命令返回 `130`。下次
+`fill` 依据 final 缺口或上一个 durable checkpoint 继续完成；不要手工补 coverage 或编辑 `.tqbn`。
 
 进度会在 stderr 显示当前 batch、physical symbol、trading day、完整接收日和 rows；它不改变
 远端调度或 cache 写入热路径。`--daily-slices` 是诊断 fallback，会按一天切远端请求；默认保持

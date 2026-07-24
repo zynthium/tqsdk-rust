@@ -6,6 +6,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `tqsdk::prelude::*`
 - `Tq::new()` (and `Tq::futures()` alias)
 - Unified strategy backtest (`.backtest(start_ns, end_ns)`): default shared history cache-backed local simulated backtest; `.disabled_cache()` means official server-side market stream; `cache_dir` / `market_cache` override the cache root
+- Resumable current-day cache snapshot (`.provisional_open_day_fill(day_start_ns, as_of_ns)?`): never promotes an open day to ordinary final coverage
 - Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`, `.record_universe(...)`)
 - Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
 - Shared futures universe selector helper for live quotes (`quotes_universe(...)`)
@@ -55,16 +56,23 @@ backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
 缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会先跳过完整缓存，再把
 每个物理 cache symbol 的 `missing_ranges` 交给内部有界远端调度器，用官方 server-side backtest 流只补缺口。默认不做
-时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。补齐成功后只
+时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。普通 final 补齐成功后只
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由
 `TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制，默认值保持保守以避免放大官方服务压力。
 默认不设置整批墙钟超时，长区间的持续进展不会被固定时限中断；60 秒无 tick 进展仍会触发
 保护，可用 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS` 调整。只有显式设置正数
 `TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 时才会启用整批限时，适合诊断或外层作业预算。
-每个成功 slice 都先校验 tick id 连续性后独立提交 coverage，全部 slice 成功后才按 symbol
-compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会继续补其缺口。
+每个成功 slice 都先校验 tick id 连续性后独立提交 coverage；普通 final fill 的全部 slice
+成功后才按 symbol compact，provisional fill 延后到最终重对账再 compact。失败或未确认的 slice
+不会标记 coverage，后续 warmup 会继续补其缺口。
 `.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
+需要自行编排当前日盘中快照时，可在固定的
+`.backtest(day_start_ns, as_of_ns)` builder 上调用
+`.provisional_open_day_fill(day_start_ns, as_of_ns)?`。它只提交 non-final checkpoint，
+普通 CacheOnly/coverage 仍报告缺口；checkpoint 的范围和 as-of 必须位于同一 TQBN 日分区。
+远端明确成功结束的空增量也可推进 checkpoint，取消、超时或未确认结束则不可。后续运行应从
+checkpoint 前 5 分钟重叠续填，并在 TQBN 18:00 分区结束后改走普通 final warmup 做全日重对账。
 调用方若需要把 warmup 接入自己的轻量进度或调度器，可配置
 `.on_remote_fill_telemetry(...)`：每检查一个 physical cache range 就先给出累计的 `Inspecting`
 快照（已检查/总范围、命中、缺口和当前 physical symbol）；coverage inspection 完成后（远端模式已
@@ -74,10 +82,11 @@ compact；失败或未确认的 slice 不会标记 coverage，后续 warmup 会�
 cursor、retry 和 split identity，适合 CLI/UI reducer，而不是策略热路径。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
-`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day `fill`、
-report-bound `verify` 和 TQBN `doctor`。`fill` 可按本地通用交易日历选择最近 N 个已结束交易日，
-并将 JSON 保持在 stdout、进度保持在 stderr。CLI 不改变 facade 默认行为，也不替代 live
-`MarketCachePolicy` recording；完整命令合同见
+`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、默认 closed-day `fill`、
+显式 `--include-open-day` provisional fill、report-bound `verify` 和 TQBN `doctor`。closed-day
+fill 可按本地通用交易日历选择最近 N 个已结束交易日；当前日模式只接受显式日期，并把单次 horizon
+固定为启动时刻减 5 秒。CLI 将 JSON 保持在 stdout、进度保持在 stderr，不改变 facade 默认行为，
+也不替代 live `MarketCachePolicy` recording；完整命令合同见
 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
 
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick
