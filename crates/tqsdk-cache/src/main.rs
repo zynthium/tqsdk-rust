@@ -125,10 +125,13 @@ impl CalendarMode {
 
 #[derive(Debug, Args)]
 struct FillDaysArgs {
-    /// First closed trading day, inclusive, in YYYY-MM-DD form.
+    /// First trading day, inclusive, in YYYY-MM-DD form.
     #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "last_trading_days")]
     start_day: Option<NaiveDate>,
-    /// Last closed trading day, inclusive, or the anchor for --last-trading-days.
+    /// Last trading day, inclusive, or the anchor for --last-trading-days.
+    ///
+    /// An explicitly selected current trading day uses provisional coverage
+    /// unless --require-final is set.
     #[arg(long, value_name = "YYYY-MM-DD")]
     end_day: Option<NaiveDate>,
     /// Resolve the most recent N closed trading days from the generic calendar.
@@ -166,9 +169,15 @@ struct FillArgs {
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote ticks.
     #[arg(long)]
     dry_run: bool,
-    /// Include the currently open trading day using non-final provisional coverage.
-    #[arg(long, conflicts_with = "last_trading_days")]
+    /// Compatibility flag; explicit current end days are included automatically.
+    #[arg(
+        long,
+        conflicts_with_all = ["last_trading_days", "require_final"]
+    )]
     include_open_day: bool,
+    /// Reject the currently open trading day and require immutable final coverage.
+    #[arg(long)]
+    require_final: bool,
     /// Wait this many seconds for an existing fill owner instead of failing immediately.
     #[arg(long, value_name = "SECONDS")]
     lock_wait_secs: Option<u64>,
@@ -386,7 +395,7 @@ async fn resolve_fill_window(
     cache_dir: &Path,
     args: &FillDaysArgs,
     dry_run: bool,
-    include_open_day: bool,
+    allow_open_day: bool,
 ) -> Result<ResolvedFillWindow, CliError> {
     if args.last_trading_days.is_some() && matches!(args.calendar, CalendarMode::Off) {
         return Err(CliError::Usage(
@@ -458,7 +467,7 @@ async fn resolve_fill_window(
                 source,
                 persist_after_plan,
             },
-            include_open_day,
+            allow_open_day,
         );
     }
 
@@ -468,11 +477,7 @@ async fn resolve_fill_window(
     let end_day = args
         .end_day
         .ok_or_else(|| CliError::Usage("fill requires --end-day with --start-day".to_string()))?;
-    let window = if include_open_day {
-        TradingDayWindow::through_open_day_from_days(start_day, end_day)?
-    } else {
-        TradingDayWindow::closed_from_days(start_day, end_day)?
-    };
+    let window = TradingDayWindow::through_open_day_from_days(start_day, end_day)?;
     let normalized_start = parse_window_day(&window.start_day)?;
     let normalized_end = parse_window_day(&window.end_day)?;
     let mut snapshot = local_snapshot;
@@ -505,37 +510,39 @@ async fn resolve_fill_window(
             source,
             persist_after_plan,
         },
-        include_open_day,
+        allow_open_day,
     )
 }
 
 fn resolved_fill_window(
     window: TradingDayWindow,
     calendar: CalendarResolution,
-    include_open_day: bool,
+    allow_open_day: bool,
 ) -> Result<ResolvedFillWindow, CliError> {
-    let provisional = if include_open_day {
-        let now_ns = current_time_ns()?;
-        let open_day = backtest_tick_trading_day_for_timestamp_ns(now_ns)?;
-        let end_day = parse_window_day(&window.end_day)?;
-        if end_day == open_day {
-            let range = tqsdk_data::backtest_tick_trading_day_range(open_day)?;
-            let as_of_ns = now_ns
-                .saturating_sub(OPEN_DAY_HORIZON_LAG_NS)
-                .min(range.end_ns);
-            if as_of_ns <= range.start_ns {
-                return Err(CliError::Usage(
-                    "current trading day has not advanced far enough for a provisional snapshot"
-                        .to_string(),
-                ));
-            }
-            Some(ProvisionalOpenDayWindow {
-                day_start_ns: range.start_ns,
-                as_of_ns,
-            })
-        } else {
-            None
+    let now_ns = current_time_ns()?;
+    let open_day = backtest_tick_trading_day_for_timestamp_ns(now_ns)?;
+    let end_day = parse_window_day(&window.end_day)?;
+    let provisional = if end_day == open_day {
+        if !allow_open_day {
+            return Err(CliError::Usage(format!(
+                "--require-final requires a closed --end-day; {} is the current open TQBN trading day",
+                window.end_day
+            )));
         }
+        let range = tqsdk_data::backtest_tick_trading_day_range(open_day)?;
+        let as_of_ns = now_ns
+            .saturating_sub(OPEN_DAY_HORIZON_LAG_NS)
+            .min(range.end_ns);
+        if as_of_ns <= range.start_ns {
+            return Err(CliError::Usage(
+                "current trading day has not advanced far enough for a provisional snapshot"
+                    .to_string(),
+            ));
+        }
+        Some(ProvisionalOpenDayWindow {
+            day_start_ns: range.start_ns,
+            as_of_ns,
+        })
     } else {
         None
     };
@@ -934,6 +941,7 @@ fn inspect(cache_dir: Option<&Path>, args: InspectArgs) -> Result<CommandOutcome
 }
 
 async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome, CliError> {
+    let allow_open_day = args.include_open_day || !args.require_final;
     let config = fill_config(&args);
     let symbols = normalized_symbols_allow_empty(args.symbols.symbols)?;
     let universe = normalized_universe(args.universe)?;
@@ -951,7 +959,7 @@ async fn fill(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome
         &canonical_cache_dir,
         &args.days,
         args.dry_run,
-        args.include_open_day,
+        allow_open_day,
     )
     .await?;
     let window = resolved.window.clone();
@@ -1685,12 +1693,13 @@ mod tests {
             calendar: CalendarMode::Auto,
         };
 
-        let resolved = resolve_fill_window(&root, &args, false, false)
+        let resolved = resolve_fill_window(&root, &args, false, true)
             .await
             .unwrap();
 
         assert_eq!(resolved.window.start_day, "2020-01-09");
         assert_eq!(resolved.window.end_day, "2020-01-10");
+        assert!(resolved.provisional.is_none());
         assert_eq!(resolved.calendar.source, "local");
         assert!(!resolved.calendar.persist_after_plan);
 
@@ -1727,6 +1736,25 @@ mod tests {
             "--last-trading-days",
             "1",
             "--include-open-day",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn open_day_compat_flag_conflicts_with_require_final() {
+        let error = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--start-day",
+            "2026-07-24",
+            "--end-day",
+            "2026-07-24",
+            "--include-open-day",
+            "--require-final",
         ])
         .unwrap_err();
 

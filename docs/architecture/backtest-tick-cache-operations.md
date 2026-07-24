@@ -30,7 +30,7 @@ deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
 `.tqbn` 文件存在、日分区数量正确或 `rows_written > 0` 都只是辅助信号。已完整缓存的重复运行
 可以合法地得到 `rows_written == 0` 和 `remote_used == false`。
 
-显式 `--include-open-day` 的盘中快照不满足上述“全日完整”标准。它成功时要求所有 physical
+显式日期结束于当前 TQBN 交易日时自动生成的盘中快照不满足上述“全日完整”标准。它成功时要求所有 physical
 symbols 至少推进到同一个 `complete_through_ns`，report 使用
 `coverage_state=provisional`、`day_complete=false`；普通 CacheOnly 仍应报告当前日缺口。
 只有 TQBN 18:00 分区边界过去后再次运行，才会按普通 final coverage 全日重对账，并恢复以上
@@ -45,9 +45,10 @@ symbols 至少推进到同一个 `complete_through_ns`，report 使用
 - 固定 root 的 operator 作业可以让 `tqsdk-cache fill --last-trading-days N --calendar auto`
   管理这一步：它优先复用 `<cache-root>/meta/trading-calendar-v1.json`，在没有可用快照且确认
   存在远端缺口后才拉取通用日历。日历只决定 selector 和进度分母，不能替代 coverage。
-- 默认只填到最后一个已结束交易日。需要盘中快照时必须显式指定
-  `--start-day/--end-day <当前交易日> --include-open-day`；该日只写 provisional checkpoint，
-  不能视为完整缓存。`--include-open-day` 不与 `--last-trading-days` 组合。
+- `--last-trading-days` 只选择已结束交易日。显式指定
+  `--start-day/--end-day <当前交易日>` 时自动写 provisional checkpoint，不能视为完整缓存；
+  必须拒绝盘中日的严格任务使用 `--require-final`。`--include-open-day` 仅作为兼容参数保留，
+  不与 `--last-trading-days` 或 `--require-final` 组合。
 - `KQ.i@...` 直接按 index symbol 缓存；`KQ.m@...` 会按日期解析到具体合约并共享具体合约的
   tick 文件。不要用一个 symbol 的 coverage 推断另一个 symbol 完整。
 - 对 SHFE 贵金属等夜盘品种，常用窗口从首个交易日前一天 `18:00:00` CST 开始，到最后交易日
@@ -72,8 +73,7 @@ tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --symbol CZCE.AP610 \
-  --start-day 2026-07-24 --end-day 2026-07-24 \
-  --include-open-day
+  --start-day 2026-07-24 --end-day 2026-07-24
 ```
 
 重复运行会从已持久化高水位前 5 分钟重新请求，利用 tick id 去重后向新 horizon 延伸。
@@ -267,7 +267,7 @@ E2E_OK remote_rows=2691170 remote_missing=0 cache_only_missing=0 replay_ticks=39
 | --- | --- |
 | `CacheOnly` 报缺口 | 不删除已有文件；确认 range、symbol 和 root 后重新运行 `RemoteOnMiss` warmup。 |
 | 远端填充无进展 | 检查 auth、官方服务连接、目标是否为已结束交易日；再根据实际任务预算调整 idle 或 batch timeout。 |
-| 盘中日被当成完整数据 | 不要把当前交易日放入预热范围；等该交易日结束后再补。 |
+| 严格任务不允许盘中日 | 传 `--require-final`；当前日会被拒绝，等 18:00 分区结束后再运行。 |
 | 日文件数与交易日数不同 | 正常。夜盘归属下一交易日，休市日可以有空 coverage 分区；以 CacheOnly coverage 为准。 |
 | `KQ.i` 与 `KQ.m` 结果不同 | 正常。前者是 index symbol，后者按日期解析到具体合约；分别检查报告。 |
 | 想重新下载全部数据 | 这是破坏性维护操作；先取得用户确认，再显式使用 `.refresh()` 或 purge。 |

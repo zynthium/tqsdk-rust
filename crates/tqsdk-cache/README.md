@@ -73,8 +73,7 @@ cargo run -p tqsdk-cache -- \
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --symbol CZCE.AP610 \
-  --start-day 2026-07-24 --end-day 2026-07-24 \
-  --include-open-day
+  --start-day 2026-07-24 --end-day 2026-07-24
 
 # 以 report 固定的 canonical root、range 和物理 symbol 做严格本地验收。
 cargo run -p tqsdk-cache -- verify \
@@ -86,11 +85,13 @@ cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history doctor
 ```
 
-`fill` 默认只接受已结束交易日。TQBN trading day 在 CST `18:00:00` 开始，周末会归一到下一交易日。
-显式 `--include-open-day` 可对当前 TQBN 交易日做盘中快照，但只能与
-`--start-day/--end-day` 组合，不能与 `--last-trading-days` 组合。单次运行把 horizon 固定为启动时刻
-减 5 秒，只写 non-final provisional checkpoint；普通 coverage、CacheOnly 和 `verify` 仍把该日视为
-缺口。checkpoint 的范围、高水位和 as-of 必须全部留在同一个 TQBN 日分区；远端明确 terminal
+TQBN trading day 在 CST `18:00:00` 开始，周末会归一到下一交易日。显式
+`--start-day/--end-day` 的结束日期等于当前 TQBN 交易日时，`fill` 自动执行盘中快照；
+`--last-trading-days` 仍只选择已结束交易日。严格任务可传 `--require-final` 拒绝当前日。
+`--include-open-day` 仅作为兼容参数保留，不能与 `--last-trading-days` 或 `--require-final` 组合。
+盘中单次运行把 horizon 固定为启动时刻减 5 秒，只写 non-final provisional checkpoint；普通
+coverage、CacheOnly 和 `verify` 仍把该日视为缺口。checkpoint 的范围、高水位和 as-of 必须全部
+留在同一个 TQBN 日分区；远端明确 terminal
 成功的空增量可以推进高水位，取消、超时或未确认结束则不能。重复运行从 checkpoint 前 5 分钟
 重叠请求并按 tick id 去重，且盘中不做全历史 compaction；18:00 分区边界过去后，同一日期会
 自动走普通 final fill，全日重对账成功后 compact 并淘汰 provisional checkpoint。传入 `KQ.m@...` 或动态

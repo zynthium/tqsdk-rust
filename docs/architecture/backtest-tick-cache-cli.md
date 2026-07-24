@@ -56,7 +56,7 @@ tqsdk-cache fill
 | `inventory` | 快速枚举 tick day partitions、文件数、字节数和 magic 问题 | 不创建不存在的 root，不解码 records，不联网 | 可在 fill 中运行，结果可能是中间状态 |
 | `inspect` | 对显式 physical symbol 检查 coverage/missing ranges | read-only，不联网 | 不取稳定视图锁 |
 | `fill --dry-run` | 解析目标并用 CacheOnly 检查 coverage | 不取 lock，不请求远端 tick 或创建 report；universe/calendar selector 可查询 metadata | 缺 coverage 退出 `1` |
-| `fill` | 默认补 closed-day missing ranges；显式 `--include-open-day` 可做当前日 provisional 快照 | 可能写 TQBN/report，只有 miss 才联网 | 每 root 排他 fill lock |
+| `fill` | 补 missing ranges；显式日期结束于当前日时自动做 provisional 快照，`--last-trading-days` 只选 closed days | 可能写 TQBN/report，只有 miss 才联网 | 每 root 排他 fill lock |
 | `verify` | CacheOnly coverage，选配实际 replay | 不远端补数；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
 | `doctor` | 深度解码所有 TQBN tick partitions | 不修改 records；stable-view lock 文件可能在 root 内创建 | shared stable-view lock |
 
@@ -72,10 +72,11 @@ TQBN day partition 的日界线固定为 CST `18:00:00`：
 
 - 一个交易日的 storage window 是前一自然日 18:00 到该交易日 18:00。
 - 周五晚和周末会归一到下一交易日；休市日的空 coverage partition 合法。
-- 默认 `fill` 和不带 report 的 `verify` 只接受最后一个已结束交易日前的窗口；未来 trading day
-  始终拒绝。
-- `fill --include-open-day` 只接受显式 `--start-day/--end-day`，允许窗口终点等于当前
-  TQBN trading day；它与 `--last-trading-days` 冲突。
+- `fill --last-trading-days` 和不带 report 的 `verify` 只选择或接受已结束交易日；未来
+  trading day 始终拒绝。
+- 显式 `fill --start-day/--end-day` 的结束日期等于当前 TQBN trading day 时自动进入
+  provisional 模式。`--require-final` 会拒绝该窗口，供必须维持“退出 0 即全日 final”的严格任务使用。
+- `--include-open-day` 仅作为兼容参数保留，与 `--last-trading-days`、`--require-final` 冲突。
 - 单次启动把 horizon 固定为启动时刻减 5 秒。当前日只写 non-final provisional checkpoint，
   report 保持 `day_complete=false`，普通 coverage/CacheOnly 仍视为缺口。
 - checkpoint 的范围、高水位和 as-of 必须全部位于同一个 TQBN day partition。远端明确
@@ -144,8 +145,7 @@ TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
   --symbol CZCE.AP610 \
-  --start-day 2026-07-24 --end-day 2026-07-24 \
-  --include-open-day
+  --start-day 2026-07-24 --end-day 2026-07-24
 
 # 生产定时作业：按日历补齐最近 60 个已结束交易日，并保留 stdout JSON 给调度器。
 cargo run -p tqsdk-cache -- \

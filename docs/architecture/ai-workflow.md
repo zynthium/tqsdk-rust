@@ -228,8 +228,9 @@ tqsdk
 职责：
 
 - 可选 canonical daily TQBN tick cache operator CLI
-- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式
-  current-day provisional fill、report-bound CacheOnly verify、fast inventory 与 deep doctor
+- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式日期
+  current-day 自动 provisional fill、`--require-final` 严格保护、report-bound CacheOnly verify、
+  fast inventory 与 deep doctor
 - 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows，
   但不提交 final coverage 或推进 provisional checkpoint
 

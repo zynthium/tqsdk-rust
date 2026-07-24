@@ -358,8 +358,8 @@ sink、WAL、journal 或 cache writer。
 ### 正确职责
 
 - 可选 workspace binary，不进入 Cargo default-members
-- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、默认
-  closed-day `fill`、显式 current-day provisional `fill`、CacheOnly `verify` 和 deep `doctor`
+- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、
+  closed-day `fill`、显式日期当前日自动 provisional `fill`、CacheOnly `verify` 和 deep `doctor`
 - 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` read-only/diagnostic/root-lock
   APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+ selectable stderr progress 的 operator contract
 - normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同

@@ -82,11 +82,11 @@ checkpoint 前 5 分钟重叠续填，并在 TQBN 18:00 分区结束后改走普
 cursor、retry 和 split identity，适合 CLI/UI reducer，而不是策略热路径。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
-`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、默认 closed-day `fill`、
-显式 `--include-open-day` provisional fill、report-bound `verify` 和 TQBN `doctor`。closed-day
-fill 可按本地通用交易日历选择最近 N 个已结束交易日；当前日模式只接受显式日期，并把单次 horizon
-固定为启动时刻减 5 秒。CLI 将 JSON 保持在 stdout、进度保持在 stderr，不改变 facade 默认行为，
-也不替代 live `MarketCachePolicy` recording；完整命令合同见
+`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day / 自动当前日
+provisional `fill`、report-bound `verify` 和 TQBN `doctor`。closed-day fill 可按本地通用交易日历
+选择最近 N 个已结束交易日；显式日期结束于当前日时自动把单次 horizon 固定为启动时刻减 5 秒，
+严格任务可用 `--require-final` 拒绝当前日。CLI 将 JSON 保持在 stdout、进度保持在 stderr，
+不改变 facade 默认行为，也不替代 live `MarketCachePolicy` recording；完整命令合同见
 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
 
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick

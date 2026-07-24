@@ -24,12 +24,12 @@
 ## 操作指南
 
 - [回测 Tick 持久缓存预热与验收](architecture/backtest-tick-cache-operations.md)：按已完成交易日
-  增量填充共享 TQBN cache，或显式保存当前日 provisional 快照，并用 CacheOnly 和实际回放验证
-  final coverage。
+  增量填充共享 TQBN cache，或用显式当前结束日期自动保存 provisional 快照，并用 CacheOnly 和
+  实际回放验证 final coverage。
 - [回测 Tick Cache CLI](architecture/backtest-tick-cache-cli.md)：可选 `tqsdk-cache` binary 的
-  默认文本摘要 / 按需 versioned JSON、calendar-aware closed-day fill、显式
-  `--include-open-day` provisional fill、selectable stderr progress、report-bound verify 与 TQBN
-  doctor 合同。
+  默认文本摘要 / 按需 versioned JSON、calendar-aware closed-day fill、显式当前结束日期自动
+  provisional fill、`--require-final` 严格保护、selectable stderr progress、report-bound verify
+  与 TQBN doctor 合同。
 
 ## AI 助手读取顺序
 

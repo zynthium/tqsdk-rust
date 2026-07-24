@@ -273,9 +273,12 @@ fn fill_progress_plain_reports_a_specific_failure_summary() {
 }
 
 #[test]
-fn fill_rejects_current_open_day_without_opt_in() {
+fn fill_auto_detects_current_open_day_without_opt_in() {
+    let cache_dir = temp_dir("open-day-auto-dry-run");
     let open_day = current_open_day().format("%Y-%m-%d").to_string();
     let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
         "fill",
         "--symbol",
         "SHFE.rb2601",
@@ -287,14 +290,42 @@ fn fill_rejects_current_open_day_without_opt_in() {
     ]);
 
     assert_eq!(output.status.code(), Some(1));
+    assert!(!cache_dir.exists());
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let _ = v3_result(&json, "fill", "error", 1);
-    assert_eq!(json["error"]["code"], "data_error");
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["report"]["coverage_state"], "provisional");
+    assert_eq!(result["report"]["day_complete"], false);
+    assert!(result["report"]["complete_through_ns"].is_null());
+}
+
+#[test]
+fn fill_require_final_rejects_current_open_day() {
+    let cache_dir = temp_dir("open-day-require-final");
+    let open_day = current_open_day().format("%Y-%m-%d").to_string();
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        open_day.as_str(),
+        "--end-day",
+        open_day.as_str(),
+        "--require-final",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "fill", "error", 2);
+    assert_eq!(json["error"]["code"], "usage");
     assert!(
         json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not closed")
+            .contains("requires a closed --end-day")
     );
 }
 
@@ -357,7 +388,6 @@ fn fill_dry_run_reports_existing_partial_open_day_high_water_mark() {
         open_day.as_str(),
         "--end-day",
         open_day.as_str(),
-        "--include-open-day",
         "--dry-run",
     ]);
 
@@ -401,7 +431,6 @@ fn fill_reuses_current_open_day_checkpoint_without_auth() {
         open_day.as_str(),
         "--end-day",
         open_day.as_str(),
-        "--include-open-day",
         "--progress",
         "off",
     ]);

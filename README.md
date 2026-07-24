@@ -32,7 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、calendar-aware closed-day fill、显式当前日 provisional fill、selectable stderr progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、calendar-aware closed-day fill、显式日期当前日自动 provisional fill、selectable stderr progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -247,8 +247,8 @@ compact 本次 symbol 的 tick 文件，用于合并回填时产生的碎片 blo
 远端明确成功结束的空增量可以推进 checkpoint；取消、超时或未确认结束不能推进。
 重复运行从 checkpoint 前 5 分钟重叠续填，并延后 compaction，避免每次盘中续填重写全历史；
 TQBN 18:00 分区结束后必须再次运行普通 warmup，完成全日 final 重对账、compaction 并淘汰 checkpoint。
-运维 CLI 对应入口是显式
-`fill --include-open-day`，单次 horizon 固定为启动时刻减 5 秒。
+运维 CLI 对显式 `--end-day` 等于当前 TQBN 交易日的请求自动采用该模式，单次 horizon 固定为
+启动时刻减 5 秒；严格任务可传 `--require-final` 拒绝当前日。`--include-open-day` 仅保留为兼容参数。
 
 多合约策略主体复用可参考 `api_contract_s39_facade_same_body`：同一个两腿价差策略只接收
 `&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
