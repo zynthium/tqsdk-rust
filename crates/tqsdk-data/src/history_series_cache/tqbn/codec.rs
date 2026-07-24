@@ -280,14 +280,38 @@ pub(super) fn decode_block_payload(
     payload: Vec<u8>,
     max_decoded_payload_bytes: usize,
 ) -> Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    decode_block_payload_into(
+        block_type,
+        flags,
+        payload,
+        max_decoded_payload_bytes,
+        &mut decoded,
+    )?;
+    Ok(decoded)
+}
+
+pub(super) fn decode_block_payload_into(
+    block_type: u8,
+    flags: u8,
+    payload: Vec<u8>,
+    max_decoded_payload_bytes: usize,
+    decoded: &mut Vec<u8>,
+) -> Result<()> {
     validate_block_flags(block_type, flags)?;
     if flags & TQBN_BLOCK_FLAG_ZSTD == 0 {
-        return Ok(payload);
+        if payload.len() <= decoded.capacity() {
+            decoded.clear();
+            decoded.extend_from_slice(&payload);
+        } else {
+            *decoded = payload;
+        }
+        return Ok(());
     }
 
     #[cfg(feature = "tqbn-zstd")]
     {
-        decode_zstd_payload(&payload, max_decoded_payload_bytes)
+        decode_zstd_payload_into(&payload, max_decoded_payload_bytes, decoded)
     }
     #[cfg(not(feature = "tqbn-zstd"))]
     {
@@ -316,7 +340,11 @@ pub(super) fn validate_block_flags(block_type: u8, flags: u8) -> Result<()> {
 }
 
 #[cfg(feature = "tqbn-zstd")]
-fn decode_zstd_payload(payload: &[u8], max_decoded_payload_bytes: usize) -> Result<Vec<u8>> {
+fn decode_zstd_payload_into(
+    payload: &[u8],
+    max_decoded_payload_bytes: usize,
+    decoded: &mut Vec<u8>,
+) -> Result<()> {
     let limit = u64::try_from(max_decoded_payload_bytes.checked_add(1).ok_or_else(|| {
         DataError::InvalidResponse("TQBN zstd decode limit overflow".to_string())
     })?)
@@ -325,8 +353,8 @@ fn decode_zstd_payload(payload: &[u8], max_decoded_payload_bytes: usize) -> Resu
         DataError::InvalidResponse(format!("TQBN zstd decoder initialization failed: {error}"))
     })?;
     let mut reader = decoder.take(limit);
-    let mut decoded = Vec::new();
-    reader.read_to_end(&mut decoded).map_err(|error| {
+    decoded.clear();
+    reader.read_to_end(decoded).map_err(|error| {
         DataError::InvalidResponse(format!("TQBN zstd decompression failed: {error}"))
     })?;
     if decoded.len() > max_decoded_payload_bytes {
@@ -335,7 +363,7 @@ fn decode_zstd_payload(payload: &[u8], max_decoded_payload_bytes: usize) -> Resu
             decoded.len()
         )));
     }
-    Ok(decoded)
+    Ok(())
 }
 
 #[derive(Debug)]
