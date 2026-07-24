@@ -142,6 +142,13 @@ struct TqbnStreamingBlockCursor {
     current: Option<HistorySeriesRow>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TqbnStreamingBlockScan {
+    Empty,
+    StrictlyIncreasing { first_id: i64 },
+    NonIncreasing,
+}
+
 enum PreparedTqbnPartition {
     Missing,
     Streaming(TqbnStreamingPartition),
@@ -1681,28 +1688,19 @@ fn plan_tqbn_streaming_blocks(
 ) -> Result<Option<Vec<TqbnStreamingBlockPlan>>> {
     let mut next_block_offset = first_block_offset;
     let mut blocks = Vec::new();
-    while let Some((descriptor, state)) = read_next_tqbn_records_block_for_range(
+    while let Some((descriptor, records)) = read_next_tqbn_records_block_payload_for_range(
         file,
-        kind,
         range_start_ns,
         range_end_ns,
         file_len,
         &mut next_block_offset,
     )? {
-        let rows = state
-            .rows
-            .into_iter()
-            .filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            continue;
-        }
-        if !history_rows_are_strictly_increasing(&rows, kind) {
-            return Ok(None);
-        }
-        let first_id = history_row_id(&rows[0], kind).ok_or_else(|| {
-            DataError::InvalidResponse("TQBN streaming block row has no id".to_string())
-        })?;
+        let first_id =
+            match scan_tqbn_streaming_block(&records, kind, range_start_ns, range_end_ns)? {
+                TqbnStreamingBlockScan::Empty => continue,
+                TqbnStreamingBlockScan::StrictlyIncreasing { first_id } => first_id,
+                TqbnStreamingBlockScan::NonIncreasing => return Ok(None),
+            };
         blocks.push(TqbnStreamingBlockPlan {
             descriptor,
             first_id,
@@ -1711,6 +1709,37 @@ fn plan_tqbn_streaming_blocks(
     }
     blocks.sort_unstable_by_key(|block| (block.first_id, block.block_order));
     Ok(Some(blocks))
+}
+
+fn scan_tqbn_streaming_block(
+    mut records: &[u8],
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+) -> Result<TqbnStreamingBlockScan> {
+    let mut first_id = None;
+    let mut previous_id = None;
+    while !records.is_empty() {
+        let decoded = decode_one_record(records)?;
+        let (row, record_size) = decode_history_row_record(decoded, kind)?;
+        records = &records[record_size..];
+        let Some(row) =
+            row.filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
+        else {
+            continue;
+        };
+        let Some(row_id) = history_row_id(&row, kind) else {
+            return Ok(TqbnStreamingBlockScan::NonIncreasing);
+        };
+        if previous_id.is_some_and(|previous_id| row_id <= previous_id) {
+            return Ok(TqbnStreamingBlockScan::NonIncreasing);
+        }
+        first_id.get_or_insert(row_id);
+        previous_id = Some(row_id);
+    }
+    Ok(first_id.map_or(TqbnStreamingBlockScan::Empty, |first_id| {
+        TqbnStreamingBlockScan::StrictlyIncreasing { first_id }
+    }))
 }
 
 fn parse_tqbn_rows_for_range(
@@ -2167,14 +2196,15 @@ fn decode_blocks_streaming_for_range(
 ) -> Result<()> {
     let file_len = file.metadata()?.len();
     let mut next_block_offset = file.stream_position()?;
-    while let Some((_, block_state)) = read_next_tqbn_records_block_for_range(
+    while let Some((_, records)) = read_next_tqbn_records_block_payload_for_range(
         file,
-        kind,
         range_start_ns,
         range_end_ns,
         file_len,
         &mut next_block_offset,
     )? {
+        let mut block_state = TqbnSeriesState::default();
+        decode_records_block(&records, kind, &mut block_state)?;
         state.rows.extend(block_state.rows);
         state.coverage.extend(block_state.coverage);
         state.provisional.extend(block_state.provisional);
@@ -2182,14 +2212,13 @@ fn decode_blocks_streaming_for_range(
     Ok(())
 }
 
-fn read_next_tqbn_records_block_for_range(
+fn read_next_tqbn_records_block_payload_for_range(
     file: &mut File,
-    kind: HistorySeriesKind,
     range_start_ns: i64,
     range_end_ns: i64,
     file_len: u64,
     next_block_offset: &mut u64,
-) -> Result<Option<(TqbnBlockDescriptor, TqbnSeriesState)>> {
+) -> Result<Option<(TqbnBlockDescriptor, Vec<u8>)>> {
     while *next_block_offset < file_len {
         let block_offset = *next_block_offset;
         let descriptor = read_tqbn_block_descriptor_at(file, block_offset, file_len)?;
@@ -2209,9 +2238,7 @@ fn read_next_tqbn_records_block_for_range(
                 *next_block_offset = block_end_offset;
                 if intersects_range {
                     let records = read_decoded_tqbn_block_payload(file, descriptor)?;
-                    let mut state = TqbnSeriesState::default();
-                    decode_records_block(&records, kind, &mut state)?;
-                    return Ok(Some((descriptor, state)));
+                    return Ok(Some((descriptor, records)));
                 }
             }
             value
