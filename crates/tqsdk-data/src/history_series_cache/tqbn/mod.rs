@@ -123,8 +123,23 @@ struct TqbnReader {
 
 struct TqbnStreamingPartition {
     file: File,
-    file_len: u64,
-    next_block_offset: u64,
+    blocks: Vec<TqbnStreamingBlockPlan>,
+    next_block_index: usize,
+    active: Vec<TqbnStreamingBlockCursor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TqbnStreamingBlockPlan {
+    descriptor: TqbnBlockDescriptor,
+    first_id: i64,
+    block_order: u64,
+}
+
+struct TqbnStreamingBlockCursor {
+    block_order: u64,
+    records: Vec<u8>,
+    records_offset: usize,
+    current: Option<HistorySeriesRow>,
 }
 
 enum PreparedTqbnPartition {
@@ -922,11 +937,10 @@ impl HistorySeriesReader for TqbnReader {
                 return Ok(Some(row));
             }
             if let Some(partition) = self.partition.as_mut() {
-                if let Some(rows) =
-                    partition.next_rows(self.kind, self.range_start_ns, self.range_end_ns)?
+                if let Some(row) =
+                    partition.next_row(self.kind, self.range_start_ns, self.range_end_ns)?
                 {
-                    self.rows = rows.into_iter();
-                    continue;
+                    return Ok(Some(row));
                 }
                 self.partition = None;
                 continue;
@@ -956,30 +970,127 @@ impl HistorySeriesReader for TqbnReader {
 }
 
 impl TqbnStreamingPartition {
-    fn next_rows(
+    fn next_row(
         &mut self,
         kind: HistorySeriesKind,
         range_start_ns: i64,
         range_end_ns: i64,
-    ) -> Result<Option<Vec<HistorySeriesRow>>> {
-        while let Some(state) = read_next_tqbn_records_block_for_range(
-            &mut self.file,
-            kind,
-            range_start_ns,
-            range_end_ns,
-            self.file_len,
-            &mut self.next_block_offset,
-        )? {
-            let rows = state
-                .rows
-                .into_iter()
-                .filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
-                .collect::<Vec<_>>();
-            if !rows.is_empty() {
-                return Ok(Some(rows));
+    ) -> Result<Option<HistorySeriesRow>> {
+        while self.active.is_empty() && self.next_block_index < self.blocks.len() {
+            self.activate_next_block(kind, range_start_ns, range_end_ns)?;
+        }
+        if self.active.is_empty() {
+            return Ok(None);
+        }
+
+        let mut next_id = self.next_active_id(kind)?;
+        while self
+            .blocks
+            .get(self.next_block_index)
+            .is_some_and(|block| block.first_id <= next_id)
+        {
+            self.activate_next_block(kind, range_start_ns, range_end_ns)?;
+            next_id = self.next_active_id(kind)?;
+        }
+
+        let mut winner: Option<(u64, HistorySeriesRow)> = None;
+        for cursor in &mut self.active {
+            let current_id = cursor
+                .current
+                .as_ref()
+                .and_then(|row| history_row_id(row, kind));
+            if current_id != Some(next_id) {
+                continue;
+            }
+
+            let row = cursor.current.take().ok_or_else(|| {
+                DataError::InvalidState("TQBN streaming block cursor lost current row")
+            })?;
+            if winner
+                .as_ref()
+                .is_none_or(|(block_order, _)| cursor.block_order > *block_order)
+            {
+                winner = Some((cursor.block_order, row));
+            }
+            cursor.advance(kind, range_start_ns, range_end_ns)?;
+        }
+        self.active.retain(|cursor| cursor.current.is_some());
+
+        winner
+            .map(|(_, row)| row)
+            .ok_or_else(|| DataError::InvalidState("TQBN streaming merge produced no winning row"))
+            .map(Some)
+    }
+
+    fn next_active_id(&self, kind: HistorySeriesKind) -> Result<i64> {
+        self.active
+            .iter()
+            .filter_map(|cursor| {
+                cursor
+                    .current
+                    .as_ref()
+                    .and_then(|row| history_row_id(row, kind))
+            })
+            .min()
+            .ok_or_else(|| {
+                DataError::InvalidState("TQBN streaming block cursor has no current row")
+            })
+    }
+
+    fn activate_next_block(
+        &mut self,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        let block = *self
+            .blocks
+            .get(self.next_block_index)
+            .ok_or_else(|| DataError::InvalidState("TQBN streaming block plan exhausted"))?;
+        self.next_block_index += 1;
+
+        let records = read_decoded_tqbn_block_payload(&mut self.file, block.descriptor)?;
+        let mut cursor = TqbnStreamingBlockCursor {
+            block_order: block.block_order,
+            records,
+            records_offset: 0,
+            current: None,
+        };
+        cursor.advance(kind, range_start_ns, range_end_ns)?;
+        if cursor.current.is_some() {
+            self.active.push(cursor);
+        }
+        Ok(())
+    }
+}
+
+impl TqbnStreamingBlockCursor {
+    fn advance(
+        &mut self,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        self.current = None;
+        while self.records_offset < self.records.len() {
+            let decoded = decode_one_record(&self.records[self.records_offset..])?;
+            let (row, record_size) = decode_history_row_record(decoded, kind)?;
+            self.records_offset =
+                self.records_offset
+                    .checked_add(record_size)
+                    .ok_or_else(|| {
+                        DataError::InvalidResponse(
+                            "TQBN streaming records offset overflow".to_string(),
+                        )
+                    })?;
+            if let Some(row) =
+                row.filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
+            {
+                self.current = Some(row);
+                return Ok(());
             }
         }
-        Ok(None)
+        Ok(())
     }
 }
 
@@ -1540,7 +1651,7 @@ fn prepare_tqbn_partition(
     };
     let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     let file_len = file.metadata()?.len();
-    if tqbn_rows_for_range_are_strictly_increasing(
+    if let Some(blocks) = plan_tqbn_streaming_blocks(
         &mut file,
         kind,
         range_start_ns,
@@ -1550,8 +1661,9 @@ fn prepare_tqbn_partition(
     )? {
         return Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
             file,
-            file_len,
-            next_block_offset: first_block_offset as u64,
+            blocks,
+            next_block_index: 0,
+            active: Vec::new(),
         }));
     }
     Ok(PreparedTqbnPartition::Materialized(
@@ -1559,17 +1671,17 @@ fn prepare_tqbn_partition(
     ))
 }
 
-fn tqbn_rows_for_range_are_strictly_increasing(
+fn plan_tqbn_streaming_blocks(
     file: &mut File,
     kind: HistorySeriesKind,
     range_start_ns: i64,
     range_end_ns: i64,
     file_len: u64,
     first_block_offset: u64,
-) -> Result<bool> {
+) -> Result<Option<Vec<TqbnStreamingBlockPlan>>> {
     let mut next_block_offset = first_block_offset;
-    let mut previous_id = None;
-    while let Some(state) = read_next_tqbn_records_block_for_range(
+    let mut blocks = Vec::new();
+    while let Some((descriptor, state)) = read_next_tqbn_records_block_for_range(
         file,
         kind,
         range_start_ns,
@@ -1577,17 +1689,28 @@ fn tqbn_rows_for_range_are_strictly_increasing(
         file_len,
         &mut next_block_offset,
     )? {
-        for row in &state.rows {
-            let Some(row_id) = history_row_id(row, kind) else {
-                return Ok(false);
-            };
-            if previous_id.is_some_and(|previous_id| row_id <= previous_id) {
-                return Ok(false);
-            }
-            previous_id = Some(row_id);
+        let rows = state
+            .rows
+            .into_iter()
+            .filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            continue;
         }
+        if !history_rows_are_strictly_increasing(&rows, kind) {
+            return Ok(None);
+        }
+        let first_id = history_row_id(&rows[0], kind).ok_or_else(|| {
+            DataError::InvalidResponse("TQBN streaming block row has no id".to_string())
+        })?;
+        blocks.push(TqbnStreamingBlockPlan {
+            descriptor,
+            first_id,
+            block_order: descriptor.payload_offset,
+        });
     }
-    Ok(true)
+    blocks.sort_unstable_by_key(|block| (block.first_id, block.block_order));
+    Ok(Some(blocks))
 }
 
 fn parse_tqbn_rows_for_range(
@@ -2044,7 +2167,7 @@ fn decode_blocks_streaming_for_range(
 ) -> Result<()> {
     let file_len = file.metadata()?.len();
     let mut next_block_offset = file.stream_position()?;
-    while let Some(block_state) = read_next_tqbn_records_block_for_range(
+    while let Some((_, block_state)) = read_next_tqbn_records_block_for_range(
         file,
         kind,
         range_start_ns,
@@ -2066,7 +2189,7 @@ fn read_next_tqbn_records_block_for_range(
     range_end_ns: i64,
     file_len: u64,
     next_block_offset: &mut u64,
-) -> Result<Option<TqbnSeriesState>> {
+) -> Result<Option<(TqbnBlockDescriptor, TqbnSeriesState)>> {
     while *next_block_offset < file_len {
         let block_offset = *next_block_offset;
         let descriptor = read_tqbn_block_descriptor_at(file, block_offset, file_len)?;
@@ -2088,7 +2211,7 @@ fn read_next_tqbn_records_block_for_range(
                     let records = read_decoded_tqbn_block_payload(file, descriptor)?;
                     let mut state = TqbnSeriesState::default();
                     decode_records_block(&records, kind, &mut state)?;
-                    return Ok(Some(state));
+                    return Ok(Some((descriptor, state)));
                 }
             }
             value
@@ -2348,6 +2471,54 @@ fn read_exact_tqbn(
         }
     }
     Ok(())
+}
+
+fn decode_history_row_record(
+    decoded: DecodedTqbnRecord<'_>,
+    kind: HistorySeriesKind,
+) -> Result<(Option<HistorySeriesRow>, usize)> {
+    let (row, record_size) = match decoded {
+        DecodedTqbnRecord::Kline {
+            bytes: record,
+            record_size,
+        } => {
+            let row = if matches!(kind, HistorySeriesKind::Kline { .. }) {
+                let record = read_kline_record_bytes(record)?;
+                Some(HistorySeriesRow::Kline(decode_kline_record(&record)?))
+            } else {
+                None
+            };
+            (row, record_size)
+        }
+        DecodedTqbnRecord::Tick1 {
+            bytes: record,
+            record_size,
+        } => {
+            let row = if kind == HistorySeriesKind::Tick {
+                let record = read_tick1_record_bytes(record)?;
+                Some(HistorySeriesRow::Tick(decode_tick1_record(&record)?))
+            } else {
+                None
+            };
+            (row, record_size)
+        }
+        DecodedTqbnRecord::Tick5 {
+            bytes: record,
+            record_size,
+        } => {
+            let row = if kind == HistorySeriesKind::Tick {
+                let record = read_tick5_record_bytes(record)?;
+                Some(HistorySeriesRow::Tick(decode_tick5_record(&record)?))
+            } else {
+                None
+            };
+            (row, record_size)
+        }
+        DecodedTqbnRecord::Coverage { record_size, .. }
+        | DecodedTqbnRecord::ProvisionalCoverage { record_size, .. }
+        | DecodedTqbnRecord::Unknown { record_size, .. } => (None, record_size),
+    };
+    Ok((row, record_size))
 }
 
 fn decode_records_block(
@@ -4065,19 +4236,86 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_reader_materializes_out_of_order_indexed_blocks() {
-        let store = tqbn_store("reader_materializes_out_of_order_blocks");
+    fn tqbn_reader_streams_overlapping_blocks_with_last_write_wins() {
+        let store = tqbn_store("reader_streams_overlapping_blocks");
         let kind = HistorySeriesKind::Tick;
-        for row in [tick5(2, 1_000, 618.5, 623.5), tick5(1, 2_000, 618.6, 623.6)] {
+        let first_block = [
+            tick5(1, 1_000, 618.5, 623.5),
+            tick5(2, 2_000, 618.6, 623.6),
+            tick5(3, 3_000, 618.7, 623.7),
+        ];
+        let second_block = [
+            tick5(2, 2_000, 628.6, 633.6),
+            tick5(3, 3_000, 628.7, 633.7),
+            tick5(4, 4_000, 628.8, 633.8),
+        ];
+        for rows in [&first_block[..], &second_block[..]] {
             store
                 .write_segment(HistorySeriesWriteSegment {
                     symbol: SYMBOL,
                     kind,
                     declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+                    rows: HistorySeriesWriteRows::Ticks(rows),
                 })
                 .unwrap();
         }
+
+        let path = store.partition_series_path("19700101", SYMBOL, kind);
+        let mut reader = TqbnReader {
+            paths: vec![path],
+            path_index: 0,
+            symbol: SYMBOL.to_string(),
+            kind,
+            range_start_ns: 1_000,
+            range_end_ns: 5_000,
+            rows: Vec::new().into_iter(),
+            partition: None,
+        };
+
+        let first = reader.next_row().unwrap().unwrap();
+        assert_eq!(history_row_id(&first, kind), Some(1));
+        assert!(
+            reader.partition.is_some(),
+            "overlapping ordered blocks must stay on the streaming merge path"
+        );
+        assert_eq!(
+            reader.rows.len(),
+            0,
+            "streaming merge must not materialize future rows"
+        );
+
+        let mut rows = vec![first];
+        while let Some(row) = reader.next_row().unwrap() {
+            rows.push(row);
+        }
+        let ticks = rows
+            .into_iter()
+            .map(|row| match row {
+                HistorySeriesRow::Tick(row) => row,
+                HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(ticks[1].last_price, 628.6);
+        assert_eq!(ticks[2].last_price, 628.7);
+    }
+
+    #[test]
+    fn tqbn_reader_materializes_out_of_order_indexed_blocks() {
+        let store = tqbn_store("reader_materializes_out_of_order_blocks");
+        let kind = HistorySeriesKind::Tick;
+        let rows = [tick5(2, 1_000, 618.5, 623.5), tick5(1, 2_000, 618.6, 623.6)];
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(&rows),
+            })
+            .unwrap();
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
             paths: vec![path],
