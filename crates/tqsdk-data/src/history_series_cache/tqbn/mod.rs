@@ -118,6 +118,19 @@ struct TqbnReader {
     range_start_ns: i64,
     range_end_ns: i64,
     rows: std::vec::IntoIter<HistorySeriesRow>,
+    partition: Option<TqbnStreamingPartition>,
+}
+
+struct TqbnStreamingPartition {
+    file: File,
+    file_len: u64,
+    next_block_offset: u64,
+}
+
+enum PreparedTqbnPartition {
+    Missing,
+    Streaming(TqbnStreamingPartition),
+    Materialized(Vec<HistorySeriesRow>),
 }
 
 type TqbnRowIdRange = Option<(i64, i64)>;
@@ -897,6 +910,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
             range_start_ns: request.range_start_ns,
             range_end_ns: request.range_end_ns,
             rows: Vec::new().into_iter(),
+            partition: None,
         }))
     }
 }
@@ -907,20 +921,65 @@ impl HistorySeriesReader for TqbnReader {
             if let Some(row) = self.rows.next() {
                 return Ok(Some(row));
             }
+            if let Some(partition) = self.partition.as_mut() {
+                if let Some(rows) =
+                    partition.next_rows(self.kind, self.range_start_ns, self.range_end_ns)?
+                {
+                    self.rows = rows.into_iter();
+                    continue;
+                }
+                self.partition = None;
+                continue;
+            }
             if self.path_index >= self.paths.len() {
                 return Ok(None);
             }
             let path = &self.paths[self.path_index];
             self.path_index += 1;
-            self.rows = parse_tqbn_rows_for_range(
+            match prepare_tqbn_partition(
                 path,
                 self.symbol.as_str(),
                 self.kind,
                 self.range_start_ns,
                 self.range_end_ns,
-            )?
-            .into_iter();
+            )? {
+                PreparedTqbnPartition::Missing => {}
+                PreparedTqbnPartition::Streaming(partition) => {
+                    self.partition = Some(partition);
+                }
+                PreparedTqbnPartition::Materialized(rows) => {
+                    self.rows = rows.into_iter();
+                }
+            }
         }
+    }
+}
+
+impl TqbnStreamingPartition {
+    fn next_rows(
+        &mut self,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<Option<Vec<HistorySeriesRow>>> {
+        while let Some(state) = read_next_tqbn_records_block_for_range(
+            &mut self.file,
+            kind,
+            range_start_ns,
+            range_end_ns,
+            self.file_len,
+            &mut self.next_block_offset,
+        )? {
+            let rows = state
+                .rows
+                .into_iter()
+                .filter(|row| history_row_in_datetime_range(row, range_start_ns, range_end_ns))
+                .collect::<Vec<_>>();
+            if !rows.is_empty() {
+                return Ok(Some(rows));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1465,6 +1524,72 @@ fn parse_tqbn_series_file(
     Ok(parsed)
 }
 
+fn prepare_tqbn_partition(
+    path: &Path,
+    symbol: &str,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+) -> Result<PreparedTqbnPartition> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(PreparedTqbnPartition::Missing);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
+    let file_len = file.metadata()?.len();
+    if tqbn_rows_for_range_are_strictly_increasing(
+        &mut file,
+        kind,
+        range_start_ns,
+        range_end_ns,
+        file_len,
+        first_block_offset as u64,
+    )? {
+        return Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
+            file,
+            file_len,
+            next_block_offset: first_block_offset as u64,
+        }));
+    }
+    Ok(PreparedTqbnPartition::Materialized(
+        parse_tqbn_rows_for_range(path, symbol, kind, range_start_ns, range_end_ns)?,
+    ))
+}
+
+fn tqbn_rows_for_range_are_strictly_increasing(
+    file: &mut File,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    file_len: u64,
+    first_block_offset: u64,
+) -> Result<bool> {
+    let mut next_block_offset = first_block_offset;
+    let mut previous_id = None;
+    while let Some(state) = read_next_tqbn_records_block_for_range(
+        file,
+        kind,
+        range_start_ns,
+        range_end_ns,
+        file_len,
+        &mut next_block_offset,
+    )? {
+        for row in &state.rows {
+            let Some(row_id) = history_row_id(row, kind) else {
+                return Ok(false);
+            };
+            if previous_id.is_some_and(|previous_id| row_id <= previous_id) {
+                return Ok(false);
+            }
+            previous_id = Some(row_id);
+        }
+    }
+    Ok(true)
+}
+
 fn parse_tqbn_rows_for_range(
     path: &Path,
     symbol: &str,
@@ -1918,24 +2043,52 @@ fn decode_blocks_streaming_for_range(
     state: &mut TqbnSeriesState,
 ) -> Result<()> {
     let file_len = file.metadata()?.len();
-    let mut offset = file.stream_position()?;
-    while offset < file_len {
-        let descriptor = read_tqbn_block_descriptor_at(file, offset, file_len)?;
+    let mut next_block_offset = file.stream_position()?;
+    while let Some(block_state) = read_next_tqbn_records_block_for_range(
+        file,
+        kind,
+        range_start_ns,
+        range_end_ns,
+        file_len,
+        &mut next_block_offset,
+    )? {
+        state.rows.extend(block_state.rows);
+        state.coverage.extend(block_state.coverage);
+        state.provisional.extend(block_state.provisional);
+    }
+    Ok(())
+}
+
+fn read_next_tqbn_records_block_for_range(
+    file: &mut File,
+    kind: HistorySeriesKind,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    file_len: u64,
+    next_block_offset: &mut u64,
+) -> Result<Option<TqbnSeriesState>> {
+    while *next_block_offset < file_len {
+        let block_offset = *next_block_offset;
+        let descriptor = read_tqbn_block_descriptor_at(file, block_offset, file_len)?;
         validate_block_flags(descriptor.block_type, descriptor.flags)?;
         match descriptor.block_type {
             value if value == TqbnBlockType::Records as u8 => {
-                if let Some((index_descriptor, index)) =
-                    read_following_tqbn_records_index(file, offset, descriptor, file_len)?
+                let (intersects_range, block_end_offset) = if let Some((index_descriptor, index)) =
+                    read_following_tqbn_records_index(file, block_offset, descriptor, file_len)?
                 {
-                    if index.range_start_ns < range_end_ns && range_start_ns < index.range_end_ns {
-                        let records = read_decoded_tqbn_block_payload(file, descriptor)?;
-                        decode_records_block(&records, kind, state)?;
-                    }
-                    offset = index_descriptor.end_offset;
+                    (
+                        index.range_start_ns < range_end_ns && range_start_ns < index.range_end_ns,
+                        index_descriptor.end_offset,
+                    )
                 } else {
+                    (true, descriptor.end_offset)
+                };
+                *next_block_offset = block_end_offset;
+                if intersects_range {
                     let records = read_decoded_tqbn_block_payload(file, descriptor)?;
-                    decode_records_block(&records, kind, state)?;
-                    offset = descriptor.end_offset;
+                    let mut state = TqbnSeriesState::default();
+                    decode_records_block(&records, kind, &mut state)?;
+                    return Ok(Some(state));
                 }
             }
             value
@@ -1943,7 +2096,7 @@ fn decode_blocks_streaming_for_range(
                     || value == TqbnBlockType::Index as u8 =>
             {
                 let _ = read_decoded_tqbn_block_payload(file, descriptor)?;
-                offset = descriptor.end_offset;
+                *next_block_offset = descriptor.end_offset;
             }
             value => {
                 return Err(DataError::InvalidResponse(format!(
@@ -1952,7 +2105,7 @@ fn decode_blocks_streaming_for_range(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn read_following_tqbn_records_index(
@@ -3436,16 +3589,18 @@ mod tests {
     use crate::history_series_cache::{
         HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit,
         HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesProvisionalCoverage,
-        HistorySeriesRow, HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+        HistorySeriesReader, HistorySeriesRow, HistorySeriesStore, HistorySeriesWriteRows,
+        HistorySeriesWriteSegment,
     };
 
     use super::codec::{TqbnBlockType, decode_blocks, encode_block, encode_file_prefix};
     use super::{
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
-        coverage_record, encode_metadata, history_rows_are_strictly_increasing,
-        parse_tqbn_coverage_file, read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at,
-        read_tqbn_coverage_index_at, rows_for_request, tick_level_depth, trading_day_range,
-        try_parse_tqbn_coverage_index_chain, write_coverage_record_bytes,
+        TqbnReader, coverage_record, encode_metadata, history_row_id,
+        history_rows_are_strictly_increasing, parse_tqbn_coverage_file,
+        read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at, read_tqbn_coverage_index_at,
+        rows_for_request, tick_level_depth, trading_day_range, try_parse_tqbn_coverage_index_chain,
+        write_coverage_record_bytes,
     };
 
     const SYMBOL: &str = "SHFE.rb2601";
@@ -3869,6 +4024,82 @@ mod tests {
             HistorySeriesRow::Tick(tick5(1, 2_000, 618.6, 623.6)),
         ];
         assert!(!history_rows_are_strictly_increasing(&duplicate, kind));
+    }
+
+    #[test]
+    fn tqbn_reader_streams_strictly_increasing_indexed_blocks() {
+        let store = tqbn_store("reader_streams_increasing_blocks");
+        let kind = HistorySeriesKind::Tick;
+        for row in [tick5(1, 1_000, 618.5, 623.5), tick5(2, 2_000, 618.6, 623.6)] {
+            store
+                .write_segment(HistorySeriesWriteSegment {
+                    symbol: SYMBOL,
+                    kind,
+                    declared_range_ns: None,
+                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+                })
+                .unwrap();
+        }
+        let path = store.partition_series_path("19700101", SYMBOL, kind);
+        let mut reader = TqbnReader {
+            paths: vec![path],
+            path_index: 0,
+            symbol: SYMBOL.to_string(),
+            kind,
+            range_start_ns: 1_000,
+            range_end_ns: 3_000,
+            rows: Vec::new().into_iter(),
+            partition: None,
+        };
+
+        let first = reader.next_row().unwrap().unwrap();
+        assert_eq!(history_row_id(&first, kind), Some(1));
+        assert_eq!(
+            reader.rows.len(),
+            0,
+            "strictly increasing partitions must retain only the current records block"
+        );
+        let second = reader.next_row().unwrap().unwrap();
+        assert_eq!(history_row_id(&second, kind), Some(2));
+        assert!(reader.next_row().unwrap().is_none());
+    }
+
+    #[test]
+    fn tqbn_reader_materializes_out_of_order_indexed_blocks() {
+        let store = tqbn_store("reader_materializes_out_of_order_blocks");
+        let kind = HistorySeriesKind::Tick;
+        for row in [tick5(2, 1_000, 618.5, 623.5), tick5(1, 2_000, 618.6, 623.6)] {
+            store
+                .write_segment(HistorySeriesWriteSegment {
+                    symbol: SYMBOL,
+                    kind,
+                    declared_range_ns: None,
+                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+                })
+                .unwrap();
+        }
+        let path = store.partition_series_path("19700101", SYMBOL, kind);
+        let mut reader = TqbnReader {
+            paths: vec![path],
+            path_index: 0,
+            symbol: SYMBOL.to_string(),
+            kind,
+            range_start_ns: 1_000,
+            range_end_ns: 3_000,
+            rows: Vec::new().into_iter(),
+            partition: None,
+        };
+
+        let first = reader.next_row().unwrap().unwrap();
+        assert_eq!(history_row_id(&first, kind), Some(1));
+        assert_eq!(
+            reader.rows.len(),
+            1,
+            "out-of-order partitions must retain materialized last-write-wins rows"
+        );
+        let second = reader.next_row().unwrap().unwrap();
+        assert_eq!(history_row_id(&second, kind), Some(2));
+        assert!(reader.next_row().unwrap().is_none());
     }
 
     #[test]
