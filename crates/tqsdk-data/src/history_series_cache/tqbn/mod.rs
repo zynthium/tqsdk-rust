@@ -1023,9 +1023,9 @@ impl TqbnStreamingPartition {
                 continue;
             }
 
-            let row = cursor.current.take().ok_or_else(|| {
-                DataError::InvalidState("TQBN streaming block cursor lost current row")
-            })?;
+            let row = cursor.current.take().ok_or(DataError::InvalidState(
+                "TQBN streaming block cursor lost current row",
+            ))?;
             if winner
                 .as_ref()
                 .is_none_or(|(block_order, _)| cursor.block_order > *block_order)
@@ -1047,7 +1047,9 @@ impl TqbnStreamingPartition {
 
         winner
             .map(|(_, row)| row)
-            .ok_or_else(|| DataError::InvalidState("TQBN streaming merge produced no winning row"))
+            .ok_or(DataError::InvalidState(
+                "TQBN streaming merge produced no winning row",
+            ))
             .map(Some)
     }
 
@@ -1061,9 +1063,9 @@ impl TqbnStreamingPartition {
                     .and_then(|row| history_row_id(row, kind))
             })
             .min()
-            .ok_or_else(|| {
-                DataError::InvalidState("TQBN streaming block cursor has no current row")
-            })
+            .ok_or(DataError::InvalidState(
+                "TQBN streaming block cursor has no current row",
+            ))
     }
 
     fn activate_next_block(
@@ -1075,7 +1077,9 @@ impl TqbnStreamingPartition {
         let block = *self
             .blocks
             .get(self.next_block_index)
-            .ok_or_else(|| DataError::InvalidState("TQBN streaming block plan exhausted"))?;
+            .ok_or(DataError::InvalidState(
+                "TQBN streaming block plan exhausted",
+            ))?;
         self.next_block_index += 1;
 
         let mut records = std::mem::take(&mut self.spare_records);
@@ -3084,9 +3088,9 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
                 rows.len(),
                 id_range,
             )?
-            .ok_or_else(|| {
-                DataError::InvalidState("TQBN compaction lost its coverage index root")
-            })?;
+            .ok_or(DataError::InvalidState(
+                "TQBN compaction lost its coverage index root",
+            ))?;
         }
         for checkpoint in provisional {
             coverage_index_offset = append_provisional_block(
@@ -3102,9 +3106,9 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
                     id_range: checkpoint.id_range,
                 },
             )?
-            .ok_or_else(|| {
-                DataError::InvalidState("TQBN compaction lost its coverage index root")
-            })?;
+            .ok_or(DataError::InvalidState(
+                "TQBN compaction lost its coverage index root",
+            ))?;
         }
         file.flush()?;
         file.sync_all()?;
