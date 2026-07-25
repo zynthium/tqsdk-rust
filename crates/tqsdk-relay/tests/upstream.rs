@@ -75,7 +75,7 @@ fn universe_expression_rejects_empty_symbol_value() {
 
     assert_eq!(
         err.to_string(),
-        "invalid relay config: futures universe selector values must not contain empty value"
+        "invalid data query input: futures universe selector values must not contain empty value"
     );
 }
 
