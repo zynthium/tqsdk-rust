@@ -25,6 +25,7 @@ mod history_backtest_replay;
 mod history_tick_replay;
 mod host;
 mod kline_synth;
+mod minute_kline_aggregate;
 mod order;
 mod order_projection;
 mod plan;
@@ -88,12 +89,17 @@ pub use environment::{
 };
 pub use error::{Result, TaskError, TaskKind};
 pub use history_backtest_replay::{
-    HistoryBacktestKlineRequest, HistoryBacktestProjectedReplayRequest,
+    HistoryBacktestKlineRequest, HistoryBacktestMinuteKlineSource,
+    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestProjectedReplayRequest,
     HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
     HistoryBacktestTickSource,
 };
 pub use history_tick_replay::HistoryTickReplayStream;
 pub use host::TaskHost;
+pub use minute_kline_aggregate::{
+    CANONICAL_MINUTE_KLINE_NS, MinuteKlineAggregationUpdate, MinuteKlineAggregator,
+    MinuteKlineSessionTemplate, MinuteKlineSessionWindow,
+};
 pub use order::{TaskOrderBuilder, TaskOrderDraft, TaskOrderIntent};
 pub use replay::{
     ReplayMarketEvent, ReplayMarketPayload, ReplayMarketPayloadKind, ReplayMarketSource,

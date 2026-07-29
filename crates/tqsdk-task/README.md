@@ -104,6 +104,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 让 cache-backed
     facade 按每个物理 tick range 回放到逻辑 symbol；`KQ.m@...` 主连因此读取具体合约
     cache file，同时为 replay quote 写入 `underlying_symbol`
+  - `HistoryBacktestMinuteKlineSource` 读取独立的 logical-symbol 60s monthly cache；
+    `MinuteKlineAggregator` 只从 closed canonical minutes 合成 `N × 60s` bars。60s 在
+    row timestamp 发 open-only、在 `+60s` 发 final，higher-period bar 也不提前暴露 OHLC
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence
@@ -122,6 +125,8 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只服务 kline quote synthesis；逐合约显式配置优先，其次可用已查询的 `InstrumentSpec` 或已 replay quote 的 `price_tick` metadata，最后才使用 `default_price_tick(tick)` 全局 fallback；不会在本地回测 builder 内自动联网查询合约 metadata 或自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders 读取和下单入口，并通过 `finish_sim_step()` 推进本地模拟成交
   - replay 结束前会 drain 已进入 runtime 的 task updates，确保 `TargetPosTask::execution_report()` 可记录最后一个本地模拟成交
+  - 相同 event timestamp 的 replay updates 由 `StrategyBacktest` 原子批处理，因此分钟 close 与
+    下一根 bar open 不会拆成两个可观察的策略 step
   - `StrategyBacktest::summary()` 提供轻量事件计数、payload 分类计数、回测事件起止时间与 UTC 日期范围、订单/成交 trade log、买卖/开平次数、初始/最终账户、最终持仓快照、账户余额变化、余额变化率、余额曲线点、权益曲线点、风险度观测与平均风险度、平仓盈亏观测、胜率、盈亏额比例、手续费、净实现盈亏、按 UTC 自然日或调用方显式交易日窗口压缩的资金/权益收益、每日盈亏与每日回撤、盈利/亏损天数、最长连续盈利/亏损天数、年化收益率、年化日 Sharpe / Sortino / Calmar（含可选年化无风险利率）、rolling balance/equity Sharpe / Sortino / Calmar、峰值余额/权益和最大回撤；`performance_metrics()` 提供类似 Python `TqReport.metrics()` 的 balance-based typed 快照，`performance_report(window)` 提供类似 Python `TqReport.full()` 的 typed 报告快照
   - 官方完整报表、自动分钟线、股票/期权完整账户语义仍是后续迭代范围；交易日历基础查询由 `tqsdk-data` 提供
 - `tqsdk-task::testing`

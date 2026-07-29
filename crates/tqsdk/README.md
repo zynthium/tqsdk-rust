@@ -4,7 +4,7 @@
 runtime contract；它只提供一个更容易开始的 facade：
 
 - `tqsdk::prelude::*`
-- `Tq::new()` (and `Tq::futures()` alias)
+- `Tq::new()` / `Tq::futures()` and `Tq::stock()` market builders
 - Unified strategy backtest (`.backtest(start_ns, end_ns)`): default shared history cache-backed local simulated backtest; `.disabled_cache()` means official server-side market stream; `cache_dir` / `market_cache` override the cache root
 - Resumable current-day cache snapshot (`.provisional_open_day_fill(day_start_ns, as_of_ns)?`): never promotes an open day to ordinary final coverage
 - Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`, `.record_universe(...)`)
@@ -24,12 +24,12 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
-`TQSDK_HISTORY_CACHE_DIR` 覆盖），通过 `BacktestTickCache` 复用
-`tqsdk-data::HistorySeriesCache` 的持久 tick 缓存，并把 tick 流式回放到本地 `TqSim`。
+`TQSDK_HISTORY_CACHE_DIR` 覆盖）。tick 使用 `BacktestTickCache`，而唯一持久 K 线输入使用
+独立 `MinuteKlineCache` 的 canonical 60s monthly files；两者都在本地回放到 `TqSim`。
 配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 会覆盖默认 cache；
 显式 `.disabled_cache()` 才直接使用官方 server-side backtest market stream 且不落盘。
 显式 `.cache_only()` 只读本地缓存；默认 `RemoteOnMiss` 在缓存完整时直接复用本地数据且不需要
-auth，缓存缺失时通过官方 server-side backtest market stream 拉取 tick、推进本地回测并写入持久缓存。
+auth，缓存缺失时通过官方 server-side backtest stream 拉取 tick 或 canonical 60s K、推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
 对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。最终 resolved
@@ -41,8 +41,13 @@ universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外�
 交易日把逻辑主连投影到具体合约 tick range。缓存文件、coverage、remote-on-miss、refresh 和
 warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约共用一份 tick cache；回放仍使用
 主连 symbol，quote 的 `underlying_symbol` 标注当时实际合约。映射查询不需天勤账号，但主连
-`.cache_only()` 仍需访问这份公开 metadata。主连 `duration > 60s` 的 native K 线目前不支持；
-改用 `duration <= 60s` 让 K 线从共享 tick 合成。
+`.cache_only()` 仍需访问这份公开 metadata。minute K cache 则始终以逻辑 `KQ.m@...` 为 key，
+dated physical contract 只保留在 replay metadata；`60s` 与整数分钟高周期均受支持。
+
+`Tq::stock()` 选择股票 market / server-backtest endpoint；cache-backed stock backtest 使用同一套
+canonical 60s monthly cache。futures universe selector 不适用于股票，股票策略应显式声明 symbol。
+minute 的 RemoteOnMiss / Refresh 不能为当前或未来 CST trading day 声称 final coverage，必须等该
+trading day 关闭后再填充。
 
 调用方自带多资产回放调度器时，可先调用 `.prepare().await?`，再通过
 `PreparedBacktest::tick_sources()` 取得同一份 logical-to-physical 投影。每项都包含稳定的
@@ -50,17 +55,18 @@ warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约
 脱离该区间扩展到整个回测窗口。默认 `.connect()` 继续消费同一投影。
 
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
-tick cache；`.kline(symbol, duration, view_width)` 对 `duration <= 60s` 的 K 线从本地 tick
-流合成，不写入 native K 线缓存；`duration > 60s` 的 K 线对齐官方 Python 行为，读取
-`HistorySeriesCache` 里的 native K 线，缺口通过 history series 远程补齐。只有缺 tick
-或缺 native K 线时才需要 auth。K 线 replay 需要 quote synthesis metadata；可在
-backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
+tick cache；`.kline(symbol, duration, view_width)` 的 `<60s` K 从 tick 本地合成，`60s` 从
+canonical minute cache 读取，`>60s` 只能是 `N × 60s` 并在本地从已关闭分钟线聚合。
+`61s` / `90s` 会明确拒绝，K-only `>=60s` 不会隐式拉取 tick；仅需 quote fallback 时会
+隐式使用 60s minute。只有缺 tick 或 canonical minute 时才需要 auth。K 线 replay 需要 quote
+synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 `.default_price_tick(...)` 显式提供。
 
-缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` 返回每个显式 symbol 的
-backend、文件路径、覆盖区间和缺口；`.purge_cache_symbols()` 删除这些 symbol 的 tick
-缓存文件。`.warmup().await?` 只预热缓存、不创建策略 runtime；它会先跳过完整缓存，再把
-每个物理 cache symbol 的 `missing_ranges` 交给内部有界远端调度器，用官方 server-side backtest 流只补缺口。默认不做
+缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` / `.purge_cache_symbols()` 是
+tick-only 兼容 API；`.inspect_history_cache()` 返回 tick 与 canonical-minute 的 typed status，
+`.purge_history_cache()` 是两类缓存的显式 destructive operation。`.warmup().await?` 只预热
+缓存、不创建策略 runtime；它会先跳过完整缓存，再把物理 tick range 和逻辑 minute symbol 的
+`missing_ranges` 交给对应的官方 server-side backtest stream 补齐。默认不做
 时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。普通 final 补齐成功后只
 compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由
@@ -71,7 +77,9 @@ compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远�
 每个成功 slice 都先校验 tick id 连续性后独立提交 coverage；普通 final fill 的全部 slice
 成功后才按 symbol compact，provisional fill 延后到最终重对账再 compact。失败或未确认的 slice
 不会标记 coverage，后续 warmup 会继续补其缺口。
-`.refresh()` 会在准备远端补齐前先按 symbol tick 文件粒度清空旧缓存。
+`.refresh()` 会在准备远端补齐前清空请求范围：tick 仍按 symbol 全 series 文件粒度，minute
+只删除与请求窗口相交的 `trading-YYYYMM` files。tick 和 minute cache 都没有自动 retention、
+max-byte eviction 或后台清理；`CacheOnly` minute inspection 是只读的，不会创建 v3 namespace。
 需要自行编排当前日盘中快照时，可在固定的
 `.backtest(day_start_ns, as_of_ns)` builder 上调用
 `.provisional_open_day_fill(day_start_ns, as_of_ns)?`。它只提交 non-final checkpoint，

@@ -324,9 +324,13 @@ sink、WAL、journal 或 cache writer。
   provisional checkpoint records 和 forward-compatible record lengths；8 MiB 目标 records
   block 与 crate-internal 时间索引支持按范围选择性解压，
   旧/不匹配索引逐 block 回退；embedded coverage commit 和 tick-only `BacktestTickCache`
-- TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 会执行 append-log compaction，
-  合并重复 rows 并保留 last-write-wins 语义；
+- TQBN cache scan / retention / size-limit maintenance；`enforce_limits(...)` 是显式 maintenance，
+  会执行 append-log compaction、合并重复 rows 并保留 last-write-wins 语义；history read/write
+  不会自动调用它。
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
+- `MinuteKlineCache`：独立 v3 `logical symbol × trading month` `.tqmk` cache，只持久化 final
+  60s K；higher periods 属于 task replay aggregation。它用 calendar/session snapshot fail closed，
+  不做 automatic retention/max-byte eviction，Refresh/purge 只作为显式操作
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有

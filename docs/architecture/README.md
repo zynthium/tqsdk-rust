@@ -106,8 +106,8 @@ V1 是：
   - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
     共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
     `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
-    tick cache，缺失时按每个物理 cache symbol 的 `missing_ranges` 通过官方 server-side
-    backtest market stream 填充缓存并驱动本地 `TqSim`；`KQ.m@...` 主连先由
+    tick cache 与独立 canonical 60s monthly cache，缺失时通过官方 server-side backtest
+    stream 填充对应输入并驱动本地 `TqSim`；`KQ.m@...` 主连先由
     `tqsdk-data` 的历史 segment query 解析为 dated concrete-contract tick ranges，
     因而与具体合约共用物理 cache、coverage 和远端补缺请求；主连 mapping 本身不需 auth，
     但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
@@ -119,9 +119,10 @@ V1 是：
     提交 non-final checkpoint；普通 coverage/cache-hit 仍视为缺口，TQBN 18:00 分区结束后必须
     走普通 final warmup 全日重对账
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
-    本地 replay runtime：`duration <= 60s` 的 K 线从 tick cache 本地合成，`duration > 60s`
-    的 K 线读取 native `HistorySeriesCache` 并按 history series 远程补缺；K 线 quote
-    synthesis 的 price tick / instrument spec 由 facade 显式 builder metadata 转发，不自动联网查询
+    本地 replay runtime：`<60s` 的 K 线从 tick cache 本地合成，`60s` 从 canonical minute
+    cache 读取，`>60s` 仅允许 `N × 60s` 并由 task 从 closed minutes 本地聚合；`61s` / `90s`
+    拒绝，且 K-only `>=60s` 不请求 tick。K 线 quote synthesis 的 price tick / instrument
+    spec 由 facade 显式 builder metadata 转发，不自动联网查询
   - `.universe(...)`、`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)`
     复用 relay 对齐的期货 universe selector 语法，支持全品种回测、实时订阅和 live/cache policy
     symbol 集合声明
@@ -132,8 +133,8 @@ V1 是：
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - cache-backed facade backtest / warmup 可自动查询 `KQ.m@...` 主连 underlying segment、按
     CST 交易日窗口裁剪并以具体合约缓存；同一物理 range 会合并，避免主连与具体合约重复回填
-  - 主连 `duration <= 60s` K 线从上述共享 tick 合成；`duration > 60s` native K 线拒绝，
-    不创建逻辑主连独立 K 线 cache
+  - 主连 minute cache 以逻辑 symbol 为 key；dated physical mapping 仅进入 replay
+    `underlying_symbol` metadata。`60s` 与整数分钟高周期均支持，不复制 physical minute files
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现

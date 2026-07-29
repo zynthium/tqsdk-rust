@@ -1,24 +1,37 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 //! Scenario 43: Cache-backed local backtest through the `tqsdk` facade.
 
-use tqsdk::{BacktestTickCache, Tq};
-use tqsdk_core::Tick;
+use tqsdk::{BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot, Tq};
+use tqsdk_core::{Kline, Tick};
 
 const SYMBOL: &str = "SHFE.rb2601";
+const START_NS: i64 = 0;
+const END_NS: i64 = 120_000_000_000;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> tqsdk::Result<()> {
     let cache_dir = temp_cache_dir();
-    let cache = BacktestTickCache::open(&cache_dir)?;
-    cache.store_ticks(
+    let tick_cache = BacktestTickCache::open(&cache_dir)?;
+    tick_cache.store_ticks(
         SYMBOL,
-        1_000,
-        3_000,
-        [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        START_NS,
+        END_NS,
+        [tick(1, 1, 100.0), tick(2, 60_000_000_001, 101.0)],
+    )?;
+    let minute_cache = MinuteKlineCache::open(&cache_dir)?;
+    minute_cache.store_final_range(
+        SYMBOL,
+        START_NS,
+        END_NS,
+        &MinuteKlineCacheSnapshot::cst_v1(),
+        &[
+            minute_kline(1, 0, 100.0),
+            minute_kline(2, 60_000_000_000, 101.0),
+        ],
     )?;
 
-    let prepared = Tq::new()
-        .backtest(1_000, 3_000)
+    let prepared = Tq::futures()
+        .backtest(START_NS, END_NS)
         .cache_dir(&cache_dir)?
         .cache_only()
         .default_price_tick(1.0)
@@ -29,8 +42,8 @@ async fn main() -> tqsdk::Result<()> {
         .await?;
     let report = prepared.data_report();
     assert_eq!(report.tick_symbols, 1);
-    assert_eq!(report.native_kline_series, 0);
-    assert_eq!(report.synthetic_kline_series, 1);
+    assert_eq!(report.minute_kline_series, 1);
+    assert_eq!(report.synthetic_kline_series, 0);
     assert!(!report.remote_used);
     assert_eq!(prepared.tick_sources().len(), 1);
     assert_eq!(prepared.tick_sources()[0].replay_symbol, SYMBOL);
@@ -40,7 +53,7 @@ async fn main() -> tqsdk::Result<()> {
             prepared.tick_sources()[0].start_ns,
             prepared.tick_sources()[0].end_ns
         ),
-        (1_000, 3_000)
+        (START_NS, END_NS)
     );
 
     let mut tq = prepared.connect().await?;
@@ -53,7 +66,7 @@ async fn main() -> tqsdk::Result<()> {
         assert!(snapshot.last_price >= 100.0);
     }
 
-    assert_eq!(events, 2);
+    assert!(events >= 2);
     Ok(())
 }
 
@@ -68,6 +81,21 @@ fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
         bid_volume1: 1,
         volume: id,
         ..Tick::default()
+    }
+}
+
+fn minute_kline(id: i64, datetime: i64, close: f64) -> Kline {
+    Kline {
+        id,
+        datetime,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: id,
+        open_oi: id,
+        close_oi: id,
+        ..Kline::default()
     }
 }
 

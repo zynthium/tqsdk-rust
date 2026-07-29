@@ -53,6 +53,7 @@ mod history_series_cache;
 mod integrity;
 mod live_quote;
 mod live_tick_cache_writer;
+mod minute_kline_cache;
 mod universe;
 mod universe_expression;
 
@@ -113,6 +114,12 @@ pub use integrity::{
     NonMonotonicHistoryTimestamp, OutOfRangeHistoryRow,
 };
 pub use live_tick_cache_writer::{LiveTickCacheWriteReport, LiveTickCacheWriter};
+pub use minute_kline_cache::{
+    MINUTE_KLINE_CACHE_FORMAT_ID, MINUTE_KLINE_CACHE_SCHEMA_VERSION, MINUTE_KLINE_DURATION_NS,
+    MinuteKlineCache, MinuteKlineCacheMonthReport, MinuteKlineCachePurgeReport,
+    MinuteKlineCacheSnapshot, MinuteKlineCacheStatus, MinuteKlineCacheWriteReport,
+    MinuteKlineCoverage, MinuteKlineReader, trading_month_for_timestamp_ns,
+};
 pub use universe::{
     DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,
     FuturesUniverseResolver, SessionFuturesUniverseResolver, StaticFuturesUniverseResolver,

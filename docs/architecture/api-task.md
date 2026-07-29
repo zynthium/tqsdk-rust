@@ -124,14 +124,19 @@
   - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
     `.backtest(...)` 默认使用 `tqsdk-data` 共享 history cache root；配置 `cache_dir` /
     `market_cache` 可覆盖 root，显式 `.disabled_cache()` 使用官方服务端回测行情且不落盘；
-    持久 tick cache、native K 线 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
-    `KQ.m@...` 主连在 facade 解析为 concrete-contract tick sources，task 的
-    `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 从这些物理 series
-    读取、却以逻辑主连 symbol 发事件并写入 `underlying_symbol`；
-    `duration <= 60s` 的 backtest K 线从 tick cache 本地合成，`duration > 60s` 的 backtest
-    K 线读取 native history series cache（主连 native K 线当前显式拒绝），并通过 `HistoryBacktestReplayStream` 与 tick /
-    synthetic K 线事件按时间合并回放；K 线 quote synthesis 所需 price tick / instrument spec
-    仍由显式 builder metadata 提供；
+    持久 tick cache、canonical-minute cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    `.inspect_cache()` / `.purge_cache_symbols()` 保持 tick-only 兼容，
+    `.inspect_history_cache()` / `.purge_history_cache()` 返回两类 typed report；任何 retention、
+    后台 timer 或 cache daemon 都不进入 task/runtime。
+    `KQ.m@...` 的 tick 在 facade 解析为 concrete-contract sources；minute cache 始终以逻辑
+    main-contract symbol 为 key，task 只把 dated mapping 写入 replay `underlying_symbol` metadata。
+    `<60s` K 从 tick cache 本地合成；`60s` 是唯一持久 canonical K；`>60s` 只允许
+    `N × 60s`，由 `MinuteKlineAggregator` 从已关闭分钟线聚合，`61s` / `90s` 会拒绝。
+    canonical minute 在 row timestamp 发 open-only、在 `+60s` 发 final row；高周期在 bar
+    start 发 open-only，随后每个关闭分钟更新一次。`HistoryBacktestReplayStream` 与 tick /
+    synthetic K 线按 event time 合并，而 `StrategyBacktest` 原子批处理相同 timestamp，避免
+    策略看到未来 OHLC。K-only `>=60s` 不读取 tick；quote fallback 隐式使用 60s minute。
+    K 线 quote synthesis 所需 price tick / instrument spec 仍由显式 builder metadata 提供；
     caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`
     继续暴露 `KlineDataSeries` / `TickDataSeries` / `StrategyReplaySourceBuilder`，供上层 host
     把已有 history rows 或自定义事件转为 replay source，但 `local_backtest_*` 不再作为新的

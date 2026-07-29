@@ -18,11 +18,14 @@ use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Timelike, Utc, Weekday}
 pub mod prelude {
     pub use crate::{
         BacktestBuilder, BacktestCachePolicy, BacktestCacheWarmupAction, BacktestCacheWarmupReport,
-        BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestRemoteFillCancellation,
-        BacktestRemoteFillConfig, BacktestRemoteFillInspectionProgress, BacktestRemoteFillPhase,
-        BacktestRemoteFillProgress, BacktestRemoteFillTelemetry, BacktestTickCache,
-        BacktestTickCachePurgeReport, BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID,
-        MarketCachePolicy, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
+        BacktestCacheWarmupSymbolReport, BacktestDataReport, BacktestHistoryCachePurgeReport,
+        BacktestHistoryCacheStatus, BacktestMinuteKlineCacheWarmupSymbolReport,
+        BacktestRemoteFillCancellation, BacktestRemoteFillConfig,
+        BacktestRemoteFillInspectionProgress, BacktestRemoteFillPhase, BacktestRemoteFillProgress,
+        BacktestRemoteFillTelemetry, BacktestTickCache, BacktestTickCachePurgeReport,
+        BacktestTickCacheStatus, Error, LOCAL_BACKTEST_ACCOUNT_ID, MarketCachePolicy,
+        MinuteKlineCache, MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot,
+        MinuteKlineCacheStatus, PreparedBacktest, RecordTicksFlushReport, RecordTicksHealth,
         RecordTicksReport, RecordTicksSymbolFlushReport, RecordTicksSymbolHealth, RemoteFillPlan,
         RemoteFillPlanSymbol, Result, TargetPos, Tq, TqBuilder,
     };
@@ -39,8 +42,10 @@ pub mod advanced {
         pub use tqsdk_data::{
             BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus, DataClient,
             DataError, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
-            KlineDataSeries, KlineDataSeriesRequest, LiveTickCacheWriter, TickDataSeries,
-            TickDataSeriesRequest, TradingCalendarRow, historical_cont_underlying_segments,
+            KlineDataSeries, KlineDataSeriesRequest, LiveTickCacheWriter, MinuteKlineCache,
+            MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot, MinuteKlineCacheStatus,
+            TickDataSeries, TickDataSeriesRequest, TradingCalendarRow,
+            historical_cont_underlying_segments,
         };
     }
 
@@ -112,6 +117,8 @@ pub use live_tick_recorder::{
 };
 pub use tqsdk_data::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
+    MinuteKlineCache, MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot,
+    MinuteKlineCacheStatus,
 };
 
 /// Result type for the user-facing facade.
@@ -249,6 +256,15 @@ impl Tq {
     #[must_use]
     pub fn futures() -> TqBuilder {
         TqBuilder::new()
+    }
+
+    /// Create a stock-market facade builder.
+    ///
+    /// This selects the stock market and server-backtest endpoints while
+    /// retaining the same cache-backed local-backtest APIs as futures.
+    #[must_use]
+    pub fn stock() -> TqBuilder {
+        TqBuilder::stock()
     }
 
     #[must_use]
@@ -985,7 +1001,8 @@ struct ProvisionalOpenDayFill {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacktestKlineSource {
     SynthesizedFromTick,
-    NativeKline,
+    CanonicalMinute,
+    AggregatedMinute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1004,9 +1021,10 @@ struct BacktestTickSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BacktestPlannedInputs {
     tick_symbols: Vec<String>,
-    native_klines: Vec<BacktestKlineSpec>,
+    canonical_minutes: Vec<BacktestKlineSpec>,
+    aggregated_minutes: Vec<BacktestKlineSpec>,
     synthetic_klines: Vec<BacktestKlineSpec>,
-    auto_quote_klines: Vec<BacktestKlineSpec>,
+    auto_quote_minutes: Vec<BacktestKlineSpec>,
 }
 
 /// Cache-prepared local backtest that can be connected without remote access.
@@ -1024,15 +1042,21 @@ enum PreparedBacktestMode {
     RemoteCaching {
         inputs: PreparedBacktestInputs,
         tick_fill_requests: Vec<backtest_remote::RemoteBacktestCacheFillRequest>,
-        kline_fill_requests: Vec<backtest_history_remote::BacktestKlineFillRequest>,
+        minute_fill_requests: Vec<backtest_history_remote::BacktestMinuteKlineFillRequest>,
     },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PreparedBacktestInputs {
     tick_sources: Vec<tqsdk_task::HistoryBacktestTickSource>,
-    native_klines: Vec<BacktestKlineSpec>,
+    minute_klines: Vec<BacktestMinuteKlineInput>,
     synthetic_klines: Vec<BacktestKlineSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BacktestMinuteKlineInput {
+    spec: BacktestKlineSpec,
+    underlying_segments: Vec<tqsdk_task::HistoryBacktestMinuteKlineUnderlyingSegment>,
 }
 
 /// Minimal data preparation report for a cache-backed local backtest.
@@ -1044,7 +1068,10 @@ pub struct BacktestDataReport {
     pub resolved_symbols: usize,
     pub remote_used: bool,
     pub tick_symbols: usize,
-    pub native_kline_series: usize,
+    /// Cache-backed Kline series whose source is the canonical 60-second
+    /// monthly store. This includes both direct 60-second and locally
+    /// aggregated higher-period serials.
+    pub minute_kline_series: usize,
     pub synthetic_kline_series: usize,
     pub remote_tick_used: bool,
     pub remote_kline_used: bool,
@@ -1069,6 +1096,37 @@ pub struct BacktestCacheWarmupSymbolReport {
     pub rows_written: usize,
 }
 
+/// One logical canonical-minute cache range prepared by [`BacktestBuilder::warmup`].
+///
+/// Unlike tick reports, this always uses the logical requested symbol as its
+/// cache key.  A `KQ.m@...` mapping is retained only by replay metadata, never
+/// by duplicate minute-cache files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestMinuteKlineCacheWarmupSymbolReport {
+    pub symbol: String,
+    pub action: BacktestCacheWarmupAction,
+    pub before: tqsdk_data::MinuteKlineCacheStatus,
+    pub after: tqsdk_data::MinuteKlineCacheStatus,
+    pub rows_written: usize,
+}
+
+/// Typed inspection result for one cache family used by a local backtest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BacktestHistoryCacheStatus {
+    Tick(BacktestTickCacheStatus),
+    MinuteKline(tqsdk_data::MinuteKlineCacheStatus),
+}
+
+/// Typed result of an explicit cache purge.
+///
+/// Neither variant is produced by automatic retention or max-byte eviction:
+/// callers opt into this destructive operation directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BacktestHistoryCachePurgeReport {
+    Tick(BacktestTickCachePurgeReport),
+    MinuteKline(tqsdk_data::MinuteKlineCachePurgeReport),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestCacheWarmupReport {
     pub requested_range: (i64, i64),
@@ -1091,6 +1149,10 @@ pub struct BacktestCacheWarmupReport {
     pub rows_written: usize,
     pub remote_used: bool,
     pub symbols: Vec<BacktestCacheWarmupSymbolReport>,
+    /// Independent v3 canonical-minute cache preparation results.
+    pub minute_kline_symbols: Vec<BacktestMinuteKlineCacheWarmupSymbolReport>,
+    pub minute_kline_rows_written: usize,
+    pub remote_minute_kline_used: bool,
 }
 
 fn backtest_kline_source(duration_ns: i64) -> Result<BacktestKlineSource> {
@@ -1099,10 +1161,16 @@ fn backtest_kline_source(duration_ns: i64) -> Result<BacktestKlineSource> {
             "backtest kline duration must be greater than zero",
         ));
     }
-    if duration_ns <= BACKTEST_SYNTH_KLINE_MAX_NS {
+    if duration_ns < BACKTEST_SYNTH_KLINE_MAX_NS {
         Ok(BacktestKlineSource::SynthesizedFromTick)
+    } else if duration_ns == BACKTEST_SYNTH_KLINE_MAX_NS {
+        Ok(BacktestKlineSource::CanonicalMinute)
+    } else if duration_ns % BACKTEST_SYNTH_KLINE_MAX_NS == 0 {
+        Ok(BacktestKlineSource::AggregatedMinute)
     } else {
-        Ok(BacktestKlineSource::NativeKline)
+        Err(data_validation(
+            "backtest Kline durations above 60 seconds must be an integer multiple of 60 seconds",
+        ))
     }
 }
 
@@ -1115,14 +1183,28 @@ fn duration_to_ns(duration: Duration) -> Result<i64> {
         .ok_or_else(|| data_validation("duration is too large"))
 }
 
+fn minute_range_can_claim_final_coverage(end_ns: i64) -> Result<bool> {
+    let last_timestamp_ns = end_ns
+        .checked_sub(1)
+        .ok_or_else(|| data_validation("minute kline range end timestamp underflow"))?;
+    let now_ns = Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or_else(|| data_validation("minute kline current timestamp overflow"))?;
+    let requested_day = tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(last_timestamp_ns)?;
+    let current_day = tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(now_ns)?;
+    Ok(requested_day < current_day)
+}
+
 fn plan_backtest_inputs(
     quote_symbols: &[String],
     tick_specs: &[BacktestTickSpec],
     kline_specs: &[BacktestKlineSpec],
 ) -> Result<BacktestPlannedInputs> {
     let mut tick_symbols = BTreeSet::new();
-    let mut native_klines = Vec::new();
-    let mut native_keys = BTreeSet::new();
+    let mut canonical_minutes = Vec::new();
+    let mut canonical_keys = BTreeSet::new();
+    let mut aggregated_minutes = Vec::new();
+    let mut aggregated_keys = BTreeSet::new();
     let mut synthetic_klines = Vec::new();
     let mut synthetic_keys = BTreeSet::new();
 
@@ -1148,13 +1230,16 @@ fn plan_backtest_inputs(
                 tick_symbols.insert(spec.symbol.clone());
                 push_unique_kline(&mut synthetic_klines, &mut synthetic_keys, spec.clone());
             }
-            BacktestKlineSource::NativeKline => {
-                push_unique_kline(&mut native_klines, &mut native_keys, spec.clone());
+            BacktestKlineSource::CanonicalMinute => {
+                push_unique_kline(&mut canonical_minutes, &mut canonical_keys, spec.clone());
+            }
+            BacktestKlineSource::AggregatedMinute => {
+                push_unique_kline(&mut aggregated_minutes, &mut aggregated_keys, spec.clone());
             }
         }
     }
 
-    let mut auto_quote_klines = Vec::new();
+    let mut auto_quote_minutes = Vec::new();
     let mut auto_keys = BTreeSet::new();
     for symbol in quote_symbols {
         validate_backtest_symbol(symbol)?;
@@ -1172,16 +1257,16 @@ fn plan_backtest_inputs(
                 duration_ns: BACKTEST_SYNTH_KLINE_MAX_NS,
                 view_width: 2,
             };
-            tick_symbols.insert(symbol.clone());
-            push_unique_kline(&mut auto_quote_klines, &mut auto_keys, spec);
+            push_unique_kline(&mut auto_quote_minutes, &mut auto_keys, spec);
         }
     }
 
     Ok(BacktestPlannedInputs {
         tick_symbols: tick_symbols.into_iter().collect(),
-        native_klines,
+        canonical_minutes,
+        aggregated_minutes,
         synthetic_klines,
-        auto_quote_klines,
+        auto_quote_minutes,
     })
 }
 
@@ -1393,17 +1478,59 @@ async fn resolve_backtest_tick_sources(
     Ok(sources)
 }
 
-fn reject_continuous_native_kline_specs(specs: &[BacktestKlineSpec]) -> Result<()> {
-    if let Some(spec) = specs
+async fn resolve_backtest_minute_kline_inputs(
+    specs: &[BacktestKlineSpec],
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<BacktestMinuteKlineInput>> {
+    let mapping_window = specs
         .iter()
-        .find(|spec| is_main_continuous_contract(&spec.symbol))
-    {
-        return Err(data_validation(format!(
-            "cache-backed continuous-contract native kline {} duration {} is unsupported; use duration <= 60s so it can be synthesized from shared physical ticks",
-            spec.symbol, spec.duration_ns
-        )));
+        .any(|spec| is_main_continuous_contract(&spec.symbol))
+        .then(|| continuous_mapping_query_window(start_ns, end_ns))
+        .transpose()?;
+    let data_client = mapping_window
+        .as_ref()
+        .map(|_| tqsdk_data::DataClient::new());
+    let mut resolved_segments =
+        BTreeMap::<String, Vec<tqsdk_task::HistoryBacktestMinuteKlineUnderlyingSegment>>::new();
+    let mut inputs = Vec::with_capacity(specs.len());
+
+    for spec in specs {
+        validate_backtest_symbol(&spec.symbol)?;
+        let underlying_segments = if is_main_continuous_contract(&spec.symbol) {
+            if let Some(segments) = resolved_segments.get(&spec.symbol) {
+                segments.clone()
+            } else {
+                let (days, end_date) =
+                    mapping_window.expect("main continuous contract requires a mapping window");
+                let segments = data_client
+                    .as_ref()
+                    .expect("main continuous contract requires a data client")
+                    .query_his_cont_underlying_segments(&spec.symbol, days, Some(end_date))
+                    .await?;
+                let segments = continuous_tick_sources(&spec.symbol, start_ns, end_ns, &segments)?
+                    .into_iter()
+                    .map(
+                        |source| tqsdk_task::HistoryBacktestMinuteKlineUnderlyingSegment {
+                            start_ns: source.start_ns,
+                            end_ns: source.end_ns,
+                            underlying_symbol: source.cache_symbol,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                resolved_segments.insert(spec.symbol.clone(), segments.clone());
+                segments
+            }
+        } else {
+            Vec::new()
+        };
+        inputs.push(BacktestMinuteKlineInput {
+            spec: spec.clone(),
+            underlying_segments,
+        });
     }
-    Ok(())
+
+    Ok(inputs)
 }
 
 fn physical_tick_ranges(
@@ -1747,6 +1874,85 @@ impl BacktestBuilder {
             .collect()
     }
 
+    /// Inspect both persistent tick and canonical-minute cache families used
+    /// by this backtest declaration.
+    ///
+    /// The legacy [`Self::inspect_cache`] remains tick-only for compatibility.
+    /// Continuous-contract tick entries are resolved to their dated physical
+    /// files; minute entries retain the logical requested symbol.
+    pub async fn inspect_history_cache(&self) -> Result<Vec<BacktestHistoryCacheStatus>> {
+        self.validate_range()?;
+        let cache = self.resolved_cache()?;
+        let planned = self.planned_inputs()?;
+        let tick_sources =
+            resolve_backtest_tick_sources(&planned.tick_symbols, self.start_ns, self.end_ns)
+                .await?;
+        let mut statuses = physical_tick_ranges(&tick_sources)
+            .into_iter()
+            .map(|(symbol, start_ns, end_ns)| {
+                cache
+                    .inspect(&symbol, start_ns, end_ns)
+                    .map(BacktestHistoryCacheStatus::Tick)
+                    .map_err(Error::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let minute_symbols = planned
+            .canonical_minutes
+            .into_iter()
+            .chain(planned.aggregated_minutes)
+            .chain(planned.auto_quote_minutes)
+            .map(|spec| spec.symbol)
+            .collect::<BTreeSet<_>>();
+        let minute_cache = tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir());
+        let snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+        for symbol in minute_symbols {
+            statuses.push(BacktestHistoryCacheStatus::MinuteKline(
+                minute_cache.inspect(symbol, self.start_ns, self.end_ns, &snapshot)?,
+            ));
+        }
+        Ok(statuses)
+    }
+
+    /// Explicitly purge the tick and/or canonical-minute cache files selected
+    /// by this backtest declaration.
+    ///
+    /// This is never called automatically. Tick purges preserve the legacy
+    /// whole-series behavior; canonical-minute purges remove only monthly
+    /// files intersecting this backtest range.
+    pub async fn purge_history_cache(&self) -> Result<Vec<BacktestHistoryCachePurgeReport>> {
+        self.validate_range()?;
+        let cache = self.resolved_cache()?;
+        let planned = self.planned_inputs()?;
+        let tick_sources =
+            resolve_backtest_tick_sources(&planned.tick_symbols, self.start_ns, self.end_ns)
+                .await?;
+        let mut reports = Vec::new();
+        let mut tick_symbols = BTreeSet::new();
+        for (symbol, _, _) in physical_tick_ranges(&tick_sources) {
+            if tick_symbols.insert(symbol.clone()) {
+                reports.push(BacktestHistoryCachePurgeReport::Tick(
+                    cache.purge_symbol_ticks(&symbol)?,
+                ));
+            }
+        }
+
+        let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+        let minute_symbols = planned
+            .canonical_minutes
+            .into_iter()
+            .chain(planned.aggregated_minutes)
+            .chain(planned.auto_quote_minutes)
+            .map(|spec| spec.symbol)
+            .collect::<BTreeSet<_>>();
+        for symbol in minute_symbols {
+            reports.push(BacktestHistoryCachePurgeReport::MinuteKline(
+                minute_cache.purge_range(&symbol, self.start_ns, self.end_ns)?,
+            ));
+        }
+        Ok(reports)
+    }
+
     pub async fn warmup(mut self) -> Result<BacktestCacheWarmupReport> {
         self.validate_range()?;
         self.apply_market_cache_policy().await?;
@@ -1773,12 +1979,22 @@ impl BacktestBuilder {
             .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let cache_dir = cache.cache_dir().to_path_buf();
         let planned = self.planned_inputs()?;
-        reject_continuous_native_kline_specs(&planned.native_klines)?;
+        let mut minute_klines = planned.canonical_minutes.clone();
+        minute_klines.extend(planned.aggregated_minutes.clone());
+        minute_klines.extend(planned.auto_quote_minutes.clone());
+        let minute_inputs =
+            resolve_backtest_minute_kline_inputs(&minute_klines, self.start_ns, self.end_ns)
+                .await?;
+        let minute_symbols = minute_inputs
+            .iter()
+            .map(|input| input.spec.symbol.clone())
+            .collect::<BTreeSet<_>>();
         let tick_sources =
             resolve_backtest_tick_sources(&planned.tick_symbols, self.start_ns, self.end_ns)
                 .await?;
         let physical_ranges = physical_tick_ranges(&tick_sources);
         let mut logical_symbols = planned.tick_symbols.clone();
+        logical_symbols.extend(minute_symbols.iter().cloned());
         logical_symbols.sort();
         logical_symbols.dedup();
 
@@ -1789,9 +2005,27 @@ impl BacktestBuilder {
             )));
         }
 
+        let minute_cache = if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
+            tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir())
+        } else {
+            tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?
+        };
+        let minute_snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+
         let refresh = matches!(self.cache_policy, BacktestCachePolicy::Refresh);
         if refresh && self.base.auth.is_none() {
             return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+        if !minute_symbols.is_empty()
+            && matches!(
+                self.cache_policy,
+                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+            )
+            && !minute_range_can_claim_final_coverage(self.end_ns)?
+        {
+            return Err(data_validation(
+                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+            ));
         }
         let _remote_fill_lock = if matches!(
             self.cache_policy,
@@ -1804,6 +2038,9 @@ impl BacktestBuilder {
         if refresh {
             for (symbol, _, _) in &physical_ranges {
                 cache.purge_symbol_ticks(symbol)?;
+            }
+            for symbol in &minute_symbols {
+                minute_cache.purge_range(symbol, self.start_ns, self.end_ns)?;
             }
         }
 
@@ -1848,6 +2085,25 @@ impl BacktestBuilder {
             before_by_range.insert((symbol, start_ns, end_ns), before);
         }
 
+        let mut minute_before_by_symbol = BTreeMap::new();
+        let mut minute_fill_requests = Vec::new();
+        for symbol in &minute_symbols {
+            let before =
+                minute_cache.inspect(symbol, self.start_ns, self.end_ns, &minute_snapshot)?;
+            if refresh || !before.is_complete() {
+                minute_fill_requests.extend(before.missing_ranges.iter().map(
+                    |(start_ns, end_ns)| {
+                        backtest_history_remote::BacktestMinuteKlineFillRequest::new(
+                            symbol.clone(),
+                            *start_ns,
+                            *end_ns,
+                        )
+                    },
+                ));
+            }
+            minute_before_by_symbol.insert(symbol.clone(), before);
+        }
+
         remote_fill_runtime.emit_plan(build_remote_fill_plan(
             (self.start_ns, self.end_ns),
             logical_symbols.clone(),
@@ -1877,6 +2133,23 @@ impl BacktestBuilder {
                     rows_written: 0,
                 });
             }
+            let minute_kline_symbols = minute_before_by_symbol
+                .into_iter()
+                .map(|(symbol, before)| {
+                    let action = if before.is_complete() {
+                        BacktestCacheWarmupAction::SkippedComplete
+                    } else {
+                        BacktestCacheWarmupAction::MissingCacheOnly
+                    };
+                    BacktestMinuteKlineCacheWarmupSymbolReport {
+                        symbol,
+                        action,
+                        before: before.clone(),
+                        after: before,
+                        rows_written: 0,
+                    }
+                })
+                .collect();
             return Ok(build_warmup_report(
                 WarmupReportContext {
                     requested_range: (self.start_ns, self.end_ns),
@@ -1885,12 +2158,16 @@ impl BacktestBuilder {
                     logical_symbols: logical_symbols.clone(),
                     batch_size: self.warmup_batch_size,
                     remote_used: false,
+                    remote_minute_kline_used: false,
                 },
                 symbols,
+                minute_kline_symbols,
             ));
         }
 
-        if !fill_requests.is_empty() && self.base.auth.is_none() {
+        if (!fill_requests.is_empty() || !minute_fill_requests.is_empty())
+            && self.base.auth.is_none()
+        {
             return Err(data_validation("remote backtest cache fill requires auth"));
         }
 
@@ -1909,6 +2186,20 @@ impl BacktestBuilder {
             for (symbol, rows) in fill_report.rows_by_symbol {
                 *rows_by_symbol.entry(symbol).or_insert(0) += rows;
             }
+        }
+        let mut minute_rows_by_symbol = BTreeMap::new();
+        let remote_minute_kline_used = !minute_fill_requests.is_empty();
+        if !minute_fill_requests.is_empty() {
+            let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
+            let fill_report = backtest_history_remote::fill_backtest_minute_kline_cache(
+                &auth,
+                &minute_cache,
+                &minute_snapshot,
+                self.base.market_kind.backtest_market_kind(),
+                minute_fill_requests,
+            )
+            .await?;
+            minute_rows_by_symbol = fill_report.rows_by_symbol;
         }
 
         let mut symbols = Vec::new();
@@ -1939,6 +2230,31 @@ impl BacktestBuilder {
                 rows_written,
             });
         }
+        let minute_kline_symbols = minute_before_by_symbol
+            .into_iter()
+            .map(|(symbol, before)| {
+                let rows_written = minute_rows_by_symbol
+                    .get(&symbol)
+                    .copied()
+                    .unwrap_or_default();
+                let after =
+                    minute_cache.inspect(&symbol, self.start_ns, self.end_ns, &minute_snapshot)?;
+                let action = if before.is_complete() && !refresh {
+                    BacktestCacheWarmupAction::SkippedComplete
+                } else if refresh {
+                    BacktestCacheWarmupAction::RefreshedRemote
+                } else {
+                    BacktestCacheWarmupAction::FilledRemote
+                };
+                Ok(BacktestMinuteKlineCacheWarmupSymbolReport {
+                    symbol,
+                    action,
+                    before,
+                    after,
+                    rows_written,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(build_warmup_report(
             WarmupReportContext {
@@ -1948,18 +2264,21 @@ impl BacktestBuilder {
                 logical_symbols,
                 batch_size: self.warmup_batch_size,
                 remote_used,
+                remote_minute_kline_used,
             },
             symbols,
+            minute_kline_symbols,
         ))
     }
 
-    /// Require all backtest ticks to already exist in the persistent cache.
+    /// Require all backtest ticks and canonical-minute inputs to already exist
+    /// in the persistent cache.
     #[must_use]
     pub fn cache_only(self) -> Self {
         self.cache(BacktestCachePolicy::CacheOnly)
     }
 
-    /// Use remote data for missing tick ranges.
+    /// Use remote data for missing tick or canonical-minute ranges.
     #[must_use]
     pub fn remote_on_miss(self) -> Self {
         self.cache(BacktestCachePolicy::RemoteOnMiss)
@@ -1971,7 +2290,7 @@ impl BacktestBuilder {
         self.cache(BacktestCachePolicy::Disabled)
     }
 
-    /// Refresh the full requested tick range before running the backtest.
+    /// Refresh the full requested tick and canonical-minute range before running the backtest.
     #[must_use]
     pub fn refresh(self) -> Self {
         self.cache(BacktestCachePolicy::Refresh)
@@ -2050,6 +2369,11 @@ impl BacktestBuilder {
 
     /// Add futures symbols resolved from the shared relay-compatible selector grammar.
     pub fn universe(mut self, expression: impl AsRef<str>) -> Result<Self> {
+        if self.base.market_kind != FacadeMarketKind::Futures {
+            return Err(data_validation(
+                "backtest universe selectors are futures-only; declare stock symbols explicitly",
+            ));
+        }
         self.universe_expression =
             Some(tqsdk_data::UniverseExpression::parse(expression.as_ref())?);
         Ok(self)
@@ -2081,9 +2405,10 @@ impl BacktestBuilder {
             .as_ref()
             .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let planned = self.planned_inputs()?;
-        reject_continuous_native_kline_specs(&planned.native_klines)?;
-        let mut synthetic_klines = planned.synthetic_klines.clone();
-        synthetic_klines.extend(planned.auto_quote_klines.clone());
+        let synthetic_klines = planned.synthetic_klines.clone();
+        let mut minute_klines = planned.canonical_minutes.clone();
+        minute_klines.extend(planned.aggregated_minutes.clone());
+        minute_klines.extend(planned.auto_quote_minutes.clone());
         let prepared_inputs = PreparedBacktestInputs {
             tick_sources: resolve_backtest_tick_sources(
                 &planned.tick_symbols,
@@ -2091,9 +2416,25 @@ impl BacktestBuilder {
                 self.end_ns,
             )
             .await?,
-            native_klines: planned.native_klines.clone(),
+            minute_klines: resolve_backtest_minute_kline_inputs(
+                &minute_klines,
+                self.start_ns,
+                self.end_ns,
+            )
+            .await?,
             synthetic_klines,
         };
+        if !prepared_inputs.minute_klines.is_empty()
+            && matches!(
+                self.cache_policy,
+                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+            )
+            && !minute_range_can_claim_final_coverage(self.end_ns)?
+        {
+            return Err(data_validation(
+                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+            ));
+        }
         let remote_fill_lock = if matches!(
             self.cache_policy,
             BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
@@ -2109,12 +2450,15 @@ impl BacktestBuilder {
             for (symbol, _, _) in physical_tick_ranges(&prepared_inputs.tick_sources) {
                 cache.purge_symbol_ticks(symbol)?;
             }
-            let history = tqsdk_data::HistorySeriesCache::open(cache.cache_dir())?;
-            for spec in &planned.native_klines {
-                history.purge_kline_series(&spec.symbol, spec.duration_ns)?;
+            let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+            let mut minute_symbols = BTreeSet::new();
+            for input in &prepared_inputs.minute_klines {
+                minute_symbols.insert(input.spec.symbol.as_str());
+            }
+            for symbol in minute_symbols {
+                minute_cache.purge_range(symbol, self.start_ns, self.end_ns)?;
             }
         }
-        let history = tqsdk_data::HistorySeriesCache::open(cache.cache_dir())?;
         let mut missing_tick_symbols = Vec::new();
         let mut tick_fill_requests = Vec::new();
         for (symbol, range_start_ns, range_end_ns) in
@@ -2126,27 +2470,36 @@ impl BacktestBuilder {
                 missing_tick_symbols.push(coverage);
             }
         }
-        let mut missing_kline_series = Vec::new();
-        let mut kline_fill_requests = Vec::new();
-        for spec in &planned.native_klines {
-            let coverage = history.kline_coverage(
-                &spec.symbol,
-                spec.duration_ns,
+        let minute_cache = if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
+            tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir())
+        } else {
+            tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?
+        };
+        let minute_snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+        let mut missing_minute_series = Vec::new();
+        let mut minute_fill_requests = Vec::new();
+        let mut seen_minute_symbols = BTreeSet::new();
+        for input in &prepared_inputs.minute_klines {
+            if !seen_minute_symbols.insert(input.spec.symbol.as_str()) {
+                continue;
+            }
+            let coverage = minute_cache.coverage(
+                &input.spec.symbol,
                 self.start_ns,
                 self.end_ns,
+                &minute_snapshot,
             )?;
             if !coverage.is_complete() {
                 for (start_ns, end_ns) in &coverage.missing_ranges {
-                    kline_fill_requests.push(
-                        backtest_history_remote::BacktestKlineFillRequest::new(
-                            spec.symbol.clone(),
-                            spec.duration_ns,
+                    minute_fill_requests.push(
+                        backtest_history_remote::BacktestMinuteKlineFillRequest::new(
+                            input.spec.symbol.clone(),
                             *start_ns,
                             *end_ns,
                         ),
                     );
                 }
-                missing_kline_series.push((spec.clone(), coverage.missing_ranges));
+                missing_minute_series.push((input.spec.clone(), coverage.missing_ranges));
             }
         }
 
@@ -2158,9 +2511,9 @@ impl BacktestBuilder {
                         coverage.symbol, coverage.missing_ranges
                     )));
                 }
-                if let Some((spec, missing_ranges)) = missing_kline_series.first() {
+                if let Some((spec, missing_ranges)) = missing_minute_series.first() {
                     return Err(data_validation(format!(
-                        "backtest native kline cache coverage is incomplete for {} duration {}: {:?}",
+                        "backtest canonical 60-second Kline cache coverage is incomplete for {} (requested duration {}): {:?}",
                         spec.symbol, spec.duration_ns, missing_ranges
                     )));
                 }
@@ -2169,7 +2522,7 @@ impl BacktestBuilder {
                 }
             }
             BacktestCachePolicy::RemoteOnMiss => {
-                if missing_tick_symbols.is_empty() && missing_kline_series.is_empty() {
+                if missing_tick_symbols.is_empty() && missing_minute_series.is_empty() {
                     PreparedBacktestMode::CacheHit {
                         inputs: prepared_inputs.clone(),
                     }
@@ -2180,7 +2533,7 @@ impl BacktestBuilder {
                     PreparedBacktestMode::RemoteCaching {
                         inputs: prepared_inputs.clone(),
                         tick_fill_requests,
-                        kline_fill_requests,
+                        minute_fill_requests,
                     }
                 }
             }
@@ -2191,7 +2544,7 @@ impl BacktestBuilder {
                 PreparedBacktestMode::RemoteCaching {
                     inputs: prepared_inputs.clone(),
                     tick_fill_requests,
-                    kline_fill_requests,
+                    minute_fill_requests,
                 }
             }
             BacktestCachePolicy::Disabled => {
@@ -2212,9 +2565,9 @@ impl BacktestBuilder {
         let remote_kline_used = matches!(
             &mode,
             PreparedBacktestMode::RemoteCaching {
-                kline_fill_requests,
+                minute_fill_requests,
                 ..
-            } if !kline_fill_requests.is_empty()
+            } if !minute_fill_requests.is_empty()
         );
         let resolved_symbols = planned
             .tick_symbols
@@ -2222,9 +2575,9 @@ impl BacktestBuilder {
             .cloned()
             .chain(
                 prepared_inputs
-                    .native_klines
+                    .minute_klines
                     .iter()
-                    .map(|spec| spec.symbol.clone()),
+                    .map(|input| input.spec.symbol.clone()),
             )
             .chain(
                 prepared_inputs
@@ -2241,7 +2594,7 @@ impl BacktestBuilder {
             resolved_symbols,
             remote_used: remote_tick_used || remote_kline_used,
             tick_symbols: planned.tick_symbols.len(),
-            native_kline_series: prepared_inputs.native_klines.len(),
+            minute_kline_series: prepared_inputs.minute_klines.len(),
             synthetic_kline_series: prepared_inputs.synthetic_klines.len(),
             remote_tick_used,
             remote_kline_used,
@@ -2396,11 +2749,13 @@ struct WarmupReportContext {
     logical_symbols: Vec<String>,
     batch_size: usize,
     remote_used: bool,
+    remote_minute_kline_used: bool,
 }
 
 fn build_warmup_report(
     context: WarmupReportContext,
     symbols: Vec<BacktestCacheWarmupSymbolReport>,
+    minute_kline_symbols: Vec<BacktestMinuteKlineCacheWarmupSymbolReport>,
 ) -> BacktestCacheWarmupReport {
     let symbols_skipped = symbols
         .iter()
@@ -2421,6 +2776,10 @@ fn build_warmup_report(
         })
         .count();
     let rows_written = symbols.iter().map(|symbol| symbol.rows_written).sum();
+    let minute_kline_rows_written = minute_kline_symbols
+        .iter()
+        .map(|symbol| symbol.rows_written)
+        .sum();
     BacktestCacheWarmupReport {
         requested_range: context.requested_range,
         cache_policy: context.cache_policy,
@@ -2432,8 +2791,11 @@ fn build_warmup_report(
         symbols_missing,
         symbols_filled,
         rows_written,
-        remote_used: context.remote_used,
+        remote_used: context.remote_used || context.remote_minute_kline_used,
         symbols,
+        minute_kline_symbols,
+        minute_kline_rows_written,
+        remote_minute_kline_used: context.remote_minute_kline_used,
     }
 }
 
@@ -2490,6 +2852,7 @@ impl PreparedBacktest {
             remote_fill_cancellation,
         );
         let cache = cache.ok_or_else(|| data_validation("prepared backtest cache missing"))?;
+        let backtest_market_kind = base.market_kind.backtest_market_kind();
         let mut base = base;
         for spec in &kline_specs {
             base = base.kline_symbol(
@@ -2511,7 +2874,7 @@ impl PreparedBacktest {
             PreparedBacktestMode::RemoteCaching {
                 inputs,
                 tick_fill_requests,
-                kline_fill_requests,
+                minute_fill_requests,
             } => {
                 let auth = base.auth.clone().ok_or(Error::MissingAuth)?;
                 if !tick_fill_requests.is_empty() {
@@ -2524,14 +2887,17 @@ impl PreparedBacktest {
                     )
                     .await?;
                 }
-                if !kline_fill_requests.is_empty() {
-                    let report = backtest_history_remote::fill_backtest_kline_cache(
+                if !minute_fill_requests.is_empty() {
+                    let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+                    let report = backtest_history_remote::fill_backtest_minute_kline_cache(
                         &auth,
-                        cache.cache_dir(),
-                        kline_fill_requests,
+                        &minute_cache,
+                        &tqsdk_data::MinuteKlineCacheSnapshot::cst_v1(),
+                        backtest_market_kind,
+                        minute_fill_requests,
                     )
                     .await?;
-                    let _ = report.rows_by_series.len();
+                    let _ = report.rows_by_symbol.len();
                 }
                 let stream = history_backtest_stream(cache.cache_dir(), start_ns, end_ns, inputs)?;
                 base.replay_backtest_stream(Box::new(stream))
@@ -2550,7 +2916,7 @@ fn history_backtest_stream(
 ) -> Result<tqsdk_task::HistoryBacktestReplayStream> {
     let PreparedBacktestInputs {
         tick_sources,
-        native_klines,
+        minute_klines,
         synthetic_klines,
     } = inputs;
     let mut synthetic_kline_sources = Vec::new();
@@ -2578,20 +2944,31 @@ fn history_backtest_stream(
                 ),
         );
     }
+    let minute_cache = tqsdk_data::MinuteKlineCache::open(cache_dir)?;
+    let minute_snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+    let minute_kline_sources = minute_klines
+        .into_iter()
+        .map(|input| tqsdk_task::HistoryBacktestMinuteKlineSource {
+            cache: minute_cache.clone(),
+            snapshot: minute_snapshot.clone(),
+            replay_symbol: input.spec.symbol.clone(),
+            cache_symbol: input.spec.symbol,
+            start_ns,
+            end_ns,
+            duration_ns: input.spec.duration_ns,
+            session: tqsdk_task::MinuteKlineSessionTemplate::cst_trading_day(),
+            underlying_segments: input.underlying_segments,
+        })
+        .collect();
     tqsdk_task::HistoryBacktestReplayStream::new_projected(
         tqsdk_task::HistoryBacktestProjectedReplayRequest {
             cache: tqsdk_data::HistorySeriesCache::open(cache_dir)?,
             start_ns,
             end_ns,
             tick_sources,
-            native_klines: native_klines
-                .into_iter()
-                .map(|spec| tqsdk_task::HistoryBacktestKlineRequest {
-                    symbol: spec.symbol,
-                    duration_ns: spec.duration_ns,
-                })
-                .collect(),
+            native_klines: Vec::new(),
             synthetic_kline_sources,
+            minute_kline_sources,
         },
     )
     .map_err(Error::from)
@@ -2601,6 +2978,7 @@ fn history_backtest_stream(
 #[derive(Debug)]
 pub struct TqBuilder {
     auth: Option<Auth>,
+    market_kind: FacadeMarketKind,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     #[cfg(feature = "live")]
@@ -2612,11 +2990,27 @@ pub struct TqBuilder {
     local_backtest_recipe: local_backtest::LocalBacktestRecipe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FacadeMarketKind {
+    Futures,
+    Stock,
+}
+
+impl FacadeMarketKind {
+    const fn backtest_market_kind(self) -> tqsdk_wait::BacktestMarketKind {
+        match self {
+            Self::Futures => tqsdk_wait::BacktestMarketKind::Futures,
+            Self::Stock => tqsdk_wait::BacktestMarketKind::Stock,
+        }
+    }
+}
+
 impl TqBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
             auth: None,
+            market_kind: FacadeMarketKind::Futures,
             query_enabled: false,
             trade_targets: Vec::new(),
             #[cfg(feature = "live")]
@@ -2633,6 +3027,18 @@ impl TqBuilder {
     #[must_use]
     pub fn futures() -> Self {
         Self::new()
+    }
+
+    /// Create a stock-market facade builder.
+    ///
+    /// Cache-backed stock backtests use the same canonical 60-second monthly
+    /// Kline source as futures. Futures-only universe selectors are not
+    /// available on this builder.
+    #[must_use]
+    pub fn stock() -> Self {
+        let mut builder = Self::new();
+        builder.market_kind = FacadeMarketKind::Stock;
+        builder
     }
 
     #[must_use]
@@ -2921,6 +3327,7 @@ impl TqBuilder {
     pub async fn connect(self) -> Result<Tq> {
         let Self {
             auth,
+            market_kind,
             query_enabled,
             trade_targets,
             #[cfg(feature = "live")]
@@ -2951,6 +3358,7 @@ impl TqBuilder {
             backtest => {
                 let tq = connect_wait_facade(
                     auth,
+                    market_kind,
                     query_enabled,
                     trade_targets,
                     market_url,
@@ -3142,6 +3550,7 @@ impl BacktestConfig {
 
 async fn connect_wait_facade(
     auth: Option<Auth>,
+    market_kind: FacadeMarketKind,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_url: Option<String>,
@@ -3168,15 +3577,24 @@ async fn connect_wait_facade(
             (market_url, replay_url)
         };
 
-    let session_builder =
-        session_builder(auth, query_enabled, trade_targets, market_url, replay_url)?;
+    let session_builder = session_builder(
+        auth,
+        market_kind,
+        query_enabled,
+        trade_targets,
+        market_url,
+        replay_url,
+    )?;
     let mut wait_builder = tqsdk_wait::TqApiBuilder::from_session_builder(session_builder);
     let remote_backtest = backtest
         .as_ref()
         .is_some_and(BacktestConfig::is_server_side);
     match &backtest {
         Some(BacktestConfig::Server { start_ns, end_ns }) => {
-            wait_builder = wait_builder.futures_backtest(*start_ns, *end_ns)?;
+            wait_builder = match market_kind {
+                FacadeMarketKind::Futures => wait_builder.futures_backtest(*start_ns, *end_ns)?,
+                FacadeMarketKind::Stock => wait_builder.stock_backtest(*start_ns, *end_ns)?,
+            };
         }
         #[cfg(all(feature = "services", feature = "live"))]
         Some(BacktestConfig::ServerReplay { .. }) => {}
@@ -3207,14 +3625,18 @@ fn server_replay_endpoints(
 
 fn session_builder(
     auth: Option<Auth>,
+    market_kind: FacadeMarketKind,
     query_enabled: bool,
     trade_targets: Vec<TradeTarget>,
     market_url: Option<String>,
     replay_url: Option<String>,
 ) -> Result<tqsdk_session::SessionClientBuilder> {
     let auth = auth.ok_or(Error::MissingAuth)?;
-    let mut builder =
-        tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass).futures_market();
+    let mut builder = tqsdk_session::SessionClientBuilder::new(&auth.user, &auth.pass);
+    builder = match market_kind {
+        FacadeMarketKind::Futures => builder.futures_market(),
+        FacadeMarketKind::Stock => builder.stock_market(),
+    };
     if let Some(market_url) = market_url {
         builder = builder.market_relay(market_url);
     }
@@ -3499,21 +3921,23 @@ mod builder_contract_tests {
 
     use chrono::{NaiveDate, TimeZone};
     use serde_json::json;
-    use tqsdk_core::Tick;
-    use tqsdk_data::{BacktestTickCache, HistoricalContUnderlyingSegment, HistorySeriesCache};
+    use tqsdk_core::{Kline, Tick};
+    use tqsdk_data::{
+        BacktestTickCache, HistoricalContUnderlyingSegment, MinuteKlineCache,
+        MinuteKlineCacheSnapshot,
+    };
     use tqsdk_task::{BacktestMarketStream, HistoryBacktestTickSource};
 
     use super::{
         Auth, AutoTradeLogin, BacktestConfig, BacktestKlineSource, BacktestKlineSpec,
-        BacktestTickSpec, Error, LOCAL_BACKTEST_ACCOUNT_ID, PreparedBacktestInputs,
-        PreparedBacktestMode, Tq, TqBuilder, backtest_kline_source,
+        BacktestTickSpec, Error, FacadeMarketKind, LOCAL_BACKTEST_ACCOUNT_ID,
+        PreparedBacktestInputs, PreparedBacktestMode, Tq, TqBuilder, backtest_kline_source,
         continuous_mapping_query_window, continuous_tick_sources, duration_to_ns,
-        history_backtest_stream, physical_tick_ranges, plan_backtest_inputs,
-        reject_continuous_native_kline_specs, session_builder,
+        history_backtest_stream, physical_tick_ranges, plan_backtest_inputs, session_builder,
     };
 
     #[test]
-    fn backtest_kline_source_uses_synthetic_path_through_one_minute() {
+    fn backtest_kline_source_uses_tick_only_below_one_minute() {
         assert_eq!(
             backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(1)).unwrap())
                 .unwrap(),
@@ -3527,12 +3951,20 @@ mod builder_contract_tests {
         assert_eq!(
             backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(60)).unwrap())
                 .unwrap(),
-            BacktestKlineSource::SynthesizedFromTick
+            BacktestKlineSource::CanonicalMinute
         );
         assert_eq!(
-            backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(61)).unwrap())
+            backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(300)).unwrap())
                 .unwrap(),
-            BacktestKlineSource::NativeKline
+            BacktestKlineSource::AggregatedMinute
+        );
+        assert!(
+            backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(61)).unwrap())
+                .is_err()
+        );
+        assert!(
+            backtest_kline_source(duration_to_ns(std::time::Duration::from_secs(90)).unwrap())
+                .is_err()
         );
         assert!(backtest_kline_source(0).is_err());
     }
@@ -3549,7 +3981,7 @@ mod builder_contract_tests {
         )
         .unwrap();
         assert_eq!(tick_only.tick_symbols, vec!["SHFE.rb2601".to_string()]);
-        assert!(tick_only.auto_quote_klines.is_empty());
+        assert!(tick_only.auto_quote_minutes.is_empty());
 
         let thirty_seconds = duration_to_ns(std::time::Duration::from_secs(30)).unwrap();
         let one_minute = duration_to_ns(std::time::Duration::from_secs(60)).unwrap();
@@ -3574,7 +4006,7 @@ mod builder_contract_tests {
             short_kline_only.synthetic_klines[0].duration_ns,
             thirty_seconds
         );
-        assert!(short_kline_only.auto_quote_klines.is_empty());
+        assert!(short_kline_only.auto_quote_minutes.is_empty());
 
         let minute_kline_only = plan_backtest_inputs(
             &["SHFE.rb2601".to_string()],
@@ -3586,11 +4018,14 @@ mod builder_contract_tests {
             }],
         )
         .unwrap();
+        assert!(minute_kline_only.tick_symbols.is_empty());
+        assert!(minute_kline_only.synthetic_klines.is_empty());
+        assert_eq!(minute_kline_only.canonical_minutes.len(), 1);
         assert_eq!(
-            minute_kline_only.synthetic_klines[0].duration_ns,
+            minute_kline_only.canonical_minutes[0].duration_ns,
             one_minute
         );
-        assert!(minute_kline_only.native_klines.is_empty());
+        assert!(minute_kline_only.aggregated_minutes.is_empty());
 
         let long_kline_only = plan_backtest_inputs(
             &["SHFE.rb2601".to_string()],
@@ -3602,15 +4037,22 @@ mod builder_contract_tests {
             }],
         )
         .unwrap();
-        assert_eq!(long_kline_only.native_klines.len(), 1);
-        assert_eq!(long_kline_only.native_klines[0].duration_ns, five_minutes);
-        assert_eq!(long_kline_only.auto_quote_klines.len(), 1);
-        assert_eq!(long_kline_only.auto_quote_klines[0].duration_ns, one_minute);
+        assert!(long_kline_only.tick_symbols.is_empty());
+        assert_eq!(long_kline_only.aggregated_minutes.len(), 1);
+        assert_eq!(
+            long_kline_only.aggregated_minutes[0].duration_ns,
+            five_minutes
+        );
+        assert_eq!(long_kline_only.auto_quote_minutes.len(), 1);
+        assert_eq!(
+            long_kline_only.auto_quote_minutes[0].duration_ns,
+            one_minute
+        );
 
         let quote_only = plan_backtest_inputs(&["DCE.i2601".to_string()], &[], &[]).unwrap();
-        assert_eq!(quote_only.tick_symbols, vec!["DCE.i2601".to_string()]);
-        assert_eq!(quote_only.auto_quote_klines.len(), 1);
-        assert_eq!(quote_only.auto_quote_klines[0].duration_ns, one_minute);
+        assert!(quote_only.tick_symbols.is_empty());
+        assert_eq!(quote_only.auto_quote_minutes.len(), 1);
+        assert_eq!(quote_only.auto_quote_minutes[0].duration_ns, one_minute);
 
         let mixed_klines = plan_backtest_inputs(
             &["SHFE.rb2601".to_string()],
@@ -3630,8 +4072,8 @@ mod builder_contract_tests {
         )
         .unwrap();
         assert_eq!(mixed_klines.synthetic_klines.len(), 1);
-        assert_eq!(mixed_klines.native_klines.len(), 1);
-        assert!(mixed_klines.auto_quote_klines.is_empty());
+        assert_eq!(mixed_klines.aggregated_minutes.len(), 1);
+        assert!(mixed_klines.auto_quote_minutes.is_empty());
     }
 
     #[test]
@@ -3713,15 +4155,12 @@ mod builder_contract_tests {
     }
 
     #[test]
-    fn continuous_contract_native_kline_requires_tick_synthesis() {
-        let error = reject_continuous_native_kline_specs(&[BacktestKlineSpec {
-            symbol: "KQ.m@SHFE.au".to_string(),
-            duration_ns: 61_000_000_000,
-            view_width: 20,
-        }])
-        .unwrap_err();
-
-        assert!(error.to_string().contains("duration <= 60s"));
+    fn continuous_contract_higher_kline_uses_the_minute_aggregation_path() {
+        assert_eq!(
+            backtest_kline_source(300_000_000_000).unwrap(),
+            BacktestKlineSource::AggregatedMinute
+        );
+        assert!(backtest_kline_source(61_000_000_000).is_err());
     }
 
     #[tokio::test]
@@ -3745,7 +4184,7 @@ mod builder_contract_tests {
                     start_ns: 1_000,
                     end_ns: 2_000,
                 }],
-                native_klines: Vec::new(),
+                minute_klines: Vec::new(),
                 synthetic_klines: Vec::new(),
             },
         )
@@ -3758,15 +4197,17 @@ mod builder_contract_tests {
     }
 
     #[tokio::test]
-    async fn backtest_kline_sixty_seconds_prepares_synthetic_from_ticks() {
-        let dir = temp_cache_dir("facade-synthetic-kline");
-        BacktestTickCache::open(&dir)
-            .unwrap()
-            .store_ticks(
+    async fn backtest_kline_sixty_seconds_prepares_canonical_minute_cache() {
+        let dir = temp_cache_dir("facade-canonical-minute");
+        let minute_cache = MinuteKlineCache::open(&dir).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        minute_cache
+            .store_final_range(
                 "SHFE.rb2601",
                 0,
                 120_000_000_000,
-                [tick(1, 1_000, 101.0, 10)],
+                &snapshot,
+                &[minute_kline(0, 0, 101.0)],
             )
             .unwrap();
 
@@ -3784,54 +4225,40 @@ mod builder_contract_tests {
         assert!(!prepared.data_report.remote_used);
         assert!(!prepared.data_report.remote_tick_used);
         assert!(!prepared.data_report.remote_kline_used);
-        assert_eq!(prepared.data_report.tick_symbols, 1);
-        assert_eq!(prepared.data_report.native_kline_series, 0);
-        assert_eq!(prepared.data_report.synthetic_kline_series, 1);
+        assert_eq!(prepared.data_report.tick_symbols, 0);
+        assert_eq!(prepared.data_report.minute_kline_series, 1);
+        assert_eq!(prepared.data_report.synthetic_kline_series, 0);
 
         match prepared.mode {
             PreparedBacktestMode::CacheHit { inputs } => {
-                assert_eq!(inputs.tick_sources.len(), 1);
-                assert_eq!(inputs.tick_sources[0].replay_symbol, "SHFE.rb2601");
-                assert_eq!(inputs.tick_sources[0].cache_symbol, "SHFE.rb2601");
-                assert!(inputs.native_klines.is_empty());
-                assert_eq!(inputs.synthetic_klines.len(), 1);
-                assert_eq!(inputs.synthetic_klines[0].duration_ns, 60_000_000_000);
+                assert!(inputs.tick_sources.is_empty());
+                assert_eq!(inputs.minute_klines.len(), 1);
+                assert_eq!(inputs.minute_klines[0].spec.duration_ns, 60_000_000_000);
+                assert!(inputs.synthetic_klines.is_empty());
             }
             PreparedBacktestMode::RemoteCaching { .. } => {
-                panic!("complete tick cache should not request remote fill")
+                panic!("complete canonical-minute cache should not request remote fill")
             }
         }
 
-        let kline_coverage = HistorySeriesCache::open(&dir)
-            .unwrap()
-            .kline_coverage("SHFE.rb2601", 60_000_000_000, 0, 120_000_000_000)
-            .unwrap();
         assert!(
-            !kline_coverage.is_complete(),
-            "synthetic klines must not be persisted as native history cache"
+            minute_cache
+                .coverage("SHFE.rb2601", 0, 120_000_000_000, &snapshot)
+                .unwrap()
+                .is_complete()
         );
     }
 
     #[tokio::test]
-    async fn backtest_kline_above_sixty_seconds_prepares_native_remote_fill() {
-        let dir = temp_cache_dir("facade-native-kline");
-        BacktestTickCache::open(&dir)
-            .unwrap()
-            .store_ticks(
-                "SHFE.rb2601",
-                0,
-                122_000_000_000,
-                [tick(1, 1_000, 101.0, 10)],
-            )
-            .unwrap();
-
+    async fn backtest_kline_above_sixty_seconds_plans_canonical_minute_remote_fill() {
+        let dir = temp_cache_dir("facade-aggregated-minute");
         let prepared = TqBuilder::new()
             .auth("demo-user", "demo-pass")
-            .backtest(0, 122_000_000_000)
+            .backtest(0, 300_000_000_000)
             .cache_dir(&dir)
             .unwrap()
             .remote_on_miss()
-            .kline("SHFE.rb2601", Duration::from_secs(61), 20)
+            .kline("SHFE.rb2601", Duration::from_secs(300), 20)
             .unwrap()
             .prepare()
             .await
@@ -3840,27 +4267,36 @@ mod builder_contract_tests {
         assert!(prepared.data_report.remote_used);
         assert!(!prepared.data_report.remote_tick_used);
         assert!(prepared.data_report.remote_kline_used);
-        assert_eq!(prepared.data_report.tick_symbols, 1);
-        assert_eq!(prepared.data_report.native_kline_series, 1);
-        assert_eq!(prepared.data_report.synthetic_kline_series, 1);
+        assert_eq!(prepared.data_report.tick_symbols, 0);
+        assert_eq!(prepared.data_report.minute_kline_series, 2);
+        assert_eq!(prepared.data_report.synthetic_kline_series, 0);
 
         match prepared.mode {
             PreparedBacktestMode::RemoteCaching {
                 inputs,
                 tick_fill_requests,
-                kline_fill_requests,
+                minute_fill_requests,
             } => {
                 assert!(tick_fill_requests.is_empty());
-                assert_eq!(kline_fill_requests.len(), 1);
-                assert_eq!(kline_fill_requests[0].symbol, "SHFE.rb2601");
-                assert_eq!(kline_fill_requests[0].duration_ns, 61_000_000_000);
-                assert_eq!(inputs.native_klines.len(), 1);
-                assert_eq!(inputs.native_klines[0].duration_ns, 61_000_000_000);
-                assert_eq!(inputs.synthetic_klines.len(), 1);
-                assert_eq!(inputs.synthetic_klines[0].duration_ns, 60_000_000_000);
+                assert_eq!(minute_fill_requests.len(), 1);
+                assert_eq!(minute_fill_requests[0].symbol, "SHFE.rb2601");
+                assert_eq!(inputs.minute_klines.len(), 2);
+                assert!(
+                    inputs
+                        .minute_klines
+                        .iter()
+                        .any(|input| input.spec.duration_ns == 60_000_000_000)
+                );
+                assert!(
+                    inputs
+                        .minute_klines
+                        .iter()
+                        .any(|input| input.spec.duration_ns == 300_000_000_000)
+                );
+                assert!(inputs.synthetic_klines.is_empty());
             }
             PreparedBacktestMode::CacheHit { .. } => {
-                panic!("missing native kline cache should request remote fill")
+                panic!("missing canonical-minute cache should request remote fill")
             }
         }
     }
@@ -3872,6 +4308,21 @@ mod builder_contract_tests {
             last_price,
             volume,
             ..Tick::default()
+        }
+    }
+
+    fn minute_kline(id: i64, datetime: i64, close: f64) -> Kline {
+        Kline {
+            id,
+            datetime,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+            open_oi: 1,
+            close_oi: 1,
+            ..Kline::default()
         }
     }
 
@@ -4060,6 +4511,7 @@ mod builder_contract_tests {
                 user: "demo-user".to_string(),
                 pass: "demo-pass".to_string(),
             }),
+            FacadeMarketKind::Futures,
             false,
             Vec::new(),
             None,
@@ -4123,6 +4575,7 @@ mod builder_contract_tests {
                 user: "demo-user".to_string(),
                 pass: "demo-pass".to_string(),
             }),
+            FacadeMarketKind::Futures,
             false,
             Vec::new(),
             market_url,

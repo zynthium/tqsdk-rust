@@ -37,6 +37,7 @@ public cache interface 保持为：
 - `HistorySeriesCache`
 - `BacktestTickCache`
 - `LiveTickCacheWriter`
+- `MinuteKlineCache`
 
 TQBN 的 record struct、metadata struct 和 codec helper 都是 `tqsdk-data` 的
 crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN record；对外只暴露 typed
@@ -50,10 +51,47 @@ row writer 语义。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
 symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
 
-后续如果 TQBN 的内部 record layout 需要演进，应先保持这两个 public facade 不变；只有当
+后续如果 TQBN 的内部 record layout 需要演进，应先保持这些 public facade 不变；只有当
 用户可见语义改变时，才同步调整 public API 文档和 contract examples。
 
-## File Identity
+## Backtest Canonical-minute v3
+
+本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的
+`MinuteKlineCache`，其唯一持久 K 线输入是服务端回测确认完成的 `60s` bar：
+
+| 请求 | 历史来源 | 持久化 / 回放 |
+| --- | --- | --- |
+| tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
+| `60s` K | server-side backtest Kline stream | v3 monthly minute cache |
+| `N × 60s` K (`N > 1`) | 已关闭的 canonical 60s K | `tqsdk-task` 本地聚合 |
+
+`61s`、`90s` 等不是整数分钟的周期会在 facade 规划阶段拒绝。K-only `>=60s` 不会隐式请求
+tick history；若仅需要 quote fallback，则隐式使用 canonical 60s K，也不会回退到 tick。
+
+v3 文件身份如下：
+
+| 项 | 值 |
+| --- | --- |
+| format id | `tqsdk.minute-kline.monthly.v3` |
+| schema version | `3` |
+| file extension | `.tqmk` |
+| root layout | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` |
+| time basis | CST trading day，`18:00` 后归入下一交易日 |
+
+每个文件只属于一个 `logical symbol × trading month`。写入前必须验证 calendar/session
+snapshot hash；不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
+range 才能标记 final coverage；当前或未来交易日不得标记为 final。文件更新按单月原子重写，
+reader 以流式方式读取，不必把整月 materialize 到内存。
+
+`KQ.m@...` 的 minute cache key 始终是逻辑主连 symbol。按日期解析得到的实际合约只作为 replay
+event 的 `underlying_symbol` metadata，用于撮合和 quote 解释；它不会造成按 physical symbol
+复制 minute 文件。
+
+minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` 仅删除与请求窗口相交的
+monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。`CacheOnly` inspection 使用
+read-only open，不创建 v3 namespace、目录或文件。
+
+## TQBN daily v2 File Identity
 
 | 项 | 值 |
 | --- | --- |

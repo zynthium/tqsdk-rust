@@ -25,6 +25,9 @@
 - `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_lock()` /
   `try_acquire_consistency_read_lock()`
 - `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
+- `MinuteKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)`
+- `MinuteKlineCache::store_final_range(...)` / `open_reader(...)` / `purge_range(...)`
+- `DataClient::run_configured_history_cache_maintenance()`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 - `DataClient::from_session(...).kline_data_download(...)`
@@ -50,7 +53,9 @@
   `TQSDK_HISTORY_CACHE_DIR` 覆盖默认 root，或通过
   `DataClientBuilder::history_cache_dir(...)` 指定单个 client 的目录
 - 可通过 `DataClientBuilder::history_cache_max_bytes(...)` 和
-  `history_cache_retention_days(...)` 配置最薄的容量/保留期清理策略
+  `history_cache_retention_days(...)` 配置显式
+  `DataClient::run_configured_history_cache_maintenance()` 的容量/保留期策略；history
+  reads/writes 不会自动清理 tick 或 K 线数据
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
   `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
@@ -86,9 +91,15 @@
   只用于恢复当前交易日的增量填充，不进入普通 coverage/cache-hit；其范围、高水位和 as-of
   必须属于同一 TQBN 日分区。盘中追加 checkpoint 不触发全历史 compaction，final coverage
   覆盖后才在 compaction 中淘汰。它不持久化 K 线，也不引入第二套 tick cache 文件格式
-- cache-backed facade backtest 的 `duration > 60s` K 线复用同一 cache root 下的
-  `HistorySeriesCache` native K 线 series；`duration <= 60s` K 线由 `tqsdk-task`
-  从 tick rows 临时合成，不写入 durable K 线文件
+- cache-backed facade backtest 的唯一 durable K 线是 `MinuteKlineCache` 的 final 60s series，
+  文件位于 `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`<60s` K 线由
+  `tqsdk-task` 从 tick rows 临时合成；`>60s` 只允许 `N × 60s`，也由 task 从 closed
+  canonical minutes 聚合。facade 不读取/写入 native higher-period `HistorySeriesCache` K 线，
+  `61s` / `90s` 会拒绝
+- `MinuteKlineCache` 以 calendar/session snapshot hash fail closed，只有完成的远端 60s range
+  才可记录 final coverage；当前/未来 trading day 不可 claim final。它没有 retention、max-byte
+  eviction 或自动清理，`Refresh` 只删除请求范围相交的月文件，`purge_range` / `purge_symbol`
+  是显式 destructive maintenance
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、
@@ -253,6 +264,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `HistorySeriesCache::read_tick_data_series(...)`
 - `HistorySeriesCache::scan()`
 - `HistorySeriesCache::enforce_limits(...)`
+- `DataClient::run_configured_history_cache_maintenance()`
 - `BacktestTickCache::open(...)`
 - `BacktestTickCache::store_ticks(...)`
 - `BacktestTickCache::load_series(...)`
@@ -260,6 +272,9 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `LiveTickCacheWriter::new(...)`
 - `LiveTickCacheWriter::push_ticks(...)`
 - `LiveTickCacheWriter::flush(...)`
+- `MinuteKlineCache::open(...)`
+- `MinuteKlineCache::store_final_range(...)`
+- `MinuteKlineCache::open_reader(...)`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
 

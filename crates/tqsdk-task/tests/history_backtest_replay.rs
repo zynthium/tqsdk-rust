@@ -1,10 +1,16 @@
 use tqsdk_core::{Kline, Tick};
-use tqsdk_data::{BacktestTickCache, HistorySeriesCache};
-use tqsdk_task::{
-    BacktestMarketStream, HistoryBacktestKlineRequest, HistoryBacktestProjectedReplayRequest,
-    HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
-    HistoryBacktestTickSource, HistoryTickReplayStream, ReplayMarketPayload,
+use tqsdk_data::{
+    BacktestTickCache, HistorySeriesCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
 };
+use tqsdk_task::{
+    BacktestMarketStream, HistoryBacktestKlineRequest, HistoryBacktestMinuteKlineSource,
+    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestProjectedReplayRequest,
+    HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
+    HistoryBacktestTickSource, HistoryTickReplayStream, MinuteKlineSessionTemplate,
+    ReplayMarketPayload,
+};
+
+const MINUTE_NS: i64 = 60_000_000_000;
 
 #[tokio::test]
 async fn history_backtest_replay_tick_only_matches_tick_stream_order() {
@@ -84,6 +90,7 @@ async fn history_backtest_replay_projects_shared_physical_ticks_under_main_contr
             ],
             native_klines: Vec::new(),
             synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: Vec::new(),
         })
         .unwrap();
 
@@ -131,6 +138,7 @@ async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_t
                 },
                 duration_ns: 60_000_000_000,
             }],
+            minute_kline_sources: Vec::new(),
         })
         .unwrap();
 
@@ -235,6 +243,158 @@ async fn history_backtest_replay_emits_native_klines_above_one_minute() {
         ReplayMarketPayload::Kline { row, .. } if row.close == 104.0 && row.volume == 10
     ));
     assert!(stream.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn history_backtest_replay_streams_canonical_and_aggregated_minute_klines() {
+    let dir = temp_dir("canonical-minute");
+    let minute_cache = MinuteKlineCache::open(&dir).unwrap();
+    let snapshot =
+        MinuteKlineCacheSnapshot::new(1, "calendar-fixture", "cst-trading-day-v1").unwrap();
+    let start_ns = 0;
+    let end_ns = 6 * MINUTE_NS;
+    let rows = (0..5)
+        .map(|index| {
+            kline(
+                index + 1,
+                index * MINUTE_NS,
+                100.0 + index as f64,
+                101.0 + index as f64,
+                99.0 + index as f64,
+                100.5 + index as f64,
+            )
+        })
+        .collect::<Vec<_>>();
+    minute_cache
+        .store_final_range("SHFE.rb2601", start_ns, end_ns, &snapshot, &rows)
+        .unwrap();
+
+    let source = |duration_ns| HistoryBacktestMinuteKlineSource {
+        cache: minute_cache.clone(),
+        snapshot: snapshot.clone(),
+        replay_symbol: "SHFE.rb2601".to_string(),
+        cache_symbol: "SHFE.rb2601".to_string(),
+        start_ns,
+        end_ns,
+        duration_ns,
+        session: MinuteKlineSessionTemplate::cst_trading_day(),
+        underlying_segments: Vec::new(),
+    };
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns,
+            end_ns,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: vec![source(MINUTE_NS), source(5 * MINUTE_NS)],
+        })
+        .unwrap();
+
+    let mut canonical = Vec::new();
+    let mut aggregate = Vec::new();
+    while let Some(event) = stream.next_event().await.unwrap() {
+        match event.payload() {
+            ReplayMarketPayload::Kline {
+                duration_ns, row, ..
+            } if *duration_ns == MINUTE_NS => canonical.push((
+                event.source().to_string(),
+                event.event_time_ns(),
+                row.clone(),
+            )),
+            ReplayMarketPayload::Kline {
+                duration_ns, row, ..
+            } if *duration_ns == 5 * MINUTE_NS => aggregate.push((
+                event.source().to_string(),
+                event.event_time_ns(),
+                row.clone(),
+            )),
+            _ => {}
+        }
+    }
+
+    assert_eq!(canonical.len(), 10);
+    assert_eq!(canonical[0].0, "history-cache-minute-kline-open");
+    assert_eq!(canonical[0].1, start_ns);
+    assert_eq!(canonical[0].2.volume, 0);
+    assert_eq!(canonical[1].0, "history-cache-minute-kline-close");
+    assert_eq!(canonical[1].1, start_ns + MINUTE_NS);
+    assert_eq!(canonical[1].2.close, 100.5);
+
+    assert_eq!(aggregate.len(), 6);
+    assert_eq!(aggregate[0].0, "history-cache-minute-kline-aggregate-open");
+    assert_eq!(aggregate[0].1, start_ns);
+    assert_eq!(aggregate[0].2.volume, 0);
+    assert_eq!(aggregate[1].1, start_ns + MINUTE_NS);
+    assert_eq!(aggregate[1].2.volume, 10);
+    assert_eq!(aggregate.last().unwrap().1, start_ns + 5 * MINUTE_NS);
+    assert_eq!(aggregate.last().unwrap().2.volume, 50);
+    assert_eq!(aggregate.last().unwrap().2.high, 105.0);
+    assert_eq!(aggregate.last().unwrap().2.low, 99.0);
+}
+
+#[tokio::test]
+async fn history_backtest_replay_applies_continuous_mapping_to_logical_minute_cache() {
+    let dir = temp_dir("logical-main-minute");
+    let minute_cache = MinuteKlineCache::open(&dir).unwrap();
+    let snapshot =
+        MinuteKlineCacheSnapshot::new(1, "calendar-fixture", "cst-trading-day-v1").unwrap();
+    let symbol = "KQ.m@SHFE.au";
+    let start_ns = 0;
+    let end_ns = 3 * MINUTE_NS;
+    minute_cache
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &snapshot,
+            &[
+                kline(1, start_ns, 500.0, 501.0, 499.0, 500.5),
+                kline(2, start_ns + MINUTE_NS, 600.0, 601.0, 599.0, 600.5),
+            ],
+        )
+        .unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns,
+            end_ns,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: vec![HistoryBacktestMinuteKlineSource {
+                cache: minute_cache,
+                snapshot,
+                replay_symbol: symbol.to_string(),
+                cache_symbol: symbol.to_string(),
+                start_ns,
+                end_ns,
+                duration_ns: MINUTE_NS,
+                session: MinuteKlineSessionTemplate::cst_trading_day(),
+                underlying_segments: vec![
+                    HistoryBacktestMinuteKlineUnderlyingSegment {
+                        start_ns,
+                        end_ns: start_ns + MINUTE_NS,
+                        underlying_symbol: "SHFE.au2608".to_string(),
+                    },
+                    HistoryBacktestMinuteKlineUnderlyingSegment {
+                        start_ns: start_ns + MINUTE_NS,
+                        end_ns,
+                        underlying_symbol: "SHFE.au2610".to_string(),
+                    },
+                ],
+            }],
+        })
+        .unwrap();
+
+    let first_open = stream.next_event().await.unwrap().unwrap();
+    let first_close = stream.next_event().await.unwrap().unwrap();
+    let second_open = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(first_open.underlying_symbol(), Some("SHFE.au2608"));
+    assert_eq!(first_close.underlying_symbol(), Some("SHFE.au2608"));
+    assert_eq!(second_open.underlying_symbol(), Some("SHFE.au2610"));
 }
 
 #[tokio::test]

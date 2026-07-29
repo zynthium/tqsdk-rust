@@ -6,11 +6,15 @@ use std::time::Duration;
 
 use tqsdk_core::{Kline, Tick};
 use tqsdk_data::{
-    HistorySeriesCache, KlineDataSeriesRequest, TickDataSeriesReader, TickDataSeriesRequest,
+    HistorySeriesCache, KlineDataSeriesRequest, MinuteKlineCache, MinuteKlineCacheSnapshot,
+    MinuteKlineReader, TickDataSeriesReader, TickDataSeriesRequest,
 };
 
 use crate::kline_synth::KlineSynthesizer;
-use crate::{BacktestMarketStream, ReplayMarketEvent, Result, TaskError};
+use crate::{
+    BacktestMarketStream, CANONICAL_MINUTE_KLINE_NS, MinuteKlineAggregator,
+    MinuteKlineSessionTemplate, ReplayMarketEvent, Result, TaskError,
+};
 
 #[derive(Debug, Clone)]
 pub struct HistoryBacktestKlineRequest {
@@ -46,6 +50,37 @@ pub struct HistoryBacktestSyntheticKlineSource {
     pub duration_ns: i64,
 }
 
+/// One interval where a logical minute-Kline replay symbol maps to a concrete
+/// trade/quote underlying.
+///
+/// The cache key stays logical (for example `KQ.m@...`), while this mapping is
+/// applied to each replay event so local simulation can transact the dated
+/// concrete contract without duplicating minute-cache files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryBacktestMinuteKlineUnderlyingSegment {
+    pub start_ns: i64,
+    pub end_ns: i64,
+    pub underlying_symbol: String,
+}
+
+/// One canonical-minute cache stream projected into a replay Kline serial.
+///
+/// `duration_ns == 60s` replays the durable canonical series.  Larger periods
+/// must be integer multiples of 60s and are aggregated locally from closed
+/// canonical minutes; no higher-period cache or remote history series is read.
+#[derive(Debug, Clone)]
+pub struct HistoryBacktestMinuteKlineSource {
+    pub cache: MinuteKlineCache,
+    pub snapshot: MinuteKlineCacheSnapshot,
+    pub replay_symbol: String,
+    pub cache_symbol: String,
+    pub start_ns: i64,
+    pub end_ns: i64,
+    pub duration_ns: i64,
+    pub session: MinuteKlineSessionTemplate,
+    pub underlying_segments: Vec<HistoryBacktestMinuteKlineUnderlyingSegment>,
+}
+
 /// Replay request with explicit logical-to-physical tick projections.
 pub struct HistoryBacktestProjectedReplayRequest {
     pub cache: HistorySeriesCache,
@@ -54,6 +89,7 @@ pub struct HistoryBacktestProjectedReplayRequest {
     pub tick_sources: Vec<HistoryBacktestTickSource>,
     pub native_klines: Vec<HistoryBacktestKlineRequest>,
     pub synthetic_kline_sources: Vec<HistoryBacktestSyntheticKlineSource>,
+    pub minute_kline_sources: Vec<HistoryBacktestMinuteKlineSource>,
 }
 
 pub struct HistoryBacktestReplayStream {
@@ -63,10 +99,16 @@ pub struct HistoryBacktestReplayStream {
 
 struct HistoryCursor {
     symbol: String,
-    underlying_symbol: Option<String>,
+    underlying_projection: UnderlyingProjection,
     symbol_rank: usize,
     producer: CursorProducer,
     next: Option<QueuedEvent>,
+}
+
+enum UnderlyingProjection {
+    None,
+    Static(String),
+    Segments(Vec<HistoryBacktestMinuteKlineUnderlyingSegment>),
 }
 
 enum CursorProducer {
@@ -80,12 +122,21 @@ enum CursorProducer {
     NativeKline {
         events: VecDeque<QueuedEvent>,
     },
+    MinuteKline(Box<MinuteKlineProducer>),
+}
+
+struct MinuteKlineProducer {
+    reader: MinuteKlineReader,
+    duration_ns: i64,
+    aggregator: Option<MinuteKlineAggregator>,
+    pending: VecDeque<QueuedEvent>,
 }
 
 struct QueuedEvent {
     event: ReplayMarketEvent,
     source_rank: u8,
     row_id: i64,
+    source_datetime_ns: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +165,7 @@ impl HistoryBacktestReplayStream {
                 .map_err(data_error_to_task)?;
             cursors.push(HistoryCursor {
                 symbol,
-                underlying_symbol: None,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
                 producer: CursorProducer::Tick { reader },
                 next: None,
@@ -134,7 +185,7 @@ impl HistoryBacktestReplayStream {
             let synth = KlineSynthesizer::new(spec.symbol.clone(), spec.duration_ns)?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
-                underlying_symbol: None,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
                 producer: CursorProducer::SyntheticKline { reader, synth },
                 next: None,
@@ -162,7 +213,7 @@ impl HistoryBacktestReplayStream {
             )?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
-                underlying_symbol: None,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
                 producer: CursorProducer::NativeKline { events },
                 next: None,
@@ -203,11 +254,12 @@ impl HistoryBacktestReplayStream {
                     source.end_ns,
                 ))
                 .map_err(data_error_to_task)?;
-            let underlying_symbol =
-                (source.replay_symbol != source.cache_symbol).then_some(source.cache_symbol);
+            let underlying_projection = (source.replay_symbol != source.cache_symbol)
+                .then_some(source.cache_symbol)
+                .map_or(UnderlyingProjection::None, UnderlyingProjection::Static);
             cursors.push(HistoryCursor {
                 symbol: source.replay_symbol,
-                underlying_symbol,
+                underlying_projection,
                 symbol_rank: 0,
                 producer: CursorProducer::Tick { reader },
                 next: None,
@@ -233,12 +285,13 @@ impl HistoryBacktestReplayStream {
                 source.tick_source.replay_symbol.clone(),
                 source.duration_ns,
             )?;
-            let underlying_symbol = (source.tick_source.replay_symbol
+            let underlying_projection = (source.tick_source.replay_symbol
                 != source.tick_source.cache_symbol)
                 .then_some(source.tick_source.cache_symbol);
             cursors.push(HistoryCursor {
                 symbol: source.tick_source.replay_symbol,
-                underlying_symbol,
+                underlying_projection: underlying_projection
+                    .map_or(UnderlyingProjection::None, UnderlyingProjection::Static),
                 symbol_rank: 0,
                 producer: CursorProducer::SyntheticKline { reader, synth },
                 next: None,
@@ -266,9 +319,44 @@ impl HistoryBacktestReplayStream {
             )?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
-                underlying_symbol: None,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
                 producer: CursorProducer::NativeKline { events },
+                next: None,
+            });
+        }
+
+        for source in request.minute_kline_sources {
+            validate_projected_minute_kline_source(&source, request.start_ns, request.end_ns)?;
+            let reader = source
+                .cache
+                .open_reader(
+                    &source.cache_symbol,
+                    source.start_ns,
+                    source.end_ns,
+                    &source.snapshot,
+                )
+                .map_err(data_error_to_task)?;
+            let aggregator = (source.duration_ns > CANONICAL_MINUTE_KLINE_NS)
+                .then(|| MinuteKlineAggregator::new(source.duration_ns, source.session.clone()))
+                .transpose()?;
+            let underlying_projection = if source.underlying_segments.is_empty() {
+                (source.replay_symbol != source.cache_symbol)
+                    .then_some(source.cache_symbol)
+                    .map_or(UnderlyingProjection::None, UnderlyingProjection::Static)
+            } else {
+                UnderlyingProjection::Segments(source.underlying_segments)
+            };
+            cursors.push(HistoryCursor {
+                symbol: source.replay_symbol,
+                underlying_projection,
+                symbol_rank: 0,
+                producer: CursorProducer::MinuteKline(Box::new(MinuteKlineProducer {
+                    reader,
+                    duration_ns: source.duration_ns,
+                    aggregator,
+                    pending: VecDeque::new(),
+                })),
                 next: None,
             });
         }
@@ -305,7 +393,9 @@ impl HistoryBacktestReplayStream {
         debug_assert_eq!(queued.event.event_time_ns(), item.event_time_ns);
         debug_assert_eq!(queued.source_rank, item.source_rank);
         debug_assert_eq!(queued.row_id, item.row_id);
-        let underlying_symbol = cursor.underlying_symbol.clone();
+        let underlying_symbol = cursor
+            .underlying_projection
+            .resolve(queued.source_datetime_ns)?;
         push_next_event(cursor, item.cursor_index, &mut self.heap)?;
         let event = match underlying_symbol {
             Some(underlying_symbol) => queued.event.with_underlying_symbol(underlying_symbol)?,
@@ -324,6 +414,24 @@ impl BacktestMarketStream for HistoryBacktestReplayStream {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<ReplayMarketEvent>>> + 'a>> {
         Box::pin(async move { self.next_event_sync() })
+    }
+}
+
+impl UnderlyingProjection {
+    fn resolve(&self, source_datetime_ns: i64) -> Result<Option<String>> {
+        match self {
+            Self::None => Ok(None),
+            Self::Static(symbol) => Ok(Some(symbol.clone())),
+            Self::Segments(segments) => segments
+                .iter()
+                .find(|segment| {
+                    source_datetime_ns >= segment.start_ns && source_datetime_ns < segment.end_ns
+                })
+                .map(|segment| Some(segment.underlying_symbol.clone()))
+                .ok_or(TaskError::InvalidState(
+                    "minute kline event is outside its continuous-underlying mapping",
+                )),
+        }
     }
 }
 
@@ -352,6 +460,57 @@ impl CursorProducer {
                 .map(Some);
             },
             Self::NativeKline { events } => Ok(events.pop_front()),
+            Self::MinuteKline(producer) => loop {
+                if let Some(event) = producer.pending.pop_front() {
+                    return Ok(Some(event));
+                }
+                let Some(row) = producer.reader.next_kline().map_err(data_error_to_task)? else {
+                    return Ok(None);
+                };
+                if producer.duration_ns == CANONICAL_MINUTE_KLINE_NS {
+                    minute_kline_events(
+                        symbol,
+                        producer.duration_ns,
+                        producer.reader.range_start_ns(),
+                        producer.reader.range_end_ns(),
+                        row,
+                        &mut producer.pending,
+                    )?;
+                } else {
+                    let update = producer
+                        .aggregator
+                        .as_mut()
+                        .expect("aggregated minute source initializes an aggregator")
+                        .update(&row)?;
+                    let Some(update) = update else {
+                        continue;
+                    };
+                    if let Some(opened) = update.opened
+                        && opened.datetime >= producer.reader.range_start_ns()
+                        && opened.datetime < producer.reader.range_end_ns()
+                    {
+                        producer
+                            .pending
+                            .push_back(aggregated_minute_kline_open_event(
+                                symbol,
+                                producer.duration_ns,
+                                &opened,
+                            )?);
+                    }
+                    if update.event_time_ns >= producer.reader.range_start_ns()
+                        && update.event_time_ns < producer.reader.range_end_ns()
+                    {
+                        producer
+                            .pending
+                            .push_back(aggregated_minute_kline_update_event(
+                                symbol,
+                                producer.duration_ns,
+                                update.event_time_ns,
+                                update.updated,
+                            )?);
+                    }
+                }
+            },
         }
     }
 }
@@ -396,19 +555,88 @@ fn validate_projected_tick_source(
     Ok(())
 }
 
+fn validate_projected_minute_kline_source(
+    source: &HistoryBacktestMinuteKlineSource,
+    request_start_ns: i64,
+    request_end_ns: i64,
+) -> Result<()> {
+    validate_symbol(&source.replay_symbol)?;
+    validate_symbol(&source.cache_symbol)?;
+    if source.start_ns >= source.end_ns {
+        return Err(TaskError::InvalidState(
+            "projected minute kline source start_ns must be less than end_ns",
+        ));
+    }
+    if source.start_ns < request_start_ns || source.end_ns > request_end_ns {
+        return Err(TaskError::InvalidState(
+            "projected minute kline source must be inside replay request range",
+        ));
+    }
+    if source.duration_ns != CANONICAL_MINUTE_KLINE_NS
+        && (source.duration_ns <= CANONICAL_MINUTE_KLINE_NS
+            || source.duration_ns % CANONICAL_MINUTE_KLINE_NS != 0)
+    {
+        return Err(TaskError::InvalidState(
+            "minute kline source duration must be 60 seconds or an integer multiple above it",
+        ));
+    }
+    if source.snapshot.session_hash != source.session.snapshot_hash() {
+        return Err(TaskError::InvalidState(
+            "minute kline source session hash does not match its cache snapshot",
+        ));
+    }
+    validate_minute_underlying_segments(source)?;
+    Ok(())
+}
+
+fn validate_minute_underlying_segments(source: &HistoryBacktestMinuteKlineSource) -> Result<()> {
+    if source.underlying_segments.is_empty() {
+        if source.replay_symbol.starts_with("KQ.m@") {
+            return Err(TaskError::InvalidState(
+                "continuous minute kline source requires complete underlying segments",
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut expected_start_ns = source.start_ns;
+    for segment in &source.underlying_segments {
+        validate_symbol(&segment.underlying_symbol)?;
+        if segment.start_ns != expected_start_ns || segment.end_ns <= segment.start_ns {
+            return Err(TaskError::InvalidState(
+                "minute kline underlying segments must be contiguous and non-empty",
+            ));
+        }
+        if segment.end_ns > source.end_ns {
+            return Err(TaskError::InvalidState(
+                "minute kline underlying segment exceeds its source range",
+            ));
+        }
+        expected_start_ns = segment.end_ns;
+    }
+    if expected_start_ns != source.end_ns {
+        return Err(TaskError::InvalidState(
+            "minute kline underlying segments must cover the complete source range",
+        ));
+    }
+    Ok(())
+}
+
 fn tick_event(symbol: &str, tick: Tick) -> Result<QueuedEvent> {
     let row_id = tick.id;
+    let source_datetime_ns = tick.datetime;
     let event = ReplayMarketEvent::tick(
         "history-cache",
         symbol,
-        tick.datetime,
-        Some(tick.datetime),
+        source_datetime_ns,
+        Some(source_datetime_ns),
         tick,
     )?;
     Ok(QueuedEvent {
         event,
         source_rank: 0,
         row_id,
+        source_datetime_ns,
     })
 }
 
@@ -419,6 +647,7 @@ fn synthetic_kline_event(
     row: Kline,
 ) -> Result<QueuedEvent> {
     let row_id = row.id;
+    let source_datetime_ns = row.datetime;
     let event = ReplayMarketEvent::kline(
         "history-cache-synth-kline",
         symbol,
@@ -431,7 +660,92 @@ fn synthetic_kline_event(
         event,
         source_rank: 1,
         row_id,
+        source_datetime_ns,
     })
+}
+
+fn minute_kline_events(
+    symbol: &str,
+    duration_ns: i64,
+    start_ns: i64,
+    end_ns: i64,
+    row: Kline,
+    pending: &mut VecDeque<QueuedEvent>,
+) -> Result<()> {
+    if row.datetime >= start_ns && row.datetime < end_ns {
+        pending.push_back(minute_kline_open_event(symbol, duration_ns, &row)?);
+    }
+    let close_time =
+        row.datetime
+            .checked_add(CANONICAL_MINUTE_KLINE_NS)
+            .ok_or(TaskError::InvalidState(
+                "canonical minute kline close timestamp overflow",
+            ))?;
+    if close_time >= start_ns && close_time < end_ns {
+        pending.push_back(minute_kline_close_event(
+            symbol,
+            duration_ns,
+            close_time,
+            row,
+        )?);
+    }
+    Ok(())
+}
+
+fn minute_kline_open_event(symbol: &str, duration_ns: i64, row: &Kline) -> Result<QueuedEvent> {
+    kline_open_event(
+        "history-cache-minute-kline-open",
+        symbol,
+        duration_ns,
+        row,
+        2,
+    )
+}
+
+fn minute_kline_close_event(
+    symbol: &str,
+    duration_ns: i64,
+    close_time: i64,
+    row: Kline,
+) -> Result<QueuedEvent> {
+    kline_close_event(
+        "history-cache-minute-kline-close",
+        symbol,
+        duration_ns,
+        close_time,
+        row,
+        3,
+    )
+}
+
+fn aggregated_minute_kline_open_event(
+    symbol: &str,
+    duration_ns: i64,
+    row: &Kline,
+) -> Result<QueuedEvent> {
+    kline_open_event(
+        "history-cache-minute-kline-aggregate-open",
+        symbol,
+        duration_ns,
+        row,
+        2,
+    )
+}
+
+fn aggregated_minute_kline_update_event(
+    symbol: &str,
+    duration_ns: i64,
+    event_time_ns: i64,
+    row: Kline,
+) -> Result<QueuedEvent> {
+    kline_close_event(
+        "history-cache-minute-kline-aggregate-update",
+        symbol,
+        duration_ns,
+        event_time_ns,
+        row,
+        3,
+    )
 }
 
 fn native_kline_events(
@@ -471,6 +785,22 @@ fn native_kline_events(
 }
 
 fn native_kline_open_event(symbol: &str, duration_ns: i64, row: &Kline) -> Result<QueuedEvent> {
+    kline_open_event(
+        "history-cache-native-kline-open",
+        symbol,
+        duration_ns,
+        row,
+        2,
+    )
+}
+
+fn kline_open_event(
+    source: &str,
+    symbol: &str,
+    duration_ns: i64,
+    row: &Kline,
+    source_rank: u8,
+) -> Result<QueuedEvent> {
     let row_id = row.id;
     let open_row = Kline {
         id: row.id,
@@ -485,7 +815,7 @@ fn native_kline_open_event(symbol: &str, duration_ns: i64, row: &Kline) -> Resul
         epoch: row.epoch,
     };
     let event = ReplayMarketEvent::kline(
-        "history-cache-native-kline-open",
+        source,
         symbol,
         row.datetime,
         Some(row.datetime),
@@ -494,8 +824,9 @@ fn native_kline_open_event(symbol: &str, duration_ns: i64, row: &Kline) -> Resul
     )?;
     Ok(QueuedEvent {
         event,
-        source_rank: 2,
+        source_rank,
         row_id,
+        source_datetime_ns: row.datetime,
     })
 }
 
@@ -505,9 +836,28 @@ fn native_kline_close_event(
     close_time: i64,
     row: Kline,
 ) -> Result<QueuedEvent> {
-    let row_id = row.id;
-    let event = ReplayMarketEvent::kline(
+    kline_close_event(
         "history-cache-native-kline-close",
+        symbol,
+        duration_ns,
+        close_time,
+        row,
+        3,
+    )
+}
+
+fn kline_close_event(
+    source: &str,
+    symbol: &str,
+    duration_ns: i64,
+    close_time: i64,
+    row: Kline,
+    source_rank: u8,
+) -> Result<QueuedEvent> {
+    let row_id = row.id;
+    let source_datetime_ns = row.datetime;
+    let event = ReplayMarketEvent::kline(
+        source,
         symbol,
         close_time,
         Some(close_time),
@@ -516,8 +866,9 @@ fn native_kline_close_event(
     )?;
     Ok(QueuedEvent {
         event,
-        source_rank: 3,
+        source_rank,
         row_id,
+        source_datetime_ns,
     })
 }
 

@@ -734,7 +734,7 @@ fn cache_only_kline_reader_reports_missing_ranges_without_download() {
 }
 
 #[test]
-fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
+fn builder_history_cache_retention_policy_requires_explicit_maintenance() {
     run_on_tokio(async {
         let dir = temp_dir("builder-retention-policy");
         let cache = HistorySeriesCache::open(&dir).unwrap();
@@ -767,7 +767,23 @@ fn builder_history_cache_retention_policy_runs_after_cache_hit_read() {
             .unwrap();
 
         assert_eq!(series.len(), 1);
-        assert_series_file_missing(&cache, "19700101/kline/60000000000/SHFE.ao2609.tqbn");
+        let relative_path = "19700101/kline/60000000000/SHFE.ao2609.tqbn";
+        assert!(
+            cache
+                .scan()
+                .unwrap()
+                .files
+                .iter()
+                .any(|file| file.file_name == relative_path),
+            "history reads must not invoke configured retention automatically"
+        );
+
+        let maintenance = client
+            .run_configured_history_cache_maintenance()
+            .unwrap()
+            .expect("configured retention must be available for explicit maintenance");
+        assert_eq!(maintenance.removed_files, 1);
+        assert_series_file_missing(&cache, relative_path);
     });
 }
 

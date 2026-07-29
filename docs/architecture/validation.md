@@ -163,12 +163,14 @@ rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cach
 TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL=<symbol> TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS=<start-ns> TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS=<end-ns> rtk cargo run -p tqsdk-data --release --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
+rtk cargo test -p tqsdk-data --test minute_kline_cache
 rtk cargo test -p tqsdk-cache
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-task --test history_tick_replay
 rtk cargo test -p tqsdk-task --test history_backtest_replay
+rtk cargo test -p tqsdk-task --test minute_kline_aggregate
 rtk cargo test -p tqsdk-task kline_synth
 rtk cargo test -p tqsdk backtest_kline
 rtk cargo test -p tqsdk --test facade_contract
@@ -202,6 +204,16 @@ final coverage；`facade_contract` 还覆盖
 `on_remote_fill_telemetry(...)` 在每个 physical cache range 检查后发出累计 inspection telemetry，并在
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
+
+`minute_kline_cache` 覆盖 v3 `logical symbol × trading month` `.tqmk` partition、snapshot
+hash fail-closed、current-day final-coverage guard、streaming reader 与 Refresh 只移除相交月文件。
+`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` session-aware
+聚合、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
+`underlying_symbol`。facade contract 还覆盖 61s/90s rejection、K-only minute path 不请求 tick、
+CacheOnly 不创建 minute namespace、typed history inspect/purge、stock backtest builder selection，
+以及 `DataClient` 的 retention/max-byte 配置只在显式
+`run_configured_history_cache_maintenance()` 时执行；任何 tick/minute history read/write 都不能自动删除数据。
+
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过
 `LiveTickCacheWriter` 的连续 id 语义提交回测可读 coverage；同一个 `MarketCachePolicy`

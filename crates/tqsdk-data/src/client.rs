@@ -14,7 +14,9 @@ use crate::error::{DataError, Result};
 use crate::greeks::{
     OptionGreeksRequest, OptionGreeksResult, build_option_greeks_row, validate_option_metadata,
 };
-use crate::history_series_cache::{HistorySeriesCache, default_history_cache_dir};
+use crate::history_series_cache::{
+    HistorySeriesCache, HistorySeriesCacheMaintenanceReport, default_history_cache_dir,
+};
 use crate::live_quote::await_quote_snapshots;
 
 mod chart_ids;
@@ -189,6 +191,28 @@ impl DataClient {
     #[must_use]
     pub fn history_cache(&self) -> Option<&HistorySeriesCache> {
         self.history_cache.as_deref()
+    }
+
+    /// Explicitly run the maintenance limits configured on this client.
+    ///
+    /// History reads and writes never invoke this automatically: tick and
+    /// Kline cache retention is operator-owned. `None` means either no cache
+    /// or no maintenance limit was configured.
+    pub fn run_configured_history_cache_maintenance(
+        &self,
+    ) -> Result<Option<HistorySeriesCacheMaintenanceReport>> {
+        let Some(cache) = self.history_cache() else {
+            return Ok(None);
+        };
+        if !self.history_cache_maintenance.enabled() {
+            return Ok(None);
+        }
+        cache
+            .enforce_limits(
+                self.history_cache_maintenance.max_bytes,
+                self.history_cache_maintenance.retention_days,
+            )
+            .map(Some)
     }
 
     #[must_use]
@@ -435,12 +459,20 @@ impl DataClientBuilder {
     }
 
     #[must_use]
+    /// Configure a size limit for an explicit
+    /// [`DataClient::run_configured_history_cache_maintenance`] call.
+    ///
+    /// Downloading or reading history never applies this limit automatically.
     pub fn history_cache_max_bytes(mut self, max_bytes: u64) -> Self {
         self.history_cache_maintenance.max_bytes = Some(max_bytes);
         self
     }
 
     #[must_use]
+    /// Configure a retention limit for an explicit
+    /// [`DataClient::run_configured_history_cache_maintenance`] call.
+    ///
+    /// Downloading or reading history never applies this limit automatically.
     pub fn history_cache_retention_days(mut self, retention_days: u64) -> Self {
         self.history_cache_maintenance.retention_days = Some(retention_days);
         self

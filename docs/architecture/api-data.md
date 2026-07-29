@@ -114,12 +114,17 @@
 - `DataClientBuilder::history_cache_dir(...)`
 - `DataClientBuilder::history_cache_max_bytes(...)`
 - `DataClientBuilder::history_cache_retention_days(...)`
+- `DataClient::run_configured_history_cache_maintenance()`
 - `BacktestCachePolicy`
 - `BacktestTickCache`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
 - `LiveTickCacheWriter`
 - `LiveTickCacheWriteReport`
+- `MinuteKlineCache`
+- `MinuteKlineCacheSnapshot`
+- `MinuteKlineCacheStatus`
+- `MinuteKlineCachePurgeReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
@@ -266,15 +271,18 @@ tqsdk-wait        tqsdk-data
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
+- `history_cache_max_bytes(...)` 与 `history_cache_retention_days(...)` 只配置显式
+  `DataClient::run_configured_history_cache_maintenance()`；任何 history read/write 都不得
+  自动清理 tick 或 K 线数据
 - `HistorySeriesCache` 的底层存储通过 crate 内部 store adapter 隔离；`BacktestTickCache`
   复用这套内部实现承接回测 tick 缓存，不再维护独立 tick replay cache 实现
-- facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`，
-  `duration > 60s` 的 K 线输入经 `HistorySeriesCache` native K 线 series；
-  `duration <= 60s` 的 K 线合成和 mixed replay 推进属于 `tqsdk-task`，不在数据层持久化
-- facade 对 `KQ.m@...` 使用 `DataClient::query_his_cont_underlying_segments(...)` 的 dated
-  mapping，把每段读写、coverage 和 remote fill 定位到 concrete underlying symbol；这样主连和
-  同一段具体合约共享同一 TQBN tick series。映射查询无需交易账号，但并非持久 tick cache 的一部分；
-  `duration > 60s` 主连 native K 线不创建逻辑 cache，当前由 facade 明确拒绝
+- facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`；唯一持久
+  K 线输入是独立 `MinuteKlineCache` 的 canonical `60s` files。`<60s` K 从 tick 本地合成，
+  `>60s` 仅允许 `N × 60s`，由 `tqsdk-task` 从已关闭分钟线聚合；`61s` / `90s` 会拒绝，
+  facade 不读取或写入 native higher-period `HistorySeriesCache` K 线
+- facade 对 `KQ.m@...` 的 tick 仍使用 `DataClient::query_his_cont_underlying_segments(...)`
+  把 physical tick cache 映射到 dated underlying。minute cache 则以 logical main-contract
+  symbol 为 key，mapping 只作为 replay `underlying_symbol` metadata；不会复制 minute files
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；
@@ -326,6 +334,11 @@ tqsdk-wait        tqsdk-data
   `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn`。旧 `.tqseries`、旧单文件
   `.tqbn` layout 和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是
   non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
+- 回测 canonical-minute v3 是并列、独立的月分区格式：
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。它仅接受 final 60s coverage，
+  以 calendar/session snapshot hash fail closed；当前交易日不能 claim final coverage。
+  它没有自动 retention 或 max-byte eviction，`Refresh` 只删除请求窗口相交的月文件，
+  `purge_range` / `purge_symbol` 是唯一 destructive maintenance
 - 默认 feature `tqbn-zstd` 对 hot append 的 TQBN internal records block 使用 zstd level 1，
   对 append-log compaction 重写的 records block 使用 zstd level 3；`--no-default-features`
   可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API

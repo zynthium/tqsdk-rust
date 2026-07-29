@@ -260,7 +260,6 @@ impl DataClient {
             downloaded_datetime_ranges,
         ))
         .with_permission_status(HistoryPermissionStatus::Checked);
-        self.enforce_history_cache_limits(cache.as_ref())?;
         Ok(series)
     }
 
@@ -325,18 +324,7 @@ impl DataClient {
             downloaded_datetime_ranges,
         ))
         .with_permission_status(HistoryPermissionStatus::Checked);
-        self.enforce_history_cache_limits(cache.as_ref())?;
         Ok(series)
-    }
-
-    fn enforce_history_cache_limits(&self, cache: &HistorySeriesCache) -> Result<()> {
-        if self.history_cache_maintenance.enabled() {
-            cache.enforce_limits(
-                self.history_cache_maintenance.max_bytes,
-                self.history_cache_maintenance.retention_days,
-            )?;
-        }
-        Ok(())
     }
 
     async fn download_official_kline_range(

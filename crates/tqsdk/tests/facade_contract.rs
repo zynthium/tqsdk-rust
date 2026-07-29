@@ -10,7 +10,7 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote,
     RuntimeHandle, RuntimeInput, Symbol, Tick,
 };
-use tqsdk_data::TickDataSeriesRequest;
+use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot, TickDataSeriesRequest};
 use tqsdk_session::testing::ManualSession;
 
 static NEXT_TEMP_CACHE_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +63,81 @@ async fn facade_backtest_cache_mode_requires_declared_symbols() {
     assert!(
         err.to_string().contains("at least one symbol"),
         "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn facade_backtest_cache_only_missing_canonical_minute_is_read_only() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let result = Tq::futures()
+        .backtest(0, 60_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, std::time::Duration::from_secs(60), 2)
+        .unwrap()
+        .prepare()
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("missing canonical minute cache unexpectedly prepared"),
+        Err(error) => error,
+    };
+    assert!(
+        err.to_string()
+            .contains("canonical 60-second Kline cache coverage is incomplete"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !cache_dir.join("minute-kline-v3").exists(),
+        "cache-only inspection must not create the minute-K namespace"
+    );
+}
+
+#[tokio::test]
+async fn facade_history_cache_operations_include_canonical_minutes() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let minute_cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+    minute_cache
+        .store_final_range(
+            symbol,
+            0,
+            120_000_000_000,
+            &snapshot,
+            &[
+                minute_kline(1, 0, 100.0),
+                minute_kline(2, 60_000_000_000, 101.0),
+            ],
+        )
+        .unwrap();
+
+    let builder = Tq::futures()
+        .backtest(0, 120_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, std::time::Duration::from_secs(60), 2)
+        .unwrap();
+
+    let statuses = builder.inspect_history_cache().await.unwrap();
+    assert!(matches!(
+        &statuses[..],
+        [tqsdk::BacktestHistoryCacheStatus::MinuteKline(status)]
+            if status.symbol == symbol && status.missing_ranges.is_empty()
+    ));
+
+    let purges = builder.purge_history_cache().await.unwrap();
+    assert!(matches!(
+        &purges[..],
+        [tqsdk::BacktestHistoryCachePurgeReport::MinuteKline(report)]
+            if report.symbol == symbol && report.removed_files == 1
+    ));
+    assert!(
+        !minute_cache.month_file_path(symbol, "197001").exists(),
+        "range purge must remove the intersecting monthly minute partition"
     );
 }
 
@@ -1229,14 +1304,24 @@ fn quote_event(
 }
 
 #[test]
-fn facade_does_not_expose_premature_stock_surface() {
+fn facade_exposes_stock_backtest_builder_without_connecting() {
+    let _backtest = Tq::stock()
+        .auth("demo-user", "demo-pass")
+        .backtest(0, 1)
+        .disabled_cache();
+    assert!(format!("{:?}", Tq::stock()).contains("market_kind: Stock"));
+
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
         .expect("read facade source");
 
-    for removed_surface in ["pub fn stock(", "MarketKind::Stock"] {
+    for required_surface in [
+        "pub fn stock() -> TqBuilder",
+        "FacadeMarketKind::Stock => wait_builder.stock_backtest",
+        "FacadeMarketKind::Stock => builder.stock_market",
+    ] {
         assert!(
-            !source.contains(removed_surface),
-            "premature stock facade surface remains: {removed_surface}"
+            source.contains(required_surface),
+            "stock facade surface is missing: {required_surface}"
         );
     }
 }
@@ -1384,7 +1469,9 @@ fn backtest_contract_example_exposes_cache_backed_flow() {
 
     for required in [
         "BacktestTickCache::open",
-        ".backtest(1_000, 3_000)",
+        "MinuteKlineCache::open",
+        "MinuteKlineCacheSnapshot::cst_v1()",
+        ".backtest(START_NS, END_NS)",
         ".cache_dir(&cache_dir)?",
         ".cache_only()",
         ".universe(format!(\"symbol:{SYMBOL}\"))?",
@@ -1612,5 +1699,20 @@ fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
         bid_price1: last_price - 0.5,
         bid_volume1: 1,
         ..Tick::default()
+    }
+}
+
+fn minute_kline(id: i64, datetime: i64, close: f64) -> Kline {
+    Kline {
+        id,
+        datetime,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: id,
+        open_oi: id,
+        close_oi: id,
+        ..Kline::default()
     }
 }
