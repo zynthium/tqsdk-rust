@@ -11,6 +11,7 @@ use tqsdk_task::{
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
+const SUB_MINUTE_NS: i64 = 15_000_000_000;
 
 #[tokio::test]
 async fn history_backtest_replay_tick_only_matches_tick_stream_order() {
@@ -136,7 +137,7 @@ async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_t
                     start_ns: 1_000,
                     end_ns: 2_000,
                 },
-                duration_ns: 60_000_000_000,
+                duration_ns: SUB_MINUTE_NS,
             }],
             minute_kline_sources: Vec::new(),
         })
@@ -148,15 +149,15 @@ async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_t
     assert!(matches!(
         event.payload(),
         ReplayMarketPayload::Kline {
-            duration_ns: 60_000_000_000,
+            duration_ns: SUB_MINUTE_NS,
             row
         } if row.close == 500.0
     ));
 }
 
 #[tokio::test]
-async fn history_backtest_replay_emits_sixty_second_synthetic_klines_from_ticks() {
-    let dir = temp_dir("synthetic-sixty");
+async fn history_backtest_replay_emits_sub_minute_synthetic_klines_from_ticks() {
+    let dir = temp_dir("synthetic-fifteen");
     let cache = BacktestTickCache::open(&dir).unwrap();
     cache
         .store_ticks(
@@ -175,7 +176,7 @@ async fn history_backtest_replay_emits_sixty_second_synthetic_klines_from_ticks(
         native_klines: Vec::new(),
         synthetic_klines: vec![HistoryBacktestKlineRequest {
             symbol: "SHFE.rb2601".to_string(),
-            duration_ns: 60_000_000_000,
+            duration_ns: SUB_MINUTE_NS,
         }],
     })
     .unwrap();
@@ -188,14 +189,14 @@ async fn history_backtest_replay_emits_sixty_second_synthetic_klines_from_ticks(
     assert!(matches!(
         first.payload(),
         ReplayMarketPayload::Kline {
-            duration_ns: 60_000_000_000,
+            duration_ns: SUB_MINUTE_NS,
             row
         } if row.close == 101.0
     ));
     assert_eq!(second.event_time_ns(), 2_000);
     assert!(matches!(
         second.payload(),
-        ReplayMarketPayload::Kline { row, .. } if row.close == 102.0 && row.volume == 2
+        ReplayMarketPayload::Kline { row, .. } if row.close == 102.0 && row.volume == 12
     ));
     assert!(stream.next_event().await.unwrap().is_none());
 }
@@ -431,7 +432,7 @@ async fn history_backtest_replay_merges_tick_synthetic_and_native_events_by_time
         }],
         synthetic_klines: vec![HistoryBacktestKlineRequest {
             symbol: "SHFE.rb2601".to_string(),
-            duration_ns: 60_000_000_000,
+            duration_ns: SUB_MINUTE_NS,
         }],
     })
     .unwrap();
@@ -460,7 +461,7 @@ async fn history_backtest_replay_does_not_persist_synthetic_klines() {
         native_klines: Vec::new(),
         synthetic_klines: vec![HistoryBacktestKlineRequest {
             symbol: "SHFE.rb2601".to_string(),
-            duration_ns: 60_000_000_000,
+            duration_ns: SUB_MINUTE_NS,
         }],
     })
     .unwrap();
@@ -468,7 +469,7 @@ async fn history_backtest_replay_does_not_persist_synthetic_klines() {
 
     let coverage = HistorySeriesCache::open(&dir)
         .unwrap()
-        .kline_coverage("SHFE.rb2601", 60_000_000_000, 1_000, 3_000)
+        .kline_coverage("SHFE.rb2601", SUB_MINUTE_NS, 1_000, 3_000)
         .unwrap();
     assert_eq!(coverage.missing_ranges, vec![(1_000, 3_000)]);
 }

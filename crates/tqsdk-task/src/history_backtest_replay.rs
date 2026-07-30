@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use tqsdk_core::{Kline, Tick};
 use tqsdk_data::{
-    HistorySeriesCache, KlineDataSeriesRequest, MinuteKlineCache, MinuteKlineCacheSnapshot,
-    MinuteKlineReader, TickDataSeriesReader, TickDataSeriesRequest,
+    HistorySeriesCache, KlineDataSeriesRequest, KlineSessionTemplate, MinuteKlineCache,
+    MinuteKlineCacheSnapshot, MinuteKlineReader, TickDataSeriesReader, TickDataSeriesRequest,
+    TickKlineAggregator,
 };
 
-use crate::kline_synth::KlineSynthesizer;
 use crate::{
     BacktestMarketStream, CANONICAL_MINUTE_KLINE_NS, MinuteKlineAggregator,
     MinuteKlineSessionTemplate, ReplayMarketEvent, Result, TaskError,
@@ -117,7 +117,7 @@ enum CursorProducer {
     },
     SyntheticKline {
         reader: TickDataSeriesReader,
-        synth: KlineSynthesizer,
+        synth: TickKlineAggregator,
     },
     NativeKline {
         events: VecDeque<QueuedEvent>,
@@ -182,7 +182,12 @@ impl HistoryBacktestReplayStream {
                     request.end_ns,
                 ))
                 .map_err(data_error_to_task)?;
-            let synth = KlineSynthesizer::new(spec.symbol.clone(), spec.duration_ns)?;
+            let synth = TickKlineAggregator::new(
+                spec.symbol.clone(),
+                spec.duration_ns,
+                KlineSessionTemplate::cst_trading_day(),
+            )
+            .map_err(data_error_to_task)?;
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
                 underlying_projection: UnderlyingProjection::None,
@@ -281,10 +286,12 @@ impl HistoryBacktestReplayStream {
                     source.tick_source.end_ns,
                 ))
                 .map_err(data_error_to_task)?;
-            let synth = KlineSynthesizer::new(
+            let synth = TickKlineAggregator::new(
                 source.tick_source.replay_symbol.clone(),
                 source.duration_ns,
-            )?;
+                KlineSessionTemplate::cst_trading_day(),
+            )
+            .map_err(data_error_to_task)?;
             let underlying_projection = (source.tick_source.replay_symbol
                 != source.tick_source.cache_symbol)
                 .then_some(source.tick_source.cache_symbol);
@@ -339,7 +346,8 @@ impl HistoryBacktestReplayStream {
                 .map_err(data_error_to_task)?;
             let aggregator = (source.duration_ns > CANONICAL_MINUTE_KLINE_NS)
                 .then(|| MinuteKlineAggregator::new(source.duration_ns, source.session.clone()))
-                .transpose()?;
+                .transpose()
+                .map_err(data_error_to_task)?;
             let underlying_projection = if source.underlying_segments.is_empty() {
                 (source.replay_symbol != source.cache_symbol)
                     .then_some(source.cache_symbol)
@@ -448,14 +456,14 @@ impl CursorProducer {
                 let Some(tick) = reader.next_tick().map_err(data_error_to_task)? else {
                     return Ok(None);
                 };
-                let Some(row) = synth.update(&tick) else {
+                let Some(update) = synth.update(&tick).map_err(data_error_to_task)? else {
                     continue;
                 };
                 return synthetic_kline_event(
                     synth.symbol(),
                     synth.duration_ns(),
-                    tick.datetime,
-                    row,
+                    update.event_time_ns,
+                    update.updated,
                 )
                 .map(Some);
             },
@@ -481,7 +489,8 @@ impl CursorProducer {
                         .aggregator
                         .as_mut()
                         .expect("aggregated minute source initializes an aggregator")
-                        .update(&row)?;
+                        .update(&row)
+                        .map_err(data_error_to_task)?;
                     let Some(update) = update else {
                         continue;
                     };

@@ -24,7 +24,6 @@ mod execution_group;
 mod history_backtest_replay;
 mod history_tick_replay;
 mod host;
-mod kline_synth;
 mod minute_kline_aggregate;
 mod order;
 mod order_projection;

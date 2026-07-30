@@ -43,6 +43,7 @@
 //! # Ok::<(), tqsdk_data::DataError>(())
 //! ```
 
+mod aggregation;
 mod backtest_history;
 mod backtest_tick_cache;
 mod client;
@@ -78,6 +79,11 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
     name
 }
 
+pub use aggregation::{
+    CANONICAL_MINUTE_KLINE_NS, KlineSessionPosition, KlineSessionTemplate, KlineSessionWindow,
+    MinuteKlineAggregationUpdate, MinuteKlineAggregator, TickKlineAggregationUpdate,
+    TickKlineAggregator,
+};
 pub use backtest_history::{
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,
     BacktestHistoryClient, BacktestHistoryClientBuilder, BacktestHistoryCollected,
